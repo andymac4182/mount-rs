@@ -1,6 +1,6 @@
 # W08 TiDB workstream progress ledger
 
-Status snapshot: **2026-09-22 20:02 AEST**
+Status snapshot: **2026-09-22 20:16 AEST**
 Repository: `andymacclenaghan/mount-rs`
 Latest publication refresh (**2026-09-22 20:02 AEST**): W08.38 was published
 in reconciled merge `e86c9ccbd394df3b8ec23551691c199e1753ede2` and verified
@@ -19,6 +19,13 @@ The read-only production boundary remains unchanged: no production workflow
 runs, `w08-production` is HTTP 404, only `v0.1.0-cli-preview` exists and no
 production-candidate tag exists. Production remains **NO-GO**. No provider,
 secret-manager, IAM, canary, rollback or approval evidence was created.
+Subsequent concurrent W26/9P/NFS/documentation updates advanced the exact
+public `origin/main` tip to
+`ff4b091ccfcea5bc197ccfe79d978c19661a166a`; they introduced no W08-specific
+source or gate result. The current-tip hosted W08 policy run `35714790666`,
+exact head `ff4b091c`, ended `cancelled` with `jobs=[]`, so it is a scheduling
+boundary rather than evidence. The terminal W08.38 hosted evidence remains
+run `35713249813` at exact head `e86c9ccb`.
 
 Previous synchronization (18:38 AEST): exact public `origin/main` is
 `ab74870c58ab768c65679ea80feb18a8f54cbe00`. The newest source-bearing W08
@@ -1236,6 +1243,7 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-22 19:29–19:34 AEST | Reconciled source-equivalent concurrent CI/documentation updates, re-ran the W08 topology/rollout/evidence controls and workflow parsing, and published exact clean public tip `232443e1`. | ~0.05 engineer-day | ~1m fetch/merge/policy/ref verification | No W08 Rust/provider evidence changed after the hosted W08.37 pass. The public tree remains clean and synchronized; P01–P09 remain open and production remains NO-GO. |
 | 2026-09-22 19:34–19:46 AEST | Reconciled the concurrent N-API/NFS mainline tip `b4729aae`, added W08.38's external secret-manager rotation/audit policy, wired its validator/test into both W08 release workflows, ran both P01/P02 policy suites and all W08 ledger/evidence controls, and passed shared-wrapper Cargo check plus strict Clippy. | ~0.25 engineer-day | ~2m Node/static policy execution plus ~3m18s shared Cargo check/Clippy execution, including a verified shared-target lock wait | Local P02 implementation/static qualification is green; no credentials or secret-manager connection was used. Publication and hosted W08.38 retest remain pending; P02 and all production gates stay open and NO-GO. |
 | 2026-09-22 19:46–20:02 AEST | Re-ran the exact reconciled merge qualification after concurrent origin/main advanced, safely published W08.38 as public merge `e86c9ccb`, verified local/tracking/remote SHA equality, followed hosted W08 release-policy run `35713249813` / job `106698749633` to terminal success in 2m49s, refreshed the read-only production boundary, and updated the rollout documents with exact evidence. | ~0.1 engineer-day | ~2m Rust check/Clippy plus ~5m hosted execution/observation and ~4m fetch/merge/push/documentation work | W08.38 implementation/static qualification is complete and integrated on shared main. Hosted policy is terminally green but remains non-provider evidence; the secret manager, IAM, provider/staging environment, rotation/audit records, canary, rollback and approval gates remain external. Production remains NO-GO with nine open gates and zero evidence records. |
+| 2026-09-22 20:02–20:16 AEST | Reconciled successive concurrent W05/W04/W01/W26/9P/NFS documentation and source tips after the W08 ledger publication, kept the W08.38 evidence intact, synchronized to exact public tip `ff4b091c`, and followed current-tip hosted run `35714790666` to terminal cancellation with `jobs=[]`. | ~0.15 engineer-day | ~4m fetch/merge/push reconciliation plus ~3m hosted scheduling observation; no new W08 source qualification was needed after the docs-only final fast-forward | The terminal W08.38 implementation/static result remains run `35713249813` on `e86c9ccb`. Run `35714790666` is not evidence. No production/provider gate changed; P01–P09 remain open, zero evidence records remain, and production stays NO-GO. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol
