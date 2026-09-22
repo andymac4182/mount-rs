@@ -244,8 +244,10 @@ Current focused behavior:
   connection accepted by the native Tokio listener intentionally reports
   `stream: undefined`: the listener owns a Tokio stream rather than a Node
   `Duplex`; the supported Node stream-injection boundary is `attach`.
-  The public `peer` type retains the native listener's `null` absence while
-  allowing the attached-stream contract's `undefined` absence.
+  The public `peer` type uses `null` only when the native binding has no peer;
+  native Unix/TCP listeners otherwise expose their socket path or
+  `address:port`, while the attached-stream contract uses `undefined` when no
+  peer fallback is supplied.
 - The N-API object boundary keeps serializable lifecycle views: native
   `P9Server.address()`/`path` use string-or-null representations, and effective
   `onError`/`onAssertion` hooks are omitted from `server.options` and
