@@ -854,6 +854,25 @@ pub struct FuseFallocateIn {
     pub mode: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FuseIoctlIn {
+    pub fh: u64,
+    pub flags: u32,
+    pub cmd: u32,
+    pub arg: u64,
+    pub in_size: u32,
+    pub out_size: u32,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FuseIoctlOut {
+    pub result: i32,
+    pub flags: u32,
+    pub in_iovs: u32,
+    pub out_iovs: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FuseLseekIn {
     pub fh: u64,
@@ -1616,6 +1635,47 @@ fn encode_fallocate_in(value: &FuseFallocateIn) -> Vec<u8> {
     writer.finish()
 }
 
+fn decode_ioctl_in(body: &[u8]) -> Result<FuseIoctlIn, ProtocolError> {
+    let mut reader = Reader::new(body);
+    let mut value = FuseIoctlIn {
+        fh: reader.u64("fuse_ioctl_in.fh")?,
+        flags: reader.u32("fuse_ioctl_in.flags")?,
+        cmd: reader.u32("fuse_ioctl_in.cmd")?,
+        arg: reader.u64("fuse_ioctl_in.arg")?,
+        in_size: reader.u32("fuse_ioctl_in.in_size")?,
+        out_size: reader.u32("fuse_ioctl_in.out_size")?,
+        data: Vec::new(),
+    };
+    value.data = reader.raw(
+        usize::try_from(value.in_size)
+            .map_err(|_| ProtocolError::new("fuse_ioctl_in.in_size does not fit usize"))?,
+        "fuse_ioctl_in.data",
+    )?;
+    reader.end("fuse_ioctl_in")?;
+    Ok(value)
+}
+
+fn encode_ioctl_in(value: &FuseIoctlIn) -> Result<Vec<u8>, ProtocolError> {
+    let declared = usize::try_from(value.in_size)
+        .map_err(|_| ProtocolError::new("fuse_ioctl_in.in_size does not fit usize"))?;
+    if declared != value.data.len() {
+        return Err(ProtocolError::new(format!(
+            "fuse_ioctl_in.in_size is {} but data has {} byte(s)",
+            value.in_size,
+            value.data.len()
+        )));
+    }
+    let mut writer = Writer::with_capacity(32 + value.data.len());
+    writer.u64(value.fh);
+    writer.u32(value.flags);
+    writer.u32(value.cmd);
+    writer.u64(value.arg);
+    writer.u32(value.in_size);
+    writer.u32(value.out_size);
+    writer.raw(&value.data);
+    Ok(writer.finish())
+}
+
 fn decode_lseek_in(body: &[u8]) -> Result<FuseLseekIn, ProtocolError> {
     let mut reader = Reader::new(body);
     let value = FuseLseekIn {
@@ -1913,6 +1973,27 @@ fn encode_bmap_out(value: &FuseBmapOut) -> Vec<u8> {
     writer.finish()
 }
 
+fn decode_ioctl_out(body: &[u8]) -> Result<FuseIoctlOut, ProtocolError> {
+    let mut reader = Reader::new(body);
+    let value = FuseIoctlOut {
+        result: reader.i32("fuse_ioctl_out.result")?,
+        flags: reader.u32("fuse_ioctl_out.flags")?,
+        in_iovs: reader.u32("fuse_ioctl_out.in_iovs")?,
+        out_iovs: reader.u32("fuse_ioctl_out.out_iovs")?,
+    };
+    reader.end("fuse_ioctl_out")?;
+    Ok(value)
+}
+
+fn encode_ioctl_out(value: &FuseIoctlOut) -> Vec<u8> {
+    let mut writer = Writer::with_capacity(16);
+    writer.i32(value.result);
+    writer.u32(value.flags);
+    writer.u32(value.in_iovs);
+    writer.u32(value.out_iovs);
+    writer.finish()
+}
+
 fn decode_readlink_out(body: &[u8]) -> FuseReadlinkOut {
     let mut reader = Reader::new(body);
     FuseReadlinkOut {
@@ -2201,6 +2282,7 @@ pub enum FuseRequestBody {
     Interrupt(FuseInterruptIn),
     Poll(FusePollIn),
     Fallocate(FuseFallocateIn),
+    Ioctl(FuseIoctlIn),
     Lseek(FuseLseekIn),
     Bmap(FuseBmapIn),
 }
@@ -2221,6 +2303,7 @@ pub enum FuseReplyBody {
     Poll(FusePollOut),
     Lseek(FuseLseekOut),
     Bmap(FuseBmapOut),
+    Ioctl(FuseIoctlOut),
     Dirents(Vec<FuseDirent>),
     DirentsPlus(Vec<FuseDirentPlus>),
 }
@@ -2294,6 +2377,7 @@ pub fn decode_request_body(
         FUSE_INTERRUPT => FuseRequestBody::Interrupt(decode_interrupt_in(body)?),
         FUSE_POLL => FuseRequestBody::Poll(decode_poll_in(body)?),
         FUSE_FALLOCATE => FuseRequestBody::Fallocate(decode_fallocate_in(body)?),
+        FUSE_IOCTL => FuseRequestBody::Ioctl(decode_ioctl_in(body)?),
         FUSE_LSEEK => FuseRequestBody::Lseek(decode_lseek_in(body)?),
         FUSE_BMAP => FuseRequestBody::Bmap(decode_bmap_in(body)?),
         _ => return Err(unsupported_opcode(opcode)),
@@ -2424,6 +2508,10 @@ pub fn encode_request_body(
             FuseRequestBody::Fallocate(value) => Ok(encode_fallocate_in(value)),
             _ => Err(wrong_request_body(opcode, "fallocate")),
         },
+        FUSE_IOCTL => match body {
+            FuseRequestBody::Ioctl(value) => encode_ioctl_in(value),
+            _ => Err(wrong_request_body(opcode, "ioctl")),
+        },
         FUSE_LSEEK => match body {
             FuseRequestBody::Lseek(value) => Ok(encode_lseek_in(value)),
             _ => Err(wrong_request_body(opcode, "lseek")),
@@ -2460,6 +2548,7 @@ pub fn decode_reply_body(
         FUSE_GETLK => FuseReplyBody::Lk(decode_lk_out(body)?),
         FUSE_POLL => FuseReplyBody::Poll(decode_poll_out(body)?),
         FUSE_BMAP => FuseReplyBody::Bmap(decode_bmap_out(body)?),
+        FUSE_IOCTL => FuseReplyBody::Ioctl(decode_ioctl_out(body)?),
         FUSE_FORGET | FUSE_BATCH_FORGET | FUSE_UNLINK | FUSE_RMDIR | FUSE_RENAME | FUSE_RENAME2
         | FUSE_RELEASE | FUSE_RELEASEDIR | FUSE_FSYNC | FUSE_FSYNCDIR | FUSE_FLUSH
         | FUSE_ACCESS | FUSE_DESTROY | FUSE_INTERRUPT | FUSE_SETXATTR | FUSE_REMOVEXATTR
@@ -2540,6 +2629,10 @@ pub fn encode_reply_body(
         FUSE_BMAP => match body {
             FuseReplyBody::Bmap(value) => Ok(encode_bmap_out(value)),
             _ => Err(wrong_reply_body(opcode, "bmap")),
+        },
+        FUSE_IOCTL => match body {
+            FuseReplyBody::Ioctl(value) => Ok(encode_ioctl_out(value)),
+            _ => Err(wrong_reply_body(opcode, "ioctl")),
         },
         FUSE_FORGET | FUSE_BATCH_FORGET | FUSE_UNLINK | FUSE_RMDIR | FUSE_RENAME | FUSE_RENAME2
         | FUSE_RELEASE | FUSE_RELEASEDIR | FUSE_FSYNC | FUSE_FSYNCDIR | FUSE_FLUSH

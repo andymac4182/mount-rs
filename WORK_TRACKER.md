@@ -915,6 +915,7 @@ patch):
 | Zeno the 2nd | W01 Unstorage capability boundary parity | `tests/unstorage/**` | Integrated as `e0e8195`; published through `9b74c87`; 14 rows passed with 5 supported, 9 explicit ENOSYS, zero ENOTSUP mismatches and zero skips |
 | Kant the 2nd | W01 Unstorage hardlink capability boundary | `tests/unstorage/**` | Integrated as `99c7d32`; published through `2bce444`; 4 rows passed with 0 supported, 4 exact ENOSYS, zero ENOTSUP mismatches and zero skips |
 | Main | W01 Rust FUSE IOCTL session framing | `transports/mount-rs-fuse/{src/session.rs,tests/session.rs}` | Integrated as `f1872f8`; live source/test blobs verified; strict 32-byte header and declared-input-size framing, malformed/trailing `EINVAL`, valid-request `ENOSYS`, and no-mutation coverage passed in 12 focused tests and strict scoped Clippy |
+| Main | W01 Rust FUSE IOCTL typed wire parity | `transports/mount-rs-fuse/{src/protocol.rs,tests/protocol.rs}` | Current packet: public typed request/reply codecs now preserve the declared inline input payload, reject truncation/trailing/length mismatches, and retain the native session `ENOSYS` boundary; focused protocol suite passed 12/12, while N-API/strict Clippy/Linux-target and hosted native gates remain to be rechecked |
 | Meitner the 2nd | W01 napi-rs FUSE IOCTL codecs | `integrations/mount-rs-napi/**` | Integrated as `32ddee3`; published sequentially through `8ea5f38`; build, typecheck, focused pinned-oracle raw-layout differential, and the full oracle-enabled N-API suite passed |
 | Pasteur the 2nd | W01 napi-rs FUSE BMAP codecs | `integrations/mount-rs-napi/**` | Integrated as `387940b`; published sequentially through `091ddcf`; Rust/N-API release build, typecheck, protocol-minor/truncation/trailing/wrong-shape oracle differentials, and the full oracle-enabled N-API suite passed |
 | Main | W01 napi-rs FUSE GETLK/SETLK/SETLKW codecs | `integrations/mount-rs-napi/**` | Current packet: generated bindings/declarations, explicit ESM/CommonJS exports, typecheck, pinned-oracle request/reply/error-boundary differential, release build, focused locked FUSE tests and full oracle-enabled N-API suite passed; native FUSE session/mount remains open |
@@ -5662,6 +5663,15 @@ reproducible in a production-like environment.
   staging-TTL evidence only; physical power-loss/torn-write ordering, live
   providers, hosted/native lifecycle, and broader workload bounds remain open,
   so W01-S3 stays **NO-GO**.
+- [x] Added the bounded provider-failure regression
+  `streaming_publish_rename_failure_removes_staging_and_preserves_object`:
+  one injected `rename(EIO)` during streamed replacement must return 500,
+  remove private `.mountx-put-*` staging, and preserve the prior object bytes.
+  The focused shared-target gateway target passed 45/45, with formatting,
+  diff checks, and strict warning-denied Clippy also passing. This is bounded
+  local provider-failure evidence only; live AWS/R2 failure handling, physical
+  power-loss/torn-write durability, hosted/native lifecycle, and broader
+  workload bounds remain open, so W01-S3 stays **NO-GO**.
 - [x] The automatic provider runs for published packet `fcf1d547` were
   refreshed: AWS run `35693941024` stopped at
   `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while R2 run `35693941037`

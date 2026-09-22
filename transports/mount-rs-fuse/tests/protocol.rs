@@ -437,6 +437,60 @@ fn write_payload_and_reply_match_upstream_golden_bytes() {
 }
 
 #[test]
+fn ioctl_request_and_reply_have_strict_typed_codecs() {
+    let request = FuseRequestBody::Ioctl(FuseIoctlIn {
+        fh: 0x0102_0304_0506_0708,
+        flags: 0x1112_1314,
+        cmd: 0x2122_2324,
+        arg: 0x3132_3334_3536_3738,
+        in_size: 2,
+        out_size: 0x5152_5354,
+        data: vec![0xa5, 0x5a],
+    });
+    let request_bytes = encode_request_body(FUSE_IOCTL, &request, None).unwrap();
+    assert_eq!(request_bytes.len(), 34);
+    assert_eq!(
+        decode_request_body(FUSE_IOCTL, &request_bytes, None).unwrap(),
+        request
+    );
+    assert!(decode_request_body(FUSE_IOCTL, &request_bytes[..33], None).is_err());
+    assert!(
+        decode_request_body(FUSE_IOCTL, &[request_bytes.as_slice(), &[0]].concat(), None).is_err()
+    );
+    assert!(
+        encode_request_body(
+            FUSE_IOCTL,
+            &FuseRequestBody::Ioctl(FuseIoctlIn {
+                fh: 0x0102_0304_0506_0708,
+                flags: 0x1112_1314,
+                cmd: 0x2122_2324,
+                arg: 0x3132_3334_3536_3738,
+                in_size: 1,
+                out_size: 0x5152_5354,
+                data: Vec::new(),
+            }),
+            None,
+        )
+        .is_err()
+    );
+
+    let reply = FuseReplyBody::Ioctl(FuseIoctlOut {
+        result: -25,
+        flags: 0x6162_6364,
+        in_iovs: 0x7172_7374,
+        out_iovs: 0x8182_8384,
+    });
+    let reply_bytes = encode_reply_body(FUSE_IOCTL, &reply, None).unwrap();
+    assert_eq!(reply_bytes.len(), 16);
+    assert_eq!(
+        decode_reply_body(FUSE_IOCTL, &reply_bytes, None).unwrap(),
+        reply
+    );
+    assert!(decode_reply_body(FUSE_IOCTL, &reply_bytes[..15], None).is_err());
+    assert!(decode_reply_body(FUSE_IOCTL, &[reply_bytes.as_slice(), &[0]].concat(), None).is_err());
+}
+
+#[test]
 fn remaining_typed_families_match_pinned_mountx_oracle_fixtures() {
     assert_reply_oracle(
         "attr-out-old",

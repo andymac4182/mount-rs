@@ -168,6 +168,18 @@ impl Stream for PendingBody {
     }
 }
 
+struct ReadyBody {
+    body: Option<Vec<u8>>,
+}
+
+impl Stream for ReadyBody {
+    type Item = Result<Vec<u8>, String>;
+
+    fn poll_next(mut self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Ready(self.body.take().map(Ok))
+    }
+}
+
 async fn wait_for_root_staging(driver: &MemoryFs) {
     timeout(Duration::from_secs(1), async {
         loop {
@@ -1060,6 +1072,49 @@ async fn cancelled_streaming_put_removes_private_staging_and_request_ticket() {
 }
 
 #[tokio::test]
+async fn streaming_publish_rename_failure_removes_staging_and_preserves_object() {
+    let driver = FaultOnReadFs {
+        inner: MemoryFs::empty(),
+        fail_next_read: Arc::new(AtomicBool::new(false)),
+        fail_unlink: Arc::new(AtomicBool::new(false)),
+        fail_rename: Arc::new(AtomicBool::new(false)),
+        durable_writes: false,
+        sync_calls: Arc::new(AtomicUsize::new(0)),
+        fail_syncfs: Arc::new(AtomicBool::new(false)),
+    };
+    let session = S3Session::new(driver.clone());
+    let original = session
+        .handle(request(
+            "PUT",
+            "/mountx/provider-fault.txt",
+            b"original",
+            &[],
+        ))
+        .await;
+    assert_eq!(original.status, 200);
+
+    driver.fail_rename.store(true, Ordering::SeqCst);
+    let failed = session
+        .handle_request_stream(
+            S3RequestHead::new("PUT", "/mountx/provider-fault.txt")
+                .with_header("content-length", "replacement".len().to_string()),
+            Box::pin(ReadyBody {
+                body: Some(b"replacement".to_vec()),
+            }),
+        )
+        .await;
+    assert_eq!(failed.status, 500);
+    wait_for_no_root_staging(&driver.inner).await;
+
+    let retained = session
+        .handle(request("GET", "/mountx/provider-fault.txt", [], &[]))
+        .await;
+    assert_eq!(retained.status, 200);
+    assert_eq!(retained.body, b"original");
+    assert!(session.assertions().is_empty());
+}
+
+#[tokio::test]
 async fn cancelled_streaming_part_preserves_existing_part_and_staging_budget() {
     let driver = MemoryFs::empty();
     let session = Arc::new(S3Session::new(driver.clone()));
@@ -1140,6 +1195,7 @@ async fn delete_objects_reports_per_key_driver_errors_to_error_hook() {
         inner: MemoryFs::empty(),
         fail_next_read: Arc::new(AtomicBool::new(false)),
         fail_unlink: Arc::new(AtomicBool::new(false)),
+        fail_rename: Arc::new(AtomicBool::new(false)),
         durable_writes: false,
         sync_calls: Arc::new(AtomicUsize::new(0)),
         fail_syncfs: Arc::new(AtomicBool::new(false)),
@@ -1194,6 +1250,7 @@ async fn session_close_reports_cleanup_errors_without_rejecting() {
         inner: MemoryFs::empty(),
         fail_next_read: Arc::new(AtomicBool::new(false)),
         fail_unlink: Arc::new(AtomicBool::new(false)),
+        fail_rename: Arc::new(AtomicBool::new(false)),
         durable_writes: false,
         sync_calls: Arc::new(AtomicUsize::new(0)),
         fail_syncfs: Arc::new(AtomicBool::new(false)),
@@ -1247,6 +1304,7 @@ struct FaultOnReadFs {
     inner: MemoryFs,
     fail_next_read: Arc<AtomicBool>,
     fail_unlink: Arc<AtomicBool>,
+    fail_rename: Arc<AtomicBool>,
     durable_writes: bool,
     sync_calls: Arc<AtomicUsize>,
     fail_syncfs: Arc<AtomicBool>,
@@ -1320,6 +1378,11 @@ impl FsDriver for FaultOnReadFs {
     }
 
     async fn rename(&self, old_path: &str, new_path: &str) -> FsResult<()> {
+        if self.fail_rename.swap(false, Ordering::SeqCst) {
+            return Err(
+                mount_rs_core::FsError::new(mount_rs_core::ErrorCode::Eio).with_syscall("rename")
+            );
+        }
         self.inner.rename(old_path, new_path).await
     }
 
@@ -1351,6 +1414,7 @@ async fn failed_multipart_assembly_releases_finalization_claim_for_retry() {
         inner: MemoryFs::empty(),
         fail_next_read: Arc::new(AtomicBool::new(false)),
         fail_unlink: Arc::new(AtomicBool::new(false)),
+        fail_rename: Arc::new(AtomicBool::new(false)),
         durable_writes: false,
         sync_calls: Arc::new(AtomicUsize::new(0)),
         fail_syncfs: Arc::new(AtomicBool::new(false)),
@@ -1415,6 +1479,7 @@ async fn durable_mutations_wait_for_and_report_syncfs_barriers() {
         inner: MemoryFs::empty(),
         fail_next_read: Arc::new(AtomicBool::new(false)),
         fail_unlink: Arc::new(AtomicBool::new(false)),
+        fail_rename: Arc::new(AtomicBool::new(false)),
         durable_writes: true,
         sync_calls: Arc::new(AtomicUsize::new(0)),
         fail_syncfs: Arc::new(AtomicBool::new(false)),
@@ -3279,6 +3344,7 @@ async fn http_server_aborts_driver_read_error_without_reusing_connection() {
             inner: memory,
             fail_next_read: Arc::new(AtomicBool::new(true)),
             fail_unlink: Arc::new(AtomicBool::new(false)),
+            fail_rename: Arc::new(AtomicBool::new(false)),
             durable_writes: false,
             sync_calls: Arc::new(AtomicUsize::new(0)),
             fail_syncfs: Arc::new(AtomicBool::new(false)),

@@ -43,7 +43,7 @@ The typed codec table covers these operations:
 `STATFS`, `RELEASE`, `FSYNC`, `SETXATTR`, `GETXATTR`, `LISTXATTR`,
 `REMOVEXATTR`, `FLUSH`, `INIT`, `OPENDIR`, `READDIR`, `RELEASEDIR`,
 `FSYNCDIR`, `GETLK`, `SETLK`, `SETLKW`, `ACCESS`, `CREATE`, `INTERRUPT`,
-`BMAP`, `DESTROY`, `POLL`, `BATCH_FORGET`, `FALLOCATE`, `READDIRPLUS`,
+`IOCTL`, `BMAP`, `DESTROY`, `POLL`, `BATCH_FORGET`, `FALLOCATE`, `READDIRPLUS`,
 `RENAME2`, `LSEEK`, and `SYNCFS`.
 
 The focused tests in `tests/protocol.rs` retain upstream byte fixtures for
@@ -59,8 +59,8 @@ layout and decoder-totality regressions remain in the same test module.
 The following named upstream opcodes intentionally have no typed body codec
 in this slice and are returned as unsupported by the dispatch helpers:
 
-`IOCTL`, `NOTIFY_REPLY`, `COPY_FILE_RANGE`, `SETUPMAPPING`, `REMOVEMAPPING`,
-`TMPFILE`, `STATX`, and `CUSE_INIT`.
+`NOTIFY_REPLY`, `COPY_FILE_RANGE`, `SETUPMAPPING`, `REMOVEMAPPING`, `TMPFILE`,
+`STATX`, and `CUSE_INIT`.
 
 Unknown numeric opcodes can still be framed as raw payloads, but they are not
 decoded into a typed body and are not treated as supported operations.
@@ -85,13 +85,15 @@ Flagged exchange/whiteout variants are rejected with `ENOSYS` without mutating
 the namespace because the core driver does not expose those semantics.
 
 The native session still returns `ENOSYS` for the other codec-covered
-operations, including `SETXATTR`, `GETXATTR`, `LISTXATTR`, `REMOVEXATTR`,
+operations, including `IOCTL`, `SETXATTR`, `GETXATTR`, `LISTXATTR`, `REMOVEXATTR`,
 `BMAP`, `POLL`, `FALLOCATE`, `LSEEK`, and `COPY_FILE_RANGE`. `GETLK` and
 `SETLK` use the session-scoped range-lock table; `SETLKW` is deliberately
 non-blocking and returns `EAGAIN` because the serialized mount-free session
 cannot safely wait for another owner. The Linux native request pump handles
 `INTERRUPT` for registered positional-read workers and returns `EAGAIN` for
-unknown targets. The N-API `./fuse` codec/session boundary is covered by the
+unknown targets. The typed Rust IOCTL codec covers the fixed header and its
+declared inline input bytes; the session validates that body before returning
+the explicit unsupported result. The N-API `./fuse` codec/session boundary is covered by the
 Rust-backed facade; hosted native device/mount, callback, crash/restart, and
 durability qualification remain outside this scoped slice.
 
