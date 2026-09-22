@@ -112,7 +112,11 @@ jobs:
         run: |
           sudo env \
             "CI=true" \
+            "HOME=$HOME" \
             "PATH=$PATH" \
+            "CARGO_HOME=$CARGO_HOME" \
+            "RUSTUP_HOME=$HOME/.rustup" \
+            "RUSTUP_TOOLCHAIN=1.95.0" \
             "MOUNTX_SOURCE=$MOUNTX_SOURCE" \
             "CARGO_TARGET_DIR=$CARGO_TARGET_DIR" \
             pnpm --dir tests/upstream test p9-conformance.test.mjs --reporter=dot
