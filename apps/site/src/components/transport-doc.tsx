@@ -383,6 +383,17 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
         Ubuntu, including the Ubuntu NFSv4.1 lane; the surrounding workflow
         failed in provider/W26, Windows, and native-FUSE lanes, so this remains
         job-scoped platform evidence rather than release acceptance.
+        The current source packet at commit
+        <code>96df991f</code> adds a forced NFSv4.1 process-restart case: it
+        deletes a seeded host file through wire <code>REMOVE</code>, kills the
+        server without async shutdown, then verifies a replacement session
+        returns <code>NFS4ERR_NOENT</code> and the host path remains absent.
+        The direct process-restart target passed 2/2 and the full locked NFS
+        target passed its 20 v4 wire cases with strict Clippy. This is
+        one-host process-crash namespace evidence, not directory-fsync,
+        physical power-loss durability, durable session/lease/replay/handle
+        state, native-client ordering, hosted acceptance, or production
+        acceptance.
       </>
     ),
     sources: [
@@ -392,6 +403,7 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
       { label: 'SQLite-over-NFS boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/README.md#node-split-store-api' },
       { label: 'Hosted native NFS platform jobs', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35658285441' },
       { label: 'Latest hosted NFS jobs', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35698854392' },
+      { label: 'Latest NFS process-restart qualification', href: 'https://github.com/andymac4182/mount-rs/commit/96df991f4d4c682fb7a8186bc37013410e93837d51db164' },
       { label: 'Latest hosted NFS status check', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35670416469' },
       { label: 'Historical hosted Linux transport CI', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35575442663' },
     ],
@@ -578,6 +590,18 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
         the Linux 9P probe and all four native lifecycle tests. This is scoped
         lifecycle evidence; broader upstream parity and crash/reset recovery
         remain open.
+        The newer supported-scope closure at exact source
+        <code>86b88c32</code> passed hosted run <code>35703805373</code>:
+        the N-API job covered direct mounted I/O, cleanup, and the adjacent
+        server/connection lifecycle, while the Rust job passed the Linux probe
+        and all four ignored native lifecycle tests. The packet records the
+        supported <code>P9Session</code> and server/connection member surface,
+        attached Node Duplex behavior, client identity/order/close semantics,
+        direct and automatic mount-option mapping, and mounted identity.
+        Legacy message families, extended attributes, rootless macOS native
+        kernel mounting, and process-crash/reset/half-close recovery remain
+        explicit outside-scope or supervisor-owned boundaries; this is not
+        broader upstream parity or production acceptance.
       </>
     ),
     sources: [
@@ -588,7 +612,8 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
       { label: 'Latest hosted Native 9P lifecycle', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35685073733' },
       { label: 'Latest hosted Native 9P structural session', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35691732267' },
       { label: 'Latest hosted Native 9P state machine', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35693518562' },
-      { label: 'Latest hosted Native 9P attached waitClosed parity', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35696071202' },
+      { label: 'Previous hosted Native 9P attached waitClosed parity', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35696071202' },
+      { label: 'Latest hosted Native 9P supported-scope closure', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35703805373' },
       { label: 'Hosted 9P wire-framing qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35687955065' },
       { label: 'Hosted 9P Unix-listener qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35683716217' },
       { label: 'Hosted N-API Native 9P qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35671509538' },
