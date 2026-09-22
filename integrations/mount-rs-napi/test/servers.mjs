@@ -456,6 +456,18 @@ async function exerciseNfs() {
     assert.equal(await server.session.v4.sweepExpired(), 0);
     assert.ok(clockCalls.length > 0, "NFSv4 uses the injected JavaScript clock");
 
+    const unsupportedVersion = nfsV4NullCall(45);
+    unsupportedVersion.writeUInt32BE(5, 16);
+    const directMismatch = await server.session.handleCall(unsupportedVersion);
+    assert.equal(directMismatch.readUInt32BE(20), nfs.RPC_PROG_MISMATCH);
+    assert.equal(directMismatch.readUInt32BE(24), 3);
+    assert.equal(directMismatch.readUInt32BE(28), 4);
+    const standaloneV3Mismatch = await server.session.v3.handleCall(unsupportedVersion);
+    assert.equal(standaloneV3Mismatch.readUInt32BE(20), nfs.RPC_PROG_MISMATCH);
+    assert.equal(standaloneV3Mismatch.readUInt32BE(24), 3);
+    assert.equal(standaloneV3Mismatch.readUInt32BE(28), 3);
+    assert.equal(server.session.stats.requests, 5);
+
     // Exercise the callback-backed NFSv4 state path through the actual N-API
     // server. The synchronous JS callbacks are invoked from the Rust async
     // worker and their translated owner strings are returned on the wire.
@@ -2746,6 +2758,11 @@ const requestedServerPhase = process.env.MOUNT_RS_SERVER_PHASE
 
 await within(
   (async () => {
+    if (requestedServerPhase === "nfs") {
+      await runPhase("NFS exercise", exerciseNfs);
+      await runPhase("NFS session destroy", exerciseNfsSessionDestroy);
+      return;
+    }
     if (requestedServerPhase === "p9") {
       await runPhase("9P exercise", exerciseP9);
       await runPhase("9P TCP concurrency", exerciseP9TcpConcurrency);

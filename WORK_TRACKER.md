@@ -2095,6 +2095,18 @@ Evidence landed without closing the remaining W01 acceptance gates:
   process-crash namespace recovery, not directory-fsync/power-loss durability,
   durable v4 state, native-client ordering, or hosted acceptance; W01-NFS
   remains NO-GO.
+- [x] The shared NFS RPC version router now advertises the actually served
+  NFSv3..v4 range for unsupported NFS versions, rather than falling into the
+  standalone v3 session's v3-only refusal. A real-TCP regression reproduced
+  the old `3..3` response, then passed `3..4` for versions 2 and 5 while
+  retaining MOUNTv3's `3..3`, unknown-program, RPC-version, auth, and valid
+  v3/v4 behavior. TCP and direct N-API dispatch use one Rust router. The full
+  locked NFS target, 266 pinned parity cases (18 explicit skips), affected
+  strict Clippy, N-API release compilation/typecheck, formatting, and diff
+  checks pass. Local direct N-API runtime execution remains unqualified:
+  the macOS-built addon fails `dlopen` with a mis-aligned LINKEDIT string
+  pool, despite a successful shared-target build. Native/hosted ordering,
+  crash/power-loss durability, and W01-NFS production acceptance remain NO-GO.
 - [x] The rootless NFSv4.1 replay-reconnect lane now completes a mutating
   `REMOVE`, disconnects, and retries its cached slot/sequence with a changed
   target. The exact old COMPOUND body returns without removing the second

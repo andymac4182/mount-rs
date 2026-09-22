@@ -35,7 +35,12 @@ semantics.
   through wire operations, effective knobs, lease sweeping, shared handles,
   and live callback tests.
 - Exercise the full v3/v4 behavior matrix, including stateful v4 operations,
-  malformed records, reconnects, and version negotiation.
+  malformed records, reconnects, and version negotiation. The shared router
+  now returns `RPC_PROG_MISMATCH` with the advertised NFSv3..v4 range for
+  unsupported NFS versions, while MOUNT remains v3-only; a real-TCP test
+  covers both directions, valid versions, unknown programs, wrong RPC version,
+  and unsupported auth. The direct N-API path compiles through the same router,
+  but its new runtime assertion awaits a loadable local or hosted addon.
 - The rootless wire suite now drives two independent NFSv4.1 sessions through
   concurrent distinct-file OPEN/WRITE/READ round trips. This closes a bounded
   in-process multi-client userspace case. Multiple server processes sharing a
@@ -203,15 +208,20 @@ semantics.
 | 2026-09-22 | pinned parity after tiny-cache fence | The pinned NFSv3/MOUNT and NFSv4.1 upstream TCP gate passed 266 tests with 18 explicit capability/root skips, 0 failures, using the shared Cargo target and installed Command Line Tools. The originally divergent NFS series was rebased onto refreshed `origin/main`; publication still requires a live fast-forward check. | Pinned parity is userspace evidence, not native ordering, crash-durable state, power-loss durability, or production acceptance; W01-NFS remains NO-GO |
 | 2026-09-22 | host-backed NFSv4.1 namespace deletion after process crash | The forced-process-restart test seeds a second host file, deletes it via successful NFSv4.1 wire `REMOVE`, kills the server without async shutdown, then establishes a replacement session and verifies wire `LOOKUP` returns `NFS4ERR_NOENT`; the host path remains absent after the replacement exits. The existing `FILE_SYNC4` readback and stale session/root/file-handle checks remain. Direct process-restart passed 2/2; the full locked NFS target passed 41 unit and all applicable integrations, including 20 v4 wire, with strict Clippy green using installed Command Line Tools. | One-host process-crash namespace evidence is not directory-fsync or physical power-loss durability, durable session/lease/replay/handle state, native-client ordering, exact-tip hosted acceptance, or production acceptance |
 | 2026-09-22 | host-backed NFSv4.1 rename after process crash | A seeded host file is renamed through successful wire `RENAME` before forced child termination. The replacement session's wire `LOOKUP` returns `NFS4ERR_NOENT` for the old name and success for the new name; the new host path retains the exact seeded bytes after the replacement exits. Direct process restart passed 2/2, the full locked NFS target passed 41 unit and all applicable integrations including 20 v4 wire, and strict Clippy, formatting, and diff checks passed using installed Command Line Tools. | Same-directory, one-host process-crash namespace evidence is not directory-fsync or physical power-loss durability, durable session/lease/replay/handle state, native-client ordering, exact-tip hosted acceptance, or production acceptance |
+| 2026-09-22 | shared NFS RPC version negotiation | The pinned upstream router and RFC 5531 require a supported program-version range in `RPC_PROG_MISMATCH`. The TCP regression first observed the old `3..3` answer for unsupported NFS versions, then passed `3..4` for versions 2 and 5 after routing all server and direct N-API calls through one Rust function. MOUNTv3 still advertises `3..3`; unknown-program, RPC-version, auth, valid v3/v4, and shared-stat cases pass. Full locked NFS passes 41 unit and all applicable integrations including the new router 1/1 and v4 wire 20/20; pinned upstream parity passes 266 with 18 explicit skips; affected strict Clippy, N-API release compilation/typecheck, formatting, and diff checks pass. | The new direct N-API runtime assertion is not locally qualified: the macOS addon fails `dlopen` on a mis-aligned LINKEDIT string pool. Native/hosted ordering, crash/power-loss durability, exact-tip hosted acceptance, and production acceptance remain open |
 
 ## Exact commands and gate boundaries
 
 - `./scripts/cargo-shared test -p mount-rs-nfs --all-targets --locked` — PASS:
-  41 unit tests, process restart 2, rootless wire 1, transport concurrency 3,
+  41 unit tests, process restart 2, rootless wire 1, version routing 1,
+  transport concurrency 3,
   transport errors 4, lifecycle 5, v4 commit barrier 1, and v4 wire 20; the
   native mount target passes its 32-way mountpoint claim test and retains 1
   explicitly ignored native test. The reconnect and pipelining rows are
   rootless userspace evidence, not native or hosted-client acceptance.
+- `DEVELOPER_DIR=/Library/Developer/CommandLineTools ./scripts/cargo-shared test -p mount-rs-nfs --test version_routing --locked` — PASS: 1/1 real-TCP router regression, after a pre-fix failure advertising `3..3` instead of `3..4` for an unsupported NFS version.
+- `DEVELOPER_DIR=/Library/Developer/CommandLineTools CARGO=/Users/andrewmcclenaghan/.codex/worktrees/5aca/mount-rs/scripts/cargo-shared CARGO_TARGET_DIR=/Users/andrewmcclenaghan/Library/Caches/mount-rs/cargo-target CARGO_BUILD_TARGET_DIR=/Users/andrewmcclenaghan/Library/Caches/mount-rs/cargo-target pnpm --dir integrations/mount-rs-napi build` — PASS: release compilation and artifact copy using the shared target. The initial build without `CARGO_BUILD_TARGET_DIR` compiled but its artifact-copy step failed; its small generated worktree-local `target/` metadata was moved recoverably to `/private/tmp/mount-rs-napi-target-20260922.kdjRfl/target`, and the worktree-local path is absent.
+- `(cd integrations/mount-rs-napi && node test/typecheck.mjs)` — PASS. `MOUNT_RS_SERVER_PHASE=nfs node test/servers.mjs` is **BLOCKED** before tests: `dlopen` rejects the freshly built macOS addon with `mis-aligned LINKEDIT string pool`; source dylib and copied `.node` have the same SHA-256. No direct N-API runtime PASS is claimed for this packet.
 - `CARGO_TARGET_DIR=/private/tmp/mount-rs-nfs-independent-slots-20260922 ./scripts/cargo-shared test -p mount-rs-nfs --test v4_wire nfs_v4_independent_slots_overlap_while_one_backend_call_is_blocked --locked -- --exact --nocapture` — PASS with loopback socket permission; the first non-escalated run failed at bind with `EPERM`. The exact disposable target was removed after the passing rerun.
 - `./scripts/cargo-shared test -p mount-rs-nfs --test transport_concurrency --locked` — PASS: 3/3 rootless real-TCP concurrency tests, including completion-order replies and a `max_in_flight=1` gate that holds a second `GETATTR` undispatched until the first completes, then returns both distinct XIDs.
 - `CI=true CARGO_TARGET_DIR=/private/tmp/mount-rs-w01-nfs-conformance-20260922 MOUNTX_SOURCE=/private/tmp/mountx-w01-nfs-oracle pnpm --dir tests/upstream exec vitest run nfs-conformance.test.mjs --config vitest.config.mjs` — PASS: 266 pinned-oracle NFSv3/MOUNT and NFSv4.1 TCP cases, 18 explicit capability/root skips, 0 mismatches; the disposable target was removed after the run.

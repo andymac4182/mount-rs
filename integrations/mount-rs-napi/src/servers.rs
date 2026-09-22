@@ -34,13 +34,14 @@ use mount_rs_fuse::{
     FuseMountHooks as TransportFuseMountHooks, FuseTransportError as TransportFuseError,
     FuseTransportErrorHook as TransportFuseErrorHook,
 };
+use mount_rs_nfs::session::route_nfs_call;
 use mount_rs_nfs::{
-    FileHandleTable as TransportNfsHandleTable, NFS_V4, NFS4_PROGRAM,
-    Nfs3Session as TransportNfsSession, Nfs4Clock as TransportNfs4Clock,
-    Nfs4IdMap as TransportNfs4IdMap, Nfs4Session as TransportNfs4Session,
-    NfsConnection as TransportNfsConnection, NfsRequestContext as TransportNfsRequestContext,
-    NfsServer as TransportNfsServer, NfsServerHooks as TransportNfsServerHooks,
-    NfsServerOptions as TransportNfsServerOptions, NfsSessionError as TransportNfsSessionError,
+    FileHandleTable as TransportNfsHandleTable, Nfs3Session as TransportNfsSession,
+    Nfs4Clock as TransportNfs4Clock, Nfs4IdMap as TransportNfs4IdMap,
+    Nfs4Session as TransportNfs4Session, NfsConnection as TransportNfsConnection,
+    NfsRequestContext as TransportNfsRequestContext, NfsServer as TransportNfsServer,
+    NfsServerHooks as TransportNfsServerHooks, NfsServerOptions as TransportNfsServerOptions,
+    NfsSessionError as TransportNfsSessionError,
     NfsSessionErrorHook as TransportNfsSessionErrorHook,
     NfsSessionOptions as TransportNfsSessionOptions, NfsTransportError as TransportNfsError,
     NfsTransportErrorHook as TransportNfsErrorHook, RpcCall as TransportNfsRpcCall,
@@ -1769,12 +1770,13 @@ impl NfsSession {
     /// `null`; decoded calls return one encoded RPC reply.
     #[napi]
     pub async fn handle_call(&self, bytes: Buffer) -> Option<Buffer> {
-        let context = TransportNfsRequestContext::default();
-        let reply = if is_nfs_v4(bytes.as_ref()) {
-            self.v4_inner.handle_call(bytes.as_ref(), context).await
-        } else {
-            self.inner.handle_call(bytes.as_ref(), context).await
-        };
+        let reply = route_nfs_call(
+            &self.inner,
+            &self.v4_inner,
+            bytes.as_ref(),
+            TransportNfsRequestContext::default(),
+        )
+        .await;
         reply.map(Buffer::from)
     }
 
@@ -1982,15 +1984,6 @@ impl NfsConnection {
         self.inner.wait_closed().await;
         Ok(())
     }
-}
-
-fn is_nfs_v4(bytes: &[u8]) -> bool {
-    if bytes.len() < 20 {
-        return false;
-    }
-    let program = u32::from_be_bytes(bytes[12..16].try_into().expect("NFS program bytes"));
-    let version = u32::from_be_bytes(bytes[16..20].try_into().expect("NFS version bytes"));
-    program == NFS4_PROGRAM && version == NFS_V4
 }
 
 #[napi]

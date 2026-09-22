@@ -19,11 +19,12 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex as AsyncMutex, Notify, Semaphore, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
 
-use crate::rpc::{DEFAULT_RECORD_LIMIT, RecordAssembler, decode_call, frame_record};
+use crate::rpc::{DEFAULT_RECORD_LIMIT, RecordAssembler, frame_record};
 use crate::session::{
     Nfs3Session, NfsRequestContext, NfsSessionErrorHook, NfsSessionHooks, NfsSessionOptions,
+    route_nfs_call,
 };
-use crate::v4::{NFS_V4, NFS4_PROGRAM, Nfs4Session};
+use crate::v4::Nfs4Session;
 
 pub const DEFAULT_NFS_PORT: u16 = 2049;
 
@@ -709,14 +710,7 @@ where
             workers.spawn(async move {
                 let _permit = permit;
                 let context = NfsRequestContext { peer: Some(peer) };
-                let is_v4 = decode_call(&record)
-                    .map(|(call, _)| call.program == NFS4_PROGRAM && call.version == NFS_V4)
-                    .unwrap_or(false);
-                let reply = if is_v4 {
-                    v4_session.handle_call(&record, context).await
-                } else {
-                    session.handle_call(&record, context).await
-                };
+                let reply = route_nfs_call(&session, &v4_session, &record, context).await;
                 let Some(reply) = reply else {
                     return;
                 };

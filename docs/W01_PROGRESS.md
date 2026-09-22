@@ -373,6 +373,14 @@ new name present, with exact host bytes at the new path. This is one-host
 process-crash namespace evidence, not directory-fsync or power-loss durability;
 W01-NFS stays NO-GO.
 
+The shared NFS RPC router now advertises the actual v3..v4 supported range
+when a client requests an unsupported NFS version. The real-TCP regression
+reproduced the former v3-only `3..3` response and now passes `3..4` while
+retaining MOUNTv3-only, unknown-program, RPC-version, auth, and valid-version
+behavior. The direct N-API path compiles through the same router, but its
+local runtime assertion is blocked by a malformed macOS addon LINKEDIT and is
+not claimed as a pass. W01-NFS remains NO-GO.
+
 W01-NFS also passes a rootless NFSv4.1 completed-request replay across an
 orderly TCP reconnect: the same cached slot/sequence returns the original
 mutating `REMOVE` reply without removing a changed target, and the next
@@ -1323,6 +1331,7 @@ spent waiting for a hosted job or credential approval.
 | 2026-09-22 | W01-FUSE | Added directory-handle accounting coverage for `OPENDIR`/`RELEASEDIR`; all 21 session tests, Linux-target test check, and warning-denied Clippy passed | W01 remains NO-GO |
 | 2026-09-22 | W01-NFS | Extended the forced-process-restart NFSv4.1 lane with wire `REMOVE` of a seeded host file before termination; replacement-session wire `LOOKUP` returned `NFS4ERR_NOENT`, while the existing `FILE_SYNC4` readback and stale session/handle checks remained green. Direct process restart passed 2/2; the full locked NFS target passed 41 unit and all applicable integrations, including 20 v4 wire; strict Clippy, formatting, and diff checks passed | — | 75% W01.4 planning view | This is one-host process-crash namespace evidence, not directory-fsync or power-loss durability, persistent NFSv4 state, native-client ordering, exact-tip hosted acceptance, or production acceptance; W01 stays NO-GO |
 | 2026-09-22 | W01-NFS | Extended the forced-process-restart NFSv4.1 lane with successful wire `RENAME` of a seeded host file; after forced termination, replacement-session wire `LOOKUP` found the old name absent and the new name present, and exact host bytes remained at the destination. Direct process restart passed 2/2, the full locked NFS target passed 41 unit and all applicable integrations including 20 v4 wire, and strict Clippy, formatting, and diff checks passed | — | 75% W01.4 planning view | This is same-directory, one-host process-crash namespace evidence, not directory-fsync or power-loss durability, persistent NFSv4 state, native-client ordering, exact-tip hosted acceptance, or production acceptance; W01 stays NO-GO |
+| 2026-09-22 | W01-NFS | Corrected the shared RPC router's unsupported NFS version response from v3-only `3..3` to the actual v3..v4 range. The pre-fix real-TCP regression failed, then passed 1/1 with MOUNT, program, RPC-version, auth, valid v3/v4, and shared-stat boundaries; full locked NFS passed 41 unit and all applicable integrations including 20 v4 wire, pinned upstream parity passed 266 with 18 explicit skips, affected strict Clippy, N-API release compilation/typecheck, formatting, and diff checks passed | — | 75% W01.4 planning view | Direct N-API runtime assertion remains unqualified locally because the built macOS addon fails `dlopen` with mis-aligned LINKEDIT; native/hosted ordering, crash/power-loss durability, exact-tip hosted acceptance, and W01 production acceptance remain NO-GO |
 
 ## Definition of W01 complete
 

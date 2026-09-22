@@ -27,6 +27,7 @@ use crate::rpc::{
     RPC_PROG_UNAVAIL, RPC_VERSION, RpcCall, RpcCredentials, credentials_of, decode_call,
     encode_accept_error, encode_auth_error, encode_rpc_mismatch, write_accepted_reply_header,
 };
+use crate::v4::{NFS_V4, Nfs4Session};
 use crate::xdr::{XdrError, XdrReader, XdrWriter};
 
 pub const DEFAULT_RTMAX: usize = 1024 * 1024;
@@ -432,6 +433,54 @@ impl SharedNfsState {
             }),
             stats: SharedStats::default(),
             path_lock: Arc::new(tokio::sync::RwLock::new(())),
+        }
+    }
+}
+
+/// Route one unframed RPC call across the server's shared NFSv3/MOUNTv3 and
+/// NFSv4.1 sessions. An unsupported NFS program version advertises the full
+/// 3..4 range; standalone versioned sessions retain their own narrower range.
+pub async fn route_nfs_call(
+    v3: &Nfs3Session,
+    v4: &Nfs4Session,
+    message: &[u8],
+    context: NfsRequestContext,
+) -> Option<Vec<u8>> {
+    let peek = message.get(12..20).map(|bytes| {
+        let program = u32::from_be_bytes(bytes[..4].try_into().expect("RPC program bytes"));
+        let version = u32::from_be_bytes(bytes[4..].try_into().expect("RPC version bytes"));
+        (program, version)
+    });
+    match peek {
+        Some((MOUNT_PROGRAM, _)) | Some((NFS_PROGRAM, NFS_V3)) | None => {
+            v3.handle_call(message, context).await
+        }
+        Some((NFS_PROGRAM, NFS_V4)) => v4.handle_call(message, context).await,
+        _ => {
+            {
+                let mut stats = v3.stats.0.lock().expect("NFS stats lock");
+                stats.requests = stats.requests.saturating_add(1);
+            }
+            let call = match decode_call(message) {
+                Ok((call, _)) => call,
+                Err(_) => {
+                    let mut stats = v3.stats.0.lock().expect("NFS stats lock");
+                    stats.dropped = stats.dropped.saturating_add(1);
+                    return None;
+                }
+            };
+            let reply = if call.rpc_version != RPC_VERSION {
+                encode_rpc_mismatch(call.xid, RPC_VERSION, RPC_VERSION)
+            } else if call.cred.flavor != AUTH_NONE && call.cred.flavor != AUTH_SYS {
+                encode_auth_error(call.xid, AUTH_TOOWEAK)
+            } else if call.program != NFS_PROGRAM {
+                encode_accept_error(call.xid, RPC_PROG_UNAVAIL, None)
+            } else {
+                encode_accept_error(call.xid, RPC_PROG_MISMATCH, Some((NFS_V3, NFS_V4)))
+            };
+            let mut stats = v3.stats.0.lock().expect("NFS stats lock");
+            stats.replies = stats.replies.saturating_add(1);
+            Some(reply)
         }
     }
 }
