@@ -277,6 +277,71 @@ async fn transport_connection_failures_are_reported() {
     server.close().await.expect("close");
 }
 
+#[tokio::test]
+async fn streamed_response_read_fault_is_reported_as_connection_failure() {
+    let inner = MemoryFs::empty();
+    inner.write_file("/source", b"source").await.unwrap();
+    let reports = Arc::new(Mutex::new(Vec::new()));
+    let notified = Arc::new(Notify::new());
+    let callback_reports = Arc::clone(&reports);
+    let callback_notified = Arc::clone(&notified);
+    let hooks = WebdavServerHooks {
+        on_transport_error: Some(Arc::new(move |error| {
+            callback_reports
+                .lock()
+                .expect("WebDAV response-fault hook lock")
+                .push(error);
+            callback_notified.notify_waiters();
+        })),
+    };
+    let server = create_webdav_server_with_hooks(
+        Arc::new(ShortSourceFs { inner }),
+        WebdavServerOptions {
+            session: WebdavSessionOptions {
+                read_chunk_bytes: 2,
+                ..WebdavSessionOptions::default()
+            },
+            ..WebdavServerOptions::default()
+        },
+        hooks,
+    )
+    .expect("loopback bind");
+    server.listen().await.expect("listen");
+
+    let response = reqwest::get(format!("{}/source", server.url()))
+        .await
+        .expect("response headers");
+    assert_eq!(response.status(), 200);
+    assert!(
+        response.bytes().await.is_err(),
+        "short response must fail the body"
+    );
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if !reports
+                .lock()
+                .expect("WebDAV response-fault report lock")
+                .is_empty()
+            {
+                break;
+            }
+            notified.notified().await;
+        }
+    })
+    .await
+    .expect("response read fault callback");
+    let report = reports.lock().expect("WebDAV response-fault report lock")[0].clone();
+    assert_eq!(report.kind, WebdavTransportErrorKind::Connection);
+    assert!(
+        report
+            .peer
+            .as_deref()
+            .is_some_and(|peer| peer.starts_with("127.0.0.1:"))
+    );
+    server.close().await.expect("close");
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn immediate_close_after_listen_does_not_lose_shutdown_wakeup() {
     let server = create_webdav_server(
