@@ -1619,6 +1619,18 @@ Evidence landed without closing the remaining W01 acceptance gates:
   pass. Other oversized result types, prefixes too large for the error,
   crash-durable replay, native-client ordering, power-loss durability, and
   exact-tip hosted acceptance remain NO-GO.
+- [x] The same bounded cache-required protection now covers an oversized
+  `READ` tail. A real-TCP `REMOVE` + `LOOKUP` + 512-byte `READ` under a
+  256-byte reply-cache bound returns a cacheable
+  `NFS4ERR_REP_TOO_BIG_TO_CACHE` on `READ`, retains the successful `REMOVE`,
+  replays the exact reply on a changed-target retry without deleting it, and
+  progresses on the next sequence. The full locked NFS target passes (41
+  unit, 1 mountpoint claim with 1 native mount ignored, 2 restart, 1 rootless
+  wire, 3 concurrency, 4 errors, 5 lifecycle, 1 v4 barrier, 16 v4 wire);
+  direct v4 wire 16/16, warning-denied Clippy, formatting, and diff checks
+  pass. Other oversized results, prefixes too large for even the error,
+  crash-durable replay, native-client ordering, power-loss durability, and
+  exact-tip hosted acceptance remain open; W01-NFS is NO-GO.
 - [x] The manual hosted NFS run `35670927787` at `fb9caec8` passed its macOS
   native job, while Ubuntu passed native v4.1 and then failed before its v3
   mount because parallel tests collided on a timestamp-only mountpoint.
