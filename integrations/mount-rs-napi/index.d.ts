@@ -225,6 +225,7 @@ export declare class NativeFuseTranscriptRecorder {
 
 export declare class NativeP9DirentPacker {
   constructor(maxSize: number)
+  get maxSize(): number
   get size(): number
   get count(): number
   get remaining(): number

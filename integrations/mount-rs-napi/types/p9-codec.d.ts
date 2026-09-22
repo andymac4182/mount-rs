@@ -430,6 +430,7 @@ export declare class P9FrameAssembler {
 
 export declare class P9DirentPacker {
   constructor(maxSize: number)
+  readonly maxSize: number
   readonly size: number
   readonly count: number
   readonly remaining: number
