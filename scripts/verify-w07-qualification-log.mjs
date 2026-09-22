@@ -56,6 +56,16 @@ const requiredMarkers = [
     /FOUNDATIONDB_LEASE_PUBLICATION_POLICY_PASS lease_ttl_ms=\d+ publication_interval_ms=\d+ max_forward_jump_ms=\d+\b/u,
   ],
   [
+    "authority-heartbeat",
+    "FOUNDATIONDB_AUTHORITY_HEARTBEAT_RUNNING",
+    /FOUNDATIONDB_AUTHORITY_HEARTBEAT_RUNNING\b.*\binterval_seconds=\d+\s+max_forward_jump_seconds=\d+\s+duration_seconds=\d+\b/u,
+  ],
+  [
+    "authority-stats",
+    "FOUNDATIONDB_AUTHORITY_STATS_PASS",
+    /FOUNDATIONDB_AUTHORITY_STATS_PASS\b publication_attempts=\d+ publication_successes=\d+ publication_failures=\d+ reader_attempts=\d+ reader_successes=\d+ reader_failures=\d+ last_published_time_ms=\d+ last_observed_time_ms=\d+\b/u,
+  ],
+  [
     "rustfs-network",
     "FOUNDATIONDB_RUSTFS_NETWORK_READY",
     /FOUNDATIONDB_RUSTFS_NETWORK_READY\b/u,
@@ -124,6 +134,79 @@ const leasePolicy = leasePolicyMatch
     }
   : null;
 
+const heartbeatPattern =
+  /FOUNDATIONDB_AUTHORITY_HEARTBEAT_RUNNING\b.*\binterval_seconds=(\d+)\s+max_forward_jump_seconds=(\d+)\s+duration_seconds=(\d+)\b/u;
+const heartbeatLine = findLine(heartbeatPattern);
+const heartbeatMatch = heartbeatLine?.match(heartbeatPattern);
+if (!heartbeatMatch) {
+  missing.push("authority-heartbeat-values");
+}
+
+const authorityHeartbeat = heartbeatMatch
+  ? {
+      marker: marker(
+        heartbeatLine,
+        "FOUNDATIONDB_AUTHORITY_HEARTBEAT_RUNNING",
+      ),
+      intervalSeconds: Number(heartbeatMatch[1]),
+      maxForwardJumpSeconds: Number(heartbeatMatch[2]),
+      durationSeconds: Number(heartbeatMatch[3]),
+    }
+  : null;
+
+if (
+  authorityHeartbeat &&
+  (!Number.isSafeInteger(authorityHeartbeat.intervalSeconds) ||
+    !Number.isSafeInteger(authorityHeartbeat.maxForwardJumpSeconds) ||
+    !Number.isSafeInteger(authorityHeartbeat.durationSeconds) ||
+    authorityHeartbeat.intervalSeconds <= 0 ||
+    authorityHeartbeat.maxForwardJumpSeconds <= 0 ||
+    authorityHeartbeat.durationSeconds < authorityHeartbeat.intervalSeconds)
+) {
+  missing.push("authority-heartbeat-values");
+}
+
+const authorityStatsPattern =
+  /FOUNDATIONDB_AUTHORITY_STATS_PASS\b publication_attempts=(\d+) publication_successes=(\d+) publication_failures=(\d+) reader_attempts=(\d+) reader_successes=(\d+) reader_failures=(\d+) last_published_time_ms=(\d+) last_observed_time_ms=(\d+)\b/u;
+const authorityStatsLine = findLine(authorityStatsPattern);
+const authorityStatsMatch = authorityStatsLine?.match(authorityStatsPattern);
+if (!authorityStatsMatch) {
+  missing.push("authority-stats-values");
+}
+
+const authorityStats = authorityStatsMatch
+  ? {
+      marker: marker(authorityStatsLine, "FOUNDATIONDB_AUTHORITY_STATS_PASS"),
+      publicationAttempts: Number(authorityStatsMatch[1]),
+      publicationSuccesses: Number(authorityStatsMatch[2]),
+      publicationFailures: Number(authorityStatsMatch[3]),
+      readerAttempts: Number(authorityStatsMatch[4]),
+      readerSuccesses: Number(authorityStatsMatch[5]),
+      readerFailures: Number(authorityStatsMatch[6]),
+      lastPublishedTimeMs: Number(authorityStatsMatch[7]),
+      lastObservedTimeMs: Number(authorityStatsMatch[8]),
+    }
+  : null;
+
+if (
+  authorityStats &&
+  (!Object.values(authorityStats)
+    .slice(1)
+    .every((value) => Number.isSafeInteger(value) && value >= 0) ||
+    authorityStats.publicationAttempts <= 0 ||
+    authorityStats.publicationSuccesses <= 0 ||
+    authorityStats.readerAttempts <= 0 ||
+    authorityStats.readerSuccesses <= 0 ||
+    authorityStats.publicationAttempts !==
+      authorityStats.publicationSuccesses + authorityStats.publicationFailures ||
+    authorityStats.readerAttempts !==
+      authorityStats.readerSuccesses + authorityStats.readerFailures ||
+    authorityStats.lastPublishedTimeMs <= 0 ||
+    authorityStats.lastObservedTimeMs <= 0)
+) {
+  missing.push("authority-stats-values");
+}
+
 if (
   leasePolicy &&
   (!Number.isSafeInteger(leasePolicy.leaseTtlMs) ||
@@ -137,6 +220,18 @@ if (
     leasePolicy.maxForwardJumpMs > leasePolicy.leaseTtlMs)
 ) {
   missing.push("lease-policy-values");
+}
+
+if (
+  leasePolicy &&
+  authorityHeartbeat &&
+  (authorityHeartbeat.intervalSeconds * 1000 !==
+    leasePolicy.publicationIntervalMs ||
+    authorityHeartbeat.maxForwardJumpSeconds * 1000 !==
+      leasePolicy.maxForwardJumpMs ||
+    authorityHeartbeat.intervalSeconds * 1000 >= leasePolicy.leaseTtlMs)
+) {
+  missing.push("authority-heartbeat-policy-values");
 }
 
 const soakPattern = new RegExp(
@@ -254,6 +349,8 @@ const summary = {
   expectedSoakRounds: expectedRounds,
   markers: found,
   leasePolicy,
+  authorityHeartbeat,
+  authorityStats,
   latency,
   provenance,
 };

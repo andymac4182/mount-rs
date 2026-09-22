@@ -195,6 +195,14 @@ observations rather than lease time, and P7 remains open until a named
 collector/pager receives and exercises the signals in the approved
 production-like environment.
 
+The qualification-log verifier fails closed unless the retained hosted log
+contains both `FOUNDATIONDB_AUTHORITY_HEARTBEAT_RUNNING` and
+`FOUNDATIONDB_AUTHORITY_STATS_PASS`. It checks that the heartbeat cadence and
+forward-jump bound match the lease-publication policy and that publication and
+reader attempts reconcile with their success/failure counters. This protects
+the qualification evidence packet from silently losing the new authority
+telemetry assertions; it is still not deployed collector or pager evidence.
+
 | Signal | Minimum alert condition | Operator action |
 | --- | --- | --- |
 | FoundationDB availability/quorum | Failed readiness, replication or sustained provider errors | Stop writers; follow the quorum/storage response |

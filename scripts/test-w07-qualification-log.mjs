@@ -18,6 +18,8 @@ const validLog = [
   "W07_PRODUCTION_CONFIG_POLICY_FAIL reason=config.driver.storage.blocks.secret_access_key-must-not-be-inline",
   "W07_PRODUCTION_CONFIG_POLICY_FAIL reason=storage.lease_ttl_ms-must-be-positive-safe-integer-at-most-24h",
   "FOUNDATIONDB_LEASE_PUBLICATION_POLICY_PASS lease_ttl_ms=120000 publication_interval_ms=30000 max_forward_jump_ms=120000",
+  "FOUNDATIONDB_AUTHORITY_HEARTBEAT_RUNNING container=mount-rs-foundationdb-authority-test interval_seconds=30 max_forward_jump_seconds=120 duration_seconds=1800",
+  "FOUNDATIONDB_AUTHORITY_STATS_PASS publication_attempts=3 publication_successes=3 publication_failures=0 reader_attempts=5 reader_successes=4 reader_failures=1 last_published_time_ms=2030001 last_observed_time_ms=2030001",
   "FOUNDATIONDB_RUSTFS_NETWORK_READY alias=mount-rs-rustfs container=mount-rs-rustfs-test",
   "FOUNDATIONDB_BLOCK_ENDPOINT_REACHABLE status=403",
   "FOUNDATIONDB_RUSTFS_CHUNKED_PASS revision=10 volume_prefix=test cleanup_deferred=false",
@@ -71,6 +73,24 @@ const cases = [
     log: validLog.replace(
       "FOUNDATIONDB_W07_WORKLOAD_PASS profile=w07-bounded provider=mount-rs-split-foundationdb-r2 size_mib=1 payload_bytes=4096 iterations=400 concurrency=64 minimum_iops=1 measured_iops=29.13 output=/tmp/foundationdb-ozone-iops.json\n",
       "",
+    ),
+  },
+  {
+    name: "missing-authority-heartbeat",
+    expectedStatus: 1,
+    expectedOutput: "missing=authority-heartbeat,authority-heartbeat-values",
+    log: validLog.replace(
+      "FOUNDATIONDB_AUTHORITY_HEARTBEAT_RUNNING container=mount-rs-foundationdb-authority-test interval_seconds=30 max_forward_jump_seconds=120 duration_seconds=1800\n",
+      "",
+    ),
+  },
+  {
+    name: "inconsistent-authority-stats",
+    expectedStatus: 1,
+    expectedOutput: "missing=authority-stats-values",
+    log: validLog.replace(
+      "publication_successes=3 publication_failures=0",
+      "publication_successes=2 publication_failures=0",
     ),
   },
 ];
