@@ -346,6 +346,15 @@ Current focused behavior:
   `closed`/`waitClosed()`, terminal `isClosed`, client removal, and cleanup.
   Local focused checks passed; hosted verification is pending publication and
   production remains NO-GO.
+- The mounted-view identity packet at exact SHA
+  `0cc78603b221e62b84cefa57402bceee7faae8d2` caches the `Mounted.server` and
+  `Mounted.connection` wrappers and reuses the matching `P9Server.clients`
+  wrapper by stable transport id. The direct native-mount regression checks
+  repeated getter identity and cross-view connection identity, alongside the
+  existing native stream/peer/session views and cleanup. Local syntax, focused
+  lifecycle checks, metadata/session/observability/type checks, and the
+  elevated 9P selector passed; hosted verification is pending publication and
+  production remains NO-GO.
 - That selector also covers the Unix listener policy: private-directory
   refusal, explicit `allowSharedDirectory`, `0600` socket mode, Unix protocol
   handshake and transport-source peer, socket cleanup, and path/port
@@ -451,7 +460,9 @@ Current focused behavior:
   `umount` exit status 32. The overall run is not hosted PASS evidence.
   Broader protocol/session behavior remains a separate gate.
 - The N-API object boundary keeps serializable lifecycle views: native
-  `P9Server.address()`/`path` use string-or-null representations, and effective
+  `P9Server.address()`/`path` use string-or-null representations (TCP
+  `host:port`, or the configured Unix socket path; TCP is `null` before binding
+  and after close), and effective
   `onError`/`onAssertion` hooks are omitted from `server.options` and
   `session.options` rather than pretending that live JavaScript functions can
   be round-tripped through the native getter. The focused metadata regression

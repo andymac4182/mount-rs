@@ -217,6 +217,16 @@ regression covers concurrent/repeated/post-closure calls, `closed`/
 checks passed; hosted verification is pending publication, so production
 remains NO-GO.
 
+The mounted-view identity packet at exact SHA
+`0cc78603b221e62b84cefa57402bceee7faae8d2` caches the N-API
+`Mounted.server` and `Mounted.connection` wrappers and reuses the matching
+`P9Server.clients` wrapper by stable transport id. The direct native-mount
+regression checks repeated getter identity and cross-view connection identity,
+alongside the existing native stream/peer/session views and cleanup. Local
+syntax, focused lifecycle checks, metadata/session/observability/type checks,
+and the elevated 9P selector passed; hosted verification is pending
+publication, so production remains NO-GO.
+
 The preceding W01-9P transport-teardown packet was published at exact SHA
 `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` and passed [Native 9P run
 `35685073733`](https://github.com/andymac4182/mount-rs/actions/runs/35685073733):
