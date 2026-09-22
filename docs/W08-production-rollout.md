@@ -368,6 +368,18 @@ publication. No provider credentials, production deployment, candidate tag,
 canary, rollback or owner approval exists. P01–P09 remain open and the
 decision remains NO-GO.
 
+The next public source `76eb2914bf8b9011cfe87984bdcd9068b29f4f3e` added the
+S3 graceful-close coverage and release-gate workflow updates; its W08 policy
+run `35694308868` cancelled before job creation with `jobs=[]`, so it is not
+hosted evidence. The exact local merge
+`d54ea71e85eb6dae1b2c161831f75ab13727b968` includes that source plus the W08
+ledger and passed the full locked workspace test, strict Clippy, seven
+workflow YAML parses, N-API/package checks, W07/W08 tracking validators/tests
+and `git diff --check`. The hosted W08 retest for this merge is pending
+publication. No provider credentials, production deployment, candidate tag,
+canary, rollback or owner approval exists. P01–P09 remain open and the
+decision remains NO-GO.
+
 After origin/main advanced with the 9P EOF/backpressure server fix `1179d9e3`,
 N-API test expansion and site component updates, exact merged source
 `d725248534eb897de4d49e916c47425e6266c05d` was freshly requalified. The full
