@@ -59,7 +59,17 @@ ledger in the same commit as an implementation/evidence chunk.
 | W01-Auto/CLI | Auto selection, mount facade and SDK-backed consumers | Focused option/consumer paths exist; cross-transport native lifecycle remains | Per-transport options/callback ownership and signal/async-dispose evidence |
 | W01-Provider/Native | Providers, hosted CI, FSKit, Windows, crash and concurrency | Local capability-limited packets exist; external lanes remain | Fresh live-provider and hosted/native results with no prerequisite-gated acceptance rows |
 
-The latest W01-9P transport-teardown packet was published at exact SHA
+The latest W01-9P TCP isolation packet was published at exact SHA
+`9870d58cfbed5bcea90972c4b9caaf5db3075cef` and passed [Native 9P run
+`35685807744`](https://github.com/andymac4182/mount-rs/actions/runs/35685807744):
+N-API job `106612633937` passed the real TCP per-connection session/fid
+isolation, survivor service after one client closes, completion-order dispatch,
+the full server/attach and teardown phases, and automatic/direct/structural
+mounted-I/O cleanup. Rust job `106612633771` passed the Linux probe plus all
+four ignored native lifecycle tests. Local syntax/diff checks and elevated
+N-API execution passed; broader W01 acceptance remains NO-GO.
+
+The preceding W01-9P transport-teardown packet was published at exact SHA
 `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` and passed [Native 9P run
 `35685073733`](https://github.com/andymac4182/mount-rs/actions/runs/35685073733):
 N-API job `106610049913` passed addon build, the isolated TCP/Unix/attached
