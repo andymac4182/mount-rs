@@ -1160,6 +1160,14 @@ probes recreate the provider in a replacement session and observe
 The current shell has no AWS/R2/Cloudflare credential names available; live
 provider acceptance remains externally gated and no credential values were
 read or persisted.
+The latest protected audit remains non-qualifying: on current `origin/main`
+`a7ff32f00e597dbdc37e0baefe3f37321354bb58`, CI run `35690677984` was cancelled
+after Ubuntu native WebDAV job `106626916000` passed and macOS native WebDAV
+job `106626916081` was cancelled; protected AWS run `35690334807` failed at
+`AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, and protected R2 run `35690334795`
+failed at `count=317 limit=20` before its live integration job. No hosted
+WebDAV aggregate PASS or live-provider acceptance is promoted from those
+results.
 The structural N-API `FsDriver` now also has an optional
 `readdirBounded(path, maxEntries)` callback. The rebuilt addon and focused
 structural WebDAV regression pass bounded `Depth: 1` PROPFIND, recursive
