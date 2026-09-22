@@ -654,6 +654,12 @@ N-API, CI-workflow, or native-build files changed through current tip
 hosted package/native slices only. Live-provider, physical power-loss/crash
 durability, durable-lock, and stronger same-resource ordering gates remain.
 
+The W01-WebDAV completion audit is therefore locally and hosted green for
+the supported protocol/session/N-API/native packet. Production remains
+**NO-GO** only on external live AWS/R2 admission and physical
+power-loss/live-provider durability; durable-lock persistence and stronger
+same-resource ordering remain explicit supported-scope exclusions.
+
 The same rebuilt package also passed the pinned barrel differential, supported
 session/member differential, and current TypeScript/Rust HTTP differential:
 `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921` yielded 40 paired
