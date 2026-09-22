@@ -27,8 +27,8 @@ use mount_rs_nfs::protocol::{
 };
 use mount_rs_nfs::v4::{
     CLAIM_FH, CLAIM_NULL, CREATE_SESSION4_FLAG_CONN_BACK_CHAN, FATTR4_LEASE_TIME,
-    NFS4ERR_BAD_STATEID, NFS4ERR_BADSESSION, NFS4ERR_DELAY, NFS4ERR_GRACE, NFS4ERR_NOSPC,
-    NFS4ERR_REP_TOO_BIG_TO_CACHE, NFS4ERR_RESOURCE, NFS4ERR_RETRY_UNCACHED_REP,
+    NFS4ERR_BAD_HIGH_SLOT, NFS4ERR_BAD_STATEID, NFS4ERR_BADSESSION, NFS4ERR_DELAY, NFS4ERR_GRACE,
+    NFS4ERR_NOSPC, NFS4ERR_REP_TOO_BIG_TO_CACHE, NFS4ERR_RESOURCE, NFS4ERR_RETRY_UNCACHED_REP,
     NFS4ERR_SEQ_FALSE_RETRY, NFS4ERR_SEQ_MISORDERED, NFS4ERR_SHARE_DENIED, NFS4ERR_STALE,
     NFS4ERR_TOO_MANY_OPS, NFS4ERR_TOOSMALL, OPEN4_CREATE, OPEN4_SHARE_ACCESS_BOTH, UNCHECKED4,
     UNSTABLE4,
@@ -4677,6 +4677,44 @@ fn nfs_v4_state_limits_are_advertised_and_enforced() {
                         "maxOperations rejects an oversized stateful COMPOUND"
                     );
                     response.end("too many ops response").unwrap();
+
+                    // A failed SEQUENCE must not consume the slot. Reuse the
+                    // same sequence for a valid request after each rejection.
+                    let mut response = rpc(
+                        &mut stream,
+                        406,
+                        compound("valid-after-too-many", &[sequence(&client)]),
+                    )
+                    .await;
+                    assert_eq!(parse_compound_status(&mut response, 1), 0);
+                    consume_sequence_result(&mut response, "valid after too many");
+                    response.end("valid after too many response").unwrap();
+
+                    client.sequence += 1;
+                    let high_slot = op(OP_SEQUENCE, |writer| {
+                        writer.fixed_opaque(&client.session, 16);
+                        writer.u32(client.sequence);
+                        writer.u32(client.slot);
+                        writer.u32(1); // The one-slot session enforces highest 0.
+                        writer.bool(true);
+                    });
+                    let mut response =
+                        rpc(&mut stream, 407, compound("bad-high-slot", &[high_slot])).await;
+                    assert_eq!(
+                        parse_compound_status(&mut response, 0),
+                        NFS4ERR_BAD_HIGH_SLOT
+                    );
+                    response.end("bad high slot response").unwrap();
+
+                    let mut response = rpc(
+                        &mut stream,
+                        408,
+                        compound("valid-after-high-slot", &[sequence(&client)]),
+                    )
+                    .await;
+                    assert_eq!(parse_compound_status(&mut response, 1), 0);
+                    consume_sequence_result(&mut response, "valid after high slot");
+                    response.end("valid after high slot response").unwrap();
 
                     stream.shutdown().await.expect("close state-limit client");
                     server.close().await.expect("close state-limit server");
