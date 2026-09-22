@@ -1028,6 +1028,15 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
         Ubuntu, but the surrounding workflow failed in provider/W26, Windows,
         and native-FUSE lanes. This is scoped native execution evidence, not a
         full hosted lifecycle or release-acceptance result.
+        The current N-API package refresh at source <code>c57e2ea3</code> also
+        passes the WebDAV-only lifecycle, 64-pair direct-session/network
+        concurrency, NodeFs/SQLite provider and network matrices, orderly
+        reopen, process-crash and in-flight PUT recovery, structural-driver
+        durability, Rust WebDAV 41/41, typecheck, strict Clippy, formatting,
+        and diff checks. Manual current-package run
+        <code>35714570430</code> at <code>92a6539e</code> remains queued, so
+        this is local package evidence only; live-provider, physical power-loss,
+        durable-lock, and stronger same-resource-ordering gates remain open.
       </>
     ),
     sources: [
@@ -1045,6 +1054,8 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
       { label: 'WebDAV bounded enumeration and copy failures', href: 'https://github.com/andymac4182/mount-rs/commit/8e08ac4' },
       { label: 'Latest hosted WebDAV queue audit', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35681127696' },
       { label: 'Latest hosted WebDAV/provider audit', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35687955189' },
+      { label: 'Current WebDAV N-API package qualification', href: 'https://github.com/andymac4182/mount-rs/commit/c57e2ea3' },
+      { label: 'Queued current-package WebDAV run', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35714570430' },
     ],
   },
 } as const satisfies Record<string, TransportSpec>
