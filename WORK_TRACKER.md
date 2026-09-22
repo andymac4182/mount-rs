@@ -545,6 +545,11 @@ rootless kernel file-operation step, so it supplies no native acceptance
 evidence. The exact branch tip still requires a non-canceling manual hosted
 qualification before any Linux mount, callback, lifecycle, concurrency, lock,
 crash/restart, or durability result can be promoted; W01 remains NO-GO.
+The published FUSE follow-up was then verified against hosted run `35668748366` /
+native-FUSE job `106560234631`: ordinary round-trip and backend-panic
+callback/close passed, while blocked-read unmount failed after 30.03s. The
+current teardown-drain fix is locally green and requires a fresh non-canceling
+hosted rerun; W01 remains NO-GO.
 
 Parallel W01 sidecars completed on 2026-09-21 and were published to `main`:
 

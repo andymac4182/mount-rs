@@ -693,8 +693,12 @@ impl MountState {
         let graceful_attempt = tokio::select! {
             attempt = &mut graceful => attempt,
             _ = &mut stop_grace => {
+                // Let the session loop observe the stop signal and drain its
+                // positional-read workers before the helper deadline. An
+                // immediate owner-task abort drops the JoinSet without
+                // waiting for those workers to release an in-flight kernel
+                // request, which can leave fusermount blocked indefinitely.
                 self.request_stop();
-                self.abort_task();
                 graceful.await
             }
         };
@@ -712,7 +716,7 @@ impl MountState {
                 // configured timeout leaves margin below the timeout plus
                 // half-timeout regression bound, while the cap prevents a
                 // blocked session from extending forced teardown indefinitely.
-                let forced_budget = (timeout / 3).min(FORCED_STOP_GRACE);
+                let forced_budget = (timeout / 3).min(READ_TASK_DRAIN_TIMEOUT);
                 let forced_phase_deadline = Instant::now() + forced_budget;
                 if let Some(task) = task {
                     // Give a normally polling session a short opportunity to

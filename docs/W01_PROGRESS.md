@@ -213,6 +213,13 @@ addon rebuild, syntax/diff checks, and elevated N-API execution passed. The
 process-crash and arbitrary-kernel-reset recovery boundary remains explicit;
 broader W01 acceptance remains NO-GO.
 
+The latest W01-FUSE packet was published at `1c195b73bcb09a09aa1c96ab657245421bd8e3b4`.
+Its local protocol/session/lifecycle checks pass, while hosted run
+`35668748366` proved ordinary native round-trip and backend-panic callback/close
+but still failed the blocked-read unmount case. The follow-up teardown-drain fix
+is locally verified and awaits a fresh non-cancelling hosted Linux run; W01 and
+W01-FUSE remain production NO-GO.
+
 The preceding W01-9P Unix listener packet was published at exact test SHA
 `dd10ac0564446c9143f8b5f68b2fed51c7eaf57f` and is included in descendant head
 `d43f5ea4e4334912de86ac0db818392531a7d4ec`. Its [Native 9P run
