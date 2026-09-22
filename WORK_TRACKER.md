@@ -1069,6 +1069,12 @@ peer-qualified `Connection` transport report.
 The public `WebdavRequestBody` documentation now states the corresponding
 contract: only known 413 limit faults are drainable for keep-alive reuse;
 non-recoverable body faults close the connection boundary.
+The exact-tip audit for `c42030c1807f6504660892bf829137897e910c5e` then found
+CI run `35687955166` cancelled with no jobs. Live Cloudflare R2 run
+`35687955189` failed the usage-admission job at `count=309 limit=20`, so its
+live integration job was skipped; no hosted WebDAV or live-provider PASS is
+claimable from that tip, and mainline subsequently advanced to
+`594ad797a67c77daa5d504042d15353da925688a`.
 The current hosted provider audit confirms the external boundary: Live AWS S3
 run `35679010203` failed its protected preflight with
 `AWS_S3_CI_CONFIG_BLOCKED missing_bucket` and empty bucket/region/account/role
@@ -3321,14 +3327,18 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   `scripts/test-w07-rollout-ledger.mjs` runs six regression cases for the
   current NO-GO, premature-GO, missing-gate, missing-drill and synthetic
   complete-GO states; these cases validate the tracking control only.
-  The hosted workflow also runs `scripts/test-w07-qualification-log.mjs` with
-  seven credential-free verifier cases. The qualification log verifier now
+  The hosted workflow runs `scripts/test-w07-qualification-log.mjs` with
+  eight credential-free verifier cases. The qualification log verifier
   requires the exact accepted configuration shape, both expected negative
-  fixtures and a parsed lease-publication policy whose cadence is shorter
-  than the TTL, whose forward-jump bound is no larger than the TTL and whose
-  TTL is at most 24 hours. These checks harden evidence integrity only; they
-  do not close any production identity, failover, recovery, capacity,
-  observability, native-platform or release-owner gate.
+  fixtures, a parsed lease-publication policy whose cadence is shorter than
+  the TTL, whose forward-jump bound is no larger than the TTL and whose TTL is
+  at most 24 hours, and at least one valid
+  `FOUNDATIONDB_LATENCY_PASS` sample for the base composition plus every
+  declared soak round. It retains all parsed latency samples in the schema-2
+  summary, so a standalone `FOUNDATIONDB_SOAK_PASS` marker cannot hide a
+  missing or malformed round measurement. These checks harden evidence
+  integrity only; they do not close any production identity, failover,
+  recovery, capacity, observability, native-platform or release-owner gate.
   The dedicated hosted lane now also requests a fixed bounded workload profile
   through the live FoundationDB/RustFS Node consumer (400 iterations, 64-way
   concurrency and 4 KiB payloads), independently validates and retains
@@ -3462,6 +3472,16 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     `afccc878e46a096c6153f04fac017f3df19d37d147a2e83629fa14616f850e30`)
     remains bounded implementation qualification; the packet remains
     **NO-GO** with seven open gates and zero evidence records.
+
+    The evidence-integrity follow-up at exact source
+    `419fbf217b5c40e0e62371e9b41badc07582e3d5` now runs eight qualification-log
+    regression cases and requires one valid latency sample for the base
+    composition plus every declared soak round; all samples are retained in
+    the schema-2 summary. The retained `35686583792` log independently passes
+    this stricter verifier because it contains the base sample plus five soak
+    samples, but its hosted workflow ran before the eighth regression case was
+    added. A fresh current-tip hosted run is required to record the tightened
+    CI result; this does not change the production **NO-GO** boundary.
 
   - [ ] **Observability and operations:** expose and alert on cluster health,
     authority publication age/errors, reader failures, lease-fence/ESTALE,

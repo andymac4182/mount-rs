@@ -252,24 +252,28 @@ found.test = testLine ? marker(testLine, "FOUNDATIONDB_TEST_PASS") : null;
 
 const latencyPattern =
   /FOUNDATIONDB_LATENCY_PASS workload=(\S+) operations=(\d+) p50_us=(\d+) p95_us=(\d+) p99_us=(\d+) total_ms=(\d+) throughput_ops_per_sec=([0-9]+(?:\.[0-9]+)?)/u;
-const latencyLine = findLine(latencyPattern);
-const latencyMatch = latencyLine?.match(latencyPattern);
-if (!latencyMatch) {
+const parseLatency = (line, match) => ({
+  marker: marker(line, "FOUNDATIONDB_LATENCY_PASS"),
+  workload: match[1],
+  operations: Number(match[2]),
+  p50Us: Number(match[3]),
+  p95Us: Number(match[4]),
+  p99Us: Number(match[5]),
+  totalMs: Number(match[6]),
+  throughputOpsPerSec: Number(match[7]),
+});
+const latencySamples = lines.flatMap((line) => {
+  const match = line.match(latencyPattern);
+  return match ? [parseLatency(line, match)] : [];
+});
+if (latencySamples.length === 0) {
   missing.push("latency");
 }
+if (latencySamples.length < expectedRounds + 1) {
+  missing.push(`latency-samples-${expectedRounds + 1}`);
+}
 
-const latency = latencyMatch
-  ? {
-      marker: marker(latencyLine, "FOUNDATIONDB_LATENCY_PASS"),
-      workload: latencyMatch[1],
-      operations: Number(latencyMatch[2]),
-      p50Us: Number(latencyMatch[3]),
-      p95Us: Number(latencyMatch[4]),
-      p99Us: Number(latencyMatch[5]),
-      totalMs: Number(latencyMatch[6]),
-      throughputOpsPerSec: Number(latencyMatch[7]),
-    }
-  : null;
+const latency = latencySamples[0] ?? null;
 
 const provenanceFields = [
   [
@@ -316,12 +320,20 @@ if (provenanceRequested) {
 }
 
 if (
-  latency &&
-  (latency.operations <= 0 ||
-    latency.p50Us > latency.p95Us ||
-    latency.p95Us > latency.p99Us ||
-    latency.totalMs <= 0 ||
-    latency.throughputOpsPerSec <= 0)
+  latencySamples.some(
+    (sample) =>
+      !Number.isSafeInteger(sample.operations) ||
+      !Number.isSafeInteger(sample.p50Us) ||
+      !Number.isSafeInteger(sample.p95Us) ||
+      !Number.isSafeInteger(sample.p99Us) ||
+      !Number.isSafeInteger(sample.totalMs) ||
+      sample.operations <= 0 ||
+      sample.p50Us < 0 ||
+      sample.p50Us > sample.p95Us ||
+      sample.p95Us > sample.p99Us ||
+      sample.totalMs <= 0 ||
+      sample.throughputOpsPerSec <= 0,
+  )
 ) {
   missing.push("latency-values");
 }
@@ -352,6 +364,7 @@ const summary = {
   authorityHeartbeat,
   authorityStats,
   latency,
+  latencySamples,
   provenance,
 };
 

@@ -33,6 +33,11 @@ const validLog = [
   "FOUNDATIONDB_SOAK_PASS rounds=5",
   "FOUNDATIONDB_TEST_PASS topology=durable manifests=tests/foundationdb/Cargo.toml+integrations/mount-rs-foundationdb/Cargo.toml platform=linux/amd64 service_restart=pass soak_rounds=5",
   "FOUNDATIONDB_LATENCY_PASS workload=composition operations=15 p50_us=1000 p95_us=2000 p99_us=3000 total_ms=40 throughput_ops_per_sec=375",
+  "FOUNDATIONDB_LATENCY_PASS workload=composition operations=15 p50_us=1100 p95_us=2100 p99_us=3100 total_ms=41 throughput_ops_per_sec=365",
+  "FOUNDATIONDB_LATENCY_PASS workload=composition operations=15 p50_us=1200 p95_us=2200 p99_us=3200 total_ms=42 throughput_ops_per_sec=355",
+  "FOUNDATIONDB_LATENCY_PASS workload=composition operations=15 p50_us=1300 p95_us=2300 p99_us=3300 total_ms=43 throughput_ops_per_sec=345",
+  "FOUNDATIONDB_LATENCY_PASS workload=composition operations=15 p50_us=1400 p95_us=2400 p99_us=3400 total_ms=44 throughput_ops_per_sec=335",
+  "FOUNDATIONDB_LATENCY_PASS workload=composition operations=15 p50_us=1500 p95_us=2500 p99_us=3500 total_ms=45 throughput_ops_per_sec=325",
 ].join("\n");
 
 const cases = [
@@ -91,6 +96,15 @@ const cases = [
     log: validLog.replace(
       "publication_successes=3 publication_failures=0",
       "publication_successes=2 publication_failures=0",
+    ),
+  },
+  {
+    name: "missing-soak-latency-evidence",
+    expectedStatus: 1,
+    expectedOutput: "missing=latency-samples-6",
+    log: validLog.replace(
+      "FOUNDATIONDB_LATENCY_PASS workload=composition operations=15 p50_us=1500 p95_us=2500 p99_us=3500 total_ms=45 throughput_ops_per_sec=325",
+      "",
     ),
   },
 ];
