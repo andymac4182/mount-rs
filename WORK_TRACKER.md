@@ -967,7 +967,10 @@ provider-backed direct-session matrix also passes 128 concurrent NodeFs and
 SQLite PUT/GET pairs in three repetitions with exact byte readback. The
 host-enabled provider-backed network matrix also passes 64 concurrent NodeFs
 and SQLite HTTP PUT/GET pairs in three repetitions, including streamed bodies.
-The current-tip Rust WebDAV target passes 20/20 with the shared Cargo wrapper,
+The focused Rust concurrent lock regression also passes: two simultaneous
+writes without the submitted token both return `423` against one exclusive
+lock.
+The current-tip Rust WebDAV target passes 21/21 with the shared Cargo wrapper,
 and warning-denied WebDAV Clippy passes; the target now includes a durable
 driver barrier regression covering successful PUT, MKCOL, PROPPATCH, COPY,
 MOVE, DELETE, resource creation by LOCK, and injected barrier failure/retry.
@@ -997,6 +1000,11 @@ The subsequent 64-pair packet `d391f9b798df455311177f462ab160736ed3ba4c`
 had its exact-SHA CI, W08, Fault injection, and W04 runs cancelled by later
 mainline publication while its Live R2 run remained queued; its local
 concurrency evidence is not promoted to hosted acceptance.
+The pinned WebDAV oracle deliberately has no `PathLock` for this HTTP session;
+the transport therefore supports concurrent independent resources and
+WebDAV lock/`If` coordination, but does not claim linearizable same-resource
+ordering or atomic same-target `PUT` publication. Power-loss durability,
+live-provider behavior, and durable locks remain separate gates.
 
 - [x] Land Rust filesystem contract and implementations, with separate crates.
 - [x] Pin mountx oracle to `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`.
@@ -1688,6 +1696,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   requests, recursive owner XML readback, plus the session-owned driver
   wrapper, are verified. The parallel packet is limited to in-process
   same-driver concurrency.
+- [x] The WebDAV concurrency boundary is explicit: the pinned HTTP oracle has
+  no `PathLock`, so independent resources may run concurrently but no
+  linearizable same-resource ordering or atomic same-target `PUT` publication
+  is claimed. The focused Rust regression dispatches two simultaneous writes
+  against one exclusive lock and both receive `423` without its submitted
+  token; clients coordinate shared-resource writes through WebDAV lock/`If`
+  state. Provider, power-loss, and durable-lock acceptance remain separate.
 - [x] The WebDAV N-API scope decision now records the oracle-only clock,
   assertion-callback, and live-lock-table boundaries explicitly. The focused
   Rust test `./scripts/cargo-shared test -p mount-rs-webdav --test webdav
@@ -3835,6 +3850,14 @@ reproducible in a production-like environment.
   packet was published fast-forward-only at `9e98f14a`; the current provider
   admission rows remain explicitly blocked (`missing_bucket` for AWS and
   `count=281 limit=20` for R2), so W01-S3 remains **NO-GO**.
+- [x] The latest W01-S3 qualification refresh at `71972b28ca7ae561325342ddf466c8353546547a`
+  passed the release N-API build, all four pinned upstream oracle files
+  (990 passed/79 skipped), the Rust S3 4/6/29/5 packet and strict Clippy, exact
+  Node scope/session/concurrency/restart checks, structural factory parity,
+  package typecheck/distribution/server smoke, and the 40-case S3+WebDAV HTTP
+  differential. These are current local and pinned-oracle gates only; live
+  AWS/R2, physical power-loss durability, broader workload bounds, and
+  native/hosted acceptance remain open, so W01-S3 stays **NO-GO**.
 - [ ] W10.1 Finish per-transport backend/platform acceptance matrix, including
   native lifecycle, disconnect/error behavior and streaming/backpressure.
 - [ ] W10.2 Verify transport auto-selection and explicit unsupported behavior.
