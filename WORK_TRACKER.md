@@ -4,6 +4,31 @@ Updated: 2026-09-22. Baseline: local commit `21803fd` plus the sequentially
 published `main` updates listed below. Overall status: **in progress;
 not release-ready**.
 
+Current W26 PGlite implementation boundary (2026-09-22): commit
+`c791ab318af4c5253dbe3e9e4d1d2f7a2026fa4c`
+(`perf(w26): compute PGlite block IDs locally`) is published and verified on
+`origin/main`. PGlite now computes the exact existing PostgreSQL
+`md5(encode($1, 'hex'))` identity locally, removing one provider round trip on
+the unique-block put path while retaining conditional insert, duplicate
+read-back, byte-for-byte collision, volume-scope and fail-closed disappearance
+checks. Formatting, diff checks and locked workspace metadata passed. Focused
+compile, library-test and strict-Clippy commands reached the native macOS
+linker and were blocked at exit 69 because this host has not accepted the
+Xcode license; this remains an explicit native-host gate, not a project pass.
+Security scan `2b2a12cd-0984-4dfb-9d89-2139055afb3d` sealed complete changed-
+file coverage over the two PGlite surfaces with zero reportable findings; the
+captured snapshot digest is
+`codex-security-snapshot/v1:sha256:d5536ab709e2b857bb5190686ba0056cd14ce798da886616241aa9a68a332833`.
+Exact-head manual W26 run
+`35706390612 <https://github.com/andymac4182/mount-rs/actions/runs/35706390612>`
+targets `c791ab31`; at capture its base `106676249167`, compositions
+`106676249209`, TiDB `106676248986` and FoundationDB `106676249267` jobs were
+queued, so no result is promoted. The latest terminal packet remains 1/4
+providers above the hard 1,000-IOPS/drive target. Production remains
+**NO-GO**: W26 owns Ozone compatibility and qualification, while customer
+deployment, security/SLO/RPO/RTO evidence, backup/DR and the separate release
+stream remain explicit external or cross-workstream gates.
+
 Current W26 TiDB implementation boundary (2026-09-22): commit
 `2ce6f753a588628593baf1000ae75330780dabd3`
 (`perf(w26): skip TiDB block readback on confirmed insert`) is published on
