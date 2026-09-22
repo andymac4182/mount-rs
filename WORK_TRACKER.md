@@ -875,7 +875,7 @@ complete.
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Complete for requested Rust/Node SDK and CLI hosted acceptance; native/platform gates remain separate | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
-| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; the current-tip run-bound provenance qualification is green at [run `35691106828`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35691106828) / exact source `6b8639aa618f301e8424b5619bc1dda559a75948`, job `106628088824`, with the 11-case qualification-log verifier, a raw-log provenance marker matching the hosted repository/ref/SHA/run/runner, and six retained latency samples (base plus five soak rounds); live durable FoundationDB/RustFS, Node/N-API, Linux CLI/FUSE, service-restart, authority-republish, fresh-client and RustFS integration paths passed; the validated 30-second bounded authority heartbeat stayed live with a 120-second forward-jump bound and the hosted shared-authority path emitted `FOUNDATIONDB_AUTHORITY_STATS_PASS publication_attempts=3 publication_successes=3 publication_failures=0 reader_attempts=5 reader_successes=4 reader_failures=1 last_published_time_ms=2030001 last_observed_time_ms=2030001`; the base composition marker was p95/p99 13,759µs at 254.79 ops/s and five-round soak passed with p95/p99 12,701–13,784µs and 241.60–248.00 ops/s; the corrected 400-lifecycle/64-concurrency/4KiB workload artifact measured 259.35 lifecycle IOPS with all 1,200 operations successful and zero timeouts/cleanup failures, but remains bounded qualification rather than capacity evidence; artifact `foundationdb-production-qualification-35691106828-1` (ID `10678891553`, SHA-256 `f26ae7cb81dd298cc78153f27e573bdb1096a6ae038cc8f42a40d7cbeeab3c17`) was retained with the seven-gate packet still NO-GO; the stricter verifier, stats, heartbeat and provenance binding are not production collector, deployment-credential, failover, capacity or owner evidence, and production authority, complete Node/native platform matrix, production-like load/capacity, observability, recovery, rollback and owner gates remain open. The prior failed provenance attempt `35690122405` remains recorded as a workflow integration failure, not qualification evidence. | Maxwell (complete slice) / Main |
+| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; the latest extended current-tip run-bound provenance qualification is green at [run `35692674674`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35692674674) / exact source `5a6d6507c6deac160f54a246a2d715c05fc35268`, job `106632794791`, with the 11-case qualification-log verifier, a raw-log provenance marker matching the hosted repository/ref/SHA/run/runner, and eleven retained latency samples (base plus ten soak rounds); live durable FoundationDB/RustFS, Node/N-API, Linux CLI/FUSE, service-restart, authority-republish, fresh-client and RustFS integration paths passed; the validated 30-second bounded authority heartbeat stayed live with a 120-second forward-jump bound and the hosted shared-authority path emitted `FOUNDATIONDB_AUTHORITY_STATS_PASS publication_attempts=3 publication_successes=3 publication_failures=0 reader_attempts=5 reader_successes=4 reader_failures=1 last_published_time_ms=2030001 last_observed_time_ms=2030001`; the base composition marker was p95/p99 439,603µs at 21.41 ops/s and ten-round soak passed with p95/p99 70,204–236,130µs and 18.19–96.22 ops/s; the corrected 400-lifecycle/64-concurrency/4KiB workload artifact measured 110.18 lifecycle IOPS with all 1,200 operations successful and zero timeouts/cleanup failures, but remains extended bounded qualification rather than capacity evidence; artifact `foundationdb-production-qualification-35692674674-1` (ID `10679154003`, SHA-256 `44beef451832c307a53571bb86f92293b70c302d0add5104152059ed4c41d2ec`) was independently revalidated with exact provenance and the seven-gate packet remains NO-GO; the stricter verifier, stats, heartbeat and provenance binding are not production collector, deployment-credential, failover, capacity or owner evidence, and production authority, complete Node/native platform matrix, production-like load/capacity, observability, recovery, rollback and owner gates remain open. The prior failed provenance attempt `35690122405` remains recorded as a workflow integration failure, not qualification evidence. | Maxwell (complete slice) / Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
@@ -3690,6 +3690,27 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     pass, not production evidence; the seven-gate packet remains **NO-GO**
     with zero production evidence records.
 
+    The extended-soak workflow chunk is published at exact source
+    `5a6d6507c6deac160f54a246a2d715c05fc35268` and hosted run
+    [35692674674](https://github.com/andymacclenaghan/mount-rs/actions/runs/35692674674)
+    (job `106632794791`) completed green in 11m26s on Ubuntu 24.04/Linux
+    `amd64`. It increased the isolated real-provider soak from five to ten
+    rounds while retaining the same multi-chunk, partial-write, truncate/
+    extend, CAS/fencing, lease-expiry, fresh-client reopen, service-restart
+    and scoped cleanup checks per round. The raw provenance marker matched
+    the exact repository, workflow, ref, source revision, run, attempt and
+    runner `GitHub Actions 1000026766`; the eleven-sample schema-2 summary
+    recorded base p95/p99 439,603µs at 21.41 ops/s and ten-round soak p95/p99
+    70,204–236,130µs at 18.19–96.22 ops/s. The bounded workload recorded
+    1,200 successful lifecycle operations at 110.18 IOPS with zero timeouts
+    and cleanup failures. Artifact
+    `foundationdb-production-qualification-35692674674-1` (ID `10679154003`,
+    SHA-256
+    `44beef451832c307a53571bb86f92293b70c302d0add5104152059ed4c41d2ec`)
+    was independently downloaded and revalidated. This is extended hosted
+    implementation qualification only; the seven-gate packet remains
+    **NO-GO** with zero production evidence records.
+
   - [ ] **Observability and operations:** expose and alert on cluster health,
     authority publication age/errors, reader failures, lease-fence/ESTALE,
     transaction retries/maybe-committed EIO and cleanup/space pressure.
@@ -3714,21 +3735,21 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     record owner sign-off.
   - [ ] **Hosted and platform evidence:** the latest hosted FoundationDB/RustFS,
     Node, CLI/native Linux checkpoint is green for exact revision
-    `6b8639aa618f301e8424b5619bc1dda559a75948` in run `35691106828` (job
-    `106628088824`) on `ubuntu-24.04`/Linux `amd64`, with the retained
-    `foundationdb-production-qualification-35691106828-1` artifact (ID
-    `10678891553`, SHA-256
-    `f26ae7cb81dd298cc78153f27e573bdb1096a6ae038cc8f42a40d7cbeeab3c17`).
+    `5a6d6507c6deac160f54a246a2d715c05fc35268` in run `35692674674` (job
+    `106632794791`) on `ubuntu-24.04`/Linux `amd64`, with the retained
+    `foundationdb-production-qualification-35692674674-1` artifact (ID
+    `10679154003`, SHA-256
+    `44beef451832c307a53571bb86f92293b70c302d0add5104152059ed4c41d2ec`).
     The run emitted the 30-second/120-second heartbeat marker and the
     reconciled `FOUNDATIONDB_AUTHORITY_STATS_PASS publication_attempts=3
     publication_successes=3 publication_failures=0 reader_attempts=5
     reader_successes=4 reader_failures=1 last_published_time_ms=2030001
     last_observed_time_ms=2030001`; its raw log also carries a provenance
     marker matching repository, workflow, ref, source revision, run, attempt
-    and runner `GitHub Actions 1000026510`. The run's base composition recorded
-    p95/p99 13,759µs at 254.79 ops/s; five-round soak recorded p95/p99
-    12,701–13,784µs at 241.60–248.00 ops/s; and the bounded workload recorded
-    1,200 successful lifecycle operations at 259.35 IOPS with zero timeouts or
+    and runner `GitHub Actions 1000026766`. The run's base composition recorded
+    p95/p99 439,603µs at 21.41 ops/s; ten-round soak recorded p95/p99
+    70,204–236,130µs at 18.19–96.22 ops/s; and the bounded workload recorded
+    1,200 successful lifecycle operations at 110.18 IOPS with zero timeouts or
     cleanup failures. Complete the advertised macOS/Linux build/native matrix
     and any remaining clean-install/package evidence, and record the actual
     runner, cluster/image, revision and result. Failed, skipped, cancelled or
