@@ -987,6 +987,11 @@ inputs, while Live Cloudflare R2 run `35680542993` failed its bounded-usage
 admission with `count=285 limit=20`. The exact-tip CI for this WebDAV scope
 chunk was cancelled by successor mainline publication; replacement CI
 `35680709436` at origin tip `1bdf8846` had no jobs at the audit snapshot.
+The following exact-tip CI run `35681063238` at published WebDAV tip
+`7282bce8` began, but native-WebDAV jobs `106597988170` (macOS) and
+`106597988268` (Ubuntu) were cancelled by successor tip `2bcd9aa4`; replacement
+CI `35681127696` was pending at the audit snapshot. The earlier terminal
+hosted native-WebDAV run remains the latest claimable hosted WebDAV result.
 The published provider packet `fb9caec81a7e3fa183f5fa51871117e62fa35036` had
 exact-SHA CI/Fault injection/W08 workflows queued or pending, W04 policy
 succeeded, Live Cloudflare R2 failed, and unrelated Native 9P in progress; no

@@ -188,6 +188,12 @@ successor mainline push; replacement CI `35680709436` at current origin tip
 `1bdf8846` had no jobs at the audit snapshot, so no fresh hosted WebDAV result
 is promoted.
 
+The next exact-tip CI run `35681063238` at published WebDAV tip `7282bce8`
+started, but native-WebDAV jobs `106597988170` (macOS) and `106597988268`
+(Ubuntu) were cancelled by successor tip `2bcd9aa4`; replacement CI
+`35681127696` was pending at the audit snapshot. The earlier terminal hosted
+native-WebDAV run remains the latest claimable hosted WebDAV result.
+
 For published provider packet `fb9caec81a7e3fa183f5fa51871117e62fa35036`, the
 exact-SHA CI/Fault injection/W08 workflows were queued or pending, W04 policy
 succeeded, Live Cloudflare R2 failed, and an unrelated Native 9P workflow was
