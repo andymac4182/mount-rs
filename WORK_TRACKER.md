@@ -1195,6 +1195,9 @@ The first exact-tip hosted rerun, CI `35677973511` at
 the harness treated the server-induced `not currently mounted` cleanup result
 as failure; the corrected cleanup now accepts an absent mount and still fails
 if the mount remains active. A fresh hosted rerun is required.
+The corrected manual run `35678488755` at `ed29016e82c46e23e372f0615916ed3c1608370b`
+was still aggregate-queued at the latest refresh, with neither native-WebDAV
+job started; no hosted teardown/restart result is claimable yet.
 At final ledger tip `3148aa5a95e5cdcf328014fac7e007db0e16adfe`, exact-SHA CI
 `35673381803` and W08 policy/targets `35673381898`/`35673381797` were pending,
 Fault injection `35673381853` and W04 policy `35673381814` were queued, and no
@@ -3784,6 +3787,15 @@ reproducible in a production-like environment.
   warning-denied Clippy passed. Complete oracle-specific member/codec parity,
   live AWS/R2, and broader restart/durability/concurrency/native gates remain
   open; W01-S3 remains **NO-GO**.
+- [x] The subsequent W01-S3 local ordering packet added bounded direct-session
+  unique-object PUT/GET concurrency and same-key conditional PUT CAS coverage:
+  the deterministic Rust paused-write race produced exactly one `200` and one
+  `412`, while the rebuilt N-API probe passed 64 concurrent PUT/GET records,
+  two concurrent buffered `If-Match` PUTs with one winner, a streamed
+  conditional update, exact final bytes, and clean counters/assertions. The
+  packet was published fast-forward-only at `9e98f14a`; the current provider
+  admission rows remain explicitly blocked (`missing_bucket` for AWS and
+  `count=281 limit=20` for R2), so W01-S3 remains **NO-GO**.
 - [ ] W10.1 Finish per-transport backend/platform acceptance matrix, including
   native lifecycle, disconnect/error behavior and streaming/backpressure.
 - [ ] W10.2 Verify transport auto-selection and explicit unsupported behavior.
