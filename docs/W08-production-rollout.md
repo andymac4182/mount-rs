@@ -484,6 +484,15 @@ pending at 17:59 AEST. These are implementation/static scheduling boundaries,
 not provider or production acceptance, so P01–P09 remain open and the
 decision remains NO-GO.
 
+The W08 ledger refresh is now published in merge
+`fb6ef40c7774aefb7251dba5867104798953381c`, with local `HEAD`, `origin/main`
+and the public main ref equal and clean at that SHA. Concurrent changes after
+the exact W08 qualification are outside the W08 Rust/provider/native path; no
+new W08 provider or production result is inferred. Hosted W08 run
+`35702979994` targets the exact published merge and was still `pending` at
+18:07 AEST, so it is not evidence. P01–P09 remain open and the decision
+remains NO-GO.
+
 After origin/main advanced with the 9P EOF/backpressure server fix `1179d9e3`,
 N-API test expansion and site component updates, exact merged source
 `d725248534eb897de4d49e916c47425e6266c05d` was freshly requalified. The full
