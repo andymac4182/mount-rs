@@ -1,6 +1,6 @@
 # W08 TiDB workstream progress ledger
 
-Status snapshot: **2026-09-22 10:57 AEST**
+Status snapshot: **2026-09-22 10:59 AEST**
 Repository: `andymac4182/mount-rs`  
 Publication snapshot: W08.36 implementation commit `0855e2ab` was reconciled
 with concurrent mainline work and pushed in merge tip `e0ab07d6`. The W08.36
@@ -17,13 +17,14 @@ JavaScript files also passed syntax checks, while full local N-API runtime
 remains blocked by absent optional binding artifacts. The earlier public
 `9b2dabd7` added only a WebDAV N-API parity test file whose syntax is clean,
 while its local runtime is blocked by absent optional N-API binding artifacts.
-The current reconciled merge checkpoint is `ae67f691`; after the tested
-`eeb628da` source, its changes are limited to unrelated W04 documentation, so
-it is source-equivalent for this qualification. This does not close any
+The current reconciled public checkpoint is `a921fe76`; after the tested
+`eeb628da` source, its changes are limited to W08/publication documentation,
+so it is source-equivalent for this qualification. This does not close any
 production gate.
 The ledger checkpoint commit `2a99acdd` was reconciled with concurrent
-mainline work and published in public merge tip `056e7a15`; the subsequent
-source qualification is currently pending publication of its normal merge.
+mainline work and published in public merge tip `056e7a15`. The latest FUSE
+qualification commit `052dc184` was reconciled and published in public merge
+tip `a921fe76`, which is the current verified `origin/main` ref.
 Earlier source-health results at `4b9787f9`, `7addaf12`,
 `77114d4d`, `229a9cd5`,
 `b7d77432`, `be721a20`,
@@ -445,12 +446,12 @@ the evidence counted here.
   recorded as external/provider/hosted gates rather than fabricated local
   passes.
 
-### Latest evidence refresh — 2026-09-22 10:57 AEST
+### Latest evidence refresh — 2026-09-22 10:59 AEST
 
 | Evidence item | Status | Evidence and boundary | Remaining action / blocker |
 | --- | --- | --- | --- |
 | Current tested Rust source base `eeb628da9deed5ad0b9670756b406556a659f9b8` | PASS — full local source-health and W08 tracking verification | `./scripts/cargo-shared test --workspace --all-targets --locked --quiet` exited 0 on the exact source merge; all executed tests passed and provider/native cases remained explicit opt-in skips. `./scripts/cargo-shared clippy --workspace --all-targets --locked -- -D warnings` exited 0. The four W08 rollout/evidence commands returned `W08_ROLLOUT_LEDGER_POLICY_PASS decision=NO-GO functional_items=36 production_gates=9`, `W08_ROLLOUT_LEDGER_TEST_PASS cases=7`, `W08_PRODUCTION_EVIDENCE_POLICY_PASS decision=NO-GO gates=9 closed=0 evidence_records=0 require_go=false` and `W08_PRODUCTION_EVIDENCE_TEST_PASS cases=11`; changed N-API JavaScript files passed `node --check`, and `git diff --check` passed. This confirms current source health and tracking controls only; it does not close P01–P09. | Publish the source-equivalent reconciled merge, then keep provider/native and production-like gates separate until the required TiDB/RustFS services, native hosts, credentials, owners and protected release environment are available. Keep the packet NO-GO with zero evidence records. |
-| Current source-equivalent documentation merge `ae67f691364db511c297d8ce4f06f4e09cc1cba5` | PASS — documentation-only reconciliation after tested source | `git diff --name-status eeb628da9deed5ad0b9670756b406556a659f9b8..HEAD` contains only `docs/w04-progress-ledger.md`; no Rust or W08 implementation source changed after the tested `eeb628da` tree. The current W08 policy/evidence validators remain green. No provider/native runtime or production result is claimed. | Publish this source-equivalent checkpoint and preserve the explicit production `NO-GO` boundary. |
+| Current public source-equivalent checkpoint `a921fe76a29f54f5164dceda297b32f856d17dbd` | PASS — publication and source-boundary verification | `git fetch origin`, `git status --short --branch`, `git rev-parse HEAD`, `git rev-parse origin/main`, `git ls-remote origin refs/heads/main` and `git merge-base --is-ancestor HEAD origin/main` all succeeded; local HEAD, tracking ref and public branch are identical. The public checkpoint contains no Rust or W08 implementation source changes after tested `eeb628da`; the W08 policy/evidence validators still pass. No provider/native runtime or production result is claimed. | Preserve the production `NO-GO` boundary until P01–P09 receive terminal evidence and named approval. |
 | Current source-equivalent documentation merge `c178fa86246bdd5f63c3ed1daf972930adbfb67c` | PASS — documentation-only reconciliation after tested source | `git diff --name-status b944218c0fbb37aab2bf6aa2257d4b6b427d461e..HEAD` contains only `WORK_TRACKER.md` and W01 documentation changes; no Rust or W08 implementation source changed after the tested `b944218c` tree. The current W08 policy/evidence validators remain green. No provider/native runtime or production result is claimed. | Publish this source-equivalent checkpoint and preserve the explicit production `NO-GO` boundary. |
 | Current reconciled merge checkpoint `703aee1cbd5c19fe95bb84347ae28b39389973b9`, published in `056e7a1584a56018d06ce9c4d1d44a215a2487df` | PASS — JS/docs static reconciliation; Rust baseline unchanged | `node --check` passed for the current changed N-API JavaScript files, including `integrations/mount-rs-napi/postbuild.mjs`; the four W08 rollout/evidence commands passed with `decision=NO-GO`, `functional_items=36`, `production_gates=9`, `closed=0`, `evidence_records=0` and `cases=7/11`; `git diff --check` passed. The merge has no Rust-source changes relative to the separately tested `f4f672dd` baseline. No local native-binding runtime or production/provider result is claimed. | Keep the optional native artifact, provider services/credentials, protected release environment, canary, rollback and owner-approval gates separate until their terminal evidence exists. |
 | Current reconciled N-API/JavaScript tip `27ac3c4b5c47a7d0dbeb9723df6b12aed799048c` | PARTIAL — static syntax qualification; native artifact boundary remains explicit | `node --check` passed for the changed `postlude-servers.cjs`, `p9-locks.mjs`, `p9-native.mjs` and `p9-session-metadata.mjs` files. The accompanying Rust source-health result remains the full test/Clippy pass at `f4f672dd`; this N-API tip does not change that Rust result. No local native-binding runtime pass is claimed because the optional platform artifact is absent. No production gate is closed. | Build/install the platform N-API binding before claiming a local runtime parity pass; retain hosted W08.4 Node/N-API evidence as the authoritative consumer acceptance. |
@@ -574,6 +575,7 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-22 10:41–10:49 AEST | Reconciled concurrent FUSE/W07/mainline updates through tested source `b944218c`, reran the full locked workspace test and strict Clippy, then merged the documentation-only public tip as source-equivalent `c178fa86`. | ~0.15 engineer-day | ~1m test/Clippy execution plus repeated mainline reconciliation | The tested source is clean and the following merge changes only W01/tracker documentation; W08 remains functionally accepted and production `NO-GO` with nine open gates and zero evidence records. This qualification is pending publication. |
 | 2026-09-22 10:49–10:52 AEST | Reconciled concurrent N-API/S3-test/mainline updates through tested source `e8c60438`, reran the full locked workspace test and strict Clippy, and retained the following `6a35eb6c` merge as source-equivalent because it changed only W08 documentation after the tested tree. | ~0.15 engineer-day | ~25s test/Clippy execution plus mainline reconciliation | The current source-equivalent checkpoint is clean; W08 remains functionally accepted and production `NO-GO` with nine open gates and zero evidence records. This qualification is pending publication. |
 | 2026-09-22 10:52–10:57 AEST | Reconciled the FUSE fix through tested source `eeb628da`, reran the full locked workspace test and strict Clippy, syntax-checked changed N-API JavaScript, reran all W08 policy/evidence suites, and merged the unrelated documentation-only tip as source-equivalent `ae67f691`. | ~0.15 engineer-day | ~30s test/Clippy/policy execution plus mainline reconciliation | The tested source and current source-equivalent tree are clean; W08 remains functionally accepted and production `NO-GO` with nine open gates and zero evidence records. This qualification is pending publication. |
+| 2026-09-22 10:57–10:59 AEST | Committed the FUSE-qualified ledger update as `052dc184`, reconciled concurrent mainline documentation, pushed public merge tip `a921fe76`, and verified exact local/remote equality and ancestry. | ~0.05 engineer-day | ~6s fetch/merge/push verification | The latest W08 qualification is publicly integrated; the packet remains NO-GO with nine open gates and zero evidence records. No production mutation, candidate release, canary, rollback or approval was attempted. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol
