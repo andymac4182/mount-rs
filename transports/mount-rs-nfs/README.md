@@ -152,6 +152,9 @@ an implicit pass. This NFS validation does not establish SQLite hosting or
 other storage support on macOS.
 
 The normal crate tests remain rootless and do not invoke `mount(8)`.
+Both native cases may run concurrently on Linux: the harness claims a distinct
+empty temporary mountpoint for each case, including when the clock returns the
+same timestamp to both test threads.
 
 ## Deliberate scope gaps
 
@@ -176,11 +179,50 @@ there is no cross-process session, lease, replay, or handle arbitration. File
 handles and
 exclusive-create verifiers are process-local unless the caller supplies a
 stable handle verifier. A caller can reconnect to a still-running server and
-reuse the tested session, but `NfsConnection` close/wait state does not provide
-automatic reconnect, lease recovery, or crash-durable session/reply state;
-the restart-boundary test therefore classifies v4 session/lease/replay state as
-process-local. Backend crash recovery and durability behavior remains outside
-the supported local scope until a separate qualification lane is accepted.
+reuse the tested session. A completed, cached v4.1 `REMOVE` reply also survives
+that TCP reconnect: retrying its slot/sequence returns the original body
+without re-executing the operation. A same-slot retry that reaches the server
+while the original is blocked now gets prompt `NFS4ERR_DELAY` before the
+per-RPC lease-sweep lock; a premature next sequence is rejected with
+`NFS4ERR_SEQ_MISORDERED`. Once the original completes, its reply is cached.
+For a completed cached reply, a retry whose decoded `AUTH_SYS` credentials
+identify a different effective user receives `NFS4ERR_SEQ_FALSE_RETRY` instead
+of the other user's cached body. A same-user retry can still receive that
+original body even when its operation arguments differ; neither retry
+re-executes the mutation. `AUTH_SYS` is not cryptographic authentication.
+Completed replies that fit the negotiated cache bound are retained even when
+`SEQUENCE.cachethis` is false, so their same-slot retries cannot repeat a
+mutation. For `cachethis=false` replies larger than the negotiated cache
+bound, the server instead retains a compact successful-`SEQUENCE` plus
+`NFS4ERR_RETRY_UNCACHED_REP` marker when it fits. `cachethis=true` oversized
+replies can also return a cached `NFS4ERR_REP_TOO_BIG_TO_CACHE` on a read-only
+`READDIR` tail, preserving earlier successful operations when the error
+reply fits. Other `cachethis=true` variable-size results, bounds too small
+even for the error or retry marker, and restart-spanning replay remain outside
+this guarantee.
+The exclusive lease-sweep lock is now taken only when a client has expired;
+otherwise independent slots of the same live session can overlap on separate
+TCP connections. A controlled rootless test proves this for two `GETATTR`
+COMPOUNDs while one backend call is blocked. An injected-clock wire test also
+checks that an expired lease waits for the blocked call before sweeping and
+rejecting the next slot. `NfsConnection` close/wait state does not provide
+automatic reconnect, lease recovery, or crash-durable session/reply state.
+If a v4.1 request is canceled after slot admission but before COMPOUND
+completion and reply caching, the server invalidates that session rather than
+permitting an uncertain-effect operation to run again under the same
+slot/sequence. A
+rootless test deletes a file before connection cancellation, observes
+`NFS4ERR_BADSESSION` on a changed-target retry, and creates a replacement
+session for the same client. `CREATE_SESSION` echoes its request sequence, so
+this replacement handshake works with a noninitial value. This is fail-closed
+recovery, not preservation of the canceled reply, uncached completed-reply
+handling, or durable replay. The restart-boundary test therefore classifies
+v4 session/lease/replay state as
+process-local. A host-backed forced-process-restart test now proves that one
+NFSv4.1 `FILE_SYNC4` write can be reopened and read through a fresh session
+after rejecting the old session and file handle. This is process-crash data
+recovery on one host, not power-loss durability or persistent v4 lease,
+replay, or handle state.
 
 The N-API boundary now also supports the upstream synchronous NFSv4
 `idmap.nameOf`, `idmap.idOf`, and `now` callbacks. Callback results must be

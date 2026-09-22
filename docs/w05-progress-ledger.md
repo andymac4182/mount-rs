@@ -1,6 +1,6 @@
 # W05 Cloudflare R2 progress ledger
 
-Last updated: 2026-09-22 18:34 AEST (2026-09-22 08:34 UTC)
+Last updated: 2026-09-22 18:40 AEST (2026-09-22 08:40 UTC)
 
 This is the working ledger for the W05 Cloudflare R2 workstream. Percentages
 and time estimates are provisional. They separate implementation work from
@@ -402,6 +402,8 @@ gates therefore remain actionable work in this session.
 
 | W05.46 Record terminal Fault and partial W07/W08 hosted results | Hosted CI/native/provider/release evidence | Fault terminal-successful; W07/W08 and CI remain open | 82% provisional | Exact candidate `87f3cdf0` now has Fault injection `35702350927` terminal-successful across Windows (`106663114945`), Ubuntu (`106663115212`), and macOS (`106663115140`), with format, default/all-feature tests, and strict Clippy green on every runner. W07 `35702352395` has its durable FoundationDB/RustFS/Rust/Node/CLI/restart job `106663122874` terminal-successful, but the macOS FoundationDB native feature-compile job `106663122748` remains queued. W08 targets `35702352896` has Linux and macOS release builds successful (`106663124664`, `106663124371`) and macOS downloaded-asset verification successful (`106671605531`); Linux downloaded-asset verification `106671605507` remains queued, so target attestation and the overall W08 run are not terminal. CI `35702348089` remains queued. | Poll CI, W07, and W08 to terminal; inspect W07 durable logs/artifacts and W08 Linux verification plus attestation markers; classify any failures; repair implementation failures on a new immutable candidate; then close AWS security/OIDC, post-reset R2, platform/package publication, support-scope, and W20.6 gates. | 0.5–1 h active tracking; 2–16 h hosted/provider/platform wait | Hosted runner capacity and macOS/Linux native/toolchain availability are external. Ozone/TiDB/FoundationDB service performance, AWS security administration, R2 UTC-month reset/token rotation, registries/signing, and release-scope ownership remain open; no provider or package acceptance is inferred from these partial results. |
 
+| W05.47 Record terminal W08 release-target provenance and current CI boundary | Hosted release/package/provenance evidence | W08 terminal-successful; CI and W07 workflow remain open | 86% provisional | Exact candidate `87f3cdf0` W08 targets run `35702352896` is terminal-successful. Linux build `106663124664`, macOS build `106663124371`, Linux download verification `106671605507`, macOS download verification `106671605531`, Linux attestation `106673506027`, and macOS attestation `106673505969` all passed. Downloaded artifact ZIP digests matched the uploaded digests: Linux `a5537b896b906c3cb4f57d7ffae36566b48f64728467b898fe0cc583638abaaa`; macOS `66a4d74b09cb86d00e12ddc38033ca0e72466b9ada967852d4a17c1b9735ad65`. Both targets emitted `W08_RELEASE_TARGET_ATTESTATION_PASS` for source `87f3cdf0`; repository attestation IDs are Linux provenance `49160460`, Linux SBOM `49160463`, macOS provenance `49160584`, and macOS SBOM `49160588`, with Rekor log indices `2908782598`, `2908782719`, `2908785011`, and `2908785055`. CI `35702348089` is not terminal: completed jobs currently include failures in Windows Node, W26 Ozone evidence, TiDB, TiDB/RustFS, Ozone/TiDB, Ozone/FoundationDB, Ubuntu Rust, and Ubuntu Node, while macOS Node and native NFS remain queued; no failure is classified until the parent run and redacted logs are terminally available. W07 `35702352395` remains workflow-queued around its macOS compile companion. | Wait for CI and W07 to terminate; retrieve and classify each failed CI job; repair implementation failures on a new immutable candidate, or record provider/capacity/support-scope blockers with evidence; then close AWS security/OIDC, post-reset R2, platform/package publication, scope, and W20.6. | 0.5–1 h active tracking; 2–16 h CI/provider/platform wait | GitHub runner capacity, incomplete CI logs while the parent is non-terminal, TiDB/Ozone/FoundationDB service behavior, AWS security administration, R2 cap reset/token rotation, native/platform support, registries/signing, and product-scope ownership remain external. |
+
 ### W05.40 exact candidate evidence (2026-09-22 17:09 AEST)
 
 The immutable candidate `25e275ab` is the current release-control anchor. Exact
@@ -598,6 +600,33 @@ artifacts; repair any actionable implementation failure on a new immutable
 candidate; then provision AWS through security issue [#3](https://github.com/andymac4182/mount-rs/issues/3), run one post-reset bounded R2
 requalification after token rotation, complete cross-platform package/signing
 and clean-install evidence, resolve support scope, and run W20.6.
+
+### W05.47 terminal W08 provenance boundary (2026-09-22 18:40 AEST)
+
+The exact immutable candidate `87f3cdf0` now has a terminal-successful W08
+release-target workflow `35702352896`. Linux build `106663124664`, macOS
+build `106663124371`, Linux downloaded-asset verification `106671605507`,
+macOS downloaded-asset verification `106671605531`, Linux attestation
+`106673506027`, and macOS attestation `106673505969` all passed.
+
+The uploaded and downloaded artifact ZIP digests matched: Linux
+`a5537b896b906c3cb4f57d7ffae36566b48f64728467b898fe0cc583638abaaa` and macOS
+`66a4d74b09cb86d00e12ddc38033ca0e72466b9ada967852d4a17c1b9735ad65`. Both
+targets emitted `W08_RELEASE_TARGET_ATTESTATION_PASS` for source
+`87f3cdf0a8b3d29c89ff6c1e8d6cbd2409d0c01d`. Repository attestation IDs are
+Linux provenance `49160460`, Linux CycloneDX SBOM `49160463`, macOS
+provenance `49160584`, and macOS CycloneDX SBOM `49160588`; the corresponding
+Rekor log indices are `2908782598`, `2908782719`, `2908785011`, and
+`2908785055`.
+
+CI `35702348089` has started but is not terminal. The current job snapshot has
+failures in Windows Node, W26 Ozone evidence, TiDB, TiDB/RustFS, Ozone/TiDB,
+Ozone/FoundationDB, Ubuntu Rust, and Ubuntu Node; macOS Node and native NFS
+remain queued. These are diagnostic observations only: the parent run remains
+non-terminal and its redacted logs are not yet available for final
+classification. W07 `35702352395` is likewise still workflow-queued around
+its macOS FoundationDB feature-compile companion. Production remains
+**NO-GO**.
 
 ### W05.36 current-tip evidence (2026-09-22 15:43 AEST)
 
@@ -821,7 +850,7 @@ green hosted/provider/native/package/scope gates.
 
 ## Production-readiness dependency register
 
-Current production-candidate addendum (2026-09-22 16:39 AEST): the selected
+Historical production-candidate addendum (superseded candidate, 2026-09-22 16:39 AEST): the selected
 release-control branch is
 `andymac4182/c/w05-production-candidate-20260922` at immutable SHA
 `25e275ab6d4f918be72dcd8f62a5baca6bbcd251`. Its exact local Rust/Node/SDK/CLI
@@ -837,6 +866,29 @@ production path. Percentages and estimates are provisional planning values,
 not a weighted release score. Every row must either reach 100% with evidence
 or be explicitly removed from the release scope by a recorded decision before
 the final audit can issue a GO decision.
+
+### Historical immutable-candidate addendum (superseded by W05.47; 2026-09-22 18:34 AEST)
+
+The active release-control candidate is the immutable branch
+`andymac4182/c/w05-production-candidate-20260922` at exact SHA
+`87f3cdf0a8b3d29c89ff6c1e8d6cbd2409d0c01d`. Its local Rust/Node SDK/CLI,
+N-API, PGlite/oracle, packaging, and license packet is green. Same-SHA
+hosted evidence currently has Native 9P `35702349894`, Fault injection
+`35702350927`, W04 policy `35702351026`, and W08 release policy `35702353241`
+terminal-successful. W07 durable qualification job `106663122874` is green,
+but W07 macOS feature compilation `106663122748` remains queued. W08 Linux
+and macOS builds plus macOS asset verification are green, while Linux asset
+verification `106671605507` and attestation remain queued. CI `35702348089`
+remains queued. These job-level results are not promoted to workflow or
+production acceptance until their parent workflows are terminal and their
+redacted artifacts are reviewed.
+
+Live R2 remains fail-closed behind the monthly usage cap and short-lived-token
+rotation. AWS remains blocked by security issue [#3](https://github.com/andymac4182/mount-rs/issues/3) and its missing protected OIDC inputs;
+no credential value was read, stored, or accessed through Keychain. The
+production decision is **NO-GO** until CI/W07/W08 terminal evidence, AWS and
+post-reset R2 provider gates, platform/package/signing and clean-install
+evidence, support scope, and W20.6 are complete.
 
 Current release-candidate addendum: exact tested pushed `1bdf8846` is the
 strongest current local implementation/SDK/CLI/PGlite packet, while fetched
@@ -1111,6 +1163,7 @@ shown separately from active engineering time.
 
 | UTC time | Activity | Classification | Result / next state |
 | --- | --- | --- | --- |
+| 2026-09-22 08:38–08:40 UTC (18:38–18:40 AEST) | Re-polled the immutable candidate, captured terminal W08 target/provenance logs, and inspected the non-terminal CI job snapshot | Hosted release/package/provenance evidence | W08 `35702352896` passed Linux/macOS builds, downloaded assets, provenance, CycloneDX SBOM attestations, Rekor publication, repository uploads, and exact-source verification. CI `35702348089` has several failed jobs but is not terminal; W07 `35702352395` remains queued around macOS compile. W05.47 recorded; production remains NO-GO. |
 | 2026-09-22 08:32–08:34 UTC (18:32–18:34 AEST) | Re-polled exact-candidate hosted runs and recorded terminal Fault plus W07/W08 partial results | Hosted release-control evidence / ledger maintenance | Fault `35702350927` passed Windows/Ubuntu/macOS. W07 durable job `106663122874` passed while macOS compile `106663122748` stayed queued; W08 builds and macOS asset verification passed while Linux verification `106671605507` stayed queued; CI `35702348089` stayed queued. Ledger updated; production remains NO-GO. |
 | 2026-09-22 08:29 UTC (18:29 AEST) | Reviewed terminal Native 9P logs and job conclusions on immutable candidate `87f3cdf0` | Hosted native/platform evidence | Native 9P `35702349894` passed Linux kernel probes, Rust native I/O/lifecycle, N-API server/session/member/identity, automatic/direct/structural mounted I/O, and cleanup. W07 macOS compile, CI, Fault, and W08 target attestation remain open. |
 | 2026-09-22 08:19 UTC (18:19 AEST) | Reviewed terminal same-SHA W08 release policy evidence after W04 policy passed | Hosted release-control evidence | W08 policy `35702353241` passed rollout/evidence policy, release identity, manifest, SBOM, and provenance checks. CI/Fault/W07/Native 9P/W08 targets remain open. |

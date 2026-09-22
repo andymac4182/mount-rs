@@ -7,25 +7,151 @@
 //! kernel mount client; native mount prerequisites are platform- and
 //! privilege-specific.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use mount_rs_core::MemoryFs;
+use mount_rs_core::{DirEntry, FileHandle, FsDriver, MemoryFs, Result, Stats};
 use mount_rs_nfs::v4::{
     CLAIM_FH, CLAIM_NULL, CREATE_SESSION4_FLAG_CONN_BACK_CHAN, FATTR4_LEASE_TIME,
-    NFS4ERR_BADSESSION, NFS4ERR_GRACE, NFS4ERR_NOSPC, NFS4ERR_RESOURCE, NFS4ERR_SHARE_DENIED,
-    NFS4ERR_TOO_MANY_OPS, NFS4ERR_TOOSMALL, OPEN4_CREATE, OPEN4_SHARE_ACCESS_BOTH, UNCHECKED4,
-    UNSTABLE4,
+    NFS4ERR_BADSESSION, NFS4ERR_DELAY, NFS4ERR_GRACE, NFS4ERR_NOSPC, NFS4ERR_REP_TOO_BIG_TO_CACHE,
+    NFS4ERR_RESOURCE, NFS4ERR_RETRY_UNCACHED_REP, NFS4ERR_SEQ_FALSE_RETRY, NFS4ERR_SEQ_MISORDERED,
+    NFS4ERR_SHARE_DENIED, NFS4ERR_TOO_MANY_OPS, NFS4ERR_TOOSMALL, OPEN4_CREATE,
+    OPEN4_SHARE_ACCESS_BOTH, UNCHECKED4, UNSTABLE4,
 };
 use mount_rs_nfs::{
-    NFS_V4, NFS4_PROGRAM, Nfs4Clock, Nfs4IdMap, NfsServer, NfsServerOptions, RecordAssembler,
-    XdrReader, XdrWriter, decode_reply, encode_call, frame_record,
+    NFS_V4, NFS4_PROGRAM, Nfs4Clock, Nfs4IdMap, NfsServer, NfsServerOptions, OpaqueAuth,
+    RecordAssembler, XdrReader, XdrWriter, auth_sys, decode_reply, encode_call, frame_record,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::runtime::Builder;
+use tokio::sync::Notify;
 use tokio::time::timeout;
+
+type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+struct GateStatDriver {
+    inner: MemoryFs,
+    block_once: Arc<AtomicBool>,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+impl FsDriver for GateStatDriver {
+    fn capabilities(&self) -> mount_rs_core::Capabilities {
+        self.inner.capabilities()
+    }
+
+    fn stat<'a, 'b, 'async_trait>(&'a self, path: &'b str) -> BoxFuture<'async_trait, Result<Stats>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            if path == "/" && self.block_once.swap(false, Ordering::AcqRel) {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            self.inner.stat(path).await
+        })
+    }
+
+    fn readdir<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> BoxFuture<'async_trait, Result<Vec<DirEntry>>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.inner.readdir(path).await })
+    }
+
+    fn open<'a, 'b, 'c, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        flags: &'c str,
+        mode: u32,
+    ) -> BoxFuture<'async_trait, Result<Arc<dyn FileHandle>>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        'c: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.inner.open(path, flags, mode).await })
+    }
+}
+
+struct GateUnlinkDriver {
+    inner: MemoryFs,
+    block_once: Arc<AtomicBool>,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+impl FsDriver for GateUnlinkDriver {
+    fn capabilities(&self) -> mount_rs_core::Capabilities {
+        self.inner.capabilities()
+    }
+
+    fn stat<'a, 'b, 'async_trait>(&'a self, path: &'b str) -> BoxFuture<'async_trait, Result<Stats>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.inner.stat(path).await })
+    }
+
+    fn readdir<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> BoxFuture<'async_trait, Result<Vec<DirEntry>>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.inner.readdir(path).await })
+    }
+
+    fn open<'a, 'b, 'c, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        flags: &'c str,
+        mode: u32,
+    ) -> BoxFuture<'async_trait, Result<Arc<dyn FileHandle>>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        'c: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.inner.open(path, flags, mode).await })
+    }
+
+    fn unlink<'a, 'b, 'async_trait>(&'a self, path: &'b str) -> BoxFuture<'async_trait, Result<()>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            self.inner.unlink(path).await?;
+            if self.block_once.swap(false, Ordering::AcqRel) {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            Ok(())
+        })
+    }
+}
 
 const OP_CLOSE: u32 = 4;
 const OP_COMMIT: u32 = 5;
@@ -34,11 +160,14 @@ const OP_GETATTR: u32 = 9;
 const OP_GETFH: u32 = 10;
 const OP_LOCK: u32 = 12;
 const OP_LOCKU: u32 = 14;
+const OP_LOOKUP: u32 = 15;
 const OP_OPEN: u32 = 18;
 const OP_OPEN_DOWNGRADE: u32 = 21;
 const OP_PUTFH: u32 = 22;
 const OP_PUTROOTFH: u32 = 24;
 const OP_READ: u32 = 25;
+const OP_READDIR: u32 = 26;
+const OP_READLINK: u32 = 27;
 const OP_REMOVE: u32 = 28;
 const OP_WRITE: u32 = 38;
 const OP_EXCHANGE_ID: u32 = 42;
@@ -56,7 +185,16 @@ struct Client {
 }
 
 async fn rpc(stream: &mut TcpStream, xid: u32, args: Vec<u8>) -> XdrReader<'static> {
-    let call = encode_call(xid, NFS4_PROGRAM, NFS_V4, 1, None, None, &args);
+    rpc_with_credential(stream, xid, args, None).await
+}
+
+async fn rpc_with_credential(
+    stream: &mut TcpStream,
+    xid: u32,
+    args: Vec<u8>,
+    credential: Option<&OpaqueAuth>,
+) -> XdrReader<'static> {
+    let call = encode_call(xid, NFS4_PROGRAM, NFS_V4, 1, credential, None, &args);
     stream
         .write_all(&frame_record(&call).expect("frame RPC call"))
         .await
@@ -104,12 +242,16 @@ fn op(opcode: u32, body: impl FnOnce(&mut XdrWriter)) -> Vec<u8> {
 }
 
 fn sequence(client: &Client) -> Vec<u8> {
+    sequence_with_cachethis(client, true)
+}
+
+fn sequence_with_cachethis(client: &Client, cachethis: bool) -> Vec<u8> {
     op(OP_SEQUENCE, |writer| {
         writer.fixed_opaque(&client.session, 16);
         writer.u32(client.sequence);
         writer.u32(client.slot);
         writer.u32(0);
-        writer.bool(true);
+        writer.bool(cachethis);
     })
 }
 
@@ -186,13 +328,17 @@ fn channel(writer: &mut XdrWriter) {
 }
 
 fn parse_create_session(mut reader: XdrReader<'_>) -> [u8; 16] {
-    parse_compound(&mut reader, &[OP_CREATE_SESSION]);
+    parse_create_session_with_sequence(&mut reader, 1)
+}
+
+fn parse_create_session_with_sequence(reader: &mut XdrReader<'_>, sequence: u32) -> [u8; 16] {
+    parse_compound(reader, &[OP_CREATE_SESSION]);
     let session: [u8; 16] = reader
         .fixed_opaque(16, "session id")
         .unwrap()
         .try_into()
         .unwrap();
-    assert_eq!(reader.u32("create session sequence").unwrap(), 1);
+    assert_eq!(reader.u32("create session sequence").unwrap(), sequence);
     assert_eq!(reader.u32("create session flags").unwrap(), 0);
     for _ in 0..2 {
         let _ = reader.u32("headerpad").unwrap();
@@ -1273,6 +1419,1442 @@ fn nfs_v4_session_survives_transport_reconnect() {
 }
 
 #[test]
+fn nfs_v4_cached_remove_reply_survives_tcp_reconnect_without_reexecution() {
+    std::thread::Builder::new()
+        .name("nfs-v4-replay-reconnect-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build v4 replay test runtime")
+                .block_on(async {
+                    let driver = MemoryFs::empty();
+                    driver.write_file("/replay-first", b"first").await.unwrap();
+                    driver
+                        .write_file("/replay-second", b"second")
+                        .await
+                        .unwrap();
+                    let server = NfsServer::new(driver.clone(), NfsServerOptions::default());
+                    let address = server.listen().await.expect("listen replay NFS server");
+                    let (mut first, mut client) =
+                        connect_v4_client(address, 601, b"replay-reconnect-client").await;
+                    let original_user = auth_sys(1000, 1000, "replay-client");
+                    let same_user_new_machine = auth_sys(1000, 1000, "replay-reconnected");
+                    let different_user = auth_sys(2000, 2000, "replay-client");
+
+                    let mut response = rpc_with_credential(
+                        &mut first,
+                        604,
+                        compound(
+                            "remove-first",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("replay-first")),
+                            ],
+                        ),
+                        Some(&original_user),
+                    )
+                    .await;
+                    let first_body = response.rest();
+                    let mut parsed = XdrReader::new(&first_body);
+                    parse_compound_header(&mut parsed, 3);
+                    consume_sequence_result(&mut parsed, "initial remove");
+                    parse_result_header(&mut parsed, OP_PUTROOTFH);
+                    parse_result_header(&mut parsed, OP_REMOVE);
+                    let _ = parsed.bool("remove change atomic").unwrap();
+                    let _ = parsed.u64("remove change before").unwrap();
+                    let _ = parsed.u64("remove change after").unwrap();
+                    parsed.end("initial remove response").unwrap();
+                    assert!(driver.stat("/replay-first").await.is_err());
+                    assert!(driver.stat("/replay-second").await.is_ok());
+
+                    first
+                        .shutdown()
+                        .await
+                        .expect("close first replay transport");
+                    timeout(Duration::from_secs(2), async {
+                        while server.connections() != 0 {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("first replay transport closes");
+                    let mut second = TcpStream::connect(address)
+                        .await
+                        .expect("connect replacement replay transport");
+                    let mut foreign_retry = rpc_with_credential(
+                        &mut second,
+                        605,
+                        compound(
+                            "foreign-retry",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("replay-second")),
+                            ],
+                        ),
+                        Some(&different_user),
+                    )
+                    .await;
+                    assert_eq!(
+                        parse_compound_status(&mut foreign_retry, 1),
+                        NFS4ERR_SEQ_FALSE_RETRY
+                    );
+                    assert_eq!(
+                        parse_result_status(&mut foreign_retry, OP_SEQUENCE),
+                        NFS4ERR_SEQ_FALSE_RETRY
+                    );
+                    foreign_retry.end("foreign replay response").unwrap();
+                    assert!(driver.stat("/replay-second").await.is_ok());
+
+                    // A changed target is intentional: the same slot/sequence
+                    // can replay the old body for the same effective user,
+                    // never executing the new REMOVE.
+                    let mut replay = rpc_with_credential(
+                        &mut second,
+                        606,
+                        compound(
+                            "altered-retry",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("replay-second")),
+                            ],
+                        ),
+                        Some(&same_user_new_machine),
+                    )
+                    .await;
+                    assert_eq!(replay.rest(), first_body);
+                    assert!(driver.stat("/replay-second").await.is_ok());
+
+                    client.sequence += 1;
+                    let mut response = rpc_with_credential(
+                        &mut second,
+                        607,
+                        compound(
+                            "fresh-remove",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("replay-second")),
+                            ],
+                        ),
+                        Some(&original_user),
+                    )
+                    .await;
+                    parse_compound_header(&mut response, 3);
+                    consume_sequence_result(&mut response, "fresh remove");
+                    parse_result_header(&mut response, OP_PUTROOTFH);
+                    parse_result_header(&mut response, OP_REMOVE);
+                    let _ = response.bool("fresh remove change atomic").unwrap();
+                    let _ = response.u64("fresh remove change before").unwrap();
+                    let _ = response.u64("fresh remove change after").unwrap();
+                    response.end("fresh remove response").unwrap();
+                    assert!(driver.stat("/replay-second").await.is_err());
+
+                    second.shutdown().await.expect("close replay transport");
+                    server.close().await.expect("close replay NFS server");
+                });
+        })
+        .expect("spawn v4 replay test thread")
+        .join()
+        .expect("v4 replay test thread panicked");
+}
+
+#[test]
+fn nfs_v4_uncached_hint_still_replays_small_completed_mutation() {
+    std::thread::Builder::new()
+        .name("nfs-v4-uncached-hint-replay-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build uncached-hint replay runtime")
+                .block_on(async {
+                    let driver = MemoryFs::empty();
+                    driver
+                        .write_file("/uncached-first", b"first")
+                        .await
+                        .unwrap();
+                    driver
+                        .write_file("/uncached-second", b"second")
+                        .await
+                        .unwrap();
+                    let server = NfsServer::new(driver.clone(), NfsServerOptions::default());
+                    let address = server.listen().await.expect("listen NFS server");
+                    let (mut stream, mut client) =
+                        connect_v4_client(address, 801, b"uncached-hint-client").await;
+
+                    let mut response = rpc(
+                        &mut stream,
+                        804,
+                        compound(
+                            "uncached-first",
+                            &[
+                                sequence_with_cachethis(&client, false),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("uncached-first")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    let first_body = response.rest();
+                    let mut first = XdrReader::new(&first_body);
+                    parse_compound_header(&mut first, 3);
+                    consume_sequence_result(&mut first, "uncached-hint first sequence");
+                    parse_result_header(&mut first, OP_PUTROOTFH);
+                    parse_result_header(&mut first, OP_REMOVE);
+                    let _ = first.bool("remove change atomic").unwrap();
+                    let _ = first.u64("remove change before").unwrap();
+                    let _ = first.u64("remove change after").unwrap();
+                    first.end("uncached-hint first response").unwrap();
+                    assert!(driver.stat("/uncached-first").await.is_err());
+
+                    // The changed target must not execute, even though the
+                    // original SEQUENCE did not request full reply caching.
+                    let mut retry = rpc(
+                        &mut stream,
+                        805,
+                        compound(
+                            "uncached-retry",
+                            &[
+                                sequence_with_cachethis(&client, false),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("uncached-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    assert_eq!(retry.rest(), first_body);
+                    assert!(driver.stat("/uncached-second").await.is_ok());
+
+                    client.sequence += 1;
+                    let mut fresh = rpc(
+                        &mut stream,
+                        806,
+                        compound(
+                            "uncached-fresh",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("uncached-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut fresh, 3);
+                    consume_sequence_result(&mut fresh, "uncached-hint fresh sequence");
+                    parse_result_header(&mut fresh, OP_PUTROOTFH);
+                    parse_result_header(&mut fresh, OP_REMOVE);
+                    let _ = fresh.bool("fresh remove change atomic").unwrap();
+                    let _ = fresh.u64("fresh remove change before").unwrap();
+                    let _ = fresh.u64("fresh remove change after").unwrap();
+                    fresh.end("uncached-hint fresh response").unwrap();
+                    assert!(driver.stat("/uncached-second").await.is_err());
+
+                    stream.shutdown().await.expect("close NFS transport");
+                    server.close().await.expect("close NFS server");
+                });
+        })
+        .expect("spawn uncached-hint replay test thread")
+        .join()
+        .expect("uncached-hint replay test thread panicked");
+}
+
+#[test]
+fn nfs_v4_oversized_uncached_reply_retries_without_repeating_mutation() {
+    std::thread::Builder::new()
+        .name("nfs-v4-oversized-uncached-replay-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build oversized replay runtime")
+                .block_on(async {
+                    let driver = MemoryFs::empty();
+                    driver.write_file("/large-first", b"first").await.unwrap();
+                    driver.write_file("/large-second", b"second").await.unwrap();
+                    for index in 0..16 {
+                        driver
+                            .write_file(&format!("/listed-{index:02}"), b"entry")
+                            .await
+                            .unwrap();
+                    }
+                    let mut options = NfsServerOptions::default();
+                    options.session.nfs4.max_cached_response_size = 128;
+                    let server = NfsServer::new(driver.clone(), options);
+                    let address = server.listen().await.expect("listen NFS server");
+                    let (mut stream, mut client) =
+                        connect_v4_client(address, 901, b"oversized-replay-client").await;
+                    let read_dir = op(OP_READDIR, |writer| {
+                        writer.u64(0);
+                        writer.fixed_opaque(&[0; 8], 8);
+                        writer.u32(4096);
+                        writer.u32(4096);
+                        writer.u32(0);
+                    });
+
+                    let mut original = rpc(
+                        &mut stream,
+                        904,
+                        compound(
+                            "oversized-original",
+                            &[
+                                sequence_with_cachethis(&client, false),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("large-first")),
+                                read_dir,
+                            ],
+                        ),
+                    )
+                    .await;
+                    let original_body = original.rest();
+                    assert!(original_body.len() > 128, "reply exceeds cached limit");
+                    let mut parsed = XdrReader::new(&original_body);
+                    parse_compound_header(&mut parsed, 4);
+                    consume_sequence_result(&mut parsed, "oversized original sequence");
+                    parse_result_header(&mut parsed, OP_PUTROOTFH);
+                    parse_result_header(&mut parsed, OP_REMOVE);
+                    assert!(driver.stat("/large-first").await.is_err());
+                    assert!(driver.stat("/large-second").await.is_ok());
+
+                    let mut retry = rpc(
+                        &mut stream,
+                        905,
+                        compound(
+                            "oversized-retry",
+                            &[
+                                sequence_with_cachethis(&client, false),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("large-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    let marker = retry.rest();
+                    assert!(marker.len() <= 128, "retry marker fits cached limit");
+                    let mut retry = XdrReader::new(&marker);
+                    assert_eq!(
+                        parse_compound_status(&mut retry, 2),
+                        NFS4ERR_RETRY_UNCACHED_REP
+                    );
+                    consume_sequence_result(&mut retry, "oversized retry sequence");
+                    assert_eq!(
+                        parse_result_status(&mut retry, OP_PUTROOTFH),
+                        NFS4ERR_RETRY_UNCACHED_REP
+                    );
+                    retry.end("oversized retry response").unwrap();
+                    assert!(driver.stat("/large-second").await.is_ok());
+
+                    let mut repeated = rpc(
+                        &mut stream,
+                        906,
+                        compound(
+                            "oversized-repeated-retry",
+                            &[
+                                sequence_with_cachethis(&client, false),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("large-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    assert_eq!(repeated.rest(), marker);
+                    assert!(driver.stat("/large-second").await.is_ok());
+
+                    client.sequence += 1;
+                    let mut fresh = rpc(
+                        &mut stream,
+                        907,
+                        compound(
+                            "oversized-fresh",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("large-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut fresh, 3);
+                    consume_sequence_result(&mut fresh, "oversized fresh sequence");
+                    parse_result_header(&mut fresh, OP_PUTROOTFH);
+                    parse_result_header(&mut fresh, OP_REMOVE);
+                    let _ = fresh.bool("fresh remove change atomic").unwrap();
+                    let _ = fresh.u64("fresh remove change before").unwrap();
+                    let _ = fresh.u64("fresh remove change after").unwrap();
+                    fresh.end("oversized fresh response").unwrap();
+                    assert!(driver.stat("/large-second").await.is_err());
+
+                    stream.shutdown().await.expect("close NFS transport");
+                    server.close().await.expect("close NFS server");
+                });
+        })
+        .expect("spawn oversized replay test thread")
+        .join()
+        .expect("oversized replay test thread panicked");
+}
+
+#[test]
+fn nfs_v4_tiny_cache_fences_uncacheable_completed_mutation() {
+    std::thread::Builder::new()
+        .name("nfs-v4-tiny-cache-fence-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build tiny-cache runtime")
+                .block_on(async {
+                    let driver = MemoryFs::empty();
+                    driver.write_file("/tiny-first", b"first").await.unwrap();
+                    driver.write_file("/tiny-second", b"second").await.unwrap();
+                    let mut options = NfsServerOptions::default();
+                    options.session.nfs4.max_cached_response_size = 96;
+                    let server = NfsServer::new(driver.clone(), options);
+                    let address = server.listen().await.expect("listen NFS server");
+                    let (mut stream, client) =
+                        connect_v4_client(address, 1501, b"tiny-cache-client").await;
+
+                    let mut original = rpc(
+                        &mut stream,
+                        1504,
+                        compound(
+                            "tiny-cache",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("tiny-first")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    let original_body = original.rest();
+                    assert!(original_body.len() > 96, "reply exceeds tiny cache");
+                    let mut parsed = XdrReader::new(&original_body);
+                    parse_compound_header(&mut parsed, 3);
+                    consume_sequence_result(&mut parsed, "tiny-cache sequence");
+                    parse_result_header(&mut parsed, OP_PUTROOTFH);
+                    parse_result_header(&mut parsed, OP_REMOVE);
+                    assert!(driver.stat("/tiny-first").await.is_err());
+
+                    let mut retry = rpc(
+                        &mut stream,
+                        1505,
+                        compound(
+                            "tiny-retry",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("tiny-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    assert_eq!(parse_compound_status(&mut retry, 0), NFS4ERR_BADSESSION);
+                    retry.end("tiny-cache retry").unwrap();
+                    assert!(driver.stat("/tiny-second").await.is_ok());
+
+                    stream.shutdown().await.expect("close NFS transport");
+                    server.close().await.expect("close NFS server");
+                });
+        })
+        .expect("spawn tiny-cache test thread")
+        .join()
+        .expect("tiny-cache test thread panicked");
+}
+
+#[test]
+fn nfs_v4_cache_required_oversized_getfh_preserves_mutation_reply() {
+    std::thread::Builder::new()
+        .name("nfs-v4-cache-required-oversized-getfh-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build oversized GETFH runtime")
+                .block_on(async {
+                    let driver = MemoryFs::empty();
+                    driver.write_file("/fh-first", b"first").await.unwrap();
+                    driver.write_file("/fh-second", b"second").await.unwrap();
+                    let mut options = NfsServerOptions::default();
+                    options.session.nfs4.max_cached_response_size = 112;
+                    let server = NfsServer::new(driver.clone(), options);
+                    let address = server.listen().await.expect("listen NFS server");
+                    let (mut stream, mut client) =
+                        connect_v4_client(address, 1401, b"oversized-getfh-client").await;
+
+                    let mut original = rpc(
+                        &mut stream,
+                        1404,
+                        compound(
+                            "fh-big",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("fh-first")),
+                                op(OP_GETFH, |_| {}),
+                            ],
+                        ),
+                    )
+                    .await;
+                    let original_body = original.rest();
+                    assert!(original_body.len() <= 112, "response must be cacheable");
+                    let mut parsed = XdrReader::new(&original_body);
+                    assert_eq!(
+                        parse_compound_status(&mut parsed, 4),
+                        NFS4ERR_REP_TOO_BIG_TO_CACHE
+                    );
+                    consume_sequence_result(&mut parsed, "oversized GETFH sequence");
+                    parse_result_header(&mut parsed, OP_PUTROOTFH);
+                    parse_result_header(&mut parsed, OP_REMOVE);
+                    let _ = parsed.bool("remove change atomic").unwrap();
+                    let _ = parsed.u64("remove change before").unwrap();
+                    let _ = parsed.u64("remove change after").unwrap();
+                    assert_eq!(
+                        parse_result_status(&mut parsed, OP_GETFH),
+                        NFS4ERR_REP_TOO_BIG_TO_CACHE
+                    );
+                    parsed.end("oversized GETFH response").unwrap();
+                    assert!(driver.stat("/fh-first").await.is_err());
+                    assert!(driver.stat("/fh-second").await.is_ok());
+
+                    let mut retry = rpc(
+                        &mut stream,
+                        1405,
+                        compound(
+                            "changed-fh-target",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("fh-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    assert_eq!(retry.rest(), original_body);
+                    assert!(driver.stat("/fh-second").await.is_ok());
+
+                    client.sequence += 1;
+                    let mut fresh = rpc(
+                        &mut stream,
+                        1406,
+                        compound(
+                            "fresh-fh-sequence",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("fh-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut fresh, 3);
+                    consume_sequence_result(&mut fresh, "fresh GETFH sequence");
+                    parse_result_header(&mut fresh, OP_PUTROOTFH);
+                    parse_result_header(&mut fresh, OP_REMOVE);
+                    assert!(driver.stat("/fh-second").await.is_err());
+
+                    stream.shutdown().await.expect("close NFS transport");
+                    server.close().await.expect("close NFS server");
+                });
+        })
+        .expect("spawn oversized GETFH test thread")
+        .join()
+        .expect("oversized GETFH test thread panicked");
+}
+
+#[test]
+fn nfs_v4_cache_required_oversized_getattr_preserves_mutation_reply() {
+    std::thread::Builder::new()
+        .name("nfs-v4-cache-required-oversized-getattr-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build oversized GETATTR runtime")
+                .block_on(async {
+                    let driver = MemoryFs::empty();
+                    driver.write_file("/attr-first", b"first").await.unwrap();
+                    driver.write_file("/attr-second", b"second").await.unwrap();
+                    let mut options = NfsServerOptions::default();
+                    options.session.nfs4.max_cached_response_size = 160;
+                    let server = NfsServer::new(driver.clone(), options);
+                    let address = server.listen().await.expect("listen NFS server");
+                    let (mut stream, mut client) =
+                        connect_v4_client(address, 1301, b"oversized-getattr-client").await;
+
+                    let mut original = rpc(
+                        &mut stream,
+                        1304,
+                        compound(
+                            "attr-big",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("attr-first")),
+                                op(OP_GETATTR, |writer| {
+                                    writer.u32(2);
+                                    writer.u32(u32::MAX);
+                                    writer.u32(!((1_u32 << 16) | (1_u32 << 22)));
+                                }),
+                            ],
+                        ),
+                    )
+                    .await;
+                    let original_body = original.rest();
+                    assert!(original_body.len() <= 160, "response must be cacheable");
+                    let mut parsed = XdrReader::new(&original_body);
+                    assert_eq!(
+                        parse_compound_status(&mut parsed, 4),
+                        NFS4ERR_REP_TOO_BIG_TO_CACHE
+                    );
+                    consume_sequence_result(&mut parsed, "oversized GETATTR sequence");
+                    parse_result_header(&mut parsed, OP_PUTROOTFH);
+                    parse_result_header(&mut parsed, OP_REMOVE);
+                    let _ = parsed.bool("remove change atomic").unwrap();
+                    let _ = parsed.u64("remove change before").unwrap();
+                    let _ = parsed.u64("remove change after").unwrap();
+                    assert_eq!(
+                        parse_result_status(&mut parsed, OP_GETATTR),
+                        NFS4ERR_REP_TOO_BIG_TO_CACHE
+                    );
+                    parsed.end("oversized GETATTR response").unwrap();
+                    assert!(driver.stat("/attr-first").await.is_err());
+                    assert!(driver.stat("/attr-second").await.is_ok());
+
+                    let mut retry = rpc(
+                        &mut stream,
+                        1305,
+                        compound(
+                            "changed-attr-target",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("attr-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    assert_eq!(retry.rest(), original_body);
+                    assert!(driver.stat("/attr-second").await.is_ok());
+
+                    client.sequence += 1;
+                    let mut fresh = rpc(
+                        &mut stream,
+                        1306,
+                        compound(
+                            "fresh-attr-sequence",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("attr-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut fresh, 3);
+                    consume_sequence_result(&mut fresh, "fresh GETATTR sequence");
+                    parse_result_header(&mut fresh, OP_PUTROOTFH);
+                    parse_result_header(&mut fresh, OP_REMOVE);
+                    assert!(driver.stat("/attr-second").await.is_err());
+
+                    stream.shutdown().await.expect("close NFS transport");
+                    server.close().await.expect("close NFS server");
+                });
+        })
+        .expect("spawn oversized GETATTR test thread")
+        .join()
+        .expect("oversized GETATTR test thread panicked");
+}
+
+#[test]
+fn nfs_v4_cache_required_oversized_readlink_preserves_mutation_reply() {
+    std::thread::Builder::new()
+        .name("nfs-v4-cache-required-oversized-readlink-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build oversized READLINK runtime")
+                .block_on(async {
+                    let driver = MemoryFs::empty();
+                    driver
+                        .symlink(&"x".repeat(512), "/long-link")
+                        .await
+                        .unwrap();
+                    driver.write_file("/link-first", b"first").await.unwrap();
+                    driver.write_file("/link-second", b"second").await.unwrap();
+                    let mut options = NfsServerOptions::default();
+                    options.session.nfs4.max_cached_response_size = 256;
+                    let server = NfsServer::new(driver.clone(), options);
+                    let address = server.listen().await.expect("listen NFS server");
+                    let (mut stream, mut client) =
+                        connect_v4_client(address, 1201, b"oversized-readlink-client").await;
+
+                    let mut original = rpc(
+                        &mut stream,
+                        1204,
+                        compound(
+                            "link-big",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("link-first")),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_LOOKUP, |writer| writer.string("long-link")),
+                                op(OP_READLINK, |_| {}),
+                            ],
+                        ),
+                    )
+                    .await;
+                    let original_body = original.rest();
+                    assert!(original_body.len() <= 256, "response must be cacheable");
+                    let mut parsed = XdrReader::new(&original_body);
+                    assert_eq!(
+                        parse_compound_status(&mut parsed, 6),
+                        NFS4ERR_REP_TOO_BIG_TO_CACHE
+                    );
+                    consume_sequence_result(&mut parsed, "oversized READLINK sequence");
+                    parse_result_header(&mut parsed, OP_PUTROOTFH);
+                    parse_result_header(&mut parsed, OP_REMOVE);
+                    let _ = parsed.bool("remove change atomic").unwrap();
+                    let _ = parsed.u64("remove change before").unwrap();
+                    let _ = parsed.u64("remove change after").unwrap();
+                    parse_result_header(&mut parsed, OP_PUTROOTFH);
+                    parse_result_header(&mut parsed, OP_LOOKUP);
+                    assert_eq!(
+                        parse_result_status(&mut parsed, OP_READLINK),
+                        NFS4ERR_REP_TOO_BIG_TO_CACHE
+                    );
+                    parsed.end("oversized READLINK response").unwrap();
+                    assert!(driver.stat("/link-first").await.is_err());
+                    assert!(driver.stat("/link-second").await.is_ok());
+
+                    let mut retry = rpc(
+                        &mut stream,
+                        1205,
+                        compound(
+                            "changed-link-target",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("link-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    assert_eq!(retry.rest(), original_body);
+                    assert!(driver.stat("/link-second").await.is_ok());
+
+                    client.sequence += 1;
+                    let mut fresh = rpc(
+                        &mut stream,
+                        1206,
+                        compound(
+                            "fresh-link-sequence",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("link-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut fresh, 3);
+                    consume_sequence_result(&mut fresh, "fresh READLINK sequence");
+                    parse_result_header(&mut fresh, OP_PUTROOTFH);
+                    parse_result_header(&mut fresh, OP_REMOVE);
+                    assert!(driver.stat("/link-second").await.is_err());
+
+                    stream.shutdown().await.expect("close NFS transport");
+                    server.close().await.expect("close NFS server");
+                });
+        })
+        .expect("spawn oversized READLINK test thread")
+        .join()
+        .expect("oversized READLINK test thread panicked");
+}
+
+#[test]
+fn nfs_v4_cache_required_oversized_read_preserves_mutation_reply() {
+    std::thread::Builder::new()
+        .name("nfs-v4-cache-required-oversized-read-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build oversized READ runtime")
+                .block_on(async {
+                    let driver = MemoryFs::empty();
+                    driver
+                        .write_file("/read-target", &[b'x'; 512])
+                        .await
+                        .unwrap();
+                    driver.write_file("/read-first", b"first").await.unwrap();
+                    driver.write_file("/read-second", b"second").await.unwrap();
+                    let mut options = NfsServerOptions::default();
+                    options.session.nfs4.max_cached_response_size = 256;
+                    let server = NfsServer::new(driver.clone(), options);
+                    let address = server.listen().await.expect("listen NFS server");
+                    let (mut stream, mut client) =
+                        connect_v4_client(address, 1101, b"oversized-read-client").await;
+
+                    let mut original = rpc(
+                        &mut stream,
+                        1104,
+                        compound(
+                            "read-big",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("read-first")),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_LOOKUP, |writer| writer.string("read-target")),
+                                op(OP_READ, |writer| {
+                                    writer.fixed_opaque(&[0; 16], 16);
+                                    writer.u64(0);
+                                    writer.u32(512);
+                                }),
+                            ],
+                        ),
+                    )
+                    .await;
+                    let original_body = original.rest();
+                    assert!(original_body.len() <= 256, "response must be cacheable");
+                    let mut parsed = XdrReader::new(&original_body);
+                    assert_eq!(
+                        parse_compound_status(&mut parsed, 6),
+                        NFS4ERR_REP_TOO_BIG_TO_CACHE
+                    );
+                    consume_sequence_result(&mut parsed, "oversized READ sequence");
+                    parse_result_header(&mut parsed, OP_PUTROOTFH);
+                    parse_result_header(&mut parsed, OP_REMOVE);
+                    let _ = parsed.bool("remove change atomic").unwrap();
+                    let _ = parsed.u64("remove change before").unwrap();
+                    let _ = parsed.u64("remove change after").unwrap();
+                    parse_result_header(&mut parsed, OP_PUTROOTFH);
+                    parse_result_header(&mut parsed, OP_LOOKUP);
+                    assert_eq!(
+                        parse_result_status(&mut parsed, OP_READ),
+                        NFS4ERR_REP_TOO_BIG_TO_CACHE
+                    );
+                    parsed.end("oversized READ response").unwrap();
+                    assert!(driver.stat("/read-first").await.is_err());
+                    assert!(driver.stat("/read-second").await.is_ok());
+
+                    let mut retry = rpc(
+                        &mut stream,
+                        1105,
+                        compound(
+                            "changed-read-target",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("read-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    assert_eq!(retry.rest(), original_body);
+                    assert!(driver.stat("/read-second").await.is_ok());
+
+                    client.sequence += 1;
+                    let mut fresh = rpc(
+                        &mut stream,
+                        1106,
+                        compound(
+                            "fresh-read-sequence",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("read-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut fresh, 3);
+                    consume_sequence_result(&mut fresh, "fresh READ sequence");
+                    parse_result_header(&mut fresh, OP_PUTROOTFH);
+                    parse_result_header(&mut fresh, OP_REMOVE);
+                    assert!(driver.stat("/read-second").await.is_err());
+
+                    stream.shutdown().await.expect("close NFS transport");
+                    server.close().await.expect("close NFS server");
+                });
+        })
+        .expect("spawn oversized READ test thread")
+        .join()
+        .expect("oversized READ test thread panicked");
+}
+
+#[test]
+fn nfs_v4_cache_required_oversized_readdir_preserves_mutation_reply() {
+    std::thread::Builder::new()
+        .name("nfs-v4-cache-required-oversized-reply-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build cache-required replay runtime")
+                .block_on(async {
+                    let driver = MemoryFs::empty();
+                    driver.write_file("/cached-first", b"first").await.unwrap();
+                    driver
+                        .write_file("/cached-second", b"second")
+                        .await
+                        .unwrap();
+                    for index in 0..16 {
+                        driver
+                            .write_file(&format!("/cached-entry-{index:02}"), b"entry")
+                            .await
+                            .unwrap();
+                    }
+                    let mut options = NfsServerOptions::default();
+                    options.session.nfs4.max_cached_response_size = 128;
+                    let server = NfsServer::new(driver.clone(), options);
+                    let address = server.listen().await.expect("listen NFS server");
+                    let (mut stream, mut client) =
+                        connect_v4_client(address, 1001, b"cache-required-client").await;
+                    let read_dir = op(OP_READDIR, |writer| {
+                        writer.u64(0);
+                        writer.fixed_opaque(&[0; 8], 8);
+                        writer.u32(4096);
+                        writer.u32(4096);
+                        writer.u32(0);
+                    });
+
+                    let mut original = rpc(
+                        &mut stream,
+                        1004,
+                        compound(
+                            "big",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("cached-first")),
+                                read_dir,
+                            ],
+                        ),
+                    )
+                    .await;
+                    let original_body = original.rest();
+                    assert!(original_body.len() <= 128, "response must be cacheable");
+                    let mut parsed = XdrReader::new(&original_body);
+                    assert_eq!(
+                        parse_compound_status(&mut parsed, 4),
+                        NFS4ERR_REP_TOO_BIG_TO_CACHE
+                    );
+                    consume_sequence_result(&mut parsed, "cache-required original sequence");
+                    parse_result_header(&mut parsed, OP_PUTROOTFH);
+                    parse_result_header(&mut parsed, OP_REMOVE);
+                    let _ = parsed.bool("remove change atomic").unwrap();
+                    let _ = parsed.u64("remove change before").unwrap();
+                    let _ = parsed.u64("remove change after").unwrap();
+                    assert_eq!(
+                        parse_result_status(&mut parsed, OP_READDIR),
+                        NFS4ERR_REP_TOO_BIG_TO_CACHE
+                    );
+                    parsed.end("cache-required oversized response").unwrap();
+                    assert!(driver.stat("/cached-first").await.is_err());
+                    assert!(driver.stat("/cached-second").await.is_ok());
+
+                    let mut retry = rpc(
+                        &mut stream,
+                        1005,
+                        compound(
+                            "changed-target",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("cached-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    assert_eq!(retry.rest(), original_body);
+                    assert!(driver.stat("/cached-second").await.is_ok());
+
+                    client.sequence += 1;
+                    let mut fresh = rpc(
+                        &mut stream,
+                        1006,
+                        compound(
+                            "fresh",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("cached-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut fresh, 3);
+                    consume_sequence_result(&mut fresh, "cache-required fresh sequence");
+                    parse_result_header(&mut fresh, OP_PUTROOTFH);
+                    parse_result_header(&mut fresh, OP_REMOVE);
+                    let _ = fresh.bool("fresh remove change atomic").unwrap();
+                    let _ = fresh.u64("fresh remove change before").unwrap();
+                    let _ = fresh.u64("fresh remove change after").unwrap();
+                    fresh.end("cache-required fresh response").unwrap();
+                    assert!(driver.stat("/cached-second").await.is_err());
+
+                    stream.shutdown().await.expect("close NFS transport");
+                    server.close().await.expect("close NFS server");
+                });
+        })
+        .expect("spawn cache-required replay test thread")
+        .join()
+        .expect("cache-required replay test thread panicked");
+}
+
+#[test]
+fn nfs_v4_busy_slot_delays_retry_and_rejects_next_sequence() {
+    std::thread::Builder::new()
+        .name("nfs-v4-busy-slot-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build v4 busy-slot test runtime")
+                .block_on(async {
+                    let block_once = Arc::new(AtomicBool::new(false));
+                    let entered = Arc::new(Notify::new());
+                    let release = Arc::new(Notify::new());
+                    let server = NfsServer::new(
+                        GateStatDriver {
+                            inner: MemoryFs::empty(),
+                            block_once: Arc::clone(&block_once),
+                            entered: Arc::clone(&entered),
+                            release: Arc::clone(&release),
+                        },
+                        NfsServerOptions::default(),
+                    );
+                    let address = server.listen().await.expect("listen busy-slot NFS server");
+                    let (mut first, client) =
+                        connect_v4_client(address, 701, b"busy-slot-client").await;
+                    let second = TcpStream::connect(address)
+                        .await
+                        .expect("connect second busy-slot transport");
+                    let getattr = |client: &Client| {
+                        compound(
+                            "busy-slot-getattr",
+                            &[
+                                sequence(client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_GETATTR, |writer| writer.u32(0)),
+                            ],
+                        )
+                    };
+                    block_once.store(true, Ordering::Release);
+                    let first_args = getattr(&client);
+                    let first_task = tokio::spawn(async move {
+                        let mut response = rpc(&mut first, 704, first_args).await;
+                        response.rest()
+                    });
+                    timeout(Duration::from_secs(2), entered.notified())
+                        .await
+                        .expect("first SEQUENCE reaches blocked backend");
+
+                    let requests_before_retry = server.v4_session().stats().requests;
+                    let retry_args = getattr(&client);
+                    let retry_task = tokio::spawn(async move {
+                        let mut second = second;
+                        let mut reply = rpc(&mut second, 705, retry_args).await;
+                        (second, reply.rest())
+                    });
+                    timeout(Duration::from_secs(2), async {
+                        while server.v4_session().stats().requests == requests_before_retry {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("retry reaches the NFSv4 server while original is blocked");
+                    let (mut second, delay_body) = timeout(Duration::from_millis(250), retry_task)
+                        .await
+                        .expect("in-flight retry receives a bounded SEQUENCE reply")
+                        .expect("in-flight retry task succeeds");
+                    let mut delayed = XdrReader::new(&delay_body);
+                    assert_eq!(parse_compound_status(&mut delayed, 0), NFS4ERR_DELAY);
+                    delayed.end("in-flight retry response").unwrap();
+                    let mut next_client = client.clone();
+                    next_client.sequence += 1;
+                    let mut premature = timeout(
+                        Duration::from_millis(250),
+                        rpc(&mut second, 706, getattr(&next_client)),
+                    )
+                    .await
+                    .expect("premature next sequence receives a bounded reply");
+                    assert_eq!(
+                        parse_compound_status(&mut premature, 0),
+                        NFS4ERR_SEQ_MISORDERED
+                    );
+                    premature.end("premature sequence response").unwrap();
+                    release.notify_one();
+                    let first_body = timeout(Duration::from_secs(2), first_task)
+                        .await
+                        .expect("blocked original request completes")
+                        .expect("original request task succeeds");
+                    let mut original = XdrReader::new(&first_body);
+                    parse_compound_header(&mut original, 3);
+                    let mut replay = rpc(&mut second, 707, getattr(&client)).await;
+                    assert_eq!(replay.rest(), first_body);
+                    let mut fresh = rpc(&mut second, 708, getattr(&next_client)).await;
+                    parse_compound_header(&mut fresh, 3);
+                    second.shutdown().await.expect("close busy-slot transport");
+                    server.close().await.expect("close busy-slot NFS server");
+                });
+        })
+        .expect("spawn v4 busy-slot test thread")
+        .join()
+        .expect("v4 busy-slot test thread panicked");
+}
+
+#[test]
+fn nfs_v4_canceled_mutation_fences_uncached_session_for_recovery() {
+    std::thread::Builder::new()
+        .name("nfs-v4-canceled-compound-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build v4 canceled-compound test runtime")
+                .block_on(async {
+                    let driver = MemoryFs::empty();
+                    driver
+                        .write_file("/canceled-first", b"first")
+                        .await
+                        .unwrap();
+                    driver
+                        .write_file("/canceled-second", b"second")
+                        .await
+                        .unwrap();
+                    let block_once = Arc::new(AtomicBool::new(false));
+                    let entered = Arc::new(Notify::new());
+                    let release = Arc::new(Notify::new());
+                    let server = NfsServer::new(
+                        GateUnlinkDriver {
+                            inner: driver.clone(),
+                            block_once: Arc::clone(&block_once),
+                            entered: Arc::clone(&entered),
+                            release,
+                        },
+                        NfsServerOptions::default(),
+                    );
+                    let address = server.listen().await.expect("listen canceled NFS server");
+                    let (mut first, client) =
+                        connect_v4_client(address, 741, b"canceled-compound-client").await;
+                    let first_connection = server
+                        .clients()
+                        .expect("list canceled-compound connections")
+                        .into_iter()
+                        .next()
+                        .expect("first canceled-compound connection");
+                    let remove = |client: &Client, target: &str| {
+                        compound(
+                            "canceled-remove",
+                            &[
+                                sequence(client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string(target)),
+                            ],
+                        )
+                    };
+                    block_once.store(true, Ordering::Release);
+                    let request = encode_call(
+                        744,
+                        NFS4_PROGRAM,
+                        NFS_V4,
+                        1,
+                        None,
+                        None,
+                        &remove(&client, "canceled-first"),
+                    );
+                    first
+                        .write_all(&frame_record(&request).expect("frame canceled COMPOUND"))
+                        .await
+                        .expect("send canceled COMPOUND");
+                    timeout(Duration::from_secs(2), entered.notified())
+                        .await
+                        .expect("canceled REMOVE deletes the first file and stalls");
+                    timeout(Duration::from_secs(2), first_connection.close())
+                        .await
+                        .expect("connection close cancels blocked COMPOUND")
+                        .expect("close canceled connection");
+                    drop(first);
+                    assert!(driver.stat("/canceled-first").await.is_err());
+                    assert!(driver.stat("/canceled-second").await.is_ok());
+
+                    let mut second = TcpStream::connect(address)
+                        .await
+                        .expect("connect replacement transport");
+                    let mut old_retry =
+                        rpc(&mut second, 745, remove(&client, "canceled-second")).await;
+                    assert_eq!(parse_compound_status(&mut old_retry, 0), NFS4ERR_BADSESSION);
+                    old_retry.end("canceled-session retry").unwrap();
+                    assert!(driver.stat("/canceled-second").await.is_ok());
+
+                    let mut replacement_reply = rpc(
+                        &mut second,
+                        746,
+                        compound(
+                            "replacement-session",
+                            &[create_session_args_with_sequence(client.clientid, 2)],
+                        ),
+                    )
+                    .await;
+                    let replacement = parse_create_session_with_sequence(&mut replacement_reply, 2);
+                    assert_ne!(replacement, client.session);
+                    let replacement_client = Client {
+                        session: replacement,
+                        clientid: client.clientid,
+                        sequence: 1,
+                        slot: 0,
+                    };
+                    let mut recovered = rpc(
+                        &mut second,
+                        747,
+                        remove(&replacement_client, "canceled-second"),
+                    )
+                    .await;
+                    parse_compound_header(&mut recovered, 3);
+                    assert!(driver.stat("/canceled-second").await.is_err());
+                    second
+                        .shutdown()
+                        .await
+                        .expect("close replacement transport");
+                    server.close().await.expect("close canceled NFS server");
+                });
+        })
+        .expect("spawn v4 canceled-compound test thread")
+        .join()
+        .expect("v4 canceled-compound test thread panicked");
+}
+
+#[test]
+fn nfs_v4_independent_slots_overlap_while_one_backend_call_is_blocked() {
+    std::thread::Builder::new()
+        .name("nfs-v4-independent-slots-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build v4 independent-slots test runtime")
+                .block_on(async {
+                    let block_once = Arc::new(AtomicBool::new(false));
+                    let entered = Arc::new(Notify::new());
+                    let release = Arc::new(Notify::new());
+                    let server = NfsServer::new(
+                        GateStatDriver {
+                            inner: MemoryFs::empty(),
+                            block_once: Arc::clone(&block_once),
+                            entered: Arc::clone(&entered),
+                            release: Arc::clone(&release),
+                        },
+                        NfsServerOptions::default(),
+                    );
+                    let address = server.listen().await.expect("listen two-slot NFS server");
+                    let (mut first, slot_zero) =
+                        connect_v4_client(address, 721, b"two-slot-client").await;
+                    let mut second = TcpStream::connect(address)
+                        .await
+                        .expect("connect second two-slot transport");
+                    let mut slot_one = slot_zero.clone();
+                    slot_one.slot = 1;
+                    slot_one.sequence = 1;
+                    let getattr = |client: &Client| {
+                        compound(
+                            "two-slot-getattr",
+                            &[
+                                sequence(client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_GETATTR, |writer| writer.u32(0)),
+                            ],
+                        )
+                    };
+                    block_once.store(true, Ordering::Release);
+                    let first_args = getattr(&slot_zero);
+                    let first_task = tokio::spawn(async move {
+                        let mut reply = rpc(&mut first, 724, first_args).await;
+                        reply.rest()
+                    });
+                    timeout(Duration::from_secs(2), entered.notified())
+                        .await
+                        .expect("slot zero reaches blocked backend");
+
+                    let mut independent = timeout(
+                        Duration::from_millis(250),
+                        rpc(&mut second, 725, getattr(&slot_one)),
+                    )
+                    .await
+                    .expect("independent slot completes while slot zero is blocked");
+                    parse_compound_header(&mut independent, 3);
+                    assert!(
+                        !first_task.is_finished(),
+                        "slot zero remains blocked when slot one completes"
+                    );
+                    release.notify_one();
+                    let first_body = timeout(Duration::from_secs(2), first_task)
+                        .await
+                        .expect("blocked slot zero completes")
+                        .expect("slot zero task succeeds");
+                    parse_compound_header(&mut XdrReader::new(&first_body), 3);
+                    second.shutdown().await.expect("close two-slot transport");
+                    server.close().await.expect("close two-slot NFS server");
+                });
+        })
+        .expect("spawn v4 independent-slots test thread")
+        .join()
+        .expect("v4 independent-slots test thread panicked");
+}
+
+#[test]
+fn nfs_v4_expired_lease_waits_for_blocked_slot_before_sweeping() {
+    std::thread::Builder::new()
+        .name("nfs-v4-expired-busy-slot-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build v4 expired busy-slot test runtime")
+                .block_on(async {
+                    let ticks = Arc::new(AtomicU64::new(0));
+                    let base = Instant::now();
+                    let clock_ticks = Arc::clone(&ticks);
+                    let mut options = NfsServerOptions::default();
+                    options.session.nfs4.lease_seconds = 1;
+                    options.session.nfs4.clock = Nfs4Clock::from_fn(move || {
+                        base + Duration::from_secs(clock_ticks.load(Ordering::Acquire))
+                    });
+                    let block_once = Arc::new(AtomicBool::new(false));
+                    let entered = Arc::new(Notify::new());
+                    let release = Arc::new(Notify::new());
+                    let server = NfsServer::new(
+                        GateStatDriver {
+                            inner: MemoryFs::empty(),
+                            block_once: Arc::clone(&block_once),
+                            entered: Arc::clone(&entered),
+                            release: Arc::clone(&release),
+                        },
+                        options,
+                    );
+                    let address = server
+                        .listen()
+                        .await
+                        .expect("listen expired-slot NFS server");
+                    let (mut first, slot_zero) =
+                        connect_v4_client(address, 731, b"expired-slot-client").await;
+                    let mut second = TcpStream::connect(address)
+                        .await
+                        .expect("connect second expired-slot transport");
+                    let mut slot_one = slot_zero.clone();
+                    slot_one.slot = 1;
+                    slot_one.sequence = 1;
+                    let getattr = |client: &Client| {
+                        compound(
+                            "expired-slot-getattr",
+                            &[
+                                sequence(client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_GETATTR, |writer| writer.u32(0)),
+                            ],
+                        )
+                    };
+                    block_once.store(true, Ordering::Release);
+                    let first_args = getattr(&slot_zero);
+                    let first_task = tokio::spawn(async move {
+                        let mut reply = rpc(&mut first, 734, first_args).await;
+                        reply.rest()
+                    });
+                    timeout(Duration::from_secs(2), entered.notified())
+                        .await
+                        .expect("slot zero reaches blocked backend before lease expiry");
+                    ticks.store(1, Ordering::Release);
+
+                    let requests_before_second = server.v4_session().stats().requests;
+                    let second_args = getattr(&slot_one);
+                    let mut second_task = tokio::spawn(async move {
+                        let reply = rpc(&mut second, 735, second_args).await;
+                        (second, reply)
+                    });
+                    timeout(Duration::from_secs(2), async {
+                        while server.v4_session().stats().requests == requests_before_second {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("expired slot-one request reaches the server");
+                    assert!(
+                        timeout(Duration::from_millis(25), &mut second_task)
+                            .await
+                            .is_err(),
+                        "lease sweep must wait for the blocked slot"
+                    );
+                    release.notify_one();
+                    let first_body = timeout(Duration::from_secs(2), first_task)
+                        .await
+                        .expect("blocked slot zero completes")
+                        .expect("slot zero task succeeds");
+                    parse_compound_header(&mut XdrReader::new(&first_body), 3);
+                    let (mut second, mut expired) = timeout(Duration::from_secs(2), second_task)
+                        .await
+                        .expect("expired slot one receives a response")
+                        .expect("slot one task succeeds");
+                    assert_eq!(parse_compound_status(&mut expired, 0), NFS4ERR_BADSESSION);
+                    expired.end("expired slot-one response").unwrap();
+                    assert_eq!(server.v4_session().sweep_expired().await, 0);
+                    second
+                        .shutdown()
+                        .await
+                        .expect("close expired-slot transport");
+                    server.close().await.expect("close expired-slot NFS server");
+                });
+        })
+        .expect("spawn v4 expired busy-slot test thread")
+        .join()
+        .expect("v4 expired busy-slot test thread panicked");
+}
+
+#[test]
 fn nfs_v4_session_state_is_process_local_after_server_restart() {
     std::thread::Builder::new()
         .name("nfs-v4-restart-boundary-test".into())
@@ -1597,17 +3179,17 @@ fn nfs_v4_state_limits_are_advertised_and_enforced() {
                     );
                     response.end("too-small replay response").unwrap();
 
-                    let _small_session = parse_create_session(
-                        rpc(
-                            &mut stream,
-                            406,
-                            compound(
-                                "too-small-retry",
-                                &[create_session_args_with_sequence(small_clientid, 2)],
-                            ),
-                        )
-                        .await,
-                    );
+                    let mut small_session_reply = rpc(
+                        &mut stream,
+                        406,
+                        compound(
+                            "too-small-retry",
+                            &[create_session_args_with_sequence(small_clientid, 2)],
+                        ),
+                    )
+                    .await;
+                    let _small_session =
+                        parse_create_session_with_sequence(&mut small_session_reply, 2);
 
                     let mut response = rpc(
                         &mut stream,

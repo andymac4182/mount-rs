@@ -10,15 +10,17 @@ use mount_rs_core::{
     Result as FsResult, Stats,
 };
 use mount_rs_webdav::protocol::{
-    RangeSpec, collect_body, href_of, parse_depth, parse_destination, parse_lock_info,
+    RangeSpec, collect_body, href_of, parse_depth, parse_destination, parse_if, parse_lock_info,
     parse_lock_token, parse_overwrite, parse_range, parse_target_path, parse_xml, status_of_error,
+    xml_document,
 };
 use mount_rs_webdav::{
-    ALLOW_HEADER, DAV_COMPLIANCE, DAV_NS, DavFault, Depth, WebdavError, WebdavRequestBody,
-    WebdavRequestHead, WebdavServer, WebdavServerError, WebdavServerHooks, WebdavServerOptions,
-    WebdavSession, WebdavSessionHooks, WebdavSessionOptions, WebdavTransportErrorKind,
-    create_webdav_server, create_webdav_server_with_hooks, status_for_error, status_line,
-    status_text,
+    ALLOW_HEADER, DAV_COMPLIANCE, DAV_NS, DavFault, DavLockGrant, DavLockRequest, DavLockTable,
+    DavLockTableOptions, Depth, LockDepth, WebdavError, WebdavRequestBody, WebdavRequestHead,
+    WebdavServer, WebdavServerError, WebdavServerHooks, WebdavServerOptions, WebdavSession,
+    WebdavSessionHooks, WebdavSessionOptions, WebdavTransportErrorKind, create_webdav_server,
+    create_webdav_server_with_hooks, create_webdav_server_with_session_hooks, status_for_error,
+    status_line, status_text,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -40,6 +42,107 @@ fn public_constants_and_status_helpers_match_the_transport_contract() {
     assert_eq!(status_text(207), Some("Multi-Status"));
     assert_eq!(status_line(423), "HTTP/1.1 423 Locked");
     assert_eq!(status_for_error(mount_rs_core::ErrorCode::Enoent), 404);
+}
+
+#[test]
+fn lock_snapshots_preserve_grant_order() {
+    let next_token = Arc::new(AtomicUsize::new(0));
+    let token_counter = Arc::clone(&next_token);
+    let mut table = DavLockTable::new(DavLockTableOptions {
+        new_token: Some(Arc::new(move || {
+            format!(
+                "urn:uuid:ordered-{}",
+                token_counter.fetch_add(1, Ordering::SeqCst)
+            )
+        })),
+        ..DavLockTableOptions::default()
+    });
+    let request = |path: &str| DavLockRequest {
+        path: path.to_owned(),
+        collection: false,
+        depth: LockDepth::Zero,
+        exclusive: true,
+        owner: None,
+        timeout: None,
+    };
+
+    assert!(matches!(
+        table.create(request("/first"), 0),
+        DavLockGrant::Granted(_)
+    ));
+    assert!(matches!(
+        table.create(request("/second"), 0),
+        DavLockGrant::Granted(_)
+    ));
+
+    let snapshots = table.all(0);
+    assert_eq!(
+        snapshots
+            .iter()
+            .map(|lock| lock.path.as_str())
+            .collect::<Vec<_>>(),
+        ["/first", "/second"]
+    );
+}
+
+#[test]
+fn lock_coverage_snapshots_preserve_grant_order() {
+    let next_token = Arc::new(AtomicUsize::new(0));
+    let token_counter = Arc::clone(&next_token);
+    let mut table = DavLockTable::new(DavLockTableOptions {
+        new_token: Some(Arc::new(move || {
+            format!(
+                "urn:uuid:coverage-{}",
+                token_counter.fetch_add(1, Ordering::SeqCst)
+            )
+        })),
+        ..DavLockTableOptions::default()
+    });
+    let request = |path: &str, depth: LockDepth| DavLockRequest {
+        path: path.to_owned(),
+        collection: false,
+        depth,
+        exclusive: false,
+        owner: None,
+        timeout: None,
+    };
+
+    assert!(matches!(
+        table.create(request("/root", LockDepth::Infinity), 0),
+        DavLockGrant::Granted(_)
+    ));
+    assert!(matches!(
+        table.create(request("/root/member", LockDepth::Zero), 0),
+        DavLockGrant::Granted(_)
+    ));
+    assert!(matches!(
+        table.create(request("/root/member/child", LockDepth::Zero), 0),
+        DavLockGrant::Granted(_)
+    ));
+
+    assert_eq!(
+        table
+            .covering("/root/member", 0)
+            .iter()
+            .map(|lock| lock.path.as_str())
+            .collect::<Vec<_>>(),
+        ["/root", "/root/member"]
+    );
+    assert_eq!(
+        table
+            .within("/root", 0)
+            .iter()
+            .map(|lock| lock.path.as_str())
+            .collect::<Vec<_>>(),
+        ["/root", "/root/member", "/root/member/child"]
+    );
+    assert_eq!(
+        table
+            .conflict("/root/member", LockDepth::Zero, true, 0)
+            .expect("shared lock must block an exclusive request")
+            .path,
+        "/root"
+    );
 }
 
 async fn server() -> WebdavServer {
@@ -153,6 +256,166 @@ impl FsDriver for ShortSourceFs {
     }
 }
 
+struct StalledResponseFs {
+    inner: MemoryFs,
+    handle: Arc<StalledReadHandle>,
+}
+
+struct StalledReadHandle {
+    started: Arc<AtomicBool>,
+    started_notify: Arc<Notify>,
+    released: Arc<Notify>,
+    closed: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl FileHandle for StalledReadHandle {
+    async fn read(&self, _buffer: &mut [u8], _position: Option<u64>) -> FsResult<usize> {
+        self.started.store(true, Ordering::SeqCst);
+        self.started_notify.notify_waiters();
+        self.released.notified().await;
+        Ok(0)
+    }
+
+    async fn write(&self, buffer: &[u8], _position: Option<u64>) -> FsResult<usize> {
+        Ok(buffer.len())
+    }
+
+    async fn stat(&self) -> FsResult<Stats> {
+        Ok(Stats {
+            dev: 0,
+            ino: 1,
+            mode: mount_rs_core::S_IFREG,
+            nlink: 1,
+            uid: 0,
+            gid: 0,
+            rdev: 0,
+            size: 1,
+            blksize: 1,
+            blocks: 1,
+            atime_ms: 0,
+            mtime_ms: 0,
+            ctime_ms: 0,
+            birthtime_ms: 0,
+        })
+    }
+
+    async fn truncate(&self, _length: u64) -> FsResult<()> {
+        Ok(())
+    }
+
+    async fn close(&self) -> FsResult<()> {
+        self.closed.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl FsDriver for StalledResponseFs {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+
+    async fn stat(&self, path: &str) -> FsResult<Stats> {
+        self.inner.stat(path).await
+    }
+
+    async fn readdir(&self, path: &str) -> FsResult<Vec<DirEntry>> {
+        self.inner.readdir(path).await
+    }
+
+    async fn readdir_bounded(&self, path: &str, max_entries: usize) -> FsResult<Vec<DirEntry>> {
+        self.inner.readdir_bounded(path, max_entries).await
+    }
+
+    async fn open(&self, path: &str, flags: &str, mode: u32) -> FsResult<Arc<dyn FileHandle>> {
+        if path == "/stalled" && flags == "r" {
+            return Ok(Arc::clone(&self.handle) as Arc<dyn FileHandle>);
+        }
+        self.inner.open(path, flags, mode).await
+    }
+}
+
+struct StalledWriteFs {
+    inner: MemoryFs,
+    handle: Arc<StalledWriteHandle>,
+}
+
+struct StalledWriteHandle {
+    started: Arc<AtomicBool>,
+    started_notify: Arc<Notify>,
+    released: Arc<Notify>,
+    closed: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl FileHandle for StalledWriteHandle {
+    async fn read(&self, _buffer: &mut [u8], _position: Option<u64>) -> FsResult<usize> {
+        Ok(0)
+    }
+
+    async fn write(&self, _buffer: &[u8], _position: Option<u64>) -> FsResult<usize> {
+        self.started.store(true, Ordering::SeqCst);
+        self.started_notify.notify_waiters();
+        self.released.notified().await;
+        Ok(0)
+    }
+
+    async fn stat(&self) -> FsResult<Stats> {
+        Ok(Stats {
+            dev: 0,
+            ino: 2,
+            mode: mount_rs_core::S_IFREG,
+            nlink: 1,
+            uid: 0,
+            gid: 0,
+            rdev: 0,
+            size: 0,
+            blksize: 1,
+            blocks: 0,
+            atime_ms: 0,
+            mtime_ms: 0,
+            ctime_ms: 0,
+            birthtime_ms: 0,
+        })
+    }
+
+    async fn truncate(&self, _length: u64) -> FsResult<()> {
+        Ok(())
+    }
+
+    async fn close(&self) -> FsResult<()> {
+        self.closed.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl FsDriver for StalledWriteFs {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+
+    async fn stat(&self, path: &str) -> FsResult<Stats> {
+        self.inner.stat(path).await
+    }
+
+    async fn readdir(&self, path: &str) -> FsResult<Vec<DirEntry>> {
+        self.inner.readdir(path).await
+    }
+
+    async fn readdir_bounded(&self, path: &str, max_entries: usize) -> FsResult<Vec<DirEntry>> {
+        self.inner.readdir_bounded(path, max_entries).await
+    }
+
+    async fn open(&self, path: &str, flags: &str, mode: u32) -> FsResult<Arc<dyn FileHandle>> {
+        if path == "/stalled-write" && flags == "w" {
+            return Ok(Arc::clone(&self.handle) as Arc<dyn FileHandle>);
+        }
+        self.inner.open(path, flags, mode).await
+    }
+}
+
 struct FailingChildStatFs {
     inner: MemoryFs,
 }
@@ -184,6 +447,55 @@ impl FsDriver for FailingChildStatFs {
 
     async fn mkdir(&self, path: &str, options: MkdirOptions) -> FsResult<Option<String>> {
         self.inner.mkdir(path, options).await
+    }
+}
+
+struct CleanupStatFaultFs {
+    inner: MemoryFs,
+    locked_stat_calls: AtomicUsize,
+}
+
+impl CleanupStatFaultFs {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: MemoryFs::empty(),
+            locked_stat_calls: AtomicUsize::new(0),
+        })
+    }
+}
+
+#[async_trait]
+impl FsDriver for CleanupStatFaultFs {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+
+    async fn stat(&self, path: &str) -> FsResult<Stats> {
+        let call = if path == "/locked" {
+            self.locked_stat_calls.fetch_add(1, Ordering::SeqCst) + 1
+        } else {
+            0
+        };
+        if path == "/locked" && call >= 3 {
+            return Err(FsError::new(ErrorCode::Eio).with_syscall("stat"));
+        }
+        self.inner.stat(path).await
+    }
+
+    async fn lstat(&self, path: &str) -> FsResult<Stats> {
+        self.inner.lstat(path).await
+    }
+
+    async fn readdir(&self, path: &str) -> FsResult<Vec<DirEntry>> {
+        self.inner.readdir(path).await
+    }
+
+    async fn open(&self, path: &str, flags: &str, mode: u32) -> FsResult<Arc<dyn FileHandle>> {
+        self.inner.open(path, flags, mode).await
+    }
+
+    async fn unlink(&self, path: &str) -> FsResult<()> {
+        self.inner.unlink(path).await
     }
 }
 
@@ -753,6 +1065,60 @@ async fn failed_streaming_put_preserves_the_written_prefix_by_contract() {
 }
 
 #[tokio::test]
+async fn cancelling_streamed_put_closes_file_handle() {
+    let started = Arc::new(AtomicBool::new(false));
+    let started_notify = Arc::new(Notify::new());
+    let closed = Arc::new(AtomicBool::new(false));
+    let fs = Arc::new(StalledWriteFs {
+        inner: MemoryFs::empty(),
+        handle: Arc::new(StalledWriteHandle {
+            started: Arc::clone(&started),
+            started_notify: Arc::clone(&started_notify),
+            released: Arc::new(Notify::new()),
+            closed: Arc::clone(&closed),
+        }),
+    });
+    let session = Arc::new(WebdavSession::new(
+        Arc::clone(&fs) as Arc<dyn FsDriver>,
+        WebdavSessionOptions::default(),
+    ));
+    let task_session = Arc::clone(&session);
+    let task = tokio::spawn(async move {
+        task_session
+            .handle_request_stream(
+                WebdavRequestHead {
+                    method: "PUT".to_owned(),
+                    target: "/stalled-write".to_owned(),
+                    headers: Default::default(),
+                },
+                FailingRequestBody::new(),
+            )
+            .await
+    });
+
+    timeout(Duration::from_secs(1), async {
+        while !started.load(Ordering::SeqCst) {
+            started_notify.notified().await;
+        }
+    })
+    .await
+    .expect("streamed PUT write did not start");
+
+    task.abort();
+    match task.await {
+        Err(error) => assert!(error.is_cancelled()),
+        Ok(_) => panic!("cancelled PUT task returned a response"),
+    }
+    timeout(Duration::from_secs(1), async {
+        while !closed.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled streamed PUT did not close its file handle");
+}
+
+#[tokio::test]
 async fn unread_body_faults_report_once_and_close_the_connection() {
     let reports = Arc::new(Mutex::new(Vec::new()));
     let callback_reports = Arc::clone(&reports);
@@ -1003,6 +1369,49 @@ async fn injected_session_clock_controls_lock_expiry_deterministically() {
     assert!(session.lock_records().is_empty());
 }
 
+#[tokio::test]
+async fn zero_lock_timeout_maximum_does_not_panic_finite_requests() {
+    let now = Arc::new(AtomicI64::new(10_000));
+    let clock = Arc::clone(&now);
+    let options = WebdavSessionOptions {
+        now: Some(Arc::new(move || clock.load(Ordering::SeqCst))),
+        locks: mount_rs_webdav::DavLockTableOptions {
+            default_timeout_seconds: 5,
+            max_timeout_seconds: 0,
+            ..mount_rs_webdav::DavLockTableOptions::default()
+        },
+        ..WebdavSessionOptions::default()
+    };
+    let session = WebdavSession::new(Arc::new(MemoryFs::empty()), options);
+
+    let response = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "LOCK".to_owned(),
+                target: "/zero-max-timeout".to_owned(),
+                headers: [("timeout".to_owned(), "Second-30".to_owned())]
+                    .into_iter()
+                    .collect(),
+            },
+            br#"<lockinfo xmlns="DAV:"><lockscope><exclusive/></lockscope><locktype><write/></locktype></lockinfo>"#
+                .to_vec(),
+        )
+        .await;
+
+    assert_eq!(response.status, 201);
+    assert!(
+        response
+            .body
+            .expect("finite timeout lock response body")
+            .into_bytes()
+            .await
+            .expect("lock response bytes")
+            .windows(b"Second-1".len())
+            .any(|window| window == b"Second-1")
+    );
+    assert_eq!(session.lock_records()[0].timeout_seconds, 1);
+}
+
 async fn read_http_response(stream: &mut TcpStream) -> (u16, Vec<u8>) {
     let mut response = Vec::new();
     let (header_end, content_length) = loop {
@@ -1095,6 +1504,14 @@ async fn protocol_fixtures_match_mountx_path_and_header_rules() {
         "/a b"
     );
     assert_eq!(
+        parse_destination(Some("http://[::1]:8080/a%20b"), Some("[::1]:8080")).unwrap(),
+        "/a b"
+    );
+    assert_eq!(
+        parse_destination(Some("http://[::1]/a"), Some("[::1]")).unwrap(),
+        "/a"
+    );
+    assert_eq!(
         parse_destination(Some("/a/b"), Some("dav.example")).unwrap(),
         "/a/b"
     );
@@ -1104,6 +1521,13 @@ async fn protocol_fixtures_match_mountx_path_and_header_rules() {
             .status,
         502
     );
+    let tagged = parse_if(
+        "<http://[::1]:8080/a> (<urn:uuid:token>)",
+        Some("[::1]:8080"),
+    )
+    .expect("IPv6 tagged If resource");
+    assert_eq!(tagged[0].resource.as_deref(), Some("/a"));
+    assert!(!tagged[0].foreign);
 
     let too_large = collect_body(b"12345", 4).unwrap_err();
     assert_eq!(status_of_error(&too_large), 413);
@@ -1111,7 +1535,18 @@ async fn protocol_fixtures_match_mountx_path_and_header_rules() {
         parse_lock_token(Some("<urn:uuid:token>")),
         Some("urn:uuid:token".to_owned())
     );
+    assert_eq!(
+        parse_lock_token(Some(" <urn:uuid:é> ")),
+        Some("urn:uuid:é".to_owned())
+    );
     assert_eq!(parse_lock_token(Some("<a><b>")), None);
+    let mut xml = mount_rs_webdav::XmlNode::new("x");
+    xml.ns = "urn:test\r\u{1}".to_owned();
+    xml.text = "a\r\u{1}&<'\"".to_owned();
+    assert_eq!(
+        xml_document(&xml),
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><x xmlns=\"urn:test&#13;�\">a&#13;�&amp;&lt;&apos;&quot;</x>"
+    );
     let lock_info = parse_lock_info(
         br#"<D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype><D:owner><Z:name xmlns:Z="urn:test">A&amp;B&#x21;</Z:name></D:owner></D:lockinfo>"#,
         256 * 1024,
@@ -1144,6 +1579,25 @@ async fn protocol_fixtures_match_mountx_path_and_header_rules() {
         parse_xml(nested.as_bytes(), 256 * 1024).unwrap_err().status,
         400
     );
+}
+
+#[test]
+fn xml_parser_rejects_raw_invalid_characters() {
+    assert_eq!(
+        parse_xml(b"<x>\0</x>", 256).unwrap_err().status,
+        400,
+        "raw XML controls must not survive into the parsed tree"
+    );
+}
+
+#[test]
+fn if_parser_rejects_non_ascii_grammar_without_panicking() {
+    let result = std::panic::catch_unwind(|| parse_if("(éé)", None));
+    assert!(
+        result.is_ok(),
+        "invalid UTF-8 boundary must not panic the parser"
+    );
+    assert_eq!(result.expect("parser did not panic"), None);
 }
 
 #[tokio::test]
@@ -1431,6 +1885,58 @@ async fn ranges_conditionals_auth_and_request_limits_are_real_http() {
 }
 
 #[tokio::test]
+async fn declared_length_limit_reports_session_error_and_stats() {
+    let reports = Arc::new(Mutex::new(Vec::new()));
+    let callback_reports = Arc::clone(&reports);
+    let server = create_webdav_server_with_session_hooks(
+        Arc::new(MemoryFs::empty()),
+        WebdavServerOptions {
+            max_request_bytes: 4,
+            ..WebdavServerOptions::default()
+        },
+        WebdavServerHooks::default(),
+        WebdavSessionHooks {
+            on_error: Some(Arc::new(move |error, head| {
+                callback_reports
+                    .lock()
+                    .expect("WebDAV declared-length report lock")
+                    .push((error, head));
+            })),
+        },
+    )
+    .unwrap();
+    server.listen().await.unwrap();
+
+    let response = reqwest::Client::new()
+        .put(format!("{}/declared-too-large", server.url()))
+        .body("12345")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(response.headers().contains_key("connection"));
+
+    {
+        let reports = reports.lock().expect("WebDAV declared-length reports");
+        assert_eq!(reports.len(), 1);
+        assert!(matches!(
+            &reports[0].0,
+            WebdavError::Fault(fault) if fault.status == 413
+        ));
+        assert_eq!(reports[0].1.method, "PUT");
+        assert_eq!(reports[0].1.target, "/declared-too-large");
+    }
+
+    let stats = server.session.stats();
+    assert_eq!(stats.requests, 1);
+    assert_eq!(stats.replies, 1);
+    assert_eq!(stats.errors, 1);
+    assert_eq!(stats.methods.get("PUT"), Some(&1));
+
+    server.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn duplicate_if_headers_are_preserved_at_the_http_boundary() {
     let server = server().await;
     let client = reqwest::Client::new();
@@ -1639,6 +2145,113 @@ async fn recursive_delete_honors_submitted_member_lock_tokens() {
 }
 
 #[tokio::test]
+async fn lock_cleanup_retains_lock_when_provider_stat_fails() {
+    let driver = CleanupStatFaultFs::new();
+    let session = WebdavSession::new(
+        Arc::clone(&driver) as Arc<dyn FsDriver>,
+        WebdavSessionOptions::default(),
+    );
+    let lock = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "LOCK".to_owned(),
+                target: "/locked".to_owned(),
+                headers: Default::default(),
+            },
+            br#"<lockinfo xmlns="DAV:"><lockscope><exclusive/></lockscope><locktype><write/></locktype></lockinfo>"#
+                .to_vec(),
+        )
+        .await;
+    assert_eq!(lock.status, 201);
+    let token = lock.headers.get("lock-token").cloned().expect("lock token");
+
+    let deleted = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "DELETE".to_owned(),
+                target: "/locked".to_owned(),
+                headers: [("if".to_owned(), format!("({token})"))]
+                    .into_iter()
+                    .collect(),
+            },
+            &[] as &[u8],
+        )
+        .await;
+
+    assert_eq!(deleted.status, 204);
+    assert_eq!(session.lock_count(), 1);
+    assert_eq!(session.lock_records()[0].path, "/locked");
+}
+
+#[tokio::test]
+async fn poisoned_lock_table_fails_closed_without_mutating_resource() {
+    let session = WebdavSession::new(Arc::new(MemoryFs::empty()), WebdavSessionOptions::default());
+    let created = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "PUT".to_owned(),
+                target: "/locked".to_owned(),
+                headers: Default::default(),
+            },
+            b"before".as_slice(),
+        )
+        .await;
+    assert_eq!(created.status, 201);
+
+    let locked = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "LOCK".to_owned(),
+                target: "/locked".to_owned(),
+                headers: Default::default(),
+            },
+            br#"<lockinfo xmlns="DAV:"><lockscope><exclusive/></lockscope><locktype><write/></locktype></lockinfo>"#,
+        )
+        .await;
+    assert_eq!(locked.status, 200);
+
+    let lock_table = Arc::clone(&session.locks);
+    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = lock_table.lock().expect("lock table should start healthy");
+        panic!("poison the WebDAV lock table");
+    }));
+    assert!(poisoned.is_err());
+
+    let rejected = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "PUT".to_owned(),
+                target: "/locked".to_owned(),
+                headers: Default::default(),
+            },
+            b"after".as_slice(),
+        )
+        .await;
+    assert_eq!(rejected.status, 500);
+
+    let unchanged = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "GET".to_owned(),
+                target: "/locked".to_owned(),
+                headers: Default::default(),
+            },
+            &[] as &[u8],
+        )
+        .await;
+    assert_eq!(unchanged.status, 200);
+    assert_eq!(
+        unchanged
+            .body
+            .expect("GET body")
+            .into_bytes()
+            .await
+            .expect("GET bytes"),
+        b"before"
+    );
+}
+
+#[tokio::test]
 async fn chunked_put_streams_request_body_over_a_real_connection() {
     let server = server().await;
     let mut stream = TcpStream::connect(("127.0.0.1", server.port()))
@@ -1749,6 +2362,105 @@ async fn streaming_get_finishes_when_server_closes() {
     closing.await.unwrap();
     assert_eq!(actual.as_ref(), expected.as_slice());
     assert_eq!(server.connections(), 0);
+}
+
+#[tokio::test]
+async fn server_close_cancels_stalled_response_and_closes_file_handle() {
+    let inner = MemoryFs::empty();
+    inner.write_file("/stalled", b"x").await.unwrap();
+    let started = Arc::new(AtomicBool::new(false));
+    let started_notify = Arc::new(Notify::new());
+    let released = Arc::new(Notify::new());
+    let closed = Arc::new(AtomicBool::new(false));
+    let fs = Arc::new(StalledResponseFs {
+        inner,
+        handle: Arc::new(StalledReadHandle {
+            started: Arc::clone(&started),
+            started_notify: Arc::clone(&started_notify),
+            released,
+            closed: Arc::clone(&closed),
+        }),
+    });
+    let server = create_webdav_server(
+        fs,
+        WebdavServerOptions {
+            drain_timeout: Duration::from_secs(1),
+            ..WebdavServerOptions::default()
+        },
+    )
+    .unwrap();
+    server.listen().await.unwrap();
+
+    let response = reqwest::get(format!("{}/stalled", server.url()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    timeout(Duration::from_secs(1), async {
+        while !started.load(Ordering::SeqCst) {
+            started_notify.notified().await;
+        }
+    })
+    .await
+    .expect("response read did not start");
+
+    timeout(Duration::from_secs(1), server.close())
+        .await
+        .expect("close did not complete")
+        .expect("close");
+    assert!(closed.load(Ordering::SeqCst));
+    drop(response);
+}
+
+#[tokio::test]
+async fn cancelling_transport_neutral_response_body_closes_file_handle() {
+    let inner = MemoryFs::empty();
+    inner.write_file("/stalled", b"x").await.unwrap();
+    let started = Arc::new(AtomicBool::new(false));
+    let started_notify = Arc::new(Notify::new());
+    let closed = Arc::new(AtomicBool::new(false));
+    let fs = Arc::new(StalledResponseFs {
+        inner,
+        handle: Arc::new(StalledReadHandle {
+            started: Arc::clone(&started),
+            started_notify: Arc::clone(&started_notify),
+            released: Arc::new(Notify::new()),
+            closed: Arc::clone(&closed),
+        }),
+    });
+    let session = WebdavSession::new(
+        Arc::clone(&fs) as Arc<dyn FsDriver>,
+        WebdavSessionOptions::default(),
+    );
+    let response = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "GET".to_owned(),
+                target: "/stalled".to_owned(),
+                headers: Default::default(),
+            },
+            &[] as &[u8],
+        )
+        .await;
+    assert_eq!(response.status, 200);
+    let body = response.body.expect("GET should have a file body");
+    let reader = tokio::spawn(body.into_bytes());
+    timeout(Duration::from_secs(1), async {
+        while !started.load(Ordering::SeqCst) {
+            started_notify.notified().await;
+        }
+    })
+    .await
+    .expect("response read did not start");
+
+    reader.abort();
+    assert!(reader.await.expect_err("cancelled reader").is_cancelled());
+    timeout(Duration::from_secs(1), async {
+        while !closed.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled response body did not close its file handle");
 }
 
 #[test]

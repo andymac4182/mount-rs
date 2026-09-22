@@ -913,6 +913,7 @@ patch):
 | Main | W01 N-API 9P mixed native/attached client arrival order | `integrations/mount-rs-napi/postlude-servers.cjs`, `integrations/mount-rs-napi/test/p9-server-order.mjs`, `integrations/mount-rs-napi/package.json`, `.github/workflows/native-9p.yml`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Exact SHA `a3554b105be58cc5ff6cacc03de53f09c0461419` adds one JS arrival ledger for native and attached `P9Server.clients`, observes accepted native clients before `attach()`, preserves stable native wrappers, and prunes closed entries. The real-TCP regression covers native-first and attached-first order plus cleanup. Local syntax, focused order/identity/member checks, metadata/session/observability/type checks, and the elevated `p9` selector passed. Published SHA `86b88c329d64bcc2a8e7b9d97993fca657458986` passed [Native 9P run `35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373): N-API job `106667799214` passed the mixed arrival-order check and all adjacent lifecycle gates, and Rust job `106667799016` passed the Linux probe plus all four ignored native lifecycle tests; broader parity and production remain NO-GO |
 | Main | W01 N-API 9P native connection close idempotence | `integrations/mount-rs-napi/postlude-servers.cjs`, `integrations/mount-rs-napi/test/p9-server-connection-lifecycle.mjs`, `integrations/mount-rs-napi/package.json`, `.github/workflows/native-9p.yml`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Exact SHA `3260f84e26c2a78e9d10d66c7eb997477130f695` memoizes the native `P9Connection.close()` promise at the JavaScript boundary, preserving concurrent/repeated/post-closure idempotence. The real-TCP regression covers concurrent calls, `closed`/`waitClosed()`, terminal `isClosed`, client removal, and cleanup. Local syntax, diff, focused close/order/identity/member checks, metadata/session/observability/type checks, and the elevated `p9` selector passed. Published SHA `86b88c329d64bcc2a8e7b9d97993fca657458986` passed [Native 9P run `35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373): N-API job `106667799214` passed the native close-idempotence check and all adjacent lifecycle gates, and Rust job `106667799016` passed the Linux probe plus all four ignored native lifecycle tests; broader parity and production remain NO-GO |
 | Main | W01 N-API 9P mounted view identity | `integrations/mount-rs-napi/postlude-servers.cjs`, `integrations/mount-rs-napi/test/p9-native.mjs`, `.github/workflows/native-9p.yml`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Exact SHA `1a18c7b82285ea557956cb35d15f1af189803d4d` caches `Mounted.server` and `Mounted.connection` wrappers and reuses the matching `P9Server.clients` wrapper by stable transport id. The direct native-mount regression covers repeated getter identity, cross-view connection identity, native stream/peer/session views, and cleanup. Local syntax, focused lifecycle checks, metadata/session/observability/type checks, and the elevated 9P selector passed; published SHA `86b88c329d64bcc2a8e7b9d97993fca657458986` passed [Native 9P run `35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373): N-API job `106667799214` passed direct mounted-I/O/cleanup and all adjacent lifecycle gates, and Rust job `106667799016` passed the Linux probe plus all four ignored native lifecycle tests; broader parity and production remain NO-GO |
+| Main | W01 9P supported-scope closure audit | `docs/W01_9P_PROGRESS.md`, `docs/W01_PROGRESS.md`, `docs/public-api-parity.md`, `transports/mount-rs-9p/README.md` | Current audit classifies the advertised codec/session/server/connection/attach/mount slice as qualified by local evidence and published SHA `86b88c329d64bcc2a8e7b9d97993fca657458986` / [Native 9P run `35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373), N-API job `106667799214`, and Rust job `106667799016`. Legacy/auth/xattr families, unadvertised upstream members, native-listener Node-stream identity, root automatic cross-transport signals, process-crash/arbitrary kernel-reset recovery, and non-Linux native mounts are explicit scope boundaries; broader oracle parity remains partial by design and overall W01/release remains NO-GO |
 | Main | W01 N-API 9P Unix listener policy and lifecycle | `.github/workflows/native-9p.yml`, `integrations/mount-rs-napi/test/servers.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet adds the Unix-domain listener phase to `MOUNT_RS_SERVER_PHASE=p9`, independently exercising private-directory refusal, explicit `allowSharedDirectory` opt-in, `0600` socket mode, protocol handshake, native Unix peer/path and `stream: undefined` representation, socket removal on close, and path/port exclusivity. Local syntax/diff checks and elevated isolated N-API execution passed. Exact test commit `dd10ac0564446c9143f8b5f68b2fed51c7eaf57f` was included in descendant head `d43f5ea4e4334912de86ac0db818392531a7d4ec`, whose Native 9P run `35683716217` passed N-API job `106606580352` with Unix policy, server/attach, and automatic/direct/structural mounted I/O/cleanup, and Rust job `106606580326` with the Linux probe plus all four ignored native lifecycle tests. The direct run at the test commit was cancelled before jobs materialized and is not evidence; production remains NO-GO |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
@@ -1222,10 +1223,21 @@ and warning-denied WebDAV Clippy passes; the target now includes a durable
 driver barrier regression covering successful PUT, MKCOL, PROPPATCH, COPY,
 MOVE, DELETE, resource creation by LOCK, and injected barrier failure/retry.
 This is transport-level barrier evidence and does not close external hosted,
-provider-lifecycle, power-loss, or durable-lock gates.
+provider-lifecycle or power-loss gates. Durable lock persistence is explicitly
+outside the supported WebDAV scope: the NodeFs and SQLite forced-process-loss
+probes recreate the provider in a replacement session and observe
+`lockCount === 0` after the killed child held an exclusive lock.
 The current shell has no AWS/R2/Cloudflare credential names available; live
 provider acceptance remains externally gated and no credential values were
 read or persisted.
+The latest protected audit remains non-qualifying: on current `origin/main`
+`a7ff32f00e597dbdc37e0baefe3f37321354bb58`, CI run `35690677984` was cancelled
+after Ubuntu native WebDAV job `106626916000` passed and macOS native WebDAV
+job `106626916081` was cancelled; protected AWS run `35690334807` failed at
+`AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, and protected R2 run `35690334795`
+failed at `count=317 limit=20` before its live integration job. No hosted
+WebDAV aggregate PASS or live-provider acceptance is promoted from those
+results.
 The structural N-API `FsDriver` now also has an optional
 `readdirBounded(path, maxEntries)` callback. The rebuilt addon and focused
 structural WebDAV regression pass bounded `Depth: 1` PROPFIND, recursive
@@ -1237,7 +1249,105 @@ The Rust WebDAV session now treats unread request-body faults as a framing
 boundary: known 413 limit faults are drained for keep-alive reuse, while any
 other drain fault is reported once and adds `Connection: close`, even when the
 request dispatch itself had already produced a response. The focused WebDAV
-target passes 28/28, and the rebuilt N-API/WebDAV-only host phase remains green.
+target passes 31/31, and the rebuilt N-API/WebDAV-only host phase remains green.
+The pinned WebDAV authority audit confirms Rust `Url::host_str()` retains
+bracketed IPv6, so the existing literal `Destination`/tagged-`If` comparison
+already matches the oracle; focused fixtures cover `[::1]` and `[::1]:8080`,
+and the full WebDAV target remains 28/28 with strict Clippy and formatting
+green.
+The pinned `CARGO=./scripts/cargo-shared MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921 node scripts/check-http-parity.mjs`
+HTTP differential also passes all 40 paired S3+WebDAV cases, including its 16
+WebDAV cases, after the authority audit.
+The public `DavLockTableOptions` finite-timeout path now caps before applying
+the one-second minimum, so even `max_timeout_seconds: 0` cannot reach Rust's
+invalid `clamp(1, 0)` panic; the deterministic regression and the full 29/29
+WebDAV target pass with strict Clippy, formatting, and diff checks green.
+Public WebDAV lock snapshots now preserve grant order like the pinned oracle's
+insertion-ordered lock map, while expiry/removal cleanup and duplicate-token
+replacement retain that order; the focused ordering regression and the full
+30/30 WebDAV target pass with strict Clippy, formatting, and diff checks green.
+Lock-root cleanup now removes a lock only after `stat` confirms `ENOENT`; a
+provider I/O error during DELETE/MOVE cleanup retains the lock rather than
+collapsing unknown namespace state into absence. The fault-injected regression
+and full 31/31 WebDAV target pass with strict Clippy, formatting, and diff
+checks green.
+Native streamed file responses now observe the shared shutdown signal during
+provider reads and channel sends, count as background work during server drain,
+and use a cancellation-safe close guard with a tracked fallback close. The
+stalled provider-read loopback regression passed, the full WebDAV target passed
+32/32, warning-denied Clippy passed, and formatting/diff checks passed. This is
+local response-task lifecycle evidence; hosted/provider, power-loss,
+durable-lock, crash/restart, and stronger same-resource ordering remain open.
+The transport-neutral `WebdavBody::into_bytes()` path now also retains a
+cancellation-safe close guard and schedules provider-handle cleanup when a
+direct session consumer aborts during a pending read. Its stalled-read
+regression passed, the full WebDAV target passed 33/33, warning-denied Clippy
+passed, and formatting/diff checks passed. This is separate from native server
+shutdown and the N-API body's explicit close seam; hosted/provider,
+power-loss, durable-lock, crash/restart, and stronger same-resource ordering
+remain open.
+Mutation-side provider handles now use the same cancellation-safe close
+boundary: streamed `PUT` and shared file-transfer helpers schedule `close` if
+their request future is abandoned during body polling or provider I/O. The
+stalled-write regression passed, the full WebDAV target passed 35/35, and
+warning-denied Clippy passed. This is separate from response-body cancellation
+and native server shutdown; hosted/provider, power-loss, durable-lock,
+crash/restart, and stronger same-resource ordering remain open.
+The shared WebDAV lock table now fails closed on mutex poisoning across request
+paths that inspect, create, refresh, unlock, or enforce locks; a poisoned table
+returns a `500` server error instead of appearing empty. Public lock snapshots
+recover the poisoned guard for observability. The deliberate-poison regression
+confirmed that a locked `PUT` does not mutate the existing resource; the full
+WebDAV target passed 34/34, warning-denied Clippy passed, and formatting/diff
+checks passed. Hosted/provider, power-loss, durable-lock, crash/restart, and
+stronger same-resource ordering remain open.
+Declared Content-Length overflows now route through session rejection
+bookkeeping before the HTTP adapter closes the connection, so request/reply/error
+stats and the request-level on_error hook remain exact-once; a real-loopback
+regression verifies the 413 response, original PUT request head, counters,
+and bodyless HEAD handling in the shared helper. The full WebDAV target passes
+36/36, warning-denied workspace Clippy passes, formatting and diff checks pass,
+and the pinned TypeScript/Rust differential passes all 40 paired cases.
+Hosted/provider, authentication-ordering, power-loss, durable-lock,
+crash/restart, and stronger same-resource ordering remain open.
+Public lock coverage now iterates the grant-order index for covering and within
+lookups instead of HashMap values, so lock-discovery lists, locked-member
+multistatus results, and first-conflict selection remain deterministic like the
+pinned insertion-ordered Map. The focused regression covers ancestor/direct
+coverage, subtree roots, and the selected 423 conflict; the full WebDAV target
+passes 37/37, warning-denied workspace Clippy passes, formatting and diff checks
+pass, and the pinned TypeScript/Rust differential passes all 40 paired cases.
+Hosted/provider, power-loss, durable-lock, crash/restart, and stronger
+same-resource ordering remain open.
+The public `parse_lock_token` boundary now uses delimiter-safe prefix/suffix
+handling rather than byte-offset slicing, so a valid Unicode token such as
+`<urn:uuid:é>` is accepted without a UTF-8 panic while nested angle brackets
+remain rejected. The focused protocol regression and full 37/37 WebDAV target
+pass, warning-denied workspace Clippy, formatting, diff checks, and the pinned
+40-case TypeScript/Rust differential all pass. Hosted/provider, power-loss,
+durable-lock, crash/restart, and stronger same-resource ordering remain open.
+The public XML serializer now follows the pinned codec for hostile text and
+namespace values: carriage returns become `&#13;`, XML-invalid controls become
+U+FFFD, and ordinary markup escaping remains intact. The focused serializer
+regression matches the pinned bytes for both text and `xmlns`; the full 37/37
+WebDAV target, warning-denied workspace Clippy, formatting, diff checks, and
+40-case TypeScript/Rust differential pass. Hosted/provider, power-loss,
+durable-lock, crash/restart, and stronger same-resource ordering remain open.
+The public XML parser now validates UTF-8 and raw XML characters before
+`quick-xml` builds a tree, rejecting controls such as NUL instead of exposing
+them in `XmlNode` text. The regression reproduced the prior acceptance and now
+matches the pinned parser's `invalid-character` refusal; the full 38/38 WebDAV
+target, warning-denied workspace Clippy, formatting, diff checks, and 40-case
+TypeScript/Rust differential pass. Hosted/provider, power-loss, durable-lock,
+crash/restart, and stronger same-resource ordering remain open.
+The public `If` parser now probes the `Not` keyword with UTF-8-safe string
+access rather than byte-offset slicing. Malformed non-ASCII grammar such as
+`(éé)` now returns the ordinary invalid-header result instead of panicking at a
+code-point boundary; the regression reproduced the prior panic before the fix.
+The full 39/39 WebDAV target, warning-denied workspace Clippy, formatting, diff
+checks, and 40-case TypeScript/Rust differential pass. Hosted/provider,
+power-loss, durable-lock, crash/restart, and stronger same-resource ordering
+remain open.
 The response stream has a native loopback fault regression as well: a short
 driver read fails the client body after `200` headers and produces one
 peer-qualified `Connection` transport report.
@@ -1286,8 +1396,9 @@ concurrency evidence is not promoted to hosted acceptance.
 The pinned WebDAV oracle deliberately has no `PathLock` for this HTTP session;
 the transport therefore supports concurrent independent resources and
 WebDAV lock/`If` coordination, but does not claim linearizable same-resource
-ordering or atomic same-target `PUT` publication. Power-loss durability,
-live-provider behavior, and durable locks remain separate gates.
+ordering or atomic same-target `PUT` publication. Power-loss durability and
+live-provider behavior remain separate gates; durable lock persistence is
+outside the supported WebDAV scope.
 
 - [x] Land Rust filesystem contract and implementations, with separate crates.
 - [x] Pin mountx oracle to `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`.
@@ -1888,6 +1999,212 @@ Evidence landed without closing the remaining W01 acceptance gates:
   tests and all applicable integration targets, with strict Clippy, formatting,
   and diff checks green. Socket write backpressure and native-client ordering
   remain separate gates.
+- [x] The host-backed NFSv4.1 forced-crash lane now writes a file with
+  `FILE_SYNC4`, kills the seed server, observes `NFS4ERR_BADSESSION` for the
+  old session and `NFS4ERR_STALE` for both old root/file handles, then opens
+  the same path and reads the exact bytes through a replacement session.
+  The persisted host file also has those bytes after the replacement exits.
+  Both process-restart tests, the complete locked NFS target (40 unit, 1
+  rootless native mountpoint claim with 1 mount ignored, 2 restart, 1 rootless
+  wire, 3 concurrency, 4 errors, 5 lifecycle, 1 v4 barrier, 7 v4 wire), and
+  warning-denied NFS Clippy pass; the process target also passed 10 consecutive
+  reruns, with formatting and diff checks clean. This qualifies local one-host
+  process-crash data recovery, not power-loss or durable v4 lease/replay/handle recovery;
+  native-client ordering, exact-tip hosted qualification, and W01-NFS
+  production acceptance remain open.
+- [x] The rootless NFSv4.1 replay-reconnect lane now completes a mutating
+  `REMOVE`, disconnects, and retries its cached slot/sequence with a changed
+  target. The exact old COMPOUND body returns without removing the second
+  file; a fresh sequence removes it. The focused test passed 20 reruns, the
+  complete locked NFS target passed (40 unit, 1 mountpoint claim with 1
+  native mount ignored, 2 restart, 1 rootless wire, 3 concurrency, 4 errors,
+  5 lifecycle, 1 v4 barrier, 8 v4 wire), and strict Clippy, formatting, and
+  diff checks passed. This is completed-request replay in one live process,
+  not in-flight same-slot ordering, crash-durable replay, native-client
+  ordering, or production acceptance; W01-NFS remains NO-GO.
+- [x] A controlled NFSv4.1 `GETATTR` backend stall now proves an in-flight
+  same-slot retry reaches the server, remains pending, and then receives the
+  exact cached original reply after the first operation finishes; the next
+  sequence succeeds. The focused test passed 10 reruns, the complete locked
+  NFS target passed (40 unit, 1 mountpoint claim with 1 native mount ignored,
+  2 restart, 1 rootless wire, 3 concurrency, 4 errors, 5 lifecycle, 1 v4
+  barrier, 9 v4 wire), and strict Clippy, formatting, and diff checks passed.
+  The retry waits at the per-RPC global lease-sweep write lock, so prompt
+  RFC-recommended `NFS4ERR_DELAY` and independent-slot overlap remain open;
+  this is not crash-durable replay or production acceptance. W01-NFS is NO-GO.
+- [x] The v4.1 slot admission path now records an active sequence and answers
+  a fully decoded same-slot retry before the global lease-sweep lock: the
+  blocked-backend real-TCP test receives bounded `NFS4ERR_DELAY`, a premature
+  next sequence receives `NFS4ERR_SEQ_MISORDERED`, and the original reply is
+  cached after release. A unit test covers slot-sequence wrap from `u32::MAX`
+  to zero. The focused case passed 20 reruns; the complete locked NFS target
+  passed (41 unit, 1 mountpoint claim with 1 native mount ignored, 2 restart,
+  1 rootless wire, 3 concurrency, 4 errors, 5 lifecycle, 1 v4 barrier, 9 v4
+  wire), with strict Clippy green. Independent-slot overlap, canceled-operation
+  reply recovery, crash-durable replay, native-client ordering, power-loss
+  durability, and exact-tip hosted acceptance remain open; W01-NFS is NO-GO.
+- [x] A same-session, two-slot real-TCP v4.1 regression now proves slot 1
+  completes while slot 0 remains blocked in backend `stat`. The initial
+  non-escalated shared-target attempt could not open Cargo's `.cargo-lock`;
+  the elevated pre-fix run compiled and timed out at the global per-request
+  lease-sweep write lock. After the fix, the independent slot completes;
+  v4 now takes that exclusive lock only when an expired client actually needs
+  cleanup. An injected-clock race test confirms that an expired slot-1 request
+  waits behind a blocked slot-0 call, then receives `NFS4ERR_BADSESSION` after
+  the sweep. The prior expired-session wire test also passes. The overlap test
+  passes both in the shared target and in an isolated `/private/tmp` target
+  with loopback socket permission; the first non-escalated isolated run failed
+  at bind with `EPERM`, not a code failure.
+  The exact 283 MB disposable target was removed and verified absent. The
+  complete locked NFS target passes (41 unit, 1 mountpoint claim with 1 native
+  mount ignored, 2 restart, 1 rootless wire, 3 concurrency, 4 errors, 5
+  lifecycle, 1 v4 barrier, 11 v4 wire), with strict Clippy and formatting
+  green. This is bounded same-process overlap, not canceled-operation
+  recovery, crash-durable replay/lease/handles, native-client ordering,
+  power-loss durability, or exact-tip hosted acceptance; W01-NFS is NO-GO.
+- [x] A canceled NFSv4.1 `REMOVE` now fences its session when the backend has
+  deleted a file but the request is aborted before COMPOUND completion and
+  reply caching. The controlled real-TCP test closes that connection after
+  backend deletion;
+  before the fix a changed-target retry returned `NFS4ERR_SEQ_MISORDERED`,
+  while now it receives `NFS4ERR_BADSESSION` and cannot delete the second
+  file. The same client creates a replacement session with request sequence 2;
+  the corrected `CREATE_SESSION` response echoes 2, and a fresh `REMOVE`
+  succeeds. The complete locked NFS target passes (41 unit, 1 mountpoint
+  claim with 1 native mount ignored, 2 restart, 1 rootless wire, 3 concurrency,
+  4 errors, 5 lifecycle, 1 v4 barrier, 12 v4 wire), with strict Clippy green.
+  This is fail-closed replacement-session progress, not the canceled request's
+  exact reply, uncached completed-reply handling, durable replay/lease/handle
+  state, all partial-mutation outcomes, native-client ordering, power-loss
+  durability, or exact-tip hosted
+  acceptance; W01-NFS is NO-GO.
+- [x] A completed cached NFSv4.1 `REMOVE` reply now records its decoded RPC
+  credentials. A real-TCP retry from a different `AUTH_SYS` UID previously
+  received the original cached body; it now gets `NFS4ERR_SEQ_FALSE_RETRY`
+  without changing the cache or deleting the other file. The original UID
+  still receives the cached body on a changed-target and changed-machine-name
+  retry, then succeeds on a fresh sequence. The full locked NFS target passes
+  (41 unit, 1 mountpoint
+  claim with 1 native mount ignored, 2 restart, 1 rootless wire, 3 concurrency,
+  4 errors, 5 lifecycle, 1 v4 barrier, 12 v4 wire); strict Clippy, formatting,
+  and diff checks also pass. This checks effective-user replay consistency,
+  not cryptographic `AUTH_SYS` identity, uncached reply
+  recovery, crash-durable replay, native-client ordering, power-loss
+  durability, or exact-tip hosted acceptance; W01-NFS is NO-GO.
+- [x] A bounded completed NFSv4.1 reply is now cached even when
+  `SEQUENCE.cachethis=false`, as permitted by RFC 8881. A new real-TCP
+  `REMOVE` regression initially got `NFS4ERR_SEQ_MISORDERED` on a retry;
+  after the fix it receives the original reply byte-for-byte and leaves a
+  changed target intact until the next sequence. The full locked NFS target
+  passes (41 unit, 1 mountpoint claim with 1 native mount ignored, 2 restart,
+  1 rootless wire, 3 concurrency, 4 errors, 5 lifecycle, 1 v4 barrier, 13 v4
+  wire), and the direct v4 wire target, warning-denied Clippy, formatting, and
+  diff checks pass. This does not establish oversized-reply safety,
+  crash-durable replay/lease/handle
+  state, native-client ordering, power-loss durability, or exact-tip hosted
+  acceptance; W01-NFS remains NO-GO.
+- [x] An oversized completed NFSv4.1 reply with `SEQUENCE.cachethis=false`
+  now stores a compact retry marker when it fits the negotiated cache limit.
+  A real-TCP `REMOVE` plus large `READDIR` exceeded a 128-byte limit; before
+  the fix a changed-target retry got `NFS4ERR_SEQ_MISORDERED`, but now it
+  receives successful `SEQUENCE` plus `NFS4ERR_RETRY_UNCACHED_REP` on the
+  original second operation. A repeated retry returns identical marker bytes
+  without deleting the changed target, and the next sequence progresses.
+  The full locked NFS target passes (41 unit, 1 mountpoint claim with 1 native
+  mount ignored, 2 restart, 1 rootless wire, 3 concurrency, 4 errors,
+  5 lifecycle, 1 v4 barrier, 14 v4 wire); direct v4 wire, warning-denied
+  Clippy, formatting, and diff checks pass. `cachethis=true` oversized
+  replies, limits below the marker size, crash-durable replay/lease/handle
+  state, native-client ordering, power-loss durability, and exact-tip hosted
+  acceptance remain NO-GO.
+- [x] A cache-required (`SEQUENCE.cachethis=true`) oversized read-only
+  `READDIR` tail now yields `NFS4ERR_REP_TOO_BIG_TO_CACHE` when the preceding
+  successful results and error fit the negotiated bound. A real-TCP
+  `REMOVE` + large `READDIR` regression failed before the fix because the
+  reply exceeded a 128-byte cache; it now keeps the successful mutation
+  result, caches the bounded error reply, and returns it exactly on a
+  changed-target retry without a second deletion. The full locked NFS target
+  passes (41 unit, 1 mountpoint claim with 1 native mount ignored, 2 restart,
+  1 rootless wire, 3 concurrency, 4 errors, 5 lifecycle, 1 v4 barrier, 15 v4
+  wire); direct v4 wire, warning-denied Clippy, formatting, and diff checks
+  pass. Other oversized result types, prefixes too large for the error,
+  crash-durable replay, native-client ordering, power-loss durability, and
+  exact-tip hosted acceptance remain NO-GO.
+- [x] The same bounded cache-required protection now covers an oversized
+  `READ` tail. A real-TCP `REMOVE` + `LOOKUP` + 512-byte `READ` under a
+  256-byte reply-cache bound returns a cacheable
+  `NFS4ERR_REP_TOO_BIG_TO_CACHE` on `READ`, retains the successful `REMOVE`,
+  replays the exact reply on a changed-target retry without deleting it, and
+  progresses on the next sequence. The full locked NFS target passes (41
+  unit, 1 mountpoint claim with 1 native mount ignored, 2 restart, 1 rootless
+  wire, 3 concurrency, 4 errors, 5 lifecycle, 1 v4 barrier, 16 v4 wire);
+  direct v4 wire 16/16, warning-denied Clippy, formatting, and diff checks
+  pass. Other oversized results, prefixes too large for even the error,
+  crash-durable replay, native-client ordering, power-loss durability, and
+  exact-tip hosted acceptance remain open; W01-NFS is NO-GO.
+- [x] A distinct oversized `READLINK` tail is now covered by that bounded
+  cache-required error path. The new real-TCP regression failed before the
+  fix because a 512-byte symlink target made the response exceed a 256-byte
+  cache; after the fix the successful `REMOVE` prefix and
+  `NFS4ERR_REP_TOO_BIG_TO_CACHE` on `READLINK` fit. A changed-target retry
+  returns identical bytes without a second deletion, and the next sequence
+  succeeds. The full locked NFS target passes (41 unit, 1 mountpoint claim
+  with 1 native mount ignored, 2 restart, 1 rootless wire, 3 concurrency,
+  4 errors, 5 lifecycle, 1 v4 barrier, 17 v4 wire); direct v4 wire 17/17,
+  warning-denied Clippy, formatting, and diff checks pass. Other oversized
+  results, prefixes too large for even the error, crash-durable replay,
+  native-client ordering, power-loss durability, and exact-tip hosted
+  acceptance remain open; W01-NFS is NO-GO.
+- [x] An oversized read-only `GETATTR` tail now uses the same bounded
+  cache-required error path. A real-TCP `REMOVE` plus broad supported
+  attribute request exceeded a 160-byte cache before the fix; afterward
+  the successful mutation prefix plus `NFS4ERR_REP_TOO_BIG_TO_CACHE` fits.
+  A changed-target retry returns identical bytes without deleting the
+  second file, then the next sequence succeeds. The full locked NFS target
+  passes (41 unit, 1 mountpoint claim with 1 native mount ignored, 2 restart,
+  1 rootless wire, 3 concurrency, 4 errors, 5 lifecycle, 1 v4 barrier,
+  18 v4 wire); direct v4 wire 18/18, warning-denied Clippy, formatting, and
+  diff checks pass. Other oversized replies, prefixes too large even for
+  the error, crash-durable replay, native-client ordering, power-loss
+  durability, and exact-tip hosted acceptance remain open; W01-NFS is NO-GO.
+- [x] A fixed-size `GETFH` tail can also exceed a small required reply cache
+  after a successful mutation. The new real-TCP `REMOVE` + `GETFH` test
+  failed before the fix with a response over the 112-byte bound; now it
+  returns a cacheable `NFS4ERR_REP_TOO_BIG_TO_CACHE` on `GETFH` while
+  retaining the successful mutation prefix. A changed-target retry is
+  identical and does not delete the second file; the next sequence succeeds.
+  The full locked NFS target passes (41 unit, 1 mountpoint claim with 1
+  native mount ignored, 2 restart, 1 rootless wire, 3 concurrency, 4 errors,
+  5 lifecycle, 1 v4 barrier, 19 v4 wire); direct v4 wire 19/19,
+  warning-denied Clippy, formatting, and diff checks pass. Other oversized
+  replies, prefixes too large even for the error, crash-durable replay,
+  native-client ordering, power-loss durability, and exact-tip hosted
+  acceptance remain open; W01-NFS is NO-GO.
+- [x] A completed `SEQUENCE(cachethis=true)` mutation whose reply cannot fit
+  the negotiated cache now fences its session rather than advancing an
+  uncached slot. A real-TCP `REMOVE` under a 96-byte cache previously
+  returned an oversized success then `NFS4ERR_SEQ_MISORDERED` on a
+  changed-target retry; the retry now receives `NFS4ERR_BADSESSION` and
+  cannot delete the second file. Read-only oversized results retain their
+  existing sequence behavior, as the state-limit wire case verifies. The
+  full locked NFS target passes (41 unit, 1 mountpoint claim with 1 native
+  mount ignored, 2 restart, 1 rootless wire, 3 concurrency, 4 errors,
+  5 lifecycle, 1 v4 barrier, 20 v4 wire); direct v4 wire 20/20 and strict
+  Clippy pass. The pinned NFS parity gate passes 266 with 18 explicit
+  capability/root skips. This is same-process fail-closed replay, not exact-reply
+  recovery, durable session/handle state, native-client ordering, power-loss
+  durability, or exact-tip hosted acceptance; W01-NFS is NO-GO.
+- [x] The manual hosted NFS run `35670927787` at `fb9caec8` passed its macOS
+  native job, while Ubuntu passed native v4.1 and then failed before its v3
+  mount because parallel tests collided on a timestamp-only mountpoint.
+  Native mountpoints now use an atomic per-process claim with collision retry;
+  a 32-way rootless claim test and the macOS native v3 mount pass. A separate
+  local full-suite run exposed a `server.close()` worker-drain race, now
+  addressed by a shared 200 ms graceful drain before abort fallback. The
+  complete locked NFS target, 20 focused lifecycle reruns, warning-denied
+  Clippy, formatting, and diff checks pass. The failed Ubuntu job does not
+  count as native-v3 acceptance; a corrected exact-SHA hosted rerun is needed,
+  and W01-NFS remains production NO-GO.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
@@ -6750,6 +7067,16 @@ cross-drive isolation.
 
 | Commit | Scope | Evidence boundary |
 | --- | --- | --- |
+| 2026-09-22 WebDAV If-parser UTF-8 boundary safety | Probe the public `Not` grammar with UTF-8-safe access so malformed non-ASCII input such as `(éé)` returns `None` instead of panicking at a code-point boundary | Focused regression reproduced the pre-fix panic and now passes; full WebDAV target 39/39, warning-denied workspace Clippy, formatting, diff checks, and the pinned 40-case S3+WebDAV differential pass; hosted/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
+| 2026-09-22 WebDAV XML parser character validation | Reject invalid UTF-8 and raw XML-invalid characters before tree construction, matching the pinned `invalid-character` refusal instead of preserving controls in `XmlNode` text | Focused raw-NUL parser regression and full WebDAV target 38/38, warning-denied workspace Clippy, formatting, diff checks, and the pinned 40-case S3+WebDAV differential pass; hosted/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
+| 2026-09-22 WebDAV XML serializer safety/parity | Escape CR as `&#13;` and replace XML-invalid controls with U+FFFD in text and namespace values, matching the pinned XML codec while retaining markup escaping | Focused serializer fixture and full WebDAV target 37/37, warning-denied workspace Clippy, formatting, diff checks, and the pinned 40-case S3+WebDAV differential pass; hosted/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
+| 2026-09-22 WebDAV Unicode lock-token parser safety | Replace byte-offset `Lock-Token` parsing with UTF-8-safe delimiter handling; accept the pinned oracle's Unicode token payloads without panic while retaining malformed-angle rejection | Focused protocol fixture and full WebDAV target 37/37, warning-denied workspace Clippy, formatting, diff checks, and the pinned 40-case S3+WebDAV differential pass; hosted/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
+| 2026-09-22 WebDAV lock coverage ordering | Preserve grant order for public covering/within lookups so lock-discovery, locked-member multistatus, and first-conflict selection do not depend on HashMap iteration | Full WebDAV target 37/37, warning-denied workspace Clippy, formatting, diff checks, and the pinned 40-case S3+WebDAV differential pass; hosted/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
+| 2026-09-22 WebDAV declared-length preflight observability | Route declared Content-Length size-limit rejections through session request/reply/error bookkeeping and the request-level error hook before closing the connection; preserve bodyless HEAD responses | Full WebDAV target 36/36, warning-denied workspace Clippy, formatting, diff checks, and the pinned 40-case S3+WebDAV differential pass; hosted/provider, authentication-ordering, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
+| `2026-09-22 WebDAV streamed mutation-handle cancellation` | Close mutation-side provider handles when streamed PUT or shared file-transfer futures are cancelled during body polling or provider I/O | Full WebDAV target 35/35, warning-denied Clippy, formatting, and diff checks pass; hosted lifecycle/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
+| `2026-09-22 WebDAV poisoned lock-table fail-closed behavior` | Propagate WebDAV lock-table mutex poisoning as a server error across lock-dependent request paths, while retaining poisoned lock state for public snapshots | Full WebDAV target 34/34, warning-denied Clippy, formatting, and diff checks pass; hosted lifecycle/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
+| `2026-09-22 WebDAV transport-neutral body cancellation` | Close the provider file handle when a direct `WebdavBody::into_bytes()` consumer is cancelled during a pending response read | Full WebDAV target 33/33, warning-denied Clippy, formatting, and diff checks pass; hosted lifecycle/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
+| `2026-09-22 WebDAV streamed-response shutdown lifecycle` | Make streamed file response tasks observe server shutdown, participate in bounded drain, and close provider handles after stalled-read cancellation | Full WebDAV target 32/32, warning-denied Clippy, formatting, and diff checks pass; hosted lifecycle/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
 | `2026-09-22 WebDAV streamed-response fault evidence` | Prove that a short driver read fails an HTTP response body and reaches the peer-qualified transport-error hook | Focused WebDAV target 28/28, warning-denied Clippy and formatting pass; hosted lifecycle/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
 | `2026-09-22 WebDAV body-stream contract clarification` | Align the public Rust request-body documentation with the published fail-closed drain behavior | Documentation-only clarification; the 28/28 WebDAV, warning-denied Clippy and formatting evidence remains the governing local result, while hosted/provider and durability gates remain open |
 | `2026-09-22 WebDAV unread-body fault packet` | Preserve framing after drainable 413 limits, but report non-recoverable unread-body faults once and close the HTTP connection | Focused WebDAV target 27/27, warning-denied Clippy, formatting, rebuilt N-API addon, generated typecheck, WebDAV-only host-enabled integration, and structural WebDAV regression pass; hosted/provider, power-loss, durable-lock, crash/restart, and same-resource ordering remain open |

@@ -47,6 +47,49 @@ pub enum WebdavBody {
     File(FileBody),
 }
 
+/// Keeps a transport-neutral response handle closeable when an embedding
+/// cancels `WebdavBody::into_bytes()` while a provider read is pending.
+struct BodyFileCloseGuard {
+    handle: Option<Arc<dyn FileHandle>>,
+}
+
+impl BodyFileCloseGuard {
+    fn new(handle: Arc<dyn FileHandle>) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+
+    fn handle(&self) -> Arc<dyn FileHandle> {
+        Arc::clone(self.handle.as_ref().expect("body file close guard handle"))
+    }
+
+    async fn close(&mut self) -> Result<(), FsError> {
+        let Some(handle) = self.handle.as_ref() else {
+            return Ok(());
+        };
+        let result = handle.close().await;
+        if result.is_ok() {
+            self.handle = None;
+        }
+        result
+    }
+}
+
+impl Drop for BodyFileCloseGuard {
+    fn drop(&mut self) {
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        runtime.spawn(async move {
+            let _ = handle.close().await;
+        });
+    }
+}
+
 impl WebdavBody {
     /// Drain a body for a session-level test or a small embedding.
     pub async fn into_bytes(self) -> Result<Vec<u8>, FsError> {
@@ -57,13 +100,12 @@ impl WebdavBody {
                 let mut position = file.start;
                 let end = file.start.saturating_add(file.length);
                 let mut buffer = vec![0_u8; file.chunk_size.max(1)];
+                let mut close_guard = BodyFileCloseGuard::new(file.handle);
+                let handle = close_guard.handle();
                 let outcome = async {
                     while position < end {
                         let wanted = (end - position).min(buffer.len() as u64) as usize;
-                        let count = file
-                            .handle
-                            .read(&mut buffer[..wanted], Some(position))
-                            .await?;
+                        let count = handle.read(&mut buffer[..wanted], Some(position)).await?;
                         if count > wanted {
                             return Err(FsError::new(ErrorCode::Eio)
                                 .with_syscall("read")
@@ -80,7 +122,7 @@ impl WebdavBody {
                     Ok::<(), FsError>(())
                 }
                 .await;
-                let close = file.handle.close().await;
+                let close = close_guard.close().await;
                 outcome.and(close.map(|_| result))
             }
         }
@@ -395,11 +437,8 @@ pub enum LockTimeout {
 
 pub fn parse_lock_token(value: Option<&str>) -> Option<String> {
     let value = value?.trim();
-    (value.starts_with('<')
-        && value.ends_with('>')
-        && value.len() > 2
-        && !value[1..value.len() - 1].contains(['<', '>']))
-    .then(|| value[1..value.len() - 1].to_owned())
+    let token = value.strip_prefix('<')?.strip_suffix('>')?;
+    (!token.is_empty() && !token.contains(['<', '>'])).then(|| token.to_owned())
 }
 
 pub fn format_lock_token(token: &str) -> String {
@@ -496,7 +535,10 @@ fn parse_if_list(value: &str, start: usize) -> Option<(Vec<IfCondition>, usize)>
         if byte == b')' {
             return (!conditions.is_empty()).then_some((conditions, at + 1));
         }
-        if value[at..].len() >= 3 && value[at..at + 3].eq_ignore_ascii_case("Not") {
+        if value
+            .get(at..at.saturating_add(3))
+            .is_some_and(|value| value.eq_ignore_ascii_case("Not"))
+        {
             negated = true;
             at += 3;
             continue;
@@ -909,6 +951,16 @@ pub fn parse_xml(body: &[u8], max_bytes: usize) -> Result<XmlNode, DavFault> {
     if body.len() > max_bytes {
         return Err(refuse(413).with_message("the XML body exceeds its byte budget"));
     }
+    let text =
+        std::str::from_utf8(body).map_err(|_| xml_fault("the XML body is not valid UTF-8"))?;
+    if text
+        .chars()
+        .any(|character| !is_xml_character(character as u32))
+    {
+        return Err(xml_fault(
+            "the XML body contains a character XML cannot carry",
+        ));
+    }
     let mut reader = Reader::from_reader(body);
     reader.config_mut().trim_text(false);
     let mut buffer = Vec::new();
@@ -1019,12 +1071,20 @@ pub fn parse_xml(body: &[u8], max_bytes: usize) -> Result<XmlNode, DavFault> {
 }
 
 fn escape_xml(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
+    let mut escaped = String::new();
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            '\r' => escaped.push_str("&#13;"),
+            character if is_xml_character(character as u32) => escaped.push(character),
+            _ => escaped.push('\u{fffd}'),
+        }
+    }
+    escaped
 }
 
 fn render_node(node: &XmlNode, inherited_ns: &str) -> String {

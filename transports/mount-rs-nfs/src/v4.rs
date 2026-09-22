@@ -78,6 +78,7 @@ pub const NFS4ERR_NOTSUPP: u32 = 10_004;
 pub const NFS4ERR_TOOSMALL: u32 = 10_005;
 pub const NFS4ERR_SERVERFAULT: u32 = 10_006;
 pub const NFS4ERR_BADTYPE: u32 = 10_007;
+pub const NFS4ERR_DELAY: u32 = 10_008;
 pub const NFS4ERR_SAME: u32 = 10_009;
 pub const NFS4ERR_DENIED: u32 = 10_010;
 pub const NFS4ERR_LOCKED: u32 = 10_012;
@@ -101,9 +102,11 @@ pub const NFS4ERR_BADSESSION: u32 = 10_052;
 pub const NFS4ERR_BADSLOT: u32 = 10_053;
 pub const NFS4ERR_SEQ_MISORDERED: u32 = 10_063;
 pub const NFS4ERR_SEQUENCE_POS: u32 = 10_064;
+pub const NFS4ERR_REP_TOO_BIG_TO_CACHE: u32 = 10_067;
 pub const NFS4ERR_RETRY_UNCACHED_REP: u32 = 10_068;
 pub const NFS4ERR_TOO_MANY_OPS: u32 = 10_070;
 pub const NFS4ERR_OP_NOT_IN_SESSION: u32 = 10_071;
+pub const NFS4ERR_SEQ_FALSE_RETRY: u32 = 10_076;
 pub const NFS4ERR_NOT_ONLY_OP: u32 = 10_081;
 pub const NFS4ERR_CONN_NOT_BOUND_TO_SESSION: u32 = 10_055;
 pub const NFS4ERR_CLIENTID_BUSY: u32 = 10_074;
@@ -638,6 +641,7 @@ struct ClientState {
 struct CachedReply {
     sequence: u32,
     body: Vec<u8>,
+    credentials: RpcCredentials,
 }
 
 #[derive(Debug, Clone)]
@@ -645,9 +649,45 @@ struct SessionState {
     id: [u8; NFS4_SESSIONID_SIZE],
     clientid: u64,
     next_sequence: Vec<u32>,
+    in_flight: Vec<Option<u32>>,
     cached: Vec<Option<CachedReply>>,
     max_operations: u32,
     max_cached: usize,
+}
+
+struct InFlightSlot {
+    state: Arc<Mutex<V4State>>,
+    sessionid: [u8; NFS4_SESSIONID_SIZE],
+    slot: usize,
+    sequence: u32,
+    completed: bool,
+}
+
+impl InFlightSlot {
+    fn complete(&mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for InFlightSlot {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.state.lock() {
+            let Some(session) = state.sessions.get_mut(&self.sessionid) else {
+                return;
+            };
+            if session.in_flight.get(self.slot) != Some(&Some(self.sequence)) {
+                return;
+            }
+            if self.completed {
+                session.in_flight[self.slot] = None;
+            } else {
+                // The request was canceled after slot admission but before a
+                // reply could be cached. Fence the session: replaying this
+                // sequence might re-execute a partially completed mutation.
+                state.sessions.remove(&self.sessionid);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1314,6 +1354,34 @@ impl V4OpResult {
 }
 
 impl Op {
+    fn may_mutate(&self) -> bool {
+        !matches!(
+            self,
+            Self::Access(_)
+                | Self::Getattr(_)
+                | Self::Getfh
+                | Self::Lookup(_)
+                | Self::Lookupp
+                | Self::Lockt { .. }
+                | Self::Nverify(_)
+                | Self::Putfh(_)
+                | Self::Putrootfh
+                | Self::Putpubfh
+                | Self::Read(..)
+                | Self::Readdir { .. }
+                | Self::Readlink
+                | Self::Restorefh
+                | Self::Savefh
+                | Self::Secinfo(_)
+                | Self::SecinfoNoName(_)
+                | Self::Sequence { .. }
+                | Self::TestStateid(_)
+                | Self::Verify(_)
+                | Self::BackchannelCtl
+                | Self::Unsupported(_)
+        )
+    }
+
     fn opnum(&self) -> u32 {
         match self {
             Self::Access(_) => OP_ACCESS,
@@ -1721,6 +1789,16 @@ impl Nfs4Session {
         now.saturating_duration_since(renewed) >= self.lease_duration()
     }
 
+    fn has_expired_clients(&self) -> bool {
+        let now = self.now();
+        self.state
+            .lock()
+            .expect("NFSv4 state lock")
+            .clients
+            .values()
+            .any(|client| self.expired(client.renewed, now))
+    }
+
     /// Remove clients whose leases have expired, including their sessions,
     /// locks, open states, and pinned backend handles.
     async fn expire_expired_clients(&self) -> usize {
@@ -1917,11 +1995,26 @@ impl Nfs4Session {
             );
             return Some(encode_accept_error(call.xid, RPC_PROC_UNAVAIL, None));
         }
+        if let Some((status, tag)) = self.busy_sequence_status(args) {
+            v4_trace_compound_reply(peer, call.xid, status, 0, false);
+            return Some(encode_accepted_reply(
+                call.xid,
+                &self.compound_error_body(status, &tag, &[]),
+            ));
+        }
         let credentials = credentials_of(&call.cred);
-        let expiry_guard = self.path_lock.write().await;
-        self.expire_expired_clients().await;
-        drop(expiry_guard);
-        let _guard = self.path_lock.read().await;
+        let _guard = loop {
+            // Keep ordinary compounds on the shared read path. Only an actual
+            // expired lease needs the exclusive path-map gate for cleanup.
+            let guard = self.path_lock.read().await;
+            if !self.has_expired_clients() {
+                break guard;
+            }
+            drop(guard);
+            let expiry_guard = self.path_lock.write().await;
+            self.expire_expired_clients().await;
+            drop(expiry_guard);
+        };
         match self
             .dispatch_compound(&mut args, &credentials, peer, call.xid)
             .await
@@ -1939,6 +2032,48 @@ impl Nfs4Session {
                 Some(encode_accept_error(call.xid, RPC_GARBAGE_ARGS, None))
             }
         }
+    }
+
+    fn busy_sequence_status(&self, mut reader: XdrReader<'_>) -> Option<(u32, String)> {
+        // Answer an already-running slot before the per-RPC lease sweep waits
+        // for the original COMPOUND's path-lock read guard.
+        let tag = reader.string(NFS4_MAX_TAG, "COMPOUND.tag").ok()?;
+        let minor = reader.u32("COMPOUND.minorversion").ok()?;
+        let count = reader.u32("COMPOUND.argarray count").ok()? as usize;
+        if minor != NFS4_MINOR_VERSION_1 || count == 0 || count > NFS4_MAX_COMPOUND_OPS {
+            return None;
+        }
+        let Op::Sequence {
+            sessionid,
+            sequence,
+            slot,
+            ..
+        } = parse_op(&mut reader).ok()?
+        else {
+            return None;
+        };
+        for _ in 1..count {
+            if matches!(parse_op(&mut reader).ok()?, Op::Unsupported(_)) {
+                return None;
+            }
+        }
+        reader.end("COMPOUND arguments").ok()?;
+        let state = self.state.lock().expect("NFSv4 state lock");
+        let active = state
+            .sessions
+            .get(&sessionid)?
+            .in_flight
+            .get(usize::try_from(slot).ok()?)
+            .copied()
+            .flatten()?;
+        Some((
+            if sequence == active {
+                NFS4ERR_DELAY
+            } else {
+                NFS4ERR_SEQ_MISORDERED
+            },
+            tag,
+        ))
     }
 
     async fn dispatch_compound(
@@ -2043,7 +2178,7 @@ impl Nfs4Session {
         else {
             unreachable!("sequence was checked above")
         };
-        let session = {
+        let (session, mut in_flight) = {
             let mut state = self.state.lock().expect("NFSv4 state lock");
             let Some(session) = state.sessions.get(sessionid) else {
                 v4_trace_compound_reply(peer, xid, NFS4ERR_BADSESSION, 0, false);
@@ -2056,34 +2191,66 @@ impl Nfs4Session {
                 drop(state);
                 return Ok(self.compound_error_body(NFS4ERR_BADSLOT, &tag, &[]));
             }
+            if let Some(active) = session.in_flight[slot_index] {
+                let status = if *sequence == active {
+                    NFS4ERR_DELAY
+                } else {
+                    NFS4ERR_SEQ_MISORDERED
+                };
+                v4_trace_compound_reply(peer, xid, status, 0, false);
+                drop(state);
+                return Ok(self.compound_error_body(status, &tag, &[]));
+            }
             let expected = session.next_sequence[slot_index];
             let clientid = session.clientid;
             if *sequence == expected {
-                state
+                let session = state
                     .sessions
                     .get_mut(sessionid)
-                    .expect("validated session while holding state lock")
-                    .next_sequence[slot_index] = expected.saturating_add(1);
+                    .expect("validated session while holding state lock");
+                session.next_sequence[slot_index] = expected.wrapping_add(1);
+                session.in_flight[slot_index] = Some(*sequence);
+                let in_flight = InFlightSlot {
+                    state: Arc::clone(&self.state),
+                    sessionid: *sessionid,
+                    slot: slot_index,
+                    sequence: *sequence,
+                    completed: false,
+                };
                 if let Some(client) = state.clients.get_mut(&clientid) {
                     client.renewed = self.now();
                 }
-                state
-                    .sessions
-                    .get(sessionid)
-                    .expect("validated session while holding state lock")
-                    .clone()
-            } else if let Some(body) = state
+                (
+                    state
+                        .sessions
+                        .get(sessionid)
+                        .expect("validated session while holding state lock")
+                        .clone(),
+                    in_flight,
+                )
+            } else if let Some(cached) = state
                 .sessions
                 .get(sessionid)
                 .and_then(|session| session.cached[slot_index].as_ref())
                 .filter(|cached| cached.sequence == *sequence)
-                .map(|cached| cached.body.clone())
+                .cloned()
             {
+                // AUTH_SYS stamps/machine names may change on retransmission;
+                // compare the decoded effective credentials, not raw bytes.
+                if cached.credentials != *credentials {
+                    v4_trace_compound_reply(peer, xid, NFS4ERR_SEQ_FALSE_RETRY, 1, false);
+                    drop(state);
+                    return Ok(self.compound_error_body(
+                        NFS4ERR_SEQ_FALSE_RETRY,
+                        &tag,
+                        &[V4OpResult::new(OP_SEQUENCE, NFS4ERR_SEQ_FALSE_RETRY)],
+                    ));
+                }
                 if let Some(client) = state.clients.get_mut(&clientid) {
                     client.renewed = self.now();
                 }
-                v4_trace_body_reply(peer, xid, &body, true);
-                return Ok(body);
+                v4_trace_body_reply(peer, xid, &cached.body, true);
+                return Ok(cached.body);
             } else {
                 v4_trace_compound_reply(peer, xid, NFS4ERR_SEQ_MISORDERED, 0, false);
                 drop(state);
@@ -2092,10 +2259,12 @@ impl Nfs4Session {
         };
         if *highest >= session.next_sequence.len() as u32 && *highest != 0 {
             v4_trace_compound_reply(peer, xid, NFS4ERR_BADSLOT, 0, false);
+            in_flight.complete();
             return Ok(self.compound_error_body(NFS4ERR_BADSLOT, &tag, &[]));
         }
         if operations.len() > session.max_operations as usize {
             v4_trace_compound_reply(peer, xid, NFS4ERR_TOO_MANY_OPS, 0, false);
+            in_flight.complete();
             return Ok(self.compound_error_body(NFS4ERR_TOO_MANY_OPS, &tag, &[]));
         }
         debug_assert_eq!(session.id, *sessionid);
@@ -2116,8 +2285,33 @@ impl Nfs4Session {
         );
         let mut results = vec![sequence_result];
         let mut status = NFS4_OK;
+        let mut may_have_mutated = false;
         for operation in operations.iter().skip(1) {
-            let result = self.execute_op(operation, &mut cursor, credentials).await;
+            may_have_mutated |= operation.may_mutate();
+            let mut result = self.execute_op(operation, &mut cursor, credentials).await;
+            if *cachethis
+                && result.status == NFS4_OK
+                && matches!(
+                    operation,
+                    Op::Getattr(_) | Op::Getfh | Op::Read(..) | Op::Readdir { .. } | Op::Readlink
+                )
+            {
+                // These read-only operations have no mutation to replay. If a
+                // result would overflow a required cache,
+                // retain earlier results and cache a bounded error here.
+                let mut candidate = results.clone();
+                candidate.push(result.clone());
+                if compound_body(NFS4_OK, &tag, &candidate).len() > session.max_cached {
+                    let error = V4OpResult::new(operation.opnum(), NFS4ERR_REP_TOO_BIG_TO_CACHE);
+                    candidate.pop();
+                    candidate.push(error.clone());
+                    if compound_body(NFS4ERR_REP_TOO_BIG_TO_CACHE, &tag, &candidate).len()
+                        <= session.max_cached
+                    {
+                        result = error;
+                    }
+                }
+            }
             status = result.status;
             results.push(result);
             if status != NFS4_OK {
@@ -2137,18 +2331,52 @@ impl Nfs4Session {
         }
         let body = compound_body(status, &tag, &results);
         v4_trace_compound_reply(peer, xid, status, results.len(), false);
-        if *cachethis && body.len() <= session.max_cached {
+        // RFC 8881 permits caching the full reply even when sa_cachethis is
+        // false. Keep bounded completed replies so a retry cannot re-execute
+        // a mutation whose caller omitted the caching hint.
+        let cached_body = if body.len() <= session.max_cached {
+            Some(body.clone())
+        } else if !*cachethis {
+            // If the full uncached reply is too large, retain SEQUENCE plus
+            // RETRY_UNCACHED_REP on the original second operation. Never
+            // execute any operation from a retry of this slot/sequence.
+            operations
+                .get(1)
+                .filter(|operation| !matches!(operation, Op::Unsupported(_)))
+                .map(|operation| {
+                    compound_body(
+                        NFS4ERR_RETRY_UNCACHED_REP,
+                        &tag,
+                        &[
+                            results[0].clone(),
+                            V4OpResult::new(operation.opnum(), NFS4ERR_RETRY_UNCACHED_REP),
+                        ],
+                    )
+                })
+                .filter(|reply| reply.len() <= session.max_cached)
+        } else {
+            None
+        };
+        let reply_was_cached = cached_body.is_some();
+        if let Some(cached_body) = cached_body {
             let mut state = self.state.lock().expect("NFSv4 state lock");
             if let Some(session) = state.sessions.get_mut(sessionid) {
                 let slot_index = *slot as usize;
                 if slot_index < session.cached.len() {
                     session.cached[slot_index] = Some(CachedReply {
                         sequence: *sequence,
-                        body: body.clone(),
+                        body: cached_body,
+                        credentials: credentials.clone(),
                     });
                 }
             }
         }
+        if reply_was_cached || !may_have_mutated {
+            in_flight.complete();
+        }
+        // An attempted mutation without a cacheable reply cannot be replayed
+        // safely. Keep the slot incomplete so its drop fences the session,
+        // including when the negotiated cache is too small for an error.
         Ok(body)
     }
 
@@ -2442,6 +2670,7 @@ impl Nfs4Session {
                     id,
                     clientid: *clientid,
                     next_sequence: vec![1; slots],
+                    in_flight: vec![None; slots],
                     cached: vec![None; slots],
                     max_operations,
                     max_cached,
@@ -2470,7 +2699,7 @@ impl Nfs4Session {
             };
             let mut body = XdrWriter::with_capacity(128);
             body.fixed_opaque(&id, NFS4_SESSIONID_SIZE);
-            body.u32(1);
+            body.u32(*sequence);
             body.u32(response_flags);
             write_channel_attrs(&mut body, response_fore);
             write_channel_attrs(&mut body, response_back);
@@ -4750,6 +4979,56 @@ mod tests {
             "the half-range boundary is treated as older"
         );
         assert_eq!(compare_stateid_seqid(17, 17), SeqidOrdering::Equal);
+    }
+
+    #[tokio::test]
+    async fn session_slot_sequence_wraps_to_zero() {
+        let session = Nfs4Session::new(MemoryFs::empty(), NfsSessionOptions::default());
+        let id = [7_u8; super::NFS4_SESSIONID_SIZE];
+        session.state.lock().unwrap().sessions.insert(
+            id,
+            super::SessionState {
+                id,
+                clientid: 1,
+                next_sequence: vec![u32::MAX],
+                in_flight: vec![None],
+                cached: vec![None],
+                max_operations: 1,
+                max_cached: 1024,
+            },
+        );
+        let credentials = crate::rpc::RpcCredentials {
+            flavor: crate::rpc::AUTH_NONE,
+            uid: None,
+            gid: None,
+            gids: Vec::new(),
+        };
+        for (sequence, expected_next) in [(u32::MAX, 0), (0, 1)] {
+            let mut writer = crate::XdrWriter::new();
+            writer.string("slot-wrap");
+            writer.u32(super::NFS4_MINOR_VERSION_1);
+            writer.u32(1);
+            writer.u32(super::OP_SEQUENCE);
+            writer.fixed_opaque(&id, super::NFS4_SESSIONID_SIZE);
+            writer.u32(sequence);
+            writer.u32(0);
+            writer.u32(0);
+            writer.bool(true);
+            let body = writer.into_bytes();
+            let mut reader = crate::XdrReader::new(&body);
+            let reply = session
+                .dispatch_compound(&mut reader, &credentials, None, sequence)
+                .await
+                .expect("dispatch wraparound SEQUENCE");
+            assert_eq!(
+                crate::XdrReader::new(&reply).u32("status").unwrap(),
+                super::NFS4_OK
+            );
+            let state = session.state.lock().unwrap();
+            let slot = &state.sessions[&id];
+            assert_eq!(slot.next_sequence[0], expected_next);
+            assert_eq!(slot.in_flight[0], None);
+        }
     }
 
     #[test]
