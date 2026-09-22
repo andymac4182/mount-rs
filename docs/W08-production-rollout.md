@@ -392,6 +392,17 @@ pending. No provider credentials, production deployment, candidate tag,
 canary, rollback or owner approval exists. P01–P09 remain open and the
 decision remains NO-GO.
 
+The following public reconciliation added W26/site documentation and N-API
+session-test surface changes through
+`e7850fb41775351503e5aa685484906b3a3cbbe4`. Its W08 policy run
+`35695239705` is pending and is not hosted evidence. The exact local merge
+`2575770676d806e4ad2d64e9ac0ea0fea9da66d1` includes that public source plus
+the W08 ledger; targeted N-API syntax/package checks, W07/W08 tracking
+validators/tests and `git diff --check` passed, with no new Rust source change
+in this range. No provider credentials, production deployment, candidate tag,
+canary, rollback or owner approval exists. P01–P09 remain open and the
+decision remains NO-GO.
+
 After origin/main advanced with the 9P EOF/backpressure server fix `1179d9e3`,
 N-API test expansion and site component updates, exact merged source
 `d725248534eb897de4d49e916c47425e6266c05d` was freshly requalified. The full
