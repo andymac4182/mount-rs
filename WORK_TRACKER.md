@@ -5118,6 +5118,16 @@ reproducible in a production-like environment.
   passed. This refreshes local Rust/N-API evidence only; live providers,
   power-loss durability, broader workload bounds, and native/hosted acceptance
   remain open and W01-S3 stays **NO-GO**.
+- [x] Added the oracle-derived pre-body disconnect regression
+  `http_server_closes_download_handle_before_first_body_chunk`: a delayed
+  driver open is parked after opening the object, the client disconnects before
+  any response body chunk, and the released handle closes exactly once. The
+  complete current Rust 5/6/41/5 packet, strict Clippy, formatting/diff checks,
+  and isolated S3 N-API server integration passed; the initial sandbox socket
+  bind `PermissionDenied` was classified and the host-enabled rerun passed.
+  This is bounded local pre-body cancellation evidence only; live providers,
+  power-loss durability, broader workload bounds, and native/hosted acceptance
+  remain open and W01-S3 stays **NO-GO**.
 - [x] The automatic provider runs for published packet `fcf1d547` were
   refreshed: AWS run `35693941024` stopped at
   `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while R2 run `35693941037`

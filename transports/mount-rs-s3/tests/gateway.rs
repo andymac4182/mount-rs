@@ -2272,10 +2272,13 @@ struct ProbeSignals {
     first_read: Arc<Notify>,
     second_read: Arc<Notify>,
     release_read: Arc<Notify>,
+    open_started: Arc<Notify>,
+    release_open: Arc<Notify>,
     writes: Arc<AtomicUsize>,
     reads: Arc<AtomicUsize>,
     opens: Arc<AtomicUsize>,
     closes: Arc<AtomicUsize>,
+    park_open: Arc<AtomicBool>,
 }
 
 impl ProbeSignals {
@@ -2285,10 +2288,13 @@ impl ProbeSignals {
             first_read: Arc::new(Notify::new()),
             second_read: Arc::new(Notify::new()),
             release_read: Arc::new(Notify::new()),
+            open_started: Arc::new(Notify::new()),
+            release_open: Arc::new(Notify::new()),
             writes: Arc::new(AtomicUsize::new(0)),
             reads: Arc::new(AtomicUsize::new(0)),
             opens: Arc::new(AtomicUsize::new(0)),
             closes: Arc::new(AtomicUsize::new(0)),
+            park_open: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -2360,6 +2366,10 @@ impl FsDriver for ProbeFs {
     async fn open(&self, path: &str, flags: &str, mode: u32) -> FsResult<Arc<dyn FileHandle>> {
         let inner = self.inner.open(path, flags, mode).await?;
         self.signals.opens.fetch_add(1, Ordering::Relaxed);
+        if flags == "r" && self.signals.park_open.load(Ordering::Acquire) {
+            self.signals.open_started.notify_one();
+            self.signals.release_open.notified().await;
+        }
         Ok(Arc::new(ProbeHandle {
             inner,
             signals: self.signals.clone(),
@@ -2842,6 +2852,61 @@ async fn http_server_closes_abandoned_download_handle() {
     .await;
     assert_eq!(next.status, 206);
     assert_eq!(next.body, payload[..4]);
+    server.close().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn http_server_closes_download_handle_before_first_body_chunk() {
+    let memory = MemoryFs::empty();
+    let payload = vec![0x38; 512 * 1024];
+    let handle = memory
+        .open("/before-body.bin", "w", 0o666)
+        .await
+        .expect("open object");
+    handle.write(&payload, Some(0)).await.expect("write object");
+    handle.close().await.expect("close object");
+
+    let signals = ProbeSignals::new();
+    signals.park_open.store(true, Ordering::Release);
+    let session = Arc::new(S3Session::new(ProbeFs {
+        inner: memory,
+        signals: signals.clone(),
+    }));
+    let server = S3Server::start(Arc::clone(&session), S3ServerOptions::default())
+        .await
+        .expect("loopback listener");
+
+    let mut stream = TcpStream::connect(server.address())
+        .await
+        .expect("connect gateway");
+    let request = format!(
+        "GET /mountx/before-body.bin HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        server.address()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write before-body request");
+    timeout(Duration::from_secs(2), signals.open_started.notified())
+        .await
+        .expect("download handle opened before the first body chunk");
+    drop(stream);
+    signals.release_open.notify_one();
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let opens = signals.opens.load(Ordering::Acquire);
+            let closes = signals.closes.load(Ordering::Acquire);
+            if opens > 0 && closes == opens {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("unsent response handle closed");
+    assert_eq!(signals.opens.load(Ordering::Acquire), 1);
+    assert_eq!(signals.closes.load(Ordering::Acquire), 1);
     server.close().await.expect("clean shutdown");
 }
 
