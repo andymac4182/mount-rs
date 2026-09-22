@@ -5529,6 +5529,16 @@ Current hosted dispatch after the published SQLite chunk: manual run
 aggregate was not yet created. This packet is **NO-GO / not evidence** until
 all producers and the aggregate are terminally successful on that one SHA.
 
+Provider-result update for the same run: base Ozone `106623193674` passed;
+compositions `106623193668` failed because PGlite/R2 measured `766.631418`
+IOPS even though SQLite/R2 measured `1,325.636778`; TiDB `106623193474`
+measured `292.606794` IOPS and FoundationDB `106623193564` measured
+`410.703639` IOPS. Every provider completed 1,200/1,200 lifecycle operations
+with zero timeouts and zero cleanup failures. Aggregate `106625464560` remains
+queued, so this is still diagnostic and **NO-GO**; the next implementation
+focus is the remaining PGlite/TiDB/FoundationDB performance gap, not lowering
+the target or weakening the verifier.
+
 The current W26 source of truth is the detailed [progress ledger](docs/w26-progress-ledger.md).
 `origin/main` is `1626d5381625d81696fa28624342f07087593760`, including the
 published W26 publication-barrier implementation `c7f0e6d0`, bounded mutation
