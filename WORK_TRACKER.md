@@ -3286,7 +3286,7 @@ Evidence landed without closing the remaining W01 acceptance gates:
   package/provenance, scope, and final-audit gates remain explicit blockers;
   no credential value was read or stored and no Keychain access was attempted.
 - [ ] W05.10 Close the production release path on one settled revision.
-  Shared `origin/main` advanced to `e984c232` while the W05.52 candidate was
+  Shared `origin/main` advanced to `75878718` while the W05.52 candidate was
   being qualified. Immutable candidate `7efded54` is locally green through
   the current Rust workspace/NFS/S3/Clippy, dyld-safe macOS N-API build and
   load, complete Node SDK/CLI/N-API suite, real PGlite lifecycle, and
