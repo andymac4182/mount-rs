@@ -500,7 +500,19 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
         direct, and structural mounted-I/O checks, with writable
         <code>Fid.iounit</code>/<code>Fid.cursor</code> and array-shaped cursor
         offsets. Automatic signal ownership and broader upstream parity remain
-        open; overall production status remains NO-GO.
+        open. The newer direct <code>./9p</code> facade now returns a
+        synchronous <code>Array&lt;P9Mount&gt;</code> from
+        <code>live9pMounts()</code>, with a process-local registry that prunes
+        inactive and closed mounts; exact SHA <code>56291e3</code> passed
+        hosted run <code>35679754417</code> for automatic, direct, and
+        structural mounted I/O and cleanup. The typed-reader helpers also
+        preserve the oracle-compatible optional maximum for
+        <code>readRread</code>, <code>readTwrite</code>, and
+        <code>readRreaddir</code>; exact SHA <code>4ecdb63</code> passed run
+        <code>35678757675</code> with bounded success and oversized-body error
+        coverage. These are scoped native/API qualifications, not broader
+        upstream parity or crash/reset recovery; overall production status
+        remains NO-GO.
       </>
     ),
     sources: [
@@ -512,6 +524,8 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
       { label: 'Hosted N-API Native 9P qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35671509538' },
       { label: 'Latest hosted 9P stats qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35673543701' },
       { label: 'Latest hosted 9P fid qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35674581481' },
+      { label: 'Latest hosted 9P live-mount qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35679754417' },
+      { label: 'Hosted 9P typed-reader qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35678757675' },
       { label: 'Hosted 9P platform-probe qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35672845113' },
       { label: 'Hosted 9P member-boundary qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35670279904' },
     ],
@@ -836,7 +850,18 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
         native-FUSE lane. This upgrades the page's hosted package/native
         evidence without claiming a full workflow pass, live remote-provider
         durability, power-loss ordering, durable locks, or mounted-host
-        teardown/concurrency. The current maturity therefore remains Preview.
+        teardown/concurrency. The newer WebDAV contract explicitly scopes
+        same-resource ordering: without a submitted lock token, concurrent
+        writes are rejected with <code>423</code>; independent-resource
+        concurrency remains supported, but no linearizable same-resource
+        ordering or atomic same-target PUT publication is claimed. Hosted run
+        <code>35678488755</code> at exact SHA <code>ed29016</code> then passed
+        the corrected close-while-mounted, bounded cleanup, relisten/remount,
+        and post-restart round-trip harness on both macOS and Ubuntu native
+        WebDAV jobs. The aggregate remained nonterminal on unrelated jobs, so
+        live-provider durability, power-loss ordering, durable locks, and
+        wider ordering remain open. The current maturity therefore remains
+        Preview.
       </>
     ),
     sources: [
@@ -844,10 +869,11 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
       { label: 'W01 WebDAV progress tracker', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W01_WEBDAV_PROGRESS.md' },
       { label: 'Transport evidence', href: 'https://github.com/andymac4182/mount-rs/blob/main/PORTING_STATUS.md' },
       { label: 'Hosted native WebDAV jobs', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35640746296' },
-      { label: 'Latest hosted WebDAV package/native qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35674823787' },
+      { label: 'Latest hosted WebDAV package/native qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35678488755' },
       { label: 'Latest hosted WebDAV durable-barrier status', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35673381803' },
       { label: 'WebDAV durable-barrier change', href: 'https://github.com/andymac4182/mount-rs/commit/4e19f226' },
       { label: '256-request concurrency change', href: 'https://github.com/andymac4182/mount-rs/commit/efd6ed33cf33e65fd1c86cd6fe3cec6783d610e6' },
+      { label: 'Same-resource ordering boundary', href: 'https://github.com/andymac4182/mount-rs/commit/475c9b3a14a0f96862242463a7f1ebf861c33a61' },
     ],
   },
 } as const satisfies Record<string, TransportSpec>
