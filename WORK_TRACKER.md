@@ -2673,6 +2673,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   checks but has not run at this patch. Hosted/native v4.1 acceptance,
   cross-process recovery, crash/power-loss durability, and production
   readiness remain open.
+- [x] W01-NFS v4.1 state limits now reject an oversized COMPOUND or invalid
+  highest-slot argument before consuming the slot sequence; the latter returns
+  `NFS4ERR_BAD_HIGH_SLOT`. A pre-fix-failing real-TCP regression reuses the
+  same sequence successfully after each rejection. Full locked NFS (44 unit,
+  27 v4 wire), strict NFS/N-API Clippy, and local macOS native NFSv3 passed.
+  Hosted native v4.1, cross-process state recovery, power-loss durability,
+  and production readiness remain open; W01-NFS stays NO-GO.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case

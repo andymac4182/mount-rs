@@ -108,6 +108,7 @@ pub const NFS4ERR_RETRY_UNCACHED_REP: u32 = 10_068;
 pub const NFS4ERR_TOO_MANY_OPS: u32 = 10_070;
 pub const NFS4ERR_OP_NOT_IN_SESSION: u32 = 10_071;
 pub const NFS4ERR_SEQ_FALSE_RETRY: u32 = 10_076;
+pub const NFS4ERR_BAD_HIGH_SLOT: u32 = 10_077;
 pub const NFS4ERR_NOT_ONLY_OP: u32 = 10_081;
 pub const NFS4ERR_CONN_NOT_BOUND_TO_SESSION: u32 = 10_055;
 pub const NFS4ERR_CLIENTID_BUSY: u32 = 10_074;
@@ -2279,6 +2280,17 @@ impl Nfs4Session {
             let expected = session.next_sequence[slot_index];
             let clientid = session.clientid;
             if *sequence == expected {
+                // These reject SEQUENCE itself, so neither the slot sequence
+                // nor its previous cached reply may change (RFC 8881
+                // section 2.10.6.1.2).
+                if *highest >= session.next_sequence.len() as u32 {
+                    v4_trace_compound_reply(peer, xid, NFS4ERR_BAD_HIGH_SLOT, 0, false);
+                    return Ok(self.compound_error_body(NFS4ERR_BAD_HIGH_SLOT, &tag, &[]));
+                }
+                if operations.len() > session.max_operations as usize {
+                    v4_trace_compound_reply(peer, xid, NFS4ERR_TOO_MANY_OPS, 0, false);
+                    return Ok(self.compound_error_body(NFS4ERR_TOO_MANY_OPS, &tag, &[]));
+                }
                 let session = state
                     .sessions
                     .get_mut(sessionid)
@@ -2332,16 +2344,6 @@ impl Nfs4Session {
                 return Ok(self.compound_error_body(NFS4ERR_SEQ_MISORDERED, &tag, &[]));
             }
         };
-        if *highest >= session.next_sequence.len() as u32 && *highest != 0 {
-            v4_trace_compound_reply(peer, xid, NFS4ERR_BADSLOT, 0, false);
-            in_flight.complete();
-            return Ok(self.compound_error_body(NFS4ERR_BADSLOT, &tag, &[]));
-        }
-        if operations.len() > session.max_operations as usize {
-            v4_trace_compound_reply(peer, xid, NFS4ERR_TOO_MANY_OPS, 0, false);
-            in_flight.complete();
-            return Ok(self.compound_error_body(NFS4ERR_TOO_MANY_OPS, &tag, &[]));
-        }
         debug_assert_eq!(session.id, *sessionid);
         let mut cursor = Cursor {
             clientid: Some(session.clientid),
