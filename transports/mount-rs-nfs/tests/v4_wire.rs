@@ -107,8 +107,10 @@ struct GateUnlinkDriver {
     release: Arc<Notify>,
 }
 
-struct GateOpenedFileStatDriver {
+struct GateTargetStatDriver {
     inner: MemoryFs,
+    target_path: &'static str,
+    block_on_stat: u64,
     armed: Arc<AtomicBool>,
     target_stats: Arc<AtomicU64>,
     entered: Arc<Notify>,
@@ -184,7 +186,7 @@ impl FsDriver for GateOneOpenDriver {
     }
 }
 
-impl FsDriver for GateOpenedFileStatDriver {
+impl FsDriver for GateTargetStatDriver {
     fn capabilities(&self) -> mount_rs_core::Capabilities {
         self.inner.capabilities()
     }
@@ -197,12 +199,12 @@ impl FsDriver for GateOpenedFileStatDriver {
     {
         Box::pin(async move {
             let stats = self.inner.stat(path).await?;
-            if path == "/raced-open.txt"
+            if path == self.target_path
                 && self.armed.load(Ordering::Acquire)
-                && self.target_stats.fetch_add(1, Ordering::AcqRel) == 1
+                && self.target_stats.fetch_add(1, Ordering::AcqRel) == self.block_on_stat
             {
-                // Let another protocol unlink after OPEN has observed this
-                // inode but before the v4 operation binds its handle.
+                // Pause after the backend returns the target inode but before
+                // the request binds it into the shared handle table.
                 self.entered.notify_one();
                 self.release.notified().await;
             }
@@ -1183,8 +1185,10 @@ fn nfs_v4_open_racing_v3_unlink_keeps_the_shared_handle_pathless() {
                     let entered = Arc::new(Notify::new());
                     let release = Arc::new(Notify::new());
                     let server = NfsServer::new(
-                        GateOpenedFileStatDriver {
+                        GateTargetStatDriver {
                             inner,
+                            target_path: "/raced-open.txt",
+                            block_on_stat: 1,
                             armed: Arc::clone(&armed),
                             target_stats: Arc::clone(&target_stats),
                             entered: Arc::clone(&entered),
@@ -1340,6 +1344,153 @@ fn nfs_v4_open_racing_v3_unlink_keeps_the_shared_handle_pathless() {
                         payload
                     );
                     read.end("raced open read response").unwrap();
+                    server.close().await.unwrap();
+                });
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn nfs_v4_remove_waits_for_v3_lookup_handle_binding() {
+    std::thread::Builder::new()
+        .name("nfs-v4-remove-v3-lookup-race".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let inner = MemoryFs::empty();
+                    inner
+                        .write_file("/raced-lookup.txt", b"lookup-before-remove")
+                        .await
+                        .unwrap();
+                    let armed = Arc::new(AtomicBool::new(false));
+                    let target_stats = Arc::new(AtomicU64::new(0));
+                    let entered = Arc::new(Notify::new());
+                    let release = Arc::new(Notify::new());
+                    let server = NfsServer::new(
+                        GateTargetStatDriver {
+                            inner,
+                            target_path: "/raced-lookup.txt",
+                            block_on_stat: 0,
+                            armed: Arc::clone(&armed),
+                            target_stats: Arc::clone(&target_stats),
+                            entered: Arc::clone(&entered),
+                            release: Arc::clone(&release),
+                        },
+                        NfsServerOptions::default(),
+                    );
+                    let address = server.listen().await.unwrap();
+                    let mut v3_stream = TcpStream::connect(address).await.unwrap();
+                    let mut mount = rpc_call(
+                        &mut v3_stream,
+                        701,
+                        MOUNT_PROGRAM,
+                        MOUNT_V3,
+                        MOUNTPROC3_MNT,
+                        encode_xdr(|writer| writer.string("/")),
+                        None,
+                    )
+                    .await;
+                    let root = read_mount_res(&mut mount).unwrap().fh.unwrap();
+                    mount.end("v3 lookup race MOUNT response").unwrap();
+                    let (mut v4_stream, client) =
+                        connect_v4_client(address, 801, b"v4-remove-race-owner").await;
+                    armed.store(true, Ordering::Release);
+                    let lookup_root = root.clone();
+                    let lookup_task = tokio::spawn(async move {
+                        let mut lookup = rpc_call(
+                            &mut v3_stream,
+                            702,
+                            NFS_PROGRAM,
+                            NFS_V3,
+                            NFSPROC3_LOOKUP,
+                            encode_xdr(|writer| {
+                                writer.var_opaque(&lookup_root);
+                                writer.string("raced-lookup.txt");
+                            }),
+                            None,
+                        )
+                        .await;
+                        let result = read_lookup_res(&mut lookup).unwrap();
+                        lookup.end("raced v3 LOOKUP response").unwrap();
+                        (v3_stream, result)
+                    });
+                    timeout(Duration::from_millis(500), entered.notified())
+                        .await
+                        .expect("v3 LOOKUP reached its backend stat");
+                    let mut remove_task = tokio::spawn(async move {
+                        rpc(
+                            &mut v4_stream,
+                            804,
+                            compound(
+                                "v4-remove-during-v3-lookup",
+                                &[
+                                    sequence(&client),
+                                    op(OP_PUTROOTFH, |_| {}),
+                                    op(OP_REMOVE, |writer| writer.string("raced-lookup.txt")),
+                                ],
+                            ),
+                        )
+                        .await
+                    });
+                    let completed_before_lookup =
+                        timeout(Duration::from_millis(100), &mut remove_task)
+                            .await
+                            .is_ok();
+                    release.notify_one();
+                    let (mut v3_stream, lookup_result) = lookup_task.await.unwrap();
+                    assert_eq!(lookup_result.status, NFS3_OK);
+                    let old_handle = lookup_result.object.unwrap();
+                    assert!(
+                        !completed_before_lookup,
+                        "v4 REMOVE completed before v3 LOOKUP bound its observed inode"
+                    );
+                    let mut removed = remove_task.await.unwrap();
+                    parse_compound_header(&mut removed, 3);
+                    consume_sequence_result(&mut removed, "v4 remove after lookup");
+                    parse_result_header(&mut removed, OP_PUTROOTFH);
+                    parse_result_header(&mut removed, OP_REMOVE);
+                    let _ = removed.bool("v4 remove change atomic").unwrap();
+                    let _ = removed.u64("v4 remove change before").unwrap();
+                    let _ = removed.u64("v4 remove change after").unwrap();
+                    removed.end("v4 remove after lookup response").unwrap();
+
+                    let mut stale = rpc_call(
+                        &mut v3_stream,
+                        703,
+                        NFS_PROGRAM,
+                        NFS_V3,
+                        NFSPROC3_GETATTR,
+                        encode_xdr(|writer| writer.var_opaque(&old_handle)),
+                        None,
+                    )
+                    .await;
+                    assert_eq!(read_getattr_res(&mut stale).unwrap().status, NFS3ERR_STALE);
+                    stale.end("v3 stale handle after v4 REMOVE").unwrap();
+                    let mut missing = rpc_call(
+                        &mut v3_stream,
+                        704,
+                        NFS_PROGRAM,
+                        NFS_V3,
+                        NFSPROC3_LOOKUP,
+                        encode_xdr(|writer| {
+                            writer.var_opaque(&root);
+                            writer.string("raced-lookup.txt");
+                        }),
+                        None,
+                    )
+                    .await;
+                    assert_eq!(read_lookup_res(&mut missing).unwrap().status, NFS3ERR_NOENT);
+                    missing
+                        .end("v3 removed-name LOOKUP after v4 REMOVE")
+                        .unwrap();
                     server.close().await.unwrap();
                 });
         })

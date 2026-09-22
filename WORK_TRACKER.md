@@ -2519,6 +2519,16 @@ Evidence landed without closing the remaining W01 acceptance gates:
   and local native macOS NFSv3 pass. Cross-process arbitration, native v4
   ordering, crash/power-loss durability, exact-tip hosted acceptance, and
   production readiness remain open.
+- [x] W01-NFS symmetric v3 LOOKUP/v4 REMOVE ordering is now covered by a
+  controlled real-TCP regression: v4 REMOVE waits while v3 LOOKUP has read
+  backend metadata but not yet bound its handle; afterward the v3 handle
+  becomes `NFS3ERR_STALE` and name lookup returns `NFS3ERR_NOENT`. The case
+  passed ten reruns, full locked NFS passed 42 unit and 24 v4 wire, and
+  strict NFS Clippy passed in a dedicated target. A shared-target binary
+  selected zero tests and was not counted; the
+  exact 782 MB disposable target was removed after checking for open handles.
+  Cross-process arbitration, native v4 ordering, crash/power-loss durability,
+  exact-tip hosted acceptance, and production readiness remain open.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
