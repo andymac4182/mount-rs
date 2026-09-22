@@ -23,6 +23,14 @@ failure rather than a false durable success. Volatile drivers retain the
 successful no-op default. WebDAV locks remain process-local session state and
 are not presented as durable locks.
 
+Independent resources may be served concurrently. The transport intentionally
+does not invent a global or same-resource ordering guarantee, and its
+oracle-compatible in-place `PUT` contract is not atomic publication. Clients
+that need shared-resource write coordination must use a WebDAV write lock and
+submit its token through `If`; the concurrent lock regression verifies that
+unsubmitted writes are rejected together. This is a supported-scope boundary,
+not a claim of linearizable ordering or durable locks.
+
 The HTTP integration tests bind an ephemeral loopback TCP socket and run as an
 ordinary user on both macOS and Linux. They are protocol tests; they do not
 claim native mount verification. `tests/native_mount.rs` is the separate,
