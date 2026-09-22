@@ -2250,6 +2250,32 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn concurrent_unmount_callers_share_one_terminal_result() {
+        let state = Arc::new(MountState::new(
+            MountMode::Rootless,
+            PathBuf::from("/tmp/mount-rs-fuse-concurrent-unmount-test"),
+            MountOptions {
+                mode: MountMode::Rootless,
+                ..MountOptions::default()
+            },
+            Some(PathBuf::from("/bin/true")),
+            FuseMountHooks::default(),
+        ));
+        let mount = FuseMount {
+            state: Arc::clone(&state),
+            mountpoint: PathBuf::from("/tmp/mount-rs-fuse-concurrent-unmount-test"),
+        };
+
+        let (first, second) = tokio::join!(mount.unmount(), mount.unmount());
+        assert!(first.is_ok(), "first unmount failed: {first:?}");
+        assert!(second.is_ok(), "second unmount failed: {second:?}");
+        assert!(!mount.is_active());
+        assert!(state.closed.load(Ordering::Acquire));
+        assert!(!state.mounted.load(Ordering::Acquire));
+    }
+
+    #[cfg(target_os = "linux")]
     struct PanicDriver {
         inner: Arc<mount_rs_core::MemoryFs>,
     }
