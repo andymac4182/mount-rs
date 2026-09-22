@@ -292,6 +292,17 @@ Current focused behavior:
   native Unix/TCP listeners otherwise expose their socket path or
   `address:port`, while the attached-stream contract uses `undefined` when no
   peer fallback is supplied.
+- The server/attach lifecycle now has an independent regression selector:
+  `MOUNT_RS_SERVER_PHASE=p9 node integrations/mount-rs-napi/test/servers.mjs`
+  reaches the real 9P TCP listener, attached socket and non-socket duplex
+  paths, duplicate attach, backpressure, frame-limit, write-fault, and
+  server-close phases without being preceded by the unrelated Darwin NFS
+  relisten phase. The local elevated phase passed; the unprivileged Darwin
+  attempt reached 9P and was blocked only by listener relisten
+  `Operation not permitted`. Exact SHA
+  `007e6545d1b25d708abfa10f2120f81fba59a74a` passed the same hosted N-API step
+  in [Native 9P run `35682638941`](https://github.com/andymac4182/mount-rs/actions/runs/35682638941),
+  job `106602684115`, with the companion Rust job `106602683880` also green.
 - The N-API object boundary keeps serializable lifecycle views: native
   `P9Server.address()`/`path` use string-or-null representations, and effective
   `onError`/`onAssertion` hooks are omitted from `server.options` and

@@ -59,7 +59,20 @@ ledger in the same commit as an implementation/evidence chunk.
 | W01-Auto/CLI | Auto selection, mount facade and SDK-backed consumers | Focused option/consumer paths exist; cross-transport native lifecycle remains | Per-transport options/callback ownership and signal/async-dispose evidence |
 | W01-Provider/Native | Providers, hosted CI, FSKit, Windows, crash and concurrency | Local capability-limited packets exist; external lanes remain | Fresh live-provider and hosted/native results with no prerequisite-gated acceptance rows |
 
-The latest W01-9P P9User packet at exact SHA
+The latest W01-9P packet at exact SHA
+`007e6545d1b25d708abfa10f2120f81fba59a74a` passed [Native 9P run
+`35682638941`](https://github.com/andymac4182/mount-rs/actions/runs/35682638941):
+N-API job `106602684115` passed the isolated server/attached-stream lifecycle
+step plus automatic/direct/structural mounted I/O and cleanup, and Rust job
+`106602683880` passed the Linux probe plus all four ignored native lifecycle
+tests. The selector independently covers the real TCP server and attached
+socket/duplex paths, duplicate attach, backpressure, frame-limit rejection,
+write-fault teardown, and server close; the local elevated phase also passed,
+while the unprivileged Darwin run reached 9P but hit only the sandbox listener
+relisten `Operation not permitted` boundary. This qualifies the covered
+server/attach lifecycle slice; broader W01 acceptance remains NO-GO.
+
+The preceding W01-9P P9User packet at exact SHA
 `1c43f66ec570be35444055ab6adb0f841628fef6` passed [Native 9P run
 `35681672318`](https://github.com/andymac4182/mount-rs/actions/runs/35681672318):
 N-API job `106599754171` and Rust job `106599753872` both passed their Linux
