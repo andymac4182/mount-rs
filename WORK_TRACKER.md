@@ -1136,6 +1136,11 @@ NodeFs/SQLite crash plus in-flight streamed-PUT recovery all passed. This is
 local rebuilt N-API/provider evidence only and does not close hosted
 session/lifecycle/concurrency, live remote-provider, power-loss, or durable-lock
 gates.
+At final ledger tip `3148aa5a95e5cdcf328014fac7e007db0e16adfe`, exact-SHA CI
+`35673381803` and W08 policy/targets `35673381898`/`35673381797` were pending,
+Fault injection `35673381853` and W04 policy `35673381814` were queued, and no
+Live AWS S3 or Live Cloudflare R2 run was listed. No hosted WebDAV PASS is
+claimable from the final published tip.
 
 For the published 256-request packet `efd6ed33cf33e65fd1c86cd6fe3cec6783d610e6`,
 the exact-SHA CI run `35669390058`, W08 release targets `35669390013`, and W08
