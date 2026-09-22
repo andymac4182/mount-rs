@@ -2150,6 +2150,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   be promoted to production GO while P03–P07 remain open. Local policy and
   mutation cases pass; hosted execution and all deployment/provider/operator
   evidence remain external, so production stays **NO-GO**.
+- Hosted run
+  [35696523606](https://github.com/andymac4182/mount-rs/actions/runs/35696523606),
+  job `106644703942`, completed successfully on head `5782aeee`. The exact log
+  contains the existing PGlite policy PASS and four expected negative markers,
+  followed by `W04_ROLLOUT_LEDGER_POLICY_PASS decision=NO-GO
+  production_gates=7 open=5` and `W04_ROLLOUT_LEDGER_TEST_PASS cases=5`.
+  This is terminal repository-control evidence only; the later queued
+  current-head run `35696590337` is not promoted, and production remains
+  **NO-GO**.
 - [x] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
   The rebased packet (`43ded00`, `980cdd7`, `2d2ac5c`, `be2170b`, final
   rebased tip `7235fde`) adds durable PGlite version metadata, reconnect and
