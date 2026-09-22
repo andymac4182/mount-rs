@@ -5,6 +5,7 @@
 //! mount-rs-core::FsDriver contract for all storage.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt;
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -263,6 +264,43 @@ impl Drop for StagedPathCleanup {
     }
 }
 
+/// Optional impure and diagnostic hooks for an S3 session.
+///
+/// The TypeScript session exposes these as `now`, `requestId`, `onError`, and
+/// `onAssertion`. Rust callers can inject the same boundaries without making
+/// the storage or protocol code depend on a particular clock, logger, or
+/// runtime callback mechanism.
+pub type S3NowHook = Arc<dyn Fn() -> Option<i64> + Send + Sync + 'static>;
+pub type S3RequestIdHook = Arc<dyn Fn() -> Option<String> + Send + Sync + 'static>;
+pub type S3ErrorHook = Arc<dyn Fn(String, Option<S3RequestHead>) + Send + Sync + 'static>;
+pub type S3AssertionHook = Arc<dyn Fn(String) + Send + Sync + 'static>;
+
+#[derive(Clone, Default)]
+pub struct S3SessionHooks {
+    /// Return the current epoch time in milliseconds, or `None` to use the
+    /// system clock for this call.
+    pub now_ms: Option<S3NowHook>,
+    /// Return the client-visible request id, or `None` to use the session's
+    /// process-local fallback id.
+    pub request_id: Option<S3RequestIdHook>,
+    /// Observe a request that produced an S3 error reply.
+    pub on_error: Option<S3ErrorHook>,
+    /// Observe a debug assertion failure.
+    pub on_assertion: Option<S3AssertionHook>,
+}
+
+impl fmt::Debug for S3SessionHooks {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("S3SessionHooks")
+            .field("now_ms", &self.now_ms.is_some())
+            .field("request_id", &self.request_id.is_some())
+            .field("on_error", &self.on_error.is_some())
+            .field("on_assertion", &self.on_assertion.is_some())
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct S3SessionOptions {
     pub credentials: Option<Credentials>,
@@ -273,6 +311,7 @@ pub struct S3SessionOptions {
     pub multipart_staging_ttl_ms: i64,
     pub multipart_staging_max_bytes: u64,
     pub debug: bool,
+    pub hooks: S3SessionHooks,
 }
 
 impl Default for S3SessionOptions {
@@ -286,6 +325,7 @@ impl Default for S3SessionOptions {
             multipart_staging_ttl_ms: DEFAULT_MULTIPART_STAGING_TTL_MS,
             multipart_staging_max_bytes: DEFAULT_MULTIPART_STAGING_MAX_BYTES,
             debug: true,
+            hooks: S3SessionHooks::default(),
         }
     }
 }
@@ -556,10 +596,7 @@ impl S3Session {
         }
         let ticket = self.begin_request();
         let mut ticket_guard = RequestTicketGuard::new(Arc::clone(&self.inflight), ticket);
-        let request_id = self
-            .next_request_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let request_id = format!("mountx-{request_id:016x}");
+        let request_id = self.next_request_id();
         let result = self.dispatch(&head, &body).await;
         let (response, error_class) = match result {
             Ok(mut response) => {
@@ -572,6 +609,7 @@ impl S3Session {
                 (response, None)
             }
             Err(error) => {
+                self.report_error(&error, &head);
                 let s3_error = error.error();
                 let error_class = classify_error(&s3_error);
                 (
@@ -611,10 +649,7 @@ impl S3Session {
         }
         let ticket = self.begin_request();
         let mut ticket_guard = RequestTicketGuard::new(Arc::clone(&self.inflight), ticket);
-        let request_id = self
-            .next_request_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let request_id = format!("mountx-{request_id:016x}");
+        let request_id = self.next_request_id();
         let body = Box::pin(CountingRequestBody {
             inner: body,
             bytes: Arc::clone(&self.stream_request_bytes),
@@ -631,6 +666,7 @@ impl S3Session {
                 (response, None)
             }
             Err(error) => {
+                self.report_error(&error, &head);
                 let s3_error = error.error();
                 let error_class = classify_error(&s3_error);
                 (
@@ -690,10 +726,43 @@ impl S3Session {
         if !removed {
             let message = format!("{} {} was answered twice", head.method, head.target);
             if let Ok(mut assertions) = self.assertions.lock() {
-                assertions.push(message);
+                assertions.push(message.clone());
+            }
+            if let Some(hook) = &self.options.hooks.on_assertion {
+                hook(message);
             }
             let mut stats = self.stats.lock().await;
             stats.assertions += 1;
+        }
+    }
+
+    fn current_now_ms(&self) -> i64 {
+        self.options
+            .hooks
+            .now_ms
+            .as_ref()
+            .and_then(|hook| hook())
+            .unwrap_or_else(now_ms)
+    }
+
+    fn next_request_id(&self) -> String {
+        self.options
+            .hooks
+            .request_id
+            .as_ref()
+            .and_then(|hook| hook())
+            .filter(|request_id| !request_id.is_empty())
+            .unwrap_or_else(|| {
+                let request_id = self
+                    .next_request_id
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                format!("mountx-{request_id:016x}")
+            })
+    }
+
+    fn report_error(&self, error: &S3Failure, head: &S3RequestHead) {
+        if let Some(hook) = &self.options.hooks.on_error {
+            hook(error.to_string(), Some(head.clone()));
         }
     }
 
@@ -937,7 +1006,7 @@ impl S3Session {
             body,
             credentials,
             expected_region: self.options.region.as_deref(),
-            now_ms: now_ms(),
+            now_ms: self.current_now_ms(),
         })
         .map(Some)
         .map_err(|failure| {
@@ -967,7 +1036,7 @@ impl S3Session {
             body: &[],
             credentials,
             expected_region: self.options.region.as_deref(),
-            now_ms: now_ms(),
+            now_ms: self.current_now_ms(),
         })
         .map(Some)
         .map_err(|failure| {
@@ -1219,7 +1288,12 @@ impl S3Session {
         let _conditional_lock = self
             .acquire_conditional_put_lock(target, &head.headers)
             .await;
-        reap_staging(&driver, self.options.multipart_staging_ttl_ms).await?;
+        reap_staging(
+            &driver,
+            self.options.multipart_staging_ttl_ms,
+            self.current_now_ms(),
+        )
+        .await?;
         let existing = driver.stat(&target.path).await.ok();
         check_put_conditionals(existing.as_ref(), &head.headers)?;
         let requested_mtime =
@@ -1370,7 +1444,12 @@ impl S3Session {
             }
         }
         let (keys, quiet) = parse_delete_document(&body, self.options.max_xml_bytes)?;
-        reap_staging(&driver, self.options.multipart_staging_ttl_ms).await?;
+        reap_staging(
+            &driver,
+            self.options.multipart_staging_ttl_ms,
+            self.current_now_ms(),
+        )
+        .await?;
         let mut deleted = Vec::new();
         let mut errors = Vec::new();
         for key in keys {
@@ -1439,7 +1518,7 @@ impl S3Session {
         ensure_parent(&destination_driver, &destination.path).await?;
         let mtime = if replace_metadata {
             parse_meta_mtime(header_value(&head.headers, "x-amz-meta-mtime").as_deref())
-                .unwrap_or_else(now_ms)
+                .unwrap_or_else(|| self.current_now_ms())
         } else {
             source_stats.mtime_ms
         };
@@ -1586,7 +1665,12 @@ impl S3Session {
                 "A key ending in / names a directory and cannot be uploaded in parts.",
             )));
         }
-        reap_staging(&driver, self.options.multipart_staging_ttl_ms).await?;
+        reap_staging(
+            &driver,
+            self.options.multipart_staging_ttl_ms,
+            self.current_now_ms(),
+        )
+        .await?;
         ensure_staging_capacity(&driver, self.options.multipart_staging_max_bytes, None, 0).await?;
         let upload_id = new_upload_id();
         let directory = upload_directory(&upload_id);
@@ -1636,7 +1720,12 @@ impl S3Session {
         part_number: u32,
         request: UploadBody<'_>,
     ) -> S3Result<S3Response> {
-        reap_staging(&driver, self.options.multipart_staging_ttl_ms).await?;
+        reap_staging(
+            &driver,
+            self.options.multipart_staging_ttl_ms,
+            self.current_now_ms(),
+        )
+        .await?;
         let _manifest = read_manifest(&driver, upload_id, &target.key).await?;
         ensure_upload_not_finalizing(&driver, upload_id).await?;
         if !aws_chunked_body(&request.head.headers) {
@@ -1703,7 +1792,12 @@ impl S3Session {
         part_number: u32,
         request: StreamUploadBody<'_>,
     ) -> S3Result<S3StreamResponse> {
-        reap_staging(&driver, self.options.multipart_staging_ttl_ms).await?;
+        reap_staging(
+            &driver,
+            self.options.multipart_staging_ttl_ms,
+            self.current_now_ms(),
+        )
+        .await?;
         let _manifest = read_manifest(&driver, upload_id, &target.key).await?;
         ensure_upload_not_finalizing(&driver, upload_id).await?;
         let path = part_path(upload_id, part_number);
@@ -1769,7 +1863,12 @@ impl S3Session {
         upload_id: &str,
         request: UploadBody<'_>,
     ) -> S3Result<S3Response> {
-        reap_staging(&driver, self.options.multipart_staging_ttl_ms).await?;
+        reap_staging(
+            &driver,
+            self.options.multipart_staging_ttl_ms,
+            self.current_now_ms(),
+        )
+        .await?;
         if !aws_chunked_body(&request.head.headers) {
             validate_declared_length(&request.head.headers, request.body.len())?;
         }
@@ -1911,7 +2010,12 @@ impl S3Session {
         target: &ObjectTarget,
         upload_id: &str,
     ) -> S3Result<S3Response> {
-        reap_staging(&driver, self.options.multipart_staging_ttl_ms).await?;
+        reap_staging(
+            &driver,
+            self.options.multipart_staging_ttl_ms,
+            self.current_now_ms(),
+        )
+        .await?;
         let marker = claim_multipart_finalization(&driver, upload_id, &target.key).await?;
         let mut marker_cleanup = StagedPathCleanup::new(Arc::clone(&driver), marker);
         if let Err(error) = remove_tree(&driver, &upload_directory(upload_id)).await {
@@ -1931,7 +2035,12 @@ impl S3Session {
         max_parts: usize,
         marker: u32,
     ) -> S3Result<S3Response> {
-        reap_staging(&driver, self.options.multipart_staging_ttl_ms).await?;
+        reap_staging(
+            &driver,
+            self.options.multipart_staging_ttl_ms,
+            self.current_now_ms(),
+        )
+        .await?;
         let _ = read_manifest(&driver, upload_id, &target.key).await?;
         let directory = upload_directory(upload_id);
         let mut parts = Vec::new();
@@ -2253,14 +2362,13 @@ async fn staging_usage_bytes(driver: &Arc<dyn FsDriver>) -> S3Result<u64> {
     Ok(total)
 }
 
-async fn reap_staging(driver: &Arc<dyn FsDriver>, ttl_ms: i64) -> S3Result<()> {
+async fn reap_staging(driver: &Arc<dyn FsDriver>, ttl_ms: i64, now: i64) -> S3Result<()> {
     // Drivers without timestamp support cannot distinguish an active upload
     // from an expired one. Keep the quota and explicit DeleteObjects cleanup
     // guarantees, but never reap by guessing from an unavailable mtime.
     if !driver.capabilities().times {
         return Ok(());
     }
-    let now = now_ms();
     let expired = |mtime_ms: i64| mtime_ms > 0 && now.saturating_sub(mtime_ms) >= ttl_ms;
     let multipart_root = format!("/{MULTIPART_PREFIX}");
     let entries = match driver.readdir(&multipart_root).await {
@@ -4122,7 +4230,7 @@ fn sigv4_error(failure: SigV4Failure, presigned: bool) -> protocol::S3Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mount_rs_core::{ErrorCode, FileHandle, FsError, Result as FsResult, Stats};
+    use mount_rs_core::{ErrorCode, FileHandle, FsError, MemoryFs, Result as FsResult, Stats};
 
     struct ReturnedWriteCount(usize);
 
@@ -4160,5 +4268,79 @@ mod tests {
             assert!(matches!(error, S3Failure::S3(ref error) if error.code == "InternalError"));
             assert_eq!(position, 0);
         }
+    }
+
+    #[tokio::test]
+    async fn session_hooks_control_ids_clock_and_diagnostics() {
+        let request_ids = Arc::new(StdMutex::new(Vec::new()));
+        let error_reports = Arc::new(StdMutex::new(Vec::new()));
+        let assertion_reports = Arc::new(StdMutex::new(Vec::new()));
+        let clock_calls = Arc::new(AtomicU64::new(0));
+
+        let request_ids_for_hook = Arc::clone(&request_ids);
+        let error_reports_for_hook = Arc::clone(&error_reports);
+        let assertion_reports_for_hook = Arc::clone(&assertion_reports);
+        let clock_calls_for_hook = Arc::clone(&clock_calls);
+        let options = S3SessionOptions {
+            hooks: S3SessionHooks {
+                now_ms: Some(Arc::new(move || {
+                    clock_calls_for_hook.fetch_add(1, Ordering::Relaxed);
+                    Some(1_700_000_000_000)
+                })),
+                request_id: Some(Arc::new(move || {
+                    request_ids_for_hook
+                        .lock()
+                        .expect("request id hook")
+                        .push("hooked-request".to_owned());
+                    Some("hooked-request".to_owned())
+                })),
+                on_error: Some(Arc::new(move |message, head| {
+                    error_reports_for_hook
+                        .lock()
+                        .expect("error hook")
+                        .push((message, head.map(|head| (head.method, head.target))));
+                })),
+                on_assertion: Some(Arc::new(move |message| {
+                    assertion_reports_for_hook
+                        .lock()
+                        .expect("assertion hook")
+                        .push(message);
+                })),
+            },
+            ..S3SessionOptions::default()
+        };
+        let session = S3Session::new_with_options(MemoryFs::empty(), options);
+
+        assert_eq!(session.current_now_ms(), 1_700_000_000_000);
+        assert_eq!(clock_calls.load(Ordering::Relaxed), 1);
+        let head = S3RequestHead::new("GET", "/mountx/missing.txt");
+        let response = session.handle_request(head.clone(), Vec::new()).await;
+        assert_eq!(response.status, 404);
+        assert_eq!(
+            response
+                .headers
+                .iter()
+                .find(|(name, _)| name == "x-amz-request-id")
+                .map(|(_, value)| value.as_str()),
+            Some("hooked-request")
+        );
+        {
+            let error_reports = error_reports.lock().expect("error report");
+            assert_eq!(error_reports.len(), 1);
+            assert!(error_reports[0].0.contains("ENOENT"));
+            assert_eq!(
+                error_reports[0].1,
+                Some(("GET".to_owned(), "/mountx/missing.txt".to_owned()))
+            );
+        }
+
+        session.finish_request(Some(999), &head).await;
+        assert_eq!(
+            assertion_reports
+                .lock()
+                .expect("assertion report")
+                .as_slice(),
+            &["GET /mountx/missing.txt was answered twice".to_owned()]
+        );
     }
 }

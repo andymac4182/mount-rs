@@ -2659,12 +2659,16 @@ export interface S3ServerOptions {
   port?: number
   credentials?: S3Credentials
   region?: string
+  now?: () => number
+  requestId?: () => string
   maxBodyBytes?: number
   maxXmlBytes?: number
   readChunkBytes?: number
   drainTimeout?: number
   debug?: boolean
   onTransportError?: (error: unknown, peer: string | undefined) => void
+  onError?: (error: unknown, head: S3RequestHead | undefined) => void
+  onAssertion?: (message: string) => void
 }
 
 export interface S3SessionOptionsView {

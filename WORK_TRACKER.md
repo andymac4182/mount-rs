@@ -4039,6 +4039,15 @@ reproducible in a production-like environment.
   differential. These are current local and pinned-oracle gates only; live
   AWS/R2, physical power-loss durability, broader workload bounds, and
   native/hosted acceptance remain open, so W01-S3 stays **NO-GO**.
+- [x] The subsequent W01-S3 option/callback packet added Rust `S3SessionHooks`
+  and N-API `now`, `requestId`, `onError`, and `onAssertion` controls with
+  close-safe callback ownership. The release addon/declaration build,
+  callback observability test, Rust 5/6/29/5 packet, warning-denied Clippy,
+  package typecheck/distribution, session differential, 64-way/CAS
+  concurrency, and process-restart recovery passed. Current AWS remains
+  blocked by `missing_bucket` and current R2 by `count=285 limit=20`; physical
+  power-loss durability, broader workload bounds, and native/hosted acceptance
+  remain open, so W01-S3 stays **NO-GO**.
 - [ ] W10.1 Finish per-transport backend/platform acceptance matrix, including
   native lifecycle, disconnect/error behavior and streaming/backpressure.
 - [ ] W10.2 Verify transport auto-selection and explicit unsupported behavior.
