@@ -82,6 +82,8 @@ import {
   p9ClientProbe,
   p9MountOptions,
   p9Platform,
+  P9FrameAssembler,
+  framesFrom,
   P9DirentPacker,
   type P9AttachOptions,
   type MountP9Options,
@@ -512,6 +514,13 @@ function checkServerAndKvSubpaths(): void {
   const p9DefaultMaxLocksPerFile: 1024 = DEFAULT_MAX_LOCKS_PER_FILE
   const p9DirentPacker = new P9DirentPacker(64)
   const p9DirentMaxSize: number = p9DirentPacker.maxSize
+  const p9FrameAssembler = new P9FrameAssembler()
+  const p9SyncChunks: Iterable<Uint8Array> = [Uint8Array.of(7)]
+  const p9AsyncChunks: AsyncIterable<Uint8Array> = (async function* () {
+    yield Uint8Array.of(7)
+  })()
+  const p9SyncFrames = framesFrom(p9SyncChunks, p9FrameAssembler)
+  const p9AsyncFrames = framesFrom(p9AsyncChunks)
   void p9DefaultPort
   void p9DefaultSocketMode
   void p9DefaultMaxInFlight
@@ -519,6 +528,8 @@ function checkServerAndKvSubpaths(): void {
   void p9LockEofEnd
   void p9DefaultMaxLocksPerFile
   void p9DirentMaxSize
+  void p9SyncFrames
+  void p9AsyncFrames
   const p9FidOptions: FidTableOptions = { useDriverIno: true }
   const p9FidTable: FidTable = new FidTable(p9FidOptions)
   const p9Fid = p9FidTable.create(1, "/")

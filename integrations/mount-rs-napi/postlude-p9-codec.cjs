@@ -276,8 +276,7 @@ function installP9Codec(binding) {
   ]
   binding.EMPTY_BODY = new Set(emptyTypes.map((name) => binding[`P9_${name}`]).filter((value) => typeof value === "number"))
 
-  binding.framesFrom = async function* framesFrom(chunks, limit = binding.P9_DEFAULT_MAX_FRAME) {
-    const assembler = new P9FrameAssembler(limit)
+  binding.framesFrom = async function* framesFrom(chunks, assembler = new P9FrameAssembler()) {
     for await (const chunk of chunks) {
       for (const frame of assembler.push(chunk)) yield frame
     }

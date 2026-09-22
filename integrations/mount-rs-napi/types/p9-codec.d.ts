@@ -512,7 +512,10 @@ export declare const EMPTY_BODY: ReadonlySet<number>
 export declare function stringByteLength(value: string): number
 export declare function direntSize(name: string): number
 export declare function readDirents(bytes: Uint8Array): P9Dirent[]
-export declare function framesFrom(chunks: AsyncIterable<Uint8Array>, limit?: number): AsyncGenerator<Uint8Array>
+export declare function framesFrom(
+  source: AsyncIterable<Uint8Array> | Iterable<Uint8Array>,
+  assembler?: P9FrameAssembler,
+): AsyncGenerator<Uint8Array>
 
 export declare function writeTversion(writer: P9Writer, value: Tversion): void
 export declare function readTversion(reader: P9Reader): Tversion
