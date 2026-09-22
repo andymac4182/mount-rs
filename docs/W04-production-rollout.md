@@ -192,9 +192,17 @@ targets exact published head `c87adf7b`. ARM, macOS-latest, and macOS-15-intel
 Node jobs are terminal success with both exact recovery steps green and direct
 rollback/N-API/zero-provider-failure markers; Ubuntu Node
 [106699957273](https://github.com/andymac4182/mount-rs/actions/runs/35713659406/job/106699957273)
-is still queued. This is partial current-tip evidence only, not a W04 or
-production pass. The run must finish its Ubuntu, native/package, provider/W26,
-and Rust lanes before the ledger can promote current-main qualification.
+also completed successfully with both exact recovery steps green and the same
+rollback/N-API/zero-provider-failure markers. This is four-platform Unix Node
+recovery evidence for candidate `c87adf7b`, not a full W04 or production pass:
+native FUSE failed its rootless-kernel step and was cancelled during finalizer
+cleanup, Ubuntu Rust was cancelled after two failed tests and a hung invalid
+device-read test, Windows Node timed out before recovery, and W26 evidence
+[106716562320](https://github.com/andymac4182/mount-rs/actions/runs/35713659406/job/106716562320)
+is still queued with no runner after all four provider jobs became terminal.
+The provider metrics were SQLite/R2 `661.53`, PGlite/R2 `1342.61`, TiDB/R2
+`493.32`, and FoundationDB/R2 `184.54` IOPS against the hard `1000` target;
+the W26 packet is not accepted. Production remains **NO-GO**.
 
 The retained native package artifacts provide current candidate provenance for
 the support matrix:

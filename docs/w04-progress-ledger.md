@@ -13,6 +13,60 @@ The historical snapshots below remain part of the audit trail. This section is
 the current status for the active production push and must be read first when a
 later mainline push has made an older snapshot stale.
 
+### Live qualification update (2026-09-22 21:24 AEST)
+
+Manual qualification run [35713659406](https://github.com/andymac4182/mount-rs/actions/runs/35713659406)
+is still non-terminal at exact source `c87adf7bf79aa974480bf6397d1873b4300d291d`.
+The run-level queue is now attributable to one hosted job rather than an
+unresolved workflow dependency: W26 evidence job
+[106716562320](https://github.com/andymac4182/mount-rs/actions/runs/35713659406/job/106716562320)
+has all four `needs` jobs terminal, but remains `queued` with
+`runner_name: null` and no executable step log. This is a GitHub-hosted runner
+allocation/backlog gate; it is not W26 packet evidence. The repository's
+`origin/main` has moved on to later commits since this candidate was dispatched,
+so the run is candidate-specific rather than latest-main acceptance.
+
+All four Unix Node jobs are now terminal success: ARM
+[106699957205](https://github.com/andymac4182/mount-rs/actions/runs/35713659406/job/106699957205),
+macOS-latest
+[106699956916](https://github.com/andymac4182/mount-rs/actions/runs/35713659406/job/106699956916),
+macOS-15-intel
+[106699957225](https://github.com/andymac4182/mount-rs/actions/runs/35713659406/job/106699957225),
+and Ubuntu
+[106699957273](https://github.com/andymac4182/mount-rs/actions/runs/35713659406/job/106699957273).
+Each passed both exact `Verify fragmented request early rejection` and
+`Verify PGlite integration and restart recovery` steps; the direct logs also
+contain `PGLITE_BACKUP_RESTORE_ROLLBACK_PASS`, `mount-rs N-API PGlite
+integration: PASS`, and `providersFailed: 0`. This is 4/4 current-candidate
+Unix Node recovery evidence, but it does not close the whole qualification.
+
+The remaining terminal boundaries are explicit. Native FUSE
+[106699957151](https://github.com/andymac4182/mount-rs/actions/runs/35713659406/job/106699957151)
+failed `Exercise actual rootless kernel file operations`; all mounted follow-up
+steps were skipped and its completion hook was still finalizing before the job
+was cancelled, with no retrievable direct log. Ubuntu Rust
+[106699957154](https://github.com/andymac4182/mount-rs/actions/runs/35713659406/job/106699957154)
+was cancelled at its 25-minute bound after
+`failed_graceful_unmount_restores_retryable_active_state` and
+`destroy_remains_readable_when_read_concurrency_is_saturated` failed and
+`invalid_device_read_reports_one_owned_read_error` exceeded 60 seconds; no
+final Rust pass exists. Windows Node
+[106699957123](https://github.com/andymac4182/mount-rs/actions/runs/35713659406/job/106699957123)
+failed `webdav-provider-network-concurrency` with a `DOMException
+[TimeoutError]` before W04 recovery. Aggregate-native was skipped because the
+Windows job failed.
+
+The provider packet is not accepted: Ozone composition measured SQLite/R2
+`661.53` IOPS (failed) and PGlite/R2 `1342.61` (passed), Ozone/TiDB measured
+`493.32`, and Ozone/FoundationDB measured `184.54`, all against the hard
+`1000` target; the materialized rows completed 400/400 iterations with zero
+operation and cleanup failures. Base Ozone passed its configuration, health,
+restart, and cleanup checks, but the W26 aggregator remains queued and cannot
+convert partial artifacts into a packet. Current-candidate Unix recovery is
+therefore 100%, current-main full qualification remains 0%, and production is
+still **NO-GO** pending native/package, Rust, provider/W26, deployment
+persistence/rollback, observability/runbook, ownership, and release evidence.
+
 ### Live qualification update (2026-09-22 20:35 AEST)
 
 Fresh manual qualification run [35713659406](https://github.com/andymac4182/mount-rs/actions/runs/35713659406)
@@ -84,6 +138,7 @@ pre-terminal wording as historical context; this override is authoritative.
 
 | Work item | Status | Completion | Evidence | Remaining action | Provisional estimate | External blocker or gate |
 | --- | --- | ---: | --- | --- | ---: | --- |
+| Current-candidate terminal qualification boundary | Four Unix Node lanes PASS; hosted/native/provider support lanes mixed; no full acceptance promoted | 100% current-candidate Unix Node recovery / 0% full qualification and production approval | Run [35713659406](https://github.com/andymac4182/mount-rs/actions/runs/35713659406) at `c87adf7b`: ARM [106699957205](https://github.com/andymac4182/mount-rs/actions/runs/35713659406/job/106699957205), macOS-latest [106699956916](https://github.com/andymac4182/mount-rs/actions/runs/35713659406/job/106699956916), macOS-15-intel [106699957225](https://github.com/andymac4182/mount-rs/actions/runs/35713659406/job/106699957225), and Ubuntu [106699957273](https://github.com/andymac4182/mount-rs/actions/runs/35713659406/job/106699957273) are terminal success with both exact recovery steps and rollback/N-API/`providersFailed: 0` markers. Native FUSE [106699957151](https://github.com/andymac4182/mount-rs/actions/runs/35713659406/job/106699957151) failed rootless operations and was cancelled in finalization; Ubuntu Rust [106699957154](https://github.com/andymac4182/mount-rs/actions/runs/35713659406/job/106699957154) was cancelled after two failed tests and a hung invalid-device-read boundary; Windows Node [106699957123](https://github.com/andymac4182/mount-rs/actions/runs/35713659406/job/106699957123) timed out before recovery; W26 [106716562320](https://github.com/andymac4182/mount-rs/actions/runs/35713659406/job/106716562320) is queued with no runner. Provider metrics are SQLite/R2 `661.53`, PGlite/R2 `1342.61`, TiDB/R2 `493.32`, and FoundationDB/R2 `184.54` IOPS against `1000`. | Diagnose/fix the Rust/FUSE and Windows boundaries, decide or remediate provider scope/capacity, obtain a terminal W26 packet, then requalify the latest published mainline before any W04/current-tip promotion. | 1–3h engineering/triage plus hosted rerun; runner/provider/owner waits external | Hosted runner allocation, Linux FUSE kernel/finalizer, Windows network timing, Rust lifecycle tests, provider capacity/W26, deployment, operations, ownership, and release approval |
 | Fresh current-main qualification | In progress; 3/4 Unix Node terminal PASS and Ubuntu Node queued; no full acceptance promoted | 75% current-tip Unix Node recovery / 0% full qualification and production approval | Run [35713659406](https://github.com/andymac4182/mount-rs/actions/runs/35713659406) targets exact published head `c87adf7b`. ARM [106699957205](https://github.com/andymac4182/mount-rs/actions/runs/35713659406/job/106699957205), macOS-latest [106699956916](https://github.com/andymac4182/mount-rs/actions/runs/35713659406/job/106699956916), and macOS-15-intel [106699957225](https://github.com/andymac4182/mount-rs/actions/runs/35713659406/job/106699957225) are terminal success with both exact steps green and rollback/N-API/`providersFailed: 0` markers; Ubuntu [106699957273](https://github.com/andymac4182/mount-rs/actions/runs/35713659406/job/106699957273) remains queued. | Wait for Ubuntu Node to start and complete, inspect its direct log, then classify every terminal native/package/provider/W26/Rust job before any W04 or production promotion. | 0.25h evidence capture/documentation; hosted runner wait external | Ubuntu runner scheduling, native FUSE, Windows/package, provider capacity/W26, Rust, deployment, operations, ownership, and release gates |
 | Fresh pre-lockfile-refresh qualification | Terminal diagnostic; no current-tip acceptance promoted | 0% current-main qualification / historical W04.2 closure retained | Run [35708551380](https://github.com/andymac4182/mount-rs/actions/runs/35708551380) at `b95fd6ad` produced terminal failures in ARM Node [106683288606](https://github.com/andymac4182/mount-rs/actions/runs/35708551380/job/106683288606), macOS-15-intel Node [106683288605](https://github.com/andymac4182/mount-rs/actions/runs/35708551380/job/106683288605), Ubuntu Node [106683288691](https://github.com/andymac4182/mount-rs/actions/runs/35708551380/job/106683288691), and macOS-latest Node [106683288650](https://github.com/andymac4182/mount-rs/actions/runs/35708551380/job/106683288650). Each exact early-rejection step passed; each recovery step passed rollback/N-API/mounted-PGlite markers before the stale standalone `tests/provider_matrix/Cargo.lock` `--locked` failure. | Publish this ledger boundary, then dispatch and inspect a fresh run from the latest `origin/main` containing lockfile refresh `6797a2d8`; require all exact steps to pass before promoting current-tip qualification. | 0.75h diagnosis, local reproduction, and documentation; 0.5–1.5h hosted wait external | Mainline drift at dispatch, GitHub runners, provider/native/Rust gates, and production approval |
 | Fresh W26/provider capacity packet | Terminal fail-closed; no provider capacity acceptance | 0% accepted W26 packet / 25% advertised capacity rows | W26 aggregate [106689376593](https://github.com/andymac4182/mount-rs/actions/runs/35708551380/job/106689376593) rejected the missing `OZONE_IOPS_PASS` marker. Composition [106683288197](https://github.com/andymac4182/mount-rs/actions/runs/35708551380/job/106683288197) retained SQLite/R2 `369.52` IOPS and PGlite/R2 `1177.61`; TiDB/R2 [106683288453](https://github.com/andymac4182/mount-rs/actions/runs/35708551380/job/106683288453) retained `432.58`; FoundationDB/R2 [106683288329](https://github.com/andymac4182/mount-rs/actions/runs/35708551380/job/106683288329) retained `415.38`. Base Ozone health/ready/restart/cleanup passed, but the hard target is not met for the failing rows. | Remediate or explicitly remove failing providers from advertised production scope, rerun the packet from current main, and obtain provider-owner approval. | 0.25h artifact inspection/classification; provider remediation and rerun external | Hosted provider capacity, W26 packet contract, scope owner, and release approval |
@@ -727,6 +782,7 @@ snapshot, while the broader work includes time spent waiting on hosted CI.
 | 2026-09-22 19:03–19:52 AEST | Monitored fresh run `35708551380`, reproduced the PGlite gate locally, confirmed the newer mainline provider-matrix lockfile refresh, downloaded retained W26/provider artifacts, and classified native-FUSE and Ubuntu-Rust terminal boundaries. | All four Unix Node jobs passed early rejection and the substantive mounted PGlite, rollback, N-API, and reconnect markers before the pre-refresh standalone `tests/provider_matrix/Cargo.lock` failure; W26/provider capacity remained below target except PGlite/R2, native FUSE failed without a retrievable direct log, and Ubuntu Rust timed out after a failed/hanging test boundary. This is diagnostic evidence only; production remains NO-GO. | Hosted diagnosis/local reproduction/documentation, ~0.75h; current-main hosted rerun, provider remediation, and production-owner gates external |
 
 | 2026-09-22 20:01–20:35 AEST | Published the lockfile/ledger recovery chunk at `c87adf7b`, dispatched current-main run `35713659406`, and inspected the three terminal ARM/macOS Node logs while Ubuntu Node remained queued. | ARM, macOS-latest, and macOS-15-intel passed both exact Node recovery steps with rollback, N-API, and zero-provider-failure markers; Ubuntu Node is queued behind active hosted capacity, so current-main qualification remains 3/4 and production remains NO-GO. | Hosted evidence/documentation and publication, ~0.25h; Ubuntu runner, native/provider/W26/Rust, and production-owner gates external |
+| 2026-09-22 20:35–21:24 AEST | Monitored run `35713659406` through the remaining Unix Node completion, retrieved the direct provider artifacts/logs, diagnosed the queued W26 aggregator as runner allocation (`runner_name: null`) after all `needs` jobs were terminal, and classified native FUSE, Ubuntu Rust, Windows Node, and aggregate-native. | All four Unix Node jobs passed both exact recovery steps with rollback/N-API/zero-provider-failure markers. Native FUSE failed rootless operations and was cancelled in finalization; Ubuntu Rust was cancelled after two failed tests plus a hung invalid-device-read test; Windows timed out before recovery; provider IOPS were SQLite/R2 `661.53`, PGlite/R2 `1342.61`, TiDB/R2 `493.32`, and FoundationDB/R2 `184.54`; W26 remained queued with no packet evidence. Production remains NO-GO. | Hosted evidence/diagnosis/documentation, ~0.8h; runner allocation, native/provider rerun, deployment, operations, ownership, and release gates external |
 
 ## Publication note
 

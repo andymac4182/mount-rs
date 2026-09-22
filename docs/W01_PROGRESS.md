@@ -635,12 +635,9 @@ result is claimable, so this does not change the production **NO-GO** decision.
 At current published tip `176445b037196f901c80d032a957fbb55eb9b5ed`, the
 shared-wrapper WebDAV Rust requalification passed 41/41; warning-denied
 WebDAV Clippy, formatting, `git diff --check`, and the no-worktree-`target/`
-check also passed. This is current local transport evidence only and does
-not promote the queued Ubuntu native job or the live-provider and durability
-gates.
-check also passed. This is current local transport evidence only and does
-not promote the queued Ubuntu native job or the live-provider and durability
-gates.
+check also passed. This is current local transport evidence only; hosted
+package/native evidence is recorded separately, while live-provider and
+durability gates remain distinct.
 
 A relevance audit found no changes between hosted SHA
 `92a6539e6a91d67a811b77cf688fc4ad2177f858` and current published tip
@@ -648,25 +645,22 @@ A relevance audit found no changes between hosted SHA
 binding, CI workflow, or native build wrapper, so the hosted macOS result
 covers the current implementation and workflow.
 
-The preserved non-canceling run remained in the same queue state on the next
-bounded poll: macOS arm64, macOS Intel, and Ubuntu arm64 Node jobs are
-terminal success, while Ubuntu Node `106702902010` and native WebDAV jobs
-`106702902155`/`106702902262` remain queued. This is an external GitHub
-runner-capacity blocker, not a test failure; no current hosted native WebDAV
-result is claimable.
-
-The preserved run then completed macOS native-WebDAV job `106702902262`
-successfully: checkout, toolchain/cache, and the native WebDAV I/O command
-all passed, with only the Linux client-install step skipped by platform. The
-Ubuntu native-WebDAV job `106702902155` remains queued, so the current
-cross-platform hosted native gate is still open.
+The preserved manual run `35714570430` is now terminal for all six
+WebDAV-relevant jobs at `92a6539e6a91d67a811b77cf688fc4ad2177f858`: Node
+Ubuntu x64/arm64, macOS arm64/Intel, and native WebDAV Ubuntu/macOS all
+passed. Its aggregate remains nonterminal on unrelated jobs, but no WebDAV,
+N-API, CI-workflow, or native-build files changed through current tip
+`f9e338e60b8e28524a223c6dddf6f2709cd748b3`, so this closes the current
+hosted package/native slices only. Live-provider, physical power-loss/crash
+durability, durable-lock, and stronger same-resource ordering gates remain.
 
 The same rebuilt package also passed the pinned barrel differential, supported
 session/member differential, and current TypeScript/Rust HTTP differential:
 `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921` yielded 40 paired
 S3+WebDAV cases, including the WebDAV slice. These remain local oracle and
-loopback results; hosted current-package qualification is live, but its native
-WebDAV jobs remain queued.
+loopback results; hosted current-package qualification is terminal for its
+six WebDAV-relevant jobs, while the aggregate remains nonterminal on
+unrelated jobs.
 
 The pinned WebDAV oracle deliberately has no `PathLock` for this HTTP session.
 The fresh concurrent lock regression passes with two simultaneous writes
@@ -677,7 +671,9 @@ Clippy passes.
 WebDAV therefore supports concurrent independent-resource work and lock/`If`
 coordination, but does not claim linearizable same-resource ordering or atomic
 same-target `PUT` publication. Power-loss durability, live-provider behavior,
-and durable locks remain open gates.
+and physical crash/power-loss durability remain open gates; durable lock
+persistence and stronger same-resource ordering are explicit supported-scope
+exclusions.
 
 The current shell has no AWS/R2/Cloudflare credential names available, so live
 provider acceptance remains an explicit external blocker; no credential values
