@@ -26,9 +26,18 @@ function DownloadsPage() {
         <p className="eyebrow">Downloads / GitHub Releases</p>
         <h1>Get the mount-rs CLI.</h1>
         <p className="doc-lede">
-          CLI binaries are published by GitHub Actions as GitHub Release
-          assets. This page records the currently verified preview and its
-          exact checksum; Vercel does not mirror executable bytes.
+          The repository&apos;s{' '}
+          <a
+            href="https://github.com/andymac4182/mount-rs/blob/main/.github/workflows/cli-release.yml"
+            {...externalProps()}
+          >
+            active GitHub Actions publisher
+          </a>{' '}
+          is configured to publish matching CLI preview tags. Downloads here
+          come from public GitHub Releases; Vercel does not mirror executable
+          bytes. The current <code>v0.1.0-cli-preview</code> asset and checksum
+          are live and verified, but no run of that publisher is recorded, so
+          we do not claim that workflow produced this release.
         </p>
 
         <div className="callout callout-amber">
