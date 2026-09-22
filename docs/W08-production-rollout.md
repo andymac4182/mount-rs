@@ -317,6 +317,32 @@ candidate-release, canary, rollback or owner-approval gates. P01–P09 remain
 open and the decision remains NO-GO. Runs `35690233250` and `35690379506`
 were cancelled before job creation with `jobs=[]` and are not evidence.
 
+The current public source `dccd8351690ba21b4ea01ab8680369c76c442041` was
+then freshly requalified after the S3 pipelined-response coverage and
+concurrent W01/W26 updates: the shared-target full locked workspace test and
+strict Clippy exited 0, changed N-API/package and workflow YAML checks passed,
+and W07/W08 tracking validators plus `git diff --check` passed. Hosted W08
+policy run `35691426889`, job `106629152293`, completed successfully in 2m24s
+with both policy steps green. This is exact source-health and hosted
+implementation/static evidence only; the intervening cancelled runs had
+`jobs=[]` and are not evidence. No provider credentials, production
+deployment, candidate tag, canary, rollback or owner approval exists; P01–P09
+remain open and the decision remains NO-GO.
+
+The reconciled current public source
+`5a6d6507c6deac160f54a246a2d715c05fc35268` was freshly requalified after the
+S3 rejected-body reuse coverage and concurrent W01/W04/W05/W07 updates. The
+full locked workspace test and strict Clippy exited 0; all runnable tests
+passed, provider/native rows remained explicit capability-gated skips, changed
+N-API/package checks and five workflow YAML parses passed, and W07/W08 tracking
+validators/tests plus `git diff --check` passed. Hosted W08 policy run
+`35692664144`, job `106632773424`, completed successfully in 2m48s with both
+policy steps green. The run's only annotations are GitHub platform deprecation
+notices, not W08 failures. This is exact source-health and hosted
+implementation/static evidence only; no provider credentials, production
+deployment, candidate tag, canary, rollback or owner approval exists. P01–P09
+remain open and the decision remains NO-GO.
+
 After origin/main advanced with the 9P EOF/backpressure server fix `1179d9e3`,
 N-API test expansion and site component updates, exact merged source
 `d725248534eb897de4d49e916c47425e6266c05d` was freshly requalified. The full
