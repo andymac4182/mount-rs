@@ -218,6 +218,24 @@ async fn construction_options_control_identity_timeouts_cache_and_errors() {
             ..FuseSessionOptions::default()
         },
     );
+    assert!(!path_identity.options().use_driver_ino);
+    assert_eq!(
+        path_identity.options().attr_timeout,
+        Duration::new(1, 250_000_000)
+    );
+    assert_eq!(
+        path_identity.options().entry_timeout,
+        Duration::new(2, 500_000_000)
+    );
+    assert_eq!(
+        path_identity.options().negative_timeout,
+        Duration::new(3, 750_000_000)
+    );
+    assert!(!path_identity.options().keep_cache);
+    assert_eq!(
+        path_identity.options().flush_mechanism,
+        FuseFlushMechanism::Noflush
+    );
     let path_visible = number(&request(&mut path_identity, 1, 1, b"visible\0").await, 0);
     let path_alias = number(&request(&mut path_identity, 1, 1, b"alias\0").await, 0);
     assert_ne!(path_visible, path_alias);
