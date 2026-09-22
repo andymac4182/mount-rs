@@ -142,6 +142,10 @@ types = types.replaceAll("resume(entry: P9Fid, offset: bigint): P9DirResume | nu
 // with that runtime boundary after every clean napi build.
 types = types.replaceAll("getlock(request: P9LockRequest): P9LockHolder | null", "getlock(request: P9LockRequest): P9LockHolder | undefined")
 types = types.replaceAll("userFor(fid: number): P9User | null", "userFor(fid: number): P9User | undefined")
+types = types.replace(
+  "export interface P9User {\n  uname: string\n  uid?: number\n  aname: string\n}",
+  "export interface P9User {\n  uname: string\n  uid: number | undefined\n  aname: string\n}",
+)
 types = types.replaceAll("get msize(): number | null", "get msize(): number | undefined")
 types = types.replaceAll("get version(): string | null", "get version(): string | undefined")
 types = types.replace(

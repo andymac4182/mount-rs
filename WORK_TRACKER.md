@@ -3093,8 +3093,16 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   - [ ] **Observability and operations:** expose and alert on cluster health,
     authority publication age/errors, reader failures, lease-fence/ESTALE,
     transaction retries/maybe-committed EIO and cleanup/space pressure.
-    Publish the dashboards, on-call runbook, escalation thresholds and
-    incident/recovery ownership.
+    The FoundationDB authority and shared-reader handles now expose bounded
+    process-local `stats()` snapshots for publication/read attempts,
+    successes/failures, last provider-time observations and local diagnostic
+    timestamps; the hosted shared-authority path asserts the success/failure
+    accounting and emits `FOUNDATIONDB_AUTHORITY_STATS_PASS`. Map these
+    snapshots into the approved collector and pager, publish dashboards,
+    escalation thresholds and incident/recovery ownership, then execute the
+    alert drills. The API is an implementation input only: counters reset with
+    a new handle and no production collector, alert route or owner evidence is
+    claimed yet.
   - [ ] **Rollout and rollback:** stage a canary with a holdback, define
     go/no-go and abort criteria, verify backward/forward compatibility of the
     keyspace and configuration, rehearse rollback/authority recovery and
@@ -3635,11 +3643,16 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provider run or grant release approval. *(Implementation/static
   qualification; production evidence and approval remain external.)*
 
-  Merged source base `32b1a229cd195ad90df592437ccfe10d88cb4804` was freshly
-  reverified after concurrent WebDAV mounted-restart cleanup correction,
-  chunked lease-release fix, 9P synchronous mount inspection, FoundationDB
-  qualification-harness updates, S3 conditional-put/session-concurrency
-  gateway coverage, N-API
+  Tested source base `c6d6778517f854ac678a80920fe4fb8afd204808` was freshly
+  reverified after the FoundationDB storage/test qualification changes, 9P
+  undefined-UID preservation, W07 lease-authority telemetry, N-API
+  postbuild/session-metadata changes, the W26 fenced-metadata publication fast
+  path, the 9P platform-type alias and 9P direct-probe
+  absence-field normalization and WebDAV
+  shared-resource ordering qualification, plus concurrent WebDAV
+  mounted-restart cleanup correction, chunked lease-release fix, 9P synchronous
+  mount inspection, FoundationDB qualification-harness updates, S3
+  conditional-put/session-concurrency gateway coverage, N-API
   provider-network cleanup, RustFS/Ozone lockfile refreshes, 9P bounded-reader,
   9P frame-assembler and WebDAV native-concurrency, R2 upload coalescing, N-API
   declaration/P9 normalization, 9P codec, S3-session-concurrency,
@@ -3652,7 +3665,9 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   package JSON also passed static checks. Provider/native rows requiring TiDB,
   RustFS, PGlite, R2, FUSE or NFS remained explicit opt-in skips. This is
   source-health and tracking-control evidence only and does not close
-  W08-P01–P09.
+  W08-P01–P09. This exact merged source was requalified after the FoundationDB,
+  9P, W07 and N-API source changes; no source result is inferred from a
+  documentation-only merge.
 
   A fresh 11:36 AEST repository-policy check passed the positive production
   config fixture with an out-of-band non-secret TLS-policy URL, failed closed

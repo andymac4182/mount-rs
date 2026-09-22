@@ -783,6 +783,7 @@ async function exerciseP9() {
     );
     assert.deepEqual(session.userFor(1), {
       uname: "node",
+      uid: undefined,
       aname: "",
     });
     assert.ok(server.connections >= 1);

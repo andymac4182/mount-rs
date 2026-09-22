@@ -162,11 +162,16 @@ tests and strict Clippy with `-D warnings` using a bounded external Cargo
 target. This is implementation evidence only; credentialed provider,
 production topology, operational, canary and approval gates remain open.
 
-Merged source base `32b1a229cd195ad90df592437ccfe10d88cb4804` was freshly
-reverified locally after the concurrent WebDAV mounted-restart cleanup
-correction, chunked lease-release fix, 9P synchronous mount inspection,
-FoundationDB qualification-harness updates and S3 conditional-put/session-
-concurrency gateway coverage,
+Tested source base `c6d6778517f854ac678a80920fe4fb8afd204808` was freshly
+reverified locally after the FoundationDB storage/test qualification changes,
+9P undefined-UID preservation, W07 lease-authority telemetry, N-API
+postbuild/session-metadata changes, the W26 fenced-metadata publication fast
+path, the 9P platform-type alias and 9P direct-probe
+absence-field normalization and
+WebDAV shared-resource ordering qualification, plus the concurrent WebDAV
+mounted-restart cleanup correction, chunked lease-release fix, 9P synchronous
+mount inspection, FoundationDB qualification-harness updates and S3
+conditional-put/session-concurrency gateway coverage,
 N-API provider-network cleanup, RustFS/Ozone lockfile refreshes, 9P
 bounded-reader fix, 9P frame-assembler, WebDAV native-concurrency, R2 upload
 coalescing, N-API
@@ -180,7 +185,9 @@ packet remains NO-GO with zero evidence records. Changed N-API JavaScript and
 package JSON also passed static checks. This is source-health and tracking-
 control evidence only and does not close any production gate. Provider/native
 rows requiring TiDB, RustFS, PGlite, R2, FUSE or NFS remained explicit opt-in
-skips.
+skips. This exact merged source was requalified after the FoundationDB, 9P,
+W07 and N-API source changes; no source result is inferred from a
+documentation-only merge.
 
 A fresh credential-free admission check at **2026-09-22 11:36 AEST** passed the
 positive production-config fixture with a non-secret TLS-policy URL supplied
