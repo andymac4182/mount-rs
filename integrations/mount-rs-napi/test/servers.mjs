@@ -2757,6 +2757,10 @@ await within(
       await runPhase("WebDAV exercise", exerciseWebdav)
       return
     }
+    if (requestedServerPhase === "s3") {
+      await runPhase("S3 exercise", exerciseS3)
+      return
+    }
     if (requestedServerPhase !== undefined) {
       throw new Error(`unknown server phase: ${requestedServerPhase}`)
     }

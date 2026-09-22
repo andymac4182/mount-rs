@@ -104,6 +104,12 @@ pub struct S3Server {
     task: Mutex<Option<JoinHandle<Result<(), std::io::Error>>>>,
 }
 
+#[derive(Clone)]
+struct HttpState {
+    session: Arc<S3Session>,
+    hooks: S3ServerHooks,
+}
+
 #[derive(Default)]
 struct ConnectionShutdown {
     cancelled: AtomicBool,
@@ -192,7 +198,10 @@ impl S3Server {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let app = Router::new()
             .fallback(any(handle_http))
-            .with_state(session.clone());
+            .with_state(HttpState {
+                session: session.clone(),
+                hooks: hooks.clone(),
+            });
         let hooks_for_task = hooks.clone();
         let tracked_listener = TrackedListener {
             listener,
@@ -453,10 +462,7 @@ impl Drop for TrackedIo {
     }
 }
 
-async fn handle_http(
-    State(session): State<Arc<S3Session>>,
-    request: Request<Body>,
-) -> impl IntoResponse {
+async fn handle_http(State(state): State<HttpState>, request: Request<Body>) -> impl IntoResponse {
     let method = request.method().as_str().to_owned();
     let target = request
         .uri()
@@ -470,7 +476,8 @@ async fn handle_http(
     let body: S3RequestBody = Box::pin(RequestBodyStream {
         inner: request.into_body().into_data_stream(),
     });
-    let response = session
+    let response = state
+        .session
         .handle_request_stream(
             S3RequestHead {
                 method,
@@ -480,7 +487,7 @@ async fn handle_http(
             body,
         )
         .await;
-    response_from_s3(response)
+    response_from_s3(response, &state.hooks)
 }
 
 struct RequestBodyStream {
@@ -500,8 +507,13 @@ impl Stream for RequestBodyStream {
     }
 }
 
-fn response_from_s3(response: S3StreamResponse) -> Response<Body> {
+fn response_from_s3(response: S3StreamResponse, hooks: &S3ServerHooks) -> Response<Body> {
     let status = StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let expected_length = response.headers.iter().find_map(|(name, value)| {
+        name.eq_ignore_ascii_case("content-length")
+            .then(|| value.parse::<u64>().ok())
+            .flatten()
+    });
     let mut builder = Response::builder().status(status);
     for (name, value) in response.headers {
         if let (Ok(name), Ok(value)) = (
@@ -513,7 +525,14 @@ fn response_from_s3(response: S3StreamResponse) -> Response<Body> {
     }
     let body = match response.body {
         Some(S3StreamBody::Bytes(bytes)) => Body::from(bytes),
-        Some(S3StreamBody::Stream(stream)) => Body::from_stream(stream),
+        Some(S3StreamBody::Stream(stream)) => Body::from_stream(FramedResponseBody {
+            inner: stream,
+            expected_length,
+            written: 0,
+            hooks: hooks.clone(),
+            reported: false,
+            finished: false,
+        }),
         None => Body::empty(),
     };
     builder.body(body).unwrap_or_else(|_| {
@@ -522,6 +541,84 @@ fn response_from_s3(response: S3StreamResponse) -> Response<Body> {
             .body(Body::empty())
             .expect("static response")
     })
+}
+
+struct FramedResponseBody {
+    inner: crate::session::S3ResponseBodyStream,
+    expected_length: Option<u64>,
+    written: u64,
+    hooks: S3ServerHooks,
+    reported: bool,
+    finished: bool,
+}
+
+impl FramedResponseBody {
+    fn report_failure(&mut self, message: String) {
+        if self.reported {
+            return;
+        }
+        self.reported = true;
+        report(
+            &self.hooks,
+            S3TransportError {
+                kind: S3TransportErrorKind::Connection,
+                peer: None,
+                message,
+            },
+        );
+    }
+
+    fn framing_error(&mut self, message: String) -> Poll<Option<Result<Vec<u8>, std::io::Error>>> {
+        self.report_failure(message.clone());
+        self.finished = true;
+        Poll::Ready(Some(Err(std::io::Error::new(
+            ErrorKind::UnexpectedEof,
+            message,
+        ))))
+    }
+}
+
+impl Stream for FramedResponseBody {
+    type Item = Result<Vec<u8>, std::io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.finished {
+            return Poll::Ready(None);
+        }
+        match self.inner.as_mut().poll_next(context) {
+            Poll::Ready(Some(Ok(chunk))) => {
+                let produced = self.written.saturating_add(chunk.len() as u64);
+                if let Some(expected) = self.expected_length
+                    && produced > expected
+                {
+                    return self.framing_error(format!(
+                        "S3 response body out of frame: declared {expected} bytes and produced {produced}"
+                    ));
+                }
+                self.written = produced;
+                Poll::Ready(Some(Ok(chunk)))
+            }
+            Poll::Ready(Some(Err(error))) => {
+                self.finished = true;
+                self.report_failure(format!("S3 response body stream failed: {error}"));
+                Poll::Ready(Some(Err(error)))
+            }
+            Poll::Ready(None) => {
+                self.finished = true;
+                if let Some(expected) = self.expected_length
+                    && self.written != expected
+                {
+                    let written = self.written;
+                    return self.framing_error(format!(
+                        "S3 response body out of frame: declared {expected} bytes and produced {}",
+                        written
+                    ));
+                }
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
 }
 
 /// Convenience constructor for a single-driver gateway.

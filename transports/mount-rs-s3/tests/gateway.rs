@@ -2363,6 +2363,80 @@ impl FsDriver for ProbeFs {
 }
 
 #[derive(Clone)]
+struct ShortReadFs {
+    inner: MemoryFs,
+    path: String,
+    deliver: u64,
+}
+
+struct ShortReadHandle {
+    inner: Arc<dyn FileHandle>,
+    deliver: u64,
+}
+
+#[async_trait]
+impl FileHandle for ShortReadHandle {
+    async fn read(&self, buffer: &mut [u8], position: Option<u64>) -> FsResult<usize> {
+        let Some(position) = position else {
+            return self.inner.read(buffer, None).await;
+        };
+        if position >= self.deliver {
+            return Ok(0);
+        }
+        let remaining = self.deliver - position;
+        let limit = remaining.min(buffer.len() as u64) as usize;
+        self.inner.read(&mut buffer[..limit], Some(position)).await
+    }
+
+    async fn write(&self, buffer: &[u8], position: Option<u64>) -> FsResult<usize> {
+        self.inner.write(buffer, position).await
+    }
+
+    async fn stat(&self) -> FsResult<mount_rs_core::Stats> {
+        self.inner.stat().await
+    }
+
+    async fn truncate(&self, length: u64) -> FsResult<()> {
+        self.inner.truncate(length).await
+    }
+
+    async fn close(&self) -> FsResult<()> {
+        self.inner.close().await
+    }
+}
+
+#[async_trait]
+impl FsDriver for ShortReadFs {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+
+    async fn stat(&self, path: &str) -> FsResult<mount_rs_core::Stats> {
+        self.inner.stat(path).await
+    }
+
+    async fn readdir(&self, path: &str) -> FsResult<Vec<mount_rs_core::DirEntry>> {
+        self.inner.readdir(path).await
+    }
+
+    async fn open(&self, path: &str, flags: &str, mode: u32) -> FsResult<Arc<dyn FileHandle>> {
+        let inner = self.inner.open(path, flags, mode).await?;
+        if path == self.path && flags.contains('r') {
+            Ok(Arc::new(ShortReadHandle {
+                inner,
+                deliver: self.deliver,
+            }))
+        } else {
+            Ok(inner)
+        }
+    }
+
+    async fn rename(&self, old_path: &str, new_path: &str) -> FsResult<()> {
+        self.inner.rename(old_path, new_path).await
+    }
+}
+
+#[derive(Clone)]
 struct ConditionalPutRaceSignals {
     armed: Arc<AtomicBool>,
     target_stats: Arc<AtomicUsize>,
@@ -2747,6 +2821,97 @@ async fn http_server_close_aborts_stalled_response_at_drain_deadline() {
     })
     .await
     .expect("stalled connection was dropped after close");
+}
+
+#[tokio::test]
+async fn http_server_aborts_short_streamed_response_without_reusing_connection() {
+    const WHOLE: usize = 256 * 1024;
+    const DELIVERED: u64 = 64 * 1024;
+    let memory = MemoryFs::empty();
+    let payload = (0..WHOLE)
+        .map(|index| ((index * 31 + (index >> 8)) & 0xff) as u8)
+        .collect::<Vec<_>>();
+    for path in ["/short.bin", "/whole.bin"] {
+        let handle = memory.open(path, "w", 0o666).await.expect("open object");
+        handle.write(&payload, Some(0)).await.expect("write object");
+        handle.close().await.expect("close object");
+    }
+    let reports = Arc::new(StdMutex::new(Vec::<String>::new()));
+    let observed = Arc::clone(&reports);
+    let session = Arc::new(S3Session::new(ShortReadFs {
+        inner: memory,
+        path: "/short.bin".to_owned(),
+        deliver: DELIVERED,
+    }));
+    let server = S3Server::start_with_hooks(
+        session,
+        S3ServerOptions::default(),
+        S3ServerHooks {
+            on_transport_error: Some(Arc::new(move |error| {
+                observed
+                    .lock()
+                    .expect("framing reports lock")
+                    .push(error.message);
+            })),
+        },
+    )
+    .await
+    .expect("loopback listener");
+
+    let mut stream = TcpStream::connect(server.address())
+        .await
+        .expect("connect gateway");
+    let request = format!(
+        "GET /mountx/short.bin HTTP/1.1\r\nHost: {}\r\nConnection: keep-alive\r\n\r\n",
+        server.address()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write request");
+    let mut raw = Vec::new();
+    let _ = timeout(Duration::from_secs(2), stream.read_to_end(&mut raw))
+        .await
+        .expect("short response connection terminated");
+    let separator = raw
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("HTTP response headers");
+    let head = String::from_utf8_lossy(&raw[..separator]).to_ascii_lowercase();
+    assert!(head.contains(&format!("content-length: {WHOLE}")));
+    assert!(raw.len() - separator - 4 < WHOLE);
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if reports
+                .lock()
+                .expect("framing reports lock")
+                .iter()
+                .any(|message| message.contains("out of frame"))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("short response framing report");
+    let framing_message = {
+        let reports = reports.lock().expect("framing reports lock");
+        let framing_reports = reports
+            .iter()
+            .filter(|message| message.contains("out of frame"))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(framing_reports.len(), 1);
+        framing_reports[0].clone()
+    };
+    assert!(framing_message.contains(&format!("declared {WHOLE} bytes and produced {DELIVERED}")));
+
+    let next = wire_request(&server, "GET", "/mountx/whole.bin", &[], &[]).await;
+    assert_eq!(next.status, 200);
+    assert_eq!(next.body, payload);
+    server.close().await.expect("clean shutdown");
 }
 
 #[derive(Debug)]

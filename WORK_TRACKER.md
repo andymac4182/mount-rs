@@ -4587,6 +4587,15 @@ reproducible in a production-like environment.
   callback/session/concurrency/restart/typecheck/distribution checks passed;
   live providers, power-loss durability, broader workload bounds, and
   native/hosted acceptance remain open, so W01-S3 stays **NO-GO**.
+- [x] The next W01-S3 connection-fault packet closes the short streamed-
+  response framing gap: the HTTP boundary counts streamed bytes against
+  `Content-Length`, reports one bounded `out of frame` transport error, and
+  terminates the damaged keep-alive connection with `UnexpectedEof`. The
+  oracle-derived regression and full Rust 5/6/33/5 packet, strict Clippy,
+  release addon, isolated S3 N-API server phase, callback/session/concurrency/
+  restart/typecheck/distribution checks passed; live providers, power-loss
+  durability, broader workload bounds, and native/hosted acceptance remain
+  open, so W01-S3 stays **NO-GO**.
 - [x] The automatic provider runs for published packet `f607d445` were
   refreshed: AWS run `35688895917` stopped at
   `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while R2 run `35688895958`
