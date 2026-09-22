@@ -98,26 +98,26 @@ function DownloadsPage() {
           </p>
           <p>
             The latest W08 release-target run{' '}
-            <a href="https://github.com/andymac4182/mount-rs/actions/runs/35769566111" {...externalProps()}>
-              35769566111
+            <a href="https://github.com/andymac4182/mount-rs/actions/runs/35771507437" {...externalProps()}>
+              35771507437
             </a>{' '}
-            at source <code>94eef54a</code> completed successfully for
+            at source <code>4742d7db</code> completed successfully for
             package version <code>0.1.0</code> on
             <code>x86_64-unknown-linux-gnu</code> and
             <code>aarch64-apple-darwin</code>. The CI bundles are
-            <code>w08-release-target-linux-x86_64-35769566111</code> and
-            <code>w08-release-target-macos-arm64-35769566111</code>; their
+            <code>w08-release-target-linux-x86_64-35771507437</code> and
+            <code>w08-release-target-macos-arm64-35771507437</code>; their
             verified archives are
             <code>mount-rs-0.1.0-x86_64-unknown-linux-gnu.tar.gz</code>{' '}
-            (8,550,825 bytes; SHA-256{' '}
-            <code>58aeb09d3d329657c26138efa82daf94fc0a08d4829fa095124058aaf36341f9</code>)
+            (8,550,792 bytes; SHA-256{' '}
+            <code>de62fe54c1df21c8bae9e1647029623f4e960b1e1ceeecd8df972b770d80d774</code>)
             and <code>mount-rs-0.1.0-aarch64-apple-darwin.tar.gz</code>{' '}
-            (7,119,463 bytes; SHA-256{' '}
-            <code>b1724016b36a056a7bdf4eedd60a2c78c4215780753218763450f01932a26764</code>).
+            (7,119,469 bytes; SHA-256{' '}
+            <code>a9ef113e9d43953cef7fcdef6fa13232715564d2225fc700fe94ceae9f244a52</code>).
             Each CI bundle passed its <code>SHA256SUMS</code> check; the
             <code>SHA256SUMS</code> files themselves are
-            <code>fc1e2222b3bf5284ea29f7f82ba695ac21294b5a276828964ff96e430e26ed7b</code>{' '}
-            (Linux) and <code>61f1fab1eba21fe4c6bf7002f553b3fd89f2a33db5cdd7f072de4d5f5ef40079</code>{' '}
+            <code>e47334272149141748ff75106cb5bceb4de2642b8376be1e10e687134a6544f8</code>{' '}
+            (Linux) and <code>7aa350b50134082aa7ba0eb384619bc53abb581b6d007ae4e4b9dbf6da8f0afa</code>{' '}
             (macOS). Both downloaded-asset verification jobs passed, but the
             attestation job was skipped and the manifests record
             signature/SBOM as pending and canary as not run, so these remain
