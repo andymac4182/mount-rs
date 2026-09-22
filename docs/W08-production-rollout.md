@@ -162,17 +162,17 @@ tests and strict Clippy with `-D warnings` using a bounded external Cargo
 target. This is implementation evidence only; credentialed provider,
 production topology, operational, canary and approval gates remain open.
 
-Merged source base `4e0d0d73b671a0a1b85a8b9315e31e27cabb42c4` was freshly
-reverified locally after concurrent N-API/session-parity, chunked durability,
-FUSE, S3-test, WebDAV, lockfile, NFS, 9P and provider updates: the full locked
-workspace test suite exited 0 and strict workspace Clippy with `-D warnings`
-exited 0. The four W08 rollout/evidence policy commands also passed with 36
-functional items, 9 open production gates, 7 rollout tests and 11 evidence
-tests; the packet remains NO-GO with zero evidence records. Changed N-API
-JavaScript and package JSON also passed static checks. This is source-health
-and tracking-control evidence only and does not close any production gate.
-Provider/native rows requiring TiDB, RustFS, PGlite, R2, FUSE or NFS remained
-explicit opt-in skips.
+Merged source base `fa08b0e9b9db89cb9a639768adb0cd89028f2e23` was freshly
+reverified locally after concurrent N-API declaration normalization,
+session-parity, chunked durability, FUSE, S3-test, WebDAV, lockfile, NFS, 9P
+and provider updates: the full locked workspace test suite exited 0 and strict
+workspace Clippy with `-D warnings` exited 0. The four W08 rollout/evidence
+policy commands also passed with 36 functional items, 9 open production gates,
+7 rollout tests and 11 evidence tests; the packet remains NO-GO with zero
+evidence records. Changed N-API JavaScript and package JSON also passed static
+checks. This is source-health and tracking-control evidence only and does not
+close any production gate. Provider/native rows requiring TiDB, RustFS,
+PGlite, R2, FUSE or NFS remained explicit opt-in skips.
 
 The latest read-only production-boundary audit at **2026-09-22 11:08 AEST**
 returned HTTP 404 from the W08 production workflow query and `w08-production`

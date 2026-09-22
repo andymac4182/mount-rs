@@ -1,6 +1,6 @@
 # W08 TiDB workstream progress ledger
 
-Status snapshot: **2026-09-22 11:09 AEST**
+Status snapshot: **2026-09-22 11:26 AEST**
 Repository: `andymac4182/mount-rs`  
 Publication snapshot: W08.36 implementation commit `0855e2ab` was reconciled
 with concurrent mainline work and pushed in merge tip `e0ab07d6`. The W08.36
@@ -9,21 +9,21 @@ pointer synchronization before the live production-boundary audit was
 `f1362442`. The audit documentation was committed as `fd29a297`, reconciled
 with concurrent mainline work and pushed in public merge tip `a40f5b8d`.
 The current tested source base for this checkpoint is merged tip
-`4e0d0d73b671a0a1b85a8b9315e31e27cabb42c4`, which passed a fresh full locked
-workspace test and strict Clippy run after concurrent N-API/session-parity,
-chunked-durability, FUSE, S3-test, WebDAV, lockfile, NFS, 9P and provider
-updates. This is source-health evidence only; provider/native rows remain
-explicit opt-in skips. Changed N-API JavaScript files and package JSON also
-passed static checks, while full local N-API runtime remains blocked by absent
-optional binding artifacts. The earlier public `9b2dabd7` added only a WebDAV
-N-API parity test file whose syntax is clean, while its local runtime is blocked
-by absent optional N-API binding artifacts. This does not close any production
-gate.
+`fa08b0e9b9db89cb9a639768adb0cd89028f2e23`, which passed a fresh full locked
+workspace test and strict Clippy run after concurrent N-API declaration
+normalization, session-parity, chunked-durability, FUSE, S3-test, WebDAV,
+lockfile, NFS, 9P and provider updates. This is source-health evidence only;
+provider/native rows remain explicit opt-in skips. Changed N-API JavaScript
+files and package JSON also passed static checks, while full local N-API runtime
+remains blocked by absent optional binding artifacts. The earlier public
+`9b2dabd7` added only a WebDAV N-API parity test file whose syntax is clean,
+while its local runtime is blocked by absent optional N-API binding artifacts.
+This does not close any production gate.
 The ledger checkpoint commit `2a99acdd` was reconciled with concurrent
 mainline work and published in public merge tip `056e7a15`. The latest FUSE
 qualification commit `052dc184` was reconciled and published in public merge
 tip `a921fe76`; the subsequent pointer synchronization was published in
-`ff29dad7`. The current source qualification is merged tip `4e0d0d73` and is
+`ff29dad7`. The current source qualification is merged tip `fa08b0e9` and is
 pending publication with this ledger update.
 Earlier source-health results at `4b9787f9`, `7addaf12`,
 `77114d4d`, `229a9cd5`,
@@ -446,11 +446,11 @@ the evidence counted here.
   recorded as external/provider/hosted gates rather than fabricated local
   passes.
 
-### Latest evidence refresh — 2026-09-22 11:17 AEST
+### Latest evidence refresh — 2026-09-22 11:26 AEST
 
 | Evidence item | Status | Evidence and boundary | Remaining action / blocker |
 | --- | --- | --- | --- |
-| Current tested merged source base `4e0d0d73b671a0a1b85a8b9315e31e27cabb42c4` | PASS — full local source-health and W08 tracking verification | `./scripts/cargo-shared test --workspace --all-targets --locked --quiet` exited 0 on the exact merged source; all executed tests passed and provider/native cases remained explicit opt-in skips. `./scripts/cargo-shared clippy --workspace --all-targets --locked -- -D warnings` exited 0. The four W08 rollout/evidence commands returned `W08_ROLLOUT_LEDGER_POLICY_PASS decision=NO-GO functional_items=36 production_gates=9`, `W08_ROLLOUT_LEDGER_TEST_PASS cases=7`, `W08_PRODUCTION_EVIDENCE_POLICY_PASS decision=NO-GO gates=9 closed=0 evidence_records=0 require_go=false` and `W08_PRODUCTION_EVIDENCE_TEST_PASS cases=11`; changed N-API JavaScript files passed `node --check`, package JSON parsed successfully, and `git diff --check` passed. This confirms current source health and tracking controls only; it does not close P01–P09. | Publish this tested merged source with the ledger update, then keep provider/native and production-like gates separate until the required TiDB/RustFS services, native hosts, credentials, owners and protected release environment are available. Keep the packet NO-GO with zero evidence records. |
+| Current tested merged source base `fa08b0e9b9db89cb9a639768adb0cd89028f2e23` | PASS — full local source-health and W08 tracking verification | `./scripts/cargo-shared test --workspace --all-targets --locked --quiet` exited 0 on the exact merged source; all executed tests passed and provider/native cases remained explicit opt-in skips. `./scripts/cargo-shared clippy --workspace --all-targets --locked -- -D warnings` exited 0. The four W08 rollout/evidence commands returned `W08_ROLLOUT_LEDGER_POLICY_PASS decision=NO-GO functional_items=36 production_gates=9`, `W08_ROLLOUT_LEDGER_TEST_PASS cases=7`, `W08_PRODUCTION_EVIDENCE_POLICY_PASS decision=NO-GO gates=9 closed=0 evidence_records=0 require_go=false` and `W08_PRODUCTION_EVIDENCE_TEST_PASS cases=11`; changed N-API JavaScript files passed `node --check`, package JSON parsed successfully, and `git diff --check` passed. This confirms current source health and tracking controls only; it does not close P01–P09. | Publish this tested merged source with the ledger update, then keep provider/native and production-like gates separate until the required TiDB/RustFS services, native hosts, credentials, owners and protected release environment are available. Keep the packet NO-GO with zero evidence records. |
 | Current public source-equivalent checkpoint `ff29dad70e5b3d3a832e99ef55f4fce2967448aa` | PASS — publication and source-boundary verification | `git fetch origin`, `git status --short --branch`, `git rev-parse HEAD`, `git rev-parse origin/main`, `git ls-remote origin refs/heads/main` and `git merge-base --is-ancestor HEAD origin/main` all succeeded; local HEAD, tracking ref and public branch are identical. The public checkpoint contains no Rust or W08 implementation source changes after tested `eeb628da`; the W08 policy/evidence validators still pass. No provider/native runtime or production result is claimed. | Preserve the production `NO-GO` boundary until P01–P09 receive terminal evidence and named approval. |
 | Live GitHub production-boundary audit, 2026-09-22 11:08 AEST | BLOCKED — P09 repository/API/environment execution boundary | Fresh read-only `gh run list --workflow w08-production-release.yml` returned HTTP 404; `gh api` for `w08-production` returned HTTP 404; `gh release list` could not resolve the repository; and `git ls-remote` found no `v*-cli-production-candidate*` tag. The fetched public mainline contains the protected workflow file, but these failed API calls are not promoted to a release claim. The last successful release observation remains 08:38 AEST with only `v0.1.0-cli-preview`. This is external GitHub/API and release-configuration evidence, not production acceptance. | Restore/authorize the repository/API surface, configure the protected environment and reviewers/secrets, create an approved immutable candidate tag, run the terminal workflow, then inspect registry assets and execute canary/rollback/approval. |
 | Current source-equivalent documentation merge `c178fa86246bdd5f63c3ed1daf972930adbfb67c` | PASS — documentation-only reconciliation after tested source | `git diff --name-status b944218c0fbb37aab2bf6aa2257d4b6b427d461e..HEAD` contains only `WORK_TRACKER.md` and W01 documentation changes; no Rust or W08 implementation source changed after the tested `b944218c` tree. The current W08 policy/evidence validators remain green. No provider/native runtime or production result is claimed. | Publish this source-equivalent checkpoint and preserve the explicit production `NO-GO` boundary. |
@@ -580,6 +580,7 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-22 10:59–11:01 AEST | Reconciled the public-pointer synchronization and concurrent site/W01 documentation, pushed public tip `ff29dad7`, and reverified exact local/remote equality, ancestry and W08 admission state. | ~0.03 engineer-day | ~8s fetch/merge/push/policy verification | The W08 ledger now points at the actual public tip; the packet remains NO-GO with nine open gates and zero evidence records. No production mutation, candidate release, canary, rollback or approval was attempted. |
 | 2026-09-22 11:01–11:09 AEST | Fast-forwarded to current public source `a81a0827`, ran the full locked workspace test and strict Clippy, syntax-checked changed N-API JavaScript, parsed package JSON, reran all W08 policy/evidence suites, and refreshed the live production-boundary audit. | ~0.2 engineer-day | ~1m test/Clippy/policy execution plus ~9s hosted-boundary observation | Current source health is clean; provider/native prerequisites remain explicit skips. The audit still finds no accessible production workflow/environment/release or candidate tag, so P09 remains blocked and the packet stays NO-GO with zero evidence records. |
 | 2026-09-22 11:09–11:17 AEST | Merged concurrent public tip `d0a67b22`, reran the full locked workspace test and strict Clippy on merged tip `4e0d0d73`, syntax-checked changed N-API JavaScript, parsed package JSON, reran all W08 policy/evidence suites, and ran diff checks. | ~0.15 engineer-day | ~53s test/Clippy/policy execution plus ~9s merge/static verification | The merged source tree is clean and production remains NO-GO; provider/native prerequisites remain explicit skips and P09 still lacks a reachable workflow/environment/release/candidate tag. This qualification is pending publication. |
+| 2026-09-22 11:17–11:26 AEST | Merged concurrent public tip `a50dce1d`, reran the full locked workspace test and strict Clippy on merged tip `fa08b0e9`, syntax-checked changed N-API JavaScript, parsed package JSON, reran all W08 policy/evidence suites, and ran diff checks. | ~0.2 engineer-day | ~2m31s test/Clippy/policy execution plus ~9s merge/static verification | The merged source tree is clean and production remains NO-GO; provider/native prerequisites remain explicit skips and P09 still lacks a reachable workflow/environment/release/candidate tag. This qualification is pending publication. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol

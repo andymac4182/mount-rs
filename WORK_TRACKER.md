@@ -3357,17 +3357,17 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provider run or grant release approval. *(Implementation/static
   qualification; production evidence and approval remain external.)*
 
-  Merged source base `4e0d0d73b671a0a1b85a8b9315e31e27cabb42c4` was freshly
-  reverified after concurrent N-API/session-parity, chunked durability, FUSE,
-  S3-test, WebDAV, lockfile, NFS, 9P and provider updates with the full locked
-  workspace test suite (exit 0) and strict workspace Clippy with `-D warnings`
-  (exit 0). The four W08 rollout/evidence policy commands also passed with 36
-  functional items, 9 open production gates, 7 rollout tests and 11 evidence
-  tests; the packet remains NO-GO with zero evidence records. Changed N-API
-  JavaScript and package JSON also passed static checks. Provider/native rows requiring TiDB,
-  RustFS, PGlite, R2, FUSE or NFS remained explicit opt-in skips. This is
-  source-health and tracking-control evidence only and does not close
-  W08-P01–P09.
+  Merged source base `fa08b0e9b9db89cb9a639768adb0cd89028f2e23` was freshly
+  reverified after concurrent N-API declaration normalization, session-parity,
+  chunked durability, FUSE, S3-test, WebDAV, lockfile, NFS, 9P and provider
+  updates with the full locked workspace test suite (exit 0) and strict
+  workspace Clippy with `-D warnings` (exit 0). The four W08 rollout/evidence
+  policy commands also passed with 36 functional items, 9 open production
+  gates, 7 rollout tests and 11 evidence tests; the packet remains NO-GO with
+  zero evidence records. Changed N-API JavaScript and package JSON also passed
+  static checks. Provider/native rows requiring TiDB, RustFS, PGlite, R2, FUSE
+  or NFS remained explicit opt-in skips. This is source-health and
+  tracking-control evidence only and does not close W08-P01–P09.
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
