@@ -2364,7 +2364,7 @@ Evidence landed without closing the remaining W01 acceptance gates:
   successors, strict Clippy, optimized N-API build/postbuild, the complete
   elevated Node SDK/CLI suite, and `scripts/test-pglite.sh`. The packet
   reports Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`,
-  and all `40 × 621` oracle traces. Current `origin/main` `4baa82a` is a
+  and all `40 × 621` oracle traces. Current `origin/main` `7cc9c8c5` is a
   documentation-only successor over that tested implementation. R2,
   AWS/security/OIDC, privileged native, external-provider,
   package/provenance, scope, and final-audit gates remain explicit blockers;
