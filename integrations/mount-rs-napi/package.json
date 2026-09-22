@@ -82,8 +82,8 @@
     "npm/*"
   ],
   "scripts": {
-    "build": "napi build --platform --release && node postbuild.mjs",
-    "build:debug": "napi build --platform && node postbuild.mjs",
+    "build": "node scripts/build-native.mjs --release && node postbuild.mjs",
+    "build:debug": "node scripts/build-native.mjs && node postbuild.mjs",
     "prepare:npm": "napi create-npm-dirs",
     "aggregate:artifacts": "node scripts/aggregate-artifacts.mjs",
     "test:distribution:aggregate": "node test/distribution-aggregate.mjs",

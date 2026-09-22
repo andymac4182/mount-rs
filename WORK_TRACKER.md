@@ -25,6 +25,27 @@ W26 continues to own Ozone compatibility and qualification only; customers
 deploy Ozone, backup/DR remains with Ozone/customer ownership, and releases
 remain with the separate stream.
 
+Current W26 FoundationDB optimization boundary (2026-09-22): source commit
+`ff0ccfddcad786fdce142adebc16fa50347b9b13`
+(`perf(w26): avoid redundant FoundationDB chunk clears`) is now on
+`origin/main` after rebase. It preserves the lease/revision and manifest
+transaction controls, skips the redundant full chunk-range clear when the
+chunk count is unchanged, and clears only stale trailing chunks when a
+manifest shrinks; missing-manifest initialization still clears the full
+prefix. Formatting, diff checks, FoundationDB feature lib/test compilation
+and strict Clippy pass. The native FoundationDB test is blocked only by the
+missing `fdb_c` linker library. Security scan
+`fa9447cc-4cff-4680-baef-d7f7c260d8c5` has complete one-file coverage and zero
+reportable findings. Fresh exact-head Ozone qualification run
+`35712159705 <https://github.com/andymac4182/mount-rs/actions/runs/35712159705>`
+was dispatched against this SHA and is not yet terminal; no hosted result is
+promoted. Production remains **NO-GO** until all feasible provider rows pass
+the hard 1,000-IOPS/drive target, the aggregate has every end-to-end marker,
+and customer/Ozone security, Tier-1 99.99% SLO, five-minute RPO/RTO and
+backup/DR evidence are closed. W26 continues to own compatibility and
+qualification only; customers deploy Ozone, backup/DR remains Ozone/customer
+owned, and releases remain with the separate stream.
+
 Current W26 CI-reproducibility boundary (2026-09-22): lockfile fix commit
 `1ceaa96486a96ed4288c079dcde2b3b2d18900bb`
 (`fix(w26): sync Ozone test lockfile`) is published and verified on
@@ -981,6 +1002,7 @@ patch):
 | Main | W01 N-API 9P mounted view identity | `integrations/mount-rs-napi/postlude-servers.cjs`, `integrations/mount-rs-napi/test/p9-native.mjs`, `.github/workflows/native-9p.yml`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Exact SHA `1a18c7b82285ea557956cb35d15f1af189803d4d` caches `Mounted.server` and `Mounted.connection` wrappers and reuses the matching `P9Server.clients` wrapper by stable transport id. The direct native-mount regression covers repeated getter identity, cross-view connection identity, native stream/peer/session views, and cleanup. Local syntax, focused lifecycle checks, metadata/session/observability/type checks, and the elevated 9P selector passed; published SHA `86b88c329d64bcc2a8e7b9d97993fca657458986` passed [Native 9P run `35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373): N-API job `106667799214` passed direct mounted-I/O/cleanup and all adjacent lifecycle gates, and Rust job `106667799016` passed the Linux probe plus all four ignored native lifecycle tests; broader parity and production remain NO-GO |
 | Main | W01 9P supported-scope closure audit | `docs/W01_9P_PROGRESS.md`, `docs/W01_PROGRESS.md`, `docs/public-api-parity.md`, `transports/mount-rs-9p/README.md` | Current audit classifies the advertised codec/session/server/connection/attach/mount slice as qualified by local evidence and published SHA `86b88c329d64bcc2a8e7b9d97993fca657458986` / [Native 9P run `35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373), N-API job `106667799214`, and Rust job `106667799016`. Legacy/auth/xattr families, unadvertised upstream members, native-listener Node-stream identity, root automatic cross-transport signals, process-crash/arbitrary kernel-reset recovery, and non-Linux native mounts are explicit scope boundaries; broader oracle parity remains partial by design and overall W01/release remains NO-GO |
 | Main | W01 dedicated hosted upstream 9P conformance gate | `.github/workflows/native-9p.yml`, `tests/upstream/p9-conformance.test.mjs`, `examples/p9_oracle.rs`, `docs/W01_9P_PROGRESS.md`, `docs/W01_PROGRESS.md` | Published SHA `a6b3e2aa10cfdb3ee730d41c5886436b02c260de` adds the revision-matched Linux `upstream-9p` job and routes the fixture through `scripts/cargo-shared`. [Native 9P run `35707546973`](https://github.com/andymac4182/mount-rs/actions/runs/35707546973) passed upstream job `106680012604` with `144 passed` and `2 skipped` root-gated ownership cases out of `146`; N-API job `106680012485` and Rust job `106680013203` also passed. Local YAML/syntax, focused oracle/public-surface, and diff checks passed; local full-suite execution is blocked before tests by the Mac's unaccepted Xcode license. The documented legacy/auth/xattr, broader upstream member, supervisor-owned crash/reset, and non-Linux native-mount boundaries remain explicit, so production remains NO-GO |
+| Main | W01 root-gated upstream 9P ownership coverage | `.github/workflows/native-9p.yml`, `tests/upstream/p9-conformance.test.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/W01_PROGRESS.md` | Follow-up exact head SHA `d11f458d7f6ef1923091fbca84a93e63f05e9455` adds the privileged `upstream-9p-root` companion job while preserving `CI`, Rustup, Cargo, and the explicit temporary target under `sudo`. [Native 9P run `35711056768`](https://github.com/andymac4182/mount-rs/actions/runs/35711056768) passed baseline job `106691472428` with `144 passed` and `2 skipped`, root job `106691917345` with `146/146`, N-API job `106691472270`, and Rust job `106691472165`; both previously root-gated symlink-ownership cases are now exercised. The explicit protocol/member/supervisor/non-Linux boundaries and overall production NO-GO remain unchanged |
 | Main | W01 N-API 9P Unix listener policy and lifecycle | `.github/workflows/native-9p.yml`, `integrations/mount-rs-napi/test/servers.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet adds the Unix-domain listener phase to `MOUNT_RS_SERVER_PHASE=p9`, independently exercising private-directory refusal, explicit `allowSharedDirectory` opt-in, `0600` socket mode, protocol handshake, native Unix peer/path and `stream: undefined` representation, socket removal on close, and path/port exclusivity. Local syntax/diff checks and elevated isolated N-API execution passed. Exact test commit `dd10ac0564446c9143f8b5f68b2fed51c7eaf57f` was included in descendant head `d43f5ea4e4334912de86ac0db818392531a7d4ec`, whose Native 9P run `35683716217` passed N-API job `106606580352` with Unix policy, server/attach, and automatic/direct/structural mounted I/O/cleanup, and Rust job `106606580326` with the Linux probe plus all four ignored native lifecycle tests. The direct run at the test commit was cancelled before jobs materialized and is not evidence; production remains NO-GO |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
@@ -1026,7 +1048,7 @@ complete.
 | W04 | PGlite | W04.2 closed; production rollout NO-GO pending external gates | Main |
 | W05 | Cloudflare R2 | Functional slice and exact local Rust/Node SDK+CLI/N-API/PGlite/oracle packet are green; candidate CI `35702348089` is terminal-failed on an actionable Rust 9P test race, Node 9P timeout, Windows Node timeout, a TiDB prepared-statement failure-injector gap, and hard Ozone IOPS below 1000. The first Rust repair is published at `be98aca9`; TiDB prepared-statement tracking and Node 9P cleanup repairs are compile-/focused-check green locally, while the replacement candidate and hosted rerun remain open | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
-| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; the latest exact-tip terminal cross-platform qualification packet is green at [run `35705886860`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35705886860) / exact source `ab74870c58ab768c65679ea80feb18a8f54cbe00`, Linux job `106674581511`, macOS job `106674582039`, aggregate job `106678244742`; Linux run-bound provenance, durable FoundationDB/RustFS, Node/N-API, Linux CLI/FUSE, service restart, authority republish, fresh-client reopen and RustFS integration paths passed, as did the 30-second heartbeat with 120-second bound and reconciled stats; macOS emitted `W07_MACOS_FOUNDATIONDB_COMPILE_PASS` plus run-bound provenance on its distinct platform runner; the repaired aggregate verifier emitted `W07_PLATFORM_QUALIFICATION_PASS` with `provenance=bound`; base composition was p50 2,848µs, p95/p99 13,430µs and 260.46 ops/s, ten-round soak p95/p99 was 11,732–13,359µs at 241.11–268.03 ops/s, and the corrected 400-lifecycle/64-concurrency/4KiB workload measured 228.83 lifecycle IOPS with all 1,200 operations successful and zero timeouts/cleanup failures; Linux artifact `foundationdb-production-qualification-35705886860-1` (ID `10684961250`, SHA-256 `b7243f25a5761ff33eb934dfdf3c6cb11e759152b6d89da81443f2b1a56a713d`), macOS artifact ID `10684372277` (SHA-256 `4a6d62462416dda0708b6ffd99ae52ce922a3be9ee528a803044bad72c4890f3`) and aggregate artifact ID `10684129931` (SHA-256 `ce9efe4f961aca6f8b0906ba55b9039ebfa4690b5e864f071574fa9b8f2026b6`) were retained and independently revalidated; the seven-gate packet remains NO-GO with zero production evidence records. This is exact-tip hosted qualification only, not live macOS service/cluster/mount, clean-install, signing/package, production capacity, identity/ACL, backup/restore, failover, observability or owner evidence; W07.3, W07.5 and W07.7 remain open. | Maxwell (complete slice) / Main |
+| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; the latest exact-tip terminal cross-platform qualification packet is green at [run `35709640688`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35709640688) / exact source `8b4cbc3860bcb5c0fdfbb1a63cbe3b04f27a5b04`, Linux job `106686845348`, macOS job `106686845149`, aggregate job `106690432291`; the RustFS lockfile refresh removed the hosted `--locked` metadata blocker; all rollout-ledger, production-evidence, workload-artifact and configuration preflights passed, as did Linux durable FoundationDB/RustFS, Node/N-API, Linux CLI/FUSE, service restart, authority republish, fresh-client reopen, RustFS integration, 30-second/120-second heartbeat, reconciled stats and ten-round soak; macOS emitted `W07_MACOS_FOUNDATIONDB_COMPILE_PASS` plus run-bound provenance on its distinct platform runner; the repaired aggregate verifier emitted `W07_PLATFORM_QUALIFICATION_PASS` with `provenance=bound`; base composition was p50 3,075µs, p95/p99 317,846µs and 39.06 ops/s, ten-round soak p95/p99 was 15,203–576,001µs at 7.51–254.49 ops/s, and the corrected 400-lifecycle/64-concurrency/4KiB workload measured 338.55 lifecycle IOPS with all 1,200 operations successful and zero timeouts/cleanup failures; Linux artifact ID `10686686017`, macOS artifact ID `10685929115` and aggregate artifact ID `10686210962` were retained and independently revalidated. The seven-gate packet remains NO-GO with zero production evidence records. This is exact-tip hosted qualification only, not live macOS service/cluster/mount, clean-install, signing/package, production capacity, identity/ACL, backup/restore, failover, observability or owner evidence; W07.3, W07.5 and W07.7 remain open. | Maxwell (complete slice) / Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
@@ -1044,7 +1066,7 @@ complete.
 | W22 | Distributed caching | Deferred for discussion | User / Main |
 | W23 | Physical copy-on-write | Future requirement | Unassigned |
 | W24 | Domain and marketing site | TanStack Start site deployed; `mount-rs.com` and `www.mount-rs.com` live on Vercel | Meitner (complete slice) / Main |
-| W25 | Actual AWS S3 integration | Qualification complete for the myroot test bucket and scoped live Rust gate; production rollout NO-GO with W25.5-W25.9 open | Main |
+| W25 | Actual AWS S3 integration | Library/runtime AWS S3 qualification complete for the myroot test bucket and scoped live Rust gate; adopter/reference deployment remains a separate NO-GO track with W25.5-W25.9 open | Main |
 | W26 | Apache Ozone S3 backend | W26 qualification harness and local controls are implemented; current published `origin/main` tip is `83e0d3b7` and includes publication-barrier `c7f0e6d0`, bounded mutation-window `183660a4`, lease-renewal `f10dbf22`, lazy-atime/EOF reduction, R2 content-addressing/cache, single-flight upload coalescing `d05548e8`, metadata batching, queue cancellation safety, same-revision concurrent-create inode rebasing, the corrected Ozone content-addressed contract and deduplicated cleanup, Ozone test lockfile fix `0cef5d44`, FoundationDB test lockfile fix `8428a5ef`, SQL publication fast path `214b9a6b` and TiDB session setup optimization `e41bed05`. The customer-deployed Ozone integration track remains **NO-GO**: terminal run `35683158821` on exact SHA `14dbf2c6` measured SQLite/R2 754.59, PGlite/R2 817.10, TiDB/R2 143.04 and FoundationDB/R2 345.17 IOPS against 1,000; all rows completed 1,200/1,200 lifecycle operations with zero timeout/cleanup failures, but aggregate `106606577835` failed closed on missing `OZONE_IOPS_PASS`. Retained artifacts are composition `10676355562`, TiDB `10675867797`, FoundationDB `10675443241` and base Ozone `10675672094`; the next code chunk must preserve the hard threshold and fail-closed packet. Security scans `e44de27d-96d8-4330-a831-b995d6458a6c`, `47641152-6539-48e1-96b6-bf2201033486`, `739f4f5b-8cc4-4154-93f7-9e486745eab1`, `5a8fcd70-71d4-461b-bb2a-dec8461c22bc` and `c4fc0012-b0e2-421c-9db8-ca3edfce730c` have zero reportable findings with complete local coverage; secure customer topology, 99.99%/5-minute objective evidence, native/end-to-end coverage and Ozone-owned DR/release gates remain explicit | Main |
 | W27 | Native Windows support and CI | HostFs symlink, read-only create/unlink and hard-link packets landed; hosted runtime and mount qualification pending | Main |
 | W28 | Deterministic fault injection | Implementing | Main integration |
@@ -3665,6 +3687,17 @@ Evidence landed without closing the remaining W01 acceptance gates:
   heartbeat, stricter verifier and hosted checkpoint are not production
   monitoring, deployment-credential or failover evidence.
 
+  The latest terminal cross-platform packet is green in
+  [35709640688](https://github.com/andymacclenaghan/mount-rs/actions/runs/35709640688)
+  at exact revision `8b4cbc3860bcb5c0fdfbb1a63cbe3b04f27a5b04`, with Linux job
+  `106686845348`, macOS job `106686845149` and aggregate job `106690432291`.
+  Linux and macOS run-bound provenance matched and the distinct platform
+  runners were `GitHub Actions 1000027895` and `GitHub Actions 1000027899`;
+  the aggregate emitted `W07_PLATFORM_QUALIFICATION_PASS provenance=bound`.
+  This closes the latest packet-integrity and feature-compilation checkpoint
+  only; live macOS FoundationDB service/cluster, native mount, clean install,
+  signing and package acceptance remain W07.5 gates.
+
 - [x] W07.6 **FoundationDB metadata + RustFS S3 chunks:** main passed the real-service
   composition and provider contract in the full RustFS harness (exit 0), with
   multi-chunk round trips, fresh-client reopen, CAS and expired-writer fencing.
@@ -3674,6 +3707,21 @@ Evidence landed without closing the remaining W01 acceptance gates:
   owned FoundationDB service restart, a separate post-restart authority
   republish, and fresh-client RustFS reopen; the terminal hosted result is
   recorded below. No emulated acceptance.
+
+  The latest repaired exact-tip runtime qualification is hosted run
+  [35709640688](https://github.com/andymacclenaghan/mount-rs/actions/runs/35709640688)
+  at revision `8b4cbc3860bcb5c0fdfbb1a63cbe3b04f27a5b04`, with Linux job
+  `106686845348`, macOS job `106686845149` and aggregate job `106690432291`
+  all green. Linux passed the locked policy/evidence/workload preflight,
+  durable FoundationDB/RustFS restart and republish, fresh-client reopen,
+  RustFS integration, authority heartbeat/stats and ten-round soak; the
+  bounded workload completed 1,200 operations at 338.55 IOPS with zero
+  timeouts or cleanup failures. Independent provenance, workload,
+  summary-replay, platform, packet and ledger validators passed. The
+  latency spread is qualification telemetry rather than production capacity
+  evidence; live production identity, recovery, observability, owner and
+  release gates remain open.
+
   The local arm64 durable qualification run on 2026-09-21 used the
   `foundationdb-soak-durable` composition name, three pinned FoundationDB
   7.4.7 server containers with `double`/SSD configuration, one bounded soak
@@ -4536,6 +4584,16 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     capacity, identity/ACL, backup/restore, failover, observability and owner
     evidence remain open. The seven-gate packet remains **NO-GO** with zero
     production evidence records.
+
+    The latest W07.7 qualification checkpoint is hosted run
+    [35709640688](https://github.com/andymacclenaghan/mount-rs/actions/runs/35709640688)
+    at exact revision `8b4cbc3860bcb5c0fdfbb1a63cbe3b04f27a5b04`. All three
+    hosted jobs were terminally green and the independent production-packet
+    and rollout-ledger validators passed, but the retained packet still has
+    seven open production gates and zero evidence records. This is a stronger
+    cross-platform qualification result, not a production PASS; W07.3, W07.5
+    and W07.7 remain open pending live credentials, platform/deployment,
+    recovery, observability, capacity and named-owner evidence.
 
   The previous current-main source gate on 2026-09-22 tested revision `3cd4377` and
   passed `./scripts/cargo-shared fmt --all -- --check`, strict workspace
@@ -6090,6 +6148,13 @@ listing a source does not mean it has been reviewed or its code can be reused.
 
 ## W25 — Actual AWS S3 integration
 
+- [x] Scope boundary clarified for this library/runtime: W25 qualification
+  evidence determines whether the AWS S3 provider and its public SDK/CLI paths
+  are suitable for release, while production bucket/IAM/IaC, hosted OIDC,
+  deployment metadata/DR, operational SLOs, canary, rollback, and post-deploy
+  smoke are adopter or reference-deployment gates. The latter remain tracked
+  below and must not be promoted to library-release blockers unless this
+  repository explicitly operates that deployment.
 - [x] W25.1 AWS MCP became available after the app restart. STS identity and
   account-owned bucket inventory verified; testing region is `ap-southeast-2`.
 - [x] Create and read back private `myroot` bucket
@@ -6378,15 +6443,17 @@ listing a source does not mean it has been reviewed or its code can be reused.
   contacted by these tests. The source audit also confirmed cleanup remains
   ownership-gated before deletion and verifies both current objects and all
   versions/delete markers after cleanup.
-- [ ] Hosted W25.3 PGlite pairing remains a separate open acceptance row. The
+- [ ] Optional hosted W25.3 PGlite pairing remains a separate deployment-
+  confidence row, not a library/runtime release blocker. The
   current `.github/workflows/aws-s3.yml` runs the base AWS harness but does not
   install `tests/pglite` dependencies or set
   `MOUNT_RS_RUN_AWS_S3_PGLITE=1`; the local authorized packet has passed the
   PGlite pairing, writer-fencing, backup/restore, and fresh-server reopen rows,
   but hosted PGlite acceptance still requires user-authorized AWS OIDC/test
   bucket access plus the pinned Node dependency setup. No hosted PGlite pass is
-  claimed from this offline audit.
-- [ ] W25.5 Define and approve the production rollout contract: AWS account,
+  claimed from this offline audit; the row blocks only a hosted AWS+PGlite
+  reference-deployment claim.
+- [ ] W25.5 (deployment track) Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
   retention/lifecycle, prefix ownership, runtime/maintenance roles, and no
@@ -6482,7 +6549,7 @@ listing a source does not mean it has been reviewed or its code can be reused.
   abort checks. It made no AWS changes; this remains qualification-account
   evidence only and the production bucket, policy, roles, and approved change
   set remain open.
-- [ ] W25.6 Qualify the production metadata pairing. Select a remote durable
+- [ ] W25.6 (deployment track) Qualify the production metadata pairing. Select a remote durable
   metadata provider and pass multi-writer/fencing, restart, backup/restore,
   schema-migration, and failure-recovery tests with actual AWS S3 blocks.
   The current SQLite composition is single-host reopen evidence only. Partial
@@ -6507,7 +6574,7 @@ listing a source does not mean it has been reviewed or its code can be reused.
   This does not close W25.6: production metadata ownership, multi-writer
   fencing, backup/restore, schema migration, failure recovery, and DR evidence
   remain open.
-- [ ] W25.7 Add deployment observability and operations: S3 latency/error and
+- [ ] W25.7 (deployment track) Add deployment observability and operations: S3 latency/error and
   retry metrics, conditional-conflict and orphan/cleanup signals, credential
   expiry detection, capacity/cost alerts, SLOs, incident runbooks, and
   canary/rollback procedures. The adjacent S3 gateway now exposes a bounded
@@ -6532,7 +6599,7 @@ listing a source does not mean it has been reviewed or its code can be reused.
   surfaces only. Exporter wiring, object-store retry measurement,
   credential-expiry detection, cost/retention alerts, approved SLO thresholds,
   and exercised staging procedures remain deployment gates.
-- [ ] W25.8 Add hosted release evidence: locked build/artifact provenance,
+- [ ] W25.8 (deployment track) Add hosted release evidence: locked build/artifact provenance,
   approved OIDC or equivalent short-lived role credentials, security scan,
   load/soak/fault/restore drills, staged canary, rollback, and post-deploy
   smoke. The sealed current-source Standard scan
@@ -6639,7 +6706,7 @@ listing a source does not mean it has been reviewed or its code can be reused.
   environment inputs/secret, GitHub OIDC provider, and immutable-subject role
   trust. It made no GitHub or AWS changes; hosted OIDC evidence remains blocked
   until the deployment owner configures and approves those controls.
-- [ ] W25.9 Production sign-off: record the exact released commit/image,
+- [ ] W25.9 (deployment track) Production sign-off: record the exact released commit/image,
   reviewed configuration, live smoke result, rollback owner, and evidence for
   every W25.5-W25.8 gate before calling the AWS workstream production-ready.
 

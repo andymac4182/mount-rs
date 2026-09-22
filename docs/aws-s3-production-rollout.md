@@ -1,7 +1,8 @@
 # AWS S3 production rollout
 
-This runbook tracks the production qualification boundary for the W25 AWS S3
-block provider. It is deliberately separate from the provider implementation:
+This document tracks the production-deployment qualification boundary for the
+W25 AWS S3 block provider. It is deliberately separate from both the provider
+implementation and the library/runtime release decision:
 AWS S3 stores immutable blocks, while namespace metadata, leases, revisions,
 and chunk references remain in an independently selected metadata provider.
 
@@ -9,12 +10,35 @@ The W25 test bucket and assumed role are qualification resources only. A green
 W25 service run is not permission to promote that bucket, its SQLite metadata,
 or its test configuration into a production workload.
 
-## Readiness rule
+## Library/runtime release boundary
 
-The workstream is production-ready only when every gate below has a named
-owner, current evidence, and a reviewed rollback path. Local tests, a demo,
-an API probe, a planning document, or a test-account bucket cannot substitute
-for a production deployment result.
+`mount-rs` is a library/runtime, not a managed AWS service. Its release gate
+is the provider and public-consumer contract: locked package and SDK/CLI gates,
+supported-platform coverage, security review, credential/workload-identity
+behavior, actual AWS S3 qualification when AWS support is advertised, and
+documentation of the supported metadata compositions. The repository does not
+need to own a production bucket, GitHub OIDC environment, canary deployment,
+pager, or customer SLO in order to release the library.
+
+The authenticated `myroot` packet is therefore relevant library compatibility
+evidence, while remaining explicitly qualification-account evidence rather than
+production deployment approval. The local AWS+PGlite pairing is also valid
+composition evidence. Hosted AWS+PGlite CI is optional continuous-confidence
+evidence unless this repository chooses to operate a hosted reference
+deployment; its absence must not be reported as a library implementation
+failure.
+
+The deployment-specific rows below remain important for an adopter or a
+maintained reference environment: production bucket/IAM/IaC, metadata ownership
+and DR, deployment observability, OIDC, canary, rollback, and post-deploy
+smoke. They are not generic library-release blockers.
+
+## Deployment-readiness rule
+
+An adopter/reference deployment is production-ready only when every gate below
+has a named owner, current evidence, and a reviewed rollback path. Local tests,
+a demo, an API probe, a planning document, or a test-account bucket cannot
+substitute for that deployment result.
 
 | Gate | Required evidence | Status |
 | --- | --- | --- |
@@ -24,7 +48,7 @@ for a production deployment result.
 | Metadata | A durable, independently operated metadata provider is selected and qualified for the intended host/multi-writer scope | Partial AWS S3 plus external PGlite qualification passed; production provider selection, multi-writer, backup/restore, and failure-recovery evidence remain open |
 | Recovery | Backup/restore, schema migration, orphan-block cleanup, restart, failure recovery, and disaster-recovery drills pass | Open |
 | Operations | S3 latency/error/retry/conditional-conflict signals, credential-expiry detection, cost/retention alerts, SLOs, and incident runbooks exist | Open; the S3 gateway exposes a bounded `S3Session::stats()` snapshot for latency, buffered and consumed streaming request/response bytes, operation counts, and authentication/conditional/throttling/client/server error classes. The immutable AWS/R2 block adapter now also exposes a bounded, clone-shared `R2BlockStore::stats()` snapshot for logical block operations, latency, bytes, conditional ID collisions, terminal retry-exhaustion markers, and bounded error classes. The public SDK's optional observability path records provider block latency, errors, bytes, and reconciliation scanned/protected/recent/deleted counts through local snapshots, tracing, and OTLP counters. [`docs/aws-s3-operations-runbook.md`](aws-s3-operations-runbook.md) defines the deployment handoff and drills. These are implementation surfaces only: exporter wiring, successful internal retry-attempt measurement, credential-expiry detection, cost/retention alerts, SLO thresholds, and exercised staging procedures remain deployment gates |
-| Release | Locked artifact provenance, security review, load/soak/fault evidence, staged canary, rollback, and post-deploy smoke pass | Open; the sealed current-source Standard scan `02d2c6eb-66e1-41f8-be59-d14aab9fde87` targets `4ebba4926045de28e9f03ac75b938947f4487a4b`, reports zero reportable findings across six W25 surfaces, and records partial coverage of a 650-file inventory. Its deferred non-W25 surfaces and external AWS/GitHub deployment state are not a production approval. Hosted run [`35629600687`](https://github.com/andymac4182/mount-rs/actions/runs/35629600687) at `62383df` passed provenance and synthetic contract suites, then safely stopped at `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; AWS authentication and acceptance were skipped. OIDC/protected-environment setup, load/soak/fault/restore, canary, rollback, and post-deploy smoke remain open. Bounded publication, listing, quota/TTL, backing-file-aware staging cleanup, the explicit AWS client retry budget, and SDK diagnostic redaction have landed |
+| Deployment release | Locked artifact provenance, security review, load/soak/fault evidence, staged canary, rollback, and post-deploy smoke pass | Open for a hosted/adopter deployment; the sealed current-source Standard scan `02d2c6eb-66e1-41f8-be59-d14aab9fde87` targets `4ebba4926045de28e9f03ac75b938947f4487a4b`, reports zero reportable findings across six W25 surfaces, and records partial coverage of a 650-file inventory. Its deferred non-W25 surfaces and external AWS/GitHub deployment state are not a production approval. Hosted run [`35629600687`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35629600687) at `62383df` passed provenance and synthetic contract suites, then safely stopped at `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; AWS authentication and acceptance were skipped. OIDC/protected-environment setup, load/soak/fault/restore, canary, rollback, and post-deploy smoke remain open. Bounded publication, listing, quota/TTL, backing-file-aware staging cleanup, the explicit AWS client retry budget, and SDK diagnostic redaction have landed |
 
 The sealed Standard scan is current source-review evidence for the six W25
 surfaces named above, not a repository-wide or deployment acceptance result.
