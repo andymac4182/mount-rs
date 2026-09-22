@@ -28,7 +28,10 @@ hold connection teardown behind a blocked earlier request. The rootless wire
 suite also proves that a v4.1 session can be used again after an
 orderly TCP transport reconnect while this server process remains alive, and
 that multiple v3 calls can be pipelined on one connection within the configured
-in-flight bound. Two independent v4.1 sessions also complete concurrent
+in-flight bound. A blocked v3 RPC does not hold a later fast RPC on the same
+connection behind it: replies are matched by XID and may complete in worker
+completion order, with the focused real-TCP test asserting that neither reply
+is lost. Two independent v4.1 sessions also complete concurrent
 distinct-file OPEN/WRITE/READ round trips. This is rootless in-process
 userspace concurrency evidence. A restart-boundary test reuses the backend
 with a replacement server and confirms that the old v4 session is rejected
@@ -36,7 +39,9 @@ with `NFS4ERR_BADSESSION`; both halves of the eight-byte write verifier
 contribute to its session identity, avoiding the observed rapid-replacement
 alias. Concurrent `NfsServer::listen()` calls share one bound listener, and
 `close()` is serialized with bind so a lifecycle race cannot leave an
-untracked listener running after teardown begins.
+untracked listener running after teardown begins. Closing the server is
+terminal: a later Rust `listen()` call returns `NotConnected` instead of the
+address of a listener that has already stopped.
 
 The rootless process-restart gate also starts a real child server over a
 `HostFs` root, writes a `FILE_SYNC` NFSv3 payload, force-terminates that child,

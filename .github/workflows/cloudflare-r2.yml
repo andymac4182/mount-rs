@@ -14,6 +14,7 @@ on:
       - 'integrations/**'
       - 'scripts/**'
       - 'tests/**'
+      - 'transports/mount-rs-s3/**'
   workflow_dispatch:
 
 permissions:
@@ -33,6 +34,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Verify S3 provider workflow trigger coverage
+        run: sh scripts/test-s3-provider-workflow-paths.sh
       - name: Enforce the monthly R2 CI usage envelope
         env:
           GH_TOKEN: ${{ github.token }}

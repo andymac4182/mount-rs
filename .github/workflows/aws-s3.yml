@@ -14,6 +14,7 @@ on:
       - 'integrations/mount-rs-persist/**'
       - 'integrations/mount-rs-pglite/**'
       - 'integrations/mount-rs-r2/**'
+      - 'transports/mount-rs-s3/**'
       - 'infra/aws-s3-production.yaml'
       - 'scripts/audit-aws-s3-bucket-policy.sh'
       - 'scripts/audit-aws-s3-ci-oidc.sh'
@@ -26,6 +27,7 @@ on:
       - 'scripts/test-aws-s3-ci-config.sh'
       - 'scripts/test-aws-s3-production-template.rb'
       - 'scripts/test-aws-s3-pglite.sh'
+      - 'scripts/test-s3-provider-workflow-paths.sh'
       - 'scripts/validate-aws-s3-ci-config.sh'
       - 'tests/aws/**'
   workflow_dispatch:
@@ -63,6 +65,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
 
+      - name: Verify S3 provider workflow trigger coverage
+        run: sh scripts/test-s3-provider-workflow-paths.sh
+
       - name: Capture locked AWS S3 qualification provenance
         run: |
           mkdir -p artifacts/aws-s3
@@ -88,6 +93,7 @@ jobs:
             scripts/check-aws-s3-ci-environment.jq \
             scripts/test-aws-s3.sh \
             scripts/test-aws-s3-pglite.sh \
+            scripts/test-s3-provider-workflow-paths.sh \
             tests/aws/Cargo.toml \
             tests/aws/Cargo.lock \
             .github/workflows/aws-s3.yml > artifacts/aws-s3/input-sha256sums.txt

@@ -10,8 +10,9 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 
 Current W01-9P packet (2026-09-22): the N-API 9P facade now owns the bounded
 Node `attach(stream, options)` adapter, direct session `handleCall`/`destroy`,
-attached connection identity/peer/stream/closed state (including the native
-`null` versus attached-stream `undefined` peer boundary), duplicate-attach and
+attached connection identity/peer/stream/closed state (including native
+transport-source peer strings versus attached-stream `undefined` when no
+fallback is supplied), duplicate-attach and
 ownership teardown, shared byte-range lock state, and backpressure/write-fault
 coverage. It now also exposes the effective scalar server/session policy and
 `P9Session.userFor(fid)`, a live transport-backed `P9Session.locks` client, and
@@ -46,8 +47,10 @@ run `35668145703`](https://github.com/andymac4182/mount-rs/actions/runs/35668145
 N-API job `106558367429`, with Rust job `106558367006` also passing; the
 direct `./9p` facade now owns the bounded `signals` teardown option.
 The local N-API member-boundary regression now records the serializable option
-snapshot and attached-stream representations; a hosted direct-mount rerun is
-pending for native `stream: undefined` and `peer: null`.
+snapshot and attached-stream representations; the first hosted direct-mount
+attempt exposed an incorrect `peer: null` expectation for Unix sockets, so a
+corrected rerun is pending for native `stream: undefined` and its
+transport-source peer string.
 The `./9p` constants/message-name/default barrel is now complete against the
 pinned upstream surface, with all 124 constants and all 274 runtime barrel
 exports differentially checked. The transport
@@ -84,10 +87,12 @@ Current W01-NFS packet (2026-09-22): NFSv3/v4 direct routing now exposes
 shared BigInt handle snapshots, live accepted-socket counts, and stable live
 client objects with peer/shared-session views plus abort-safe close/wait state,
 including cancellation while a queued request waits for an in-flight slot and
-serialized concurrent listen/close lifecycle calls.
+serialized concurrent listen/close lifecycle calls. Rust server close is
+terminal, and a later `listen()` rejects rather than returning a stale address.
 The focused Rust/N-API checks pass; rootless tests also prove process-lifetime
 NFSv4.1 session continuity across an orderly TCP reconnect and eight pipelined
-NFSv3 calls under bounded in-flight dispatch. The forced-crash boundary tests
+NFSv3 calls under bounded in-flight dispatch, and a blocked NFSv3 RPC does not
+hold a later fast RPC on the same connection behind it. The forced-crash boundary tests
 now reject a pre-crash NFSv3 file handle with `NFS3ERR_STALE`, a pre-crash v4
 session with `NFS4ERR_BADSESSION`, and a pre-crash v4 root handle with
 `NFS4ERR_STALE`; the v4 session identity folds both write-verifier halves to
@@ -778,7 +783,7 @@ patch):
 | Main | W01 hosted N-API 9P native lifecycle gate | `.github/workflows/native-9p.yml`, `integrations/mount-rs-napi/package.json`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: run `35664614270`, N-API job `106547449823`, at exact SHA `1dcf4dee4d01fb5e3807335579659b54efd74351` passed `9p`/`9pnet_fd` probing, addon build, automatic and direct `./9p` mounted I/O/cleanup, and structural-driver mounted I/O/cleanup; the Rust `native-9p` job `106547449501` also passed; automatic cross-transport signal ownership, remaining mount controls, and supervisor-owned crash/reset/half-close recovery remain outside this acceptance slice, so production remains NO-GO |
 | Main | W01 N-API 9P return-shape and direct-option parity | `integrations/mount-rs-napi/types/p9-codec.d.ts`, `integrations/mount-rs-napi/test/types.test.ts`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: `P9Mount.source` is declared as `string`, compile-time checked, and asserted non-empty by the hosted direct mount; generated typecheck, syntax, helper, and diff checks passed locally. Exact SHA `3c884bd8c0d0199a17e4c355c36d45f660c7c786` passed Native 9P run `35665824215`, N-API job `106552944097`, with automatic/direct/structural mounted I/O and cleanup, and Rust job `106552944349` passed all four ignored native tests; the pinned direct `MountP9Options` audit found no additional unrepresented fields. Automatic cross-transport signal ownership and supervisor-owned crash/reset/half-close recovery remain outside this acceptance slice, so production remains NO-GO |
 | Main | W01 N-API 9P public barrel/default parity | `integrations/mount-rs-napi/p9.cjs`, `integrations/mount-rs-napi/postlude-p9-codec.cjs`, `integrations/mount-rs-napi/test/p9-constants.mjs`, `integrations/mount-rs-napi/test/types.test.ts`, `integrations/mount-rs-napi/types/p9-codec.d.ts`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: the direct facade, postlude binding, and generated declarations expose the six pinned oracle defaults; the runtime parity test passes all 124 constants and all 274 upstream 9P barrel exports, with local typecheck, syntax, helper, and diff checks green. Exact SHA `0ad4928e86af89163c8c87d08fea53ccf7f5f89b` passed Native 9P run `35668145703`, N-API job `106558367429`, with automatic/direct/structural mounted I/O and cleanup, and Rust job `106558367006` passed all four ignored native tests; automatic cross-transport signal ownership, native listener `stream: undefined`, supervisor-owned crash/reset/half-close recovery, and broader W01 gates remain explicit, so production remains NO-GO |
-| Main | W01 N-API 9P member representation boundaries | `integrations/mount-rs-napi/test/p9-session-metadata.mjs`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md` | Current bounded packet: local metadata checks prove effective callback hooks are omitted from serializable option snapshots while attached connections retain the supplied Node `Duplex`, peer, closed state, and string/null server views; the direct native test now asserts the native listener's `stream: undefined` and `peer: null`. Local typecheck, metadata, mount-helper, syntax, and diff checks passed; hosted direct `./9p` rerun remains required, so production remains NO-GO |
+| Main | W01 N-API 9P member representation boundaries | `integrations/mount-rs-napi/test/p9-session-metadata.mjs`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md` | Current bounded packet: local metadata checks prove effective callback hooks are omitted from serializable option snapshots while attached connections retain the supplied Node `Duplex`, peer, closed state, and string/null server views; the direct native test now asserts the native listener's `stream: undefined` and transport-source peer string. Local typecheck, metadata, mount-helper, syntax, and diff checks passed. Hosted run `35669536706` at exact SHA `03529cf30985c2be6503c2909b94e646565cf6fe` passed Rust and automatic N-API but exposed the test's incorrect native-Unix `peer: null` expectation; corrected exact-SHA direct rerun remains required, so production remains NO-GO |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
@@ -823,7 +828,7 @@ complete.
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Complete for requested Rust/Node SDK and CLI hosted acceptance; native/platform gates remain separate | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
-| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; the current mainline Linux Node/CLI/native-FUSE qualification is green at `35666991514`/`5b9af323` with six hosted rollout-ledger and four qualification-log regression cases plus the NO-GO guard; the lease-publication policy marker and inline-secret/unsafe-TTL negative fixtures passed; its base latency was 35,120µs p95/p99 at 105.73 ops/s and five-round soak p95/p99 ranged 20,100–21,587µs with throughput 107.93–119.84 ops/s, so capacity evidence remains open; the preceding `35662679910` lockfile blocker was corrected by `ccd3f671` and requalified; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
+| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; the latest mainline Linux Node/CLI/native-FUSE qualification is green at `35668646531`/`564d0949` with six hosted rollout-ledger, four qualification-log and twelve production-evidence packet regression cases plus the NO-GO guard; the lease-publication policy marker and inline-secret/unsafe-TTL negative fixtures passed; its base latency was 51,773µs p95/p99 at 83.15 ops/s and five-round soak p95/p99 ranged 17,332–31,275µs with throughput 102.88–129.93 ops/s, so capacity evidence remains open; the preceding `35662679910` lockfile blocker was corrected by `ccd3f671` and requalified; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
@@ -930,7 +935,8 @@ host-enabled WebDAV network/fault/restart matrix, while the package-wide
 server harness remains blocked in its unrelated NFS phase before WebDAV.
 Hosted network concurrency, power-loss/live-provider durability, and broader
 hosted session/member lifecycle remain open; local NodeFs/SQLite process-crash
-recovery is covered by the dedicated N-API probe. The callable/member packet
+recovery, including in-flight streamed-PUT prefix recovery after independent
+readback, is covered by the dedicated N-API probes. The callable/member packet
 `8f0e74138286a678cbc5868d3cc4a528fb1b9fe9` has exact-SHA CI and release lanes
 pending or queued, so no hosted WebDAV acceptance is claimable from that packet.
 The subsequent 64-pair packet `d391f9b798df455311177f462ab160736ed3ba4c`
@@ -1066,6 +1072,14 @@ the exact-SHA CI run `35669390058`, W08 release targets `35669390013`, and W08
 release policy `35669389968` were pending; Fault injection `35669390039` and
 W04 production policy `35669390028` were queued, and no Live Cloudflare R2
 run was listed. No hosted WebDAV PASS is claimable from this tip.
+
+For the published in-flight-crash packet
+`4719eb50a6e2d48e4539c10f0638fa2f493301c1`, exact-SHA CI `35670254510`, Fault
+injection `35670254549`, W08 release targets `35670254488`, and W08 release
+policy `35670254485` were cancelled; W04 production policy `35670254554`
+succeeded, while Live Cloudflare R2 `35670254473` and unrelated Native 9P
+`35670254618` were in progress. No hosted WebDAV PASS is claimable from that
+packet.
 
 Evidence landed without closing the remaining W01 acceptance gates:
 
@@ -1416,6 +1430,22 @@ Evidence landed without closing the remaining W01 acceptance gates:
   transport errors 4, v4 barrier 1, v4 wire 6), release addon/typecheck, live
   N-API harness, and strict affected Clippy pass. Native Linux/hosted lifecycle
   and crash/durability remain open.
+- [x] The NFS transport concurrency packet now directly proves completion-order
+  replies: a blocked NFSv3 `GETATTR` does not hold a later fast `GETATTR` on the
+  same TCP connection, and both XIDs arrive exactly once. The focused target
+  passed 2/2, the complete locked NFS target passed 39 unit tests, process
+  restart 2, rootless wire 1, transport concurrency 2, transport errors 4,
+  lifecycle 4, v4 barrier 1, and v4 wire 7; strict Clippy, formatting, and diff
+  checks pass. Native-client ordering, cross-process concurrency, and crash/
+  durability remain open.
+- [x] The NFS server close boundary is terminal in Rust: the lifecycle lock
+  orders close against listen, and subsequent `listen()` returns `NotConnected`
+  instead of the stale former address. The focused lifecycle target passed
+  5/5; the complete locked NFS target passed 39 unit tests, process restart 2,
+  rootless wire 1, transport concurrency 2, transport errors 4, lifecycle 5,
+  v4 barrier 1, and v4 wire 7; strict Clippy, formatting, and diff checks pass.
+  Native-client ordering, cross-process concurrency, and crash/durability
+  qualification remain open.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
@@ -1534,6 +1564,14 @@ Evidence landed without closing the remaining W01 acceptance gates:
   local NodeFs process-crash recovery and process-local WebDAV locks only;
   power-loss ordering, live-provider behavior, durable locks, and hosted
   lifecycle remain open.
+- [x] The focused N-API in-flight WebDAV process-crash probe is now part of the
+  package test sequence: three repeated `node
+  test/webdav-inflight-crash.mjs` runs yielded and independently read back a
+  streamed PUT prefix before forced child termination, then recovered the exact
+  prefix through replacement NodeFs and SQLite providers with zero replacement
+  locks. This classifies local in-flight process-crash recovery only; power-loss
+  ordering, live-provider behavior, durable locks, hosted lifecycle, and hosted
+  concurrency remain open.
 - [x] Direct JavaScript peer-fault qualification now drives abortive Node
   socket resets against both S3 and WebDAV after session-reply readiness. Each
   N-API callback delivered exactly once with the accepted peer, repeated
@@ -1946,6 +1984,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   authority/consumer, service-restart and fresh-client paths. Deployment-level
   authority credentials, monitored clock/cadence telemetry and failover
   evidence remain pending, so this item is not yet marked complete.
+  Latest packet-guard requalification
+  [35668646531](https://github.com/andymac4182/mount-rs/actions/runs/35668646531)
+  (job `106559918401`, revision `564d0949`) completed green in 10m27s and
+  re-ran the credential-free NO-GO packet admission checks plus the real
+  authority/consumer, service-restart and fresh-client paths. Deployment-level
+  authority credentials, monitored clock/cadence telemetry and failover
+  evidence remain pending, so this item is not yet marked complete.
 - [x] W07.4 Add conservative transaction/block limits, CAS, stale-writer and
   deterministic lease-fencing checks. Provider restart and hosted identity remain
   separate acceptance work.
@@ -2006,6 +2051,17 @@ Evidence landed without closing the remaining W01 acceptance gates:
   Its retained artifact is
   `foundationdb-production-qualification-35666991514-1` with SHA-256
   `7313f7ce6f7fb188d84d79a5c5d98df01a1319f071208f1058c5ab87a72acb12`.
+  Live macOS service/cluster acceptance, the complete advertised
+  platform/package matrix and production owner gates remain open.
+  Latest packet-guard requalification
+  [35668646531](https://github.com/andymac4182/mount-rs/actions/runs/35668646531)
+  (job `106559918401`, revision `564d0949`) completed green in 10m27s and
+  passed the live Node/N-API, Linux CLI/FUSE mount and reopen, FoundationDB
+  service restart/authority republish and RustFS restart/fault-recovery paths.
+  Its retained artifact is
+  `foundationdb-production-qualification-35668646531-1` (ID `10670422714`)
+  with SHA-256
+  `f6f663ff26bb925cf601353a8e2c4e7d48bf15fbaeb7ba20163e32eb3c8a3897`.
   Live macOS service/cluster acceptance, the complete advertised
   platform/package matrix and production owner gates remain open.
 - [x] W07.6 **FoundationDB metadata + RustFS S3 chunks:** main passed the real-service
@@ -2481,6 +2537,21 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provenance records runner `GitHub Actions 1000023347`; this remains
   bounded hosted Linux qualification, not production capacity or rollout
   acceptance.
+  Latest packet-guard requalification
+  [35668646531](https://github.com/andymac4182/mount-rs/actions/runs/35668646531)
+  (job `106559918401`, revision `564d0949`) completed green in 10m27s. It
+  emitted `FOUNDATIONDB_TEST_PASS topology=durable ... platform=linux/amd64
+  service_restart=pass soak_rounds=5`, `FOUNDATIONDB_SOAK_PASS rounds=5`,
+  `FOUNDATIONDB_NAPI_PASS`, `FOUNDATIONDB_CLI_PASS`, `RUSTFS_COMBO_PASS` and
+  `RUSTFS_INTEGRATION_PASS`; base latency was
+  `operations=15 p50_us=9720 p95_us=51773 p99_us=51773 total_ms=180
+  throughput_ops_per_sec=83.15`, with five soak-round p95/p99 values from
+  17,332µs to 31,275µs and throughput from 102.88 to 129.93 ops/s. The
+  artifact digest is
+  `f6f663ff26bb925cf601353a8e2c4e7d48bf15fbaeb7ba20163e32eb3c8a3897` and
+  provenance records runner `GitHub Actions 1000023513`; this remains
+  bounded hosted Linux qualification, not production capacity or rollout
+  acceptance.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. The earlier target-gated packet did not
@@ -2548,11 +2619,11 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     and fresh-client reopen at production-like duration and load. Record
     latency, retry, capacity and error-budget results. The real composition
     harness now emits `FOUNDATIONDB_LATENCY_PASS` with p50/p95/p99 operation
-    latency and throughput; latest hosted run `35666991514` recorded base
-    `operations=15 p50_us=8101 p95_us=35120 p99_us=35120 total_ms=141
-    throughput_ops_per_sec=105.73` at revision `5b9af323`; its five soak-round
-    p95/p99 values ranged from 20,100µs to 21,587µs and throughput ranged
-    from 107.93 to 119.84 ops/s. This remains bounded
+    latency and throughput; latest hosted run `35668646531` recorded base
+    `operations=15 p50_us=9720 p95_us=51773 p99_us=51773 total_ms=180
+    throughput_ops_per_sec=83.15` at revision `564d0949`; its five soak-round
+    p95/p99 values ranged from 17,332µs to 31,275µs and throughput ranged
+    from 102.88 to 129.93 ops/s. This remains bounded
     qualification evidence and does not convert the five-round result into
     production capacity evidence.
   - [ ] **Observability and operations:** expose and alert on cluster health,
@@ -2565,9 +2636,9 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     keyspace and configuration, rehearse rollback/authority recovery and
     record owner sign-off.
   - [ ] **Hosted and platform evidence:** the latest hosted FoundationDB/RustFS,
-    Node, CLI/native Linux checkpoint is green for revision `5b9af323` in run
-    `35666991514` on `ubuntu-24.04`, with the retained
-    `foundationdb-production-qualification-35666991514-1` artifact and
+    Node, CLI/native Linux checkpoint is green for revision `564d0949` in run
+    `35668646531` on `ubuntu-24.04`, with the retained
+    `foundationdb-production-qualification-35668646531-1` artifact and
     provenance digest. Complete the
     advertised macOS/Linux build/native matrix and any remaining
     clean-install/package evidence; record the actual runner, cluster/image,
