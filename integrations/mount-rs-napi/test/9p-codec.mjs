@@ -378,10 +378,17 @@ for (const [name, body] of boundedBodies) {
   const upstreamValue = upstreamProtocol[name](new upstreamWire.P9Reader(body), 3)
   const nativeValue = native[name](new native.P9Reader(body), 3)
   assert.deepEqual(plain(nativeValue), plain(upstreamValue), `${name} custom max`)
+  const nativeTypedValue = new native.P9Reader(body)[name](3)
+  assert.deepEqual(plain(nativeTypedValue), plain(upstreamValue), `${name} typed reader custom max`)
   assert.deepEqual(
     errorShape(native, () => native[name](new native.P9Reader(body), 2)),
     errorShape(upstreamProtocol, () => upstreamProtocol[name](new upstreamWire.P9Reader(body), 2), upstreamWire),
     `${name} custom max error`,
+  )
+  assert.deepEqual(
+    errorShape(native, () => new native.P9Reader(body)[name](2)),
+    errorShape(upstreamProtocol, () => upstreamProtocol[name](new upstreamWire.P9Reader(body), 2), upstreamWire),
+    `${name} typed reader custom max error`,
   )
 }
 
