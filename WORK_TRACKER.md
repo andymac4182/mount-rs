@@ -10,8 +10,9 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 
 Current W01-9P packet (2026-09-22): the N-API 9P facade now owns the bounded
 Node `attach(stream, options)` adapter, direct session `handleCall`/`destroy`,
-attached connection identity/peer/stream/closed state (including the native
-`null` versus attached-stream `undefined` peer boundary), duplicate-attach and
+attached connection identity/peer/stream/closed state (including native
+transport-source peer strings versus attached-stream `undefined` when no
+fallback is supplied), duplicate-attach and
 ownership teardown, shared byte-range lock state, and backpressure/write-fault
 coverage. It now also exposes the effective scalar server/session policy and
 `P9Session.userFor(fid)`, a live transport-backed `P9Session.locks` client, and
@@ -46,8 +47,10 @@ run `35668145703`](https://github.com/andymac4182/mount-rs/actions/runs/35668145
 N-API job `106558367429`, with Rust job `106558367006` also passing; the
 direct `./9p` facade now owns the bounded `signals` teardown option.
 The local N-API member-boundary regression now records the serializable option
-snapshot and attached-stream representations; a hosted direct-mount rerun is
-pending for native `stream: undefined` and `peer: null`.
+snapshot and attached-stream representations; the first hosted direct-mount
+attempt exposed an incorrect `peer: null` expectation for Unix sockets, so a
+corrected rerun is pending for native `stream: undefined` and its
+transport-source peer string.
 The `./9p` constants/message-name/default barrel is now complete against the
 pinned upstream surface, with all 124 constants and all 274 runtime barrel
 exports differentially checked. The transport
@@ -779,7 +782,7 @@ patch):
 | Main | W01 hosted N-API 9P native lifecycle gate | `.github/workflows/native-9p.yml`, `integrations/mount-rs-napi/package.json`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: run `35664614270`, N-API job `106547449823`, at exact SHA `1dcf4dee4d01fb5e3807335579659b54efd74351` passed `9p`/`9pnet_fd` probing, addon build, automatic and direct `./9p` mounted I/O/cleanup, and structural-driver mounted I/O/cleanup; the Rust `native-9p` job `106547449501` also passed; automatic cross-transport signal ownership, remaining mount controls, and supervisor-owned crash/reset/half-close recovery remain outside this acceptance slice, so production remains NO-GO |
 | Main | W01 N-API 9P return-shape and direct-option parity | `integrations/mount-rs-napi/types/p9-codec.d.ts`, `integrations/mount-rs-napi/test/types.test.ts`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: `P9Mount.source` is declared as `string`, compile-time checked, and asserted non-empty by the hosted direct mount; generated typecheck, syntax, helper, and diff checks passed locally. Exact SHA `3c884bd8c0d0199a17e4c355c36d45f660c7c786` passed Native 9P run `35665824215`, N-API job `106552944097`, with automatic/direct/structural mounted I/O and cleanup, and Rust job `106552944349` passed all four ignored native tests; the pinned direct `MountP9Options` audit found no additional unrepresented fields. Automatic cross-transport signal ownership and supervisor-owned crash/reset/half-close recovery remain outside this acceptance slice, so production remains NO-GO |
 | Main | W01 N-API 9P public barrel/default parity | `integrations/mount-rs-napi/p9.cjs`, `integrations/mount-rs-napi/postlude-p9-codec.cjs`, `integrations/mount-rs-napi/test/p9-constants.mjs`, `integrations/mount-rs-napi/test/types.test.ts`, `integrations/mount-rs-napi/types/p9-codec.d.ts`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: the direct facade, postlude binding, and generated declarations expose the six pinned oracle defaults; the runtime parity test passes all 124 constants and all 274 upstream 9P barrel exports, with local typecheck, syntax, helper, and diff checks green. Exact SHA `0ad4928e86af89163c8c87d08fea53ccf7f5f89b` passed Native 9P run `35668145703`, N-API job `106558367429`, with automatic/direct/structural mounted I/O and cleanup, and Rust job `106558367006` passed all four ignored native tests; automatic cross-transport signal ownership, native listener `stream: undefined`, supervisor-owned crash/reset/half-close recovery, and broader W01 gates remain explicit, so production remains NO-GO |
-| Main | W01 N-API 9P member representation boundaries | `integrations/mount-rs-napi/test/p9-session-metadata.mjs`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md` | Current bounded packet: local metadata checks prove effective callback hooks are omitted from serializable option snapshots while attached connections retain the supplied Node `Duplex`, peer, closed state, and string/null server views; the direct native test now asserts the native listener's `stream: undefined` and `peer: null`. Local typecheck, metadata, mount-helper, syntax, and diff checks passed; hosted direct `./9p` rerun remains required, so production remains NO-GO |
+| Main | W01 N-API 9P member representation boundaries | `integrations/mount-rs-napi/test/p9-session-metadata.mjs`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md` | Current bounded packet: local metadata checks prove effective callback hooks are omitted from serializable option snapshots while attached connections retain the supplied Node `Duplex`, peer, closed state, and string/null server views; the direct native test now asserts the native listener's `stream: undefined` and transport-source peer string. Local typecheck, metadata, mount-helper, syntax, and diff checks passed. Hosted run `35669536706` at exact SHA `03529cf30985c2be6503c2909b94e646565cf6fe` passed Rust and automatic N-API but exposed the test's incorrect native-Unix `peer: null` expectation; corrected exact-SHA direct rerun remains required, so production remains NO-GO |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2

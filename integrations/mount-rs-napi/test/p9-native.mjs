@@ -48,7 +48,8 @@ try {
   assert.ok(mounted.server)
   assert.ok(mounted.connection)
   assert.equal(mounted.connection.stream, undefined)
-  assert.equal(mounted.connection.peer, null)
+  assert.equal(typeof mounted.connection.peer, "string")
+  assert.ok(mounted.connection.peer.length > 0)
   assert.equal(typeof mounted.waitClosed, "function")
   assert.equal((await live9pMounts()).length, 1)
 
