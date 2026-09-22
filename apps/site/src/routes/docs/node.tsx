@@ -26,8 +26,8 @@ function NodeDocs() {
         filesystem explicitly when the process is done.
       </p>
 
-      <CodeBlock label="integrations/mount-rs-napi / current factory shape">
-        {`const { createChunkedDriver } = require('./integrations/mount-rs-napi');
+      <CodeBlock label="bindings/mount-rs-napi / current factory shape">
+        {`const { createChunkedDriver } = require('./bindings/mount-rs-napi');
 
 const fs = await createChunkedDriver({
   metadata: { kind: 'sqlite', uri: './metadata.sqlite' },
@@ -67,7 +67,7 @@ try {
       <div className="source-note">
         <span className="source-note-mark" aria-hidden="true">↗</span>
         <p>
-          Source links: <a href="https://github.com/andymac4182/mount-rs/blob/main/integrations/mount-rs-napi/index.d.ts">Node declarations</a>, <a href="https://github.com/andymac4182/mount-rs/blob/main/integrations/mount-rs-napi/src/lib.rs">N-API implementation</a>, and the <a href="https://github.com/andymac4182/mount-rs/blob/main/README.md#node-split-store-api">README example</a>.
+          Source links: <a href="https://github.com/andymac4182/mount-rs/blob/main/bindings/mount-rs-napi/index.d.ts">Node declarations</a>, <a href="https://github.com/andymac4182/mount-rs/blob/main/bindings/mount-rs-napi/src/lib.rs">N-API implementation</a>, and the <a href="https://github.com/andymac4182/mount-rs/blob/main/README.md#node-split-store-api">README example</a>.
         </p>
       </div>
     </article>

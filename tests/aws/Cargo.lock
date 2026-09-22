@@ -1002,11 +1002,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mount-rs-aws-s3"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mount-rs-core",
+ "mount-rs-object-store-blocks",
+ "object_store",
+]
+
+[[package]]
 name = "mount-rs-aws-s3-tests"
 version = "0.1.0"
 dependencies = [
+ "mount-rs-aws-s3",
  "mount-rs-core",
- "mount-rs-r2",
  "mount-rs-sdk",
  "object_store",
  "tokio",
@@ -1051,6 +1061,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mount-rs-memfs"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mount-rs-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mount-rs-memory"
 version = "0.1.0"
 dependencies = [
@@ -1067,11 +1087,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "mount-rs-object-store-blocks"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "mount-rs-core",
+ "object_store",
+ "sha2 0.10.9",
+ "tokio",
+]
+
+[[package]]
 name = "mount-rs-persist"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "mount-rs-core",
+ "mount-rs-memfs",
 ]
 
 [[package]]
@@ -1079,6 +1112,7 @@ name = "mount-rs-pglite"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "md-5 0.10.6",
  "mount-rs-core",
  "mount-rs-persist",
  "serde_json",
@@ -1091,12 +1125,10 @@ name = "mount-rs-r2"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "futures-util",
  "mount-rs-core",
+ "mount-rs-object-store-blocks",
  "mount-rs-persist",
  "object_store",
- "sha2 0.10.9",
- "tokio",
 ]
 
 [[package]]
@@ -1105,13 +1137,16 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "mount-rs-auto",
+ "mount-rs-aws-s3",
  "mount-rs-chunked",
  "mount-rs-core",
  "mount-rs-host",
+ "mount-rs-memfs",
  "mount-rs-memory",
  "mount-rs-pglite",
  "mount-rs-r2",
  "mount-rs-sqlite",
+ "mount-rs-sqlite-fs",
  "mount-rs-tidb",
 ]
 
@@ -1124,6 +1159,15 @@ dependencies = [
  "mount-rs-persist",
  "rusqlite",
  "serde_json",
+]
+
+[[package]]
+name = "mount-rs-sqlite-fs"
+version = "0.1.0"
+dependencies = [
+ "mount-rs-core",
+ "mount-rs-persist",
+ "mount-rs-sqlite",
 ]
 
 [[package]]

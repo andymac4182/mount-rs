@@ -12,7 +12,7 @@ use mount_rs_9p::{
     P9Server, P9ServerOptions, P9Writer, Tattach, Tversion, decode_message, encode_message,
     read_rattach, read_rversion, write_tattach, write_tversion,
 };
-use mount_rs_core::MemoryFs;
+use mount_rs_memfs::MemoryFs;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Notify;

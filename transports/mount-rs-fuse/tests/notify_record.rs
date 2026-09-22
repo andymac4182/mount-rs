@@ -3,7 +3,7 @@
 use mount_rs_fuse::RequestHeader;
 use mount_rs_fuse::{notify, record, session};
 
-use mount_rs_core::MemoryFs;
+use mount_rs_memfs::MemoryFs;
 use notify::{
     FUSE_NOTIFY_INVAL_ENTRY, FUSE_NOTIFY_INVAL_INODE, FuseNotifyInvalEntryOut,
     FuseNotifyInvalInodeOut, decode_notify, decode_notify_inval_entry, decode_notify_inval_inode,

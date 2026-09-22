@@ -1,6 +1,6 @@
 # Mount-free SQLite VFS design
 
-`integrations/mount-rs-sqlite-vfs/` is a separate SQLite hosting boundary for
+`bindings/mount-rs-sqlite-vfs/` is a separate SQLite hosting boundary for
 environments where mounting a filesystem is unavailable or undesirable. It
 contains both the synchronous rollback-journal VFS API and the concrete
 `StorageBackend<M, B, E>` bridge to mount-rs metadata and immutable-block

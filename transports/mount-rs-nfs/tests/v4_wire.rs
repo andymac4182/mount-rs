@@ -14,8 +14,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use mount_rs_core::{DirEntry, FileHandle, FsDriver, MemoryFs, Result, Stats};
+use mount_rs_core::{DirEntry, FileHandle, FsDriver, Result, Stats};
 use mount_rs_host::HostFs;
+use mount_rs_memfs::MemoryFs;
 use mount_rs_nfs::constants::{
     CREATE_UNCHECKED, MOUNT_PROGRAM, MOUNT_V3, MOUNTPROC3_MNT, NFS_PROGRAM, NFS_V3, NFS3_OK,
     NFS3ERR_NOENT, NFS3ERR_STALE, NFSPROC3_CREATE, NFSPROC3_GETATTR, NFSPROC3_LOOKUP,

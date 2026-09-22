@@ -1,7 +1,8 @@
-use mount_rs_core::{FsDriver, Loopback, MemoryFs};
+use mount_rs_core::{FsDriver, Loopback};
 use mount_rs_fuse::{RequestHeader, session::FuseSession};
-use mount_rs_r2::open_object_store;
-use mount_rs_sqlite::open_sqlite_memory;
+use mount_rs_memfs::MemoryFs;
+use mount_rs_r2_fs::open_object_store;
+use mount_rs_sqlite_fs::open_sqlite_memory;
 use object_store::memory::InMemory;
 use std::sync::Arc;
 
@@ -225,8 +226,11 @@ async fn fuse_io_runs_over_memory_sqlite_and_object_store() {
 async fn fuse_sqlite_operations_survive_database_reopen() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("fuse.db");
-    let expected = scenario(Arc::new(mount_rs_sqlite::open_sqlite(&path).await.unwrap())).await;
-    let reopened = Loopback::new(mount_rs_sqlite::open_sqlite(&path).await.unwrap());
+    let expected = scenario(Arc::new(
+        mount_rs_sqlite_fs::open_sqlite(&path).await.unwrap(),
+    ))
+    .await;
+    let reopened = Loopback::new(mount_rs_sqlite_fs::open_sqlite(&path).await.unwrap());
     assert_eq!(reopened.read_file("/renamed").await.unwrap(), expected);
     assert_eq!(
         reopened.stat("/renamed").await.unwrap().mode & 0o7777,
@@ -240,13 +244,13 @@ async fn fuse_pglite_operations_survive_connection_reopen() {
     let url = std::env::var("PGLITE_DATABASE_URL").expect("PGLITE_DATABASE_URL is required");
     let key = format!("fuse-test-{}", std::process::id());
     let expected = scenario(Arc::new(
-        mount_rs_pglite::connect_pglite_with_key(&url, &key)
+        mount_rs_pglite_fs::connect_pglite_with_key(&url, &key)
             .await
             .unwrap(),
     ))
     .await;
     let reopened = Loopback::new(
-        mount_rs_pglite::connect_pglite_with_key(&url, &key)
+        mount_rs_pglite_fs::connect_pglite_with_key(&url, &key)
             .await
             .unwrap(),
     );

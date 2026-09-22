@@ -101,12 +101,12 @@ jobs:
       - name: Install real PGlite and Node factory prerequisites
         run: |
           pnpm --dir tests/pglite install --frozen-lockfile
-          pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
+          pnpm --dir bindings/mount-rs-napi install --frozen-lockfile
 
       - name: Build the default N-API addon with the locked Rust graph
         env:
           CARGOFLAGS: --locked
-        run: pnpm --dir integrations/mount-rs-napi build
+        run: pnpm --dir bindings/mount-rs-napi build
 
       - name: Install and verify the Linux FUSE prerequisite for the FDB CLI gate
         run: |

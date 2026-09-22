@@ -1484,7 +1484,8 @@ pub use http_propagation::{HeaderExtractor, HeaderInjector, extract_headers, inj
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mount_rs_core::{FsDriver, MemoryFs, MemoryOptions};
+    use mount_rs_core::FsDriver;
+    use mount_rs_memfs::{MemoryFs, MemoryOptions};
 
     #[test]
     fn disabled_telemetry_has_zero_snapshot_and_redacts_path_shape() {

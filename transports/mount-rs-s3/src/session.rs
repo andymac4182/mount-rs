@@ -4287,7 +4287,8 @@ fn sigv4_error(failure: SigV4Failure, presigned: bool) -> protocol::S3Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mount_rs_core::{ErrorCode, FileHandle, FsError, MemoryFs, Result as FsResult, Stats};
+    use mount_rs_core::{ErrorCode, FileHandle, FsError, Result as FsResult, Stats};
+    use mount_rs_memfs::MemoryFs;
 
     struct ReturnedWriteCount(usize);
 

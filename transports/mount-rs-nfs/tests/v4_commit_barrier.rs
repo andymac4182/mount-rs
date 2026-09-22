@@ -13,8 +13,9 @@ use std::sync::{
 use std::time::Duration;
 
 use mount_rs_core::{
-    Capabilities, DirEntry, ErrorCode, FileHandle, FsDriver, FsError, MemoryFs, Result, Stats,
+    Capabilities, DirEntry, ErrorCode, FileHandle, FsDriver, FsError, Result, Stats,
 };
+use mount_rs_memfs::MemoryFs;
 use mount_rs_nfs::v4::{
     CREATE_SESSION4_FLAG_CONN_BACK_CHAN, NFS_V4, NFS4_PROGRAM, NFS4ERR_IO, NFS4ERR_PERM, OP_COMMIT,
     OP_CREATE_SESSION, OP_EXCHANGE_ID, OP_GETFH, OP_OPEN, OP_PUTFH, OP_PUTROOTFH,

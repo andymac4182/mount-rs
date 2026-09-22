@@ -19,7 +19,7 @@ compress before encryption. Compression does not strengthen durability.
 
 The current `BlockExtent` offsets and lengths describe logical file bytes.
 `BlockStore::put/get` accept and return whole immutable blocks. Fixed-size writes
-in `integrations/mount-rs-chunked/src/lib.rs` reconstruct only touched chunks and
+in `filesystems/mount-rs-chunked/src/lib.rs` reconstruct only touched chunks and
 already omit all-zero chunks. A wrapper can preserve that contract: `get` returns
 decoded bytes, while metadata keeps logical offsets. Sparse holes stay holes.
 

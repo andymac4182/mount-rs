@@ -27,7 +27,7 @@ Options:
   --help                  Show this help.
 
 The CLI uses the public @mount-rs/core N-API SDK. From a checkout it loads the
-local addon at integrations/mount-rs-napi; set MOUNT_RS_NAPI_PACKAGE to use a
+local addon at bindings/mount-rs-napi; set MOUNT_RS_NAPI_PACKAGE to use a
 published or otherwise externally-resolved package. It never reads credentials.
 `;
 }
@@ -153,7 +153,7 @@ async function importFirst(specifiers, label) {
 }
 
 async function loadSdk() {
-  const local = new URL("../../integrations/mount-rs-napi/index.js", import.meta.url).href;
+  const local = new URL("../../bindings/mount-rs-napi/index.js", import.meta.url).href;
   const specifiers = process.env.MOUNT_RS_NAPI_PACKAGE
     ? [process.env.MOUNT_RS_NAPI_PACKAGE]
     : [local, "@mount-rs/core"];

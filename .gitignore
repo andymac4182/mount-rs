@@ -7,6 +7,6 @@ transports/*/Cargo.lock
 node_modules/
 # Generated benchmark reports are uploaded by CI, not source artifacts.
 /artifacts/storage-*.json
-integrations/mount-rs-napi/*.node
-integrations/.mount-rs-napi.napi-stage-*/
-integrations/.napi-rs-filesystem-reconciliation.*.swp
+bindings/mount-rs-napi/*.node
+bindings/.mount-rs-napi.napi-stage-*/
+bindings/.napi-rs-filesystem-reconciliation.*.swp

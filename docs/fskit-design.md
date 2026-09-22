@@ -16,13 +16,13 @@ The current repository and pinned upstream support the following:
 
 | Area | State | Evidence |
 | --- | --- | --- |
-| Core filesystem and providers | Implemented in the working tree | `mount_rs_core::FsDriver` and the existing metadata/block provider crates are the delegation boundary. The CLI provider composition is visible in [crates/mount-rs-cli/src/storage.rs](../crates/mount-rs-cli/src/storage.rs). |
+| Core filesystem and providers | Implemented in the working tree | `mount_rs_core::FsDriver` and the existing metadata/block provider crates are the delegation boundary. Rust provider construction is visible in [crates/mount-rs-sdk/src/providers.rs](../crates/mount-rs-sdk/src/providers.rs). |
 | macOS native transport today | Implemented | The NFS native bridge recognises macOS and `/sbin/mount_nfs` in [transports/mount-rs-nfs/src/native.rs](../transports/mount-rs-nfs/src/native.rs). The automatic facade documents NFS as the macOS choice in [transports/mount-rs-auto/src/lib.rs](../transports/mount-rs-auto/src/lib.rs). |
-| Node native loading | Implemented, FSKit-independent | The N-API loader has Darwin arm64, Darwin x64, and Darwin-universal artifact paths in [integrations/mount-rs-napi/index.js](../integrations/mount-rs-napi/index.js). Loading one of those artifacts does not imply that a signed or activated FSKit module exists. |
-| Existing transport selection | Implemented, no FSKit entry | Rust `Transport` and the N-API `transport` option currently contain only `fuse`, `9p`, and `nfs`; see [transports/mount-rs-auto/src/lib.rs](../transports/mount-rs-auto/src/lib.rs) and [integrations/mount-rs-napi/src/lib.rs](../integrations/mount-rs-napi/src/lib.rs). The pinned upstream has the same union in `/tmp/mountx-source.uWiHfX/src/auto.ts:70-71`, preference at `:293-304`, and dispatch at `:372-387`. |
+| Node native loading | Implemented, FSKit-independent | The N-API loader has Darwin arm64, Darwin x64, and Darwin-universal artifact paths in [bindings/mount-rs-napi/index.js](../bindings/mount-rs-napi/index.js). Loading one of those artifacts does not imply that a signed or activated FSKit module exists. |
+| Existing transport selection | Implemented, no FSKit entry | Rust `Transport` and the N-API `transport` option currently contain only `fuse`, `9p`, and `nfs`; see [transports/mount-rs-auto/src/lib.rs](../transports/mount-rs-auto/src/lib.rs) and [bindings/mount-rs-napi/src/lib.rs](../bindings/mount-rs-napi/src/lib.rs). The pinned upstream has the same union in `/tmp/mountx-source.uWiHfX/src/auto.ts:70-71`, preference at `:293-304`, and dispatch at `:372-387`. |
 | FSKit source artifacts in this repository | Missing | A read-only search found no Swift sources, Xcode project/workspace, entitlements file, Swift package, or FSKit target. |
 | FSKit source artifacts upstream | Missing | A read-only search of `/tmp/mountx-source.uWiHfX` found no FSKit, `FSVolume`, `FSUnaryFileSystem`, or file-system-extension implementation. |
-| Local Apple toolchain | Compile gate verified; runtime still unverified | `uname -m` = `arm64`; `sw_vers` = macOS `26.5.1`, build `25F80`; `xcodebuild -version` = Xcode `26.6`, build `17F113`; SDK = macOS `26.5` at `/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk`. The standalone unsigned target in `integrations/mount-rs-fskit/` type-checks and builds with both `arm64-apple-macos15.4` and `x86_64-apple-macos15.4` using `CODE_SIGNING_ALLOWED=NO`. This is not evidence of a valid FSKit entitlement, provisioning profile, extension activation, or mounted I/O. |
+| Local Apple toolchain | Compile gate verified; runtime still unverified | `uname -m` = `arm64`; `sw_vers` = macOS `26.5.1`, build `25F80`; `xcodebuild -version` = Xcode `26.6`, build `17F113`; SDK = macOS `26.5` at `/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX26.5.sdk`. The standalone unsigned target in `transports/mount-rs-fskit/` type-checks and builds with both `arm64-apple-macos15.4` and `x86_64-apple-macos15.4` using `CODE_SIGNING_ALLOWED=NO`. This is not evidence of a valid FSKit entitlement, provisioning profile, extension activation, or mounted I/O. |
 | Real FSKit mount and SQLite-on-FSKit behavior | Unverified/missing | No FSKit extension has been installed or activated, and no native mounted-path test has run. |
 
 The pinned upstream's NFS implementation is useful for behavioral parity but
@@ -79,7 +79,7 @@ These links are the official Apple documentation consulted for this checkpoint:
 ### Package boundaries
 
 Add a separate macOS integration, tentatively
-`integrations/mount-rs-fskit`, with these logical pieces:
+`transports/mount-rs-fskit`, with these logical pieces:
 
 1. A Rust host-side worker/control library that depends on the existing core
    and provider crates only. It owns provider construction, mount identity,
@@ -185,7 +185,7 @@ commit.
 
 The FSKit deliverable is a signed macOS app-extension package plus its Rust
 worker/control artifact. It is not a `.node` file and must not be loaded by
-`integrations/mount-rs-napi/index.js` as if it were one. The current
+`bindings/mount-rs-napi/index.js` as if it were one. The current
 compile-only target is intentionally unsigned and has no containing app.
 
 ### Rust side

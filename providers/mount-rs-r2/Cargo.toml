@@ -1,0 +1,19 @@
+[package]
+name = "mount-rs-r2"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Cloudflare R2 and S3-compatible object-store provider for mount-rs"
+license = "Apache-2.0"
+
+[dependencies]
+async-trait = "0.1"
+mount-rs-core = { path = "../.." }
+mount-rs-object-store-blocks = { path = "../mount-rs-object-store-blocks" }
+mount-rs-persist = { path = "../../filesystems/mount-rs-persist" }
+object_store = { version = "0.12", default-features = false, features = ["aws"] }
+
+[dev-dependencies]
+mount-rs-s3 = { path = "../../transports/mount-rs-s3" }
+mount-rs-memfs = { path = "../../filesystems/mount-rs-memfs" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

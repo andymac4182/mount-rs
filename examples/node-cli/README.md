@@ -58,7 +58,7 @@ node examples/node-cli/index.mjs \
 Use `--driver host --root PATH` for a rooted host-backed view. `--transport`
 accepts `auto`, `fuse`, `9p`, or `nfs`; a named transport is attempted once and
 does not silently fall back. The repository checkout resolves the local N-API
-addon at `integrations/mount-rs-napi/index.js`. A published install can resolve
+addon at `bindings/mount-rs-napi/index.js`. A published install can resolve
 `@mount-rs/core`, or override resolution with `MOUNT_RS_NAPI_PACKAGE`.
 
 The CLI never accepts plaintext provider credentials in its JSON; configured

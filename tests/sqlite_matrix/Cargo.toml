@@ -8,10 +8,10 @@ rust-version = "1.95"
 publish = false
 
 [dependencies]
-mount-rs-chunked = { path = "../../integrations/mount-rs-chunked" }
+mount-rs-chunked = { path = "../../filesystems/mount-rs-chunked" }
 mount-rs-core = { path = "../.." }
-mount-rs-fault-injection = { path = "../../integrations/mount-rs-fault-injection" }
-mount-rs-sqlite = { path = "../../integrations/mount-rs-sqlite" }
+mount-rs-fault-injection = { path = "../../crates/mount-rs-fault-injection" }
+mount-rs-sqlite = { path = "../../providers/mount-rs-sqlite" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

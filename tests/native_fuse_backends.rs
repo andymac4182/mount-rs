@@ -1,7 +1,8 @@
 //! Actual Linux kernel I/O, separate from rootless protocol-frame tests.
 
-use mount_rs_core::{FsDriver, Loopback, MemoryFs};
+use mount_rs_core::{FsDriver, Loopback};
 use mount_rs_fuse::mount::{MountOptions, mount};
+use mount_rs_memfs::MemoryFs;
 use std::sync::Arc;
 
 async fn unmount(
@@ -84,11 +85,11 @@ async fn mounted_memory_sqlite_and_object_store_match_and_persist() {
     let database_dir = tempfile::tempdir().unwrap();
     let database = database_dir.path().join("filesystem.sqlite");
     mounted_round_trip(Arc::new(
-        mount_rs_sqlite::open_sqlite(&database).await.unwrap(),
+        mount_rs_sqlite_fs::open_sqlite(&database).await.unwrap(),
     ))
     .await;
     assert_eq!(
-        Loopback::new(mount_rs_sqlite::open_sqlite(&database).await.unwrap())
+        Loopback::new(mount_rs_sqlite_fs::open_sqlite(&database).await.unwrap())
             .read_file("/alias")
             .await
             .unwrap(),
@@ -98,14 +99,14 @@ async fn mounted_memory_sqlite_and_object_store_match_and_persist() {
     // This proves the object-store adapter, not live Cloudflare credentials.
     let store = Arc::new(object_store::memory::InMemory::new());
     mounted_round_trip(Arc::new(
-        mount_rs_r2::open_object_store(store.clone(), "kernel/state")
+        mount_rs_r2_fs::open_object_store(store.clone(), "kernel/state")
             .await
             .unwrap(),
     ))
     .await;
     assert_eq!(
         Loopback::new(
-            mount_rs_r2::open_object_store(store, "kernel/state")
+            mount_rs_r2_fs::open_object_store(store, "kernel/state")
                 .await
                 .unwrap()
         )
@@ -126,13 +127,13 @@ async fn mounted_pglite_persists_through_connection_reopen() {
     let url = std::env::var("PGLITE_DATABASE_URL").expect("PGLITE_DATABASE_URL required");
     let key = format!("native-pglite-{}", std::process::id());
     mounted_round_trip(Arc::new(
-        mount_rs_pglite::connect_pglite_with_key(&url, &key)
+        mount_rs_pglite_fs::connect_pglite_with_key(&url, &key)
             .await
             .unwrap(),
     ))
     .await;
     let reopened = Loopback::new(
-        mount_rs_pglite::connect_pglite_with_key(&url, &key)
+        mount_rs_pglite_fs::connect_pglite_with_key(&url, &key)
             .await
             .unwrap(),
     );
@@ -194,7 +195,7 @@ async fn mounted_sqlite_engine_locks_journals_and_process_recovery() {
     sqlite_engine_round_trip(Arc::new(MemoryFs::empty())).await;
     let directory = tempfile::tempdir().unwrap();
     sqlite_engine_round_trip(Arc::new(
-        mount_rs_sqlite::open_sqlite(directory.path().join("backend.sqlite"))
+        mount_rs_sqlite_fs::open_sqlite(directory.path().join("backend.sqlite"))
             .await
             .unwrap(),
     ))

@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mount_rs_auto::probe_transports_for;
-use mount_rs_core::MemoryFs;
 use mount_rs_fuse::mount::{MountError as FuseMountError, MountOptions, mount as mount_fuse};
+use mount_rs_memfs::MemoryFs;
 use mount_rs_nfs::nfs_client_probe;
 
 const FSKIT_CAPABILITY_BOUNDARY: &str = "FSKit has an unsigned path-backed worker checkpoint, but no containing app, installation, activation, or mounted-volume host";

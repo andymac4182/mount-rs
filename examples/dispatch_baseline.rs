@@ -6,7 +6,8 @@
 //! design.
 
 use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
-use mount_rs_core::{FileHandle, FsDriver, MemoryFs};
+use mount_rs_core::{FileHandle, FsDriver};
+use mount_rs_memfs::MemoryFs;
 use mount_rs_memory::{MemoryBlockStore, MemoryMetadataStore};
 use serde_json::{Value, json};
 use std::alloc::{GlobalAlloc, Layout, System};

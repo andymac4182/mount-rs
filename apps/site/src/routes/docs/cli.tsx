@@ -92,7 +92,7 @@ mount-rs serve-http --config config-http.json`}
         <span className="source-note-mark" aria-hidden="true">↗</span>
         <p>
           <Link to="/downloads">Download mount-rs {cliRelease.version}</Link>{' '}
-          or read the <a href="https://github.com/andymac4182/mount-rs/blob/main/crates/mount-rs-cli/README.md">CLI README</a> and <a href="https://github.com/andymac4182/mount-rs/blob/main/.github/workflows/cli-release.yml">release workflow</a> for the exact build and publication boundary.
+          or read the <a href="https://github.com/andymac4182/mount-rs/blob/main/apps/mount-rs-cli/README.md">CLI README</a> and <a href="https://github.com/andymac4182/mount-rs/blob/main/.github/workflows/cli-release.yml">release workflow</a> for the exact build and publication boundary.
         </p>
       </div>
     </article>

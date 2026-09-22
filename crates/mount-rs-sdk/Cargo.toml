@@ -15,20 +15,23 @@ foundationdb = ["dep:mount-rs-foundationdb", "mount-rs-foundationdb/foundationdb
 rustls = ["mount-rs-tidb/rustls"]
 
 [dependencies]
+mount-rs-memfs = { path = "../../filesystems/mount-rs-memfs" }
 async-trait = "0.1"
 mount-rs-auto = { path = "../../transports/mount-rs-auto" }
-mount-rs-chunked = { path = "../../integrations/mount-rs-chunked" }
+mount-rs-aws-s3 = { path = "../../providers/mount-rs-aws-s3" }
+mount-rs-chunked = { path = "../../filesystems/mount-rs-chunked" }
 mount-rs-core = { path = "../.." }
-mount-rs-host = { path = "../../integrations/mount-rs-host" }
-mount-rs-memory = { path = "../../integrations/mount-rs-memory" }
+mount-rs-host = { path = "../../filesystems/mount-rs-host" }
+mount-rs-memory = { path = "../../providers/mount-rs-memory" }
 mount-rs-observability = { path = "../mount-rs-observability", optional = true }
-mount-rs-pglite = { path = "../../integrations/mount-rs-pglite" }
-mount-rs-r2 = { path = "../../integrations/mount-rs-r2" }
-mount-rs-sqlite = { path = "../../integrations/mount-rs-sqlite" }
-mount-rs-tidb = { path = "../../integrations/mount-rs-tidb" }
+mount-rs-pglite = { path = "../../providers/mount-rs-pglite" }
+mount-rs-r2 = { path = "../../providers/mount-rs-r2" }
+mount-rs-sqlite = { path = "../../providers/mount-rs-sqlite" }
+mount-rs-sqlite-fs = { path = "../../filesystems/mount-rs-sqlite-fs" }
+mount-rs-tidb = { path = "../../providers/mount-rs-tidb" }
 
 [target.'cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "linux", target_arch = "aarch64"), all(target_os = "macos", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))'.dependencies]
-mount-rs-foundationdb = { path = "../../integrations/mount-rs-foundationdb", optional = true }
+mount-rs-foundationdb = { path = "../../providers/mount-rs-foundationdb", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

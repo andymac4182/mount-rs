@@ -1,4 +1,4 @@
-use mount_rs_core::MemoryFs;
+use mount_rs_memfs::MemoryFs;
 use mount_rs_nfs::constants::{
     CREATE_UNCHECKED, FILE_SYNC, MOUNT_PROGRAM, MOUNT_V3, MOUNTPROC3_MNT, NFS_PROGRAM, NFS_V3,
     NFS3_OK, NFSPROC3_CREATE, NFSPROC3_READ, NFSPROC3_WRITE,

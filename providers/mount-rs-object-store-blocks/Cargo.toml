@@ -1,0 +1,18 @@
+[package]
+name = "mount-rs-object-store-blocks"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Generic immutable object-store block provider for mount-rs"
+license = "Apache-2.0"
+
+[dependencies]
+async-trait = "0.1"
+futures-util = "0.3"
+mount-rs-core = { path = "../.." }
+object_store = { version = "0.12", default-features = false }
+sha2 = "0.10"
+tokio = { version = "1", default-features = false, features = ["sync"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

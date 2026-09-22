@@ -1,6 +1,7 @@
 //! Loopback 9P server for the unmodified upstream conformance client.
 use mount_rs_9p::{P9Server, P9ServerOptions};
-use mount_rs_core::{Loopback, MemoryFs};
+use mount_rs_core::Loopback;
+use mount_rs_memfs::MemoryFs;
 use std::io::{Read, Write};
 use std::sync::Arc;
 

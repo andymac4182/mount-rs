@@ -76,12 +76,12 @@ result.
 - Classification: missing capability in the generic Unstorage adapter, not an
   environment prerequisite. It is not a missing core capability: MemoryFs and
   ChunkedFs advertise hardlinks ([`memory.rs`](../../src/memory.rs#L765),
-  [`chunked/src/lib.rs`](../../integrations/mount-rs-chunked/src/lib.rs#L998)).
+  [`chunked/src/lib.rs`](../../filesystems/mount-rs-chunked/src/lib.rs#L998)).
 - Required for mount-rs: yes for a full filesystem driver; conditional for the
   deliberately capability-limited Unstorage adapter. The latter must keep the
   false declaration until it has real alias and `nlink` semantics.
 - Simplest next task: add the three upstream hardlink cases to the focused
-  Unstorage test ([`test/unstorage.mjs`](../../integrations/mount-rs-napi/test/unstorage.mjs))
+  Unstorage test ([`test/unstorage.mjs`](../../bindings/mount-rs-napi/test/unstorage.mjs))
   as a failing contract, then implement alias metadata in the KV bridge or
   explicitly retain `hardlinks: false`.
 - Evidence boundary: this column uses an in-memory Unstorage memory driver;
@@ -97,7 +97,7 @@ result.
   current capability-limited Unstorage target.
 - Simplest next task: add the upstream dangling-link, loop, relative-target,
   `lstat`/`stat`, and `readlink` cases to
-  [`test/unstorage.mjs`](../../integrations/mount-rs-napi/test/unstorage.mjs),
+  [`test/unstorage.mjs`](../../bindings/mount-rs-napi/test/unstorage.mjs),
   then implement the node-kind/target representation and resolver in the KV
   bridge. Do not only flip `symlinks` to true.
 - Evidence boundary: the core Rust symlink implementation and its NAPI
@@ -113,7 +113,7 @@ result.
 - Required for mount-rs: yes for full filesystem-driver parity; conditional
   for a generic KV-backed adapter that explicitly reports `statfs: false`.
 - Simplest next task: define an optional capacity/statistics callback and test
-  it in [`test/unstorage.mjs`](../../integrations/mount-rs-napi/test/unstorage.mjs),
+  it in [`test/unstorage.mjs`](../../bindings/mount-rs-napi/test/unstorage.mjs),
   or add a focused assertion that the adapter remains explicitly unsupported;
   do not synthesize capacity from key count.
 - Evidence boundary: `statfs` passes in MemoryFs/ChunkedFs do not qualify an
@@ -124,16 +124,16 @@ result.
 - Exact reason: the TypeScript and Rust rooted host targets, plus both
   Unstorage targets, do not advertise the optional `mountx.mknod` extension.
   Rust `HostFs` records this directly as `mknod: false` in
-  [`mount-rs-host/src/lib.rs`](../../integrations/mount-rs-host/src/lib.rs#L1140);
+  [`mount-rs-host/src/lib.rs`](../../filesystems/mount-rs-host/src/lib.rs#L1140);
   the NAPI capability surface forwards that declaration in
-  [`integrations/mount-rs-napi/src/lib.rs`](../../integrations/mount-rs-napi/src/lib.rs#L340).
+  [`bindings/mount-rs-napi/src/lib.rs`](../../bindings/mount-rs-napi/src/lib.rs#L340).
 - Classification: an explicit capability boundary, or missing implementation
   if those targets are intended to be full-capability filesystems; it is not a
   missing privilege in the current rootless runner. The pinned upstream
   `node-fs` target also has no `mountx.mknod` extension.
 - Required for mount-rs: required and already present for MemoryFs and
   ChunkedFs ([`memory.rs`](../../src/memory.rs#L765),
-  [`chunked/src/lib.rs`](../../integrations/mount-rs-chunked/src/lib.rs#L998));
+  [`chunked/src/lib.rs`](../../filesystems/mount-rs-chunked/src/lib.rs#L998));
   not required for the current HostFs/Unstorage capability-limited targets
   unless mount-rs promises special-node parity there.
 - Simplest next task: keep the false capability and add an explicit HostFs /
@@ -207,11 +207,11 @@ change which W01 evidence exists.
 
 | Gate | Exact reason when absent | Required? | Simplest next task | Evidence boundary |
 | --- | --- | --- | --- | --- |
-| `MOUNTX_SOURCE` | [`scripts/test-all.sh`](../../scripts/test-all.sh#L5) exits if the oracle path is absent; auxiliary NAPI differentials log explicit skips in [`differential.mjs`](../../integrations/mount-rs-napi/test/differential.mjs#L6), [`js-driver.mjs`](../../integrations/mount-rs-napi/test/js-driver.mjs#L9), [`memory-options.mjs`](../../integrations/mount-rs-napi/test/memory-options.mjs#L8), [`nfs-codec.mjs`](../../integrations/mount-rs-napi/test/nfs-codec.mjs#L5), and [`9p-codec.mjs`](../../integrations/mount-rs-napi/test/9p-codec.mjs#L132). | Yes for W01.1–W01.3 oracle evidence. | Check `git -C "$mountx_source" rev-parse HEAD` equals the pinned SHA, install the oracle and runner lockfiles, then rerun the exact commands above. | No oracle source means no parity result; local Rust tests are not a substitute. |
-| `PGLITE_DATABASE_URL` | The upstream wrapper registers no PGlite chunked columns without it; the NAPI factory and chunked tests report explicit skips in [`factories.mjs`](../../integrations/mount-rs-napi/test/factories.mjs#L150) and [`chunked.mjs`](../../integrations/mount-rs-napi/test/chunked.mjs#L141). | Yes for the PGlite/P0 backend and the 1,194-test stage; no for the mount-free memory baseline. | Use [`scripts/test-pglite.sh`](../../scripts/test-pglite.sh#L1), which owns an isolated server and reruns the upstream stage. | Local PGlite is not live R2, remote durability, or native-mount evidence. |
-| R2 credentials (`R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`) | [`test-all.sh`](../../scripts/test-all.sh#L54) prints a live-R2 skip and the NAPI factory does the same at [`factories.mjs`](../../integrations/mount-rs-napi/test/factories.mjs#L156). | Yes for W05/live Cloudflare acceptance; no for Tier-0 memory conformance. | Run [`scripts/test-acceptance.sh`](../../scripts/test-acceptance.sh#L1) with dedicated credentials kept outside the repository; add `MOUNT_RS_RUN_CLOUDFLARE_R2_CLI=1` only for the CLI lane. | Local object-store and PGlite results are not Cloudflare R2 evidence. |
+| `MOUNTX_SOURCE` | [`scripts/test-all.sh`](../../scripts/test-all.sh#L5) exits if the oracle path is absent; auxiliary NAPI differentials log explicit skips in [`differential.mjs`](../../bindings/mount-rs-napi/test/differential.mjs#L6), [`js-driver.mjs`](../../bindings/mount-rs-napi/test/js-driver.mjs#L9), [`memory-options.mjs`](../../bindings/mount-rs-napi/test/memory-options.mjs#L8), [`nfs-codec.mjs`](../../bindings/mount-rs-napi/test/nfs-codec.mjs#L5), and [`9p-codec.mjs`](../../bindings/mount-rs-napi/test/9p-codec.mjs#L132). | Yes for W01.1–W01.3 oracle evidence. | Check `git -C "$mountx_source" rev-parse HEAD` equals the pinned SHA, install the oracle and runner lockfiles, then rerun the exact commands above. | No oracle source means no parity result; local Rust tests are not a substitute. |
+| `PGLITE_DATABASE_URL` | The upstream wrapper registers no PGlite chunked columns without it; the NAPI factory and chunked tests report explicit skips in [`factories.mjs`](../../bindings/mount-rs-napi/test/factories.mjs#L150) and [`chunked.mjs`](../../bindings/mount-rs-napi/test/chunked.mjs#L141). | Yes for the PGlite/P0 backend and the 1,194-test stage; no for the mount-free memory baseline. | Use [`scripts/test-pglite.sh`](../../scripts/test-pglite.sh#L1), which owns an isolated server and reruns the upstream stage. | Local PGlite is not live R2, remote durability, or native-mount evidence. |
+| R2 credentials (`R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`) | [`test-all.sh`](../../scripts/test-all.sh#L54) prints a live-R2 skip and the NAPI factory does the same at [`factories.mjs`](../../bindings/mount-rs-napi/test/factories.mjs#L156). | Yes for W05/live Cloudflare acceptance; no for Tier-0 memory conformance. | Run [`scripts/test-acceptance.sh`](../../scripts/test-acceptance.sh#L1) with dedicated credentials kept outside the repository; add `MOUNT_RS_RUN_CLOUDFLARE_R2_CLI=1` only for the CLI lane. | Local object-store and PGlite results are not Cloudflare R2 evidence. |
 | Seeded trace backend opt-ins | [`check-trace-parity.mjs`](../../scripts/check-trace-parity.mjs#L28) runs local backends by default, adds PGlite only with its URL, and adds R2 only with `MOUNT_RS_TRACE_R2=1`. | Yes for W01.3's required backend matrix. | Run the default five seeds, then explicitly run PGlite and R2 lanes with `MOUNT_RS_TRACE_SEEDS=4182,1,42,65535,4294967295`; retain backend, seed, operation index, and oracle revision. | A passing seed/backend pair does not cover another backend or a native transport. |
-| Native mount/transport opt-ins | The NAPI mount test skips until `MOUNT_RS_NAPI_NATIVE_MOUNT=1` ([`native.mjs`](../../integrations/mount-rs-napi/test/native.mjs#L52)); ignored Rust tests additionally require Linux/macOS clients, kernel modules, `/dev/fuse`, privileges, or host consent. | Yes for W01.4 platform/native acceptance; no for Tier-0 userspace conformance. | Use the exact CI lanes in [`ci.yml`](../../.github/workflows/ci.yml#L52): FUSE (`MOUNT_RS_RUN_NATIVE_FUSE=1`), NFS (`MOUNT_RS_NFS_NATIVE_TEST=1` and `_V4_TEST=1`), 9P (`MOUNT_RS_9P_NATIVE_TEST=1`), WebDAV (`MOUNT_RS_WEBDAV_NATIVE_TEST=1`), and the NAPI mount opt-in. | An ignored test is not a pass. Userspace TCP NFS/9P tests, protocol fixtures, and transport probes do not prove a kernel-mounted result. |
+| Native mount/transport opt-ins | The NAPI mount test skips until `MOUNT_RS_NAPI_NATIVE_MOUNT=1` ([`native.mjs`](../../bindings/mount-rs-napi/test/native.mjs#L52)); ignored Rust tests additionally require Linux/macOS clients, kernel modules, `/dev/fuse`, privileges, or host consent. | Yes for W01.4 platform/native acceptance; no for Tier-0 userspace conformance. | Use the exact CI lanes in [`ci.yml`](../../.github/workflows/ci.yml#L52): FUSE (`MOUNT_RS_RUN_NATIVE_FUSE=1`), NFS (`MOUNT_RS_NFS_NATIVE_TEST=1` and `_V4_TEST=1`), 9P (`MOUNT_RS_9P_NATIVE_TEST=1`), WebDAV (`MOUNT_RS_WEBDAV_NATIVE_TEST=1`), and the NAPI mount opt-in. | An ignored test is not a pass. Userspace TCP NFS/9P tests, protocol fixtures, and transport probes do not prove a kernel-mounted result. |
 
 Missing host prerequisites belong in the environment column. If an explicitly
 enabled lane starts and fails, that is implementation evidence and must be

@@ -12,24 +12,31 @@ the bytes live in memfs, SQLite, Cloudflare R2, or PGlite. The first milestone
 provides the async driver API, POSIX path and error behavior, a full in-memory
 driver, and persisted drivers that use the same filesystem model.
 
+For crate responsibilities and extension points, see the
+[code architecture guide](docs/code-architecture.md). The
+[storage and durability guide](ARCHITECTURE.md) records publication ordering
+and safety boundaries; the [documentation index](docs/README.md) links to
+acceptance and operations records.
+
 ## Backends
 
 - `ChunkedFs` — composes independently selected metadata and immutable block
   providers with persisted fixed-size chunking, fenced writers and ordered
   durability barriers. Memory, SQLite and PGlite implement both provider roles;
-  R2 provides block storage. Each integration is a separate crate.
-- `MemoryFs` — memfs-style in-memory filesystem with handles, links, symlinks,
-  rename, timestamps, and special-node metadata.
-- `SqliteFs` — persisted state in SQLite, including an in-memory SQLite mode for
-  fast tests.
-- `R2Fs` — persisted state in any S3-compatible object store. The `R2Config`
-  builder targets Cloudflare R2 endpoints and credentials.
-- `PgliteFs` — persisted state through PostgreSQL wire protocol. PGlite's
+  R2 and AWS S3 provide block storage. Each provider and filesystem has its own
+  crate under `providers/` or `filesystems/`.
+- `MemoryFs` (`mount-rs-memfs`) — memfs-style in-memory filesystem with handles,
+  links, symlinks, rename, timestamps, and special-node metadata.
+- `SqliteFs` (`mount-rs-sqlite-fs`) — persisted state in SQLite, including an
+  in-memory SQLite mode for fast tests.
+- `R2Fs` (`mount-rs-r2-fs`) — persisted state in any S3-compatible object store.
+  The `R2Config` builder targets Cloudflare R2 endpoints and credentials.
+- `PgliteFs` (`mount-rs-pglite-fs`) — persisted state through PostgreSQL wire protocol. PGlite's
   official socket server makes it usable from Rust without embedding a JS
   runtime.
 
-The workspace includes separate FUSE, 9P, NFS, WebDAV, S3, native auto-mount,
-and CLI crates. Behavioral and native-platform acceptance remain in progress.
+The workspace includes separate FUSE, 9P, NFS, WebDAV, S3, HTTP, native
+auto-mount, and CLI crates. Behavioral and native-platform acceptance remain in progress.
 The full upstream surface is tracked explicitly in
 [`PORTING_STATUS.md`](PORTING_STATUS.md) and remains part of the active porting
 goal.
@@ -51,7 +58,7 @@ Copy-on-write and additional chunking algorithms are future work. The older
 After building the local napi-rs package:
 
 ```js
-const { createChunkedDriver } = require('./integrations/mount-rs-napi');
+const { createChunkedDriver } = require('./bindings/mount-rs-napi');
 const fs = await createChunkedDriver({
   metadata: { kind: 'sqlite', uri: './metadata.sqlite' },
   blocks: { kind: 'sqlite', uri: './blocks.sqlite' },
@@ -127,9 +134,9 @@ MOUNTX_SOURCE=/path/to/mountx node scripts/check-parity.mjs
 MOUNTX_SOURCE=/path/to/mountx node scripts/check-edge-parity.mjs
 
 # Build and smoke-test the Node.js package.
-pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
-pnpm --dir integrations/mount-rs-napi build
-pnpm --dir integrations/mount-rs-napi test
+pnpm --dir bindings/mount-rs-napi install --frozen-lockfile
+pnpm --dir bindings/mount-rs-napi build
+pnpm --dir bindings/mount-rs-napi test
 
 # Run the complete local acceptance gate.
 MOUNTX_SOURCE=/path/to/mountx ./scripts/test-all.sh

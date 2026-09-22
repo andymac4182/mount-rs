@@ -2162,7 +2162,7 @@ mod tests {
             },
         ));
         let task = tokio::spawn(run_session(
-            FuseSession::new(Arc::new(mount_rs_core::MemoryFs::empty())),
+            FuseSession::new(Arc::new(mount_rs_memfs::MemoryFs::empty())),
             device,
             Arc::clone(&state),
         ));
@@ -2222,7 +2222,7 @@ mod tests {
             },
         ));
         let task = tokio::spawn(run_session(
-            FuseSession::new(Arc::new(mount_rs_core::MemoryFs::empty())),
+            FuseSession::new(Arc::new(mount_rs_memfs::MemoryFs::empty())),
             device,
             Arc::clone(&state),
         ));
@@ -2279,7 +2279,7 @@ mod tests {
             },
         ));
         let task = tokio::spawn(run_session(
-            FuseSession::new(Arc::new(mount_rs_core::MemoryFs::empty())),
+            FuseSession::new(Arc::new(mount_rs_memfs::MemoryFs::empty())),
             device,
             Arc::clone(&state),
         ));
@@ -2515,7 +2515,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     struct PanicDriver {
-        inner: Arc<mount_rs_core::MemoryFs>,
+        inner: Arc<mount_rs_memfs::MemoryFs>,
     }
 
     #[cfg(target_os = "linux")]
@@ -2591,7 +2591,7 @@ mod tests {
             },
         ));
         let driver = Arc::new(PanicDriver {
-            inner: Arc::new(mount_rs_core::MemoryFs::empty()),
+            inner: Arc::new(mount_rs_memfs::MemoryFs::empty()),
         });
         let task = tokio::spawn(run_session(
             FuseSession::new(driver),
@@ -2635,7 +2635,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     struct BlockingDriver {
-        inner: Arc<mount_rs_core::MemoryFs>,
+        inner: Arc<mount_rs_memfs::MemoryFs>,
         entered: Arc<tokio::sync::Notify>,
     }
 
@@ -2716,7 +2716,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     struct BlockingCloseDriver {
-        inner: Arc<mount_rs_core::MemoryFs>,
+        inner: Arc<mount_rs_memfs::MemoryFs>,
     }
 
     #[cfg(target_os = "linux")]
@@ -2752,7 +2752,7 @@ mod tests {
         use tokio::io::AsyncWriteExt;
         use tokio::net::UnixStream;
 
-        let inner = Arc::new(mount_rs_core::MemoryFs::empty());
+        let inner = Arc::new(mount_rs_memfs::MemoryFs::empty());
         let file = inner.open("/file", "w", 0o644).await.expect("create file");
         file.close().await.expect("close seed file");
         let driver = Arc::new(BlockingCloseDriver { inner });
@@ -2829,7 +2829,7 @@ mod tests {
         use std::sync::atomic::AtomicUsize;
         use tokio::net::UnixDatagram;
 
-        let inner = Arc::new(mount_rs_core::MemoryFs::empty());
+        let inner = Arc::new(mount_rs_memfs::MemoryFs::empty());
         let file = inner.open("/file", "w", 0o644).await.expect("create file");
         file.write(b"data", Some(0)).await.expect("seed file");
         file.close().await.expect("close seed file");
@@ -2963,7 +2963,7 @@ mod tests {
         ));
         let entered = Arc::new(tokio::sync::Notify::new());
         let driver = Arc::new(BlockingDriver {
-            inner: Arc::new(mount_rs_core::MemoryFs::empty()),
+            inner: Arc::new(mount_rs_memfs::MemoryFs::empty()),
             entered: Arc::clone(&entered),
         });
         let task = tokio::spawn(run_session(
@@ -3072,7 +3072,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     struct ReadBarrierDriver {
-        inner: Arc<mount_rs_core::MemoryFs>,
+        inner: Arc<mount_rs_memfs::MemoryFs>,
         active: Arc<std::sync::atomic::AtomicUsize>,
         max_active: Arc<std::sync::atomic::AtomicUsize>,
         barrier: Arc<tokio::sync::Barrier>,
@@ -3153,7 +3153,7 @@ mod tests {
         use tokio::io::AsyncWriteExt;
         use tokio::net::UnixStream;
 
-        let inner = Arc::new(mount_rs_core::MemoryFs::empty());
+        let inner = Arc::new(mount_rs_memfs::MemoryFs::empty());
         let file = inner.open("/file", "w", 0o644).await.expect("create file");
         file.write(b"data", Some(0)).await.expect("seed file");
         file.close().await.expect("close seed file");
@@ -3270,7 +3270,7 @@ mod tests {
         use tokio::io::AsyncWriteExt;
         use tokio::net::UnixStream;
 
-        let inner = Arc::new(mount_rs_core::MemoryFs::empty());
+        let inner = Arc::new(mount_rs_memfs::MemoryFs::empty());
         let file = inner.open("/file", "w", 0o644).await.expect("create file");
         file.write(b"data", Some(0)).await.expect("seed file");
         file.close().await.expect("close seed file");
@@ -3382,7 +3382,7 @@ mod tests {
         use tokio::io::AsyncWriteExt;
         use tokio::net::UnixStream;
 
-        let inner = Arc::new(mount_rs_core::MemoryFs::empty());
+        let inner = Arc::new(mount_rs_memfs::MemoryFs::empty());
         let file = inner.open("/file", "w", 0o644).await.expect("create file");
         file.write(b"data", Some(0)).await.expect("seed file");
         file.close().await.expect("close seed file");
@@ -3477,7 +3477,7 @@ mod tests {
         use tokio::io::AsyncWriteExt;
         use tokio::net::UnixStream;
 
-        let inner = Arc::new(mount_rs_core::MemoryFs::empty());
+        let inner = Arc::new(mount_rs_memfs::MemoryFs::empty());
         let file = inner.open("/file", "w", 0o644).await.expect("create file");
         file.write(b"data", Some(0)).await.expect("seed file");
         file.close().await.expect("close seed file");
@@ -4099,7 +4099,7 @@ mod tests {
     #[tokio::test]
     async fn mount_is_explicitly_unsupported_without_touching_the_path() {
         let result = mount(
-            Arc::new(mount_rs_core::MemoryFs::empty()),
+            Arc::new(mount_rs_memfs::MemoryFs::empty()),
             "/definitely/not/a/native/fuse/mount",
             MountOptions::default(),
         )

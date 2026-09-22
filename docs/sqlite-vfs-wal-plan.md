@@ -1,7 +1,7 @@
 # SQLite VFS WAL plan
 
 Status: implementation plan for the WAL capability in
-`integrations/mount-rs-sqlite-vfs`. Rollback-journal behavior remains the
+`bindings/mount-rs-sqlite-vfs`. Rollback-journal behavior remains the
 compatibility baseline and must continue to pass unchanged.
 
 ## Contract being implemented

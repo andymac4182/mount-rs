@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use mount_rs_core::{FsDriver, MemoryFs};
+use mount_rs_core::FsDriver;
+use mount_rs_memfs::MemoryFs;
 use mount_rs_nfs::constants::{MOUNT_PROGRAM, MOUNT_V3, MOUNTPROC3_MNT};
 use mount_rs_nfs::rpc::{encode_call, frame_record};
 use mount_rs_nfs::xdr::encode_xdr;

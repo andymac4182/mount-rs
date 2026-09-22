@@ -281,10 +281,10 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
     ),
     sources: [
       { label: 'FUSE transport boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-fuse/README.md' },
-      { label: 'FUSE body codec tests', href: 'https://github.com/andymac4182/mount-rs/blob/main/integrations/mount-rs-napi/test/fuse-codec.mjs' },
+      { label: 'FUSE body codec tests', href: 'https://github.com/andymac4182/mount-rs/blob/main/bindings/mount-rs-napi/test/fuse-codec.mjs' },
       { label: 'N-API FUSE parity ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/public-api-parity.md' },
       { label: 'W01 FUSE progress tracker', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W01_FUSE_PROGRESS.md' },
-      { label: 'CLI native prerequisites', href: 'https://github.com/andymac4182/mount-rs/blob/main/crates/mount-rs-cli/README.md#native-prerequisites' },
+      { label: 'CLI native prerequisites', href: 'https://github.com/andymac4182/mount-rs/blob/main/apps/mount-rs-cli/README.md#native-prerequisites' },
       { label: 'Historical hosted Linux transport CI', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35575442663' },
       { label: 'Latest hosted FUSE diagnostic', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35666436803' },
       { label: 'Latest hosted FUSE status packet', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35698854392' },
@@ -820,9 +820,9 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
       </>
     ),
     verifyLabel: 'Verify the unsigned seam without calling it a mount',
-    verifyCode: `cargo test --manifest-path integrations/mount-rs-fskit/Cargo.toml --locked
+    verifyCode: `cargo test --manifest-path transports/mount-rs-fskit/Cargo.toml --locked
 
-xcodebuild -project integrations/mount-rs-fskit/MountRsFSKit.xcodeproj \
+xcodebuild -project transports/mount-rs-fskit/MountRsFSKit.xcodeproj \
   -scheme MountRsHost -configuration Debug -sdk macosx26.5 \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build`,
     safeUse: (
@@ -859,7 +859,7 @@ xcodebuild -project integrations/mount-rs-fskit/MountRsFSKit.xcodeproj \
       </>
     ),
     sources: [
-      { label: 'FSKit integration README', href: 'https://github.com/andymac4182/mount-rs/blob/main/integrations/mount-rs-fskit/README.md' },
+      { label: 'FSKit integration README', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-fskit/README.md' },
       { label: 'FSKit workstream', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w13--fskit' },
     ],
   },
@@ -903,7 +903,7 @@ xcodebuild -project integrations/mount-rs-fskit/MountRsFSKit.xcodeproj \
     verifyCode: `MOUNT_RS_MEMORY_TOKEN=demo-memory \
   MOUNT_RS_SQLITE_TOKEN=demo-sqlite \
   cargo run --locked -p mount-rs-cli -- serve-http \
-  --config crates/mount-rs-cli/examples/config-http.json
+  --config apps/mount-rs-cli/examples/config-http.json
 
 curl -H 'Authorization: Bearer demo-memory' \
   http://127.0.0.1:PORT/v1/drives/memory/entries/`,
@@ -944,12 +944,12 @@ curl -H 'Authorization: Bearer demo-memory' \
       </>
     ),
     sources: [
-      { label: 'HTTP transport README', href: 'https://github.com/andymac4182/mount-rs/blob/main/crates/mount-rs-http/README.md' },
+      { label: 'HTTP transport README', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-http/README.md' },
       { label: 'HTTP observability boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/observability.md' },
       { label: 'Observability platform qualification', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w30.5-platform-qualification.md' },
-      { label: 'HTTP server options and telemetry seam', href: 'https://github.com/andymac4182/mount-rs/blob/main/crates/mount-rs-http/src/server.rs' },
+      { label: 'HTTP server options and telemetry seam', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-http/src/server.rs' },
       { label: 'Hosted HTTP observability CI', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35599817215' },
-      { label: 'CLI HTTP example', href: 'https://github.com/andymac4182/mount-rs/blob/main/crates/mount-rs-cli/README.md#quick-local-demo' },
+      { label: 'CLI HTTP example', href: 'https://github.com/andymac4182/mount-rs/blob/main/apps/mount-rs-cli/README.md#quick-local-demo' },
     ],
   },
   webdav: {

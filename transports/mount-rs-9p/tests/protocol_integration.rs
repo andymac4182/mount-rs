@@ -11,7 +11,7 @@ use mount_rs_9p::{
     read_rwrite, write_tattach, write_tgetattr, write_tlcreate, write_tlopen, write_tread,
     write_treaddir, write_tversion, write_twalk, write_twrite,
 };
-use mount_rs_core::MemoryFs;
+use mount_rs_memfs::MemoryFs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;

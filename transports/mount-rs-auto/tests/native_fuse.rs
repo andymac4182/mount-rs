@@ -18,8 +18,9 @@ use mount_rs_auto::{
     AutoMountHooks, AutoMountOptions, AutoTransport, MountMode, MountOptions, mount,
     mount_with_hooks,
 };
-use mount_rs_core::{FileHandle, FsDriver, MemoryFs};
+use mount_rs_core::{FileHandle, FsDriver};
 use mount_rs_fuse::mount::{FuseMountHooks, FuseTransportError, FuseTransportErrorKind};
+use mount_rs_memfs::MemoryFs;
 
 static NEXT_MOUNTPOINT_ID: AtomicU64 = AtomicU64::new(0);
 

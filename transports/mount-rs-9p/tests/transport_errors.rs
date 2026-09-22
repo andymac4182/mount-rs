@@ -8,7 +8,7 @@ use mount_rs_9p::server::{
     P9AttachOptions, P9Server, P9ServerHooks, P9TransportError, P9TransportErrorKind,
 };
 use mount_rs_9p::{P9_NOTAG, P9_TVERSION, Tversion, encode_message, write_tversion};
-use mount_rs_core::MemoryFs;
+use mount_rs_memfs::MemoryFs;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::Notify;
 use tokio::time::{sleep, timeout};

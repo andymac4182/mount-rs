@@ -8,6 +8,16 @@ crate.
 The CLI is an SDK consumer: `mount-rs-cli` creates a `Filesystem` through this
 crate and only owns argument/configuration parsing plus transport lifecycle.
 
+The SDK source is organized by responsibility: `options.rs` defines public
+provider choices, `filesystem.rs` owns construction and shutdown,
+`providers.rs` opens built-in stores and closes their resources, and
+`stores.rs` adapts those stores to the common contract with optional telemetry.
+`lib.rs` keeps the existing root API available. Applications implementing their
+own metadata and block stores can compose them directly with
+`mount-rs-chunked::ChunkedFs::open`; the SDK's built-in `StoreConfig` choices
+remain a closed list. Direct composition also leaves provider-specific resource
+closure with the caller after `ChunkedFs::shutdown()` releases its writer lease.
+
 ```rust
 use mount_rs_core::Loopback;
 use mount_rs_sdk::{Filesystem, MemoryOptions};

@@ -1,6 +1,6 @@
 //! Real-TCP RPC program/version negotiation across the shared NFS router.
 
-use mount_rs_core::MemoryFs;
+use mount_rs_memfs::MemoryFs;
 use mount_rs_nfs::constants::{
     MOUNT_PROGRAM, MOUNT_V3, MOUNTPROC3_NULL, NFS_PROGRAM, NFS_V3, NFSPROC3_NULL,
 };

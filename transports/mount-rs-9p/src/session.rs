@@ -1894,7 +1894,7 @@ fn child_of(parent: &str, name: &str, syscall: &str) -> FsResult<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mount_rs_core::MemoryFs;
+    use mount_rs_memfs::MemoryFs;
     use std::{future::Future, pin::Pin, sync::Arc};
     use tokio::sync::Notify;
     use tokio::time::{Duration, timeout};

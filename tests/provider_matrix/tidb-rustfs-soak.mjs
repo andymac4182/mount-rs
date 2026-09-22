@@ -65,7 +65,7 @@ if (rustfs.missing.length > 0) {
 
 // Delay loading the native addon so an explicitly disabled soak remains a
 // credential-free, mount-free skip on developer machines.
-const { createChunkedDriver } = await import("../../integrations/mount-rs-napi/index.js");
+const { createChunkedDriver } = await import("../../bindings/mount-rs-napi/index.js");
 const runId = safeRunId();
 const prefix = `mount-rs-provider-matrix/${runId}/tidb-rustfs-soak`;
 const volumeKey = `mount-rs-provider-matrix/${runId}/tidb-rustfs-soak-metadata`;

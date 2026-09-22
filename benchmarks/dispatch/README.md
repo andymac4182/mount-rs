@@ -25,7 +25,7 @@ the existing release example with cargo --locked and loads the existing N-API
 artifact; it does not install dependencies or change Cargo manifests.
 
 The N-API artifact must already be available at
-integrations/mount-rs-napi/index.js. If it is not built, run the repository's
+bindings/mount-rs-napi/index.js. If it is not built, run the repository's
 existing N-API build procedure first.
 
 ## Thorough and custom runs

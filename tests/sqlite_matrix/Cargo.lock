@@ -172,11 +172,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "mount-rs-memfs"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mount-rs-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mount-rs-persist"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "mount-rs-core",
+ "mount-rs-memfs",
 ]
 
 [[package]]

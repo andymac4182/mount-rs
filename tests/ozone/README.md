@@ -154,7 +154,7 @@ production durability claim.
 
 ### Node and Rust CLI configuration
 
-[`config-pglite-ozone.json`](../../crates/mount-rs-cli/examples/config-pglite-ozone.json)
+[`config-pglite-ozone.json`](../../apps/mount-rs-cli/examples/config-pglite-ozone.json)
 is the shared versioned configuration shape for a PGlite metadata provider and
 the Ozone S3-compatible block provider. It keeps credentials as environment
 references and uses the loopback gateway endpoint. The Rust and Node CLI
@@ -165,7 +165,7 @@ credentials, loading native code, or claiming a live Ozone Node factory pass:
 cargo test --locked -p mount-rs-cli --test cli \
   actual_binary_validates_the_loopback_ozone_provider_config_without_credentials_or_network
 node examples/node-cli/index.mjs \
-  --config crates/mount-rs-cli/examples/config-pglite-ozone.json --check
+  --config apps/mount-rs-cli/examples/config-pglite-ozone.json --check
 ```
 
 The base Ubuntu CI Ozone job runs the real gateway contract plus these

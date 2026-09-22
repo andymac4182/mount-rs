@@ -8,7 +8,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use futures_core::Stream;
-use mount_rs_core::{Capabilities, FileHandle, FsDriver, MemoryFs, Result as FsResult};
+use mount_rs_core::{Capabilities, FileHandle, FsDriver, Result as FsResult};
+use mount_rs_memfs::MemoryFs;
 use mount_rs_s3::{
     CredentialScope, Credentials, EMPTY_PAYLOAD_SHA256, HeaderEntry, MIN_PART_SIZE, PresignRequest,
     S3BindError, S3ErrorClass, S3Request, S3RequestHead, S3Response, S3Server, S3ServerHooks,

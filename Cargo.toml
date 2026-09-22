@@ -1,20 +1,26 @@
 [workspace]
 members = [
     ".",
-    "integrations/mount-rs-persist",
-    "integrations/mount-rs-memory",
-    "integrations/mount-rs-host",
-    "integrations/mount-rs-kv",
-    "integrations/mount-rs-chunked",
-    "integrations/mount-rs-fault-injection",
-    "integrations/mount-rs-sqlite",
-    "integrations/mount-rs-r2",
-    "integrations/mount-rs-pglite",
-    "integrations/mount-rs-foundationdb",
-    "integrations/mount-rs-tidb",
-    "integrations/mount-rs-versioned",
-    "integrations/mount-rs-sqlite-vfs",
-    "integrations/mount-rs-napi",
+    "filesystems/mount-rs-memfs",
+    "filesystems/mount-rs-persist",
+    "filesystems/mount-rs-sqlite-fs",
+    "filesystems/mount-rs-pglite-fs",
+    "filesystems/mount-rs-r2-fs",
+    "providers/mount-rs-memory",
+    "filesystems/mount-rs-host",
+    "filesystems/mount-rs-kv",
+    "filesystems/mount-rs-chunked",
+    "crates/mount-rs-fault-injection",
+    "providers/mount-rs-sqlite",
+    "providers/mount-rs-r2",
+    "providers/mount-rs-object-store-blocks",
+    "providers/mount-rs-aws-s3",
+    "providers/mount-rs-pglite",
+    "providers/mount-rs-foundationdb",
+    "providers/mount-rs-tidb",
+    "filesystems/mount-rs-versioned",
+    "bindings/mount-rs-sqlite-vfs",
+    "bindings/mount-rs-napi",
     "crates/mount-rs-observability",
     "transports/mount-rs-fuse",
     "transports/mount-rs-9p",
@@ -22,9 +28,9 @@ members = [
     "transports/mount-rs-webdav",
     "transports/mount-rs-s3",
     "transports/mount-rs-auto",
-    "crates/mount-rs-cli",
+    "apps/mount-rs-cli",
     "crates/mount-rs-sdk",
-    "crates/mount-rs-http",
+    "transports/mount-rs-http",
 ]
 resolver = "3"
 
@@ -38,11 +44,11 @@ name = "mount-rs-core"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
-description = "Core Rust filesystem driver contract and memory filesystem for mountx"
+description = "Core Rust filesystem driver and storage contracts for mountx"
 license = "Apache-2.0"
 repository = "https://github.com/andymac4182/mount-rs"
 readme = "README.md"
-keywords = ["filesystem", "mount", "memfs", "r2", "pglite"]
+keywords = ["filesystem", "mount", "driver", "storage"]
 
 [dependencies]
 async-trait = "0.1"
@@ -50,21 +56,26 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [dev-dependencies]
+mount-rs-memfs = { path = "filesystems/mount-rs-memfs" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 mount-rs-9p = { path = "transports/mount-rs-9p" }
 mount-rs-s3 = { path = "transports/mount-rs-s3" }
 mount-rs-webdav = { path = "transports/mount-rs-webdav" }
-mount-rs-kv = { path = "integrations/mount-rs-kv" }
+mount-rs-kv = { path = "filesystems/mount-rs-kv" }
 mount-rs-auto = { path = "transports/mount-rs-auto" }
-mount-rs-host = { path = "integrations/mount-rs-host" }
+mount-rs-host = { path = "filesystems/mount-rs-host" }
 mount-rs-nfs = { path = "transports/mount-rs-nfs" }
-mount-rs-memory = { path = "integrations/mount-rs-memory" }
-mount-rs-chunked = { path = "integrations/mount-rs-chunked" }
+mount-rs-memory = { path = "providers/mount-rs-memory" }
+mount-rs-chunked = { path = "filesystems/mount-rs-chunked" }
 mount-rs-fuse = { path = "transports/mount-rs-fuse" }
 tokio = { version = "1", features = ["macros", "process", "rt-multi-thread"] }
-mount-rs-r2 = { path = "integrations/mount-rs-r2" }
-mount-rs-pglite = { path = "integrations/mount-rs-pglite" }
-mount-rs-persist = { path = "integrations/mount-rs-persist" }
-mount-rs-sqlite = { path = "integrations/mount-rs-sqlite" }
+mount-rs-r2 = { path = "providers/mount-rs-r2" }
+mount-rs-aws-s3 = { path = "providers/mount-rs-aws-s3" }
+mount-rs-r2-fs = { path = "filesystems/mount-rs-r2-fs" }
+mount-rs-pglite = { path = "providers/mount-rs-pglite" }
+mount-rs-pglite-fs = { path = "filesystems/mount-rs-pglite-fs" }
+mount-rs-persist = { path = "filesystems/mount-rs-persist" }
+mount-rs-sqlite = { path = "providers/mount-rs-sqlite" }
+mount-rs-sqlite-fs = { path = "filesystems/mount-rs-sqlite-fs" }
 object_store = { version = "0.12", features = ["aws"] }
 tempfile = "3"

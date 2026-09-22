@@ -146,7 +146,7 @@ async function fallbackUnmount(mountpoint) {
 }
 
 async function loadProbe() {
-  const local = new URL("../../integrations/mount-rs-napi/index.js", import.meta.url).href;
+  const local = new URL("../../bindings/mount-rs-napi/index.js", import.meta.url).href;
   const specifiers = process.env.MOUNT_RS_NAPI_PACKAGE
     ? [process.env.MOUNT_RS_NAPI_PACKAGE]
     : [local, "@mount-rs/core"];
@@ -235,7 +235,7 @@ async function verifyTidbRustfsFiles(configPath, expectedFiles) {
     if (typeof name !== "string") throw new Error(`${label} must be an environment reference`);
     return requiredEnv(name);
   };
-  const sdk = await import(new URL("../../integrations/mount-rs-napi/index.js", import.meta.url));
+  const sdk = await import(new URL("../../bindings/mount-rs-napi/index.js", import.meta.url));
   const createChunkedDriver = sdk.createChunkedDriver ?? sdk.default?.createChunkedDriver;
   if (typeof createChunkedDriver !== "function") {
     throw new Error("the Node SDK does not export createChunkedDriver for native verification");

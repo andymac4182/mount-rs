@@ -1011,7 +1011,7 @@ Consumers that use TLS must ship the opt-in client graph:
 
 ```sh
 CARGOFLAGS="--locked --features rustls" \
-  pnpm --dir integrations/mount-rs-napi build
+  pnpm --dir bindings/mount-rs-napi build
 
 ./scripts/cargo-shared check --locked -p mount-rs-sdk --features rustls
 ./scripts/cargo-shared check --locked -p mount-rs-cli --features rustls

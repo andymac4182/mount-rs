@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::io::{self, Read};
 use std::sync::{Arc, Mutex};
 
-use mount_rs_core::{FileHandle, Loopback, MemoryFs, MemoryOptions, MkdirOptions, Stats};
+use mount_rs_core::{FileHandle, Loopback, MkdirOptions, Stats};
+use mount_rs_memfs::{MemoryFs, MemoryOptions};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 

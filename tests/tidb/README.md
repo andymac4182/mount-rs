@@ -124,7 +124,7 @@ paths; native-mount selection remains a separate evidence boundary.
 
 The direct provider and ambiguous-commit tests are `#[ignore]` and require an
 actual TiDB endpoint. If the current checkout contains
-`integrations/mount-rs-tidb/tests/ambiguous_commit.rs`, its exact opt-in lane
+`providers/mount-rs-tidb/tests/ambiguous_commit.rs`, its exact opt-in lane
 is:
 
 ```sh
@@ -141,12 +141,12 @@ runs as part of both TiDB CI harnesses.
 
 The following paths are the audited selection points for consumers:
 
-- `crates/mount-rs-cli/src/config.rs` accepts `memory`, `sqlite`, `pglite`,
-  `tidb`, and block-only `r2`; `crates/mount-rs-cli/src/parser.rs` exposes the
+- `apps/mount-rs-cli/src/config.rs` accepts `memory`, `sqlite`, `pglite`,
+  `tidb`, and block-only `r2`; `apps/mount-rs-cli/src/parser.rs` exposes the
   `memory`, `host`, `sqlite`, and `splitstore` driver choices.
 - `crates/mount-rs-sdk` owns the public split-store facade and depends on the
   TiDB integration behind its provider selection boundary.
-- `integrations/mount-rs-napi/src/lib.rs` accepts `memory`, `sqlite`, `pglite`,
+- `bindings/mount-rs-napi/src/lib.rs` accepts `memory`, `sqlite`, `pglite`,
   `tidb`, and block-only `r2` for `createChunkedDriver`; unknown backend kinds
   fail rather than falling back to memory.
 - `examples/node-cli/index.mjs` mirrors that provider set for mount-free SDK

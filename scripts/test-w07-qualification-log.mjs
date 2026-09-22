@@ -31,7 +31,7 @@ const validLog = [
   "RUSTFS_INTEGRATION_PASS endpoint=http://127.0.0.1:32769 bucket=test prefix=test",
   "FOUNDATIONDB_W07_WORKLOAD_PASS profile=w07-bounded provider=mount-rs-split-foundationdb-r2 size_mib=1 payload_bytes=4096 iterations=400 concurrency=64 minimum_iops=1 measured_iops=29.13 output=/tmp/foundationdb-ozone-iops.json",
   "FOUNDATIONDB_SOAK_PASS rounds=5",
-  "FOUNDATIONDB_TEST_PASS topology=durable manifests=tests/foundationdb/Cargo.toml+integrations/mount-rs-foundationdb/Cargo.toml platform=linux/amd64 service_restart=pass soak_rounds=5",
+  "FOUNDATIONDB_TEST_PASS topology=durable manifests=tests/foundationdb/Cargo.toml+providers/mount-rs-foundationdb/Cargo.toml platform=linux/amd64 service_restart=pass soak_rounds=5",
   "FOUNDATIONDB_LATENCY_PASS workload=composition operations=15 p50_us=1000 p95_us=2000 p99_us=3000 total_ms=40 throughput_ops_per_sec=375",
   "FOUNDATIONDB_LATENCY_PASS workload=composition operations=15 p50_us=1100 p95_us=2100 p99_us=3100 total_ms=41 throughput_ops_per_sec=365",
   "FOUNDATIONDB_LATENCY_PASS workload=composition operations=15 p50_us=1200 p95_us=2200 p99_us=3200 total_ms=42 throughput_ops_per_sec=355",
