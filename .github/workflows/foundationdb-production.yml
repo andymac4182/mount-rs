@@ -84,7 +84,7 @@ jobs:
           mkdir -p artifacts
           node scripts/verify-w07-production-config.mjs \
             tests/foundationdb/production-config-policy.json \
-            2>&1 | tee artifacts/foundationdb-production-qualification.log
+            2>&1 | tee -a artifacts/foundationdb-production-qualification.log
           if node scripts/verify-w07-production-config.mjs \
             tests/foundationdb/production-config-policy.invalid.json \
             2>&1 | tee -a artifacts/foundationdb-production-qualification.log; then
