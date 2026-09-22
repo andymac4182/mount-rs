@@ -892,6 +892,18 @@ complete.
 | W30 | OpenTelemetry traces, metrics and logs | Implementing: opt-in facade, boundary wiring, local collector/failure tests, benchmark and macOS qualification packet landed; external collector/Linux/Windows evidence pending | Main |
 | W31 | Per-drive mounts from one backing datastore | Deferred for future design | Unassigned |
 
+Current W26 unpublished chunk (2026-09-22): the TiDB provider now configures and
+verifies `tidb_txn_mode='pessimistic'` once for each newly created private pool
+session, disables redundant pool-reset round trips, and retains the
+`RepeatableRead` transaction guard, fail-closed mode check, parameterized SQL,
+rollback handling and ambiguous-commit semantics. Focused TiDB tests, strict
+provider/workspace Clippy, full locked workspace tests, formatting and diff
+checks pass locally. Security diff scan `c4fc0012-b0e2-421c-9db8-ca3edfce730c`
+completed with full changed-file coverage and zero reportable findings. This
+is implementation evidence only until the chunk is pushed and the hosted W26
+matrix is rerun on its exact published revision; the 1,000-IOPS production
+gate remains **NO-GO**.
+
 ## Decisions and external prerequisites
 
 - After the app restart, the nine prior worker handles were missing. Their
