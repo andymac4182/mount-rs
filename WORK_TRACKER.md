@@ -2153,6 +2153,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   server integration (including unsupported-version routing) passes with
   loopback permission. Native/hosted ordering,
   crash/power-loss durability, and W01-NFS production acceptance remain NO-GO.
+- [x] The NFS transport now has a bounded stalled-reply close regression. An
+  in-memory peer stops reading from a 16-byte reply buffer while two MOUNT
+  NULL calls are pipelined with `max_in_flight=1`: the first write holds the
+  only permit, the second call stays undispatched, and connection stop
+  cancels the writer and retires the task without a false error callback.
+  Focused and full locked NFS tests (42 unit tests plus applicable integration
+  targets), strict Clippy, formatting, and diff checks pass. This is local
+  userspace backpressure evidence, not native-client ordering, cross-process
+  concurrency, crash/power-loss durability, hosted acceptance, or W01 GO.
 - [x] The rootless NFSv4.1 replay-reconnect lane now completes a mutating
   `REMOVE`, disconnects, and retries its cached slot/sequence with a changed
   target. The exact old COMPOUND body returns without removing the second
