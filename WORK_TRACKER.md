@@ -2951,6 +2951,20 @@ Evidence landed without closing the remaining W01 acceptance gates:
   compilation passed, and formatting/diff checks passed. This is local
   implementation evidence only; hosted Linux Rust/native-FUSE rerun and all
   remaining production gates are still open.
+- [x] W04 production-support follow-up: the Windows WebDAV provider-network
+  test now reports the provider, phase, request index, and elapsed time for
+  its bounded 10-second requests, with a temporary bounded timeout override
+  for hosted diagnosis. Default 32-pair and 64-pair NodeFs/SQLite loopback
+  runs, `node --check`, and `git diff --check` passed locally. The change is
+  published at `d096930a`; hosted Windows confirmation remains open and does
+  not change the production **NO-GO** decision.
+- A non-cancelling manual exact-main qualification run
+  [35723080355](https://github.com/andymac4182/mount-rs/actions/runs/35723080355)
+  targets published `d096930a`. Its 27 materialized jobs were queued at the
+  latest capture, including all Node platforms, Windows Node, native FUSE, and
+  Ubuntu Rust. The push-triggered CI/policy runs for the same publication were
+  cancelled before usable jobs because of mainline concurrency and are
+  excluded from evidence; no current-tip W04 or production claim is promoted.
 - Production rollout packet refreshed in
   [`docs/W04-production-rollout.md`](docs/W04-production-rollout.md): exact
   candidate `d870f900`, run `35692153251`, aggregate-native package/consumer
