@@ -6691,6 +6691,15 @@ listing a source does not mean it has been reviewed or its code can be reused.
   environment inputs/secret, GitHub OIDC provider, and immutable-subject role
   trust. It made no GitHub or AWS changes; hosted OIDC evidence remains blocked
   until the deployment owner configures and approves those controls.
+- [x] The hosted qualification provenance boundary is now fail-closed. The
+  workflow records the checked-out source SHA, commit subject, toolchain,
+  repository/workflow/ref/event/run identity, and clean-tree state, then
+  `scripts/validate-aws-s3-ci-provenance.sh` requires the SHA to equal
+  `GITHUB_SHA`, the exact `refs/heads/main` ref, a supported push or manual
+  dispatch event, unique required fields, and a clean checkout before AWS
+  authentication. Credential-free regression coverage passed
+  `AWS_S3_CI_PROVENANCE_TEST_PASS cases=5`; this validates evidence binding
+  only and does not claim hosted AWS acceptance.
 - [ ] W25.9 (deployment track) Production sign-off: record the exact released commit/image,
   reviewed configuration, live smoke result, rollback owner, and evidence for
   every W25.5-W25.8 gate before calling the AWS workstream production-ready.
