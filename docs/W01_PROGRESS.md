@@ -603,7 +603,7 @@ at exact SHA `232443e133abf7c8f20f6ffec5a2a22a747270e0` also passed the
 [macOS native-WebDAV job `106691801834`](https://github.com/andymac4182/mount-rs/actions/runs/35711153805/job/106691801834)
 and [Ubuntu native-WebDAV job `106691802073`](https://github.com/andymac4182/mount-rs/actions/runs/35711153805/job/106691802073).
 No WebDAV files changed between that tested SHA and current mainline
-`91ce4233ad324323284c3b5240e97aa8cea4ed22`; this qualifies the hosted native
+`fba61979f1f6c9858026cd5ebc4c5d3d357f366b`; this qualifies the hosted native
 mounted-I/O slice only. A fresh full locked workspace suite also passed locally
 with `CARGO_TARGET_DIR=/private/tmp/mount-rs-w01-workspace-515`; live providers,
 power-loss/crash durability, durable locks, and stronger same-resource ordering
@@ -616,6 +616,16 @@ stopped at `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while [Cloudflare R2 run
 stopped at `R2 CI monthly run cap already exceeded: count=362 limit=20` and
 skipped live integration; newer R2 run `35713639700` at `c87adf7` remained
 queued. No live AWS/R2 service PASS is claimable.
+
+At tested checkout `c57e2ea36f3f30e36a3f26a4ca2ecf88893c7ba5`, the fresh
+release N-API build using `scripts/build-native.mjs` passed in
+`/private/tmp/mount-rs-w01-webdav-current-napi`. The WebDAV-only N-API phase,
+typecheck, lifecycle, 64-pair direct-session/network concurrency, NodeFs/SQLite
+provider and network matrices, orderly reopen, process-crash and in-flight PUT
+recovery, structural-driver durability, Rust WebDAV 41/41, strict Clippy,
+formatting, and diff checks all passed. Manual current-package CI run
+`35714570430` at `92a6539e` remains queued, so this refresh is local evidence
+only and does not change the production **NO-GO** decision.
 
 The pinned WebDAV oracle deliberately has no `PathLock` for this HTTP session.
 The fresh concurrent lock regression passes with two simultaneous writes
