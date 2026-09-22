@@ -283,6 +283,12 @@ but still failed the blocked-read unmount case. The follow-up teardown-drain fix
 is locally verified and awaits a fresh non-cancelling hosted Linux run; W01 and
 W01-FUSE remain production NO-GO.
 
+The next local FUSE parity packet adds typed Rust IOCTL request/reply framing,
+including declared inline input-length validation, while retaining the explicit
+native `ENOSYS` boundary. Its focused protocol tests pass; hosted Linux/native
+IOCTL and the remaining lifecycle gates remain unverified, so W01 remains
+production NO-GO.
+
 The preceding W01-9P Unix listener packet was published at exact test SHA
 `dd10ac0564446c9143f8b5f68b2fed51c7eaf57f` and is included in descendant head
 `d43f5ea4e4334912de86ac0db818392531a7d4ec`. Its [Native 9P run
