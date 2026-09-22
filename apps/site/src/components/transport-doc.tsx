@@ -411,6 +411,20 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
         unsupported-version assertion pass locally. This qualifies local
         addon loading and runtime reachability only, not hosted ordering,
         crash durability, or production readiness.
+        The latest NFS source at commit <code>ff4b091c</code> now validates
+        complete <code>AUTH_SYS</code> bodies before shared-router or v3/v4
+        dispatch. Its real-TCP regression denies five malformed credential
+        cases across MOUNTv3, NFSv3, NFSv4, an unsupported NFS version, and
+        trailing <code>AUTH_SYS</code> bytes while accepting three controls,
+        including nonempty <code>AUTH_NONE</code>; the full locked target passed
+        42 unit tests and the pinned oracle remained 266 passed with 18
+        explicit skips. Malformed <code>AUTH_SYS</code> bodies receive
+        <code>AUTH_BADCRED</code>, while unsupported flavors retain
+        <code>AUTH_TOOWEAK</code>. RFC 5531 leaves opaque <code>AUTH_NONE</code>
+        bytes undefined while recommending a zero length. This is fail-closed
+        protocol parsing; <code>AUTH_SYS</code> remains client-asserted identity
+        rather than cryptographic authentication, and native ordering, crash
+        durability, hosted acceptance, and production readiness remain open.
       </>
     ),
     sources: [
@@ -423,6 +437,7 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
       { label: 'Latest NFS process-restart qualification', href: 'https://github.com/andymac4182/mount-rs/commit/96df991f4d4c682fb7a8186bc37013410e93837d51db164' },
       { label: 'NFSv4 process-restart rename qualification', href: 'https://github.com/andymac4182/mount-rs/commit/6d520dd2903a03230e673840b47934e7374959f3' },
       { label: 'macOS N-API loader repair', href: 'https://github.com/andymac4182/mount-rs/commit/b7ba3806e5a36f9732b1976e100c5d0e3004dd1e' },
+      { label: 'Latest NFS credential validation', href: 'https://github.com/andymac4182/mount-rs/commit/ff4b091ccfcea5bc197ccfe79d978c19661a166a' },
       { label: 'Latest hosted NFS status check', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35670416469' },
       { label: 'Historical hosted Linux transport CI', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35575442663' },
     ],
