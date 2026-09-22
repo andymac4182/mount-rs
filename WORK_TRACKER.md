@@ -2210,6 +2210,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
   target. macOS-latest and Ubuntu Node remain queued at this snapshot, so no
   current-tip full qualification or production approval is promoted; rollout
   remains **NO-GO**.
+- The same retained run's RustFS `106641134074`, FoundationDB/RustFS
+  `106641134166`, and base Ozone `106641134190` lanes passed their materialized
+  block/metadata, restart, fault, and cleanup checks. Ozone/TiDB `106641134221`
+  failed on TiDB optimistic write conflicts (`[kv:9007] ... Optimistic [try
+  again later]`) and emitted `RUSTFS_COMBO_FAIL`; provider launch scope is
+  still open and production remains **NO-GO**.
 - [x] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
   The rebased packet (`43ded00`, `980cdd7`, `2d2ac5c`, `be2170b`, final
   rebased tip `7235fde`) adds durable PGlite version metadata, reconnect and

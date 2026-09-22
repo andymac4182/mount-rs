@@ -83,6 +83,13 @@ boundary. The macOS-latest and Ubuntu Node jobs were still queued at the latest
 ledger refresh. This is qualification evidence only; production remains
 **NO-GO**.
 
+The same run separately passed the materialized RustFS,
+FoundationDB/RustFS, and base Ozone block/metadata, restart, fault, and
+cleanup checks. Its Ozone/TiDB composition failed on TiDB optimistic write
+conflicts (`[kv:9007] ... Optimistic [try again later]`) and emitted
+`RUSTFS_COMBO_FAIL`. Those results keep provider launch scope open; they do
+not authorize advertising TiDB or Ozone-backed compositions in production.
+
 The retained native package artifacts provide current candidate provenance for
 the support matrix:
 
