@@ -297,6 +297,10 @@ class AttachedP9Connection {
     return this._closed
   }
 
+  waitClosed() {
+    return this._closed
+  }
+
   get isClosed() {
     return this._stopped
   }

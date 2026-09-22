@@ -55,6 +55,7 @@ try {
   assert.equal(connection.stream, stream);
   assert.equal(connection.peer, "metadata-test");
   assert.equal(connection.isClosed, false);
+  assert.equal(typeof connection.waitClosed, "function");
   assert.equal(connection.session.options.msize, 32 * 1024);
   assert.equal(connection.session.msize, undefined);
   assert.equal(connection.session.version, undefined);
@@ -123,6 +124,7 @@ try {
   assert.equal(connection.session.locks.held, 0);
 } finally {
   await connection.close();
+  await connection.waitClosed();
   await server.close();
   stream.destroy();
 }
