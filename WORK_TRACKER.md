@@ -3850,6 +3850,14 @@ reproducible in a production-like environment.
   packet was published fast-forward-only at `9e98f14a`; the current provider
   admission rows remain explicitly blocked (`missing_bucket` for AWS and
   `count=281 limit=20` for R2), so W01-S3 remains **NO-GO**.
+- [x] The latest W01-S3 qualification refresh at `71972b28ca7ae561325342ddf466c8353546547a`
+  passed the release N-API build, all four pinned upstream oracle files
+  (990 passed/79 skipped), the Rust S3 4/6/29/5 packet and strict Clippy, exact
+  Node scope/session/concurrency/restart checks, structural factory parity,
+  package typecheck/distribution/server smoke, and the 40-case S3+WebDAV HTTP
+  differential. These are current local and pinned-oracle gates only; live
+  AWS/R2, physical power-loss durability, broader workload bounds, and
+  native/hosted acceptance remain open, so W01-S3 stays **NO-GO**.
 - [ ] W10.1 Finish per-transport backend/platform acceptance matrix, including
   native lifecycle, disconnect/error behavior and streaming/backpressure.
 - [ ] W10.2 Verify transport auto-selection and explicit unsupported behavior.
