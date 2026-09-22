@@ -2665,6 +2665,14 @@ Evidence landed without closing the remaining W01 acceptance gates:
   NFSv3 passed. Native v4.1 ordering, external/cross-process changes,
   crash/power-loss durability, exact-tip hosted acceptance, and production
   readiness remain open.
+- [x] W01-NFS native mount workload now covers held-open rename replacement
+  and same-inode hard-link rename/alias removal through actual kernel I/O.
+  The expanded macOS native NFSv3 test passed once plus five reruns with no
+  leaked mountpoints; full locked NFS (44 unit, 27 v4 wire), strict NFS
+  Clippy, and formatting passed. The Linux native v4.1 case includes these
+  checks but has not run at this patch. Hosted/native v4.1 acceptance,
+  cross-process recovery, crash/power-loss durability, and production
+  readiness remain open.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
@@ -3036,6 +3044,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   Ubuntu Rust. The push-triggered CI/policy runs for the same publication were
   cancelled before usable jobs because of mainline concurrency and are
   excluded from evidence; no current-tip W04 or production claim is promoted.
+- The same run has produced partial terminal evidence: ARM Node
+  `106730233011` passed both exact recovery steps plus rollback/N-API/
+  `providersFailed: 0`; Windows Node `106730232893` passed the full N-API,
+  package/consumer, and diagnosed WebDAV provider-network phases, including
+  SQLite PUT fan-out at `5182ms` under the unchanged `10000ms` timeout; and
+  Windows Rust `106730232577` passed format, strict Clippy, and locked
+  workspace tests. Intel macOS Node `106730233208` remains in its N-API build,
+  while the remaining Node/native/provider/W26 lanes are queued. This is not
+  full current-tip W04 or production acceptance; production remains **NO-GO**.
 - Production rollout packet refreshed in
   [`docs/W04-production-rollout.md`](docs/W04-production-rollout.md): exact
   candidate `d870f900`, run `35692153251`, aggregate-native package/consumer

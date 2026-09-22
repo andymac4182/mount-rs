@@ -11,8 +11,9 @@
 
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
+use std::io::Read;
 #[cfg(target_os = "linux")]
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -49,6 +50,9 @@ struct NativeChecks {
     truncated_len: u64,
     renamed_bytes: Vec<u8>,
     link_bytes: Vec<u8>,
+    held_replaced_bytes: Vec<u8>,
+    replacement_bytes: Vec<u8>,
+    surviving_hardlink_bytes: Vec<u8>,
     #[cfg(target_os = "linux")]
     v4_expanded: Option<NativeV4ExpandedChecks>,
 }
@@ -149,6 +153,27 @@ fn exercise_namespace(mountpoint: &std::path::Path) -> std::io::Result<NativeChe
     let link = renamed_dir.join("hardlink.txt");
     fs::hard_link(&renamed_file, &link)?;
     let link_bytes = fs::read(&link)?;
+
+    let rename_cases = mountpoint.join("native-rename-cases");
+    fs::create_dir(&rename_cases)?;
+    let destination = rename_cases.join("destination.txt");
+    let replacement = rename_cases.join("replacement.txt");
+    fs::write(&destination, b"held before replacement")?;
+    fs::write(&replacement, b"replacement bytes")?;
+    let mut held_destination = OpenOptions::new().read(true).open(&destination)?;
+    fs::rename(&replacement, &destination)?;
+    let mut held_replaced_bytes = Vec::new();
+    held_destination.read_to_end(&mut held_replaced_bytes)?;
+    drop(held_destination);
+    let replacement_bytes = fs::read(&destination)?;
+
+    let source = rename_cases.join("source.txt");
+    let alias = rename_cases.join("alias.txt");
+    fs::write(&source, b"same inode survives")?;
+    fs::hard_link(&source, &alias)?;
+    fs::rename(&source, &alias)?;
+    fs::remove_file(&alias)?;
+    let surviving_hardlink_bytes = fs::read(&source)?;
     let all_entries = fs::read_dir(&renamed_dir)?
         .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
         .collect::<Result<BTreeSet<_>, _>>()?;
@@ -170,6 +195,9 @@ fn exercise_namespace(mountpoint: &std::path::Path) -> std::io::Result<NativeChe
         truncated_len,
         renamed_bytes,
         link_bytes,
+        held_replaced_bytes,
+        replacement_bytes,
+        surviving_hardlink_bytes,
         #[cfg(target_os = "linux")]
         v4_expanded: None,
     })
@@ -375,6 +403,9 @@ fn assert_namespace_checks(checks: &NativeChecks) {
     assert_eq!(checks.truncated_len, 4);
     assert_eq!(checks.renamed_bytes, b"nati");
     assert_eq!(checks.link_bytes, b"nati");
+    assert_eq!(checks.held_replaced_bytes, b"held before replacement");
+    assert_eq!(checks.replacement_bytes, b"replacement bytes");
+    assert_eq!(checks.surviving_hardlink_bytes, b"same inode survives");
     assert_eq!(
         checks.entries,
         BTreeSet::from(["after.txt".into(), "hardlink.txt".into()])
