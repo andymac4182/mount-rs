@@ -10,7 +10,10 @@ for engineering planning, not a commitment.
 This is the newest implementation and qualification boundary. Source commit
 [9f6041db2f8aba9301507bad24664015890295f9](https://github.com/andymac4182/mount-rs/commit/9f6041db2f8aba9301507bad24664015890295f9)
 (perf(w26): coalesce remote mutation preparation waves) is verified at both
-the detached checkout and origin/main. It adds a bounded in-flight
+the detached checkout and the current origin/main history. Current
+origin/main is a107b382, which contains this source commit plus unrelated
+later work; the authoritative qualification run below is bound to the exact
+9f6041db source head. It adds a bounded in-flight
 preparation counter for whole-file writes so the mutation runner does not
 declare the queue idle while peer operations are still preparing immutable
 remote blocks. The guard is released before the prepared request waits for
@@ -20,7 +23,7 @@ are unchanged.
 
 | Gate / item | Current result | Evidence | Remaining action / ownership |
 | --- | --- | --- | --- |
-| Source implementation | **PUBLISHED / 100% for this chunk** | 9f6041db is exactly origin/main; git diff --check and cargo fmt --all -- --check pass. | Requalify the real Ozone/provider path on this exact source. |
+| Source implementation | **PUBLISHED / 100% for this chunk** | 9f6041db is included in current origin/main history; git diff --check and cargo fmt --all -- --check pass. The exact qualification run is bound to 9f6041db. | Requalify the real Ozone/provider path on this exact source. |
 | Chunked Rust unit gate | **PASS** | ./scripts/cargo-shared test -p mount-rs-chunked --lib --locked: 21 passed, 0 failed. | Workspace/hosted gates remain separate; retain the exact source boundary. |
 | Chunked strict Clippy gate | **PASS** | ./scripts/cargo-shared clippy -p mount-rs-chunked --lib --locked -- -D warnings completed successfully. | No local action; hosted qualification remains open. |
 | Full locked Rust workspace test gate | **PASS** | ./scripts/cargo-shared test --workspace --all-targets --locked exited 0; executed workspace suites passed, while explicitly opt-in native/live provider tests remained ignored because their external services or host privileges were not configured. | Hosted Ozone/provider execution remains required; ignored native/provider cases are not promoted as passes. |
@@ -56,6 +59,7 @@ their hosted acceptance percentages.
 | 2026-09-22 — workspace regression verification (21:20 AEST) | Re-ran the full locked workspace all-target test matrix and full workspace strict Clippy with -D warnings; both exited 0. Explicitly opt-in native/live provider cases remain separate external gates. | ~0.25–0.5 h | ~0.1 h shared Cargo target wait | Workspace regression evidence is green without converting ignored native/provider cases into acceptance. |
 | 2026-09-22 — security review | Ran security preflight, one-file discovery, source-backed threat review and final scan 8f4fb7da...; complete coverage and zero findings were sealed before commit. | ~0.5–0.75 h | ~0.25 h workbench finalization | No security candidate survived; customer/provider controls remain separately tracked. |
 | 2026-09-22 — hosted live recheck (21:20 AEST) | Re-polled exact-head run 35720016370: W26 provider/base/aggregate jobs remain queued; unrelated Node jobs are progressing and the workflow still has no terminal conclusion. | ~0.1 h | Hosted capacity pending | No provider, performance or aggregate result is promoted from unrelated job progress. |
+| 2026-09-22 — mainline/CI recheck (21:25 AEST) | Fetched origin/main at a107b382, which contains the W26 source commit plus unrelated W04/W07 documentation; exact-head run 35720016370 remains queued, with all W26 provider/base/aggregate jobs still queued. | ~0.1 h | Hosted capacity pending | Corrected the source ancestry wording; no provider, performance or aggregate result is promoted. |
 | 2026-09-22 — publication | Committed, rebased over concurrent mainline updates, pushed 9f6041db to origin/main, fetched again, and verified local HEAD equals remote. | ~0.25–0.5 h | ~0.25–0.75 h mainline reconciliation | Other threads can build from the exact implementation tip. |
 | 2026-09-22 — dispatch | Dispatched exact-head manual CI run 35720016370; its workflow head is exactly 9f6041db and all listed provider/base/aggregate jobs were queued at capture. | ~0.1–0.25 h | CI queue pending; provisional ~0.5–2 h | The run is the authoritative hosted gate; queued state is not acceptance. |
 | 2026-09-22 — live CI recheck (21:16 AEST) | Re-polled run 35720016370: workflow status remains queued; all four W26 provider jobs, the base Ozone job and ozone-compositions remain queued, while one unrelated ubuntu-24.04-arm Node job has started. | ~0.1 h | Hosted capacity still pending for W26 jobs | This is progress in runner allocation only; no provider, performance or aggregate result is promoted. |

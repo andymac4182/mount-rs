@@ -9,7 +9,9 @@ not release-ready**.
 Source commit
 [9f6041db2f8aba9301507bad24664015890295f9](https://github.com/andymac4182/mount-rs/commit/9f6041db2f8aba9301507bad24664015890295f9)
 (perf(w26): coalesce remote mutation preparation waves) is published and
-verified exactly at origin/main. The chunk adds a bounded in-flight
+included in current origin/main history at a107b382, which contains this
+source commit plus unrelated later work. The exact qualification run below
+is bound to 9f6041db. The chunk adds a bounded in-flight
 preparation counter for whole-file writes so the mutation runner continues
 collecting concurrent immutable-block preparations before taking a metadata
 batch. The counter is released before the caller waits for the batch response;
