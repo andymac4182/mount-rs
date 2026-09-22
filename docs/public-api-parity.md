@@ -322,6 +322,11 @@ Current focused behavior:
   passed: N-API job `106647016617` passed the new member-surface step and all
   hosted N-API lifecycle gates, while Rust job `106647016767` passed the Linux
   probe plus all four ignored native lifecycle tests.
+- The next bounded server contract packet caches native `P9Connection` wrappers
+  by stable transport id. A real-TCP regression checks that repeated
+  `P9Server.clients` reads preserve connection, session, and closed-promise
+  identity and that the wrapper is pruned after `close()`/`waitClosed()`;
+  hosted Native 9P evidence for this revision is pending.
 - That selector also covers the Unix listener policy: private-directory
   refusal, explicit `allowSharedDirectory`, `0600` socket mode, Unix protocol
   handshake and transport-source peer, socket cleanup, and path/port

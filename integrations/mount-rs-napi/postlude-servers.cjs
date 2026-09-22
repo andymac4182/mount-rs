@@ -482,6 +482,7 @@ function wrapP9Server(P9Server) {
     const state = serverState(server)
     state.attachments ??= new Set()
     state.attachedStreams ??= new Map()
+    state.nativeConnections ??= new Map()
     state.nextAttachedId ??= 1_000_000_000_000
     return state
   }
@@ -525,7 +526,19 @@ function wrapP9Server(P9Server) {
       const clients = typeof nativeClientsGetter === "function"
         ? nativeClientsGetter.call(this)
         : nativeClients.call(this)
-      return [...clients, ...state.attachments]
+      const live = new Set()
+      const stable = clients.map((client) => {
+        const id = client.id
+        live.add(id)
+        const cached = state.nativeConnections.get(id)
+        if (cached !== undefined) return cached
+        state.nativeConnections.set(id, client)
+        return client
+      })
+      for (const id of state.nativeConnections.keys()) {
+        if (!live.has(id)) state.nativeConnections.delete(id)
+      }
+      return [...stable, ...state.attachments]
     },
   })
 
