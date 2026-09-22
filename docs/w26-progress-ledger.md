@@ -5,6 +5,45 @@ workstream. It distinguishes repository implementation, local evidence, and
 hosted/native/provider acceptance. Estimates are provisional and are intended
 for engineering planning, not a commitment.
 
+## Current authority override — 2026-09-22, Ozone test lockfile synchronization
+
+This is the newest W26 CI-reproducibility boundary. The PGlite dependency
+addition exposed a separate standalone lockfile in `tests/ozone`; its
+`mount-rs-pglite` package entry was missing the already-resolved `md-5
+0.10.6` edge. Ozone TiDB and FoundationDB jobs therefore failed before their
+provider tests under `--locked`. The one-line lockfile correction is now
+published and a replacement exact-head packet is running. The earlier failure
+is retained as evidence of the gate and is not promoted as provider behavior.
+
+| Field | Current value |
+| --- | --- |
+| Shared build-on tip | `1ceaa96486a96ed4288c079dcde2b3b2d18900bb` (`fix(w26): sync Ozone test lockfile`) is verified on `origin/main`; it is rebased over concurrent mainline changes. |
+| Implementation delta | `tests/ozone/Cargo.lock` now records `md-5 0.10.6` under `mount-rs-pglite`, matching the root lockfile and the published PGlite manifest. No source, credential, runtime-policy or provider behavior changed. |
+| Local evidence | `git diff --check`, locked standalone Ozone metadata and `./scripts/cargo-shared check --manifest-path tests/ozone/Cargo.toml --all-targets --locked` passed. The latter completed the full Ozone test package compile in 10.34 seconds. |
+| Security evidence | Lockfile diff scan `f2ba64e6-373d-4741-b27f-60bdcec6d7e6` is sealed with complete coverage of `tests/ozone/Cargo.lock`, 0 reportable findings, and snapshot digest `codex-security-snapshot/v1:sha256:221389df7c2e76fc8b4cc22076ff0ea7e97f1269b91adf9fbbfeffdc8901494a`. Report: `/private/var/folders/qx/1pyrtldd3nb1l0p44xbmd97h0000gn/T/codex-security-scans-MW6oGi/mount-rs/ef682793d64222ad299697f044a71d0b44c124c1_20260922T085554Z_x5xpbucd/report.md`. |
+| Pre-fix hosted evidence | Run [`35706390612`](https://github.com/andymac4182/mount-rs/actions/runs/35706390612) targeted `c791ab31`. TiDB job `106676248986` and FoundationDB job `106676249267` both failed at `tests/ozone/Cargo.lock` under `--locked` before provider tests; their retained artifacts are `w26-ozone-tidb-evidence` (`10684169484`) and `w26-ozone-foundationdb-evidence` (`10684693731`). PGlite job `106676249562` also failed its runtime step, but its log is not promoted until the run is terminal. |
+| Replacement hosted qualification | Run [`35707725455`](https://github.com/andymac4182/mount-rs/actions/runs/35707725455) targets exact SHA `1ceaa96486a96ed4288c079dcde2b3b2d18900bb`. At capture it was queued: base `106680595638`, compositions `106680595812`, FoundationDB `106680595831`, TiDB `106680595912`; queued/in-progress state is not acceptance. |
+| Production decision | **NO-GO / last terminal packet passed 1 of 4 provider rows; replacement packet pending.** The 1,000 IOPS/drive, Tier-1 99.99% reliability, five-minute RPO/RTO, secure customer Ozone topology, complete end-to-end packet and exact-head security gates remain open. Deployment, backup/DR and release ownership remain external. |
+| Next action | Let the replacement packet reach terminal state, retrieve every producer and aggregate artifact, and update each W26 row without treating the pre-fix lock failure as a provider result. Continue provider-specific remediation only from terminal runtime evidence. |
+
+### Work-item impact of the lockfile correction
+
+The complete W26.1–W26.15/P14 itemized table in the next authority section
+remains current for implementation, estimates and external ownership. This
+chunk changes only the hosted-gate state: W26.3a–d, W26.4, W26.8,
+W26.10–W26.15 and P14 are awaiting the replacement exact-head packet; W26.1,
+W26.2, W26.5–W26.7 and W26.9/W26.12/W26.13 remain implemented locally with
+their hosted/customer evidence boundaries unchanged. No completion percentage
+is promoted from a queued or pre-test-failure job.
+
+### Session time log — Ozone lockfile correction
+
+| Date / phase | Activity | Engineering time | External wait / gate time | Result |
+| --- | --- | ---: | ---: | --- |
+| 2026-09-22 — failure diagnosis | Retrieved retained TiDB/FoundationDB artifacts from run `35706390612` and identified the shared `tests/ozone/Cargo.lock` drift before provider tests. | ~0.25–0.5 h | ~0.25–0.5 h artifact/CI wait | Classified the failure as a W26 CI reproducibility defect, not provider performance evidence. |
+| 2026-09-22 — lockfile repair and verification | Added the single required `md-5 0.10.6` edge, ran locked metadata and the standalone Ozone all-targets compile. | ~0.25–0.5 h | ~0.1–0.25 h shared-target build | Ozone test package compiles with `--locked`; no source behavior changed. |
+| 2026-09-22 — security and publication | Sealed scan `f2ba64e6-373d-4741-b27f-60bdcec6d7e6`, rebased over concurrent mainline work, pushed `1ceaa964`, verified `origin/main`, and dispatched run `35707725455`. | ~0.5–0.75 h | ~0.5–1 h remote reconciliation and CI queue | Replacement packet is queued; production remains NO-GO. |
+
 ## Current authority override — 2026-09-22, PGlite local identity fast path
 
 This is the newest W26 implementation boundary. The PGlite block store now

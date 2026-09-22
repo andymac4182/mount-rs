@@ -1,8 +1,61 @@
 # W08 TiDB workstream progress ledger
 
-Status snapshot: **2026-09-22 18:20 AEST**
+Status snapshot: **2026-09-22 18:46 AEST**
 Repository: `andymac4182/mount-rs`  
-Latest synchronization: exact local merged qualification is
+Latest synchronization: exact public `origin/main` is
+`214169edea0b4bcd8273be9e6771790d3e5d5d96`. The final combined source
+qualification boundary is merged source `3fe2a02d0f9cb14256d24c2b60bab2d453d67c9c`
+after PGlite source `c791ab31`, NFS/WebDAV, S3/N-API and TiDB/N-API/9P updates.
+Compile-only locked workspace check and strict Clippy with `-D warnings`
+passed on `/private/tmp/mount-rs-w08-qual-TeImd6`; the full linked workspace
+test remains blocked before execution by the macOS Xcode-license gate (`xcrun
+--sdk macosx --show-sdk-path`, linker exit 69). The prior exact `35523b9f`
+boundary retains the full linked-test PASS. Public main then added docs-only
+W07/W08 reconciliation through `214169ed`; hosted W08 run `35706621318`
+targets that exact tip and was `pending` at 18:46 AEST, so it is not evidence.
+Production workflow runs remain absent, the protected environment is HTTP 404,
+only the preview release exists and no production-candidate tag exists.
+
+Previous synchronization (18:38 AEST): exact public `origin/main` is
+`ab74870c58ab768c65679ea80feb18a8f54cbe00`. The newest source-bearing W08
+boundary is merged source `d81c4f4cdfee9e30021764663e9a40cb7d0064cc` after
+S3/N-API changes through `7ed41f88` and the prior TiDB/N-API/9P updates.
+Compile-only locked workspace check and strict Clippy with `-D warnings`
+passed on `/private/tmp/mount-rs-w08-qual-TeImd6`; the full linked workspace
+test remains blocked before execution by the macOS Xcode-license gate (`xcrun
+--sdk macosx --show-sdk-path`, linker exit 69). The prior exact source
+`35523b9f` retains the full linked-test PASS. Public main then added W07
+provenance/control and docs-only updates through `ab74870c`; hosted W08 run
+`35705868850` targets that exact tip and was `pending` at 18:38 AEST, so it is
+not evidence. Production workflow runs remain absent, the protected environment
+is HTTP 404, only the preview release exists and no production-candidate tag
+exists.
+
+Previous synchronization (18:32 AEST): exact public `origin/main` is
+`bd1481babb8145adff1d150f46e3976d2b117662`. The newest source-bearing
+qualification boundary is merged source `adfae4b18b57b087786a2c29857dfaae20b492ad`
+after TiDB storage source `2ce6f753` and the prior N-API/9P updates. Compile-only
+locked `check --workspace --all-targets` and strict Clippy with `-D warnings`
+passed on `/private/tmp/mount-rs-w08-qual-TeImd6`; the full linked workspace
+test could not start because macOS `xcrun --sdk macosx --show-sdk-path`
+requires acceptance of the Xcode license (link exit 69). This is a host/toolchain
+gate, not a source failure; the prior exact source `35523b9f` retains the full
+linked test pass. Public main then added docs-only native-9P/W05/W08 updates
+through `bd1481ba`; hosted W08 run `35705304456` targets that exact tip and was
+`pending` at 18:32 AEST, so it is not evidence. Production workflow runs
+remain absent, the protected environment is HTTP 404, only the preview release
+exists and no production-candidate tag exists.
+
+Previous synchronization (18:25 AEST): exact public `origin/main` is
+`20835a079581f69d0855d23714bb7f3be5e9f124`, published after exact merged
+N-API/9P qualification `35523b9fc4b12d63d5dbfe1fbc96f080b3dce4b6`. Hosted W08
+run `35704624070` targets this exact public SHA and was `pending` at 18:25
+AEST, so it is not evidence. The production workflow still has no runs, the
+protected environment is HTTP 404, releases are preview-only and no
+production-candidate tag exists. The checkout is clean and exactly equal to
+`origin/main` before this next ledger refresh.
+
+Previous synchronization (18:20 AEST): exact local merged qualification is
 `35523b9fc4b12d63d5dbfe1fbc96f080b3dce4b6` after source-bearing N-API/9P
 updates through public base `24b83a60`. The full locked workspace test and
 strict Clippy with `-D warnings` passed on isolated target
@@ -842,10 +895,24 @@ the evidence counted here.
   recorded as external/provider/hosted gates rather than fabricated local
   passes.
 
-### Latest evidence refresh — 2026-09-22 18:20 AEST
+### Latest evidence refresh — 2026-09-22 18:46 AEST
 
 | Evidence item | Status | Evidence and boundary | Remaining action / blocker |
 | --- | --- | --- | --- |
+| Final combined source boundary `3fe2a02d0f9cb14256d24c2b60bab2d453d67c9c` after PGlite source `c791ab31` | PARTIAL PASS — compile/static qualification; linked test blocked by host Xcode gate; production remains NO-GO | Compile-only locked `check --workspace --all-targets` and strict Clippy with `-D warnings` exited 0 on `/private/tmp/mount-rs-w08-qual-TeImd6`. The full linked test remains blocked before execution by `xcrun --sdk macosx --show-sdk-path` requiring the Xcode license (link exit 69); no test failure is inferred. The preceding exact `35523b9f` boundary retains the full linked-test PASS. | Accept the Xcode license on the native host and rerun the full linked workspace test before promoting `3fe2a02d` to a full-test PASS. Keep provider/native and P01–P09 gates separate. |
+| Public docs-only tip `214169edea0b4bcd8273be9e6771790d3e5d5d96` / hosted W08 run `35706621318` | NOT EVIDENCE — run `pending` at 18:46 AEST | The public delta after `3fe2a02d` changed W07/W08 documentation only. The current hosted W08 run targets the exact public tip but has no terminal conclusion. | Follow to terminal status; pending or superseded runs cannot close any gate. |
+| Live production-boundary audit, 2026-09-22 18:46 AEST | BLOCKED — production execution surface absent | Read-only checks continue to show no `w08-production-release.yml` runs, HTTP 404 for the protected `w08-production` environment, only prerelease `v0.1.0-cli-preview`, and no `v*-cli-production-candidate*` tag. No production mutation was attempted. | Configure the protected environment/reviewers/secrets, create an approved immutable candidate tag, run terminal release, retain target assets/attestations, canary, rollback and named approval evidence before changing P09 or the NO-GO decision. |
+
+| Evidence item | Status | Evidence and boundary | Remaining action / blocker |
+| --- | --- | --- | --- |
+| Newest S3/N-API source-bearing merged boundary `d81c4f4cdfee9e30021764663e9a40cb7d0064cc` after S3 source `7ed41f88` | PARTIAL PASS — compile/static qualification; linked test blocked by host Xcode gate; production remains NO-GO | Compile-only locked `check --workspace --all-targets` and strict Clippy with `-D warnings` exited 0 on `/private/tmp/mount-rs-w08-qual-TeImd6`. The full linked test remains blocked before execution by `xcrun --sdk macosx --show-sdk-path` requiring the Xcode license (link exit 69); no test failure is inferred. The preceding exact `35523b9f` boundary retains the full linked-test PASS. | Accept the Xcode license on the native host and rerun the full linked workspace test before promoting `d81c4f4` to a full-test PASS. Keep provider/native and P01–P09 gates separate. |
+| Public W07 provenance/control and docs-only tip `ab74870c58ab768c65679ea80feb18a8f54cbe00` / hosted W08 run `35705868850` | NOT EVIDENCE — run `pending` at 18:38 AEST | The public delta after `d81c4f4` changed W07 control scripts and documentation only. The current hosted W08 run targets the exact public tip but has no terminal conclusion. | Follow to terminal status; pending or superseded runs cannot close any gate. |
+| Live production-boundary audit, 2026-09-22 18:38 AEST | BLOCKED — production execution surface absent | Read-only checks continue to show no `w08-production-release.yml` runs, HTTP 404 for the protected `w08-production` environment, only prerelease `v0.1.0-cli-preview`, and no `v*-cli-production-candidate*` tag. No production mutation was attempted. | Configure the protected environment/reviewers/secrets, create an approved immutable candidate tag, run terminal release, retain target assets/attestations, canary, rollback and named approval evidence before changing P09 or the NO-GO decision. |
+| Newest source-bearing merged boundary `adfae4b18b57b087786a2c29857dfaae20b492ad` after TiDB storage source `2ce6f753` | PARTIAL PASS — compile/static qualification; linked test blocked by host Xcode gate; production remains NO-GO | `CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/private/tmp/mount-rs-w08-qual-TeImd6 ./scripts/cargo-shared check --workspace --all-targets --locked` and strict Clippy with `-D warnings` both exited 0. The full locked workspace test attempted to link `mount-rs-tidb` and stopped before test execution because `xcrun --sdk macosx --show-sdk-path` requires the Xcode license (`cc` exit 69). This is a host/toolchain gate, not a source assertion; the prior exact `35523b9f` boundary retains the full linked test pass. | Accept the Xcode license on the native host and rerun the full linked workspace test before promoting `adfae4b1` to a full-test PASS. Keep provider/native and P01–P09 gates separate. |
+| Public docs-only tip `bd1481babb8145adff1d150f46e3976d2b117662` / hosted W08 run `35705304456` | NOT EVIDENCE — run `pending` at 18:32 AEST | The public delta after the TiDB source merge changed documentation/control records only. The current hosted W08 run targets the exact public tip but has no terminal conclusion. | Follow to terminal status; pending or superseded runs cannot close any gate. |
+| Live production-boundary audit, 2026-09-22 18:32 AEST | BLOCKED — production execution surface absent | Read-only checks continue to show no `w08-production-release.yml` runs, HTTP 404 for the protected `w08-production` environment, only prerelease `v0.1.0-cli-preview`, and no `v*-cli-production-candidate*` tag. No production mutation was attempted. | Configure the protected environment/reviewers/secrets, create an approved immutable candidate tag, run terminal release, retain target assets/attestations, canary, rollback and named approval evidence before changing P09 or the NO-GO decision. |
+| Published W08 qualification tip `20835a079581f69d0855d23714bb7f3be5e9f124`; exact tested source `35523b9fc4b12d63d5dbfe1fbc96f080b3dce4b6` | PASS — public publication/ref integrity and exact source-health qualification; production remains NO-GO | Local `HEAD`, `origin/main` and public `refs/heads/main` are exactly `20835a07` with a clean checkout. The exact N-API/9P source qualification at `35523b9f` passed the full locked workspace test, strict Clippy, six workflow YAML parses, changed N-API/package checks, W07 platform evidence and W07/W08 tracking/evidence suites. | Retain `35523b9f` as the source-health boundary; current hosted policy is pending and provider/native/P01–P09 gates remain open. |
+| Hosted W08 policy run `35704624070`, head SHA `20835a079581f69d0855d23714bb7f3be5e9f124` | NOT EVIDENCE — `pending` at 18:25 AEST | The run was triggered by the exact published W08 qualification tip but had no terminal conclusion at observation. | Follow to terminal status; pending or superseded jobs do not close any gate. |
 | Exact merged N-API/9P source qualification `35523b9fc4b12d63d5dbfe1fbc96f080b3dce4b6` after public base `24b83a60` | PASS — full source-health/static/tracking qualification; production remains NO-GO | The full locked workspace test and strict workspace Clippy with `-D warnings` exited 0 on isolated target `/private/tmp/mount-rs-w08-qual-TeImd6`; all runnable tests passed and provider/native rows remained explicit opt-in skips. Six workflow YAML files, changed N-API/package paths including 9P lifecycle/order tests, W07 platform-evidence, W07/W08 validators/tests and `git diff --check` passed. This is exact source-health evidence only; it does not close provider/native or P01–P09 production gates. | Publish this requalified source through the next safe mainline push; retain the provider/native and production boundaries. |
 | Public docs-only reconciliation `f177e0679779e9b9e7d6baac30eba59361e91ed4` / hosted W08 run `35704230143` | NOT EVIDENCE — run `pending` at 18:20 AEST | The public delta after the exact N-API/9P qualification changed W05/W08 documentation only. `gh run view`/queue observation found the current hosted W08 run non-terminal at the exact public docs-only tip. | Follow to terminal status after publishing the exact merged source; do not promote pending or superseded runs to evidence. |
 | Live production-boundary audit, 2026-09-22 18:20 AEST | BLOCKED — production execution surface absent | Read-only checks continue to show no `w08-production-release.yml` runs, HTTP 404 for the protected `w08-production` environment, only prerelease `v0.1.0-cli-preview`, and no `v*-cli-production-candidate*` tag. No production mutation was attempted. | Configure the protected environment/reviewers/secrets, create an approved immutable candidate tag, run terminal release, retain target assets/attestations, canary, rollback and named approval evidence before changing P09 or the NO-GO decision. |
@@ -1153,6 +1220,10 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-22 17:59–18:07 AEST | Reconciled concurrent W04/W05/site documentation and site-component changes, safely published the W08 ledger merge `fb6ef40c`, verified exact local/tracking/public-main equality and a clean checkout, and observed hosted W08 run `35702979994` targeting the exact merge in `pending`. | ~0.1 engineer-day | ~1m public-ref/push verification plus ~1m hosted observation and ledger update | The W08 ledger is publicly integrated and the prior exact source-health boundary remains `245258d9`; current hosted run is not terminal evidence. No provider/native or P01–P09 production gate is closed; production remains NO-GO with zero evidence records. |
 | 2026-09-22 18:07–18:14 AEST | Reconciled the next W07/W05/W26 control/documentation tips into public merge `b4e7c868`, verified exact local/tracking/public equality and a clean checkout, followed hosted W08 run `35703582574` to its current `pending` state, and refreshed the read-only production boundary: no production runs, environment HTTP 404, preview-only release and no candidate tag. | ~0.1 engineer-day | ~1m public-ref/push verification plus ~1m hosted/live-boundary observation and ledger update | The W08 publication remains integrated and exact source-health remains green at `245258d9`; hosted current-tip evidence is non-terminal, while provider/native and P01–P09 production gates remain external and production stays NO-GO with zero evidence records. |
 | 2026-09-22 18:14–18:20 AEST | Reconciled source-bearing N-API/9P lifecycle/order and native-workflow changes through exact merged source `35523b9f`, reran full locked tests, strict Clippy, six workflow YAML parses, changed N-API/package checks, W07 platform evidence and W07/W08 controls, then reconciled docs-only public tip `f177e067` and observed hosted run `35704230143` pending. | ~0.3 engineer-day | ~2m full test/Clippy/static/policy execution plus ~3m fetch/merge/hosted observation | Exact N-API/9P source-health is green; current public docs-only hosted run is non-terminal. Provider/native services and P01–P09 production gates remain external; production stays NO-GO with zero evidence records. |
+| 2026-09-22 18:20–18:25 AEST | Published the N-API/9P qualification ledger as `20835a07`, verified exact local/tracking/public equality and a clean checkout, and observed hosted run `35704624070` targeting the exact published SHA in `pending`; refreshed the read-only production boundary. | ~0.1 engineer-day | ~1m push/ref verification plus ~1m hosted/production-boundary observation and ledger update | The exact source-health result is publicly integrated; hosted current-tip evidence is non-terminal. No provider/native or P01–P09 production gate is closed; production remains NO-GO with zero evidence records. |
+| 2026-09-22 18:25–18:32 AEST | Reconciled TiDB storage source `2ce6f753` into exact merge `adfae4b1`, attempted the full locked workspace test, recorded the Xcode-license linker gate, then passed compile-only locked workspace check and strict Clippy, reconciled docs-only native-9P/W05/W08 public tip `bd1481ba`, and observed hosted run `35705304456` pending. | ~0.25 engineer-day | ~1m failed link attempt plus ~1m compile-only check/Clippy and ~3m public/hosted reconciliation | Compile/static qualification is green; full linked test of the newest source remains blocked by native Xcode license acceptance. Prior full linked-test source `35523b9f` remains valid. Provider/native services and P01–P09 production gates remain external; production stays NO-GO with zero evidence records. |
+| 2026-09-22 18:32–18:38 AEST | Reconciled S3 session/gateway and N-API in-flight crash/concurrency source through exact merge `d81c4f4`, ran compile-only locked workspace check and strict Clippy, merged W07 provenance/control and docs-only public tip `ab74870c`, and observed hosted W08 run `35705868850` pending. | ~0.25 engineer-day | ~2m compile-only/Clippy execution plus ~3m source/public/hosted reconciliation | Latest source is compile/static clean; linked tests remain host-blocked by Xcode license acceptance, and hosted current-tip state is non-terminal. Provider/native services and P01–P09 production gates remain external; production stays NO-GO with zero evidence records. |
+| 2026-09-22 18:38–18:46 AEST | Reconciled NFS/WebDAV source updates and PGlite source `c791ab31` into final combined boundary `3fe2a02d`, reran compile-only locked workspace check and strict Clippy, merged docs-only public tip `214169ed`, and observed hosted W08 run `35706621318` pending. | ~0.3 engineer-day | ~2m compile-only/Clippy execution plus ~4m source/public/hosted reconciliation | Final combined tree is compile/static clean; linked tests remain blocked by Xcode licensing, while hosted current-tip evidence is non-terminal. Provider/native services and P01–P09 production gates remain external; production stays NO-GO with zero evidence records. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol

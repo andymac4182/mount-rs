@@ -514,6 +514,46 @@ AEST. This is source-health and hosted scheduling evidence only; no provider,
 native, production, candidate, canary, rollback or approval gate is closed.
 P01–P09 remain open and the decision remains NO-GO.
 
+The exact W08 qualification tip was published as `20835a07` and verified
+equal to local `HEAD`, `origin/main` and the public main ref with a clean
+checkout. Its hosted W08 policy run `35704624070` targets the exact published
+SHA and was still `pending` at 18:25 AEST. This is hosted scheduling evidence,
+not a terminal implementation/provider/production result. The production
+workflow still has no runs, the protected environment is unavailable (HTTP
+404), only `v0.1.0-cli-preview` exists, and no production-candidate tag is
+present; P01–P09 remain open and the decision remains NO-GO.
+
+The subsequent TiDB storage source update `2ce6f753` was merged into exact
+qualification boundary `adfae4b1` with the prior N-API/9P changes. Compile-only
+locked workspace checks and strict Clippy passed, but the full linked workspace
+test stopped before execution when macOS `xcrun --sdk macosx --show-sdk-path`
+required an unaccepted Xcode license (link exit 69). The previous exact source
+`35523b9f` remains the latest full linked-test PASS. Public main then advanced
+docs-only through `bd1481ba`; hosted W08 run `35705304456` targets that exact
+tip and was `pending` at 18:32 AEST. This is a native host/toolchain and hosted
+scheduling boundary, not a provider or production acceptance; P01–P09 remain
+open and the decision remains NO-GO.
+
+The latest S3/N-API source-bearing merge `d81c4f4` (S3 session/gateway cleanup
+and N-API in-flight crash/concurrency coverage) passed compile-only locked
+workspace check and strict Clippy. The linked test remains blocked by the same
+unaccepted Xcode license; `35523b9f` is still the latest full linked-test PASS.
+Public main then added W07 provenance/control and docs-only updates through
+`ab74870c`; hosted W08 run `35705868850` targets that exact public tip and was
+`pending` at 18:38 AEST. No provider, native, production, candidate, canary,
+rollback or approval gate is closed; P01–P09 remain open and the decision
+remains NO-GO.
+
+The final combined source boundary `3fe2a02d` includes PGlite source
+`c791ab31` plus the NFS/WebDAV/S3/N-API and TiDB/N-API/9P updates. Compile-only
+locked workspace check and strict Clippy passed; the linked test remains
+blocked before execution by the unaccepted Xcode license (link exit 69), so
+`35523b9f` remains the latest full linked-test PASS. Public main then advanced
+docs-only through `214169ed`; hosted W08 run `35706621318` targets that exact
+tip and was `pending` at 18:46 AEST. This is source-health, native-host and
+hosted scheduling evidence only; no provider or production gate is closed.
+P01–P09 remain open and the decision remains NO-GO.
+
 After origin/main advanced with the 9P EOF/backpressure server fix `1179d9e3`,
 N-API test expansion and site component updates, exact merged source
 `d725248534eb897de4d49e916c47425e6266c05d` was freshly requalified. The full

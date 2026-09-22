@@ -2,8 +2,9 @@
 //!
 //! The child server is terminated without running its async shutdown path.
 //! The replacement server must still expose the file written through the NFS
-//! wire before the crash. This deliberately qualifies backend data recovery;
-//! it does not claim durable NFSv4 lease, replay, or file-handle state.
+//! wire and the namespace mutations completed before the crash. This qualifies
+//! one-host process-crash recovery, not power-loss durability or durable NFSv4
+//! lease, replay, or file-handle state.
 
 #![cfg(unix)]
 
@@ -27,7 +28,8 @@ use mount_rs_nfs::protocol::{
 use mount_rs_nfs::rpc::{RPC_SUCCESS, RecordAssembler, decode_reply, encode_call, frame_record};
 use mount_rs_nfs::v4::{
     ACCESS4_READ, CLAIM_NULL, CREATE_SESSION4_FLAG_CONN_BACK_CHAN, FILE_SYNC4, NFS4ERR_BADSESSION,
-    NFS4ERR_STALE, OPEN4_CREATE, OPEN4_NOCREATE, OPEN4_SHARE_ACCESS_BOTH, UNCHECKED4,
+    NFS4ERR_NOENT, NFS4ERR_STALE, OPEN4_CREATE, OPEN4_NOCREATE, OPEN4_SHARE_ACCESS_BOTH,
+    UNCHECKED4,
 };
 use mount_rs_nfs::xdr::{XdrReader, XdrWriter, encode_xdr};
 use mount_rs_nfs::{NFS_V4, NFS4_PROGRAM, NfsServer, NfsServerOptions};
@@ -43,16 +45,23 @@ const V4_TEST_NAME: &str = "nfs_v4_session_and_handles_are_process_local_after_p
 static NEXT_ROOT_ID: AtomicU64 = AtomicU64::new(0);
 
 const OP_GETFH: u32 = 10;
+const OP_LOOKUP: u32 = 15;
 const OP_OPEN: u32 = 18;
 const OP_PUTFH: u32 = 22;
 const OP_PUTROOTFH: u32 = 24;
 const OP_READ: u32 = 25;
+const OP_REMOVE: u32 = 28;
+const OP_RENAME: u32 = 29;
+const OP_SAVEFH: u32 = 32;
 const OP_WRITE: u32 = 38;
 const OP_EXCHANGE_ID: u32 = 42;
 const OP_CREATE_SESSION: u32 = 43;
 const OP_SEQUENCE: u32 = 53;
 const OP_RECLAIM_COMPLETE: u32 = 58;
 const V4_RECOVERY_FILE: &str = "v4-crash-recovered.txt";
+const V4_REMOVED_FILE: &str = "v4-crash-removed.txt";
+const V4_RENAME_FROM: &str = "v4-crash-rename-from.txt";
+const V4_RENAME_TO: &str = "v4-crash-rename-to.txt";
 
 struct TestRoot(PathBuf);
 
@@ -568,6 +577,118 @@ async fn v4_read_file(
     data
 }
 
+async fn v4_remove_file(stream: &mut TcpStream, session: &[u8; 16]) {
+    let record = exchange(
+        stream,
+        encode_call(
+            107,
+            NFS4_PROGRAM,
+            NFS_V4,
+            1,
+            None,
+            None,
+            &v4_compound(
+                "crash-remove",
+                &[
+                    v4_sequence(session, 5),
+                    v4_op(OP_PUTROOTFH, |_| {}),
+                    v4_op(OP_REMOVE, |writer| writer.string(V4_REMOVED_FILE)),
+                ],
+            ),
+        ),
+    )
+    .await;
+    let mut response = v4_reader(&record);
+    assert_eq!(v4_compound_status(&mut response, 3), 0);
+    v4_consume_sequence(&mut response);
+    assert_eq!(v4_result_status(&mut response, OP_PUTROOTFH), 0);
+    assert_eq!(v4_result_status(&mut response, OP_REMOVE), 0);
+    let _ = response.bool("NFSv4 remove cinfo atomic").unwrap();
+    let _ = response.u64("NFSv4 remove cinfo before").unwrap();
+    let _ = response.u64("NFSv4 remove cinfo after").unwrap();
+    response.end("NFSv4 remove response").unwrap();
+}
+
+async fn v4_rename_file(stream: &mut TcpStream, session: &[u8; 16]) {
+    let record = exchange(
+        stream,
+        encode_call(
+            108,
+            NFS4_PROGRAM,
+            NFS_V4,
+            1,
+            None,
+            None,
+            &v4_compound(
+                "crash-rename",
+                &[
+                    v4_sequence(session, 6),
+                    v4_op(OP_PUTROOTFH, |_| {}),
+                    v4_op(OP_SAVEFH, |_| {}),
+                    v4_op(OP_RENAME, |writer| {
+                        writer.string(V4_RENAME_FROM);
+                        writer.string(V4_RENAME_TO);
+                    }),
+                ],
+            ),
+        ),
+    )
+    .await;
+    let mut response = v4_reader(&record);
+    assert_eq!(v4_compound_status(&mut response, 4), 0);
+    v4_consume_sequence(&mut response);
+    assert_eq!(v4_result_status(&mut response, OP_PUTROOTFH), 0);
+    assert_eq!(v4_result_status(&mut response, OP_SAVEFH), 0);
+    assert_eq!(v4_result_status(&mut response, OP_RENAME), 0);
+    for directory in ["source", "target"] {
+        let _ = response
+            .bool(&format!("NFSv4 rename {directory} cinfo atomic"))
+            .unwrap();
+        let _ = response
+            .u64(&format!("NFSv4 rename {directory} cinfo before"))
+            .unwrap();
+        let _ = response
+            .u64(&format!("NFSv4 rename {directory} cinfo after"))
+            .unwrap();
+    }
+    response.end("NFSv4 rename response").unwrap();
+}
+
+async fn v4_assert_lookup(
+    stream: &mut TcpStream,
+    session: &[u8; 16],
+    sequence: u32,
+    name: &str,
+    expected_status: u32,
+) {
+    let record = exchange(
+        stream,
+        encode_call(
+            210 + sequence,
+            NFS4_PROGRAM,
+            NFS_V4,
+            1,
+            None,
+            None,
+            &v4_compound(
+                "crash-namespace-lookup",
+                &[
+                    v4_sequence(session, sequence),
+                    v4_op(OP_PUTROOTFH, |_| {}),
+                    v4_op(OP_LOOKUP, |writer| writer.string(name)),
+                ],
+            ),
+        ),
+    )
+    .await;
+    let mut response = v4_reader(&record);
+    assert_eq!(v4_compound_status(&mut response, 3), expected_status);
+    v4_consume_sequence(&mut response);
+    assert_eq!(v4_result_status(&mut response, OP_PUTROOTFH), 0);
+    assert_eq!(v4_result_status(&mut response, OP_LOOKUP), expected_status);
+    response.end("NFSv4 namespace lookup response").unwrap();
+}
+
 async fn mount_root(stream: &mut TcpStream, xid: u32) -> Vec<u8> {
     let call = encode_call(
         xid,
@@ -759,14 +880,18 @@ async fn nfs_v3_host_backend_survives_process_crash_and_restart() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn nfs_v4_session_and_handles_are_process_local_after_process_crash() {
+async fn v4_crash_recovery_body() {
     if std::env::var_os(CHILD_ENV).is_some() {
         child_server().await;
         return;
     }
 
     let root = TestRoot::new();
+    std::fs::write(root.0.join(V4_REMOVED_FILE), b"removed before crash")
+        .expect("seed NFSv4 namespace removal target");
+    let rename_payload = b"renamed before crash";
+    std::fs::write(root.0.join(V4_RENAME_FROM), rename_payload)
+        .expect("seed NFSv4 namespace rename target");
     let seed = start_child_for(&root.0, "seed", V4_TEST_NAME).await;
     let mut first = TcpStream::connect(seed.address)
         .await
@@ -777,6 +902,14 @@ async fn nfs_v4_session_and_handles_are_process_local_after_process_crash() {
     let (stateid, file_handle) = v4_open_file(&mut first, 105, clientid, &session, 3, true).await;
     let payload = b"FILE_SYNC4 survives an NFSv4 server process crash";
     v4_write_file(&mut first, &session, 4, &stateid, &file_handle, payload).await;
+    v4_remove_file(&mut first, &session).await;
+    assert!(!root.0.join(V4_REMOVED_FILE).exists());
+    v4_rename_file(&mut first, &session).await;
+    assert!(!root.0.join(V4_RENAME_FROM).exists());
+    assert_eq!(
+        std::fs::read(root.0.join(V4_RENAME_TO)).unwrap(),
+        rename_payload
+    );
     first.shutdown().await.expect("close seed NFSv4 connection");
     drop(first);
     seed.crash().await;
@@ -797,7 +930,7 @@ async fn nfs_v4_session_and_handles_are_process_local_after_process_crash() {
             1,
             None,
             None,
-            &v4_compound("stale-session", &[v4_sequence(&session, 5)]),
+            &v4_compound("stale-session", &[v4_sequence(&session, 7)]),
         ),
     )
     .await;
@@ -881,6 +1014,23 @@ async fn nfs_v4_session_and_handles_are_process_local_after_process_crash() {
         .await,
         payload
     );
+    v4_assert_lookup(
+        &mut second,
+        &replacement_session,
+        7,
+        V4_REMOVED_FILE,
+        NFS4ERR_NOENT,
+    )
+    .await;
+    v4_assert_lookup(
+        &mut second,
+        &replacement_session,
+        8,
+        V4_RENAME_FROM,
+        NFS4ERR_NOENT,
+    )
+    .await;
+    v4_assert_lookup(&mut second, &replacement_session, 9, V4_RENAME_TO, 0).await;
     second
         .shutdown()
         .await
@@ -891,4 +1041,29 @@ async fn nfs_v4_session_and_handles_are_process_local_after_process_crash() {
         std::fs::read(root.0.join(V4_RECOVERY_FILE)).expect("read NFSv4 host file after crashes"),
         payload
     );
+    assert!(!root.0.join(V4_REMOVED_FILE).exists());
+    assert!(!root.0.join(V4_RENAME_FROM).exists());
+    assert_eq!(
+        std::fs::read(root.0.join(V4_RENAME_TO)).unwrap(),
+        rename_payload
+    );
+}
+
+#[test]
+fn nfs_v4_session_and_handles_are_process_local_after_process_crash() {
+    std::thread::Builder::new()
+        .name("nfs-v4-process-restart-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build NFSv4 restart runtime")
+                .block_on(v4_crash_recovery_body());
+        })
+        .expect("spawn NFSv4 restart test thread")
+        .join()
+        .expect("NFSv4 restart test thread panicked");
 }
