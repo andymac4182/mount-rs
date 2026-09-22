@@ -1,6 +1,6 @@
 # W08 TiDB workstream progress ledger
 
-Status snapshot: **2026-09-22 14:07 AEST**
+Status snapshot: **2026-09-22 14:12 AEST**
 Repository: `andymac4182/mount-rs`  
 Publication snapshot: W08.36 implementation commit `0855e2ab` was reconciled
 with concurrent mainline work and pushed in merge tip `e0ab07d6`. The W08.36
@@ -107,14 +107,19 @@ release-policy run `35684975387`, job `106609795509`, which completed
 successfully in 2m46s with both hosted policy steps green. This remains
 implementation/static qualification only and does not close any production
 gate.
+The published source-equivalent checkpoint
+`a47c0cd91699deea9888d3d87aeb04b64fdb6576` passed hosted W08 release-policy
+run `35685756342`, job `106612127535`, which completed successfully in 2m47s
+with both hosted policy steps green. This remains implementation/static
+qualification only and does not close any production gate.
 The ledger checkpoint commit `2a99acdd` was reconciled with concurrent
 mainline work and published in public merge tip `056e7a15`. The latest FUSE
 qualification commit `052dc184` was reconciled and published in public merge
 tip `a921fe76`; the subsequent pointer synchronization was published in
 `ff29dad7`. The current source qualification is exact merged source
-`7752dd2e`; current `origin/main` `87d5eb27` contains the same incoming 9P,
-WebDAV, N-API and site source changes plus concurrent documentation, while this
-W08 checkpoint is pending publication. The next normal push will publish this
+`7752dd2e`; current public checkpoint
+`a47c0cd91699deea9888d3d87aeb04b64fdb6576` is source-equivalent after
+documentation-only reconciliation. The next normal push will publish this
 updated source/evidence pointer.
 Earlier source-health results at `4b9787f9`, `7addaf12`,
 `77114d4d`, `229a9cd5`,
@@ -537,7 +542,7 @@ the evidence counted here.
   recorded as external/provider/hosted gates rather than fabricated local
   passes.
 
-### Latest evidence refresh — 2026-09-22 14:07 AEST
+### Latest evidence refresh — 2026-09-22 14:12 AEST
 
 | Evidence item | Status | Evidence and boundary | Remaining action / blocker |
 | --- | --- | --- | --- |
@@ -546,6 +551,7 @@ the evidence counted here.
 | Hosted W08 policy run `35683936652`, source `62e86dc092dfe9816ef54ca681872ff9f51d8895`, job `106607017325` | PASS — hosted implementation/static qualification; production remains NO-GO | The pushed public source-equivalent checkpoint completed the W08 rollout-ledger and release-identity/provenance policy in terminal `success` in approximately 2m47s. No provider credentials, production deployment, candidate tag, canary, rollback or owner approval was involved. | Retain this as hosted policy evidence only. P01–P09 still require terminal production-like evidence, named ownership and explicit GO approval. |
 | Hosted W08 policy run `35684400799`, source `9563d2db8d73b8583212eed00f5b909cbcadf27e`, job `106608087688` | PASS — hosted implementation/static qualification; production remains NO-GO | The surviving current-public-source-equivalent checkpoint completed the W08 rollout-ledger and release-identity/provenance policy in terminal `success` in 2m05s. GitHub emitted only informational Node 20/Ubuntu 26 migration annotations; no provider credentials, production deployment, candidate tag, canary, rollback or owner approval was involved. | Retain this as hosted policy evidence only. P01–P09 still require terminal production-like evidence, named ownership and explicit GO approval. |
 | Hosted W08 policy run `35684975387`, source `1626d5381625d81696fa28624342f07087593760`, job `106609795509` | PASS — hosted implementation/static qualification; production remains NO-GO | The current public source-equivalent checkpoint completed the W08 rollout-ledger and release-identity/provenance policy in terminal `success` in 2m46s. No provider credentials, production deployment, candidate tag, canary, rollback or owner approval was involved. | Retain this as hosted policy evidence only. P01–P09 still require terminal production-like evidence, named ownership and explicit GO approval. |
+| Hosted W08 policy run `35685756342`, source `a47c0cd91699deea9888d3d87aeb04b64fdb6576`, job `106612127535` | PASS — hosted implementation/static qualification; production remains NO-GO | The published source-equivalent checkpoint completed the W08 rollout-ledger and release-identity/provenance policy in terminal `success` in 2m47s. No provider credentials, production deployment, candidate tag, canary, rollback or owner approval was involved. | Retain this as hosted policy evidence only. P01–P09 still require terminal production-like evidence, named ownership and explicit GO approval. |
 | Hosted W08 policy run `35684358649`, source `622dd0dc82125ba1979ea7ebf2b6a1b11145c6bb` | NOT EVIDENCE — cancelled before job creation | The run was cancelled with `jobs=[]` when concurrent public source `9563d2db` superseded it. No W08 policy step ran, so this is a scheduling boundary rather than a source or production result. | Keep the terminal-success evidence from run `35684400799`; do not count this cancellation as a failure or pass. |
 | Hosted native-9P workflow run `35682638941`, source `007e6545d1b25d708abfa10f2120f81fba59a74a`, jobs `106602683880` and `106602684115` | PASS — hosted/native functional qualification; production remains NO-GO | The `native-9p` job and `N-API native 9P lifecycle` job both completed in terminal `success`. This qualifies the hosted native functional path only; it does not establish provider, production topology, candidate release, canary, rollback or owner-approval evidence. | Retain as hosted/native qualification only; keep P01–P09 open. |
 | Current tested merged source base `874aca5750ac3c4557ed6d3903a8c1d9e02fe5a9`, reconciled docs-only `HEAD` `66442a5057085267a15a2fb688f0f44f12b490f1` | PASS — full local source-health and W08 tracking verification; production remains NO-GO | After merging the WebDAV bounded propfind/copy failure fix, `./scripts/cargo-shared test --workspace --all-targets --locked --quiet` exited 0 with all executed tests passing; the WebDAV test group reported 24 passing tests and native host rows remained explicit opt-in skips. Strict workspace Clippy with `-D warnings` exited 0. Changed N-API JavaScript paths, package JSON, all four W08 validators/tests and `git diff --check` also passed. The later 9P/W26 merge changed documentation only, so `66442a50` is source-equivalent. | Push this reconciled checkpoint normally; retain the explicit P01–P09 blockers and do not promote this source-health result to provider/native or production acceptance. |
@@ -734,6 +740,7 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-22 13:53–14:00 AEST | Fast-forwarded documentation-only public reconciliation to `1626d538`, followed hosted policy run `35684975387` / job `106609795509` to terminal success, and recorded the hosted result. | ~0.1 engineer-day | ~2m46s hosted job runtime plus public-ref/run observation | Hosted implementation/static policy passed on the current public source-equivalent tip. No provider, production candidate, protected environment, registry acceptance, canary, rollback or named approval exists; production remains NO-GO with nine open gates and zero evidence records. |
 | 2026-09-22 14:00–14:04 AEST | Merged concurrent 9P EOF/backpressure server, N-API test and site component changes, re-ran the full locked workspace test and strict Clippy on exact merged source `d7252485`, checked affected N-API/package paths, re-ran all W08 rollout/evidence suites, native-9P YAML parsing and diff checks. | ~0.2 engineer-day | ~1m source/policy/static execution plus fetch/merge reconciliation | The exact merged source is test-, lint-, static- and tracking-control clean. Provider/native services and all P01–P09 production gates remain external; production stays NO-GO with nine open gates and zero evidence records. |
 | 2026-09-22 14:04–14:07 AEST | Merged concurrent WebDAV listener/mutation/header hardening and related N-API changes, re-ran the full locked workspace test and strict Clippy on exact merged source `7752dd2e`, checked affected N-API/package paths, re-ran all W08 rollout/evidence suites, native-9P YAML parsing and diff checks. | ~0.2 engineer-day | ~1m source/policy/static execution plus fetch/merge reconciliation | The exact merged source is test-, lint-, static- and tracking-control clean, including 26 WebDAV tests. Provider/native services and all P01–P09 production gates remain external; production stays NO-GO with nine open gates and zero evidence records. |
+| 2026-09-22 14:07–14:12 AEST | Published the WebDAV-qualified source-equivalent checkpoint `a47c0cd9`, verified exact local/public equality, followed hosted W08 policy run `35685756342` / job `106612127535` to terminal success, and recorded the hosted result. | ~0.1 engineer-day | ~2m47s hosted job runtime plus push/ref verification and terminal observation | Hosted implementation/static policy passed. No provider, production candidate, protected environment, registry acceptance, canary, rollback or named approval exists; production remains NO-GO with nine open gates and zero evidence records. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol
