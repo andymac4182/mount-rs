@@ -20,6 +20,7 @@ import {
   WebdavSession,
 } from "../index.js";
 import * as nfs from "../nfs.cjs";
+import p9 from "../p9.cjs";
 
 let memoryFilesystem = () => Filesystem.memory();
 if (process.env.MOUNT_RS_STRUCTURAL_SERVERS === "1") {
@@ -706,6 +707,39 @@ function p9String(value) {
   return Buffer.concat([length, bytes]);
 }
 
+function p9LockBody({ fid, type, flags = 0, start = 0n, length = 1n, procId, clientId }) {
+  const body = Buffer.alloc(29);
+  body.writeUInt32LE(fid, 0);
+  body.writeUInt8(type, 4);
+  body.writeUInt32LE(flags, 5);
+  body.writeBigUInt64LE(start, 9);
+  body.writeBigUInt64LE(length, 17);
+  body.writeUInt32LE(procId, 25);
+  return Buffer.concat([body, p9String(clientId)]);
+}
+
+function p9GetLockBody({ fid, type, start = 0n, length = 1n, procId, clientId }) {
+  const body = Buffer.alloc(25);
+  body.writeUInt32LE(fid, 0);
+  body.writeUInt8(type, 4);
+  body.writeBigUInt64LE(start, 5);
+  body.writeBigUInt64LE(length, 13);
+  body.writeUInt32LE(procId, 21);
+  return Buffer.concat([body, p9String(clientId)]);
+}
+
+function readP9GetLock(body) {
+  const clientLength = body.readUInt16LE(21);
+  assert.equal(body.length, 23 + clientLength);
+  return {
+    type: body.readUInt8(0),
+    start: body.readBigUInt64LE(1),
+    length: body.readBigUInt64LE(9),
+    procId: body.readUInt32LE(17),
+    clientId: body.subarray(23).toString(),
+  };
+}
+
 function p9Frame(type, tag, body = Buffer.alloc(0)) {
   const frame = Buffer.alloc(7 + body.length);
   frame.writeUInt32LE(frame.length, 0);
@@ -1060,6 +1094,105 @@ async function exerciseP9TcpConcurrency() {
       if (connection?.connection) await within(connection.connection.closed, "9P TCP concurrency cleanup");
       await server.close();
     }
+  }
+}
+
+async function exerciseP9LockTableNetwork() {
+  const filesystem = memoryFilesystem();
+  await filesystem.writeFile("/db", Buffer.from("shared-lock-file"));
+  const locks = new p9.P9LockTable();
+  const server = createP9Server(filesystem, {
+    host: "127.0.0.1",
+    port: 0,
+    locks,
+  });
+  let first;
+  let second;
+  try {
+    await within(server.listen(), "9P shared lock listen");
+    first = await connectP9HeldFile(server, "db", 7);
+    second = await connectP9HeldFile(server, "db", 7);
+    assert.equal(server.connections, 2);
+    assert.equal(locks.size, 0);
+
+    const firstLock = await p9Request(
+      first.socket,
+      first.reader,
+      52,
+      10,
+      p9LockBody({
+        fid: 7,
+        type: p9.P9_LOCK_TYPE_WRLCK,
+        procId: 11,
+        clientId: "host-a",
+      }),
+      53,
+    );
+    assert.equal(firstLock.readUInt8(0), p9.P9_LOCK_SUCCESS);
+    assert.equal(locks.size, 1);
+
+    const secondLock = await p9Request(
+      second.socket,
+      second.reader,
+      52,
+      11,
+      p9LockBody({
+        fid: 7,
+        type: p9.P9_LOCK_TYPE_WRLCK,
+        procId: 22,
+        clientId: "host-b",
+      }),
+      53,
+    );
+    assert.equal(secondLock.readUInt8(0), p9.P9_LOCK_BLOCKED);
+
+    const holder = await p9Request(
+      second.socket,
+      second.reader,
+      54,
+      12,
+      p9GetLockBody({
+        fid: 7,
+        type: p9.P9_LOCK_TYPE_WRLCK,
+        procId: 22,
+        clientId: "host-b",
+      }),
+      55,
+    );
+    assert.deepEqual(readP9GetLock(holder), {
+      type: p9.P9_LOCK_TYPE_WRLCK,
+      start: 0n,
+      length: 1n,
+      procId: 11,
+      clientId: "host-a",
+    });
+
+    await closeSocket(first.socket, "9P shared lock first client close");
+    await within(first.connection.closed, "9P shared lock first connection");
+    assert.equal(server.connections, 1);
+    assert.equal(locks.size, 0);
+
+    const replacement = await p9Request(
+      second.socket,
+      second.reader,
+      52,
+      13,
+      p9LockBody({
+        fid: 7,
+        type: p9.P9_LOCK_TYPE_WRLCK,
+        procId: 22,
+        clientId: "host-b",
+      }),
+      53,
+    );
+    assert.equal(replacement.readUInt8(0), p9.P9_LOCK_SUCCESS);
+    assert.equal(locks.size, 1);
+  } finally {
+    for (const item of [first, second]) {
+      if (item?.socket) item.socket.destroy();
+      if (item?.connection) await within(item.connection.closed, "9P shared lock connection cleanup");
+    }
+    await server.close();
   }
 }
 
@@ -2263,6 +2396,7 @@ await within(
     if (requestedServerPhase === "p9") {
       await runPhase("9P exercise", exerciseP9);
       await runPhase("9P TCP concurrency", exerciseP9TcpConcurrency);
+      await runPhase("9P shared lock table", exerciseP9LockTableNetwork);
       await runPhase("9P Unix listener policy", exerciseP9Unix);
       await runPhase("9P teardown", exerciseP9Teardown);
       await runPhase("9P attached stream", exerciseP9AttachedStream);
@@ -2283,6 +2417,7 @@ await within(
     await runPhase("NFS session destroy", exerciseNfsSessionDestroy);
     await runPhase("9P exercise", exerciseP9);
     await runPhase("9P TCP concurrency", exerciseP9TcpConcurrency);
+    await runPhase("9P shared lock table", exerciseP9LockTableNetwork);
     await runPhase("9P Unix listener policy", exerciseP9Unix);
     await runPhase("9P teardown", exerciseP9Teardown);
     await runPhase("9P attached stream", exerciseP9AttachedStream);
