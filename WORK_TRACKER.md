@@ -1144,6 +1144,17 @@ NodeFs/SQLite crash plus in-flight streamed-PUT recovery all passed. This is
 local rebuilt N-API/provider evidence only and does not close hosted
 session/lifecycle/concurrency, live remote-provider, power-loss, or durable-lock
 gates.
+At exact current tip `e5ae05d07bbc73184952def0437e58be9efef790`, the locked
+Rust WebDAV target passed 20 tests with the privileged native mount probe
+explicitly ignored; warning-denied `mount-rs-napi` Clippy, the host-enabled
+release N-API build, generated typecheck, the structural durable-driver
+success/500-error/501-missing-callback regression, lifecycle, 64-pair direct-
+session concurrency, 64-pair live HTTP network/auth/streaming concurrency,
+formatting, and diff checks all passed. Manual exact-tip CI run
+`35674823787` remains queued, including its macOS and Ubuntu native-WebDAV
+jobs, so no hosted PASS is claimable from this requalification. Hosted
+session/lifecycle/concurrency, live-provider behavior, power-loss ordering,
+durable locks, and wider ordering remain open.
 At final ledger tip `3148aa5a95e5cdcf328014fac7e007db0e16adfe`, exact-SHA CI
 `35673381803` and W08 policy/targets `35673381898`/`35673381797` were pending,
 Fault injection `35673381853` and W04 policy `35673381814` were queued, and no
