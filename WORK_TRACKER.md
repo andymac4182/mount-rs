@@ -37,6 +37,12 @@ Ozone/customer-owned backup/DR evidence remain open. W26 continues to own
 compatibility and qualification only; customers deploy Ozone and releases
 remain with the separate stream.
 
+Live recheck at 21:16 AEST: the exact-head workflow remains queued; all four
+W26 provider jobs, the base Ozone job and ozone-compositions remain queued,
+while one unrelated ubuntu-24.04-arm Node job is in progress. This records
+runner allocation only; no provider, performance or aggregate result is
+promoted.
+
 Current W26 exact-head replacement qualification boundary (2026-09-22): run
 `35707725455 <https://github.com/andymac4182/mount-rs/actions/runs/35707725455>`
 targeted source/lockfile SHA `1ceaa96486a96ed4288c079dcde2b3b2d18900bb` after
