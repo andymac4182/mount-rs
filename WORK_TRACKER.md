@@ -2192,17 +2192,25 @@ Evidence landed without closing the remaining W01 acceptance gates:
   not promote W04 or production acceptance. Dispatch a fresh non-cancelling
   qualification from the exact current tip and keep production **NO-GO**.
 
-- Active exact-tip qualification: non-cancelling run `35686870515` was
-  dispatched from the exact published `origin/main` head `6db7a3ca` after the
-  terminal diagnosis above. At the 2026-09-22 14:26 AEST snapshot, Node jobs
-  macOS-15-intel `106615463347`, ARM `106615463353`, and Windows
-  `106615463597` were in progress; macOS-latest `106615463377` and Ubuntu
-  `106615463386` were queued. RustFS, FoundationDB/RustFS, Ozone/TiDB,
-  Ozone/FoundationDB, Ozone compositions, and native WebDAV Ubuntu were in
-  progress; the remaining Rust, native, observability, and provider jobs were
-  queued. No queued or in-progress job is acceptance evidence. The exact
-  PGlite/restart steps, native/package/artifact gates, provider/W26 markers,
-  and production rollout gates remain open; production remains **NO-GO**.
+- Current-tip qualification boundary: run `35686870515` was dispatched from
+  `6db7a3ca`, before the published structural-factory test correction
+  `d34ccfee`. ARM `106615463353`, Ubuntu `106615463386`, macOS-latest
+  `106615463377`, macOS-15-intel `106615463347`, and Windows `106615463597`
+  all failed before PGlite/restart at `structural-factories.mjs:108`: the
+  bounded native structural driver correctly returned `/tree/` `501 Not
+  Implemented`, while the stale test still required `/tree/blocked`. The
+  exact recovery steps were skipped. Native FUSE `106615463613` failed
+  `Exercise actual rootless kernel file operations` and left its `Complete
+  job` hook in progress; cancellation was requested after the substantive
+  failure. Ubuntu Rust `106615463402` failed the saturated-read timing
+  assertion. Ozone/TiDB `106615463375`, Ozone/FoundationDB `106615463216`,
+  and Ozone compositions `106615463430` measured `275.84`, `125.39`, and
+  `725.59/710.15` IOPS against the hard `1000` target; W26 `106617278027`
+  failed closed without `OZONE_IOPS_PASS`, and aggregate-native was skipped.
+  The local `d34ccfee` correction passed the release build, generated
+  typecheck, structural/WebDAV integration, and runnable N-API suite. Publish
+  this tracker/ledger update, then dispatch a fresh non-cancelling run from
+  the resulting `origin/main`; production remains **NO-GO**.
 
 ## W05 — Cloudflare R2
 
