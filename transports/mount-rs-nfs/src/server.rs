@@ -440,11 +440,25 @@ impl NfsServer {
             .expect("NFS connection lock")
             .drain(..)
             .collect::<Vec<_>>();
-        for task in &tasks {
-            task.abort();
-        }
-        for task in tasks {
-            let _ = task.await;
+        // Let serving tasks observe shutdown and drain their request workers
+        // before close returns. Aborting a serving task immediately drops its
+        // JoinSet without waiting for those workers to observe cancellation.
+        let mut tasks = tasks;
+        let mut drained = 0;
+        let graceful = tokio::time::timeout(std::time::Duration::from_millis(200), async {
+            for task in &mut tasks {
+                let _ = task.await;
+                drained += 1;
+            }
+        })
+        .await;
+        if graceful.is_err() {
+            for task in &tasks[drained..] {
+                task.abort();
+            }
+            for task in &mut tasks[drained..] {
+                let _ = task.await;
+            }
         }
         self.session.destroy().await;
         self.v4_session.destroy().await;
