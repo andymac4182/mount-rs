@@ -4,6 +4,18 @@ Updated: 2026-09-22. Baseline: local commit `21803fd` plus the sequentially
 published `main` updates listed below. Overall status: **in progress;
 not release-ready**.
 
+## Current W26 exact-head hosted queue recheck (2026-09-22)
+
+At 22:07 AEST, manual run
+[`35724922283`](https://github.com/andymac4182/mount-rs/actions/runs/35724922283)
+still has exact head `c1d3037a`, status `queued`, and no conclusion. A bounded
+watch plus a direct query confirmed all seven W26 provider/base/aggregate jobs
+remain queued. Only the local watcher was stopped; the hosted run remains
+active. This is external runner capacity, not a provider result. W26
+completion percentages and production **NO-GO** are unchanged pending the
+hard 1,000 IOPS/drive rows, complete aggregate/end-to-end packet, customer
+security/SLO/RPO/RTO evidence, and customer/Ozone-owned backup/DR.
+
 ## Current W26 optimistic preparation snapshot boundary (2026-09-22)
 
 Runtime commit

@@ -5,6 +5,33 @@ workstream. It distinguishes repository implementation, local evidence, and
 hosted/native/provider acceptance. Estimates are provisional and are intended
 for engineering planning, not a commitment.
 
+## Current authority override — 2026-09-22, exact-head hosted queue recheck
+
+At 22:07 AEST, manual run
+[`35724922283`](https://github.com/andymac4182/mount-rs/actions/runs/35724922283)
+still reports exact head `c1d3037ad3e179a2df01005f1b72295f08f0887b`, overall
+status `queued`, and no conclusion. A bounded two-interval live watch followed
+by a direct status query confirmed all seven W26 jobs remain queued:
+`ozone-foundationdb` `106736188870`, `ozone-tidb` `106736188994`,
+`tidb-rustfs` `106736189003`, `ozone` `106736189040`,
+`ozone-compositions` `106736189052`, `foundationdb-rustfs` `106736189166`
+and `tidb` `106736189217`. Only the local watcher was stopped; the hosted run
+was not canceled. This remains an external runner-capacity wait, not a
+provider failure, performance result or acceptance outcome.
+
+| Gate / item | Current result | Evidence | Remaining action / ownership |
+| --- | --- | --- | --- |
+| Exact-head hosted qualification | **PENDING / unchanged** | Run `35724922283` remains queued after the bounded watch and exact direct query. | Leave the manual run active; retrieve provider/base/aggregate artifacts only after terminal completion. |
+| W26 completion percentages | **UNCHANGED** | No new provider metric, functional marker or aggregate packet exists. | Do not promote queued state or change W26.15/W26.14/P14 percentages. |
+| Production readiness | **NO-GO / unchanged** | 1,000 IOPS/drive, complete end-to-end packet, Tier-1 99.99%, five-minute RPO/RTO and customer/Ozone security evidence remain unclosed; backup/DR and releases remain external. | Keep the goal active and continue bounded polling or implementation when evidence changes. |
+
+### Session time log — exact-head hosted queue recheck
+
+| Date / phase | Activity | Engineering time | External wait / gate time | Result |
+| --- | --- | ---: | ---: | --- |
+| 2026-09-22 — bounded watch (22:04–22:07 AEST) | Watched manual run `35724922283` at 30-second intervals for two intervals, stopped only the local watcher, and directly confirmed all seven W26 jobs remain queued. | ~0.1 h | ~0.1 h hosted capacity wait | No hosted state change; exact `c1d3037a` evidence remains pending. |
+| 2026-09-22 — next gate | Re-poll the same run with bounded waits; do not dispatch a replacement unless the exact run becomes terminal or W26 source changes again. | ~0.1–0.25 h per recheck | External runner/provider capacity | Keep production **NO-GO** until terminal evidence closes the packet. |
+
 ## Current authority override — 2026-09-22, optimistic preparation snapshot chunk
 
 This is the newest W26 implementation boundary. Source commit
