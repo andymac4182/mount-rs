@@ -59,7 +59,16 @@ ledger in the same commit as an implementation/evidence chunk.
 | W01-Auto/CLI | Auto selection, mount facade and SDK-backed consumers | Focused option/consumer paths exist; cross-transport native lifecycle remains | Per-transport options/callback ownership and signal/async-dispose evidence |
 | W01-Provider/Native | Providers, hosted CI, FSKit, Windows, crash and concurrency | Local capability-limited packets exist; external lanes remain | Fresh live-provider and hosted/native results with no prerequisite-gated acceptance rows |
 
-The latest W01-9P typed-reader packet at exact SHA
+The latest W01-9P direct-facade packet at exact SHA
+`56291e3f9b4274fec2111e4e2f88696e98f3a548` passed [Native 9P run
+`35679754417`](https://github.com/andymac4182/mount-rs/actions/runs/35679754417):
+N-API job `106593941892` and Rust job `106593942012` both passed their Linux
+probes and supported lifecycle gates. The packet restores the synchronous
+direct `live9pMounts()` contract with inactive/closed pruning while leaving
+the root all-transport `liveMounts()` registry asynchronous; broader W01
+acceptance remains NO-GO.
+
+The preceding W01-9P typed-reader packet at exact SHA
 `4ecdb63db64711e0fadf77d4612b6394f57f3f4d` passed [Native 9P run
 `35678757675`](https://github.com/andymac4182/mount-rs/actions/runs/35678757675):
 N-API job `106590841909` and Rust job `106590841982` both passed their Linux

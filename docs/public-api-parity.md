@@ -219,6 +219,19 @@ The hosted N-API native-mount run now qualifies the supported lifecycle. The Rus
 selection and timeout handling, but this does not close the upstream option or
 lifecycle surface.
 
+The direct `./9p` `live9pMounts()` function now matches the pinned oracle's
+synchronous `Array<P9Mount>` return shape. It uses a process-local registry of
+direct `mount9p()` results, prunes mounts observed as inactive, and removes
+them when their `closed` promise settles; the root all-transport `liveMounts()`
+function remains asynchronous by design. Local helper/typecheck/syntax,
+codec, fid/session/observability, formatting, strict Clippy, and focused Rust
+checks passed, and exact SHA `56291e3f9b4274fec2111e4e2f88696e98f3a548`
+passed [Native 9P run `35679754417`](https://github.com/andymac4182/mount-rs/actions/runs/35679754417),
+N-API job `106593941892`, and Rust job `106593942012`. This qualifies the
+direct synchronous registry only; it does not promote the root asynchronous
+registry or automatic cross-transport signal ownership into the direct 9P
+contract.
+
 No native mount, unmount, signal, or live-filesystem result should be inferred
 from component tests. The CLI and integration test prerequisites remain an
 explicit evidence boundary.
