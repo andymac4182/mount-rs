@@ -4291,6 +4291,15 @@ reproducible in a production-like environment.
   admission. No service PASS is claimable; protected AWS configuration, the
   R2 budget reset, physical power-loss durability, broader workload bounds,
   and native/hosted acceptance remain open, so W01-S3 stays **NO-GO**.
+- [x] The next W01-S3 lifecycle packet makes `S3Session.close()` mirror the
+  oracle's non-rejecting cleanup contract: per-driver sweep failures reach
+  `onError(error, undefined)` and later cleanup remains eligible. The focused
+  regression and full Rust 5/6/31/5 packet, warning-denied Clippy, release
+  N-API build, callback observability, session differential, 64-way/CAS
+  concurrency, process restart, typecheck, and distribution checks passed.
+  AWS `35684677320` remains blocked by `missing_bucket` and R2 `35684677273`
+  by `count=295 limit=20`; physical power-loss durability, broader workload
+  bounds, and native/hosted acceptance remain open, so W01-S3 stays **NO-GO**.
 - [ ] W10.1 Finish per-transport backend/platform acceptance matrix, including
   native lifecycle, disconnect/error behavior and streaming/backpressure.
 - [ ] W10.2 Verify transport auto-selection and explicit unsupported behavior.

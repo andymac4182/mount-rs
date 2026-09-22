@@ -609,7 +609,7 @@ impl S3Session {
                 (response, None)
             }
             Err(error) => {
-                self.report_error(&error, &head);
+                self.report_error(&error, Some(&head));
                 let s3_error = error.error();
                 let error_class = classify_error(&s3_error);
                 (
@@ -666,7 +666,7 @@ impl S3Session {
                 (response, None)
             }
             Err(error) => {
-                self.report_error(&error, &head);
+                self.report_error(&error, Some(&head));
                 let s3_error = error.error();
                 let error_class = classify_error(&s3_error);
                 (
@@ -760,9 +760,9 @@ impl S3Session {
             })
     }
 
-    fn report_error(&self, error: &S3Failure, head: &S3RequestHead) {
+    fn report_error(&self, error: &S3Failure, head: Option<&S3RequestHead>) {
         if let Some(hook) = &self.options.hooks.on_error {
-            hook(error.to_string(), Some(head.clone()));
+            hook(error.to_string(), head.cloned());
         }
     }
 
@@ -1457,7 +1457,7 @@ impl S3Session {
                 match delete_staging_key(&driver, &key).await {
                     Ok(()) => deleted.push(key),
                     Err(error) => {
-                        self.report_error(&error, head);
+                        self.report_error(&error, Some(head));
                         errors.push((key, error.error()));
                     }
                 }
@@ -1473,7 +1473,7 @@ impl S3Session {
             match self.delete_object(driver.clone(), &target).await {
                 Ok(_) => deleted.push(key),
                 Err(error) => {
-                    self.report_error(&error, head);
+                    self.report_error(&error, Some(head));
                     errors.push((key, error.error()));
                 }
             }
@@ -2106,18 +2106,25 @@ impl S3Session {
                 {
                     continue;
                 }
-                Err(error) => return Err(S3Failure::Fs(error)),
+                Err(error) => {
+                    let failure = S3Failure::Fs(error);
+                    self.report_error(&failure, None);
+                    continue;
+                }
             };
             for entry in entries {
                 let path = format!("{root}/{}", entry.name);
-                if entry.is_directory() {
-                    remove_tree(driver, &path).await?;
+                let result = if entry.is_directory() {
+                    remove_tree(driver, &path).await
                 } else {
-                    let _ = driver.unlink(&path).await;
+                    driver.unlink(&path).await.map_err(S3Failure::Fs)
+                };
+                if let Err(error) = result {
+                    self.report_error(&error, None);
+                    break;
                 }
             }
             let _ = driver.rmdir(&root).await;
-            durability_barrier(driver).await?;
         }
         Ok(())
     }
