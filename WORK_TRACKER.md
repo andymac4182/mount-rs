@@ -7218,6 +7218,15 @@ W26 estimate.
 
 ## W30 — OpenTelemetry observability (later)
 
+### W30 qualification infrastructure chunk (2026-09-22)
+
+- [x] Added the `observability-qualification` CI matrix for Ubuntu, macOS, and
+  Windows. It runs the locked cross-platform command set through
+  `scripts/cargo-shared`, including the observability crate lint gate.
+- [ ] W30.1–W30.5 acceptance remains open until completed matrix runs retain
+  exact revision, host identity, command output, and collector-boundary
+  evidence; workflow configuration alone is not a platform PASS.
+
 - [ ] W30.1 Define trace spans, metric instruments and structured log events
   across filesystem operations, metadata/block providers, chunking/compression,
   SQLite VFS, mounts, Node, CLI and HTTP services. Include lifecycle, latency,
