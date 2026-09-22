@@ -40,12 +40,49 @@ const validLog = [
   "FOUNDATIONDB_LATENCY_PASS workload=composition operations=15 p50_us=1500 p95_us=2500 p99_us=3500 total_ms=45 throughput_ops_per_sec=325",
 ].join("\n");
 
+const validProvenance =
+  "W07_QUALIFICATION_PROVENANCE repository=andymac4182/mount-rs workflow=W07 FoundationDB production qualification ref=refs/heads/main source_revision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa run_id=35688516329 run_attempt=1 runner=GitHub Actions 1000026164";
+const provenanceEnvironment = {
+  W07_REQUIRE_PROVENANCE: "1",
+  W07_QUALIFICATION_REPOSITORY: "andymac4182/mount-rs",
+  W07_QUALIFICATION_WORKFLOW: "W07 FoundationDB production qualification",
+  W07_QUALIFICATION_REF: "refs/heads/main",
+  W07_QUALIFICATION_SOURCE_REVISION: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  W07_QUALIFICATION_RUN_ID: "35688516329",
+  W07_QUALIFICATION_RUN_ATTEMPT: "1",
+  W07_QUALIFICATION_RUNNER: "GitHub Actions 1000026164",
+};
+
 const cases = [
   {
     name: "valid-evidence",
     expectedStatus: 0,
     expectedOutput: "W07_PRODUCTION_QUALIFICATION_EVIDENCE_PASS",
     log: validLog,
+  },
+  {
+    name: "valid-run-bound-provenance",
+    expectedStatus: 0,
+    expectedOutput: "W07_PRODUCTION_QUALIFICATION_PROVENANCE_PASS",
+    log: `${validLog}\n${validProvenance}`,
+    env: provenanceEnvironment,
+  },
+  {
+    name: "missing-run-bound-provenance-marker",
+    expectedStatus: 1,
+    expectedOutput: "provenance-marker-missing",
+    log: validLog,
+    env: provenanceEnvironment,
+  },
+  {
+    name: "mismatched-run-bound-provenance",
+    expectedStatus: 1,
+    expectedOutput: "provenance-mismatch-sourceRevision",
+    log: `${validLog}\n${validProvenance.replace(
+      "source_revision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "source_revision=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    )}`,
+    env: provenanceEnvironment,
   },
   {
     name: "missing-unsafe-ttl-negative",
@@ -117,6 +154,7 @@ try {
     const result = spawnSync(process.execPath, [verifierPath, logPath, "5"], {
       cwd: repoRoot,
       encoding: "utf8",
+      env: { ...process.env, ...(testCase.env ?? {}) },
     });
     const output = `${result.stdout}${result.stderr}`;
     if (

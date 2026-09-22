@@ -275,6 +275,22 @@ if (latencySamples.length < expectedRounds + 1) {
 
 const latency = latencySamples[0] ?? null;
 
+const provenancePattern =
+  /^W07_QUALIFICATION_PROVENANCE repository=(\S+) workflow=(.*?) ref=(\S+) source_revision=(\S+) run_id=([1-9]\d*) run_attempt=([1-9]\d*) runner=(\S.*)$/u;
+const provenanceLine = findLine(provenancePattern);
+const provenanceMatch = provenanceLine?.match(provenancePattern);
+const loggedProvenance = provenanceMatch
+  ? {
+      repository: provenanceMatch[1],
+      workflow: provenanceMatch[2],
+      ref: provenanceMatch[3],
+      sourceRevision: provenanceMatch[4],
+      runId: provenanceMatch[5],
+      runAttempt: provenanceMatch[6],
+      runner: provenanceMatch[7].trim(),
+    }
+  : null;
+
 const provenanceFields = [
   [
     "repository",
@@ -312,10 +328,28 @@ if (provenanceRequested) {
   if (invalidProvenance.length > 0) {
     missing.push(`provenance-invalid-${invalidProvenance.join("+")}`);
   }
-  if (missingProvenance.length === 0 && invalidProvenance.length === 0) {
-    provenance = Object.fromEntries(
-      provenanceFields.map(([name, value]) => [name, value]),
+  if (!provenanceMatch) {
+    missing.push(
+      provenanceLine
+        ? "provenance-marker-invalid"
+        : "provenance-marker-missing",
     );
+  }
+  if (
+    missingProvenance.length === 0 &&
+    invalidProvenance.length === 0 &&
+    loggedProvenance
+  ) {
+    for (const [name, value] of provenanceFields) {
+      if (loggedProvenance[name] !== value) {
+        missing.push(`provenance-mismatch-${name}`);
+      }
+    }
+    if (
+      !missing.some((reason) => reason.startsWith("provenance-mismatch-"))
+    ) {
+      provenance = loggedProvenance;
+    }
   }
 }
 
