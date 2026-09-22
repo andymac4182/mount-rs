@@ -4,6 +4,19 @@ Updated: 2026-09-22. Baseline: local commit `21803fd` plus the sequentially
 published `main` updates listed below. Overall status: **in progress;
 not release-ready**.
 
+## Current W26 hosted queue recheck (2026-09-22)
+
+At 21:52 AEST, manual run
+[`35723306179`](https://github.com/andymac4182/mount-rs/actions/runs/35723306179)
+still has exact head `73534bce`, status `queued`, and no conclusion. A
+bounded five-minute watch observed no job start; a direct query confirmed all
+seven W26 jobs remain queued (`foundationdb-rustfs`, `ozone-tidb`,
+`ozone-foundationdb`, `ozone-compositions`, `ozone`, `tidb`, and
+`tidb-rustfs`). Only the local watch was stopped; the GitHub run remains
+active. This is hosted runner/provider capacity, not a provider failure or
+acceptance result. W26 status, completion percentages and production **NO-GO**
+are unchanged.
+
 ## Current W26 stable hosted qualification dispatch (2026-09-22)
 
 The current shared tip is
