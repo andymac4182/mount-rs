@@ -1398,6 +1398,8 @@ W01 can move to complete only when each of these is true:
 Until then, the percentage is a progress aid only and the W01 status remains
 **Open**.
 
+| 2026-09-22 | W01-FUSE | Lima Ubuntu 26.04 arm64 VM at published `467da6a7` passed native Rust FUSE `3/3`, automatic facade `2/2`, CLI lifecycle `3/3`, Node N-API/structural/SDK native FUSE, SQLite restart `2/2`, and Python fault injection; backend persistence/reopen passed `3/4`, with PGlite skipped because `PGLITE_DATABASE_URL` was unset | Local Linux `/dev/fuse` qualification is green, but hosted exact-tip acceptance, PGlite environment qualification, and the wider W01 release/provider gates remain open; W01 stays NO-GO |
+
 ## Production-readiness decision
 
 Current decision: **NO-GO**. W01 is being tracked toward production release,
