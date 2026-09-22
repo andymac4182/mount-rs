@@ -1196,6 +1196,77 @@ async function exerciseP9LockTableNetwork() {
   }
 }
 
+async function exerciseP9ServerBoundary() {
+  {
+    const taken = createP9Server(memoryFilesystem(), { host: "127.0.0.1", port: 0 });
+    let listening;
+    let clash;
+    try {
+      ({ listening } = await listenLifecycle(taken, "9P port conflict owner"));
+      clash = createP9Server(memoryFilesystem(), {
+        host: "127.0.0.1",
+        port: taken.port,
+      });
+      await assert.rejects(clash.listen(), (error) => error?.code === "EADDRINUSE");
+    } finally {
+      if (clash) await clash.close();
+      await closeLifecycle(taken, "9P port conflict owner", listening);
+    }
+  }
+
+  {
+    const reports = [];
+    const filesystem = memoryFilesystem();
+    await filesystem.writeFile("/before.txt", Buffer.from("survivor remains serving"));
+    const server = createP9Server(filesystem, {
+      host: "127.0.0.1",
+      port: 0,
+      onTransportError(error, peer) {
+        reports.push({ error, peer });
+      },
+    });
+    let broken;
+    let healthy;
+    try {
+      await within(server.listen(), "9P framing isolation listen");
+      broken = await connectP9Session(server);
+      healthy = await connectP9HeldFile(server, "before.txt", 41);
+      assert.equal(server.connections, 2);
+
+      const malformedFrame = Buffer.alloc(7);
+      malformedFrame.writeUInt32LE(1, 0);
+      await writeSocket(broken.socket, malformedFrame, "9P framing isolation malformed frame");
+      await within(broken.connection.closed, "9P framing isolation broken connection");
+      const report = await waitForTransportError(reports, "9P framing isolation transport error");
+      assert.match(report.error.message, /below the 7-byte header|header|frame|size/i);
+      assert.match(report.peer, /^127\.0\.0\.1:\d+$/);
+      assert.equal(reports.length, 1);
+      assert.equal(server.connections, 1);
+
+      const readBody = Buffer.alloc(16);
+      readBody.writeUInt32LE(41, 0);
+      readBody.writeBigUInt64LE(0n, 4);
+      readBody.writeUInt32LE(64, 12);
+      const survivor = await p9Request(
+        healthy.socket,
+        healthy.reader,
+        116,
+        20,
+        readBody,
+        117,
+      );
+      assert.equal(survivor.readUInt32LE(0), Buffer.byteLength("survivor remains serving"));
+      assert.deepEqual(survivor.subarray(4), Buffer.from("survivor remains serving"));
+    } finally {
+      for (const item of [broken, healthy]) {
+        if (item?.socket) item.socket.destroy();
+        if (item?.connection) await within(item.connection.closed, "9P framing isolation cleanup");
+      }
+      await server.close();
+    }
+  }
+}
+
 async function exerciseP9Unix() {
   if (process.platform === "win32") return;
 
@@ -2397,6 +2468,7 @@ await within(
       await runPhase("9P exercise", exerciseP9);
       await runPhase("9P TCP concurrency", exerciseP9TcpConcurrency);
       await runPhase("9P shared lock table", exerciseP9LockTableNetwork);
+      await runPhase("9P server boundary", exerciseP9ServerBoundary);
       await runPhase("9P Unix listener policy", exerciseP9Unix);
       await runPhase("9P teardown", exerciseP9Teardown);
       await runPhase("9P attached stream", exerciseP9AttachedStream);
@@ -2418,6 +2490,7 @@ await within(
     await runPhase("9P exercise", exerciseP9);
     await runPhase("9P TCP concurrency", exerciseP9TcpConcurrency);
     await runPhase("9P shared lock table", exerciseP9LockTableNetwork);
+    await runPhase("9P server boundary", exerciseP9ServerBoundary);
     await runPhase("9P Unix listener policy", exerciseP9Unix);
     await runPhase("9P teardown", exerciseP9Teardown);
     await runPhase("9P attached stream", exerciseP9AttachedStream);

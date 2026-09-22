@@ -563,6 +563,20 @@ function cachedPromise(invoke, transform) {
   }
 }
 
+function normalizeServerListenError(error) {
+  if (
+    error &&
+    error.code === "GenericFailure" &&
+    typeof error.message === "string" &&
+    /address already in use/i.test(error.message)
+  ) {
+    error.code = "EADDRINUSE"
+    if (error.errno === undefined) error.errno = process.platform === "darwin" ? -48 : -98
+    if (error.syscall === undefined) error.syscall = "listen"
+  }
+  return error
+}
+
 function wrapServer(Server) {
   if (!Server || !Server.prototype || Server.prototype[SERVER_WRAPPED]) return
 
@@ -574,10 +588,9 @@ function wrapServer(Server) {
   function listen() {
     const state = serverState(this)
     if (state.listen !== undefined) return state.listen
-    state.listen = cachedPromise(
-      () => nativeListen.call(this),
-      () => this,
-    )
+    state.listen = cachedPromise(() => nativeListen.call(this), () => this).catch((error) => {
+      throw normalizeServerListenError(error)
+    })
     return state.listen
   }
 
