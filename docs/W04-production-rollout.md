@@ -130,6 +130,13 @@ ledger as qualification provenance only; they are not a signed production
 release identity and do not close deployment, provider, operations, ownership,
 or release-approval gates.
 
+Fresh manual exact-tip qualification run
+[35700938192](https://github.com/andymac4182/mount-rs/actions/runs/35700938192)
+was dispatched from published SHA `33f52cda`. Its four Unix Node jobs,
+Windows Node, native FUSE, and provider/package support jobs were all queued at
+the first snapshot; no current-tip result is acceptance evidence until the
+exact recovery, package, native, provider, and W26 steps are terminal.
+
 The retained native package artifacts provide current candidate provenance for
 the support matrix:
 
