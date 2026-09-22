@@ -2410,7 +2410,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
   package/provenance, scope, and final-audit gates remain explicit blockers;
   no credential value was read or stored and no Keychain access was attempted.
 - [ ] W05.10 Close the production release path on one settled revision.
-  The current pushed tip `2278f32b` is documentation-only over the
+  The current pushed tip `13f17162` is the W05 documentation successor rebased
+  over concurrent W01/W07/W26 documentation and CI changes, and remains
+  documentation-only over the
   rejected-request-body drain fix `d870f900` and the direct-9P, PGlite
   autocommit, S3 pipelining, structural-driver, and HTTP framing-boundary
   changes:
@@ -2421,9 +2423,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
   sessions pass, the rebuilt Node artifact passes its complete integration
   suite, and the S3 gateway has `37/37` passing tests, including
   Expect/Continue, transfer-encoding refusal, HEAD framing, and pipelined
-  response ordering. No terminal
-  hosted release acceptance is claimed for this moving tip; R2 remains
-  fail-closed at the monthly cap. Remaining production actions are to select
+  response ordering. The exact W05 hosted-status candidate is `b72d02f4`;
+  for that candidate, W04 policy run `35692639780`
+  succeeded, while fault `35692639786`, W08 policy `35692639797`, CI
+  `35692639806`, and W08 targets `35692639831` completed cancelled; no
+  terminal hosted release acceptance is claimed for this moving tip. R2
+  remains fail-closed at the monthly cap. Remaining production actions are to select
   a settled final SHA, obtain terminal same-SHA hosted CI/fault/W04/W07/W08
   and package/provenance evidence, request security to provision AWS protected
   inputs and immutable OIDC trust through the approved path, rotate R2
@@ -4708,6 +4713,21 @@ reproducible in a production-like environment.
   is bounded local keep-alive recovery only, so live providers, power-loss
   durability, broader workload bounds, and native/hosted acceptance remain
   open and W01-S3 stays **NO-GO**.
+- [x] The next W01-S3 streaming packet adds the oracle-derived abandoned-
+  download regression `http_server_closes_abandoned_download_handle`: after
+  the first response bytes, the client disconnects while the driver read is
+  parked, the opened handle closes exactly once, and a fresh ranged GET returns
+  `206`. The complete current Rust 5/6/39/5 packet, strict Clippy, formatting,
+  and diff checks passed; this is bounded local cancellation cleanup only, so
+  live providers, power-loss durability, broader workload bounds, and
+  native/hosted acceptance remain open and W01-S3 stays **NO-GO**.
+- [x] The automatic provider runs for published packet `d4f43b28` were
+  refreshed: AWS run `35692509801` stopped at
+  `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while R2 run `35692509869`
+  stopped at `R2 CI monthly run cap already exceeded: count=325` before live
+  admission. No service PASS is claimable; protected AWS configuration, the R2
+  budget reset, physical power-loss durability, broader workload bounds, and
+  native/hosted acceptance remain open, so W01-S3 stays **NO-GO**.
 - [x] The automatic provider runs for published packet `4f9120a2` were
   refreshed: AWS run `35690334807` stopped at
   `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while R2 run `35690334795`
@@ -5595,7 +5615,30 @@ listing a source does not mean it has been reviewed or its code can be reused.
 
 ### W26 current authoritative status — 2026-09-22
 
-#### Latest W26 authority override — exact-SHA qualification dispatch
+#### Latest W26 authority override — terminal exact-SHA packet
+
+Run `35691451007` is terminal for every W26 producer and the aggregate. It
+selected exact code revision
+`dccd8351690ba21b4ea01ab8680369c76c442041`, the parent of the documentation
+only push that followed. Base Ozone `106629129201` passed; compositions
+`106629129102` failed, TiDB `106629129183` failed, FoundationDB
+`106629129105` failed and aggregate `106631474430` failed closed. The retained
+artifact IDs/digests are recorded in `docs/w26-progress-ledger.md`.
+
+The provider rows completed their full 1,200/1,200 lifecycle with zero
+timeouts and cleanup failures: SQLite/R2 `213.947686` IOPS (write/read/delete
+p95 `1751.446370/105.174762/202.276166` ms), PGlite/R2 `2065.669446`
+(`106.518128/7.567658/2.705368` ms), TiDB/R2 `333.356025`
+(`629.659611/36.006496/29.342427` ms) and FoundationDB/R2 `363.254472`
+(`528.842275/97.605869/85.797321` ms). PGlite clears the hard target on this
+packet; SQLite, TiDB and FoundationDB do not. The aggregate emitted
+`W26_OZONE_EVIDENCE_PACKET_FAIL reason=ozone-compositions-log-missing-marker=OZONE_IOPS_PASS providers=mount-rs-split-sqlite-r2,mount-rs-split-pglite-r2 target=1000`.
+Production remains **NO-GO**. The next bounded implementation candidate is
+TiDB's successful metadata CAS autocommit path, while SQLite hosted variance
+and FoundationDB/provider latency remain explicit qualification work; no
+threshold reduction, provider skip or averaging is allowed.
+
+#### Historical W26 authority override — exact-SHA qualification dispatch
 
 The PGlite implementation and progress ledger are published. Manual CI run
 `35691451007` selected exact shared SHA

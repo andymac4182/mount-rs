@@ -2270,9 +2270,12 @@ async fn credentialed_server_refuses_non_loopback_without_tls() {
 struct ProbeSignals {
     first_write: Arc<Notify>,
     first_read: Arc<Notify>,
+    second_read: Arc<Notify>,
     release_read: Arc<Notify>,
     writes: Arc<AtomicUsize>,
     reads: Arc<AtomicUsize>,
+    opens: Arc<AtomicUsize>,
+    closes: Arc<AtomicUsize>,
 }
 
 impl ProbeSignals {
@@ -2280,9 +2283,12 @@ impl ProbeSignals {
         Self {
             first_write: Arc::new(Notify::new()),
             first_read: Arc::new(Notify::new()),
+            second_read: Arc::new(Notify::new()),
             release_read: Arc::new(Notify::new()),
             writes: Arc::new(AtomicUsize::new(0)),
             reads: Arc::new(AtomicUsize::new(0)),
+            opens: Arc::new(AtomicUsize::new(0)),
+            closes: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -2307,6 +2313,7 @@ impl FileHandle for ProbeHandle {
             if previous == 0 {
                 self.signals.first_read.notify_one();
             } else if previous == 1 {
+                self.signals.second_read.notify_one();
                 self.signals.release_read.notified().await;
             }
         }
@@ -2331,6 +2338,7 @@ impl FileHandle for ProbeHandle {
     }
 
     async fn close(&self) -> FsResult<()> {
+        self.signals.closes.fetch_add(1, Ordering::Relaxed);
         self.inner.close().await
     }
 }
@@ -2351,6 +2359,7 @@ impl FsDriver for ProbeFs {
 
     async fn open(&self, path: &str, flags: &str, mode: u32) -> FsResult<Arc<dyn FileHandle>> {
         let inner = self.inner.open(path, flags, mode).await?;
+        self.signals.opens.fetch_add(1, Ordering::Relaxed);
         Ok(Arc::new(ProbeHandle {
             inner,
             signals: self.signals.clone(),
@@ -2755,6 +2764,84 @@ async fn real_http_download_sends_first_chunk_before_next_driver_read() {
     assert_eq!(response.body, payload);
     let stats = session.stats().await;
     assert_eq!(stats.response_bytes, payload.len() as u64);
+    server.close().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn http_server_closes_abandoned_download_handle() {
+    let memory = MemoryFs::empty();
+    let payload = vec![0x27; 2 * 1024 * 1024];
+    let handle = memory
+        .open("/abandoned.bin", "w", 0o666)
+        .await
+        .expect("open object");
+    handle.write(&payload, Some(0)).await.expect("write object");
+    handle.close().await.expect("close object");
+    let signals = ProbeSignals::new();
+    let session = Arc::new(S3Session::new(ProbeFs {
+        inner: memory,
+        signals: signals.clone(),
+    }));
+    let server = S3Server::start(Arc::clone(&session), S3ServerOptions::default())
+        .await
+        .expect("loopback listener");
+
+    let mut stream = TcpStream::connect(server.address())
+        .await
+        .expect("connect gateway");
+    let request = format!(
+        "GET /mountx/abandoned.bin HTTP/1.1\r\nHost: {}\r\nConnection: keep-alive\r\n\r\n",
+        server.address()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write abandoned download request");
+    let mut raw = Vec::new();
+    loop {
+        let mut buffer = [0_u8; 8192];
+        let count = timeout(Duration::from_secs(2), stream.read(&mut buffer))
+            .await
+            .expect("response bytes before abandonment")
+            .expect("read response");
+        assert!(count > 0, "response ended before the first body chunk");
+        raw.extend_from_slice(&buffer[..count]);
+        if let Some(offset) = raw.windows(4).position(|window| window == b"\r\n\r\n")
+            && raw.len() > offset + 4
+        {
+            break;
+        }
+    }
+    timeout(Duration::from_secs(2), signals.second_read.notified())
+        .await
+        .expect("download entered the parked second read");
+    drop(stream);
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if signals.opens.load(Ordering::Relaxed) > 0
+                && signals.closes.load(Ordering::Relaxed) >= signals.opens.load(Ordering::Relaxed)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("abandoned download handle closed");
+    assert_eq!(signals.opens.load(Ordering::Relaxed), 1);
+    assert_eq!(signals.closes.load(Ordering::Relaxed), 1);
+
+    let next = wire_request(
+        &server,
+        "GET",
+        "/mountx/abandoned.bin",
+        &[("range".to_owned(), "bytes=0-3".to_owned())],
+        &[],
+    )
+    .await;
+    assert_eq!(next.status, 206);
+    assert_eq!(next.body, payload[..4]);
     server.close().await.expect("clean shutdown");
 }
 

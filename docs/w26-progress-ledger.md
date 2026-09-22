@@ -5,6 +5,39 @@ workstream. It distinguishes repository implementation, local evidence, and
 hosted/native/provider acceptance. Estimates are provisional and are intended
 for engineering planning, not a commitment.
 
+## Current authority override — 2026-09-22, terminal run `35691451007`
+
+This is the newest hosted evidence boundary. The run exercised the published
+PGlite implementation on one exact revision, but it is diagnostic rather than
+acceptance evidence because three provider rows missed the hard threshold and
+the aggregate correctly failed closed. Earlier pending-dispatch text remains
+below for auditability.
+
+| Field | Current value |
+| --- | --- |
+| Shared build-on tip | `origin/main` = `8ab5fc20c95d503cde895a430bc9ac2e2fa5cc04`; the hosted run selected its code-equivalent parent `dccd8351690ba21b4ea01ab8680369c76c442041` before the documentation-only dispatch record. |
+| Terminal W26 jobs | Base Ozone `106629129201` **passed**; compositions `106629129102`, TiDB `106629129183`, FoundationDB `106629129105` and aggregate `106631474430` **failed**. All W26 jobs are terminal; unrelated workflow jobs may still be running. |
+| Provider outcome | SQLite/R2 `213.947686` IOPS **FAIL**; PGlite/R2 `2,065.669446` **PASS**; TiDB/R2 `333.356025` **FAIL**; FoundationDB/R2 `363.254472` **FAIL**. Each row completed 1,200/1,200 lifecycle operations with zero timeouts and zero cleanup failures. |
+| Retained artifacts | Base `10679061163`, digest `sha256:8a2633ea51b3a0d64bb73e57bdbe02ec1849ddfa0bdc1901336ac8567f1d9f53`; compositions `10679446128`, digest `sha256:eaa7a727830512afccdc3fc2733444c330ac60b4db11093e98105705eaba447f`; TiDB `10679510692`, digest `sha256:d00f662fd252651d96dbca472809b4fc525ac3e8af13b04df6958df702db0e2c`; FoundationDB `10679336769`, digest `sha256:c176c7ff5859363c0ce85e8d1937e040d7fade7e207bac4d137de1accb77c33d`. All were retained and non-expired. |
+| Aggregate evidence | `W26_OZONE_EVIDENCE_PACKET_FAIL reason=ozone-compositions-log-missing-marker=OZONE_IOPS_PASS providers=mount-rs-split-sqlite-r2,mount-rs-split-pglite-r2 target=1000`. The fail-closed verifier rejected the packet because SQLite missed the threshold; this is the correct result. |
+| Current production decision | **NO-GO**. PGlite now clears the hard target on this exact hosted packet, but SQLite is highly variable (`1,325.636778` on the prior diagnostic packet versus `213.947686` here), and TiDB/FoundationDB remain below target. Next work is correctness-preserving SQLite variance diagnosis plus a narrow TiDB publication-path optimization; no threshold reduction or provider skip is permitted. |
+
+### Terminal provider metrics — run `35691451007`
+
+| Provider | IOPS / elapsed | p95 write / read / delete | Lifecycle and markers | Status / next action |
+| --- | ---: | ---: | --- | --- |
+| SQLite/R2 | `213.947686` / `5,608.847758 ms` | `1,751.446370 / 105.174762 / 202.276166 ms` | 1,200/1,200; timeout `0`; cleanup `0`; Ozone gateway, restart/reopen, Node/Rust/CLI/HTTP and cleanup markers passed | **FAIL**; diagnose hosted write variance and requalify exact current SHA |
+| PGlite/R2 | `2,065.669446` / `580.925473 ms` | `106.518128 / 7.567658 / 2.705368 ms` | 1,200/1,200; timeout `0`; cleanup `0`; composition functional/bounded/reopen markers passed | **PASS for this provider row**; retain as evidence but W26.15 remains open |
+| TiDB/R2 | `333.356025` / `3,599.754942 ms` | `629.659611 / 36.006496 / 29.342427 ms` | 1,200/1,200; timeout `0`; cleanup `0`; TiDB identity, bounded listing, N-API seed/reopen, Ozone restart and cleanup markers passed | **FAIL**; evaluate autocommit CAS success path while preserving fail-closed ambiguity handling |
+| FoundationDB/R2 | `363.254472` / `3,303.469310 ms` | `528.842275 / 97.605869 / 85.797321 ms` | 1,200/1,200; timeout `0`; cleanup `0`; durable readiness/image match, authority heartbeat, bounded listing, restart/reopen, N-API and cleanup markers passed | **FAIL**; retain durable markers and investigate transaction/runner/provider latency after TiDB chunk |
+
+All provider-specific failures are performance-only in this packet: no
+timeout, cleanup, lifecycle, marker, revision, restart or security-verifier
+failure was promoted. The hosted JSON reported the source revision as verified
+`dccd8351` and a generated native artifact made the checkout dirty; the
+aggregate still bound all artifacts to the exact Git revision and rejected the
+packet on the required hard marker, not on source mismatch.
+
 ## Current authority override — 2026-09-22, exact-SHA qualification dispatch
 
 The PGlite implementation and its ledger are published, and the next hosted
@@ -1019,6 +1052,8 @@ separately because they are elapsed wall-clock, not implementation effort.
 | 2026-09-22 — Terminal review of pre-PGlite hosted packet | Rechecked run `35689474986`, its exact tested SHA, terminal W26 producer jobs, retained artifact IDs/digests and the fail-closed aggregate log. | ~0.75–1.25 h hosted evidence review; estimate remains provisional | W26 jobs `106623193674` (base), `106623193668` (compositions), `106623193474` (TiDB), `106623193564` (FoundationDB) and aggregate `106625464560` are terminal; the parent workflow remains in progress only for unrelated jobs. | The packet selected `1891c363` before `e0180c75`: SQLite/R2 `1,325.636778` IOPS passed, PGlite/R2 `766.631418`, TiDB/R2 `292.606794` and FoundationDB/R2 `410.703639` failed; all four rows completed 1,200/1,200 operations with zero timeout/cleanup failures. Aggregate failed closed on missing `OZONE_IOPS_PASS`; no acceptance is promoted. | Fresh exact-SHA dispatch, hosted runner/provider startup and Ozone/customer capacity are external gates. |
 | 2026-09-22 — W26 current ledger/tracker refresh after PGlite publication | Added the current authority override, every W26 work-item row, exact hosted metrics, artifact identities, production envelope, external ownership boundaries and this session log entry to `docs/w26-progress-ledger.md` and `WORK_TRACKER.md`. | ~0.75–1.25 h documentation; estimate remains provisional | `git diff --check` and the documentation review remain required before the separate tracker/ledger commit and push; the next work chunk is a fresh exact-SHA hosted qualification. | Documentation will be committed and pushed separately at the current clean implementation tip so other threads can build on the complete ledger. | No staging environment exists; customer deployment, secure Ozone runtime, 99.99%/RPO/RTO, backup/DR and release execution remain external/non-W26 gates. |
 | 2026-09-22 — Fresh exact-SHA W26 qualification dispatch | Dispatched the non-canceling CI workflow after publishing the PGlite implementation and ledger; captured the selected SHA and initial producer state. | ~0.1–0.25 h dispatch/status capture; estimate remains provisional | Run `35691451007` targets `dccd8351690ba21b4ea01ab8680369c76c442041`; compositions `106629129102` was queued, FoundationDB `106629129105`, TiDB `106629129183` and base Ozone `106629129201` were in progress, and the aggregate was not yet created. | No hosted result is promoted while jobs are queued/in progress. Poll to terminal, retrieve artifacts/logs and update the ledger before the next implementation decision. | GitHub-hosted runner queue, Ozone/provider startup, artifact retention and customer-like capacity are external elapsed gates. |
+| 2026-09-22 — Terminal exact-SHA W26 packet review | Retrieved the terminal composition, TiDB and FoundationDB artifacts, verified all four JSON digests, inspected provider logs/markers and retrieved the aggregate fail-closed log for run `35691451007`. | ~1–1.5 h hosted evidence review; estimate remains provisional | Base passed; SQLite/R2 `213.947686`, PGlite/R2 `2,065.669446`, TiDB/R2 `333.356025`, FoundationDB/R2 `363.254472` IOPS; every row completed 1,200/1,200 with zero timeout/cleanup failures. Aggregate `106631474430` failed closed on missing `OZONE_IOPS_PASS`; no acceptance is promoted. | The terminal packet is fully recorded; next code decision is a narrow TiDB autocommit CAS chunk plus hosted SQLite variance diagnosis, followed by a fresh exact-SHA packet. | Hosted runner/Ozone variability, TiDB/PD/TiKV and FoundationDB runtime latency, customer-like capacity and artifact service remain external gates. |
+| 2026-09-22 — Terminal packet ledger/tracker refresh | Added the terminal run metrics, p95s, exact job/artifact identities and digests, marker boundary, production NO-GO decision and next-action split to `docs/w26-progress-ledger.md` and `WORK_TRACKER.md`. | ~0.75–1.25 h documentation; estimate remains provisional | Run `35691451007` remains diagnostic; W26.15 is open despite the PGlite pass. `git diff --check` and the separate docs commit/push remain required. | Push this documentation chunk before starting the TiDB implementation chunk so downstream threads have the correct build-on and evidence boundary. | CI-only qualification; customer Ozone secure topology, 99.99% SLO, five-minute RPO/RTO, backup/DR and release execution remain outside W26. |
 
 ## Current status addendum — hosted runs `35677828440` / `35678993571` and lockfile-gate correction
 
