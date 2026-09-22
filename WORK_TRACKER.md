@@ -1125,9 +1125,10 @@ power-loss ordering, live remote-provider behavior, hosted lifecycle, and
 durable-lock acceptance remain open.
 The narrow structural N-API `FsDriver` seam now forwards an optional
 `syncfs()` callback as well; the WebDAV regression reaches it through
-`createWebdavServer` and confirms both acknowledgement after success and a
-500 response after callback failure. Durable structural drivers without the
-callback continue to fail closed with `ENOSYS`.
+`createWebdavServer` and confirms acknowledgement after success, a 500
+response after callback failure, and a 501 Not Implemented response when the
+callback is absent. Durable structural drivers without the callback continue
+to fail closed with `ENOSYS`.
 At exact published packet `4e19f22648dc8f6fa622b70e76f70ca4540a3483`, the
 read-only hosted snapshot found CI `35672738319` and W08 release targets/policy
 `35672738309`/`35672738333` pending, Fault injection `35672738370` and Live AWS
