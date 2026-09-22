@@ -549,13 +549,42 @@ module.exports.V9FS_MAGIC = 0x01021997
 // non-Linux hosts without attempting a mount.
 const nativeP9ClientProbe = binding.p9ClientProbe
 const nativeP9Platform = binding.p9Platform
-module.exports.p9ClientProbe = () => {
-  const probe = nativeP9ClientProbe()
+function p9ProbeForPlatform(platform) {
+  const root = (process.getuid?.() ?? -1) === 0
+  const host = platform === "linux" ? "linux" : undefined
+  const missing = []
+  if (host === undefined) {
+    missing.push(`this is ${String(platform)}; 9P mounts on Linux only — no other kernel has a v9fs client`)
+  }
+  if (host !== undefined && !root) {
+    missing.push("mounting 9P needs root: mount(2) needs CAP_SYS_ADMIN and v9fs has no setuid helper the way FUSE has fusermount3")
+  }
+  if (host !== undefined) {
+    missing.push("the kernel has no 9p filesystem and no module tree at /lib/modules/<unknown release> to load one from")
+  }
+  return {
+    usable: false,
+    platform: host,
+    kernel: false,
+    transport: false,
+    modules: false,
+    root,
+    reason: missing.join("; "),
+  }
+}
+
+module.exports.p9ClientProbe = (platform) => {
+  const probe = platform === undefined || (platform === "linux" && process.platform === "linux")
+    ? nativeP9ClientProbe()
+    : p9ProbeForPlatform(platform)
   if (probe.platform === null) probe.platform = undefined
   if (probe.reason === null) probe.reason = undefined
   return probe
 }
-module.exports.p9Platform = () => nativeP9Platform() ?? undefined
+module.exports.p9Platform = (platform) => {
+  if (platform !== undefined) return platform === "linux" ? "linux" : undefined
+  return nativeP9Platform() ?? undefined
+}
 module.exports.P9_DEFAULT_MOUNT_MSIZE = 128 * 1024 + module.exports.P9_IOHDRSZ
 module.exports.P9_MAX_MOUNT_MSIZE = 1024 * 1024
 module.exports.P9_UNIX_PATH_MAX = 108

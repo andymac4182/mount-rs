@@ -173,16 +173,16 @@ is source-health and tracking-control evidence only and does not close any
 production gate. Provider/native rows requiring TiDB, RustFS, PGlite, R2, FUSE
 or NFS remained explicit opt-in skips.
 
-The latest read-only production-boundary audit at **2026-09-22 09:25 AEST**
+The latest read-only production-boundary audit at **2026-09-22 10:24 AEST**
 again returned HTTP 404 from the GitHub repository, `w08-production` environment
-and environment-secret API surfaces. Release and workflow API queries likewise
-could not resolve the repository/current workflow, so the last successful
-release observation (08:38 AEST: only `v0.1.0-cli-preview`) is retained as the
-latest known release state rather than replaced with an unsupported claim.
-`git ls-remote` found no `v*-cli-production-candidate*` tag, and public
-`origin/main` still contains `.github/workflows/w08-production-release.yml`.
-This remains an external GitHub/API and release-configuration blocker; no
-production gate is closed.
+and environment-secret API surfaces. `gh release list` could not resolve the
+repository and `gh run list --workflow w08-production-release.yml` returned
+HTTP 404, so the last successful release observation (08:38 AEST: only
+`v0.1.0-cli-preview`) is retained as the latest known release state rather than
+replaced with an unsupported claim. `git ls-remote` found no
+`v*-cli-production-candidate*` tag, while the fetched public mainline contains
+`.github/workflows/w08-production-release.yml`. This remains an external
+GitHub/API and release-configuration blocker; no production gate is closed.
 
 The W08.11 release-policy job is a separate credential-free implementation
 gate. It validates a manifest shape and, when supplied, an artifact checksum;
