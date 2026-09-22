@@ -79,6 +79,8 @@ jobs:
         run: MOUNT_RS_SERVER_PHASE=p9 node integrations/mount-rs-napi/test/servers.mjs
       - name: Verify direct N-API 9P session lifecycle
         run: node integrations/mount-rs-napi/test/p9-session.mjs
+      - name: Verify N-API 9P server and connection member surface
+        run: node integrations/mount-rs-napi/test/p9-server-members.mjs
       - name: Verify automatic N-API 9P mounted I/O and cleanup
         run: |
           node_path=$(command -v node)
