@@ -906,6 +906,18 @@ is implementation evidence only until the chunk is pushed and the hosted W26
 matrix is rerun on its exact published revision; the 1,000-IOPS production
 gate remains **NO-GO**.
 
+Current W26 SQLite follow-up (2026-09-22): the SQLite metadata publisher now
+uses a parameterized fenced conditional CAS update on the successful path and
+performs the lease/revision read only when the update affects zero rows. It
+retains missing-row errors, stale-lease classification, revision conflicts,
+unexplained-zero-row fail-closed behavior and the existing transaction commit
+boundary. SQLite provider tests, strict provider/workspace Clippy, full locked
+workspace tests, formatting and diff checks pass locally. Security diff scan
+`ea882470-0ef4-4f7a-8d91-03c8d85d7fb7` completed with full changed-file
+coverage and zero reportable findings. This remains unpublished
+implementation evidence until pushed and requalified on an exact hosted
+revision; production remains **NO-GO**.
+
 ## Decisions and external prerequisites
 
 - After the app restart, the nine prior worker handles were missing. Their
