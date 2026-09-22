@@ -2914,6 +2914,46 @@ async fn http_server_aborts_short_streamed_response_without_reusing_connection()
     server.close().await.expect("clean shutdown");
 }
 
+#[tokio::test]
+async fn http_server_answers_pipelined_requests_in_order() {
+    let memory = MemoryFs::empty();
+    for (path, payload) in [
+        ("/pipe-one.txt", b"the first reply".as_slice()),
+        ("/pipe-two.txt", b"the second reply".as_slice()),
+    ] {
+        let handle = memory.open(path, "w", 0o666).await.expect("open object");
+        handle.write(payload, Some(0)).await.expect("write object");
+        handle.close().await.expect("close object");
+    }
+    let server = S3Server::start(Arc::new(S3Session::new(memory)), S3ServerOptions::default())
+        .await
+        .expect("loopback listener");
+
+    let mut stream = TcpStream::connect(server.address())
+        .await
+        .expect("connect gateway");
+    let request = format!(
+        "GET /mountx/pipe-one.txt HTTP/1.1\r\nHost: {}\r\n\r\nGET /mountx/pipe-two.txt HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        server.address(),
+        server.address()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write pipelined requests");
+    let mut raw = Vec::new();
+    stream
+        .read_to_end(&mut raw)
+        .await
+        .expect("read pipelined responses");
+    let raw = String::from_utf8_lossy(&raw);
+    assert_eq!(raw.matches("HTTP/1.1 200").count(), 2);
+    let first = raw.find("the first reply").expect("first response body");
+    let second = raw.find("the second reply").expect("second response body");
+    assert!(first < second, "pipelined replies were reordered");
+    server.close().await.expect("clean shutdown");
+}
+
 #[derive(Debug)]
 struct WireResponse {
     status: u16,
