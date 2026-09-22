@@ -1,6 +1,6 @@
 # W05 Cloudflare R2 progress ledger
 
-Last updated: 2026-09-22 16:53 AEST (2026-09-22 06:53 UTC)
+Last updated: 2026-09-22 17:09 AEST (2026-09-22 07:09 UTC)
 
 This is the working ledger for the W05 Cloudflare R2 workstream. Percentages
 and time estimates are provisional. They separate implementation work from
@@ -9,27 +9,30 @@ hosted or native gate.
 
 ## Overall position
 
-Current moving boundary: fetched `origin/main` is now
-`13f17162438e8be24608660e2fafe085ecd6128d` (`13f17162`), the W05 ledger
-successor rebased over concurrent W01/W07/W26 documentation and CI changes.
-The exact W05 hosted-status candidate recorded below is `b72d02f4`; the
-underlying W05 runtime surface is the
-rejected-request-body drain fix `d870f900` plus the structural-driver N-API,
-PGlite autocommit, S3 pipelining, and HTTP framing-boundary changes. Its
-changed-surface qualification passed the direct-9P structural-driver and
-pipelined-response regressions, 37/37 S3 gateway tests, the optimized N-API
-build, and the complete rebuilt Node SDK/CLI suite. The immediately preceding
-full local packet reports a passing locked Rust workspace, strict workspace
-Clippy, formatting and `git diff --check`, the real PGlite/provider/CLI/oracle
-matrix, Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`,
-and all 40 five-seed/eight-backend traces at 621 operations. R2/TiDB/RustFS
-credentials or services and privileged native mounts remain explicit skips.
-For exact `b72d02f4`, hosted W04 policy `35692639780` succeeded, while Fault
-injection `35692639786`, W08 release policy `35692639797`, CI `35692639806`,
-and W08 release targets `35692639831` were cancelled; this is not terminal
-release acceptance. No current R2 run was admitted because the monthly cap
-remains closed. Native mounts, live external providers, package/provenance,
-scope, and the final audit remain open. Production remains **NO-GO**.
+Current shared-main observation: remote `origin/main` is
+`a73197b6819714791aa45065ec026fd09025c823` (`a73197b6`) at this capture;
+the local ledger tip is `c34d2d66` and must be safely rebased over any
+intervening mainline changes before publication. The deliberately stable W05
+hosted-status candidate is `25e275ab6d4f918be72dcd8f62a5baca6bbcd251` and its
+underlying W05 runtime surface is the rejected-request-body drain fix
+`d870f900` plus the structural-driver N-API, PGlite autocommit, S3 pipelining,
+and HTTP framing-boundary changes. Its changed-surface qualification passed
+the direct-9P structural-driver and pipelined-response regressions, 37/37 S3
+gateway tests, the optimized N-API build, and the complete rebuilt Node
+SDK/CLI suite. The immediately preceding full local packet reports a passing
+locked Rust workspace, strict workspace Clippy, formatting and `git
+diff --check`, the real PGlite/provider/CLI/oracle matrix, Rust SDK `6/3/0`,
+Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and all 40
+five-seed/eight-backend traces at 621 operations. R2/TiDB/RustFS credentials
+or services and privileged native mounts remain explicit skips. The candidate
+W08 attestation run `35697156046` is terminal-successful for both
+`x86_64-unknown-linux-gnu` and `aarch64-apple-darwin`, including SBOM
+attestation publication and verification. Candidate CI `35694325175` is still
+in progress with four provider jobs and the W26 Ozone evidence job failed;
+the job logs will be classified after workflow termination. No current R2 run
+was admitted because the monthly cap remains closed. Native mounts, live
+external providers, package/provenance, scope, and the final audit remain
+open. Production remains **NO-GO**.
 
 Latest immutable release-candidate boundary (2026-09-22 16:39 AEST): the
 candidate branch
@@ -319,9 +322,11 @@ gates therefore remain actionable work in this session.
 
 | W05.38 Requalify the S3 rejected-request-body drain runtime fix | S3 transport implementation + current-tip integration qualification | Complete on changed surface; hosted/provider/native/package closure open | 100% changed-surface local / 0% current-tip hosted closure | Runtime fix `d870f900` drains a rejected HTTP request body after the S3 session refuses it, preventing unread-body connection contamination. Exact pushed `2278f32b57809d8a224023636ba045683955898e` is documentation-only over that runtime; the full S3 gateway suite passed `37/37` after the fix, the optimized N-API artifact was rebuilt, and the complete Node/N-API SDK/CLI suite passed with only documented provider/native opt-in skips. The immediately preceding exact packet remains green for Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and 40×621 traces. | Select one final settled SHA; retain terminal same-SHA hosted CI, fault, W04/W07/W08, AWS, provider, Native 9P/FUSE/Windows/FSKit, package/provenance, scope, and final-audit evidence. Keep live R2 blocked until the UTC-month reset and security-approved token rotation. | 0 h additional implementation; 1–3 h changed-surface reconciliation plus hosted/provider/platform wait | This runtime delta is locally green but hosted concurrency/cancellation, R2 cap/reset, AWS security/OIDC, native platforms, signing, registries, providers, scope, and final audit remain external gates. |
 | W05.39 Record terminal hosted status for the published W05 release candidate | Hosted evidence / release control | Open; external gate | 0% terminal hosted closure | Exact published `b72d02f4` has W04 policy run `35692639780` successful. Fault injection `35692639786`, W08 release policy `35692639797`, CI `35692639806`, and W08 release targets `35692639831` all completed `cancelled`; no same-SHA terminal full release packet is therefore promoted. | Select a settled release SHA and obtain non-cancelled same-SHA CI, fault, W04/W07/W08, AWS/OIDC, provider, Native 9P/FUSE/Windows/FSKit, package/provenance, scope, and final-audit evidence; preserve the R2 cap and wait for security-approved credential rotation before any live R2 retry. | 0.25–1 h evidence reconciliation; hosted/provider/platform wait separate | Mainline supersession/cancellation is an external hosted gate. R2 monthly admission is closed; security provisioning, provider services, native runners/signing, registries, scope ownership, and W20.6 remain external. |
-| W05.40 Stabilize and qualify an immutable production candidate | Release engineering + hosted CI/native/provider evidence | Local exact-candidate packet green; hosted packet partial | 78% local / 62% overall closure | Candidate branch `andymac4182/c/w05-production-candidate-20260922` is pinned to `25e275ab6d4f918be72dcd8f62a5baca6bbcd251`. Exact-candidate format/diff checks, full locked Rust workspace, strict Clippy, 40/40 S3 gateway tests, optimized N-API build, full Node/N-API suite, real PGlite/Rust/Node/CLI/oracle packet, credential-free W07/W08/AWS-control fixtures, both npm pack dry-runs, and the locked Cargo license inventory passed. Same-SHA hosted W04 `35694326676`, W08 policy `35694327019`, Native 9P `35694328753`, Fault `35694329117`, and W07 `35694328112` succeeded; W07 had both the macOS FoundationDB compile and durable FoundationDB/RustFS/Node/CLI/restart jobs green. W08 targets `35694328409` and CI `35694325175` remain queued. Security request [#3](https://github.com/andymac4182/mount-rs/issues/3) is open for the protected AWS/OIDC inputs and <=$100 monthly test budget. The candidate branch is stable against unrelated mainline pushes. | Wait for candidate CI and W08 targets to become terminal; inspect job-level failures/artifacts; retain same-SHA package/provenance, AWS/provider, scope, and W20.6 evidence. Do not admit R2 before the UTC-month reset and security-approved short-lived-token rotation. | 1–2 h active evidence reconciliation; 2–8 h hosted/provider/platform wait | Hosted runner capacity and workflow scheduling are external. AWS protected inputs/OIDC, R2 cap/reset, live provider services, Linux/macOS/Windows native privileges/signing, registries, product scope, and final-audit ownership remain external. |
+| W05.40 Stabilize and qualify an immutable production candidate | Release engineering + hosted CI/native/provider evidence | Exact-candidate local packet green; W04/W07/W08/Fault/Native 9P hosted gates green; CI terminal closure pending | 100% local / 68% overall closure | Candidate branch `andymac4182/c/w05-production-candidate-20260922` is pinned to `25e275ab6d4f918be72dcd8f62a5baca6bbcd251`. Exact-candidate format/diff checks, full locked Rust workspace, strict Clippy, 40/40 S3 gateway tests, optimized N-API build, full Node/N-API suite, real PGlite/Rust/Node/CLI/oracle packet, credential-free W07/W08/AWS-control fixtures, both npm pack dry-runs, and the locked Cargo license inventory passed. Same-SHA hosted W04 `35694326676`, W08 policy `35694327019`, Native 9P `35694328753`, Fault `35694329117`, and W07 `35694328112` succeeded; W07 had both the macOS FoundationDB compile and durable FoundationDB/RustFS/Node/CLI/restart jobs green. Attestation-enabled W08 `35697156046` also succeeded for Linux and macOS, including CycloneDX SBOM attestation publication and verification. Candidate CI `35694325175` remains in progress with four provider jobs and W26 Ozone evidence failed; job-level classification is deliberately pending workflow termination. Security request [#3](https://github.com/andymac4182/mount-rs/issues/3) is open for the protected AWS/OIDC inputs and <=$100 monthly test budget. The candidate branch is stable against unrelated mainline pushes. | Let candidate CI become terminal, retrieve and classify every failed job, and retain same-SHA package/provenance, AWS/provider, scope, and W20.6 evidence. Do not admit R2 before the UTC-month reset and security-approved short-lived-token rotation. | 1–2 h active evidence reconciliation; 2–8 h hosted/provider/platform wait | Hosted runner capacity and workflow scheduling are external. AWS protected inputs/OIDC, R2 cap/reset, live provider services, Linux/macOS/Windows native privileges/signing, registries, product scope, and final-audit ownership remain external. |
 
-### W05.40 exact candidate evidence (2026-09-22 16:39 AEST)
+| W05.41 Reconcile terminal candidate CI and release-artifact evidence | Hosted CI failure classification + release control | In progress; W08 release artifact/provenance gate green, CI matrix non-terminal | 50% of this evidence item / included in 68% overall closure | Same-SHA candidate CI `35694325175` has green Rust, Node, NFS, WebDAV, 9P, HTTP-observability, RustFS, FoundationDB/RustFS, Ozone, and platform jobs. Four provider jobs (`tidb`, `ozone-tidb`, `tidb-rustfs`, `ozone-foundationdb`) and W26 Ozone evidence are failed, while native FUSE and the remaining Node jobs are still running. GitHub withholds failed-job logs until the workflow is terminal, so no provider or implementation conclusion is inferred yet. | After terminal completion, capture redacted logs for every failed job, classify each as implementation regression or hosted/provider gate, rerun only justified failures on the same immutable SHA or record them as explicit external blockers, and update the production exit checklist. CI is not acceptance while any job is failed, cancelled, skipped, or non-terminal. | 0.5–2 h active log reconciliation; hosted wait separate | GitHub Actions workflow completion/log retention, provider service startup, native runner capacity, W26 evidence dependencies, AWS security/OIDC, R2 cap/reset, package/signing, support scope, and W20.6 approval remain external boundaries. |
+
+### W05.40 exact candidate evidence (2026-09-22 17:09 AEST)
 
 The immutable candidate `25e275ab` is the current release-control anchor. Exact
 local checks passed: formatting, `git diff --check`, the full locked Rust
@@ -333,16 +338,20 @@ lifecycle/split-store/FUSE coverage, Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI
 621 operations each. The oracle was verified at
 `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`.
 
-The candidate hosted packet is deliberately being waited to terminal state:
-W04 policy, W08 policy, Native 9P, Fault injection, and W07 are green; W08
-targets and CI remain queued. W07 completed both the macOS FoundationDB compile
-job and the durable FoundationDB/RustFS/Node/CLI/restart job. Candidate push
-Fault injection `35694307087` is a secondary same-SHA result and also passed
-all three operating systems. No hosted result is promoted to production
-acceptance until the remaining candidate runs are terminal and their artifacts
-are reviewed. The R2 admission remains fail-closed, and the AWS audit remains
-blocked on security-provisioned protected inputs; neither provider boundary is
-inferred from local or RustFS evidence.
+The candidate hosted packet now has W04 policy `35694326676`, W08 policy
+`35694327019`, Native 9P `35694328753`, Fault injection `35694329117`, W07
+`35694328112`, and attestation-enabled W08 release targets `35697156046`
+terminal-successful. W08 attestation verification emitted
+`W08_RELEASE_TARGET_ATTESTATION_PASS` for both `x86_64-unknown-linux-gnu` and
+`aarch64-apple-darwin`; the corresponding repository attestation records are
+`49141286` and `49141266`. Candidate push Fault injection `35694307087` is a
+secondary same-SHA result and also passed all three operating systems. CI
+`35694325175` remains non-terminal; its four provider failures and W26 Ozone
+evidence failure are not promoted or classified until the workflow completes.
+No hosted result is promoted to production acceptance until CI is terminal and
+its artifacts are reviewed. The R2 admission remains fail-closed, and the AWS
+audit remains blocked on security-provisioned protected inputs; neither
+provider boundary is inferred from local or RustFS evidence.
 
 The focused security diff scan
 `7b383f24-5724-43a6-bbf6-8bbf22c1947c` completed with zero reportable findings
@@ -728,6 +737,22 @@ in Keychain; no security request was fabricated.
 | PR-10 / W20.6 | Final audit and release decision | Not started | 0% | The tracker currently reports overall status `in progress; not release-ready`; the previous W05 close explicitly did not claim whole-product production readiness. | Audit `REQUIREMENTS.md`, `PORTING_STATUS.md`, API parity, tracker, CI artifacts, support matrix, security/license/dependency records, rollback plan, and every required test result. Issue GO only when all required rows are green on one revision; otherwise record NO-GO and exact blockers. | 2–4 h after dependencies close | Requires all required implementation, hosted, native, provider, packaging, and scope decisions to be complete. |
 | PR-11 / W05.9 current exact-SHA packet | Release-candidate requalification and moving-main reconciliation | Local implementation packet complete; release gate open | 100% local / 0% hosted closure | Exact pushed `01f844c` passed format/diff, full locked Rust workspace including the HTTP/Windows parity successor, strict Clippy, optimized N-API build/postbuild, elevated Node SDK/CLI suite, and real PGlite/provider/CLI/oracle matrix. Counts: Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, `40 × 621` traces. `7cc9c8c5` is a docs-only successor, so the local implementation packet is reusable as ancestry evidence but not terminal current-tip release evidence. | Select one final SHA after the moving mainline settles; rerun or attach exact-SHA local packet, let CI/W04/W08/fault/native/package jobs finish without cancellation, run one admitted R2 packet after the UTC reset and credential rotation, close AWS/security/OIDC and advertised-provider gates, then issue W20.6 GO/NO-GO. | 1–3 h for each successor requalification, plus 8–24 h hosted/provider/platform wait | R2 monthly cap and token expiry/rotation, no approved security destination for AWS credentials, privileged Linux/macOS/Windows/native hosts, provider services, package registries/signing, and concurrent origin/main movement. |
 
+### Current immutable-candidate addendum (2026-09-22 17:09 AEST)
+
+The selected candidate remains `25e275ab6d4f918be72dcd8f62a5baca6bbcd251`.
+Hosted W04 policy, W07 FoundationDB/provider qualification, W08 policy,
+Native 9P, fault injection, and the attestation-enabled W08 release-target
+packet are terminal-successful on that SHA. W08 produced and verified both
+the Linux `x86_64-unknown-linux-gnu` and macOS `aarch64-apple-darwin`
+artifacts, with CycloneDX SBOM attestations uploaded to the repository and
+the Rekor transparency log. Candidate CI `35694325175` is still running;
+green jobs are recorded, but `tidb`, `ozone-tidb`, `tidb-rustfs`,
+`ozone-foundationdb`, and W26 Ozone evidence are failed at the job level and
+cannot be classified until GitHub exposes terminal logs. This is a hosted
+evidence checkpoint, not release acceptance. AWS/OIDC security provisioning,
+live R2 post-reset requalification, remaining provider/native/package/scope
+decisions, and W20.6 remain open.
+
 ### Production exit criteria
 
 The goal is complete only when all of the following are true on one release
@@ -984,6 +1009,7 @@ shown separately from active engineering time.
 | 2026-09-22 16:24–16:39 | Ran exact-candidate PGlite end-to-end harness, rebuilt optimized N-API artifact, reran complete pinned-oracle Node SDK/CLI/N-API suite, and updated this ledger/tracker | Local SDK/CLI/provider gate / documentation | PGlite packet passed Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and all 40×621 traces; exact N-API build and full Node suite passed; W05.40 records the remaining hosted/provider/native/package/scope gates. |
 | 2026-09-22 16:39–16:47 | Ran credential-free W07/W08/AWS control fixtures, recovered exact npm package dry-runs with a task-scoped cache, verified 25/25 workspace licenses, and opened security request [#3](https://github.com/andymac4182/mount-rs/issues/3) | Local packaging / security coordination | W07 ledger `6/6`, W08 ledger `7/7`, AWS config `7/7`, AWS environment `3/3`, W08 evidence `11/11`, `@mount-rs/core` and `@mount-rs/virtual-fs` pack dry-runs, and Apache-2.0 inventory `25/25` passed. AWS credentials remain external and no secret value was read or stored. |
 | 2026-09-22 16:47–16:53 | Completed focused security diff scan `7b383f24-5724-43a6-bbf6-8bbf22c1947c` over the W05 candidate range; refreshed exact-SHA hosted statuses | Security review / hosted evidence | Security scan completed with zero reportable findings and complete focused coverage; W07 and Fault are terminal-successful, W08 targets and CI remain queued, and production remains NO-GO pending those hosted gates plus AWS/provider/native/package/scope/W20.6 closure. |
+| 2026-09-22 16:53–17:09 | Waited for and verified the attestation-enabled W08 release-target run; refreshed the candidate CI matrix and added the terminal provenance evidence to the W05 ledger | Hosted package/provenance / release control | W08 `35697156046` succeeded for Linux and macOS builds, downloaded assets, CycloneDX SBOM attestations, Rekor publication, repository attestation upload, and `gh attestation verify`. Candidate CI `35694325175` remains in progress with four provider jobs and W26 Ozone evidence failed; GitHub has not released its failed-job logs yet. Production remains NO-GO. |
 
 Estimated active engineering time for the completed W05 continuation before
 this production program plus the current qualification checkpoints: **about
