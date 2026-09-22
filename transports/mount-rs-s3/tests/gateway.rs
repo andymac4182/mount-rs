@@ -2379,6 +2379,10 @@ impl FsDriver for ProbeFs {
     async fn rename(&self, old_path: &str, new_path: &str) -> FsResult<()> {
         self.inner.rename(old_path, new_path).await
     }
+
+    async fn unlink(&self, path: &str) -> FsResult<()> {
+        self.inner.unlink(path).await
+    }
 }
 
 #[derive(Clone)]
@@ -2652,6 +2656,50 @@ async fn real_http_fragmented_upload_reaches_driver_before_body_end() {
     assert!(signals.writes.load(Ordering::Relaxed) > 0);
     let stats = session.stats().await;
     assert_eq!(stats.request_bytes, payload.len() as u64);
+    server.close().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn real_http_aborted_upload_removes_staging_and_object() {
+    let memory = MemoryFs::empty();
+    let signals = ProbeSignals::new();
+    let session = Arc::new(S3Session::new(ProbeFs {
+        inner: memory.clone(),
+        signals: signals.clone(),
+    }));
+    let server = S3Server::start(Arc::clone(&session), S3ServerOptions::default())
+        .await
+        .expect("loopback listener");
+    let payload = vec![0x6b; 512 * 1024];
+    let first_fragment = 64 * 1024;
+    let mut stream = TcpStream::connect(server.address())
+        .await
+        .expect("connect gateway");
+    let request_head = format!(
+        "PUT /mountx/aborted-http.bin HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+        server.address(),
+        payload.len()
+    );
+    stream
+        .write_all(request_head.as_bytes())
+        .await
+        .expect("write request head");
+    stream
+        .write_all(&payload[..first_fragment])
+        .await
+        .expect("write partial request body");
+    timeout(Duration::from_secs(2), signals.first_write.notified())
+        .await
+        .expect("staging write before client disconnect");
+    let stream = stream.into_std().expect("convert client stream");
+    SockRef::from(&stream)
+        .set_linger(Some(Duration::ZERO))
+        .expect("set reset-on-close");
+    drop(stream);
+
+    wait_for_no_root_staging(&memory).await;
+    assert!(memory.stat("/aborted-http.bin").await.is_err());
+    assert!(session.assertions().is_empty());
     server.close().await.expect("clean shutdown");
 }
 

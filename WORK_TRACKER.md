@@ -5137,6 +5137,15 @@ reproducible in a production-like environment.
   integration passed. This is bounded local streamed fault evidence only; live
   providers, power-loss durability, broader workload bounds, and native/hosted
   acceptance remain open and W01-S3 stays **NO-GO**.
+- [x] Qualified real HTTP aborted-upload cleanup with
+  `real_http_aborted_upload_removes_staging_and_object`: after a partial staged
+  PUT is visible, the client sends a TCP reset; the private `.mountx-put-*`
+  entry is reaped within the bounded wait and the destination is not published.
+  The complete current Rust 5/6/43/5 packet, strict Clippy, formatting/diff
+  checks, and isolated S3 N-API server integration passed. This is bounded
+  local request-cancellation staging evidence only; live providers, power-loss
+  durability, broader workload bounds, and native/hosted acceptance remain open
+  and W01-S3 stays **NO-GO**.
 - [x] The automatic provider runs for published packet `fcf1d547` were
   refreshed: AWS run `35693941024` stopped at
   `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while R2 run `35693941037`
