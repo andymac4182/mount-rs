@@ -1,6 +1,6 @@
 # W05 Cloudflare R2 progress ledger
 
-Last updated: 2026-09-22 18:45 AEST (2026-09-22 08:45 UTC)
+Last updated: 2026-09-22 19:01 AEST (2026-09-22 09:01 UTC)
 
 This is the working ledger for the W05 Cloudflare R2 workstream. Percentages
 and time estimates are provisional. They separate implementation work from
@@ -406,6 +406,8 @@ gates therefore remain actionable work in this session.
 
 | W05.48 Record terminal W07 cross-platform FoundationDB/RustFS evidence | Hosted provider/platform evidence | W07 terminal-successful; CI remains open | 90% provisional | Exact candidate `87f3cdf0` W07 run `35702352395` is terminal-successful. Durable job `106663122874`, macOS feature-compile job `106663122748`, and cross-platform assembly `106676099279` all passed. The durable packet verified rollout/evidence/config policy, optimized N-API, Linux FUSE prerequisite, durable FoundationDB metadata, RustFS chunks, service/VFS restart and reopen, Rust/Node/CLI paths, and fail-closed evidence fixtures. The bounded workload marker measured `466.18` lifecycle IOPS over 400 iterations/64 concurrency with `minimum_iops=1`; the assembled packet emitted `W07_PLATFORM_QUALIFICATION_PASS linux=terminal macos=feature-compile-only source_revision=87f3cdf0`. Linux evidence download digest was `2229862b90ca978f9a9d205ab59bb8414a4396e2d381f35380ad9df22543d5fd`, macOS evidence digest `84185d564272f3a360f9d20606b0c99af31162d685a9fb26b103843c4b13ceeb`, and the preserved aggregate artifact is `10683929336` with upload digest `082db52c7760bf8cad5420b0539dbf7f6658c42a6b0f572fbf3181690c9ac8ab`. | Inspect the terminal W07 artifact against the production support matrix; retain the explicit `feature-compile-only` macOS boundary and do not promote the bounded W07 IOPS result to the separate W26 hard `1000` IOPS gate; wait for CI terminal classification, then close AWS/R2/provider/platform/package/scope/W20.6 gates. | 0.5–1 h active evidence review; 2–16 h CI/provider/platform wait | W07 does not prove live macOS service/cluster/mount, production capacity, identity/ACL, backup/restore, failover, observability, signing, or owner evidence. CI’s failed provider-composition jobs, AWS security administration, R2 cap reset/token rotation, registries, and support scope remain external gates. |
 
+| W05.49 Repair terminal candidate CI failures and preserve hard provider boundaries | Implementation + hosted CI/provider qualification | Terminal candidate failure classified; Rust test repair compile-checked; rerun pending | 18% of this repair chunk / 72% provisional overall closure | Candidate CI `35702348089` at exact source `87f3cdf0` is terminal `failure`. Ubuntu Rust job `106663105271` timed out `destroy_overrides_late_driver_error_for_inflight_call` at `session.rs:2023`; the test helper published its entered signal before registering the `Notify` release waiter. The repair registers/enables the waiter first, and `./scripts/cargo-shared check -p mount-rs-9p --tests --locked` passes; a local executable test remains blocked by the host Xcode license gate, so no local runtime pass is claimed. Ubuntu Node job `106663105160` timed out in `9P server boundary` at `+19842ms`; Windows Node job `106663105335` timed out in the pinned-oracle parity phase. TiDB jobs `106663105037` and `106663105174` returned `1` from the publication instead of exercising the intended unknown-outcome assertion, showing that the proxy does not yet intercept the prepared autocommit statement path. Ozone/TiDB measured successful lifecycle IOPS `362.85`; Ozone compositions measured `445.24` for one provider and `1720.01` for the other, so the hard `1000` target remains correctly failed and must not be lowered. W26 evidence consequently emitted `W26_OZONE_EVIDENCE_PACKET_FAIL` because the required composition marker was absent. | Finish the TiDB prepared-statement failure injector; reproduce/fix or classify the Node/Windows 9P timeout; run Linux Rust/Node focused and full local gates where the host permits; create a new immutable candidate without mutating `87f3cdf0`; dispatch one complete same-SHA CI/Fault/W04/W07/W08/Native 9P/attestation packet; retain the Ozone capacity failure as a provider/platform blocker unless the service meets `1000` without weakening the gate; then close AWS security/OIDC, post-reset R2, native-FUSE, package/publication, advertised support scope, and W20.6. | 2–6 h active repair and qualification; 4–16 h hosted/provider/native wait | Xcode license approval blocks executable Rust tests on this macOS host. TiDB/Ozone service behavior and capacity, GitHub runner/kernel timing, AWS protected OIDC provisioning, R2 UTC-month reset/token rotation, native-FUSE privileges, signing/registries, product scope, and final-audit ownership remain external. |
+
 ### W05.40 exact candidate evidence (2026-09-22 17:09 AEST)
 
 The immutable candidate `25e275ab` is the current release-control anchor. Exact
@@ -655,6 +657,45 @@ macOS feature-compile-only boundary. It does not prove live macOS
 service/cluster/mount, production capacity, identity/ACL, backup/restore,
 failover, observability, signing, or owner evidence. CI remains the only
 candidate hosted workflow still running, and production remains **NO-GO**.
+
+### W05.49 terminal candidate CI failure and repair boundary (2026-09-22 19:01 AEST)
+
+Candidate CI run `35702348089` is terminal `failure` on exact source
+`87f3cdf0a8b3d29c89ff6c1e8d6cbd2409d0c01d`. The redacted job evidence is
+classified as follows:
+
+- Ubuntu Rust job `106663105271` timed out the regression
+  `destroy_overrides_late_driver_error_for_inflight_call` at
+  `transports/mount-rs-9p/src/session.rs:2023`. The test driver called
+  `entered.notify_one()` before registering `release.notified()`, so the
+  test's `notify_waiters()` could legally be lost. The repair registers and
+  enables the release waiter before publishing the entered signal. The
+  shared-target compile check passes, but this macOS host cannot execute the
+  test until its Xcode license is accepted; this is not presented as a local
+  runtime pass.
+- Ubuntu Node job `106663105160` timed out during `9P server boundary` after
+  `+19842ms`; Windows Node job `106663105335` timed out during the pinned-oracle
+  parity phase. These require focused reproduction on the repaired candidate;
+  they are not waived as runner noise.
+- TiDB job `106663105037` and TiDB/RustFS job `106663105174` both reached the
+  ambiguous-publication assertion with provider result `1`, meaning the
+  failure injector did not intercept the prepared autocommit publication
+  acknowledgement. The proxy must track the MySQL prepared-statement path;
+  the test must then prove a dropped acknowledgement produces an unknown
+  outcome without replay.
+- Ozone/TiDB measured `362.85` successful lifecycle IOPS and the Ozone
+  composition packet measured `445.24` for the failing provider and `1720.01`
+  for the passing provider against the hard `1000` target. The target remains
+  unchanged. W26 evidence job `106671318709` therefore emitted
+  `W26_OZONE_EVIDENCE_PACKET_FAIL` because the required `OZONE_IOPS_PASS`
+  composition marker was absent. This is a provider/capacity gate, not a
+  reason to weaken production acceptance.
+
+The first repair chunk is limited to deterministic test synchronization and
+is compile-checked with
+`./scripts/cargo-shared check -p mount-rs-9p --tests --locked`. A new
+immutable candidate and hosted rerun are still required; the prior candidate
+branch is not mutated. Production remains **NO-GO**.
 
 ### W05.36 current-tip evidence (2026-09-22 15:43 AEST)
 
@@ -1191,6 +1232,7 @@ shown separately from active engineering time.
 
 | UTC time | Activity | Classification | Result / next state |
 | --- | --- | --- | --- |
+| 2026-09-22 09:00–09:01 UTC (19:00–19:01 AEST) | Retrieved terminal candidate CI logs, classified Rust/Node/TiDB/Ozone failures, patched the Rust 9P blocking-test synchronization race, and ran the shared-target compile check | Hosted failure analysis / implementation repair | Candidate CI `35702348089` is terminal-failed on exact `87f3cdf0`; the Rust test repair compile-checks successfully. Node 9P/Windows timeouts, TiDB prepared-statement interception, and hard Ozone IOPS remain open; W05.49 recorded and production remains NO-GO. |
 | 2026-09-22 08:44–08:45 UTC (18:44–18:45 AEST) | Retrieved terminal W07 job/assembly logs and artifact digests on exact candidate `87f3cdf0` | Hosted provider/platform evidence | W07 `35702352395` passed durable FoundationDB/RustFS, macOS feature compilation, and cross-platform evidence assembly; the packet preserves the explicit macOS feature-compile-only boundary and records 466.18 lifecycle IOPS with a workflow-specific minimum of 1. CI remains the only candidate workflow in progress; production remains NO-GO. |
 | 2026-09-22 08:38–08:40 UTC (18:38–18:40 AEST) | Re-polled the immutable candidate, captured terminal W08 target/provenance logs, and inspected the non-terminal CI job snapshot | Hosted release/package/provenance evidence | W08 `35702352896` passed Linux/macOS builds, downloaded assets, provenance, CycloneDX SBOM attestations, Rekor publication, repository uploads, and exact-source verification. CI `35702348089` has several failed jobs but is not terminal; W07 `35702352395` remains queued around macOS compile. W05.47 recorded; production remains NO-GO. |
 | 2026-09-22 08:32–08:34 UTC (18:32–18:34 AEST) | Re-polled exact-candidate hosted runs and recorded terminal Fault plus W07/W08 partial results | Hosted release-control evidence / ledger maintenance | Fault `35702350927` passed Windows/Ubuntu/macOS. W07 durable job `106663122874` passed while macOS compile `106663122748` stayed queued; W08 builds and macOS asset verification passed while Linux verification `106671605507` stayed queued; CI `35702348089` stayed queued. Ledger updated; production remains NO-GO. |
