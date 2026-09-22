@@ -423,14 +423,16 @@ pushed to shared `origin/main`; its exact W08 policy run `35696819458` then
 cancelled before job creation with `jobs=[]`. Shared main then advanced
 through W04/W26/site documentation tips to public merge `09b554a1`, then
 through the 9P/N-API audit tip `75c149f8` and reconciled public merge
-`20330a36`. The `75c149f8` W08 run `35697338233` was still `in_progress` at
-observation, while exact current public run `35697637897` for
-`20330a36cfa400540c041a7714b418b8b591b24d` is pending; neither is terminal
-evidence. The current exact public tip is
-`20330a36cfa400540c041a7714b418b8b591b24d`. These scheduling boundaries and
+`20330a36`. Its W08 run `35697338233` reached terminal success in
+`w08-release-policy` job `106647435583` in 2m43s; this is hosted
+implementation/static evidence only. Shared main then advanced through 9P
+audit documentation tip `a3305079` and reconciled public merge `ce984ad0`;
+the exact current public run `35697911432` is pending and is not evidence.
+The current exact public tip is
+`ce984ad09a422871ad6990d9aeb26fd96107f742`. These scheduling boundaries and
 source-equivalent mainline changes add no provider/native or production
-qualification. The last retained terminal hosted W08 policy pass remains
-`35692664144` / job `106632773424` for source `5a6d6507`. No provider
+qualification. The latest retained terminal hosted W08 policy pass is
+`35697338233` / job `106647435583` for source `75c149f8`. No provider
 credentials, production deployment, candidate tag, canary, rollback or owner
 approval exists. P01–P09 remain open and the decision remains NO-GO.
 

@@ -1,6 +1,6 @@
 # W08 TiDB workstream progress ledger
 
-Status snapshot: **2026-09-22 17:03 AEST**
+Status snapshot: **2026-09-22 17:07 AEST**
 Repository: `andymac4182/mount-rs`  
 Latest synchronization: the W08 ledger publication commit `60fcef71` was
 pushed to shared `origin/main`; its exact W08 release-policy run
@@ -12,14 +12,15 @@ to shared `origin/main`; its exact W08 release-policy run `35696819458`
 completed as `cancelled` before job creation (`jobs=[]`). Shared main then
 advanced through W04/W26/site documentation tips to public merge `09b554a1`,
 then through the 9P/N-API audit tip `75c149f8` and reconciled public merge
-`20330a36`. The `75c149f8` W08 run `35697338233` was still `in_progress` at
-observation; current exact public run `35697637897` for
-`20330a36cfa400540c041a7714b418b8b591b24d` is `pending`. Neither is terminal
-evidence. This checkout is exactly equal to `origin/main`; these are
-scheduling and source-equivalent reconciliation boundaries, not new
-provider/native or production qualification. The last retained terminal
-hosted W08 policy pass remains run `35692664144` / job `106632773424` for
-source `5a6d6507`.
+`20330a36`. Its W08 run `35697338233` reached terminal success in the
+`w08-release-policy` job `106647435583` (2m43s); this is hosted
+implementation/static evidence only. Shared main then advanced through the
+9P audit documentation tip `a3305079` and reconciled public merge `ce984ad0`;
+the exact current public run `35697911432` is `pending` and is not evidence.
+This checkout is exactly equal to `origin/main`; these are scheduling and
+source-equivalent reconciliation boundaries, not new provider/native or
+production qualification. The latest retained terminal hosted W08 policy pass
+is run `35697338233` / job `106647435583` for source `75c149f8`.
 Publication snapshot: W08.36 implementation commit `0855e2ab` was reconciled
 with concurrent mainline work and pushed in merge tip `e0ab07d6`. The W08.36
 implementation was qualified at hosted source `e0ab07d6`; the latest W08 ledger
@@ -1070,6 +1071,7 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-22 16:47–16:54 AEST | Pushed reconciled ledger merge `a8c78312`, verified exact equality with `origin/main`, followed exact W08 run `35696819458` to terminal cancellation with `jobs=[]`, fast-forwarded the W04 documentation-only public tip `f68ed226`, and observed current run `35696948306` still pending. | ~0.1 engineer-day | ~2m hosted scheduling observation plus push/ref verification and mainline reconciliation | The public tree is current and source-equivalent for W08; the published merge cancellation created no hosted evidence, and the current pending run is not evidence. Provider/native services and all P01–P09 production gates remain external; production stays NO-GO with nine open gates and zero evidence records. |
 | 2026-09-22 16:54–16:58 AEST | Reconciled the W05/W26/site documentation updates, safely published merge `09b554a1`, verified exact local/public equality, and observed exact current W08 run `35697289516` as pending. | ~0.1 engineer-day | ~1m hosted scheduling observation plus merge/push/ref verification | The public tree remains source-equivalent for W08; the current pending run is not evidence. No new Rust/provider/native result or production-gate closure is claimed. Production remains NO-GO with nine open gates and zero evidence records. |
 | 2026-09-22 16:58–17:03 AEST | Reconciled the 9P/N-API audit tip `75c149f8`, ran changed-JavaScript/package/workflow static checks plus all W08/W07 tracking controls, safely published merge `20330a36`, and observed superseded run `35697338233` still `in_progress` while exact current run `35697637897` remained pending. | ~0.15 engineer-day | ~1m static/policy checks plus hosted scheduling observation and merge/push/ref reconciliation | The public tree is current and clean for the tracked scope; neither non-terminal hosted state is evidence. No new provider/native result or production-gate closure is claimed. Production remains NO-GO with nine open gates and zero evidence records. |
+| 2026-09-22 17:03–17:07 AEST | Rechecked hosted run `35697338233` to terminal success (`w08-release-policy` job `106647435583`, 2m43s), reconciled 9P audit documentation tip `a3305079` into public merge `ce984ad0`, verified exact local/public equality, and observed current run `35697911432` pending. | ~0.1 engineer-day | ~3m hosted terminal observation plus merge/ref verification | Hosted W08 implementation/static policy passed for source `75c149f8`; the current public run is pending and not evidence. Provider/native services and all P01–P09 production gates remain external; production stays NO-GO with nine open gates and zero evidence records. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol
