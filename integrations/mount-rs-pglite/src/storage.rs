@@ -9,6 +9,7 @@
 //! directory.
 
 use async_trait::async_trait;
+use md5::{Digest, Md5};
 use mount_rs_core::storage::{
     BlockId, BlockStore, LoadedMetadata, MetadataStore, Namespace, WriterLease,
 };
@@ -318,6 +319,25 @@ impl PgliteBlockStore {
 
 fn connection_closed() -> FsError {
     FsError::new(ErrorCode::Ebadf).with_syscall("PGlite connection")
+}
+
+fn block_id(bytes: &[u8]) -> String {
+    // Preserve the existing PostgreSQL identity contract exactly: the old
+    // query was md5(encode($1, 'hex')), which hashes the lowercase ASCII hex
+    // representation rather than the raw bytes. Computing that same value
+    // locally removes one provider round trip from every unique block put.
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut hasher = Md5::new();
+    for &byte in bytes {
+        hasher.update([HEX[(byte >> 4) as usize], HEX[(byte & 0x0f) as usize]]);
+    }
+    let digest = hasher.finalize();
+    let mut id = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        id.push(HEX[(byte >> 4) as usize] as char);
+        id.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    id
 }
 
 fn incompatible_schema(message: impl Into<String>) -> FsError {
@@ -1492,17 +1512,8 @@ impl BlockStore for PgliteBlockStore {
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
         let bytes = bytes.to_vec();
         let client = self.0.lock_client().await?;
-        // PostgreSQL's built-in md5/encode functions give the same opaque
-        // identity for equal bytes without requiring a PGlite extension.
         // A collision is checked below and never aliases different content.
-        let row = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .query_typed_opt("SELECT md5(encode($1, 'hex'))", &[(&bytes, Type::BYTEA)])
-            .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| backend_error("PGlite did not return a block identity"))?;
-        let id = row.get::<_, String>(0);
+        let id = block_id(&bytes);
         let changed = client
             .as_ref()
             .ok_or_else(connection_closed)?
@@ -1755,6 +1766,13 @@ mod tests {
     use mount_rs_core::storage::{BlockExtent, FileLayout, NodeData, NodeMetadata};
     use mount_rs_core::{FsDriver, MemoryFs};
     use std::collections::BTreeMap;
+
+    #[test]
+    fn block_id_matches_postgresql_md5_hex_contract() {
+        assert_eq!(block_id(b""), "d41d8cd98f00b204e9800998ecf8427e");
+        assert_eq!(block_id(b"abc"), "0e04049912772820000827e2da893ae2");
+        assert_eq!(block_id(&[0, 0xff]), "74a76031f936ac0e7b0d1b176e3ee7d7");
+    }
 
     async fn cancel_close_while_client_is_held(database: &Database) {
         let client_guard = database.client.lock().await;
