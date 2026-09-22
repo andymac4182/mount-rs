@@ -212,6 +212,10 @@ function p9UndefinedForNull(value) {
   return value === null ? undefined : value
 }
 
+function p9MapForObject(value) {
+  return value instanceof Map ? value : new Map(Object.entries(value ?? {}))
+}
+
 function reviveP9Error(binding, error) {
   const message = String(error?.message ?? error)
   const fields = message.split("|")
@@ -688,6 +692,20 @@ function wrapP9Session(P9Session) {
       enumerable: descriptor.enumerable,
       get() {
         return p9UndefinedForNull(native.call(this))
+      },
+    })
+  }
+  const nativeStats = Object.getOwnPropertyDescriptor(prototype, "stats")
+  if (nativeStats && typeof nativeStats.get === "function") {
+    Object.defineProperty(prototype, "stats", {
+      configurable: true,
+      enumerable: nativeStats.enumerable,
+      get() {
+        const stats = nativeStats.get.call(this)
+        return {
+          ...stats,
+          messages: p9MapForObject(stats && stats.messages),
+        }
       },
     })
   }

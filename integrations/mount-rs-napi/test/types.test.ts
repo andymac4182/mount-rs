@@ -650,6 +650,7 @@ function checkServerAndKvSubpaths(): void {
   const p9SessionOptions: P9SessionOptions = p9Session.options
   const p9SessionOptionLocks: P9LockTable | undefined = p9SessionOptions.locks
   const p9SessionStats: P9SessionStats = p9Session.stats
+  const p9MessageCounts: Map<string, number> = p9SessionStats.messages
   const p9Locks: P9LockClient = p9Session.locks
   const p9LockTable: P9LockTable = p9Locks.table
   const p9LockTableOptions: P9LockTableOptions = { maxLocksPerFile: 2 }
@@ -751,6 +752,7 @@ function checkServerAndKvSubpaths(): void {
   void p9Session
   void p9SessionOptions
   void p9SessionStats
+  void p9MessageCounts
   void p9User
   void p9NoFid
   void p9GetattrAll

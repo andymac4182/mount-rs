@@ -320,6 +320,17 @@ async fn oracle_refusal_boundaries_keep_their_protocol_reasons() {
         );
     }
 
+    for method in ["PUT", "DELETE"] {
+        let response = session.handle(request(method, "/mountx", [], &[])).await;
+        assert_eq!(response.status, 501, "{method} bucket root");
+        let document = String::from_utf8_lossy(&response.body);
+        assert!(document.contains("<Code>NotImplemented</Code>"));
+        assert!(
+            document
+                .contains("A header you provided implies functionality that is not implemented.")
+        );
+    }
+
     let response = session
         .handle(request("PATCH", "/mountx/object", [], &[]))
         .await;
