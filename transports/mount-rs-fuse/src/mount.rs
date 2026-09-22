@@ -754,6 +754,37 @@ impl MountState {
                     after: timeout,
                 })
             }
+            UnmountAttempt::Busy(error) => {
+                // fusermount can report EBUSY after the session has stopped
+                // while the kernel is still draining an in-flight request.
+                // Treat that specific helper outcome as a forced-teardown
+                // handoff; unrelated helper failures remain ordinary errors.
+                self.request_stop();
+                self.abort_task();
+                let forced_phase_deadline = Instant::now() + FORCED_STOP_GRACE;
+                force_unmount_until(
+                    self.mode,
+                    &self.mountpoint,
+                    self.helper.as_deref(),
+                    forced_phase_deadline,
+                )
+                .await;
+                forced_deadline = Some(forced_phase_deadline);
+                let mount_still_present = mounted_at(&self.mountpoint);
+                forced_mount_present = Some(mount_still_present);
+                if mount_still_present {
+                    self.record_transport_error(FuseTransportError::from_message(
+                        FuseTransportErrorKind::Task,
+                        format!(
+                            "FUSE unmount helper reported a busy mount; forced teardown was requested but '{}' remains present",
+                            self.mountpoint.display()
+                        ),
+                    ));
+                    Err(error)
+                } else {
+                    Ok(())
+                }
+            }
             UnmountAttempt::Failed(_error) if !mounted_at(&self.mountpoint) => Ok(()),
             UnmountAttempt::Failed(error) => {
                 self.unmount_started.store(false, Ordering::Release);
@@ -1660,6 +1691,7 @@ fn mount_data(
 enum UnmountAttempt {
     Done,
     TimedOut,
+    Busy(MountError),
     Failed(MountError),
 }
 
@@ -1753,18 +1785,36 @@ async fn attempt_unmount(state: &MountState, timeout: Duration) -> UnmountAttemp
     match run_child(program, &arguments, timeout).await {
         Ok(None) => UnmountAttempt::TimedOut,
         Ok(Some(outcome)) if outcome.status.success() => UnmountAttempt::Done,
-        Ok(Some(outcome)) => UnmountAttempt::Failed(MountError::Native(format!(
-            "unmount of '{}' failed (status {}): {}",
-            state.mountpoint.display(),
-            outcome.status,
-            if outcome.stderr.is_empty() {
-                "no diagnostic output"
+        Ok(Some(outcome)) => {
+            let error = MountError::Native(format!(
+                "unmount of '{}' failed (status {}): {}",
+                state.mountpoint.display(),
+                outcome.status,
+                if outcome.stderr.is_empty() {
+                    "no diagnostic output"
+                } else {
+                    &outcome.stderr
+                }
+            ));
+            if is_busy_unmount_error(&error) {
+                UnmountAttempt::Busy(error)
             } else {
-                &outcome.stderr
+                UnmountAttempt::Failed(error)
             }
-        ))),
+        }
         Err(error) => UnmountAttempt::Failed(error),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn is_busy_unmount_error(error: &MountError) -> bool {
+    let MountError::Native(message) = error else {
+        return false;
+    };
+    let message = message.to_ascii_lowercase();
+    message.contains("device or resource busy")
+        || message.contains("resource busy")
+        || message.contains("ebusy")
 }
 
 #[cfg(target_os = "linux")]
