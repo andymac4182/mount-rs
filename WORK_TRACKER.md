@@ -896,7 +896,7 @@ complete.
 | W30 | OpenTelemetry traces, metrics and logs | Implementing: opt-in facade, boundary wiring, local collector/failure tests, benchmark and macOS qualification packet landed; external collector/Linux/Windows evidence pending | Main |
 | W31 | Per-drive mounts from one backing datastore | Deferred for future design | Unassigned |
 
-Current W26 unpublished chunk (2026-09-22): the TiDB provider now configures and
+Historical W26 TiDB session-setup chunk (published 2026-09-22): the TiDB provider now configures and
 verifies `tidb_txn_mode='pessimistic'` once for each newly created private pool
 session, disables redundant pool-reset round trips, and retains the
 `RepeatableRead` transaction guard, fail-closed mode check, parameterized SQL,
@@ -904,9 +904,9 @@ rollback handling and ambiguous-commit semantics. Focused TiDB tests, strict
 provider/workspace Clippy, full locked workspace tests, formatting and diff
 checks pass locally. Security diff scan `c4fc0012-b0e2-421c-9db8-ca3edfce730c`
 completed with full changed-file coverage and zero reportable findings. This
-is implementation evidence only until the chunk is pushed and the hosted W26
-matrix is rerun on its exact published revision; the 1,000-IOPS production
-gate remains **NO-GO**.
+is included in the current published tree; the exact hosted qualification
+recorded below selected an earlier revision and the 1,000-IOPS production gate
+remains **NO-GO**.
 
 Current W26 SQLite follow-up (2026-09-22): the SQLite metadata publisher now
 uses a parameterized fenced conditional CAS update on the successful path and
@@ -916,11 +916,11 @@ unexplained-zero-row fail-closed behavior and the existing transaction commit
 boundary. SQLite provider tests, strict provider/workspace Clippy, full locked
 workspace tests, formatting and diff checks pass locally. Security diff scan
 `ea882470-0ef4-4f7a-8d91-03c8d85d7fb7` completed with full changed-file
-coverage and zero reportable findings. This remains unpublished
-implementation evidence until pushed and requalified on an exact hosted
-revision; production remains **NO-GO**.
+coverage and zero reportable findings. The implementation is published as
+`ba4e89d0` in the current shared tree, but the last hosted packet selected an
+earlier revision; production remains **NO-GO**.
 
-Current W26 TiDB isolation follow-up (2026-09-22): the TiDB private pool now
+Current W26 published TiDB isolation follow-up (2026-09-22): the TiDB private pool now
 sets and verifies both pessimistic transaction mode and `REPEATABLE-READ`
 session isolation once for each newly created connection. Per-transaction
 isolation negotiation is removed while the transaction guard, rollback on
@@ -929,9 +929,24 @@ parameterized SQL and ambiguous-commit semantics remain intact. The focused
 TiDB package has 7 passing unit tests; full locked workspace tests, strict
 workspace Clippy, formatting and diff checks pass locally. Security diff scan
 `5975446d-8bb7-457e-92d3-74c5c6ccf671` completed with full changed-file
-coverage and zero reportable findings. This is unpublished implementation
-evidence until pushed and requalified on the exact published revision;
-production remains **NO-GO**.
+coverage and zero reportable findings. Commit `0f95cb7d` is included in
+`origin/main` `0ca59c85`; the last hosted packet selected an earlier revision
+and did not qualify this change. Production remains **NO-GO**.
+
+Current W26 authority override (2026-09-22): `origin/main` is
+`0ca59c85a36227a07730f0282194ef7af8650fbf`. Manual hosted run
+`35686340751` selected `1e64bc250b5e863620f069aad173945dc474c5b4`: base Ozone
+job `106613849779` passed; compositions `106613849813` failed with
+SQLite/R2 `997.06` and PGlite/R2 `592.43` IOPS; TiDB `106613849794` failed
+with `277.59` IOPS; FoundationDB `106613849672` failed before benchmarking
+because `tests/foundationdb/Cargo.lock` rejected `--locked`; aggregate
+`106616062969` failed closed on missing `OZONE_IOPS_PASS`. SQLite/PGlite/TiDB
+completed 1,200/1,200 lifecycle operations with zero timeout/cleanup failures;
+FoundationDB produced no IOPS artifact. This run predates `ba4e89d0` and
+`8428a5ef`, so it is diagnostic only. The next matrix must run on the exact
+current published SHA, preserve the 1,000-IOPS hard target and keep production
+**NO-GO** until every configured provider and the complete end-to-end aggregate
+pass.
 
 ## Decisions and external prerequisites
 
