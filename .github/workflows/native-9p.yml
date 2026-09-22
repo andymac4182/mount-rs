@@ -111,6 +111,7 @@ jobs:
           CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-9p-root-conformance-target
         run: |
           sudo env \
+            "CI=true" \
             "PATH=$PATH" \
             "MOUNTX_SOURCE=$MOUNTX_SOURCE" \
             "CARGO_TARGET_DIR=$CARGO_TARGET_DIR" \
