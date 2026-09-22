@@ -1181,12 +1181,13 @@ jobs, `106584655866` on macOS and `106584656036` on Ubuntu, including the
 eight concurrent native-client write/read pairs. Mounted-I/O concurrency is
 now hosted evidence; adverse mounted-host teardown/restart, live-provider,
 power-loss, durable-lock, and wider ordering acceptance remain open.
-The ignored native WebDAV harness now performs eight concurrent native-client
-write/read pairs after the basic round trip and verifies every payload through
-the driver. The host-enabled macOS run passed 1/1 with the shared Cargo
-wrapper. At this local evidence snapshot, hosted Linux/macOS reruns were still
-required; the follow-up hosted run above passed mounted-I/O concurrency, while
-mounted-host teardown remains open.
+The current ignored native WebDAV harness now performs eight concurrent
+native-client write/read pairs after the basic round trip, then closes the
+server while mounted, unmounts, relistens, remounts the same driver, and
+verifies a post-restart round trip. Its host-enabled macOS run passed 1/1 with
+the shared Cargo wrapper; the follow-up hosted run above passed the preceding
+mounted-I/O concurrency version, while hosted qualification of the new
+teardown/restart extension remains open.
 At final ledger tip `3148aa5a95e5cdcf328014fac7e007db0e16adfe`, exact-SHA CI
 `35673381803` and W08 policy/targets `35673381898`/`35673381797` were pending,
 Fault injection `35673381853` and W04 policy `35673381814` were queued, and no
