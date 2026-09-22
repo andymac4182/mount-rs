@@ -4110,6 +4110,12 @@ reproducible in a production-like environment.
   blocked by `missing_bucket` and R2 run `35683716251` by `count=294 limit=20`;
   physical power-loss durability, broader workload bounds, and native/hosted
   acceptance remain open, so W01-S3 stays **NO-GO**.
+- [x] The published S3 packet's automatic provider runs were refreshed:
+  AWS run `35684677320` stopped at `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`,
+  while R2 run `35684677273` stopped at `count=295 limit=20` before live
+  admission. No service PASS is claimable; protected AWS configuration, the
+  R2 budget reset, physical power-loss durability, broader workload bounds,
+  and native/hosted acceptance remain open, so W01-S3 stays **NO-GO**.
 - [ ] W10.1 Finish per-transport backend/platform acceptance matrix, including
   native lifecycle, disconnect/error behavior and streaming/backpressure.
 - [ ] W10.2 Verify transport auto-selection and explicit unsupported behavior.
