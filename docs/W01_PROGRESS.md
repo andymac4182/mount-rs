@@ -614,8 +614,10 @@ The refreshed protected-provider admission remains blocked: [AWS S3 run
 stopped at `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while [Cloudflare R2 run
 `35713249887`](https://github.com/andymac4182/mount-rs/actions/runs/35713249887)
 stopped at `R2 CI monthly run cap already exceeded: count=362 limit=20` and
-skipped live integration; newer R2 run `35713639700` at `c87adf7` remained
-queued. No live AWS/R2 service PASS is claimable.
+skipped live integration; [newer R2 run
+`35713639700`](https://github.com/andymac4182/mount-rs/actions/runs/35713639700)
+also failed admission at `count=363 limit=20` and skipped live integration.
+No live AWS/R2 service PASS is claimable.
 
 At tested checkout `c57e2ea36f3f30e36a3f26a4ca2ecf88893c7ba5`, the fresh
 release N-API build using `scripts/build-native.mjs` passed in
@@ -624,14 +626,18 @@ typecheck, lifecycle, 64-pair direct-session/network concurrency, NodeFs/SQLite
 provider and network matrices, orderly reopen, process-crash and in-flight PUT
 recovery, structural-driver durability, Rust WebDAV 41/41, strict Clippy,
 formatting, and diff checks all passed. Manual current-package CI run
-`35714570430` at `92a6539e` remains queued, so this refresh is local evidence
-only and does not change the production **NO-GO** decision.
+`35714570430` at
+`92a6539e6a91d67a811b77cf688fc4ad2177f858` is live: its macOS arm64 and
+Intel Node jobs completed successfully, while Ubuntu Node and both native
+WebDAV jobs remained queued at the audit. No terminal current hosted WebDAV
+result is claimable, so this does not change the production **NO-GO** decision.
 
 The same rebuilt package also passed the pinned barrel differential, supported
 session/member differential, and current TypeScript/Rust HTTP differential:
 `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921` yielded 40 paired
 S3+WebDAV cases, including the WebDAV slice. These remain local oracle and
-loopback results; hosted current-package qualification is still queued.
+loopback results; hosted current-package qualification is live, but its native
+WebDAV jobs remain queued.
 
 The pinned WebDAV oracle deliberately has no `PathLock` for this HTTP session.
 The fresh concurrent lock regression passes with two simultaneous writes
