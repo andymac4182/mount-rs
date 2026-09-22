@@ -823,6 +823,7 @@ patch):
 | Main | W01 N-API 9P `P9User.uid` object-shape parity | `integrations/mount-rs-napi/postlude-servers.cjs`, `integrations/mount-rs-napi/postbuild.mjs`, `integrations/mount-rs-napi/index.d.ts`, `integrations/mount-rs-napi/test/p9-session-metadata.mjs`, `integrations/mount-rs-napi/test/servers.mjs`, `integrations/mount-rs-napi/test/types.test.ts`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet: the direct/root N-API `P9User` facade preserves the oracle-required own `uid` property, using `undefined` when native identity has no numeric uid; generated direct declarations use `uid: number | undefined`. Local `pnpm build:debug`, session metadata, generated typecheck, syntax, and diff checks passed. Exact SHA `1c43f66ec570be35444055ab6adb0f841628fef6` passed Native 9P run `35681672318`, N-API job `106599754171` with automatic/direct/structural mounted I/O and cleanup, and Rust job `106599753872` with all four ignored native lifecycle tests; the broad `node test/servers.mjs` script remains separately blocked by the Darwin NFS relisten sandbox `Operation not permitted` before 9P, so production remains NO-GO |
 | Main | W01 N-API 9P transport teardown under backpressure | `transports/mount-rs-9p/src/server.rs`, `integrations/mount-rs-napi/test/servers.mjs`, `.github/workflows/native-9p.yml`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet fixes the connection task's permit-wait deadlock by retaining a bounded pending-frame queue while continuing to read for peer EOF, and reports a frame transport failure if that queue is exceeded. Real loopback N-API coverage now checks server close with an open fid, paused-peer FIN with a large queued reply burst, silent TCP reset, and orderly client EOF. Local focused Rust tests (36 passed), strict Clippy, addon rebuild, syntax/diff checks, and elevated isolated N-API execution passed. Exact SHA `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` passed Native 9P run `35685073733`, N-API job `106610049913` with teardown and automatic/direct/structural mounted-I/O cleanup, and Rust job `106610049705` with the Linux probe plus all four ignored native lifecycle tests; process-crash and arbitrary kernel-reset recovery, broader parity, and W01 acceptance remain open, so production remains NO-GO |
 | Main | W01 N-API 9P TCP connection isolation and dispatch ordering | `integrations/mount-rs-napi/test/servers.mjs`, `.github/workflows/native-9p.yml`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet adds real loopback coverage for two native listener connections using distinct sessions but the same fid number, survivor service after one client closes, and a slow-open/fast-getattr burst that replies in completion order. Local syntax/diff checks and elevated isolated N-API execution passed. Exact SHA `9870d58cfbed5bcea90972c4b9caaf5db3075cef` passed Native 9P run `35685807744`, N-API job `106612633937` with the full server/attach, teardown, and automatic/direct/structural mounted-I/O cleanup gates, and Rust job `106612633771` with the Linux probe plus all four ignored native lifecycle tests; shared lock-table network behavior, remote-admission/interface qualification, remaining framing/payload/port cases, process-crash and arbitrary kernel-reset recovery, broader parity, and W01 acceptance remain open, so production remains NO-GO |
+| Main | W01 N-API 9P shared network lock table | `integrations/mount-rs-napi/test/servers.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet adds real loopback coverage for two native TCP sessions sharing one configured `P9LockTable`: the first write lock succeeds, the second receives `P9_LOCK_BLOCKED` and reads the first holder through `Tgetlock`, and closing the first connection releases the range for the second. Local `git diff --check` and elevated isolated N-API execution passed. Exact SHA `514d2c533382b927c059ccd946f3e566d2c371a9` passed Native 9P run `35686403815`, N-API job `106614048924` with the shared-lock, server/attach, teardown, and automatic/direct/structural mounted-I/O cleanup gates, and Rust job `106614048722` with the Linux probe plus all four ignored native lifecycle tests; remote-admission/interface qualification, remaining framing/payload/port cases, process-crash and arbitrary kernel-reset recovery, broader parity, and W01 acceptance remain open, so production remains NO-GO |
 | Main | W01 N-API 9P Unix listener policy and lifecycle | `.github/workflows/native-9p.yml`, `integrations/mount-rs-napi/test/servers.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet adds the Unix-domain listener phase to `MOUNT_RS_SERVER_PHASE=p9`, independently exercising private-directory refusal, explicit `allowSharedDirectory` opt-in, `0600` socket mode, protocol handshake, native Unix peer/path and `stream: undefined` representation, socket removal on close, and path/port exclusivity. Local syntax/diff checks and elevated isolated N-API execution passed. Exact test commit `dd10ac0564446c9143f8b5f68b2fed51c7eaf57f` was included in descendant head `d43f5ea4e4334912de86ac0db818392531a7d4ec`, whose Native 9P run `35683716217` passed N-API job `106606580352` with Unix policy, server/attach, and automatic/direct/structural mounted I/O/cleanup, and Rust job `106606580326` with the Linux probe plus all four ignored native lifecycle tests. The direct run at the test commit was cancelled before jobs materialized and is not evidence; production remains NO-GO |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
@@ -1009,6 +1010,13 @@ provider-lifecycle, power-loss, or durable-lock gates.
 The current shell has no AWS/R2/Cloudflare credential names available; live
 provider acceptance remains externally gated and no credential values were
 read or persisted.
+The structural N-API `FsDriver` now also has an optional
+`readdirBounded(path, maxEntries)` callback. The rebuilt addon and focused
+structural WebDAV regression pass bounded `Depth: 1` PROPFIND, recursive
+collection COPY/DELETE, provider-reported overflow, adapter rejection of an
+over-large callback result, and the absent-callback `ENOTSUP`/`501` boundary;
+the provider callback remains responsible for enforcing the ceiling before it
+materializes its listing.
 The current hosted provider audit confirms the external boundary: Live AWS S3
 run `35679010203` failed its protected preflight with
 `AWS_S3_CI_CONFIG_BLOCKED missing_bucket` and empty bucket/region/account/role
@@ -2113,20 +2121,24 @@ Evidence landed without closing the remaining W01 acceptance gates:
   Current `origin/main` is `9563d2db`; a fresh exact-tip qualification is
   required and production remains **NO-GO**.
 
-- Active current-tip qualification checkpoint: non-cancelling run
-  `35684808019` was dispatched from exact published head `4cd57723` before
-  concurrent mainline advanced to `87d5eb27`. At the 14:06 AEST snapshot,
-  Windows Node, RustFS, native WebDAV/NFS/9P, observability, Ozone base,
-  TiDB/RustFS, and TiDB had completed successfully; ARM Node `106609248954`,
-  Ubuntu Node `106609249118`, macOS-latest Node `106609248932`, Ubuntu Rust
-  `106609249086`, Ozone/TiDB `106609249034`, and Ozone compositions
-  `106609249144` had failed; macOS-15-intel Node `106609248961`, native FUSE
-  `106609249088`, FoundationDB/RustFS `106609249058`, and
-  Ozone/FoundationDB `106609249069` remained non-terminal. GitHub had not
-  exposed terminal logs while the workflow was still running, so no failure
-  cause, exact PGlite/restart PASS, or W04 acceptance is claimed. Production
-  remains **NO-GO** pending terminal diagnosis and all deployment/provider/
-  operational gates.
+- Terminal diagnosis for current-tip qualification run `35684808019`: it was
+  dispatched from exact published head `4cd57723` before later mainline WebDAV
+  changes and ended **cancelled** after native-FUSE job `106609249088` failed
+  `Exercise actual rootless kernel file operations` and its hosted `Complete
+  job` hook remained in progress. ARM `106609248954`, Ubuntu `106609249118`,
+  macOS-latest `106609248932`, and macOS-15-intel `106609248961` all failed
+  `webdav/propfind-links mismatch` before the exact PGlite/restart step, with
+  TypeScript HTTP 207 XML versus Rust HTTP 501 and an empty response. Ubuntu
+  Rust `106609249086` failed the saturated-read timing assertion `Elapsed(())`.
+  Ozone/TiDB `106609249034` measured `59.76` IOPS, Ozone/FoundationDB
+  `106609249069` measured `339.24`, and Ozone compositions `106609249144`
+  measured `837.80` and `789.33` against the hard `1000` target; W26
+  `106611498619` failed closed without `OZONE_IOPS_PASS`, and aggregate-native
+  was skipped. Windows Node `106609248992` passed package/N-API sub-gates only.
+  The native-FUSE failure log was not retrievable because hosted cleanup never
+  finalized. Current `origin/main` is `5e910e80`; this stale-tip diagnosis does
+  not promote W04 or production acceptance. Dispatch a fresh non-cancelling
+  qualification from the exact current tip and keep production **NO-GO**.
 
 ## W05 — Cloudflare R2
 
@@ -3309,6 +3321,17 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     stronger hosted implementation qualification, not production capacity,
     collector, failover, recovery or owner evidence.
 
+    Hosted attempt
+    [35685846631](https://github.com/andymacclenaghan/mount-rs/actions/runs/35685846631)
+    (job `106612350173`, exact revision
+    `e9e2d30c6be06a5aa1f0e81e39fb5a0450c77a78`) did not produce a qualification
+    pass: all policy, configuration, prerequisite, N-API and Linux FUSE steps
+    passed, but the durable step stopped before provider execution because the
+    standalone `tests/foundationdb/Cargo.lock` lacked the new `tracing` feature
+    dependency and `--locked` refused to update it. This is a reproducibility
+    failure, not FoundationDB/RustFS runtime evidence; the missing lockfile edge
+    is corrected in the next mainline chunk and requires a fresh exact-tip run.
+
   - [ ] **Observability and operations:** expose and alert on cluster health,
     authority publication age/errors, reader failures, lease-fence/ESTALE,
     transaction retries/maybe-committed EIO and cleanup/space pressure.
@@ -3984,6 +4007,23 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   candidate-release, registry, canary, rollback or owner-approval evidence, so
   P01–P09 remain open and the decision remains NO-GO.
 
+  After origin/main advanced with the FoundationDB/TiDB storage changes, 9P/W07
+  telemetry updates and N-API test expansion, exact merged source
+  `858682f63ca5b2da3f3610a8d8d641d77c2a904e` was freshly requalified. The full
+  locked workspace test and strict workspace Clippy exited 0; all runnable tests
+  passed, provider/native rows remained explicit opt-in skips, and affected
+  N-API/package, W08 policy/evidence and native-9P workflow-shape checks passed.
+  This is source-health evidence only and does not close P01–P09 or change the
+  NO-GO decision.
+
+  The published source-equivalent checkpoint
+  `a47c0cd91699deea9888d3d87aeb04b64fdb6576` passed hosted W08 release-policy
+  run `35685756342`, job `106612127535`, which completed successfully in 2m47s
+  with both hosted policy steps green. This remains hosted implementation/static
+  evidence only; it does not provide production topology, provider,
+  candidate-release, registry, canary, rollback or owner-approval evidence, so
+  P01–P09 remain open and the decision remains NO-GO.
+
   After origin/main advanced with the 9P EOF/backpressure server fix `1179d9e3`,
   N-API test expansion and site component updates, exact merged source
   `d725248534eb897de4d49e916c47425e6266c05d` was freshly requalified. The full
@@ -4286,6 +4326,21 @@ reproducible in a production-like environment.
   admission. No service PASS is claimable; protected AWS configuration, the
   R2 budget reset, physical power-loss durability, broader workload bounds,
   and native/hosted acceptance remain open, so W01-S3 stays **NO-GO**.
+- [x] The next W01-S3 lifecycle packet makes `S3Session.close()` mirror the
+  oracle's non-rejecting cleanup contract: per-driver sweep failures reach
+  `onError(error, undefined)` and later cleanup remains eligible. The focused
+  regression and full Rust 5/6/31/5 packet, warning-denied Clippy, release
+  N-API build, callback observability, session differential, 64-way/CAS
+  concurrency, process restart, typecheck, and distribution checks passed.
+  AWS `35684677320` remains blocked by `missing_bucket` and R2 `35684677273`
+  by `count=295 limit=20`; physical power-loss durability, broader workload
+  bounds, and native/hosted acceptance remain open, so W01-S3 stays **NO-GO**.
+- [x] The automatic provider runs for published packet `5e910e80` were refreshed:
+  AWS `35686512809` stopped at `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while
+  R2 `35686512842` stopped at `count=302 limit=20` before live admission. No
+  service PASS is claimable; protected AWS configuration, the R2 budget reset,
+  physical power-loss durability, broader workload bounds, and native/hosted
+  acceptance remain open, so W01-S3 stays **NO-GO**.
 - [ ] W10.1 Finish per-transport backend/platform acceptance matrix, including
   native lifecycle, disconnect/error behavior and streaming/backpressure.
 - [ ] W10.2 Verify transport auto-selection and explicit unsupported behavior.
@@ -5688,6 +5743,7 @@ cross-drive isolation.
 
 | Commit | Scope | Evidence boundary |
 | --- | --- | --- |
+| `2026-09-22 WebDAV structural bounded-listing packet` | Forward the optional structural N-API `FsDriver.readdirBounded(path, maxEntries)` callback and reject over-large callback results as `EOVERFLOW`; exercise bounded PROPFIND, recursive COPY/DELETE, provider overflow, and the explicit absent-capability boundary | Release addon, generated typecheck, WebDAV-only host-enabled server phase, and focused structural WebDAV regression pass; hosted package/provider qualification, power-loss ordering, durable locks, crash/power-loss restart, and same-resource ordering remain open |
 | `2026-09-22 FUSE boundary packet` | Reject unsafe and transport-owned `MountOptions.mount_options` tokens before native Linux FUSE mount/helper invocation | Focused `mount-rs-fuse` all-target tests and strict Clippy passed on macOS; hosted `/dev/fuse`, crash/concurrency, callback-event, and FSKit gates remain open |
 | `2026-09-22 FUSE forced-teardown packet` | Make forced native session-task cancellation publish inactive/closed state and wake `wait_closed()` observers | Host FUSE tests, host/Linux-target strict Clippy, Linux-target test check, formatting and diff checks pass; hosted `/dev/fuse` forced-unmount, callback-event, crash/restart and durability gates remain open |
 | `2026-09-22 FUSE forced-unmount deadline packet` (published as `987c593bc08adfb161a55a7a9eee27ff82606310`) | Share the forced `umount`/lazy-detach deadline with final session-task draining so bounded teardown does not add a third full timeout | Host FUSE all-target tests, host/Linux-target strict Clippy, Linux-target test check, formatting and diff checks pass; exact-SHA CI run `35648821996` and Fault injection run `35648821873` are pending, while the Linux-gated timing test and hosted `/dev/fuse` forced-unmount and broader lifecycle gates remain open |

@@ -33,6 +33,8 @@ export interface FsDriver {
   syncfs?(): Promise<void>
   stat(path: string): Promise<JsStats>
   readdir(path: string, options: { withFileTypes: true }): Promise<DirentLike[]>
+  /** Enumerate at most `maxEntries`; providers must enforce the bound before returning. */
+  readdirBounded?(path: string, maxEntries: number): Promise<DirentLike[]>
   open(path: string, flags?: string | number, mode?: number): Promise<FileHandleLike>
   lstat?(path: string): Promise<JsStats>
   statfs?(path: string): Promise<Pick<JsStatsFs, "type" | "bsize" | "blocks" | "bfree" | "bavail" | "files" | "ffree">>

@@ -271,6 +271,23 @@ evidence only; it does not provide production topology, provider,
 candidate-release, registry, canary, rollback or owner-approval evidence, so
 P01–P09 remain open and the decision remains NO-GO.
 
+After origin/main advanced with the FoundationDB/TiDB storage changes, 9P/W07
+telemetry updates and N-API test expansion, exact merged source
+`858682f63ca5b2da3f3610a8d8d641d77c2a904e` was freshly requalified. The full
+locked workspace test and strict workspace Clippy exited 0; all runnable tests
+passed, provider/native rows remained explicit opt-in skips, and affected
+N-API/package, W08 policy/evidence and native-9P workflow-shape checks passed.
+This is source-health evidence only and does not close P01–P09 or change the
+NO-GO decision.
+
+The published source-equivalent checkpoint
+`a47c0cd91699deea9888d3d87aeb04b64fdb6576` passed hosted W08 release-policy
+run `35685756342`, job `106612127535`, which completed successfully in 2m47s
+with both hosted policy steps green. This remains hosted implementation/static
+evidence only; it does not provide production topology, provider,
+candidate-release, registry, canary, rollback or owner-approval evidence, so
+P01–P09 remain open and the decision remains NO-GO.
+
 After origin/main advanced with the 9P EOF/backpressure server fix `1179d9e3`,
 N-API test expansion and site component updates, exact merged source
 `d725248534eb897de4d49e916c47425e6266c05d` was freshly requalified. The full

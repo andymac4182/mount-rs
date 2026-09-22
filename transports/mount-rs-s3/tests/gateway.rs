@@ -1188,6 +1188,60 @@ async fn delete_objects_reports_per_key_driver_errors_to_error_hook() {
     assert_eq!(reports[0].2, "/mountx?delete");
 }
 
+#[tokio::test]
+async fn session_close_reports_cleanup_errors_without_rejecting() {
+    let driver = FaultOnReadFs {
+        inner: MemoryFs::empty(),
+        fail_next_read: Arc::new(AtomicBool::new(false)),
+        fail_unlink: Arc::new(AtomicBool::new(false)),
+        durable_writes: false,
+        sync_calls: Arc::new(AtomicUsize::new(0)),
+        fail_syncfs: Arc::new(AtomicBool::new(false)),
+    };
+    let reports = Arc::new(StdMutex::new(Vec::<(String, Option<S3RequestHead>)>::new()));
+    let observed = Arc::clone(&reports);
+    let session = S3Session::new_with_options(
+        driver.clone(),
+        S3SessionOptions {
+            hooks: S3SessionHooks {
+                on_error: Some(Arc::new(move |message, head| {
+                    observed
+                        .lock()
+                        .expect("close error reports lock")
+                        .push((message, head));
+                })),
+                ..S3SessionHooks::default()
+            },
+            ..S3SessionOptions::default()
+        },
+    );
+    let initiated = session
+        .handle(request("POST", "/mountx/close.bin?uploads", [], &[]))
+        .await;
+    assert_eq!(initiated.status, 200);
+    let upload_id = xml_field(&initiated.body, "UploadId");
+    let part = session
+        .handle(request(
+            "PUT",
+            &format!("/mountx/close.bin?uploadId={upload_id}&partNumber=1"),
+            b"close fault",
+            &[],
+        ))
+        .await;
+    assert_eq!(part.status, 200);
+
+    driver.fail_unlink.store(true, Ordering::SeqCst);
+    session
+        .close()
+        .await
+        .expect("close reports cleanup errors without rejecting");
+
+    let reports = reports.lock().expect("close error reports lock");
+    assert_eq!(reports.len(), 1);
+    assert!(!reports[0].0.is_empty());
+    assert!(reports[0].1.is_none());
+}
+
 #[derive(Clone)]
 struct FaultOnReadFs {
     inner: MemoryFs,
@@ -1282,7 +1336,7 @@ impl FsDriver for FaultOnReadFs {
     }
 
     async fn unlink(&self, path: &str) -> FsResult<()> {
-        if path == "/fault.txt" && self.fail_unlink.swap(false, Ordering::SeqCst) {
+        if self.fail_unlink.swap(false, Ordering::SeqCst) {
             return Err(
                 mount_rs_core::FsError::new(mount_rs_core::ErrorCode::Eio).with_syscall("unlink")
             );

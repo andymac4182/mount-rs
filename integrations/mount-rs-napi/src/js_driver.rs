@@ -31,6 +31,7 @@ type JsCallback<T> = ThreadsafeFunction<T, JsReturn, T, Status, false, false>;
 
 type PathArgs = FnArgs<(String,)>;
 type ReaddirArgs = FnArgs<(String, super::JsReaddirOptions)>;
+type ReaddirBoundedArgs = FnArgs<(String, f64)>;
 type OpenArgs = FnArgs<(String, Either<String, f64>, u32)>;
 type MkdirArgs = FnArgs<(String, super::JsMkdirOptions)>;
 type TwoPathArgs = FnArgs<(String, String)>;
@@ -991,8 +992,8 @@ fn parse_dirents(
     _env: Env,
     value: Unknown<'static>,
     parent_path: &str,
+    operation: &'static str,
 ) -> Result<Vec<DirEntry>, JsDriverError> {
-    let operation = "readdir";
     let array: Vec<Unknown<'static>> =
         unsafe { Vec::from_napi_value(value.value().env, value.raw()) }
             .map_err(|error| JsDriverError::native(operation, error))?;
@@ -1029,6 +1030,26 @@ fn parse_dirents(
             parent_path: parent_path.to_owned(),
             file_type,
         });
+    }
+    Ok(output)
+}
+
+fn parse_bounded_dirents(
+    env: Env,
+    value: Unknown<'static>,
+    parent_path: &str,
+    max_entries: usize,
+) -> Result<Vec<DirEntry>, JsDriverError> {
+    let output = parse_dirents(env, value, parent_path, "readdirBounded")?;
+    if output.len() > max_entries {
+        return Err(JsDriverError::native(
+            "readdirBounded",
+            format!(
+                "driver returned {} entries despite maxEntries={max_entries}",
+                output.len()
+            ),
+        )
+        .with_code("EOVERFLOW"));
     }
     Ok(output)
 }
@@ -1370,6 +1391,7 @@ struct DriverCallbacks {
     syncfs: Option<Arc<CallbackSlot<NoArgs>>>,
     stat: Arc<CallbackSlot<PathArgs>>,
     readdir: Arc<CallbackSlot<ReaddirArgs>>,
+    readdir_bounded: Option<Arc<CallbackSlot<ReaddirBoundedArgs>>>,
     open: Arc<CallbackSlot<OpenArgs>>,
     lstat: Option<Arc<CallbackSlot<PathArgs>>>,
     statfs: Option<Arc<CallbackSlot<PathArgs>>>,
@@ -1754,7 +1776,7 @@ impl FsDriver for JsDriver {
         let parent_path = path.clone();
         let lifecycle = Arc::clone(&self.lifecycle);
         let callback = self.callbacks.readdir.clone();
-        let parse = Arc::new(move |env, value| parse_dirents(env, value, &parent_path));
+        let parse = Arc::new(move |env, value| parse_dirents(env, value, &parent_path, "readdir"));
         Box::pin(async move {
             invoke(
                 callback,
@@ -1776,19 +1798,40 @@ impl FsDriver for JsDriver {
 
     fn readdir_bounded<'a, 'b, 'async_trait>(
         &'a self,
-        _path: &'b str,
-        _max_entries: usize,
+        path: &'b str,
+        max_entries: usize,
     ) -> Pin<Box<dyn Future<Output = CoreResult<Vec<DirEntry>>> + Send + 'async_trait>>
     where
         'a: 'async_trait,
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        // The JavaScript callback contract returns a complete array and does
-        // not expose a provider-side enumeration limit. Refuse the bounded
-        // transport path until that contract can enforce the limit before the
-        // JS array is materialized.
-        Box::pin(async { Err(FsError::enotsup("scandir")) })
+        let Some(callback) = self.callbacks.readdir_bounded.clone() else {
+            return Box::pin(async { Err(FsError::enotsup("scandir")) });
+        };
+        if (max_entries as u64) > super::MAX_SAFE_INTEGER as u64 {
+            return Box::pin(async {
+                Err(FsError::new(ErrorCode::Eoverflow).with_syscall("readdirBounded"))
+            });
+        }
+        let path = path.to_owned();
+        let parent_path = path.clone();
+        let lifecycle = Arc::clone(&self.lifecycle);
+        let parse = Arc::new(move |env, value| {
+            parse_bounded_dirents(env, value, &parent_path, max_entries)
+        });
+        Box::pin(async move {
+            invoke(
+                callback,
+                lifecycle.clone(),
+                &lifecycle.waiters,
+                FnArgs::from((path, max_entries as f64)),
+                "readdirBounded",
+                parse,
+            )
+            .await
+            .map_err(|error| error.into_fs_error("readdirBounded", None, None))
+        })
     }
 
     fn open<'a, 'b, 'c, 'async_trait>(
@@ -2303,6 +2346,7 @@ pub fn create_driver(driver: Object<'_>) -> napi::Result<super::Filesystem> {
         syncfs: object_method(driver, "syncfs", &lifecycle)?,
         stat,
         readdir,
+        readdir_bounded: object_method(driver, "readdirBounded", &lifecycle)?,
         open,
         lstat: object_method(driver, "lstat", &lifecycle)?,
         statfs: object_method(driver, "statfs", &lifecycle)?,

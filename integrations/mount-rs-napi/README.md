@@ -123,6 +123,13 @@ this path with `getKeysBounded(prefix, maxKeys)`, which must return no more than
 overflow signal. The legacy `getKeys` callback alone is intentionally not used
 for bounded remote listings.
 
+Structural JavaScript `FsDriver` providers can opt into the same WebDAV-safe
+path with `readdirBounded(path, maxEntries)`. `createDriver` forwards the
+ceiling to that callback and rejects a callback result larger than the ceiling
+as `EOVERFLOW`; omitting the optional callback retains the explicit
+`ENOTSUP`/`501` capability boundary. The provider callback must enforce the
+bound before materializing and returning its listing.
+
 ## Optional observability
 
 The native crate has an opt-in `observability` feature that decorates every

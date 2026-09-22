@@ -327,9 +327,17 @@ Current focused behavior:
   the same fid number for different files, closing one leaves the other live,
   and a slow open does not delay a quick getattr in the same delivery. Exact
   SHA `9870d58cfbed5bcea90972c4b9caaf5db3075cef` passed [Native 9P run `35685807744`](https://github.com/andymac4182/mount-rs/actions/runs/35685807744),
-  N-API job `106612633937`, with Rust job `106612633771` also green. Shared
-  lock-table network behavior and the remaining server-boundary cases are
-  still separate gates.
+  N-API job `106612633937`, with Rust job `106612633771` also green. Remote
+  admission and the remaining server-boundary cases are still separate gates.
+- The same real TCP selector now exercises a configured shared `P9LockTable`
+  across two native sessions: the first write lock succeeds, the second
+  receives `P9_LOCK_BLOCKED` and reads the first holder through `Tgetlock`, and
+  closing the first session releases the range for the second. Exact SHA
+  `514d2c533382b927c059ccd946f3e566d2c371a9` passed [Native 9P run `35686403815`](https://github.com/andymac4182/mount-rs/actions/runs/35686403815),
+  N-API job `106614048924`, with Rust job `106614048722` also green. This
+  qualifies the configured shared-lock network slice; remote admission,
+  invalid-port/framing-isolation/large-payload/negotiated-msize cases, and
+  broader server-boundary parity remain separate gates.
 - The N-API object boundary keeps serializable lifecycle views: native
   `P9Server.address()`/`path` use string-or-null representations, and effective
   `onError`/`onAssertion` hooks are omitted from `server.options` and
