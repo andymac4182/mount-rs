@@ -11,9 +11,11 @@ const P9_SERVER_WRAPPED = Symbol("mountRsP9ServerWrapped")
 const P9_SESSION_SHAPES_WRAPPED = Symbol("mountRsP9SessionShapesWrapped")
 const P9_LOCK_TABLE_SHAPES_WRAPPED = Symbol("mountRsP9LockTableShapesWrapped")
 const P9_LOCK_CLIENT_SHAPES_WRAPPED = Symbol("mountRsP9LockClientShapesWrapped")
+const MOUNTED_VIEWS_WRAPPED = Symbol("mountRsMountedViewsWrapped")
 const SERVER_STATE = new WeakMap()
 const CONNECTION_STATE = new WeakMap()
 const P9_SESSION_STATE = new WeakMap()
+const MOUNTED_VIEW_STATE = new WeakMap()
 const MOUNT_CLOSED_STATE = new WeakMap()
 const FACTORIES_WRAPPED = Symbol("mountRsStructuralFactoriesWrapped")
 const S3_STREAM_WRAPPED = Symbol("mountRsS3StreamWrapped")
@@ -600,6 +602,15 @@ function connectionState(connection) {
   return state
 }
 
+function mountedViewState(mounted) {
+  let state = MOUNTED_VIEW_STATE.get(mounted)
+  if (state === undefined) {
+    state = {}
+    MOUNTED_VIEW_STATE.set(mounted, state)
+  }
+  return state
+}
+
 function cachedPromise(invoke, transform) {
   try {
     return Promise.resolve(invoke()).then(transform)
@@ -756,6 +767,52 @@ function wrapP9Connection(P9Connection) {
     })
   }
   Object.defineProperty(prototype, CONNECTION_WRAPPED, { value: true })
+}
+
+function wrapMounted(Mounted) {
+  if (!Mounted || !Mounted.prototype || Mounted.prototype[MOUNTED_VIEWS_WRAPPED]) return
+  const prototype = Mounted.prototype
+  const nativeServer = Object.getOwnPropertyDescriptor(prototype, "server")
+  const nativeConnection = Object.getOwnPropertyDescriptor(prototype, "connection")
+  if (typeof nativeServer?.get !== "function" && typeof nativeConnection?.get !== "function") return
+
+  if (typeof nativeServer?.get === "function") {
+    Object.defineProperty(prototype, "server", {
+      configurable: true,
+      enumerable: nativeServer.enumerable,
+      get() {
+        const state = mountedViewState(this)
+        if (state.server === undefined) state.server = nativeServer.get.call(this)
+        return state.server
+      },
+    })
+  }
+
+  if (typeof nativeConnection?.get === "function") {
+    Object.defineProperty(prototype, "connection", {
+      configurable: true,
+      enumerable: nativeConnection.enumerable,
+      get() {
+        const state = mountedViewState(this)
+        if (state.connection !== undefined) return state.connection
+        const connection = nativeConnection.get.call(this)
+        if (connection === null || connection === undefined) {
+          state.connection = connection
+          return connection
+        }
+
+        // `Mounted.server` and `Mounted.connection` are two views over the
+        // same transport. Reuse the server's cached client wrapper when the
+        // stable transport id is present, so close/closed/session identity is
+        // preserved across both public access paths.
+        const server = this.server
+        const cached = server?.clients?.find((candidate) => candidate.id === connection.id)
+        state.connection = cached ?? connection
+        return state.connection
+      },
+    })
+  }
+  Object.defineProperty(prototype, MOUNTED_VIEWS_WRAPPED, { value: true })
 }
 
 function wrapP9Session(P9Session, binding) {
@@ -1072,6 +1129,7 @@ module.exports = function installServers(binding) {
   wrapNfsConnection(binding && binding.NfsConnection)
   wrapS3Session(binding && binding.S3Session)
   wrapWebdavSession(binding && binding.WebdavSession)
+  wrapMounted(binding && binding.Mounted)
   installStructuralFactories(binding)
   return binding
 }
