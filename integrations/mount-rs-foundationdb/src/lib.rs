@@ -1644,6 +1644,35 @@ fn metadata_chunk_count(payload_len: usize, metadata_chunk_bytes: usize) -> Resu
     Ok(chunk_count)
 }
 
+fn metadata_chunk_key(prefix: &[u8], index: u32) -> Vec<u8> {
+    let mut key = Vec::with_capacity(prefix.len() + std::mem::size_of::<u32>());
+    key.extend_from_slice(prefix);
+    key.extend_from_slice(&index.to_be_bytes());
+    key
+}
+
+/// Return the smallest chunk key that must be cleared before a publication.
+///
+/// Existing chunks covered by the new manifest are overwritten by the same
+/// transaction. Clearing the whole range on every publication adds an
+/// unnecessary range mutation and conflict range to the common case where the
+/// chunk count is unchanged. A missing manifest still clears the full range
+/// so a pre-existing orphan cannot survive initialization; when a manifest
+/// shrinks, only its trailing chunks are stale.
+fn metadata_chunk_clear_start(
+    prefix: &[u8],
+    current_manifest: Option<Manifest>,
+    next_chunk_count: u32,
+) -> Option<Vec<u8>> {
+    match current_manifest {
+        None => Some(prefix.to_vec()),
+        Some(manifest) if manifest.chunk_count > next_chunk_count => {
+            Some(metadata_chunk_key(prefix, next_chunk_count))
+        }
+        Some(_) => None,
+    }
+}
+
 /// Conservatively estimate the affected bytes for a metadata publication.
 ///
 /// FoundationDB counts mutation bytes and read/write conflict-range endpoints.
@@ -1831,8 +1860,7 @@ impl MetadataStore for FoundationDbMetadataStore {
                     }
                     let mut payload = Vec::with_capacity(payload_len);
                     for index in 0..manifest.chunk_count {
-                        let mut key = chunk_prefix.clone();
-                        key.extend_from_slice(&index.to_be_bytes());
+                        let key = metadata_chunk_key(&chunk_prefix, index);
                         let Some(chunk) = get_owned(trx, &key).await? else {
                             return Err(TxnError::Fs(backend_error(
                                 "FoundationDB metadata chunk is missing",
@@ -2083,12 +2111,15 @@ impl MetadataStore for FoundationDbMetadataStore {
                             FsError::new(ErrorCode::Eagain).with_syscall("publish metadata"),
                         ));
                     }
-                    trx.clear_range(&chunk_prefix, &chunk_end);
+                    if let Some(clear_start) =
+                        metadata_chunk_clear_start(&chunk_prefix, current_manifest, chunk_count)
+                    {
+                        trx.clear_range(&clear_start, &chunk_end);
+                    }
                     for index in 0..chunk_count {
                         let start = index as usize * limits.metadata_chunk_bytes;
                         let end = (start + limits.metadata_chunk_bytes).min(payload.len());
-                        let mut key = chunk_prefix.clone();
-                        key.extend_from_slice(&index.to_be_bytes());
+                        let key = metadata_chunk_key(&chunk_prefix, index);
                         trx.set(&key, &payload[start..end]);
                     }
                     trx.set(&manifest_key, &manifest);
@@ -2537,6 +2568,40 @@ mod tests {
         assert_ne!(block_id(b"a"), block_id(b"b"));
         let end = range_end(b"prefix/").unwrap();
         assert_eq!(end, b"prefix0");
+    }
+
+    #[test]
+    fn metadata_publication_clears_only_missing_trailing_chunks() {
+        let prefix = b"volume/meta/chunk/";
+        assert_eq!(
+            metadata_chunk_clear_start(prefix, None, 2),
+            Some(prefix.to_vec())
+        );
+        assert_eq!(
+            metadata_chunk_clear_start(
+                prefix,
+                Some(Manifest {
+                    revision: 1,
+                    chunk_count: 4,
+                    payload_len: 32,
+                }),
+                2,
+            ),
+            Some(metadata_chunk_key(prefix, 2))
+        );
+        assert_eq!(
+            metadata_chunk_clear_start(
+                prefix,
+                Some(Manifest {
+                    revision: 2,
+                    chunk_count: 2,
+                    payload_len: 16,
+                }),
+                2,
+            ),
+            None
+        );
+        assert_eq!(metadata_chunk_key(prefix, 0), b"volume/meta/chunk/\0\0\0\0");
     }
 
     #[test]
