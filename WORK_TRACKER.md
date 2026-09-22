@@ -5525,7 +5525,19 @@ listing a source does not mean it has been reviewed or its code can be reused.
 
 ### W26 current authoritative status — 2026-09-22
 
-#### Latest W26 authority override — PGlite publication chunk
+#### Latest W26 authority override — exact-SHA qualification dispatch
+
+The PGlite implementation and progress ledger are published. Manual CI run
+`35691451007` selected exact shared SHA
+`dccd8351690ba21b4ea01ab8680369c76c442041` after the ledger push. At dispatch
+capture, base Ozone `106629129201`, TiDB `106629129183` and FoundationDB
+`106629129105` were in progress, compositions `106629129102` was queued and
+the aggregate was not yet created. This run is the first hosted packet that
+can exercise `e0180c75`, but queued/in-progress state is not evidence and
+production remains **NO-GO** until every producer and the aggregate are
+terminally successful on that one revision.
+
+#### Historical W26 authority override — PGlite publication chunk
 
 The current shared build-on tip is `origin/main` at
 `e0180c75a190340f2c0a45265803de9df5605d59`. The published W26 chunk

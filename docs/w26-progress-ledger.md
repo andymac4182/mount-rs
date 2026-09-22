@@ -5,6 +5,21 @@ workstream. It distinguishes repository implementation, local evidence, and
 hosted/native/provider acceptance. Estimates are provisional and are intended
 for engineering planning, not a commitment.
 
+## Current authority override — 2026-09-22, exact-SHA qualification dispatch
+
+The PGlite implementation and its ledger are published, and the next hosted
+qualification is now dispatched against the exact shared tip. This block is
+newer than the terminal diagnostic packet below; it records pending state only
+and does not promote queued or in-progress work to acceptance.
+
+| Field | Current value |
+| --- | --- |
+| Shared implementation tip | `origin/main` = `dccd8351690ba21b4ea01ab8680369c76c442041`; code chunk `e0180c75` is present and the ledger/tracker publication is `dccd8351`. |
+| Hosted qualification run | Run `35691451007` selected exact SHA `dccd8351690ba21b4ea01ab8680369c76c442041`; URL: `https://github.com/andymac4182/mount-rs/actions/runs/35691451007`. Parent status at dispatch capture: `queued`. |
+| Initial W26 job state | `ozone-compositions` `106629129102` queued; `ozone-foundationdb` `106629129105` in progress; `ozone-tidb` `106629129183` in progress; base `ozone` `106629129201` in progress; aggregate job not yet present. |
+| Acceptance state | **NO-GO / pending**. This run is the first packet eligible to test PGlite `e0180c75`, but it is not evidence until all W26 producers and the one-revision aggregate are terminal; any failed provider or missing pass marker remains fail-closed. |
+| Next action | Poll the W26 jobs, download retained artifacts/logs after terminal completion, record exact provider metrics and update this ledger before deciding whether another correctness-preserving implementation chunk is justified. |
+
 ## Current authority override — 2026-09-22, PGlite publication chunk
 
 This is the newest shared build-on boundary. Older current-status blocks remain
@@ -1003,6 +1018,7 @@ separately because they are elapsed wall-clock, not implementation effort.
 | 2026-09-22 — PGlite autocommit publication fast path | Moved successful PGlite fenced metadata publication from an explicit transaction to one parameterized PostgreSQL autocommit conditional UPDATE; retained the explicit locked classification transaction only for zero-row outcomes and kept fail-closed semantics. | ~1.5–2.5 h implementation/design; estimate remains provisional | Focused PGlite compile/tests, full locked workspace tests, strict workspace Clippy, formatting and diff checks all passed; five server-dependent focused tests remained ignored because no local isolated PGlite server was available. | Commit `e0180c75a190340f2c0a45265803de9df5605d59` is verified on `origin/main`; security scan `6906585f-77c3-41fa-afe0-06ab4df9e2c6` sealed with complete coverage and zero reportable findings. This is local implementation/security evidence only; the next hosted packet must select this exact revision. | Hosted PGlite/Ozone latency, provider startup and CI artifact retention remain external; no target reduction or semantic weakening is authorized. |
 | 2026-09-22 — Terminal review of pre-PGlite hosted packet | Rechecked run `35689474986`, its exact tested SHA, terminal W26 producer jobs, retained artifact IDs/digests and the fail-closed aggregate log. | ~0.75–1.25 h hosted evidence review; estimate remains provisional | W26 jobs `106623193674` (base), `106623193668` (compositions), `106623193474` (TiDB), `106623193564` (FoundationDB) and aggregate `106625464560` are terminal; the parent workflow remains in progress only for unrelated jobs. | The packet selected `1891c363` before `e0180c75`: SQLite/R2 `1,325.636778` IOPS passed, PGlite/R2 `766.631418`, TiDB/R2 `292.606794` and FoundationDB/R2 `410.703639` failed; all four rows completed 1,200/1,200 operations with zero timeout/cleanup failures. Aggregate failed closed on missing `OZONE_IOPS_PASS`; no acceptance is promoted. | Fresh exact-SHA dispatch, hosted runner/provider startup and Ozone/customer capacity are external gates. |
 | 2026-09-22 — W26 current ledger/tracker refresh after PGlite publication | Added the current authority override, every W26 work-item row, exact hosted metrics, artifact identities, production envelope, external ownership boundaries and this session log entry to `docs/w26-progress-ledger.md` and `WORK_TRACKER.md`. | ~0.75–1.25 h documentation; estimate remains provisional | `git diff --check` and the documentation review remain required before the separate tracker/ledger commit and push; the next work chunk is a fresh exact-SHA hosted qualification. | Documentation will be committed and pushed separately at the current clean implementation tip so other threads can build on the complete ledger. | No staging environment exists; customer deployment, secure Ozone runtime, 99.99%/RPO/RTO, backup/DR and release execution remain external/non-W26 gates. |
+| 2026-09-22 — Fresh exact-SHA W26 qualification dispatch | Dispatched the non-canceling CI workflow after publishing the PGlite implementation and ledger; captured the selected SHA and initial producer state. | ~0.1–0.25 h dispatch/status capture; estimate remains provisional | Run `35691451007` targets `dccd8351690ba21b4ea01ab8680369c76c442041`; compositions `106629129102` was queued, FoundationDB `106629129105`, TiDB `106629129183` and base Ozone `106629129201` were in progress, and the aggregate was not yet created. | No hosted result is promoted while jobs are queued/in progress. Poll to terminal, retrieve artifacts/logs and update the ledger before the next implementation decision. | GitHub-hosted runner queue, Ozone/provider startup, artifact retention and customer-like capacity are external elapsed gates. |
 
 ## Current status addendum — hosted runs `35677828440` / `35678993571` and lockfile-gate correction
 
