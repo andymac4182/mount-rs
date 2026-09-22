@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { chmod, mkdtemp, rm, stat } from "node:fs/promises";
 import * as net from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Duplex } from "node:stream";
 import { pathToFileURL } from "node:url";
 
@@ -210,6 +213,18 @@ async function connectLoopback(port) {
   return { socket, reader: new BufferedSocket(socket) };
 }
 
+async function connectUnix(path) {
+  const socket = net.createConnection({ path });
+  await within(
+    new Promise((resolve, reject) => {
+      socket.once("connect", resolve);
+      socket.once("error", reject);
+    }),
+    `connect to ${path}`,
+  );
+  return { socket, reader: new BufferedSocket(socket) };
+}
+
 async function closeSocket(socket, label) {
   if (!socket.destroyed) {
     socket.destroy();
@@ -278,6 +293,15 @@ function nfsV4Call(xid, tag, operations) {
     verf: nfs.AUTH_NULL,
     args: nfsV4Compound(tag, operations),
   });
+}
+
+function nativeErrorMessage(error) {
+  const message = String(error?.message ?? error);
+  const fields = message.split("|");
+  if (fields[0] === "__mount_rs_error_v1__" && fields.length === 7) {
+    return Buffer.from(fields[6], "hex").toString("utf8");
+  }
+  return message;
 }
 
 function decodeNfsV4Compound(reply, label) {
@@ -874,6 +898,86 @@ async function exerciseP9() {
       closeLifecycle(server, "9P", listening),
     );
     assert.equal(reports.length, 1);
+  }
+}
+
+async function exerciseP9Unix() {
+  if (process.platform === "win32") return;
+
+  const directory = await mkdtemp(join(tmpdir(), "mount-rs-napi-9p-unix-"));
+  await chmod(directory, 0o700);
+  try {
+    const path = join(directory, "9p.sock");
+    const server = createP9Server(memoryFilesystem(), { path, socketMode: 0o600 });
+    let socket;
+    let serverReader;
+    try {
+      assert.equal(server.path, path);
+      assert.equal(server.address(), path);
+      await within(server.listen(), "9P Unix listen");
+      assert.equal(server.path, path);
+      assert.equal(server.address(), path);
+      assert.equal((await stat(path)).mode & 0o777, 0o600);
+
+      ({ socket, reader: serverReader } = await connectUnix(path));
+      await p9Request(
+        socket,
+        serverReader,
+        100,
+        0xffff,
+        Buffer.concat([Buffer.from([0x00, 0x00, 0x01, 0x00]), p9String("9P2000.L")]),
+        101,
+      );
+      const [connection] = server.clients;
+      assert.ok(connection);
+      assert.equal(connection.stream, undefined);
+      assert.equal(connection.peer, path);
+    } finally {
+      if (socket) await closeSocket(socket, "9P Unix socket close");
+      await within(server.close(), "9P Unix server close");
+    }
+    await assert.rejects(stat(path), (error) => error?.code === "ENOENT");
+
+    await chmod(directory, 0o755);
+    const refusedPath = join(directory, "refused.sock");
+    const refused = createP9Server(memoryFilesystem(), { path: refusedPath });
+    await assert.rejects(
+      refused.listen(),
+      (error) => /directory must be uid .* mode 0700/.test(nativeErrorMessage(error)),
+    );
+    await refused.close();
+
+    const sharedPath = join(directory, "shared.sock");
+    const shared = createP9Server(memoryFilesystem(), {
+      path: sharedPath,
+      allowSharedDirectory: true,
+    });
+    let sharedSocket;
+    let sharedReader;
+    try {
+      await within(shared.listen(), "9P shared-directory Unix listen");
+      assert.equal((await stat(sharedPath)).mode & 0o777, 0o600);
+      ({ socket: sharedSocket, reader: sharedReader } = await connectUnix(sharedPath));
+      await p9Request(
+        sharedSocket,
+        sharedReader,
+        100,
+        0xffff,
+        Buffer.concat([Buffer.from([0x00, 0x00, 0x01, 0x00]), p9String("9P2000.L")]),
+        101,
+      );
+    } finally {
+      if (sharedSocket) await closeSocket(sharedSocket, "9P shared Unix socket close");
+      await within(shared.close(), "9P shared-directory Unix server close");
+    }
+    await assert.rejects(stat(sharedPath), (error) => error?.code === "ENOENT");
+
+    assert.throws(
+      () => createP9Server(memoryFilesystem(), { path: join(directory, "both.sock"), port: 0 }),
+      (error) => /either path or host\/port, not both/.test(nativeErrorMessage(error)),
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 }
 
@@ -1868,6 +1972,7 @@ await within(
   (async () => {
     if (requestedServerPhase === "p9") {
       await runPhase("9P exercise", exerciseP9);
+      await runPhase("9P Unix listener policy", exerciseP9Unix);
       await runPhase("9P attached stream", exerciseP9AttachedStream);
       await runPhase("9P attached duplex", exerciseP9AttachedDuplex);
       await runPhase("9P attached backpressure", exerciseP9AttachedBackpressure);
@@ -1885,6 +1990,7 @@ await within(
     await runPhase("NFS exercise", exerciseNfs);
     await runPhase("NFS session destroy", exerciseNfsSessionDestroy);
     await runPhase("9P exercise", exerciseP9);
+    await runPhase("9P Unix listener policy", exerciseP9Unix);
     await runPhase("9P attached stream", exerciseP9AttachedStream);
     await runPhase("9P attached duplex", exerciseP9AttachedDuplex);
     await runPhase("9P attached backpressure", exerciseP9AttachedBackpressure);

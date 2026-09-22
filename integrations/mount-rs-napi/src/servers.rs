@@ -46,12 +46,14 @@ use mount_rs_nfs::{
 };
 use mount_rs_s3::{
     Credentials as TransportS3Credentials, HeaderEntry as TransportS3HeaderEntry,
+    S3ErrorHook as TransportS3SessionErrorHook, S3NowHook as TransportS3NowHook,
     S3RequestBody as TransportS3RequestBody, S3RequestHead as TransportS3RequestHead,
-    S3Response as TransportS3Response, S3ResponseBodyStream as TransportS3ResponseBodyStream,
-    S3Server as TransportS3Server, S3ServerHooks as TransportS3ServerHooks,
-    S3ServerOptions as TransportS3ServerOptions, S3Session as TransportS3Session, S3SessionOptions,
-    S3StreamBody as TransportS3StreamBody, S3StreamResponse as TransportS3StreamResponse,
-    S3TransportError as TransportS3Error, S3TransportErrorHook as TransportS3ErrorHook,
+    S3RequestIdHook as TransportS3RequestIdHook, S3Response as TransportS3Response,
+    S3ResponseBodyStream as TransportS3ResponseBodyStream, S3Server as TransportS3Server,
+    S3ServerHooks as TransportS3ServerHooks, S3ServerOptions as TransportS3ServerOptions,
+    S3Session as TransportS3Session, S3SessionOptions, S3StreamBody as TransportS3StreamBody,
+    S3StreamResponse as TransportS3StreamResponse, S3TransportError as TransportS3Error,
+    S3TransportErrorHook as TransportS3ErrorHook,
 };
 use mount_rs_webdav::{
     WebdavBody as TransportWebdavBody, WebdavError as TransportWebdavRequestError,
@@ -662,7 +664,7 @@ impl NfsClockCallback {
         receiver.recv().ok().flatten()
     }
 
-    fn release(&self) {
+    pub(crate) fn release(&self) {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -889,7 +891,7 @@ impl P9AssertionCallback {
         }))
     }
 
-    fn report(&self, message: String) {
+    pub(crate) fn report(&self, message: String) {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
@@ -940,6 +942,197 @@ impl P9AssertionCallback {
 impl Drop for P9AssertionCallback {
     fn drop(&mut self) {
         self.release();
+    }
+}
+
+pub(crate) type JsS3RequestIdCallback = Function<'static, Unknown<'static>, Unknown<'static>>;
+type S3RequestIdTsfn = ThreadsafeFunction<(), Unknown<'static>, (), Status, false, false>;
+
+struct S3RequestIdCallback {
+    callback: Mutex<Option<Arc<S3RequestIdTsfn>>>,
+    closed: AtomicBool,
+}
+
+impl S3RequestIdCallback {
+    fn new(function: JsS3RequestIdCallback) -> napi::Result<Arc<Self>> {
+        let callback = function
+            .build_threadsafe_function::<()>()
+            .weak::<false>()
+            .callee_handled::<false>()
+            .build_callback(|_| Ok(()))?;
+        Ok(Arc::new(Self {
+            callback: Mutex::new(Some(Arc::new(callback))),
+            closed: AtomicBool::new(false),
+        }))
+    }
+
+    fn call(&self) -> Option<String> {
+        if self.closed.load(Ordering::Acquire) {
+            return None;
+        }
+        let callback = match self.callback.lock() {
+            Ok(callback) => callback.as_ref().cloned(),
+            Err(poisoned) => poisoned.into_inner().as_ref().cloned(),
+        }?;
+        let (sender, receiver) = sync_channel(1);
+        let status = callback.call_with_return_value(
+            (),
+            ThreadsafeFunctionCallMode::NonBlocking,
+            move |result, _env| {
+                let _ = sender.send(result.ok().and_then(parse_nfs_name));
+                Ok(())
+            },
+        );
+        if status != Status::Ok {
+            return None;
+        }
+        receiver.recv().ok().flatten()
+    }
+
+    fn release(&self) {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let callback = match self.callback.lock() {
+            Ok(mut callback) => callback.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        let Some(callback) = callback else {
+            return;
+        };
+        callback.handle.with_write_aborted(|mut aborted| {
+            if !*aborted {
+                // SAFETY: the raw TSFN is owned by `callback.handle`; the
+                // write guard serializes this abort with calls and Drop.
+                let _ = unsafe {
+                    sys::napi_release_threadsafe_function(
+                        callback.handle.get_raw(),
+                        sys::ThreadsafeFunctionReleaseMode::abort,
+                    )
+                };
+                *aborted = true;
+            }
+        });
+    }
+}
+
+impl Drop for S3RequestIdCallback {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+pub(crate) type JsS3ErrorCallback = Function<'static, Unknown<'static>, Unknown<'static>>;
+type S3ErrorCall = FnArgs<(Error, Option<S3RequestHead>)>;
+type S3ErrorTsfn =
+    ThreadsafeFunction<S3ErrorEvent, Unknown<'static>, S3ErrorCall, Status, false, false>;
+
+#[derive(Clone)]
+struct S3ErrorEvent {
+    message: String,
+    head: Option<TransportS3RequestHead>,
+}
+
+struct S3ErrorCallback {
+    callback: Mutex<Option<Arc<S3ErrorTsfn>>>,
+    closed: AtomicBool,
+}
+
+impl S3ErrorCallback {
+    fn new(function: JsS3ErrorCallback) -> napi::Result<Arc<Self>> {
+        let callback = function
+            .build_threadsafe_function::<S3ErrorEvent>()
+            .weak::<false>()
+            .callee_handled::<false>()
+            .build_callback(|context| {
+                let event = context.value;
+                Ok(FnArgs::from((
+                    Error::new(Status::GenericFailure, event.message),
+                    event.head.map(napi_s3_request_head),
+                )))
+            })?;
+        Ok(Arc::new(Self {
+            callback: Mutex::new(Some(Arc::new(callback))),
+            closed: AtomicBool::new(false),
+        }))
+    }
+
+    fn report(&self, message: String, head: Option<TransportS3RequestHead>) {
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        let callback = match self.callback.lock() {
+            Ok(callback) => callback.as_ref().cloned(),
+            Err(poisoned) => poisoned.into_inner().as_ref().cloned(),
+        };
+        let Some(callback) = callback else {
+            return;
+        };
+        let _ = callback.call_with_return_value(
+            S3ErrorEvent { message, head },
+            ThreadsafeFunctionCallMode::NonBlocking,
+            |result, _env| {
+                let _ = result;
+                Ok(())
+            },
+        );
+    }
+
+    fn release(&self) {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let callback = match self.callback.lock() {
+            Ok(mut callback) => callback.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        let Some(callback) = callback else {
+            return;
+        };
+        callback.handle.with_write_aborted(|mut aborted| {
+            if !*aborted {
+                // SAFETY: the raw TSFN is owned by `callback.handle`; the
+                // write guard serializes this abort with calls and Drop.
+                let _ = unsafe {
+                    sys::napi_release_threadsafe_function(
+                        callback.handle.get_raw(),
+                        sys::ThreadsafeFunctionReleaseMode::abort,
+                    )
+                };
+                *aborted = true;
+            }
+        });
+    }
+}
+
+impl Drop for S3ErrorCallback {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+#[derive(Default)]
+struct S3CallbackKeepalive {
+    now: Option<Arc<NfsClockCallback>>,
+    request_id: Option<Arc<S3RequestIdCallback>>,
+    on_error: Option<Arc<S3ErrorCallback>>,
+    on_assertion: Option<Arc<P9AssertionCallback>>,
+}
+
+impl S3CallbackKeepalive {
+    fn release(&self) {
+        if let Some(callback) = &self.now {
+            callback.release();
+        }
+        if let Some(callback) = &self.request_id {
+            callback.release();
+        }
+        if let Some(callback) = &self.on_error {
+            callback.release();
+        }
+        if let Some(callback) = &self.on_assertion {
+            callback.release();
+        }
     }
 }
 
@@ -3468,6 +3661,10 @@ pub struct S3ServerOptions {
     pub port: Option<f64>,
     pub credentials: Option<S3Credentials>,
     pub region: Option<String>,
+    #[napi(ts_type = "() => number")]
+    pub now: Option<JsNfsClockCallback>,
+    #[napi(ts_type = "() => string")]
+    pub request_id: Option<JsS3RequestIdCallback>,
     pub max_body_bytes: Option<f64>,
     pub max_xml_bytes: Option<f64>,
     pub read_chunk_bytes: Option<f64>,
@@ -3475,6 +3672,10 @@ pub struct S3ServerOptions {
     pub debug: Option<bool>,
     #[napi(ts_type = "(error: unknown, peer: string | undefined) => void")]
     pub on_transport_error: Option<JsTransportErrorCallback>,
+    #[napi(ts_type = "(error: unknown, head: S3RequestHead | undefined) => void")]
+    pub on_error: Option<JsS3ErrorCallback>,
+    #[napi(ts_type = "(message: string) => void")]
+    pub on_assertion: Option<JsP9AssertionCallback>,
 }
 
 type S3FactoryOptions = (
@@ -3484,6 +3685,7 @@ type S3FactoryOptions = (
     TransportS3ServerOptions,
     S3SessionOptions,
     Option<JsTransportErrorCallback>,
+    S3CallbackKeepalive,
 );
 
 fn s3_options(options: Option<S3ServerOptions>) -> Result<S3FactoryOptions, Error> {
@@ -3493,14 +3695,34 @@ fn s3_options(options: Option<S3ServerOptions>) -> Result<S3FactoryOptions, Erro
         port: None,
         credentials: None,
         region: None,
+        now: None,
+        request_id: None,
         max_body_bytes: None,
         max_xml_bytes: None,
         read_chunk_bytes: None,
         drain_timeout: None,
         debug: None,
         on_transport_error: None,
+        on_error: None,
+        on_assertion: None,
     });
     let on_transport_error = options.on_transport_error;
+    let now = options.now.map(NfsClockCallback::new).transpose()?;
+    let request_id = options
+        .request_id
+        .map(S3RequestIdCallback::new)
+        .transpose()?;
+    let on_error = options.on_error.map(S3ErrorCallback::new).transpose()?;
+    let on_assertion = options
+        .on_assertion
+        .map(P9AssertionCallback::new)
+        .transpose()?;
+    let callbacks = S3CallbackKeepalive {
+        now: now.clone(),
+        request_id: request_id.clone(),
+        on_error: on_error.clone(),
+        on_assertion: on_assertion.clone(),
+    };
     let (host, address) = ip_host(options.host, "127.0.0.1")?;
     let port = u16_number("port", options.port, 0)?;
     let credentials = options.credentials.map(|credentials| {
@@ -3527,6 +3749,28 @@ fn s3_options(options: Option<S3ServerOptions>) -> Result<S3FactoryOptions, Erro
         session.read_chunk_bytes,
     )?;
     session.debug = options.debug.unwrap_or(session.debug);
+    if let Some(callback) = now {
+        session.hooks.now_ms = Some(Arc::new(move || {
+            callback.call().and_then(|value| {
+                (i64::MIN as f64..=i64::MAX as f64)
+                    .contains(&value)
+                    .then_some(value as i64)
+            })
+        }) as TransportS3NowHook);
+    }
+    if let Some(callback) = request_id {
+        session.hooks.request_id =
+            Some(Arc::new(move || callback.call()) as TransportS3RequestIdHook);
+    }
+    if let Some(callback) = on_error {
+        session.hooks.on_error = Some(
+            Arc::new(move |message, head| callback.report(message, head))
+                as TransportS3SessionErrorHook,
+        );
+    }
+    if let Some(callback) = on_assertion {
+        session.hooks.on_assertion = Some(Arc::new(move |message| callback.report(message)));
+    }
     let mut server_options = TransportS3ServerOptions {
         host: address,
         port,
@@ -3544,6 +3788,7 @@ fn s3_options(options: Option<S3ServerOptions>) -> Result<S3FactoryOptions, Erro
         server_options,
         session,
         on_transport_error,
+        callbacks,
     ))
 }
 
@@ -3816,6 +4061,21 @@ fn transport_s3_head(head: S3RequestHead) -> TransportS3RequestHead {
     }
 }
 
+fn napi_s3_request_head(head: TransportS3RequestHead) -> S3RequestHead {
+    S3RequestHead {
+        method: head.method,
+        target: head.target,
+        headers: head
+            .headers
+            .into_iter()
+            .map(|header| S3Header {
+                name: header.name,
+                value: header.value,
+            })
+            .collect(),
+    }
+}
+
 /// Read-only N-API view of the in-process S3 session shared by a server.
 /// Request dispatch remains owned by the Rust session; this view exposes the
 /// streaming boundary without taking ownership of the underlying drivers.
@@ -3948,6 +4208,7 @@ pub struct S3Server {
     binding: AtomicBool,
     closed: AtomicBool,
     transport_error: Option<Arc<TransportErrorCallback>>,
+    callbacks: S3CallbackKeepalive,
 }
 
 #[napi]
@@ -4047,6 +4308,7 @@ impl S3Server {
         if let Some(callback) = &self.transport_error {
             callback.release();
         }
+        self.callbacks.release();
         let running = self.running.lock().expect("S3 server lock").take();
         if let Some(server) = running {
             server
@@ -4071,8 +4333,15 @@ pub fn create_s3_server(
     >,
     options: Option<S3ServerOptions>,
 ) -> napi::Result<S3Server> {
-    let (host, requested_port, bucket, server_options, session_options, on_transport_error) =
-        s3_options(options)?;
+    let (
+        host,
+        requested_port,
+        bucket,
+        server_options,
+        session_options,
+        on_transport_error,
+        callbacks,
+    ) = s3_options(options)?;
     let buckets = s3_buckets(source, bucket)?;
     let session = Arc::new(TransportS3Session::from_buckets_with_options(
         buckets,
@@ -4092,6 +4361,7 @@ pub fn create_s3_server(
         binding: AtomicBool::new(false),
         closed: AtomicBool::new(false),
         transport_error,
+        callbacks,
     })
 }
 

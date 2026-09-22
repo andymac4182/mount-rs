@@ -3084,7 +3084,7 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   current NO-GO, premature-GO, missing-gate, missing-drill and synthetic
   complete-GO states; these cases validate the tracking control only.
   The hosted workflow also runs `scripts/test-w07-qualification-log.mjs` with
-  five credential-free verifier cases. The qualification log verifier now
+  seven credential-free verifier cases. The qualification log verifier now
   requires the exact accepted configuration shape, both expected negative
   fixtures and a parsed lease-publication policy whose cadence is shorter
   than the TTL, whose forward-jump bound is no larger than the TTL and whose
@@ -3185,8 +3185,10 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     process-local `stats()` snapshots for publication/read attempts,
     successes/failures, last provider-time observations and local diagnostic
     timestamps; the hosted shared-authority path asserts the success/failure
-    accounting and emits `FOUNDATIONDB_AUTHORITY_STATS_PASS`. Map these
-    snapshots into the approved collector and pager, publish dashboards,
+    accounting and emits `FOUNDATIONDB_AUTHORITY_STATS_PASS`; the
+    qualification-log verifier now fails closed unless the bounded heartbeat
+    and stats markers are present and their counters/policy values reconcile.
+    Map these snapshots into the approved collector and pager, publish dashboards,
     escalation thresholds and incident/recovery ownership, then execute the
     alert drills. The API is an implementation input only: counters reset with
     a new handle and no production collector, alert route or owner evidence is
@@ -4057,6 +4059,15 @@ reproducible in a production-like environment.
   differential. These are current local and pinned-oracle gates only; live
   AWS/R2, physical power-loss durability, broader workload bounds, and
   native/hosted acceptance remain open, so W01-S3 stays **NO-GO**.
+- [x] The subsequent W01-S3 option/callback packet added Rust `S3SessionHooks`
+  and N-API `now`, `requestId`, `onError`, and `onAssertion` controls with
+  close-safe callback ownership. The release addon/declaration build,
+  callback observability test, Rust 5/6/29/5 packet, warning-denied Clippy,
+  package typecheck/distribution, session differential, 64-way/CAS
+  concurrency, and process-restart recovery passed. Current AWS remains
+  blocked by `missing_bucket` and current R2 by `count=285 limit=20`; physical
+  power-loss durability, broader workload bounds, and native/hosted acceptance
+  remain open, so W01-S3 stays **NO-GO**.
 - [ ] W10.1 Finish per-transport backend/platform acceptance matrix, including
   native lifecycle, disconnect/error behavior and streaming/backpressure.
 - [ ] W10.2 Verify transport auto-selection and explicit unsupported behavior.

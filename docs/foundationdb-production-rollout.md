@@ -415,6 +415,16 @@ missing-negative-fixture, unsafe-cadence and unbounded-config cases. These are
 evidence-integrity checks only; they do not create production credentials,
 identity, failover, backup, capacity or owner evidence.
 
+The qualification-log verifier also fails closed unless the hosted log contains
+the bounded authority heartbeat marker and the shared-authority stats marker.
+It validates that heartbeat cadence and forward-jump bounds match the emitted
+lease policy, that the authority and reader attempt counters reconcile with
+their success/failure counts, and that both paths observed a non-zero provider
+time. The credential-free regression suite now exercises seven cases, including
+missing-heartbeat and inconsistent-stats failures. This strengthens evidence
+integrity for the production-shaped lane; it does not turn test heartbeat or
+process-local counters into deployed monitoring, ACL, failover or owner proof.
+
 The same workflow also runs
 `scripts/verify-w07-rollout-ledger.mjs`. Its
 `W07_ROLLOUT_LEDGER_POLICY_PASS` marker is an internal consistency guard: while
