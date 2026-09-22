@@ -182,8 +182,11 @@ stable handle verifier. A caller can reconnect to a still-running server and
 reuse the tested session, but `NfsConnection` close/wait state does not provide
 automatic reconnect, lease recovery, or crash-durable session/reply state;
 the restart-boundary test therefore classifies v4 session/lease/replay state as
-process-local. Backend crash recovery and durability behavior remains outside
-the supported local scope until a separate qualification lane is accepted.
+process-local. A host-backed forced-process-restart test now proves that one
+NFSv4.1 `FILE_SYNC4` write can be reopened and read through a fresh session
+after rejecting the old session and file handle. This is process-crash data
+recovery on one host, not power-loss durability or persistent v4 lease,
+replay, or handle state.
 
 The N-API boundary now also supports the upstream synchronous NFSv4
 `idmap.nameOf`, `idmap.idOf`, and `now` callbacks. Callback results must be

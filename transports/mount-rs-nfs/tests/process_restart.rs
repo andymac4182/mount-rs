@@ -1,4 +1,4 @@
-//! Cross-process NFSv3 crash/restart evidence with a persistent host backend.
+//! Cross-process NFSv3/v4.1 crash/restart evidence with a persistent host backend.
 //!
 //! The child server is terminated without running its async shutdown path.
 //! The replacement server must still expose the file written through the NFS
@@ -25,7 +25,10 @@ use mount_rs_nfs::protocol::{
     write_dir_op, write_read_args, write_write_args,
 };
 use mount_rs_nfs::rpc::{RPC_SUCCESS, RecordAssembler, decode_reply, encode_call, frame_record};
-use mount_rs_nfs::v4::{CREATE_SESSION4_FLAG_CONN_BACK_CHAN, NFS4ERR_BADSESSION, NFS4ERR_STALE};
+use mount_rs_nfs::v4::{
+    ACCESS4_READ, CLAIM_NULL, CREATE_SESSION4_FLAG_CONN_BACK_CHAN, FILE_SYNC4, NFS4ERR_BADSESSION,
+    NFS4ERR_STALE, OPEN4_CREATE, OPEN4_NOCREATE, OPEN4_SHARE_ACCESS_BOTH, UNCHECKED4,
+};
 use mount_rs_nfs::xdr::{XdrReader, XdrWriter, encode_xdr};
 use mount_rs_nfs::{NFS_V4, NFS4_PROGRAM, NfsServer, NfsServerOptions};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader as AsyncBufReader};
@@ -40,11 +43,16 @@ const V4_TEST_NAME: &str = "nfs_v4_session_and_handles_are_process_local_after_p
 static NEXT_ROOT_ID: AtomicU64 = AtomicU64::new(0);
 
 const OP_GETFH: u32 = 10;
+const OP_OPEN: u32 = 18;
 const OP_PUTFH: u32 = 22;
 const OP_PUTROOTFH: u32 = 24;
+const OP_READ: u32 = 25;
+const OP_WRITE: u32 = 38;
 const OP_EXCHANGE_ID: u32 = 42;
 const OP_CREATE_SESSION: u32 = 43;
 const OP_SEQUENCE: u32 = 53;
+const OP_RECLAIM_COMPLETE: u32 = 58;
+const V4_RECOVERY_FILE: &str = "v4-crash-recovered.txt";
 
 struct TestRoot(PathBuf);
 
@@ -273,7 +281,7 @@ async fn establish_v4_session(
     stream: &mut TcpStream,
     xid: u32,
     owner: &[u8],
-) -> ([u8; 16], Vec<u8>) {
+) -> (u64, [u8; 16], Vec<u8>) {
     let exchange_record = exchange(
         stream,
         encode_call(
@@ -367,7 +375,197 @@ async fn establish_v4_session(
     assert_eq!(v4_result_status(&mut response, OP_GETFH), 0);
     let root_handle = response.var_opaque(128, "NFSv4 root handle").unwrap();
     response.end("NFSv4 root response").unwrap();
-    (session, root_handle)
+    (clientid, session, root_handle)
+}
+
+async fn v4_reclaim_complete(stream: &mut TcpStream, xid: u32, session: &[u8; 16]) {
+    let record = exchange(
+        stream,
+        encode_call(
+            xid,
+            NFS4_PROGRAM,
+            NFS_V4,
+            1,
+            None,
+            None,
+            &v4_compound(
+                "crash-reclaim-complete",
+                &[
+                    v4_sequence(session, 2),
+                    v4_op(OP_RECLAIM_COMPLETE, |writer| writer.bool(false)),
+                ],
+            ),
+        ),
+    )
+    .await;
+    let mut response = v4_reader(&record);
+    assert_eq!(v4_compound_status(&mut response, 2), 0);
+    v4_consume_sequence(&mut response);
+    assert_eq!(v4_result_status(&mut response, OP_RECLAIM_COMPLETE), 0);
+    response.end("NFSv4 reclaim-complete response").unwrap();
+}
+
+async fn v4_open_file(
+    stream: &mut TcpStream,
+    xid: u32,
+    clientid: u64,
+    session: &[u8; 16],
+    sequence: u32,
+    create: bool,
+) -> ([u8; 16], Vec<u8>) {
+    let open = v4_op(OP_OPEN, |writer| {
+        writer.u32(0);
+        writer.u32(if create {
+            OPEN4_SHARE_ACCESS_BOTH
+        } else {
+            ACCESS4_READ
+        });
+        writer.u32(0);
+        writer.u64(clientid);
+        writer.var_opaque(b"crash-recovery-owner");
+        writer.u32(if create { OPEN4_CREATE } else { OPEN4_NOCREATE });
+        if create {
+            writer.u32(UNCHECKED4);
+            writer.u32(0);
+            writer.u32(0);
+        }
+        writer.u32(CLAIM_NULL);
+        writer.string(V4_RECOVERY_FILE);
+    });
+    let record = exchange(
+        stream,
+        encode_call(
+            xid,
+            NFS4_PROGRAM,
+            NFS_V4,
+            1,
+            None,
+            None,
+            &v4_compound(
+                "crash-open",
+                &[
+                    v4_sequence(session, sequence),
+                    v4_op(OP_PUTROOTFH, |_| {}),
+                    open,
+                    v4_op(OP_GETFH, |_| {}),
+                ],
+            ),
+        ),
+    )
+    .await;
+    let mut response = v4_reader(&record);
+    assert_eq!(v4_compound_status(&mut response, 4), 0);
+    v4_consume_sequence(&mut response);
+    assert_eq!(v4_result_status(&mut response, OP_PUTROOTFH), 0);
+    assert_eq!(v4_result_status(&mut response, OP_OPEN), 0);
+    let stateid: [u8; 16] = response
+        .fixed_opaque(16, "NFSv4 open stateid")
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let _ = response.bool("NFSv4 open cinfo atomic").unwrap();
+    let _ = response.u64("NFSv4 open cinfo before").unwrap();
+    let _ = response.u64("NFSv4 open cinfo after").unwrap();
+    let _ = response.u32("NFSv4 open flags").unwrap();
+    let _ = response
+        .array(16, "NFSv4 open attrset", |reader| {
+            reader.u32("attribute word")
+        })
+        .unwrap();
+    assert_eq!(response.u32("NFSv4 open delegation").unwrap(), 0);
+    assert_eq!(v4_result_status(&mut response, OP_GETFH), 0);
+    let handle = response.var_opaque(128, "NFSv4 file handle").unwrap();
+    response.end("NFSv4 open response").unwrap();
+    (stateid, handle)
+}
+
+async fn v4_write_file(
+    stream: &mut TcpStream,
+    session: &[u8; 16],
+    sequence: u32,
+    stateid: &[u8; 16],
+    handle: &[u8],
+    payload: &[u8],
+) {
+    let record = exchange(
+        stream,
+        encode_call(
+            106,
+            NFS4_PROGRAM,
+            NFS_V4,
+            1,
+            None,
+            None,
+            &v4_compound(
+                "crash-write",
+                &[
+                    v4_sequence(session, sequence),
+                    v4_op(OP_PUTFH, |writer| writer.var_opaque(handle)),
+                    v4_op(OP_WRITE, |writer| {
+                        writer.fixed_opaque(stateid, 16);
+                        writer.u64(0);
+                        writer.u32(FILE_SYNC4);
+                        writer.var_opaque(payload);
+                    }),
+                ],
+            ),
+        ),
+    )
+    .await;
+    let mut response = v4_reader(&record);
+    assert_eq!(v4_compound_status(&mut response, 3), 0);
+    v4_consume_sequence(&mut response);
+    assert_eq!(v4_result_status(&mut response, OP_PUTFH), 0);
+    assert_eq!(v4_result_status(&mut response, OP_WRITE), 0);
+    assert_eq!(
+        response.u32("NFSv4 written bytes").unwrap(),
+        payload.len() as u32
+    );
+    assert_eq!(response.u32("NFSv4 committed level").unwrap(), FILE_SYNC4);
+    let _ = response.fixed_opaque(8, "NFSv4 write verifier").unwrap();
+    response.end("NFSv4 FILE_SYNC4 response").unwrap();
+}
+
+async fn v4_read_file(
+    stream: &mut TcpStream,
+    session: &[u8; 16],
+    sequence: u32,
+    stateid: &[u8; 16],
+    handle: &[u8],
+) -> Vec<u8> {
+    let record = exchange(
+        stream,
+        encode_call(
+            216,
+            NFS4_PROGRAM,
+            NFS_V4,
+            1,
+            None,
+            None,
+            &v4_compound(
+                "crash-read",
+                &[
+                    v4_sequence(session, sequence),
+                    v4_op(OP_PUTFH, |writer| writer.var_opaque(handle)),
+                    v4_op(OP_READ, |writer| {
+                        writer.fixed_opaque(stateid, 16);
+                        writer.u64(0);
+                        writer.u32(256);
+                    }),
+                ],
+            ),
+        ),
+    )
+    .await;
+    let mut response = v4_reader(&record);
+    assert_eq!(v4_compound_status(&mut response, 3), 0);
+    v4_consume_sequence(&mut response);
+    assert_eq!(v4_result_status(&mut response, OP_PUTFH), 0);
+    assert_eq!(v4_result_status(&mut response, OP_READ), 0);
+    assert!(response.bool("NFSv4 read EOF").unwrap());
+    let data = response.var_opaque(256, "NFSv4 recovered data").unwrap();
+    response.end("NFSv4 recovered read response").unwrap();
+    data
 }
 
 async fn mount_root(stream: &mut TcpStream, xid: u32) -> Vec<u8> {
@@ -573,7 +771,12 @@ async fn nfs_v4_session_and_handles_are_process_local_after_process_crash() {
     let mut first = TcpStream::connect(seed.address)
         .await
         .expect("connect seed NFSv4 server");
-    let (session, root_handle) = establish_v4_session(&mut first, 101, b"crash-client-seed").await;
+    let (clientid, session, root_handle) =
+        establish_v4_session(&mut first, 101, b"crash-client-seed").await;
+    v4_reclaim_complete(&mut first, 104, &session).await;
+    let (stateid, file_handle) = v4_open_file(&mut first, 105, clientid, &session, 3, true).await;
+    let payload = b"FILE_SYNC4 survives an NFSv4 server process crash";
+    v4_write_file(&mut first, &session, 4, &stateid, &file_handle, payload).await;
     first.shutdown().await.expect("close seed NFSv4 connection");
     drop(first);
     seed.crash().await;
@@ -582,8 +785,9 @@ async fn nfs_v4_session_and_handles_are_process_local_after_process_crash() {
     let mut second = TcpStream::connect(replacement.address)
         .await
         .expect("connect replacement NFSv4 server");
-    let (replacement_session, _) =
+    let (replacement_clientid, replacement_session, _) =
         establish_v4_session(&mut second, 201, b"crash-client-replacement").await;
+    v4_reclaim_complete(&mut second, 204, &replacement_session).await;
     let stale_record = exchange(
         &mut second,
         encode_call(
@@ -593,7 +797,7 @@ async fn nfs_v4_session_and_handles_are_process_local_after_process_crash() {
             1,
             None,
             None,
-            &v4_compound("stale-session", &[v4_sequence(&session, 2)]),
+            &v4_compound("stale-session", &[v4_sequence(&session, 5)]),
         ),
     )
     .await;
@@ -617,7 +821,7 @@ async fn nfs_v4_session_and_handles_are_process_local_after_process_crash() {
             &v4_compound(
                 "stale-handle",
                 &[
-                    v4_sequence(&replacement_session, 2),
+                    v4_sequence(&replacement_session, 3),
                     v4_op(OP_PUTFH, |writer| writer.var_opaque(&root_handle)),
                 ],
             ),
@@ -633,10 +837,58 @@ async fn nfs_v4_session_and_handles_are_process_local_after_process_crash() {
     v4_consume_sequence(&mut response);
     assert_eq!(v4_result_status(&mut response, OP_PUTFH), NFS4ERR_STALE);
     response.end("stale NFSv4 handle response").unwrap();
+    let stale_file_record = exchange(
+        &mut second,
+        encode_call(
+            213,
+            NFS4_PROGRAM,
+            NFS_V4,
+            1,
+            None,
+            None,
+            &v4_compound(
+                "stale-file-handle",
+                &[
+                    v4_sequence(&replacement_session, 4),
+                    v4_op(OP_PUTFH, |writer| writer.var_opaque(&file_handle)),
+                ],
+            ),
+        ),
+    )
+    .await;
+    let mut response = v4_reader(&stale_file_record);
+    assert_eq!(v4_compound_status(&mut response, 2), NFS4ERR_STALE);
+    v4_consume_sequence(&mut response);
+    assert_eq!(v4_result_status(&mut response, OP_PUTFH), NFS4ERR_STALE);
+    response.end("stale NFSv4 file handle response").unwrap();
+    let (replacement_stateid, replacement_handle) = v4_open_file(
+        &mut second,
+        215,
+        replacement_clientid,
+        &replacement_session,
+        5,
+        false,
+    )
+    .await;
+    assert_eq!(
+        v4_read_file(
+            &mut second,
+            &replacement_session,
+            6,
+            &replacement_stateid,
+            &replacement_handle,
+        )
+        .await,
+        payload
+    );
     second
         .shutdown()
         .await
         .expect("close replacement NFSv4 connection");
     drop(second);
     replacement.crash().await;
+    assert_eq!(
+        std::fs::read(root.0.join(V4_RECOVERY_FILE)).expect("read NFSv4 host file after crashes"),
+        payload
+    );
 }

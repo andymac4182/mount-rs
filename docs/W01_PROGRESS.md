@@ -59,6 +59,14 @@ ledger in the same commit as an implementation/evidence chunk.
 | W01-Auto/CLI | Auto selection, mount facade and SDK-backed consumers | Focused option/consumer paths exist; cross-transport native lifecycle remains | Per-transport options/callback ownership and signal/async-dispose evidence |
 | W01-Provider/Native | Providers, hosted CI, FSKit, Windows, crash and concurrency | Local capability-limited packets exist; external lanes remain | Fresh live-provider and hosted/native results with no prerequisite-gated acceptance rows |
 
+The W01-NFS forced-process-restart lane now also passes a host-backed NFSv4.1
+`FILE_SYNC4` write/reopen/readback: a replacement process rejects the old
+session and both old root/file handles, but a fresh session recovers the exact
+bytes by path. This is local one-host process-crash data evidence, not
+power-loss durability or persistent lease/replay/handle recovery. The corrected
+native-mountpoint packet remains unpublished, so the newer failed Ubuntu job
+does not close the exact-tip hosted gate; W01 remains **NO-GO**.
+
 WebDAV's streamed `PUT` boundary is deliberately oracle-compatible rather
 than an atomic-publication promise: a body failure returns an error and leaves
 the prefix already written at the destination. The focused Rust regression and

@@ -1488,6 +1488,19 @@ Evidence landed without closing the remaining W01 acceptance gates:
   tests and all applicable integration targets, with strict Clippy, formatting,
   and diff checks green. Socket write backpressure and native-client ordering
   remain separate gates.
+- [x] The host-backed NFSv4.1 forced-crash lane now writes a file with
+  `FILE_SYNC4`, kills the seed server, observes `NFS4ERR_BADSESSION` for the
+  old session and `NFS4ERR_STALE` for both old root/file handles, then opens
+  the same path and reads the exact bytes through a replacement session.
+  The persisted host file also has those bytes after the replacement exits.
+  Both process-restart tests, the complete locked NFS target (40 unit, 1
+  rootless native mountpoint claim with 1 mount ignored, 2 restart, 1 rootless
+  wire, 3 concurrency, 4 errors, 5 lifecycle, 1 v4 barrier, 7 v4 wire), and
+  warning-denied NFS Clippy pass; the process target also passed 10 consecutive
+  reruns, with formatting and diff checks clean. This qualifies local one-host
+  process-crash data recovery, not power-loss or durable v4 lease/replay/handle recovery;
+  native-client ordering, exact-tip hosted qualification, and W01-NFS
+  production acceptance remain open.
 - [x] The manual hosted NFS run `35670927787` at `fb9caec8` passed its macOS
   native job, while Ubuntu passed native v4.1 and then failed before its v3
   mount because parallel tests collided on a timestamp-only mountpoint.
