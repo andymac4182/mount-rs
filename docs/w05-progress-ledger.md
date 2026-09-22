@@ -1,6 +1,6 @@
 # W05 Cloudflare R2 progress ledger
 
-Last updated: 2026-09-22 12:53 AEST (2026-09-22 02:53 UTC)
+Last updated: 2026-09-22 13:00 AEST (2026-09-22 03:00 UTC)
 
 This is the working ledger for the W05 Cloudflare R2 workstream. Percentages
 and time estimates are provisional. They separate implementation work from
@@ -393,6 +393,16 @@ tip is limited to `WORK_TRACKER.md` and W01/W26 documentation, so the tested
 implementation remains code-identical but no hosted result is promoted to the
 new tip. Production remains NO-GO.
 
+Follow-up boundary at 12:57–13:00 AEST: the pushed ledger checkpoint
+`75248969` triggered a fresh hosted snapshot. W04 policy `35681358469`
+succeeded, while fault injection `35681358424`, CI `35681358476`, and W08
+policy `35681358387` were cancelled during workflow concurrency; W08 targets
+`35681358456` remained in progress at the final bounded poll. These statuses
+are recorded as non-terminal/cancelled hosted evidence only. The checkpoint
+changes documentation only over the tested `1bdf8846` implementation, and
+the production decision remains NO-GO pending one selected SHA with terminal
+green hosted/provider/native/package/scope gates.
+
 ## Production-readiness dependency register
 
 This register expands W05 from a closed provider slice into the complete
@@ -502,6 +512,7 @@ necessary provider gate, not a substitute for these release criteria.
 | Hosted current-main R2 `35628414156` | Failed at the monthly usage-envelope step with `count=139 limit=20`; live jobs skipped | Successful cost-safety refusal; no current-main live R2 evidence or provider operation was admitted, and the encrypted secrets were not passed to the skipped live jobs. Do not loosen the cap to force a run. |
 | Hosted current-main AWS `35625592317` | Failed closed at `AWS_S3_CI_CONFIG_BLOCKED missing_bucket` before OIDC/provider tests | This records the missing security-provisioned AWS environment boundary; it is not an AWS provider failure or acceptance pass. No credential value was read or persisted. |
 | Hosted exact-SHA packet `1bdf8846` / `35680709392`, `35680709400`, `35680709394`, `35680709423`, `35680709436` | W04 and fault injection succeeded; W08 policy in progress; W08 targets queued; CI cancelled | These statuses are revision-matched evidence only and do not form a production acceptance packet because required jobs are non-terminal or cancelled. R2/AWS were not admitted for this tip; the monthly R2 cap and security/OIDC preflight remain explicit blockers. |
+| Hosted ledger checkpoint `75248969` / `35681358469`, `35681358424`, `35681358456`, `35681358387`, `35681358476` | W04 succeeded; fault/CI/W08 policy cancelled; W08 targets remained in progress at bounded poll | The checkpoint is documentation-only over the tested implementation. Hosted concurrency cancellation and the non-terminal W08 target are not release acceptance; no provider credential was admitted or read. |
 | Hosted current-main CI/W08/fault | At the 2026-09-22 08:23 AEST live check, current head was `b27dd2bb`: CI `35662346488` queued with duplicate CI `35662257713` queued, W04 policy `35662257709` pending, W08 policy `35662257731` pending, fault `35662257717` queued, and W08 targets `35662257718` pending; no terminal workflow for exact `6f29d9ce` or `b27dd2bb` was listed | These runs are not terminal release evidence for the final release revision and may be superseded by concurrent shared-main pushes. The preceding R2 admission `35662206094` on superseded `5026a230` remained queued only at admission and was not provider evidence. The current local evidence does not promote queued, cancelled, stale, revision-mismatched, or cap-denied runs to release acceptance; a fresh terminal packet on one final SHA is required. |
 | Hosted S3 publication regression `7ed1075` / fix `39a19fd` | Hosted Rust and Node HTTP paths reported nested streaming PUT `404`/`200` mismatch and test-driver `501`; local follow-up passed gateway `14/14`, R2 interop `2/2`, and earlier Node HTTP parity `40` paired cases | The implementation regression and staged-upload retention defect are fixed locally and included in the current ancestry; only a terminal unsuperseded hosted CI pass closes this release gate. |
 | Hosted fault matrix `35598843164` | Storage-faults passed on preceding shared revision `82ffeb9` | Useful diagnostic evidence only; it does not close current-head full CI, live R2, AWS, signed/native, or package-publication gates. |
@@ -671,6 +682,7 @@ shown separately from active engineering time.
 | 2026-09-22 12:32–12:44 | Requalified exact pushed tip `f1ee869a` across format, full locked Rust workspace, strict Clippy, optimized N-API build, complete Node/N-API suite, and the full real PGlite/oracle matrix; refreshed exact-SHA hosted status and fetched current main | Local production qualification / hosted evidence | Exact `f1ee869a` passed Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and all 40×621 traces. W04 and W08 targets succeeded on the same SHA; CI, fault, and W08 policy were cancelled during later movement. `origin/main` advanced to `7389be4d`, whose 9P/FoundationDB changes remain unqualified. Production remains NO-GO. |
 | 2026-09-22 12:44–12:52 | Requalified exact pushed `1bdf8846` after the 9P/FoundationDB/WebDAV successors with format, full locked Rust workspace, strict Clippy, optimized N-API build, complete Node/N-API suite, and the full real PGlite/oracle matrix | Local production qualification | Exact `1bdf8846` passed Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, all 40×621 traces, WebDAV provider/network concurrency and crash/restart, S3 restart/barrel scope, P9/9P/FUSE/NFS/WebDAV differential surfaces, chunked integration, distribution, and artifact aggregation. Provider credentials and privileged native mounts remained explicit skips. Production remains NO-GO. |
 | 2026-09-22 12:52–12:53 | Refreshed exact-SHA Actions, fast-forwarded the checkout through concurrent shared-main documentation, and updated the W05 ledger | Hosted evidence / release engineering | W04 `35680709392` and fault injection `35680709400` succeeded; W08 policy `35680709423` remained in progress, W08 targets `35680709394` were queued, and CI `35680709436` was cancelled. `origin/main` is now `6d65716f`, differing from `1bdf8846` only in `WORK_TRACKER.md` and W01/W26 docs. No hosted release acceptance is promoted; production remains NO-GO. |
+| 2026-09-22 12:57–13:00 | Refreshed the hosted jobs triggered by pushed ledger checkpoint `75248969` with two bounded polls | Hosted evidence / release engineering | W04 `35681358469` succeeded; fault injection `35681358424`, CI `35681358476`, and W08 policy `35681358387` were cancelled; W08 targets `35681358456` remained in progress. These results are non-terminal/cancelled and do not close the release gate. |
 
 Estimated active engineering time for the completed W05 continuation before
 this production program: **about 39–42 h total active work so far**. The
