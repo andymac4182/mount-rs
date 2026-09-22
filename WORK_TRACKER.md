@@ -3015,6 +3015,18 @@ Evidence landed without closing the remaining W01 acceptance gates:
   [`docs/w04-progress-ledger.md`](docs/w04-progress-ledger.md) and remains
   NO-GO until artifact/package, persistence/rollback, provider, and
   operational gates also close.
+- [ ] Current-main hosted qualification follow-up remains in progress.
+  Non-cancelling manual run [35723080355](https://github.com/andymac4182/mount-rs/actions/runs/35723080355)
+  at exact source `d096930a` now has terminal-success ARM and macOS-15-intel
+  Node recovery lanes, plus successful Windows Node/Rust support lanes. The
+  Intel job [106730233208](https://github.com/andymac4182/mount-rs/actions/runs/35723080355/job/106730233208)
+  passed the exact fragmented-request and PGlite/restart steps and retained
+  rollback/N-API/`providersFailed: 0` markers; its diagnosed WebDAV NodeFs and
+  SQLite phases stayed below the unchanged 10-second request timeout. This is
+  2/4 Unix Node recovery for that run, not full W04/current-tip or production
+  acceptance. The remaining macOS-latest/Ubuntu/native FUSE/Rust/package/
+  provider/W26 lanes are still queued or non-terminal; production remains
+  NO-GO.
 - [x] W04.2 current-tip revalidation: replacement qualification run
   [35692153251](https://github.com/andymac4182/mount-rs/actions/runs/35692153251)
   ran from exact published `d870f900`. macOS-latest
