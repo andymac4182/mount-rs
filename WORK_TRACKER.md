@@ -2670,6 +2670,18 @@ Evidence landed without closing the remaining W01 acceptance gates:
   validations, and clean-consumer smoke. W04.2 remains closed and current-tip
   confirmed. The same run's provider/W26 failures are separate production
   blockers; rollout remains **NO-GO**.
+- [x] W04.2 current-tip diagnostic boundary: fresh run
+  [35708551380](https://github.com/andymac4182/mount-rs/actions/runs/35708551380)
+  at pre-refresh source `b95fd6ad` does not supersede the historical W04.2
+  closure. ARM, macOS-15-intel, Ubuntu, and macOS-latest Node all reached the
+  exact PGlite/restart step and passed rollback, N-API, and mounted-PGlite
+  markers, then failed only when the standalone provider-matrix lockfile was
+  updated under `--locked`; shared `origin/main` now includes refresh
+  `6797a2d8`. The same run retains W26/provider-capacity failures, native-FUSE
+  rootless-operation failure without a retrievable direct log, and Ubuntu Rust
+  timeout/test boundaries. Dispatch a fresh run from current `origin/main`
+  after this ledger chunk; W04.2 remains historically closed, current-tip
+  acceptance is pending, and production rollout remains **NO-GO**.
 - Production rollout packet refreshed in
   [`docs/W04-production-rollout.md`](docs/W04-production-rollout.md): exact
   candidate `d870f900`, run `35692153251`, aggregate-native package/consumer

@@ -167,6 +167,25 @@ and production remains **NO-GO**; terminal job metadata is not promoted to a
 provider or production pass when a prerequisite is skipped or the evidence
 contract fails.
 
+Fresh manual qualification run
+[35708551380](https://github.com/andymac4182/mount-rs/actions/runs/35708551380)
+then ran from exact source `b95fd6ad` and is terminal `failure`. All four Unix
+Node jobs reached the exact PGlite/restart recovery step and passed the rollback,
+N-API, and mounted-PGlite markers before the final provider-matrix command
+failed because `tests/provider_matrix/Cargo.lock` was stale under `--locked`.
+The newer shared `origin/main` already contains the lockfile refresh at
+`6797a2d8`; this pre-refresh run is diagnostic evidence only and does not
+supersede the historical W04.2 closure or establish current-main acceptance.
+The same run's W26 packet failed closed without `OZONE_IOPS_PASS`: SQLite/R2
+measured `369.52` IOPS, PGlite/R2 `1177.61`, TiDB/R2 `432.58`, and
+FoundationDB/R2 `415.38` against the hard `1000` target. TiDB retained an
+`[kv:9007]` write-conflict failure, native FUSE failed its substantive rootless
+kernel operation without a retrievable direct log, and Ubuntu Rust timed out at
+25 minutes after one failed unmount test and a hanging invalid-device-read test.
+Production remains **NO-GO**; the next qualification must use the latest
+published mainline and close the artifact/package, persistence/rollback,
+provider-scope, observability/runbook, ownership, and release-approval gates.
+
 The retained native package artifacts provide current candidate provenance for
 the support matrix:
 
