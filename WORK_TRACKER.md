@@ -5651,6 +5651,25 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   is claimed. *(Static qualification published; P06 provider gate remains
   open.)*
 
+- [x] W08.43 **External security and transport hardening policy:** added
+  `scripts/verify-w08-production-security.mjs` and its eight-case
+  `scripts/test-w08-production-security.mjs` control over
+  `tests/tidb/production-security-policy.json`. The credential-free contract
+  requires TLS 1.3, CA-chain and hostname validation, bounded certificate
+  rotation with overlap/revocation, private segmented metadata/block/client
+  networking with default-deny ingress/egress, workload identity,
+  resource-and-prefix tenant isolation, least privilege and separated admin /
+  two-person break-glass access, dependency/image/SBOM/provenance scans with
+  critical-vulnerability blocking, required threat-model status and owner,
+  immutable redacted audit events, a credentialed TLS handshake using external
+  endpoint/CA references with cleanup, and named security/network/platform
+  owners. Weak transport, network, authorization, supply-chain, review, audit
+  or handshake controls fail closed. The checks are wired into both W08
+  release workflows. This is a P07 implementation/control boundary only; it
+  does not execute a credentialed handshake or provide production security
+  sign-off. *(Implementation/static qualification; provider and production
+  evidence remain external.)*
+
   Tested source base `c9df268902335934dbe2c369de881803ca376bcd` was freshly
   reverified after the 9P N-API server-lifecycle gate isolation, the WebDAV
   bounded propfind/copy failure fix, the

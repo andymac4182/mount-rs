@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "environment_class": "production-like-staging",
+  "transport": {
+    "tls_required": true,
+    "min_tls_version": "1.3",
+    "certificate_validation": ["ca-chain", "hostname"],
+    "rotation_max_days": 90,
+    "rotation_overlap_required": true,
+    "revocation_on_failure": true
+  },
+  "network": {
+    "private_only": true,
+    "zones": ["metadata", "block", "client"],
+    "ingress_default_deny": true,
+    "egress_default_deny": true,
+    "encryption_in_transit": true
+  },
+  "authorization": {
+    "identity_mode": "workload-identity",
+    "tenant_isolation": "resource-and-prefix",
+    "least_privilege": true,
+    "admin_separation": true,
+    "break_glass_two_person": true
+  },
+  "supply_chain": {
+    "dependency_scan_required": true,
+    "image_scan_required": true,
+    "sbom_required": true,
+    "provenance_required": true,
+    "vulnerability_policy": "fail-on-critical",
+    "scan_retention_days": 90
+  },
+  "threat_model": {
+    "required": true,
+    "review_status": "required-before-go",
+    "review_ref": "docs/W08-operations-runbook.md#p07-security",
+    "open_findings_need_plan": true,
+    "owner_ref": "security-owner"
+  },
+  "audit": {
+    "enabled": true,
+    "events": ["authz-deny", "secret-access", "admin-change", "tenant-boundary"],
+    "retention_days": 90,
+    "redaction_required": true,
+    "immutable": true
+  },
+  "handshake": {
+    "credentialed_required": true,
+    "endpoint_ref": "MOUNT_RS_TIDB_TLS_URL",
+    "ca_ref": "MOUNT_RS_TIDB_CA",
+    "hostname_verification": true,
+    "cleanup_required": true
+  },
+  "ownership": {
+    "security_owner": "team/security",
+    "network_owner": "team/network",
+    "platform_owner": "team/platform"
+  }
+}

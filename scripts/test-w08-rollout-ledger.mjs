@@ -60,12 +60,12 @@ const cases = [
   {
     name: "premature-functional-item",
     expectedStatus: 1,
-    expectedOutput: "reason=w08-42-must-be-checked",
+    expectedOutput: "reason=w08-43-must-be-checked",
     documents: {
       ...source,
       tracker: source.tracker.replace(
-        "- [x] W08.42 **External capacity, load and soak policy:",
-        "- [ ] W08.42 **External capacity, load and soak policy:",
+        "- [x] W08.43 **External security and transport hardening policy:",
+        "- [ ] W08.43 **External security and transport hardening policy:",
       ),
     },
   },
