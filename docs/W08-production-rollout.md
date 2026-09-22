@@ -423,16 +423,96 @@ pushed to shared `origin/main`; its exact W08 policy run `35696819458` then
 cancelled before job creation with `jobs=[]`. Shared main then advanced
 through W04/W26/site documentation tips to public merge `09b554a1`, then
 through the 9P/N-API audit tip `75c149f8` and reconciled public merge
-`20330a36`. The `75c149f8` W08 run `35697338233` was still `in_progress` at
-observation, while exact current public run `35697637897` for
-`20330a36cfa400540c041a7714b418b8b591b24d` is pending; neither is terminal
-evidence. The current exact public tip is
-`20330a36cfa400540c041a7714b418b8b591b24d`. These scheduling boundaries and
+`20330a36`. Its W08 run `35697338233` reached terminal success in
+`w08-release-policy` job `106647435583` in 2m43s, and later exact public run
+`35697637897` reached success in job `106648176391` in 2m41s; these are hosted
+implementation/static evidence only. Shared main then advanced through 9P
+audit documentation tip `a3305079` and reconciled public merge `ce984ad0`;
+run `35697911432` reached success in job `106648941097` in 2m40s. Shared main
+then advanced through 9P hosted-gate documentation tip `cc4c65d1` and
+reconciled public merge `a73197b6`; the exact current public run
+`35698296320` is pending and is not evidence. The current exact public tip is
+`a73197b6819714791aa45065ec026fd09025c823`. These scheduling boundaries and
 source-equivalent mainline changes add no provider/native or production
-qualification. The last retained terminal hosted W08 policy pass remains
-`35692664144` / job `106632773424` for source `5a6d6507`. No provider
+qualification. The latest retained terminal hosted W08 policy pass is
+`35697911432` / job `106648941097` for source `ce984ad0`. No provider
 credentials, production deployment, candidate tag, canary, rollback or owner
 approval exists. P01–P09 remain open and the decision remains NO-GO.
+
+The latest source-bearing shared checkpoint
+`323820683fcd3c063ab392c81eb12906ec8ab2e0` passed the full locked workspace
+test and strict Clippy with warnings denied on an isolated non-incremental
+Cargo target; changed N-API/package checks, six workflow YAML parses, all
+W07/W08 tracking/evidence suites and diff hygiene also passed. Hosted W08 run
+`35699181097`, job `106653083216`, completed successfully in 2m42s. This is
+implementation/static qualification only. Shared main then advanced with
+documentation-only updates to public tip
+`b31291c1cda67ecb1928970a766d6e17af841b56`; current run `35699754200` is
+queued and is not evidence. No provider/native or production gate is closed;
+P01–P09 remain open and the decision remains NO-GO.
+
+The latest exact source-health requalification covered shared source
+`33f52cdaaefcee268cf633d6c0852d0bc685b975` after the FUSE and TiDB-test/CI
+updates. The full locked workspace test and strict Clippy with `-D warnings`
+passed using isolated target `/private/tmp/mount-rs-w08-qual-TeImd6`; all
+runnable tests passed and provider/native rows remained explicit opt-in skips.
+Six workflow YAML files, changed N-API/package checks, W07/W08 tracking and
+evidence validators/tests, and `git diff --check` also passed. Public
+`origin/main` then advanced documentation-only to
+`3a14de2f31862cec1ecd40206c4703aacb4f5309`. Hosted W08 run `35700945120`
+has that exact head SHA and was still `in_progress` at the 17:45 AEST audit,
+so it is pending and not evidence. No provider/native or production gate is
+closed; P01–P09 remain open and the decision remains NO-GO.
+
+A fresh read-only production-boundary audit at **2026-09-22 17:43–17:45
+AEST** found no `w08-production-release.yml` runs, HTTP 404 for the protected
+`w08-production` environment, only the prerelease `v0.1.0-cli-preview`, and no
+`v*-cli-production-candidate*` tag. The separate W08 policy run above is a
+non-production implementation/static workflow and does not change this
+boundary. No production mutation, candidate publication, canary, rollback or
+approval was attempted or inferred; P01–P09 remain open.
+
+The subsequent source-bearing public updates `fe4a6bbf` and `7de703da`
+(chunked mutation batching and FUSE forced-unmount read draining) were
+requalified in exact public source `245258d9`: the full locked workspace test,
+strict Clippy, six workflow YAML parses, changed N-API/package checks, W07/W08
+tracking/evidence suites and diff hygiene all passed. Public tip `0044d020`
+then added only W05 documentation. W08 run `35701909098` for published merge
+`e44506ab` and run `35702023377` for `7de703da` were cancelled by concurrent
+mainline scheduling; current run `35702239279` targets `0044d020` and was
+pending at 17:59 AEST. These are implementation/static scheduling boundaries,
+not provider or production acceptance, so P01–P09 remain open and the
+decision remains NO-GO.
+
+The W08 ledger refresh is now published in merge
+`fb6ef40c7774aefb7251dba5867104798953381c`, with local `HEAD`, `origin/main`
+and the public main ref equal and clean at that SHA. Concurrent changes after
+the exact W08 qualification are outside the W08 Rust/provider/native path; no
+new W08 provider or production result is inferred. Hosted W08 run
+`35702979994` targets the exact published merge and was still `pending` at
+18:07 AEST, so it is not evidence. P01–P09 remain open and the decision
+remains NO-GO.
+
+The public mainline subsequently advanced to merge
+`b4e7c8686cc8fe9006e880b8eaccb4a6bc4262f3`, preserving the W08 ledger and
+concurrent W07/W05/W26 updates. The latest exact W08 Rust qualification is
+still `245258d9` after the FUSE/chunked source `7de703da`; no new W08
+provider/native result is inferred for the later documentation/control
+changes. Hosted W08 run `35703582574` targets the exact merge and remained
+`pending` at 18:14 AEST. The same read-only audit found no production-release
+runs, HTTP 404 for `w08-production`, only `v0.1.0-cli-preview`, and no
+production-candidate tag. P01–P09 remain open and the decision remains NO-GO.
+
+The latest source-bearing N-API/9P updates were requalified in exact merged
+source `35523b9f` after public base `24b83a60`: the full locked workspace test,
+strict Clippy, six workflow YAML parses, changed N-API/package checks including
+the 9P lifecycle/order tests, W07 platform-evidence control, all W07/W08
+tracking/evidence suites and diff hygiene passed. Public main then advanced
+with documentation-only W05/W08 reconciliation through `f177e067`; hosted
+W08 run `35704230143` targets that exact public tip and was `pending` at 18:20
+AEST. This is source-health and hosted scheduling evidence only; no provider,
+native, production, candidate, canary, rollback or approval gate is closed.
+P01–P09 remain open and the decision remains NO-GO.
 
 After origin/main advanced with the 9P EOF/backpressure server fix `1179d9e3`,
 N-API test expansion and site component updates, exact merged source

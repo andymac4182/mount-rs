@@ -693,8 +693,12 @@ impl MountState {
         let graceful_attempt = tokio::select! {
             attempt = &mut graceful => attempt,
             _ = &mut stop_grace => {
+                // Let the session loop observe the stop signal and drain its
+                // positional-read workers before the helper deadline. An
+                // immediate owner-task abort drops the JoinSet without
+                // waiting for those workers to release an in-flight kernel
+                // request, which can leave fusermount blocked indefinitely.
                 self.request_stop();
-                self.abort_task();
                 graceful.await
             }
         };
@@ -712,7 +716,7 @@ impl MountState {
                 // configured timeout leaves margin below the timeout plus
                 // half-timeout regression bound, while the cap prevents a
                 // blocked session from extending forced teardown indefinitely.
-                let forced_budget = (timeout / 3).min(FORCED_STOP_GRACE);
+                let forced_budget = (timeout / 3).min(READ_TASK_DRAIN_TIMEOUT);
                 let forced_phase_deadline = Instant::now() + forced_budget;
                 if let Some(task) = task {
                     // Give a normally polling session a short opportunity to
@@ -2039,9 +2043,38 @@ mod tests {
     fn defaults_are_safe_for_a_single_mount() {
         let options = MountOptions::default();
         assert_eq!(options.mode, MountMode::Auto);
+        assert_eq!(options.fsname, "mount-rs");
+        assert!(options.subtype.is_none());
         assert!(options.default_permissions);
         assert!(!options.allow_other);
+        assert!(!options.read_only);
+        assert!(options.max_read.is_none());
+        assert!(options.mount_options.is_empty());
         assert_eq!(options.device, Path::new("/dev/fuse"));
+        assert_eq!(options.max_frame, DEFAULT_MAX_FRAME);
+        assert_eq!(options.init_timeout, Duration::from_secs(10));
+        assert_eq!(options.unmount_timeout, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn mount_error_exposes_only_nested_error_sources() {
+        use std::error::Error;
+
+        let io = MountError::Io(io::Error::other("device unavailable"));
+        assert_eq!(io.to_string(), "device unavailable");
+        assert_eq!(
+            io.source().map(ToString::to_string).as_deref(),
+            Some("device unavailable")
+        );
+
+        let option = MountError::InvalidOption("bad option".to_owned());
+        assert!(option.source().is_none());
+        let timeout = MountError::Timeout {
+            operation: "unmount",
+            after: Duration::from_millis(25),
+        };
+        assert_eq!(timeout.to_string(), "unmount did not finish within 25ms");
+        assert!(timeout.source().is_none());
     }
 
     #[cfg(target_os = "linux")]
@@ -2130,6 +2163,145 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
+    async fn closed_reply_peer_reports_one_owned_write_error() {
+        use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::UnixStream;
+
+        let (device_stream, mut peer) = UnixStream::pair().expect("socket pair");
+        let standard = device_stream.into_std().expect("standard Unix stream");
+        // SAFETY: the raw descriptor is transferred immediately into OwnedFd.
+        let descriptor = unsafe { OwnedFd::from_raw_fd(standard.into_raw_fd()) };
+        let device = FuseDevice::from_owned_fd(descriptor, DEFAULT_MAX_FRAME)
+            .expect("socket descriptor should satisfy the device boundary");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_callback = Arc::clone(&observed);
+        let state = Arc::new(MountState::new(
+            MountMode::Privileged,
+            PathBuf::from("/tmp/mount-rs-fuse-write-error-test"),
+            MountOptions::default(),
+            None,
+            FuseMountHooks {
+                on_transport_error: Some(Arc::new(move |error| {
+                    observed_callback
+                        .lock()
+                        .expect("callback observation lock")
+                        .push(error);
+                })),
+            },
+        ));
+        let task = tokio::spawn(run_session(
+            FuseSession::new(Arc::new(mount_rs_core::MemoryFs::empty())),
+            device,
+            Arc::clone(&state),
+        ));
+
+        let init: Vec<u8> = [7_u32, 41, 65536, u32::MAX, u32::MAX]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        peer.write_all(&test_frame(26, 1, 0, &init))
+            .await
+            .expect("send init before closing reply peer");
+        drop(peer);
+
+        task.await
+            .expect("session task should finish after reply peer closes");
+        let observed = observed.lock().expect("callback observation lock");
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].kind, FuseTransportErrorKind::Write);
+        assert!(!state.active.load(Ordering::Acquire));
+        assert!(state.closed.load(Ordering::Acquire));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn invalid_device_read_reports_one_owned_read_error() {
+        use std::os::fd::{FromRawFd, OwnedFd};
+
+        let mut pipe = [0; 2];
+        assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+        // SAFETY: pipe returned two owned descriptors and each is transferred
+        // exactly once into an OwnedFd.
+        let read_end = unsafe { OwnedFd::from_raw_fd(pipe[0]) };
+        let write_end = unsafe { OwnedFd::from_raw_fd(pipe[1]) };
+        let device = FuseDevice::from_owned_fd(write_end, DEFAULT_MAX_FRAME)
+            .expect("write-only pipe should satisfy the device boundary");
+        drop(read_end);
+
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_callback = Arc::clone(&observed);
+        let state = Arc::new(MountState::new(
+            MountMode::Privileged,
+            PathBuf::from("/tmp/mount-rs-fuse-read-error-test"),
+            MountOptions::default(),
+            None,
+            FuseMountHooks {
+                on_transport_error: Some(Arc::new(move |error| {
+                    observed_callback
+                        .lock()
+                        .expect("callback observation lock")
+                        .push(error);
+                })),
+            },
+        ));
+        let task = tokio::spawn(run_session(
+            FuseSession::new(Arc::new(mount_rs_core::MemoryFs::empty())),
+            device,
+            Arc::clone(&state),
+        ));
+
+        task.await
+            .expect("session task should finish after device read failure");
+        let observed = observed.lock().expect("callback observation lock");
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].kind, FuseTransportErrorKind::Read);
+        assert!(!state.active.load(Ordering::Acquire));
+        assert!(state.closed.load(Ordering::Acquire));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn panicking_transport_error_hook_isolated_and_reported_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let callback_calls = Arc::clone(&calls);
+        let state = MountState::new(
+            MountMode::Privileged,
+            PathBuf::from("/tmp/mount-rs-fuse-hook-panic-test"),
+            MountOptions::default(),
+            None,
+            FuseMountHooks {
+                on_transport_error: Some(Arc::new(move |_error| {
+                    callback_calls.fetch_add(1, Ordering::AcqRel);
+                    panic!("injected transport-error hook panic");
+                })),
+            },
+        );
+
+        state.record_transport_error(FuseTransportError::from_message(
+            FuseTransportErrorKind::Protocol,
+            "first transport failure".to_owned(),
+        ));
+        state.record_transport_error(FuseTransportError::from_message(
+            FuseTransportErrorKind::Task,
+            "second transport failure".to_owned(),
+        ));
+
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        assert_eq!(
+            state
+                .transport_error
+                .lock()
+                .expect("transport error lock")
+                .as_deref(),
+            Some("first transport failure")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
     async fn aborting_session_task_marks_mount_closed() {
         let state = Arc::new(MountState::new(
             MountMode::Privileged,
@@ -2157,6 +2329,44 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn all_wait_closed_observers_wake_on_terminal_cleanup() {
+        let state = Arc::new(MountState::new(
+            MountMode::Privileged,
+            PathBuf::from("/tmp/mount-rs-fuse-wait-closed-test"),
+            MountOptions::default(),
+            None,
+            FuseMountHooks::default(),
+        ));
+        let mountpoint = PathBuf::from("/tmp/mount-rs-fuse-wait-closed-test");
+        let first_mount = FuseMount {
+            state: Arc::clone(&state),
+            mountpoint: mountpoint.clone(),
+        };
+        let second_mount = FuseMount {
+            state: Arc::clone(&state),
+            mountpoint,
+        };
+
+        let first = tokio::spawn(async move { first_mount.wait_closed().await });
+        let second = tokio::spawn(async move { second_mount.wait_closed().await });
+        tokio::task::yield_now().await;
+        assert!(!state.closed.load(Ordering::Acquire));
+
+        state.mark_closed();
+        tokio::time::timeout(Duration::from_secs(1), first)
+            .await
+            .expect("first wait_closed observer should wake")
+            .expect("first wait_closed task should finish");
+        tokio::time::timeout(Duration::from_secs(1), second)
+            .await
+            .expect("second wait_closed observer should wake")
+            .expect("second wait_closed task should finish");
+
+        state.mounted.store(false, Ordering::Release);
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn source_reports_the_configured_fsname() {
         let state = Arc::new(MountState::new(
@@ -2175,6 +2385,11 @@ mod tests {
         };
 
         assert_eq!(mount.source(), Some("mount-rs-source-test"));
+        assert_eq!(mount.mode(), MountMode::Privileged);
+        assert_eq!(
+            mount.mountpoint(),
+            Path::new("/tmp/mount-rs-fuse-source-test")
+        );
         state.mounted.store(false, Ordering::Release);
     }
 
@@ -2205,6 +2420,62 @@ mod tests {
             .await
             .expect("unmount helper should settle")
             .expect("a non-mounted synthetic path should be idempotent");
+        assert!(state.closed.load(Ordering::Acquire));
+        assert!(!state.mounted.load(Ordering::Acquire));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn concurrent_unmount_callers_share_one_terminal_result() {
+        let state = Arc::new(MountState::new(
+            MountMode::Rootless,
+            PathBuf::from("/tmp/mount-rs-fuse-concurrent-unmount-test"),
+            MountOptions {
+                mode: MountMode::Rootless,
+                ..MountOptions::default()
+            },
+            Some(PathBuf::from("/bin/true")),
+            FuseMountHooks::default(),
+        ));
+        let mount = FuseMount {
+            state: Arc::clone(&state),
+            mountpoint: PathBuf::from("/tmp/mount-rs-fuse-concurrent-unmount-test"),
+        };
+
+        let (first, second) = tokio::join!(mount.unmount(), mount.unmount());
+        assert!(first.is_ok(), "first unmount failed: {first:?}");
+        assert!(second.is_ok(), "second unmount failed: {second:?}");
+        assert!(!mount.is_active());
+        assert!(state.closed.load(Ordering::Acquire));
+        assert!(!state.mounted.load(Ordering::Acquire));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn completed_unmount_is_idempotent_for_later_callers() {
+        let state = Arc::new(MountState::new(
+            MountMode::Rootless,
+            PathBuf::from("/tmp/mount-rs-fuse-idempotent-unmount-test"),
+            MountOptions {
+                mode: MountMode::Rootless,
+                ..MountOptions::default()
+            },
+            Some(PathBuf::from("/bin/true")),
+            FuseMountHooks::default(),
+        ));
+        let mount = FuseMount {
+            state: Arc::clone(&state),
+            mountpoint: PathBuf::from("/tmp/mount-rs-fuse-idempotent-unmount-test"),
+        };
+
+        mount
+            .unmount()
+            .await
+            .expect("initial unmount should succeed");
+        mount
+            .unmount()
+            .await
+            .expect("later unmount should remain idempotent");
         assert!(state.closed.load(Ordering::Acquire));
         assert!(!state.mounted.load(Ordering::Acquire));
     }
@@ -3328,6 +3599,76 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn zero_read_limit_and_mount_timeouts_are_rejected() {
+        let options = MountOptions {
+            max_read: Some(0),
+            ..MountOptions::default()
+        };
+        assert!(matches!(
+            validate_options(&options),
+            Err(MountError::InvalidOption(message)) if message.contains("max_read")
+        ));
+
+        let options = MountOptions {
+            init_timeout: Duration::ZERO,
+            ..MountOptions::default()
+        };
+        assert!(matches!(
+            validate_options(&options),
+            Err(MountError::InvalidOption(message)) if message.contains("timeouts")
+        ));
+
+        let options = MountOptions {
+            unmount_timeout: Duration::ZERO,
+            ..MountOptions::default()
+        };
+        assert!(matches!(
+            validate_options(&options),
+            Err(MountError::InvalidOption(message)) if message.contains("timeouts")
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn invalid_mountpoints_fail_before_native_side_effects() {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_nanos();
+        let file = std::env::temp_dir().join(format!(
+            "mount-rs-fuse-invalid-mountpoint-{}-{suffix}",
+            std::process::id()
+        ));
+        std::fs::write(&file, b"not a directory").expect("write regular-file fixture");
+
+        let regular_file = validate_mountpoint(&file);
+        assert!(matches!(
+            regular_file,
+            Err(MountError::InvalidMountpoint { .. })
+        ));
+
+        let missing = file.with_extension("missing");
+        let absent = validate_mountpoint(&missing);
+        assert!(matches!(absent, Err(MountError::InvalidMountpoint { .. })));
+
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn privileged_and_root_auto_modes_do_not_require_a_helper() {
+        assert_eq!(
+            choose_mode(MountMode::Privileged, 1000).expect("privileged mode"),
+            (MountMode::Privileged, None)
+        );
+        assert_eq!(
+            choose_mode(MountMode::Auto, 0).expect("root auto mode"),
+            (MountMode::Privileged, None)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn privileged_mount_data_masks_root_permissions() {
         let data = mount_data(
             &MountOptions::default(),
@@ -3589,6 +3930,60 @@ mod tests {
         .expect("helper should finish before the deadline");
         assert_eq!(result.status.code(), Some(7));
         assert_eq!(result.stderr, "helper-failure");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn failed_graceful_unmount_restores_retryable_active_state() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_nanos();
+        let helper = std::env::temp_dir().join(format!(
+            "mount-rs-fuse-retry-unmount-{}-{suffix}",
+            std::process::id()
+        ));
+        let script = b"#!/bin/sh\nmarker=\"$0.marker\"\nif [ -e \"$marker\" ]; then exit 0; fi\n: > \"$marker\"\nprintf retryable-failure >&2\nexit 7\n";
+        std::fs::write(&helper, script).expect("write retry helper");
+        let mut permissions = std::fs::metadata(&helper)
+            .expect("retry helper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&helper, permissions).expect("make retry helper executable");
+
+        let state = Arc::new(MountState::new(
+            MountMode::Rootless,
+            PathBuf::from("/tmp/mount-rs-fuse-retry-unmount-test"),
+            MountOptions {
+                mode: MountMode::Rootless,
+                ..MountOptions::default()
+            },
+            Some(helper.clone()),
+            FuseMountHooks::default(),
+        ));
+        let mount = FuseMount {
+            state: Arc::clone(&state),
+            mountpoint: PathBuf::from("/tmp/mount-rs-fuse-retry-unmount-test"),
+        };
+
+        let first = mount.unmount().await;
+        assert!(first.is_err(), "first helper attempt should fail");
+        assert!(state.mounted.load(Ordering::Acquire));
+        assert!(state.active.load(Ordering::Acquire));
+        assert!(!state.unmount_started.load(Ordering::Acquire));
+
+        let second = mount.unmount().await;
+        assert!(
+            second.is_ok(),
+            "retry helper attempt should succeed: {second:?}"
+        );
+        assert!(!state.mounted.load(Ordering::Acquire));
+        assert!(state.closed.load(Ordering::Acquire));
+
+        let _ = std::fs::remove_file(&helper);
+        let _ = std::fs::remove_file(helper.with_extension("marker"));
     }
 
     #[cfg(target_os = "linux")]

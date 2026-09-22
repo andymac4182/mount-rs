@@ -319,7 +319,54 @@ Current focused behavior:
   `waitClosed()`. The local direct/oracle audit excludes only the oracle's
   non-interface `drop()` helper; adjacent metadata/typecheck, syntax, and diff
   checks pass. Its exact [Native 9P run `35697338227`](https://github.com/andymac4182/mount-rs/actions/runs/35697338227)
-  is queued with no materialized jobs yet, so no hosted PASS is claimed.
+  passed: N-API job `106647016617` passed the new member-surface step and all
+  hosted N-API lifecycle gates, while Rust job `106647016767` passed the Linux
+  probe plus all four ignored native lifecycle tests.
+- The native server client-identity packet at exact SHA
+  `15cb940988913c666d8d592a583e7eb3d2d82241` caches native `P9Connection`
+  wrappers by stable transport id. Its real-TCP regression checks that repeated
+  `P9Server.clients` reads preserve connection, session, and closed-promise
+  identity and that the wrapper is pruned after `close()`/`waitClosed()`.
+  Hosted [Native 9P run `35698924766`](https://github.com/andymac4182/mount-rs/actions/runs/35698924766)
+  passed: N-API job `106652302954` passed the new identity step and all hosted
+  N-API lifecycle gates, while Rust job `106652303250` passed the Linux probe
+  plus all four ignored native lifecycle tests.
+- The mixed native/attached client-order packet at exact SHA
+  `a3554b105be58cc5ff6cacc03de53f09c0461419` adds one JS arrival ledger for
+  `P9Server.clients`, so native-listener and `attach()` connections are returned
+  in arrival order rather than by backing-store type. Its real-TCP regression
+  covers native-first and attached-first order, stable native wrappers, and
+  cleanup. Local focused checks passed. Published SHA
+  `86b88c329d64bcc2a8e7b9d97993fca657458986` passed [Native 9P run
+  `35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373):
+  N-API job `106667799214` passed the mixed arrival-order check and all adjacent
+  lifecycle gates, while Rust job `106667799016` passed the Linux probe plus all
+  four ignored native lifecycle tests. Production remains NO-GO.
+- The native connection close-idempotence packet at exact SHA
+  `3260f84e26c2a78e9d10d66c7eb997477130f695` memoizes the native
+  `P9Connection.close()` promise at the JavaScript boundary, matching the
+  attached wrapper's and pinned oracle's idempotent teardown behavior. Its
+  real-TCP regression covers concurrent/repeated/post-closure calls,
+  `closed`/`waitClosed()`, terminal `isClosed`, client removal, and cleanup.
+  Local focused checks passed. Published SHA
+  `86b88c329d64bcc2a8e7b9d97993fca657458986` passed [Native 9P run
+  `35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373):
+  N-API job `106667799214` passed the native close-idempotence check and all
+  adjacent lifecycle gates, while Rust job `106667799016` passed the Linux probe
+  plus all four ignored native lifecycle tests. Production remains NO-GO.
+- The mounted-view identity packet at exact SHA
+  `1a18c7b82285ea557956cb35d15f1af189803d4d` caches the `Mounted.server` and
+  `Mounted.connection` wrappers and reuses the matching `P9Server.clients`
+  wrapper by stable transport id. The direct native-mount regression checks
+  repeated getter identity and cross-view connection identity, alongside the
+  existing native stream/peer/session views and cleanup. Local syntax, focused
+  lifecycle checks, metadata/session/observability/type checks, and the
+  elevated 9P selector passed. Published SHA
+  `86b88c329d64bcc2a8e7b9d97993fca657458986` passed [Native 9P run
+  `35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373):
+  N-API job `106667799214` passed direct mounted-I/O/cleanup and all adjacent
+  lifecycle gates, while Rust job `106667799016` passed the Linux probe plus all
+  four ignored native lifecycle tests. Production remains NO-GO.
 - That selector also covers the Unix listener policy: private-directory
   refusal, explicit `allowSharedDirectory`, `0600` socket mode, Unix protocol
   handshake and transport-source peer, socket cleanup, and path/port
@@ -425,7 +472,9 @@ Current focused behavior:
   `umount` exit status 32. The overall run is not hosted PASS evidence.
   Broader protocol/session behavior remains a separate gate.
 - The N-API object boundary keeps serializable lifecycle views: native
-  `P9Server.address()`/`path` use string-or-null representations, and effective
+  `P9Server.address()`/`path` use string-or-null representations (TCP
+  `host:port`, or the configured Unix socket path; TCP is `null` before binding
+  and after close), and effective
   `onError`/`onAssertion` hooks are omitted from `server.options` and
   `session.options` rather than pretending that live JavaScript functions can
   be round-tripped through the native getter. The focused metadata regression

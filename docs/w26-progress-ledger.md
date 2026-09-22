@@ -5,6 +5,157 @@ workstream. It distinguishes repository implementation, local evidence, and
 hosted/native/provider acceptance. Estimates are provisional and are intended
 for engineering planning, not a commitment.
 
+## Current authority override — 2026-09-22, TiDB confirmed-insert acknowledgement fast path
+
+This is the newest W26 implementation chunk. TiDB block creation now uses the
+affected-row acknowledgement from the existing insert statement to avoid a
+second read when the row was definitely inserted by this request. Duplicate,
+provider-specific no-op and ambiguous acknowledgement cases still finish the
+result and perform the existing byte-for-byte read-back collision check. The
+change therefore reduces one round trip on the hot unique-block path without
+changing immutable block semantics, fencing, collision handling or fail-closed
+disappearance handling.
+
+| Field | Current value |
+| --- | --- |
+| Shared build-on tip | `2ce6f753a588628593baf1000ae75330780dabd3` (`perf(w26): skip TiDB block readback on confirmed insert`) is verified on `origin/main`. The ledger update below is a separate docs publication and will advance the shared tip again. |
+| Current implementation chunk | `2ce6f753` changes `integrations/mount-rs-tidb/src/storage.rs` from unconditional `INSERT` plus `SELECT` to `exec_iter`, `affected_rows() == 1`, explicit result draining, and read-back only for duplicate/ambiguous cases. |
+| Local implementation evidence | `cargo fmt --all -- --check`, `git diff --check`, `./scripts/cargo-shared check -p mount-rs-tidb --all-targets --locked`, and strict TiDB Clippy with `-D warnings` passed. The focused locked TiDB library suite passed 8/8 before publication. A fresh all-targets test attempt could not link because this Mac has not accepted the Xcode license (`xcrun --sdk macosx --show-sdk-path`); this is recorded as a native-host gate, not a code pass or a suppressed failure. |
+| Security evidence | Diff scan `b2761b0b-aa05-4f49-a52a-3c5b7f09cad9` reviewed the TiDB storage surface with complete coverage and 0 reportable findings. Report: `/private/var/folders/qx/1pyrtldd3nb1l0p44xbmd97h0000gn/T/codex-security-scans-MW6oGi/mount-rs/42e1025781d4bd620f687b0927dddfc2c9fc15c0_20260922T081459Z_f4z43kvw/report.md`; snapshot digest: `codex-security-snapshot/v1:sha256:543c7a6f7d6f3dd9135034f2e37940dd273523ac6a3b1b9f223f47019e63f6e9`. The result is pre-publication snapshot evidence; a matching terminal exact-head security packet remains required for production acceptance. |
+| Hosted qualification | Existing run `35702188498 <https://github.com/andymac4182/mount-rs/actions/runs/35702188498>` targeted old head `245258d9`, not this chunk. At the latest live capture, FoundationDB job `106662583211` had failed, while Ozone base `106662583505`, compositions `106662583710` and TiDB `106662583344` were queued; the run and aggregate were nonterminal, so no result is promoted. A new exact-head packet is required after this ledger publication. |
+| Production decision | **NO-GO / 1 of 4 provider rows passed the last terminal packet; current exact-head qualification pending.** The 1,000 IOPS/drive target, Tier-1 99.99% reliability, five-minute RPO/RTO, secure customer Ozone topology, and end-to-end provider markers remain acceptance gates. Customer backup/DR, deployment and the separate release stream remain external ownership boundaries. |
+| Next action | Publish this ledger, dispatch a fresh exact-head W26 packet, and compare TiDB plus all other providers without lowering, averaging or skipping the per-drive target. Retrieve terminal artifacts, exact SHA evidence, security result and aggregate marker before any readiness change. |
+
+### TiDB chunk production-readiness delta
+
+| Work-item impact | Status / completion | Evidence and remaining action | Provisional estimate / external gate |
+| --- | --- | --- | --- |
+| W26.3c TiDB/R2 composition and W26.15 hard IOPS gate | **OPEN / 100% implementation chunk; hosted qualification pending** | The unique-insert path now avoids a confirmed redundant read; duplicate and ambiguous cases retain the collision check. The last terminal packet measured TiDB/R2 at `463.080116` IOPS with 400/400 lifecycles, zero timeouts and zero cleanup failures, below the hard target. Re-run the exact current head and keep any miss fail-closed. | ~0.5–1 d for the exact-head run and review; TiDB/Ozone fixtures, runner capacity and artifact retention are external. |
+| W26.4 end-to-end Rust/Node/CLI/HTTP/N-API path | **PASS locally for this provider change / hosted packet pending** | Compile-only all-targets check, strict Clippy and 8/8 focused TiDB tests pass. The all-targets test linker is blocked by the unaccepted local Xcode license; hosted Rust/Node/Ozone markers remain authoritative for end-to-end acceptance. | ~0.25–0.75 d review; native macOS toolchain and hosted Ozone/provider fixtures are gates. |
+| W26.7/W26.13 security and customer rollout contract | **OPEN for production / local TiDB scan zero findings** | Scan `b2761b0b-aa05-4f49-a52a-3c5b7f09cad9` is complete with zero reportable findings over the changed TiDB surface. Rebind security evidence to the final exact-head packet; customer IAM, certificates, secret rotation, tenant isolation and measured SLO/RPO/RTO evidence remain outside this local change. | ~0.5–1 d exact-head review; customer security and Ozone topology are external. |
+| W26.9–W26.12 verifier/retention/aggregate | **IMPLEMENTED / current packet pending** | Existing verifier remains fail-closed on missing markers, incomplete metrics and target misses. The stale run has no terminal aggregate; a new exact-head run must emit one complete all-provider marker. | ~0.25–0.5 d review; GitHub scheduling/artifact services are external. |
+| P14 final integration-readiness review | **NO-GO / 49% provisional** | This chunk improves one provider hot path and is published with local evidence, but it does not change the hosted 1/4 terminal acceptance result. | ~1–2 d after the four-provider packet; customer deployment, backup/DR and release ownership remain external. |
+
+### Session time log — TiDB confirmed-insert chunk
+
+| Date / phase | Activity | Engineering time | External wait / gate time | Result |
+| --- | --- | ---: | ---: | --- |
+| 2026-09-22 — provider-path inspection | Compared TiDB, PGlite, FoundationDB and R2 block-write acknowledgement paths and identified the TiDB unique-insert readback as a correctness-preserving round-trip candidate. | ~0.5–0.75 h | ~0.25 h code inspection | Selected only the unambiguous affected-row fast path; retained duplicate collision checks. |
+| 2026-09-22 — implementation and local verification | Implemented `exec_iter`/affected-row handling, drained the result, ran formatting/diff checks, 8/8 focused library tests, all-targets compile check and strict Clippy. | ~0.75–1.25 h | ~0.25–0.5 h shared-target build wait | Local code gates passed; all-targets test linking is blocked by the unaccepted Xcode license. |
+| 2026-09-22 — security and publication | Sealed the complete zero-finding TiDB diff scan, rebased onto concurrent mainline work, committed and pushed `2ce6f753` to `origin/main`. | ~0.5–0.75 h | ~0.5–1 h publication race/reconciliation | Implementation is visible to other threads; hosted exact-head qualification is still pending. |
+| 2026-09-22 — next hosted gate | Update both ledgers, dispatch the exact-head W26 packet and retrieve terminal provider/aggregate artifacts. | ~0.5–1 h provisional | ~1–3 h provisional CI/provider queue | No production promotion until every provider, marker, security and reliability gate passes. |
+
+## Current authority override — 2026-09-22, adaptive concurrent mutation batching
+
+This is the newest W26 implementation boundary. The shared chunked coordinator
+now keeps the low-latency local-provider path, but continues collecting only
+while the mutation queue is growing, targets the 64-worker Ozone qualification
+wave, and caps the scheduler window. The change is correctness-preserving: the
+existing fenced single-publication/CAS boundary, queue-capacity limit and
+cancellation fail-closed path are unchanged. A fixed 64-round variant was
+discarded after a local diagnostic latency regression; it is not part of the
+published implementation.
+
+| Field | Current value |
+| --- | --- |
+| Shared build-on tip | `origin/main` = `2dab2386ac86df1256299e0052f81319d1164130` at the current fast-forward before this ledger commit; implementation commit `fe4a6bbf0daf0b5f466536ab8caf864717c74e35` is in its history. Other workstreams added unrelated mainline changes after that implementation push; this ledger publication will advance the shared tip again. |
+| Current implementation chunk | `fe4a6bbf` (`perf(w26): adapt mutation batching to concurrent waves`). The coordinator uses an eight-round initial window, extends only across observed queue growth, stops at two idle rounds or 64 queued requests, and caps at 64 rounds. The 64-way create and replace regressions both prove one fenced publication. |
+| Local implementation evidence | `cargo fmt --all -- --check`, `git diff --check`, all 21 chunked tests, full locked workspace tests (exit 0; all runnable tests passed and service/native rows remained explicit skips), strict workspace Clippy with `-D warnings` (exit 0), shared-target N-API debug build, and the complete pinned-oracle N-API suite all passed. |
+| Diagnostic performance evidence | Local split-SQLite direct-api run `/private/tmp/w26-local-split-sqlite-adaptive.json` (SHA-256 `23246f4a8a6d56ad393713e352967094557ca5fe192744aa6407ef485c632d2c`) completed 400/400 lifecycles with zero timeouts and cleanup failures but measured `631.141356` lifecycle IOPS (`1,901.317334 ms`; p95 write/read/delete `284.050833/96.620334/10.030708 ms`). This is macOS/local split-provider diagnostics, not customer Ozone/R2 acceptance. |
+| Security evidence | Diff scan `b5429807-35af-4978-83d4-ed7bcde2d6f5` is sealed with complete coverage over `integrations/mount-rs-chunked/src/lib.rs` and `transports/mount-rs-fuse/src/mount.rs`, 0 reportable findings, and report `/private/var/folders/qx/1pyrtldd3nb1l0p44xbmd97h0000gn/T/codex-security-scans-MW6oGi/mount-rs/6c868cb487f0ab13359d3fd79fe26737d51db164_20260922T075316Z_bs0_9ffi/report.md`. It is evidence for captured snapshot digest `codex-security-snapshot/v1:sha256:b4dc9c71c4b0465ff0dc9c7e724b099d3a54ef486372fb7c0193379d5a4772dd`; the scanner warned that repository HEAD changed during the run, so the terminal exact-head packet must still carry a matching current-head security result before production acceptance. |
+| Fresh hosted qualification | Manual run `35702188498 <https://github.com/andymac4182/mount-rs/actions/runs/35702188498>` selected shared head `245258d9`. W26 producers were queued at capture: base `ozone` job `106662583505`, compositions `106662583710`, TiDB `106662583344`, FoundationDB `106662583211`; aggregate had not yet produced a terminal packet. |
+| Production decision | **NO-GO / 1 of 4 provider rows passed the last terminal packet; current requalification pending**. The prior exact-SHA packet remains the acceptance boundary: SQLite/R2 `1051.976655` passed, PGlite/R2 `837.779225`, TiDB/R2 `463.080116` and FoundationDB/R2 `450.696578` failed. Tier-1 99.99% reliability, five-minute RPO/RTO, secure customer Ozone topology, backup/DR and release ownership remain explicit external or cross-workstream gates. |
+| Next action | Retrieve the terminal W26 artifacts for run `35702188498`, bind every provider row to its exact head, and decide whether adaptive batching changes PGlite/TiDB/FoundationDB throughput. If any row still misses, continue with provider-specific correctness-preserving optimization; do not lower, average or skip the per-drive 1,000-IOPS target. |
+
+### Current implementation and production-readiness ledger delta
+
+| Work-item impact | Status / completion | Evidence and remaining action | Provisional estimate / external gate |
+| --- | --- | --- | --- |
+| W26.3a–d provider compositions and W26.15 hard IOPS gate | **OPEN / 100% adaptive coordinator implementation; hosted requalification pending** | The published chunk changes only bounded mutation collection. The previous terminal packet remains `1/4` provider rows over target; the new run is queued. Local split-SQLite diagnostics are recorded for regression context only and do not replace Ozone/R2 evidence. | ~0.5–1.5 d per provider remediation/review cycle; hosted runners, Ozone/R2/provider capacity and artifact retention are external gates. |
+| W26.4 end-to-end Rust/Node/CLI/HTTP/N-API path | **PASS locally / hosted current packet pending** | Full workspace and pinned-oracle suites pass, including 64-way protocol/provider concurrency checks; re-read the current W26 producer markers from one terminal run before promoting acceptance. | ~0.5–1 d review; hosted Ozone and provider fixtures remain external. |
+| W26.9–W26.12 verifier, retention and one-revision aggregation | **PASS implementation / current aggregate pending** | Existing verifier remains fail-closed on missing markers, incomplete metrics and hard-target misses. Run `35702188498` must produce one complete exact-head aggregate before this row can close. | ~0.25–1 d review; GitHub scheduling/artifact services are external. |
+| W26.7/W26.13 security and customer rollout contract | **OPEN for production / captured diff scan sealed** | Adaptive diff scan is sealed with 0 findings for its two reviewed surfaces, but it warns that repository HEAD changed while scanning; rebind the security result to the terminal exact head before closing the gate. Customer certificates, IAM, secret rotation, tenant isolation, measured 99.99% SLO, five-minute RPO/RTO and backup/DR evidence remain customer/Ozone-owned. | ~1–2 d review; current-head rescan, secure customer deployment and backup/DR are external or cross-workstream gates. |
+| P14 final integration-readiness review | **NO-GO / 48% provisional** | The code chunk is published and locally tested, but no remote provider gate changed until the new exact-head packet is terminal. | ~1–2 d after W26.15; customer security/SLO/DR, native/provider qualification and release stream remain gates. |
+
+### Session time log — adaptive batching chunk
+
+| Date / phase | Activity | Engineering time | External wait / gate time | Result |
+| --- | --- | ---: | ---: | --- |
+| 2026-09-22 — performance isolation | Compared the fixed 64-round window against the eight-round baseline; the fixed variant was discarded after a local split-SQLite diagnostic at `644.073320` IOPS, with all lifecycles successful but materially higher latency. Implemented the adaptive growth/idle/target/cap policy instead. | ~0.75–1.25 h | ~0.25 h local build/benchmark | Published `fe4a6bbf`; no threshold relaxation and no provider skip. |
+| 2026-09-22 — local verification | Ran chunked unit tests, full locked workspace tests, strict Clippy, shared-target N-API build and the complete pinned MountX oracle suite. | ~0.75–1.25 h | ~0.5–1 h shared-target/build wait | All runnable local gates passed; explicit provider/native skips remain external. |
+| 2026-09-22 — publication and hosted requalification | Fetched concurrent mainline work, fast-forwarded, committed/pushed `fe4a6bbf`, dispatched manual run `35702188498`, recorded all W26 job IDs and retained the local diagnostic digest. | ~0.25–0.5 h | pending; CI queue/provider startup and execution | Shared `origin/main` contains the chunk; production remains NO-GO pending terminal exact-head provider evidence. |
+| 2026-09-22 — security closure and ledger refresh | Completed the compact diff review for the adaptive chunk plus the concurrent FUSE teardown diff, persisted the threat model, sealed scan `b5429807-35af-4978-83d4-ed7bcde2d6f5`, and recorded its complete two-surface/zero-finding result with the current-HEAD warning. | ~0.25–0.5 h | ~0.25 h security workbench finalization | Captured security evidence is sealed; a matching current-head result remains part of the exact-head production gate. |
+
+## Current authority override — 2026-09-22, atomic write path through production wrappers
+
+This is the newest W26 implementation and evidence boundary. The chunk fixes a
+real production-path performance defect found while investigating the hosted
+per-drive IOPS misses: the N-API `DriverSlot` (and the persistence and
+observability wrappers) inherited the generic `FsDriver::write_file` fallback,
+which could turn one atomic write into separate create and data publications.
+The wrappers now forward the optimized atomic operation, preserving one
+metadata publication after immutable block staging. The retained exact-SHA
+hosted run is now terminal and remains a fail-closed diagnostic packet: no
+provider or aggregate failure is promoted to production acceptance.
+
+| Field | Current value |
+| --- | --- |
+| Shared build-on tip | `origin/main` = `8520e362710a4b3fe00fd567cf00fcc13e64c222` at the start of this ledger update; the terminal packet's implementation SHA `116e9ed405cdc1eb37634a2fa381ce387be036db` is in its history. The next docs publication will become the new shared tip. |
+| Current implementation chunk | `116e9ed4` (`perf(w26): preserve atomic write path through wrappers`). `DriverSlot`, `MountDriver`, `InstrumentedDriver`, and `PersistedFs` now forward `FsDriver::write_file`; the N-API regression asserts a new atomic write advances the metadata revision exactly once. |
+| Local implementation evidence | `cargo fmt --all`, `git diff --check`, focused N-API regression (1 passed), full locked workspace tests (all runnable tests passed; service/native rows explicitly ignored), strict workspace Clippy with `-D warnings`, shared-target debug N-API build, and the complete pinned-oracle N-API suite all passed. The suite recorded MountX oracle revision `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`; provider credential and native-mount opt-ins remained explicit skips. |
+| Security evidence | Diff scan `2582d7c0-130a-454e-beb3-ffba77169e3e` completed with complete changed-file coverage across the three wrapper surfaces and zero reportable findings. Report: `/private/var/folders/qx/1pyrtldd3nb1l0p44xbmd97h0000gn/T/codex-security-scans-MW6oGi/mount-rs/eea79cbe13ae059a447925bf9ac37c4b41d08074_20260922T070839Z_t507xqc7/report.md`. |
+| Fresh hosted qualification | Retained manual run `35698854392` selected exact implementation SHA `116e9ed405cdc1eb37634a2fa381ce387be036db`. Producers: base `106651810139` passed; compositions `106651810176`, TiDB `106651810223` and FoundationDB `106651810219` failed; aggregate `106656637297` failed closed. JSON/log artifacts were retained and digested below. |
+| Production decision | **NO-GO / 1 of 4 provider rows passed the hard target**. SQLite/R2 reached `1051.976655` IOPS; PGlite/R2 `837.779225`, TiDB/R2 `463.080116` and FoundationDB/R2 `450.696578` failed the required `>=1,000` per-drive target. Tier-1 99.99% reliability, five-minute RPO/RTO, secure customer Ozone topology, backup/DR and release ownership remain explicit external or cross-workstream gates. |
+| Next action | Diagnose and implement the next correctness-preserving metadata/provider throughput improvement for PGlite, TiDB and FoundationDB; rerun the exact four-provider packet. Preserve all lifecycle integrity, `RUSTFS_COMBO_FAIL`, artifact and marker failures; do not lower, average or skip the per-drive target. |
+
+### Current implementation and production-readiness ledger delta
+
+The full W26.1–W26.15/P14 ledger immediately below remains the itemized
+authority for every work item. This delta records the effect of the current
+chunk and separates code completion from hosted/provider acceptance.
+
+| Work-item impact | Status / completion | Evidence and remaining action | Provisional estimate / external gate |
+| --- | --- | --- | --- |
+| W26.3a–d provider compositions and W26.15 hard IOPS gate | **OPEN / 100% wrapper implementation; 1/4 current provider rows passed** | Terminal run `35698854392`: SQLite/R2 `1051.976655` IOPS (elapsed `1,140.709724 ms`, p95 write/read/delete `179.865148/120.138688/32.928342 ms`); PGlite/R2 `837.779225` (`1,432.358268 ms`, `307.770188/127.094863/48.836423`); TiDB/R2 `463.080116` (`2,591.344259 ms`, `571.281588/251.164974/77.053363`); FoundationDB/R2 `450.696578` (`2,662.545177 ms`, `405.676561/210.387481/40.586330`). Each row had 400/400 successful iterations, 1,200 attempted operations, zero timeouts and zero cleanup failures; the three misses remain failures. | ~0.5–1.5 d per remediation/review cycle; hosted runners, Ozone/R2/provider capacity and artifact retention are external gates. |
+| W26.4 end-to-end Rust/Node/CLI/HTTP/N-API path | **PASS locally and base/composition functional markers; hosted full packet FAIL** | Pinned-oracle N-API suite passed smoke, contract, provider/reopen/crash, protocol differential, distribution and aggregation checks. Current Ozone base and composition functional markers, bounded listing, Node/CLI/HTTP/reopen and cleanup passed; TiDB/FDB logs retained `RUSTFS_COMBO_FAIL`, and the aggregate failed. | ~0.5–1 d review; hosted Ozone and provider fixtures remain external. |
+| W26.9–W26.12 verifier, retention and one-revision aggregation | **PASS implementation / 100%; terminal aggregate FAIL** | All four provider JSON/log artifacts were retained with digests below. Aggregate job `106656637297` failed after the producer packet; no all-provider acceptance marker was emitted. The verifier remains fail-closed on missing markers, incomplete metrics and hard-target misses. | ~0.25–1 d review; GitHub scheduling/artifact services are external. |
+| W26.14 complete packet surface enforcement | **PASS implementation / 100%; hosted acceptance FAIL** | Base policy, gateway, block, failure/restart/reopen and cleanup markers passed. Composition functional markers passed; PGlite failed only its hard IOPS row, while TiDB/FDB also retained `RUSTFS_COMBO_FAIL`; no aggregate pass exists. | ~0.5–1 d review; hosted native/provider fixtures and customer Ozone topology are external. |
+| W26.7/W26.13 security and customer rollout contract | **PASS local policy / production acceptance open** | Wrapper diff scan is zero-finding; local credential-free and fail-closed controls remain. Customer certificates, IAM, secret rotation, tenant isolation, measured 99.99% SLO, five-minute RPO/RTO and backup/DR evidence remain customer/Ozone-owned. | ~1–2 d review; secure customer deployment and backup/DR are external and outside W26 implementation. |
+| P14 final integration-readiness review | **NO-GO / 48% provisional** | Current code is published with strong local evidence and one current provider row above target, but three providers and the aggregate fail. Releases are owned by another stream, and W26 does not claim deployment. | ~1–2 d after W26.15; customer security/SLO/DR, native/provider qualification and release stream remain gates. |
+
+### Terminal hosted packet — run `35698854392`
+
+This packet is exact-SHA evidence for the wrapper chunk, but it is not a
+production acceptance packet. The FoundationDB artifact cannot self-verify the
+Git revision (`revisionVerified=false` in its JSON); the workflow head SHA is
+therefore the provenance boundary for that row. The generated Node addons made
+the producer checkouts dirty, which is an expected artifact-build effect and
+not a source-change promotion.
+
+| Producer | Job / result | Artifact files and SHA-256 | Acceptance result |
+| --- | --- | --- | --- |
+| Ozone base | `106651810139` / success | `ozone-base.log` `7d7c9f97c6e56cee9290e46759dcf8b2cafbd5bf7e5ad63a870c51a42d28aef0`; `ozone-policy.log` `f58a6d905b0d0ca444be1fd422e65566bf339cd858071b0d62deda0b17aa74e2` | PASS: policy positive/negative cases, health/readiness, block contract, bounded gateway failure, restart/reopen, integration and cleanup. |
+| SQLite/PGlite compositions | `106651810176` / failure | `ozone-compositions.log` `4abe9a3518cea66c7fde721d5ab4a2ee546df8d3478620b7c35d040fc02c9f2f`; `ozone-iops.json` `27c61d2e804c6cbff9b263433dadbba19dbf24db5d882d4553af087f7b737791` | SQLite PASS at `1051.976655`; PGlite FAIL at `837.779225`; functional/reopen/bounded/Node/CLI/HTTP/cleanup markers passed. |
+| TiDB/Ozone | `106651810223` / failure | `ozone-tidb.log` `15b04849a3e2a95dfac897103dcf75157b15ba8de12c818a91a12a61955ca9af`; `ozone-tidb-iops.json` `5a0272d698b8deafdfb09d29d4d0f435843c25875f41e75507c874b165e533c7` | FAIL at `463.080116`; 400/400, zero timeout/cleanup; log retains `RUSTFS_COMBO_FAIL`. |
+| FoundationDB/Ozone | `106651810219` / failure | `ozone-foundationdb.log` `347e65e7b691bd4fa083664663000096ed87a2cc5d8f7f650d977911c900e208`; `ozone-foundationdb-iops.json` `fe37f7a4e0edc47c7c645e991d364152234eef0cbeb9bfdd2f7d93c39fdbfa8` | FAIL at `450.696578`; 400/400, zero timeout/cleanup; log retains `RUSTFS_COMBO_FAIL`, and JSON lacks self-verified Git revision. |
+| W26 aggregate | `106656637297` / failure | No aggregate artifact was published | FAIL closed: no complete all-provider/end-to-end pass marker. |
+
+The local direct `mount-rs-sqlite` sanity benchmark on macOS is deliberately
+not promoted to Ozone evidence: its combined local SQLite topology produced
+`14.941059` lifecycle IOPS with 337/400 successful iterations and 63 timeout /
+cleanup-deferred rows under the synthetic 64-way load. It is retained as a
+diagnostic boundary, not as a replacement for the customer-facing SQLite/R2
+composition result.
+
+### Session time log — wrapper forwarding chunk
+
+| Date / phase | Activity | Engineering time | External wait / gate time | Result |
+| --- | --- | ---: | ---: | --- |
+| 2026-09-22 — defect isolation and implementation | Traced hosted IOPS misses through ChunkedFs, R2 caching and the N-API wrapper path; found the inherited generic `write_file` fallback and added forwarding through N-API, persistence and observability wrappers plus the one-publication regression. | ~1–2 h | ~0.25 h code/build inspection | Correctness-preserving implementation complete; no target relaxation. |
+| 2026-09-22 — local verification | Ran formatting/diff checks, focused regression, full locked workspace tests, strict workspace Clippy, shared-target debug N-API build and complete pinned-oracle N-API suite. | ~0.75–1.25 h | ~0.5–1 h shared target/build wait | All runnable local gates passed; provider credentials/native mount opt-ins remained explicit skips. |
+| 2026-09-22 — security review | Completed standard changed-file security diff scan `2582d7c0-130a-454e-beb3-ffba77169e3e`. | ~0.5–0.75 h | 0 h hosted | Complete coverage and zero reportable findings. |
+| 2026-09-22 — publication | Committed, fetched concurrent mainline work, rebased, pushed and verified the implementation and ledger chunks; dispatched retained manual run `35698854392` and retrieved all terminal producer artifacts. | ~0.25–0.5 h | ~1.5–3 h CI queue/provider startup and provider execution | SQLite/R2 passed the hard target; PGlite/TiDB/FoundationDB and the aggregate failed closed. The next implementation chunk is required; production remains NO-GO. |
+
 ## Current authority override — 2026-09-22, FoundationDB transaction-sharing chunk
 
 This is the newest implementation and production-readiness boundary. The

@@ -73,6 +73,70 @@ password, invalid TTL, and missing production TTL. This validates configuration
 shape only; it does not validate a real volume, backup, provider, collector,
 operator, or release decision.
 
+The retained non-cancelling manual qualification
+[35695427227](https://github.com/andymac4182/mount-rs/actions/runs/35695427227)
+targets exact SHA `e7850fb41775351503e5aa685484906b3a3cbbe4`. Its ARM and
+macOS-15-intel Node jobs passed the exact early-rejection and PGlite/restart
+steps, but Ozone/FoundationDB failed its lifecycle capacity gate at `396.44`
+IOPS versus `1000`, and both TiDB lanes failed their ambiguous-commit functional
+boundary. The macOS-latest and Ubuntu Node jobs were still queued at the
+earlier ledger refresh; both later completed successfully in the retained run.
+This is qualification evidence only; production remains
+**NO-GO**.
+
+The same run separately passed the materialized RustFS,
+FoundationDB/RustFS, and base Ozone block/metadata, restart, fault, and
+cleanup checks. Its Ozone/TiDB composition failed on TiDB optimistic write
+conflicts (`[kv:9007] ... Optimistic [try again later]`) and emitted
+`RUSTFS_COMBO_FAIL`. Those results keep provider launch scope open; they do
+not authorize advertising TiDB or Ozone-backed compositions in production.
+
+The terminal Ozone-compositions job [106641134304](https://github.com/andymac4182/mount-rs/actions/runs/35695427227/job/106641134304)
+measured SQLite/R2 lifecycle IOPS `127.46` (below the hard `1000` target) and
+PGlite/R2 lifecycle IOPS `1287.12` (above target). Cleanup passed, but the
+composition job failed closed on the failing row, and its queued W26 evidence
+job [106652855215](https://github.com/andymac4182/mount-rs/actions/runs/35695427227/job/106652855215)
+is not evidence. Provider capacity therefore remains an open production gate.
+
+The dependent W26 evidence job [106652855215](https://github.com/andymac4182/mount-rs/actions/runs/35695427227/job/106652855215)
+downloaded the base, composition, TiDB, and FoundationDB artifacts but failed
+closed with `W26_OZONE_EVIDENCE_PACKET_FAIL` because the compositions log lacked
+`OZONE_IOPS_PASS` for the SQLite/R2 and PGlite/R2 scope. The packet is not a
+provider or production acceptance record.
+
+Ubuntu Node [106641134421](https://github.com/andymac4182/mount-rs/actions/runs/35695427227/job/106641134421)
+also completed successfully with the exact early-rejection and PGlite/restart
+steps, `PGLITE_BACKUP_RESTORE_ROLLBACK_PASS`, N-API/package/consumer smoke, and
+`providersFailed: 0`. macOS-latest Node was still in progress at the earlier
+ledger refresh and later completed successfully; the retained run is still
+partial because native-FUSE/provider/W26 lanes failed, so production remains
+NO-GO.
+
+macOS-latest Node [106641134336](https://github.com/andymac4182/mount-rs/actions/runs/35695427227/job/106641134336)
+has now also completed successfully with the exact early-rejection and
+PGlite/restart steps, `PGLITE_BACKUP_RESTORE_ROLLBACK_PASS`, N-API integration,
+and `providersFailed: 0`. All four Unix Node recovery lanes therefore pass for
+retained SHA `e7850fb4`, but the native-FUSE job
+[106641134269](https://github.com/andymac4182/mount-rs/actions/runs/35695427227/job/106641134269)
+failed its rootless-kernel step and was cancelled while finalizing. This
+retained run is not a latest-tip full qualification or production release
+record.
+
+Its aggregate-native job [106655469380](https://github.com/andymac4182/mount-rs/actions/runs/35695427227/job/106655469380)
+passed `mount-rs N-API artifact aggregation: PASS`, all five native
+distribution-package validations, and `mount-rs clean consumer install/smoke:
+PASS`. The five artifact IDs and SHA-256 digests are retained in the progress
+ledger as qualification provenance only; they are not a signed production
+release identity and do not close deployment, provider, operations, ownership,
+or release-approval gates.
+
+Fresh manual exact-tip qualification run
+[35700938192](https://github.com/andymac4182/mount-rs/actions/runs/35700938192)
+was dispatched from published SHA `33f52cda`. Its four Unix Node jobs,
+Windows Node, native FUSE, and provider/package support jobs were all queued at
+the first snapshot; no current-tip result is acceptance evidence until the
+exact recovery, package, native, provider, and W26 steps are terminal.
+
 The retained native package artifacts provide current candidate provenance for
 the support matrix:
 

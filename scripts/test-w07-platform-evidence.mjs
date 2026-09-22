@@ -14,8 +14,10 @@ const linuxLog = [
   "FOUNDATIONDB_TEST_PASS topology=durable manifests=tests/foundationdb/Cargo.toml+integrations/mount-rs-foundationdb/Cargo.toml platform=linux/amd64 service_restart=pass soak_rounds=10",
   "W07_PRODUCTION_QUALIFICATION_EVIDENCE_PASS rounds=10 workload=composition operations=15",
 ].join("\n");
-const macosLog =
-  "W07_MACOS_FOUNDATIONDB_COMPILE_PASS provider=mount-rs-foundationdb cli=native_lifecycle napi=foundationdb\n";
+const macosLog = [
+  "W07_MACOS_FOUNDATIONDB_COMPILE_PASS provider=mount-rs-foundationdb cli=native_lifecycle napi=foundationdb",
+  "W07_MACOS_FOUNDATIONDB_COMPILE_PROVENANCE repository=andymac4182/mount-rs workflow=W07 FoundationDB production qualification ref=refs/heads/main source_revision=" + sourceRevision + " run_id=123 run_attempt=1 runner=GitHub Actions 1",
+].join("\n");
 const linuxSummary = {
   schema: 2,
   result: "qualification-pass",
@@ -68,6 +70,34 @@ const cases = [
             macosLog: "cargo check completed\n",
           }),
         /macos-foundationdb-compile-marker-missing/u,
+      );
+    },
+  },
+  {
+    name: "missing-macos-provenance",
+    run() {
+      assert.throws(
+        () =>
+          validateW07PlatformEvidence({
+            linuxLog,
+            linuxSummary,
+            macosLog: "W07_MACOS_FOUNDATIONDB_COMPILE_PASS provider=mount-rs-foundationdb cli=native_lifecycle napi=foundationdb\n",
+          }),
+        /macos-provenance-marker-missing/u,
+      );
+    },
+  },
+  {
+    name: "macos-provenance-mismatch",
+    run() {
+      assert.throws(
+        () =>
+          validateW07PlatformEvidence({
+            linuxLog,
+            linuxSummary,
+            macosLog: macosLog.replace(sourceRevision, "b".repeat(40)),
+          }),
+        /macos-provenance-sourceRevision-mismatch/u,
       );
     },
   },

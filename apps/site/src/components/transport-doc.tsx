@@ -226,6 +226,12 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         release. This is a session-boundary behavior, not native mount proof.
         <code>FALLOCATE</code>, <code>LSEEK</code>, and
         <code>COPY_FILE_RANGE</code> remain unsupported boundaries.
+        The latest terminal CI packet <code>35698854392</code> at source
+        <code>116e9ed4</code> canceled its native-FUSE job before a hosted
+        <code>/dev/fuse</code> result; the current exact-tip run
+        <code>35700938192</code> is still nonterminal. No new native-FUSE
+        acceptance is promoted, and callback delivery, close races,
+        crash/restart, concurrency, locks, and durability remain open.
       </>
     ),
     sources: [
@@ -236,7 +242,8 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
       { label: 'CLI native prerequisites', href: 'https://github.com/andymac4182/mount-rs/blob/main/crates/mount-rs-cli/README.md#native-prerequisites' },
       { label: 'Historical hosted Linux transport CI', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35575442663' },
       { label: 'Latest hosted FUSE diagnostic', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35666436803' },
-      { label: 'Current exact-tip FUSE qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35673738166' },
+      { label: 'Latest hosted FUSE status packet', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35698854392' },
+      { label: 'Current exact-tip FUSE qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35700938192' },
     ],
   },
   nfs: {
@@ -371,6 +378,11 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
         open-state pinning are covered. The full stateful/member matrix,
         hosted lifecycle, and crash/concurrency/durability remain external
         gates.
+        The latest terminal CI packet <code>35698854392</code> at source
+        <code>116e9ed4</code> also passed the native NFSv3 jobs on macOS and
+        Ubuntu, including the Ubuntu NFSv4.1 lane; the surrounding workflow
+        failed in provider/W26, Windows, and native-FUSE lanes, so this remains
+        job-scoped platform evidence rather than release acceptance.
       </>
     ),
     sources: [
@@ -379,6 +391,7 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
       { label: 'Public API parity ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/public-api-parity.md' },
       { label: 'SQLite-over-NFS boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/README.md#node-split-store-api' },
       { label: 'Hosted native NFS platform jobs', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35658285441' },
+      { label: 'Latest hosted NFS jobs', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35698854392' },
       { label: 'Latest hosted NFS status check', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35670416469' },
       { label: 'Historical hosted Linux transport CI', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35575442663' },
     ],
@@ -559,9 +572,12 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
         regression now awaits it after <code>close()</code>. Local metadata,
         direct-session, observability, fid, mount-helper, generated typecheck,
         syntax, diff, and elevated server-selector checks passed. Hosted run
-        <code>35696071202</code> is queued with no terminal result, so no
-        hosted PASS is claimed; broader upstream parity and crash/reset
-        recovery remain open.
+        <code>35696071202</code> then completed successfully: the N-API job
+        passed addon build, server/attach, direct-session, automatic/direct/
+        structural mounted-I/O and cleanup checks, while the Rust job passed
+        the Linux 9P probe and all four native lifecycle tests. This is scoped
+        lifecycle evidence; broader upstream parity and crash/reset recovery
+        remain open.
       </>
     ),
     sources: [
@@ -572,7 +588,7 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
       { label: 'Latest hosted Native 9P lifecycle', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35685073733' },
       { label: 'Latest hosted Native 9P structural session', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35691732267' },
       { label: 'Latest hosted Native 9P state machine', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35693518562' },
-      { label: 'Latest Native 9P attached waitClosed parity (queued)', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35696071202' },
+      { label: 'Latest hosted Native 9P attached waitClosed parity', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35696071202' },
       { label: 'Hosted 9P wire-framing qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35687955065' },
       { label: 'Hosted 9P Unix-listener qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35683716217' },
       { label: 'Hosted N-API Native 9P qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35671509538' },
@@ -931,6 +947,11 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
         <code>35687955189</code> stopped at the usage admission guard
         (<code>count=309 limit=20</code>) and skipped live integration. No
         hosted WebDAV or live-provider PASS is promoted from that audit.
+        The latest terminal CI packet <code>35698854392</code> at source
+        <code>116e9ed4</code> passed the native WebDAV jobs on macOS and
+        Ubuntu, but the surrounding workflow failed in provider/W26, Windows,
+        and native-FUSE lanes. This is scoped native execution evidence, not a
+        full hosted lifecycle or release-acceptance result.
       </>
     ),
     sources: [
@@ -939,6 +960,7 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
       { label: 'Transport evidence', href: 'https://github.com/andymac4182/mount-rs/blob/main/PORTING_STATUS.md' },
       { label: 'Hosted native WebDAV jobs', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35640746296' },
       { label: 'Latest hosted WebDAV package/native qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35678488755' },
+      { label: 'Latest hosted WebDAV jobs', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35698854392' },
       { label: 'Latest hosted WebDAV durable-barrier status', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35673381803' },
       { label: 'WebDAV durable-barrier change', href: 'https://github.com/andymac4182/mount-rs/commit/4e19f226' },
       { label: '256-request concurrency change', href: 'https://github.com/andymac4182/mount-rs/commit/efd6ed33cf33e65fd1c86cd6fe3cec6783d610e6' },

@@ -51,17 +51,25 @@ try {
   assert.equal(typeof mounted.source, "string")
   assert.ok(mounted.source.length > 0)
   assert.equal(mounted.trans, "unix")
-  assert.ok(mounted.server)
-  assert.ok(mounted.connection)
-  assert.equal(mounted.connection.stream, undefined)
-  assert.equal(typeof mounted.connection.peer, "string")
-  assert.ok(mounted.connection.peer.length > 0)
-  assert.equal(typeof mounted.connection.session.msize, "number")
-  assert.equal(mounted.connection.session.version, "9P2000.L")
-  assert.ok(mounted.connection.session.stats.messages instanceof Map)
-  assert.equal(mounted.connection.session.stats.messages.get("Tversion"), 1)
-  assert.equal(mounted.connection.session.userFor(0xffff_fffe), undefined)
-  assert.equal(mounted.connection.session.locks.getlock({
+  const mountedServer = mounted.server
+  const mountedConnection = mounted.connection
+  assert.ok(mountedServer)
+  assert.ok(mountedConnection)
+  assert.strictEqual(mounted.server, mountedServer)
+  assert.strictEqual(mounted.connection, mountedConnection)
+  assert.strictEqual(
+    mountedServer.clients.find(({ id }) => id === mountedConnection.id),
+    mountedConnection,
+  )
+  assert.equal(mountedConnection.stream, undefined)
+  assert.equal(typeof mountedConnection.peer, "string")
+  assert.ok(mountedConnection.peer.length > 0)
+  assert.equal(typeof mountedConnection.session.msize, "number")
+  assert.equal(mountedConnection.session.version, "9P2000.L")
+  assert.ok(mountedConnection.session.stats.messages instanceof Map)
+  assert.equal(mountedConnection.session.stats.messages.get("Tversion"), 1)
+  assert.equal(mountedConnection.session.userFor(0xffff_fffe), undefined)
+  assert.equal(mountedConnection.session.locks.getlock({
     path: "/no-such-lock",
     fid: 0,
     type: P9_LOCK_TYPE_RDLCK,

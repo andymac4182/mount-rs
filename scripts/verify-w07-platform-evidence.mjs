@@ -31,6 +31,40 @@ function requireMarker(text, pattern, reason) {
   return line.trim();
 }
 
+function parseMacosProvenance(macosLog) {
+  const line = requireMarker(
+    macosLog,
+    /^W07_MACOS_FOUNDATIONDB_COMPILE_PROVENANCE\b/u,
+    "macos-provenance-marker-missing",
+  );
+  const match = line.match(
+    /^W07_MACOS_FOUNDATIONDB_COMPILE_PROVENANCE repository=(\S+) workflow=(.+?) ref=(\S+) source_revision=(\S+) run_id=(\S+) run_attempt=(\S+) runner=(.+)$/u,
+  );
+  if (!match) failure("macos-provenance-marker-malformed");
+  const [
+    ,
+    repository,
+    workflow,
+    ref,
+    sourceRevision,
+    runId,
+    runAttempt,
+    runner,
+  ] = match;
+  if (!/^[0-9a-f]{40}$/iu.test(sourceRevision)) {
+    failure("macos-provenance-source-revision-invalid");
+  }
+  return {
+    repository,
+    workflow,
+    ref,
+    sourceRevision,
+    runId,
+    runAttempt,
+    runner: runner.trim(),
+  };
+}
+
 export function validateW07PlatformEvidence({
   linuxLog,
   linuxSummary,
@@ -104,6 +138,20 @@ export function validateW07PlatformEvidence({
     /^W07_MACOS_FOUNDATIONDB_COMPILE_PASS provider=mount-rs-foundationdb cli=native_lifecycle napi=foundationdb$/u,
     "macos-foundationdb-compile-marker-missing",
   );
+  const macosProvenance = parseMacosProvenance(macosLog);
+  for (const field of [
+    "repository",
+    "workflow",
+    "ref",
+    "sourceRevision",
+    "runId",
+    "runAttempt",
+    "runner",
+  ]) {
+    if (macosProvenance[field] !== linuxSummary.provenance[field]) {
+      failure(`macos-provenance-${field}-mismatch`);
+    }
+  }
 
   return {
     expectedSoakRounds,
@@ -111,6 +159,7 @@ export function validateW07PlatformEvidence({
     linuxQualification,
     linuxTest,
     macosCompile,
+    macosProvenance,
   };
 }
 
@@ -146,6 +195,7 @@ export async function main(argv = process.argv.slice(2)) {
       `W07_PLATFORM_QUALIFICATION_PASS linux=terminal macos=feature-compile-only ` +
         `expected_soak_rounds=${result.expectedSoakRounds} ` +
         `source_revision=${result.sourceRevision} ` +
+        "provenance=bound " +
         `linux_log=${resolve(linuxLogPath)} macos_log=${resolve(macosLogPath)}`,
     );
     return 0;

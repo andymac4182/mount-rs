@@ -154,10 +154,25 @@ jobs:
         run: pnpm --dir tests/pglite install --frozen-lockfile
       - name: Install the public Node SDK test addon
         run: pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
-      - name: Build the public Node SDK test addon
+      - name: Build the public Node SDK test addon outside the checkout
         env:
           CARGOFLAGS: --locked
-        run: pnpm --dir integrations/mount-rs-napi build
+        run: |
+          set -eu
+          napi_stage="$RUNNER_TEMP/mount-rs-napi-stage"
+          mkdir -p "$napi_stage"
+          pnpm --dir integrations/mount-rs-napi exec napi build \
+            --platform --release --no-js --output-dir "$napi_stage"
+          native_path=$(find "$napi_stage" -maxdepth 1 -type f -name '*.node' -print)
+          test -n "$native_path"
+          test "$(printf '%s\n' "$native_path" | wc -l | tr -d ' ')" = 1
+          printf 'NAPI_RS_NATIVE_LIBRARY_PATH=%s\n' "$native_path" >> "$GITHUB_ENV"
+          if [ -n "$(git status --porcelain=v1 --untracked-files=all)" ]; then
+            echo 'W26_NAPI_BUILD_SOURCE_CLEAN_FAIL checkout became dirty during staged native build' >&2
+            git status --porcelain=v1 --untracked-files=all >&2
+            exit 1
+          fi
+          echo "W26_NAPI_BUILD_SOURCE_CLEAN_PASS native_path=$native_path"
       - name: Verify Ozone with SQLite and PGlite metadata
         env:
           MOUNT_RS_OZONE_COMPOSITIONS: '1'
@@ -202,10 +217,25 @@ jobs:
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
       - name: Install the public Node SDK test addon
         run: pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
-      - name: Build the public Node SDK test addon
+      - name: Build the public Node SDK test addon outside the checkout
         env:
           CARGOFLAGS: --locked
-        run: pnpm --dir integrations/mount-rs-napi build
+        run: |
+          set -eu
+          napi_stage="$RUNNER_TEMP/mount-rs-napi-stage"
+          mkdir -p "$napi_stage"
+          pnpm --dir integrations/mount-rs-napi exec napi build \
+            --platform --release --no-js --output-dir "$napi_stage"
+          native_path=$(find "$napi_stage" -maxdepth 1 -type f -name '*.node' -print)
+          test -n "$native_path"
+          test "$(printf '%s\n' "$native_path" | wc -l | tr -d ' ')" = 1
+          printf 'NAPI_RS_NATIVE_LIBRARY_PATH=%s\n' "$native_path" >> "$GITHUB_ENV"
+          if [ -n "$(git status --porcelain=v1 --untracked-files=all)" ]; then
+            echo 'W26_NAPI_BUILD_SOURCE_CLEAN_FAIL checkout became dirty during staged native build' >&2
+            git status --porcelain=v1 --untracked-files=all >&2
+            exit 1
+          fi
+          echo "W26_NAPI_BUILD_SOURCE_CLEAN_PASS native_path=$native_path"
       - name: Verify durable TiDB metadata over Apache Ozone chunks
         env:
           MOUNT_RS_OZONE_TIDB_COMPOSITION: '1'

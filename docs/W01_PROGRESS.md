@@ -184,9 +184,59 @@ including `waitClosed()`, while excluding only the oracle's non-interface
 `drop()` helper. Local direct/oracle execution, adjacent metadata/typecheck
 checks, syntax, and diff checks passed. The exact hosted [Native 9P run
 `35697338227`](https://github.com/andymac4182/mount-rs/actions/runs/35697338227)
-is queued with no materialized jobs yet; no hosted PASS is claimed. Broader
-session/protocol parity, crash/reset scope, and W01 gates remain open, so
-production remains NO-GO.
+passed: N-API job `106647016617` passed the Linux probe, addon build,
+server/attach and direct-session lifecycle, the new server/connection member
+surface step, and automatic/direct/structural mounted-I/O cleanup; Rust job
+`106647016767` passed the Linux probe plus all four ignored native lifecycle
+tests. Broader session/protocol parity, crash/reset scope, and W01 gates remain
+open, so production remains NO-GO.
+
+The native server client-identity packet at exact SHA
+`15cb940988913c666d8d592a583e7eb3d2d82241` caches native `P9Connection`
+wrappers by stable transport id. Its real-TCP regression checks that repeated
+`P9Server.clients` reads preserve connection, session, and closed-promise
+identity and that the wrapper disappears after `close()`/`waitClosed()`.
+Hosted [Native 9P run `35698924766`](https://github.com/andymac4182/mount-rs/actions/runs/35698924766)
+passed: N-API job `106652302954` passed the new identity step and all hosted
+N-API lifecycle gates, while Rust job `106652303250` passed the Linux probe plus
+all four ignored native lifecycle tests. Production remains NO-GO.
+
+The mixed native/attached client-order packet at exact SHA
+`a3554b105be58cc5ff6cacc03de53f09c0461419` adds one JS arrival ledger for the
+two `P9Server.clients` backing stores. Its real-TCP regression covers both
+native-first and attached-first order, stable native wrappers, and cleanup.
+Local syntax, focused order/identity/member checks, metadata/session/
+observability/type checks, and the elevated `p9` server selector passed.
+Published SHA `86b88c329d64bcc2a8e7b9d97993fca657458986` passed [Native 9P run
+`35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373):
+N-API job `106667799214` passed the mixed arrival-order check and all adjacent
+lifecycle gates, while Rust job `106667799016` passed the Linux probe plus all
+four ignored native lifecycle tests. Production remains NO-GO.
+
+The native connection close-idempotence packet at exact SHA
+`3260f84e26c2a78e9d10d66c7eb997477130f695` memoizes the native
+`P9Connection.close()` promise at the JavaScript boundary. Its real-TCP
+regression covers concurrent/repeated/post-closure calls, `closed`/
+`waitClosed()`, terminal `isClosed`, client removal, and cleanup. Local focused
+checks passed. Published SHA `86b88c329d64bcc2a8e7b9d97993fca657458986`
+passed [Native 9P run `35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373):
+N-API job `106667799214` passed the native close-idempotence check and all
+adjacent lifecycle gates, while Rust job `106667799016` passed the Linux probe
+plus all four ignored native lifecycle tests. Production remains NO-GO.
+
+The mounted-view identity packet at exact SHA
+`1a18c7b82285ea557956cb35d15f1af189803d4d` caches the N-API
+`Mounted.server` and `Mounted.connection` wrappers and reuses the matching
+`P9Server.clients` wrapper by stable transport id. The direct native-mount
+regression checks repeated getter identity and cross-view connection identity,
+alongside the existing native stream/peer/session views and cleanup. Local
+syntax, focused lifecycle checks, metadata/session/observability/type checks,
+and the elevated 9P selector passed. Published SHA
+`86b88c329d64bcc2a8e7b9d97993fca657458986` passed [Native 9P run
+`35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373):
+N-API job `106667799214` passed direct mounted-I/O/cleanup and all adjacent
+lifecycle gates, while Rust job `106667799016` passed the Linux probe plus all
+four ignored native lifecycle tests. Production remains NO-GO.
 
 The preceding W01-9P transport-teardown packet was published at exact SHA
 `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` and passed [Native 9P run
@@ -199,6 +249,13 @@ ignored native lifecycle tests. Local focused Rust tests, strict Clippy,
 addon rebuild, syntax/diff checks, and elevated N-API execution passed. The
 process-crash and arbitrary-kernel-reset recovery boundary remains explicit;
 broader W01 acceptance remains NO-GO.
+
+The latest W01-FUSE packet was published at `1c195b73bcb09a09aa1c96ab657245421bd8e3b4`.
+Its local protocol/session/lifecycle checks pass, while hosted run
+`35668748366` proved ordinary native round-trip and backend-panic callback/close
+but still failed the blocked-read unmount case. The follow-up teardown-drain fix
+is locally verified and awaits a fresh non-cancelling hosted Linux run; W01 and
+W01-FUSE remain production NO-GO.
 
 The preceding W01-9P Unix listener packet was published at exact test SHA
 `dd10ac0564446c9143f8b5f68b2fed51c7eaf57f` and is included in descendant head
@@ -909,6 +966,7 @@ spent waiting for a hosted job or credential approval.
 | 2026-09-22 | W01-FUSE | Current-main hosted run [35662346488](https://github.com/andymac4182/mount-rs/actions/runs/35662346488) at `b27dd2b` passed the real round-trip and backend-panic callback cases but failed only the blocked-read unmount with `native blocked-read unmount timed out: Err(Elapsed(()))` in native-FUSE job `106540264683`; retained one stop-notify permit and added a Linux-gated blocked-positional-read stop regression | — | 80% planning view | Local FUSE tests, formatting/diff, and Linux-target strict Clippy pass; exact-tip hosted rerun is required before native unmount, callback/lifecycle, crash/restart, concurrency, locks, durability, and the overall W01 decision can change from NO-GO |
 | 2026-09-22 | W01-FUSE | Added a stop-aware terminal reply for positional reads: when teardown interrupts a prepared backend read, the worker returns `EIO` for the original request unique before session close; the Linux-gated Unix-stream regression asserts that reply. Host FUSE all-target tests (14 unit, 6 INIT, 0 native, 6 notify/record, 11 protocol, 20 session, 4 sync-barrier), host strict Clippy, Linux-target check/strict Clippy, formatting and diff checks passed | — | 80% planning view | Manual hosted CI `35662415701` / native-FUSE job `106540484337` passed ordinary round-trip and backend-panic close but timed out both the blocked-read `Mounted::unmount()` and kernel read; this remains a diagnosed cancellation gap requiring exact-tip Linux rerun, with native lifecycle/callback, crash/restart, concurrency, locks, durability and W01 still NO-GO |
 | 2026-09-22 | W01-FUSE | Manual non-canceling CI `35666436803` / native-FUSE job `106553144636` passed ordinary round-trip and backend-panic close but blocked-read unmount exceeded the 15s observation bound. Forced teardown now launches lazy detach concurrently with the 250ms stop grace so descriptor closure can release the helper within the existing bound; local verification passes, but exact hosted rerun and all remaining native gates are still required | — | 80% planning view | W01 remains NO-GO |
+| 2026-09-22 | W01-FUSE | Non-canceling CI `35668748366` / native-FUSE job `106560234631` passed ordinary round-trip and backend-panic close, but blocked-read unmount still timed out after 30.03s because graceful `fusermount3 -u` consumed its full 10s before forced teardown. The serving task now stops/closes after the 250ms grace while the graceful helper remains pending; focused FUSE tests and strict checks pass locally | — | 80% planning view | Fresh hosted exact-tip rerun is required; blocked-read, native lifecycle, crash/restart, concurrency, locks, durability and W01 remain NO-GO |
 | 2026-09-21 | Baseline | Created this ledger from the current W01 tracker and evidence | — | 61% planning view | Hosted/native/live-provider gates remain open |
 | 2026-09-21 | W01.1 / W01.4 | Added shared `useDriverIno`, focused native `fuse`/`9p`/`nfs` option bags, configured FUSE `Mounted.source`, package-level signal teardown, `Mounted.port` readback, and `Mounted[Symbol.asyncDispose]()` to the N-API auto facade; 16 N-API unit tests, affected Rust crates, strict Clippy, Linux-target transport check, build/typecheck, authorized macOS NFS lifecycle, and the opt-in child-process signal lane passed | — | 65% planning view | Automatic error/transport callbacks, shared-server handles, remaining option/session members, hosted Linux native lanes, FSKit, PGlite, and live R2 remain open |
 | 2026-09-21 | W01.2 / W01.3 | Refreshed the pinned PGlite-enabled upstream suite (4 files, 1,200 passed, 82 skipped), the bounded PGlite provider/CLI packet (Rust SDK 6/6, Node SDK 5/5, CLI 11/11 with R2 skips), and all 40 seeded trace lanes across eight local backends at the pinned oracle revision | — | 65% planning view | Root-only skip rows, live R2, hosted platforms, and native transport acceptance remain open |
@@ -1083,6 +1141,29 @@ spent waiting for a hosted job or credential approval.
 | 2026-09-22 | W01-WebDAV | Aligned public XML serialization with the pinned codec: carriage returns in text and namespace values become `&#13;`, XML-invalid controls become U+FFFD, and ordinary markup escaping remains intact; the focused serializer regression matches the pinned bytes | — | 77% W01.1 planning view | This closes a local public XML-encoding safety/parity boundary only; full WebDAV 37/37, warning-denied workspace Clippy, formatting, git diff --check, and the pinned 40-case differential pass, while hosted/provider qualification, power-loss ordering, crash/power-loss filesystem durability, durable lock persistence, and same-resource ordering remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-WebDAV | Hardened public XML parsing with a pre-parse UTF-8/XML-character validation gate: raw controls such as NUL now produce the pinned `invalid-character`/400 refusal instead of surviving in `XmlNode` text; the focused regression reproduced and closed the prior acceptance | — | 77% W01.1 planning view | This closes a local public XML-parser safety/parity boundary only; full WebDAV 38/38, warning-denied workspace Clippy, formatting, git diff --check, and the pinned 40-case differential pass, while hosted/provider qualification, power-loss ordering, crash/power-loss filesystem durability, durable lock persistence, and same-resource ordering remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-WebDAV | Hardened the public `If` parser's `Not` keyword probe against UTF-8 byte-boundary panics: malformed `(éé)` input now returns the ordinary invalid-header result, with the pre-fix panic reproduced by the focused regression | — | 77% W01.1 planning view | This closes a local public `If`-parser safety boundary only; full WebDAV 39/39, warning-denied workspace Clippy, formatting, `git diff --check`, and the pinned 40-case differential pass, while hosted/provider qualification, power-loss ordering, crash/power-loss filesystem durability, durable lock persistence, and same-resource ordering remain open; W01 stays NO-GO |
+| 2026-09-22 | W01-FUSE | Reconciled the FUSE README boundary with the current dispatch: session-scoped `GETLK`/`SETLK` are supported, `SETLKW` deliberately returns `EAGAIN`, and Linux handles targeted `INTERRUPT`; hosted native lock/interrupt and lifecycle evidence remain open | W01 remains NO-GO |
+| 2026-09-22 | W01-FUSE | Rechecked deterministic FUSE lifecycle coverage: 14 library tests and 20 focused session tests passed with an isolated Cargo target; Darwin cannot execute the Linux-gated `/dev/fuse` lifecycle, crash/restart, concurrency, locks or durability scenarios | W01 remains NO-GO |
+| 2026-09-22 | W01-FUSE | Rechecked deterministic mount-free durability barriers: all 4 `sync_barrier` tests passed for `SYNCFS`, `FSYNCDIR`, durable/volatile `FLUSH`, and backend errors; this does not qualify kernel persistence or crash recovery | W01 remains NO-GO |
+| 2026-09-22 | W01-FUSE | Linux-target `cargo check --tests` passed for the FUSE crate; executable cross-linking is unavailable on Darwin due to incompatible host linker flags, so no Linux runtime result is inferred | W01 remains NO-GO |
+| 2026-09-22 | W01-FUSE | The complete current FUSE package suite passed 61 tests across unit, INIT, notify/record, protocol, session, and sync-barrier lanes; Darwin reported zero native mount tests, so hosted kernel acceptance remains open | W01 remains NO-GO |
+| 2026-09-22 | W01-FUSE | Warning-denied Clippy passed for the complete current FUSE target set using an isolated Cargo target; this does not substitute for hosted Linux lifecycle or durability evidence | W01 remains NO-GO |
+| 2026-09-22 | W01-FUSE | Added callback-panic isolation coverage: the Linux-gated unit regression verifies exactly-once terminal callback state and preservation of the first error; host tests, Linux-target test check, and warning-denied Clippy passed | W01 remains NO-GO |
+| 2026-09-22 | W01-FUSE | Added concurrent-unmount waiter coverage for the shared terminal lifecycle result; host tests, Linux-target test check, and warning-denied Clippy passed, while actual `/dev/fuse` execution remains external | W01 remains NO-GO |
+| 2026-09-22 | W01-FUSE | Added failure-then-retry coverage for graceful unmount state restoration; host tests, Linux-target test check, and warning-denied Clippy passed, while hosted helper/kernel behavior remains external | W01 remains NO-GO |
+| 2026-09-22 | W01-FUSE | Added multi-observer `wait_closed()` cleanup coverage; host tests, Linux-target test check, and warning-denied Clippy passed, while hosted kernel lifecycle remains external | W01 remains NO-GO |
+| 2026-09-22 | W01-FUSE | Added closed-peer write-error callback coverage for the native session loop; host tests, Linux-target test check, and warning-denied Clippy passed, while hosted callback delivery remains open | W01 remains NO-GO |
+| 2026-09-22 | W01-FUSE | Added invalid-device read-error callback coverage for the native session loop; host tests, Linux-target test check, and warning-denied Clippy passed, while hosted callback delivery remains open | W01 remains NO-GO |
+| 2026-09-22 | W01-FUSE | Added fail-closed public mount-option coverage for zero read limits and lifecycle timeouts; host tests, Linux-target test check, and warning-denied Clippy passed | W01 remains NO-GO |
+| 2026-09-22 | W01-FUSE | Added invalid-file and missing-path mountpoint preflight coverage before native side effects; host tests, Linux-target test check, and warning-denied Clippy passed | W01 remains NO-GO |
+| 2026-09-22 | W01-FUSE | Extended public mount-object coverage to verify `mode()` and `mountpoint()` identity alongside `source()`; host tests, Linux-target test check, and warning-denied Clippy passed | W01 remains NO-GO |
+| 2026-09-22 | W01-FUSE | Added public `MountError` nested-source coverage; host tests, Linux-target test check, and warning-denied Clippy passed | W01 remains NO-GO |
+| 2026-09-22 | W01-FUSE | Added direct `FuseSession::options()` policy readback coverage; all 20 session tests, Linux-target test check, and warning-denied Clippy passed | W01 remains NO-GO |
+| 2026-09-22 | W01-FUSE | Added sequential post-teardown `unmount()` idempotence coverage; host tests, Linux-target test check, and warning-denied Clippy passed | W01 remains NO-GO |
+| 2026-09-22 | W01-FUSE | Added direct public `max_request` and negotiated-INIT state coverage; all 20 session tests, Linux-target test check, and warning-denied Clippy passed | W01 remains NO-GO |
+| 2026-09-22 | W01-FUSE | Expanded native mount default-option coverage for source, permissions, frame, and lifecycle timeout policy; host tests, Linux-target test check, and warning-denied Clippy passed | W01 remains NO-GO |
+| 2026-09-22 | W01-FUSE | Added helper-free privileged and root-auto mount-mode selection coverage; host tests, Linux-target test check, and warning-denied Clippy passed | W01 remains NO-GO |
+| 2026-09-22 | W01-FUSE | Added directory-handle accounting coverage for `OPENDIR`/`RELEASEDIR`; all 21 session tests, Linux-target test check, and warning-denied Clippy passed | W01 remains NO-GO |
+
 ## Definition of W01 complete
 
 W01 can move to complete only when each of these is true:

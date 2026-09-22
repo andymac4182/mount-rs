@@ -214,6 +214,28 @@ jobs:
             echo 'W07_MACOS_FOUNDATIONDB_COMPILE_PASS provider=mount-rs-foundationdb cli=native_lifecycle napi=foundationdb'
           } 2>&1 | tee artifacts/w07-macos-foundationdb-compile.log
 
+      - name: Record macOS W07 qualification provenance
+        if: success()
+        env:
+          W07_QUALIFICATION_REPOSITORY: ${{ github.repository }}
+          W07_QUALIFICATION_WORKFLOW: ${{ github.workflow }}
+          W07_QUALIFICATION_REF: ${{ github.ref }}
+          W07_QUALIFICATION_SOURCE_REVISION: ${{ github.sha }}
+          W07_QUALIFICATION_RUN_ID: ${{ github.run_id }}
+          W07_QUALIFICATION_RUN_ATTEMPT: ${{ github.run_attempt }}
+          W07_QUALIFICATION_RUNNER: ${{ runner.name }}
+        run: |
+          set -eu
+          printf 'W07_MACOS_FOUNDATIONDB_COMPILE_PROVENANCE repository=%s workflow=%s ref=%s source_revision=%s run_id=%s run_attempt=%s runner=%s\n' \
+            "$W07_QUALIFICATION_REPOSITORY" \
+            "$W07_QUALIFICATION_WORKFLOW" \
+            "$W07_QUALIFICATION_REF" \
+            "$W07_QUALIFICATION_SOURCE_REVISION" \
+            "$W07_QUALIFICATION_RUN_ID" \
+            "$W07_QUALIFICATION_RUN_ATTEMPT" \
+            "$W07_QUALIFICATION_RUNNER" \
+            >> artifacts/w07-macos-foundationdb-compile.log
+
       - name: Preserve macOS platform qualification evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -263,8 +285,8 @@ jobs:
           test '${{ needs.foundationdb-rustfs.result }}' = success
           test '${{ needs.foundationdb-macos-platform.result }}' = success
           node scripts/verify-w07-platform-evidence.mjs \
-            evidence/linux/foundationdb-production-qualification.log \
-            evidence/linux/foundationdb-production-qualification-summary.json \
+            evidence/linux/artifacts/foundationdb-production-qualification.log \
+            evidence/linux/artifacts/foundationdb-production-qualification-summary.json \
             evidence/macos/w07-macos-foundationdb-compile.log
 
       - name: Preserve W07 cross-platform qualification packet

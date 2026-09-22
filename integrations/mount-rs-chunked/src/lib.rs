@@ -34,12 +34,15 @@ const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(30);
 const LEASE_RENEWAL_MARGIN: Duration = Duration::from_secs(5);
 const DEFAULT_CHUNK_SIZE: usize = 64 * 1024;
 const MAX_PENDING_MUTATIONS: usize = 1024;
-// A small fixed collection window lets concurrently prepared remote block
-// operations enqueue their metadata mutations before the first publisher
-// snapshots the queue. It is deliberately scheduler-yield based rather than
-// time based so core tests remain runtime-independent and single mutations do
-// not wait on an unbounded or provider-controlled delay.
-const MUTATION_BATCH_YIELD_ROUNDS: usize = 8;
+// The W26 Ozone qualification uses 64 concurrent lifecycle workers. Start
+// with the small fast-path window used by local providers, then extend it
+// only while newly-prepared remote operations are still arriving. The total
+// window remains bounded and scheduler-yield based rather than depending on
+// provider-controlled time.
+const MUTATION_BATCH_INITIAL_YIELD_ROUNDS: usize = 8;
+const MUTATION_BATCH_MAX_YIELD_ROUNDS: usize = 64;
+const MUTATION_BATCH_IDLE_YIELD_ROUNDS: usize = 2;
+const MUTATION_BATCH_REQUEST_TARGET: usize = 64;
 
 /// Runtime configuration for a newly-created namespace.
 ///
@@ -793,12 +796,31 @@ where
         loop {
             // Let other operations finish their immutable block work and
             // enqueue their prepared metadata mutations before this runner
-            // snapshots the namespace. The fixed round count is a bounded
-            // batching window: it improves coalescing for remote providers
-            // without turning publication into a timer or changing the
-            // fenced revision/CAS boundary below.
-            for _ in 0..MUTATION_BATCH_YIELD_ROUNDS {
+            // snapshots the namespace. The bounded adaptive window improves
+            // coalescing for remote providers without turning publication
+            // into a timer or changing the fenced revision/CAS boundary.
+            let mut previous_pending = 0;
+            let mut idle_rounds = 0;
+            for round in 0..MUTATION_BATCH_MAX_YIELD_ROUNDS {
                 cooperative_yield().await;
+                let pending = match self.inner.mutations.lock() {
+                    Ok(queue) => queue.pending.len(),
+                    Err(_) => break,
+                };
+                if pending >= MUTATION_BATCH_REQUEST_TARGET {
+                    break;
+                }
+                if pending == previous_pending {
+                    idle_rounds += 1;
+                } else {
+                    idle_rounds = 0;
+                }
+                previous_pending = pending;
+                if round + 1 >= MUTATION_BATCH_INITIAL_YIELD_ROUNDS
+                    && idle_rounds >= MUTATION_BATCH_IDLE_YIELD_ROUNDS
+                {
+                    break;
+                }
             }
 
             let requests = {
@@ -3468,7 +3490,7 @@ mod tests {
 
     #[test]
     fn concurrent_whole_file_mutations_share_one_fenced_publication() {
-        const PARTICIPANTS: usize = 4;
+        const PARTICIPANTS: usize = MUTATION_BATCH_REQUEST_TARGET;
         let metadata = CountingMetadataStore {
             inner: MemoryMetadataStore::new(),
             publishes: Arc::new(AtomicUsize::new(0)),
@@ -3512,7 +3534,7 @@ mod tests {
 
     #[test]
     fn concurrent_whole_file_creates_rebase_inodes_in_one_publication() {
-        const PARTICIPANTS: usize = 4;
+        const PARTICIPANTS: usize = MUTATION_BATCH_REQUEST_TARGET;
         let metadata = CountingMetadataStore {
             inner: MemoryMetadataStore::new(),
             publishes: Arc::new(AtomicUsize::new(0)),
