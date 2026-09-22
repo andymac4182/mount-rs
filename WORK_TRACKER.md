@@ -948,6 +948,17 @@ current published SHA, preserve the 1,000-IOPS hard target and keep production
 **NO-GO** until every configured provider and the complete end-to-end aggregate
 pass.
 
+Current W26 hosted dispatch override (2026-09-22): concurrent mainline work
+advanced the shared tip to `06fc70612b9387a281ab050f711fc878713177ea` after
+the ledger publication. Manual run `35688061634` selected that exact SHA.
+Producer jobs are queued/in progress: base Ozone `106619031921`, compositions
+`106619031684`, TiDB `106619031746` and FoundationDB `106619031804`; the
+aggregate job has not yet been created at capture. This run is not evidence
+until every producer and the aggregate are terminal. It includes the SQLite
+CAS `ba4e89d0`, TiDB isolation `0f95cb7d` and FoundationDB lockfile correction
+`8428a5ef`; production remains **NO-GO** pending all hard markers and the
+1,000-IOPS target.
+
 ## Decisions and external prerequisites
 
 - After the app restart, the nine prior worker handles were missing. Their

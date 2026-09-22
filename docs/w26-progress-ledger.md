@@ -1382,3 +1382,24 @@ optimization; `ba4e89d0` is the SQLite metadata-publication CAS optimization;
 `35686340751` selected earlier SHA `1e64bc25` and is diagnostic only. A fresh
 matrix must be dispatched against the current exact SHA; no failed, queued,
 partial or earlier-SHA result is promoted to acceptance.
+
+## Current hosted dispatch override — run `35688061634`
+
+After the ledger publication, concurrent mainline work advanced the shared tip
+to `06fc70612b9387a281ab050f711fc878713177ea`. A fresh manual
+`gh workflow run ci.yml --ref main` was dispatched and GitHub selected that
+exact SHA. The run is currently **queued/in progress**, not acceptance evidence.
+
+| Producer | Job ID | Current state | Acceptance rule |
+| --- | ---: | --- | --- |
+| Ozone base | `106619031921` | queued | Must pass gateway, policy, recovery and cleanup markers |
+| Ozone compositions | `106619031684` | queued | Must pass SQLite/R2 and PGlite/R2 at >=1,000 IOPS plus all composition/end-to-end markers |
+| Ozone TiDB | `106619031746` | queued | Must pass TiDB durable/restart/bounded-listing markers and >=1,000 IOPS |
+| Ozone FoundationDB | `106619031804` | queued | Must pass lockfile/preflight, durable restart, bounded-listing, cleanup and >=1,000 IOPS |
+| W26 aggregate | not created at capture | pending | Must verify all exact-SHA artifacts and emit the complete aggregate pass marker |
+
+The required current code includes SQLite CAS `ba4e89d0`, TiDB isolation
+`0f95cb7d` and FoundationDB lockfile `8428a5ef`. I will not promote any
+producer result until its job and the aggregate are terminal, and the
+production decision remains **NO-GO** while this run is queued or any hard gate
+fails.
