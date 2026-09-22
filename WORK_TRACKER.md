@@ -980,6 +980,13 @@ provider-lifecycle, power-loss, or durable-lock gates.
 The current shell has no AWS/R2/Cloudflare credential names available; live
 provider acceptance remains externally gated and no credential values were
 read or persisted.
+The current hosted provider audit confirms the external boundary: Live AWS S3
+run `35679010203` failed its protected preflight with
+`AWS_S3_CI_CONFIG_BLOCKED missing_bucket` and empty bucket/region/account/role
+inputs, while Live Cloudflare R2 run `35680542993` failed its bounded-usage
+admission with `count=285 limit=20`. The exact-tip CI for this WebDAV scope
+chunk was cancelled by successor mainline publication; replacement CI
+`35680709436` at origin tip `1bdf8846` had no jobs at the audit snapshot.
 The published provider packet `fb9caec81a7e3fa183f5fa51871117e62fa35036` had
 exact-SHA CI/Fault injection/W08 workflows queued or pending, W04 policy
 succeeded, Live Cloudflare R2 failed, and unrelated Native 9P in progress; no

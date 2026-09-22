@@ -179,6 +179,15 @@ The current shell has no AWS/R2/Cloudflare credential names available, so live
 provider acceptance remains an explicit external blocker; no credential values
 were read or persisted.
 
+The current hosted provider audit confirms that boundary: Live AWS S3 run
+`35679010203` stopped at `AWS_S3_CI_CONFIG_BLOCKED missing_bucket` with its
+protected bucket/region/account/role inputs empty, while Live Cloudflare R2 run
+`35680542993` stopped at the bounded-usage gate (`count=285`, limit `20`). The
+exact-tip CI run for the published WebDAV scope chunk was cancelled by a
+successor mainline push; replacement CI `35680709436` at current origin tip
+`1bdf8846` had no jobs at the audit snapshot, so no fresh hosted WebDAV result
+is promoted.
+
 For published provider packet `fb9caec81a7e3fa183f5fa51871117e62fa35036`, the
 exact-SHA CI/Fault injection/W08 workflows were queued or pending, W04 policy
 succeeded, Live Cloudflare R2 failed, and an unrelated Native 9P workflow was
