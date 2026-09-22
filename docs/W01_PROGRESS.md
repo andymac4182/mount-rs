@@ -156,13 +156,14 @@ exact SHA `fb532b46fd8b6c5af66dc9b771e84116b2997ca3`. Its local regression
 compares the native direct `P9Session` semantic member set with the pinned
 oracle's 14-member set and passes alongside the adjacent metadata,
 observability, fid, mount-helper, typecheck, syntax, and diff checks. The
-exact hosted [Native 9P run `35694841984`](https://github.com/andymac4182/mount-rs/actions/runs/35694841984)
-completed with N-API job `106639369581` passing, but Rust job
-`106639369868` failed because `native_linux_external_umount_finishes_server_lifecycle`
-reported external `umount` exit status 32 (three native tests passed, one
-failed). It is not hosted PASS evidence. Broader session/protocol parity,
-crash/reset scope, the failed native external-umount gate, and W01 gates
-remain open, so production remains NO-GO.
+historical hosted [Native 9P run `35694841984`](https://github.com/andymac4182/mount-rs/actions/runs/35694841984)
+had N-API job `106639369581` passing but Rust job `106639369868` failed because
+the external-umount case exited 32. The current published SHA
+`86b88c329d64bcc2a8e7b9d97993fca657458986` reran the direct session/member path
+in N-API job `106667799214` and passed it, while Rust job `106667799016` passed
+all four ignored native lifecycle tests; the historical failure is superseded
+for the current supported slice. Broader session/protocol parity, crash/reset
+scope, and W01 gates remain open, so production remains NO-GO.
 
 The attached-connection API parity packet was published at exact SHA
 `1c791cf67861efdfe8e5da223048904c88c6b168`. It adds the declared
