@@ -217,6 +217,16 @@ N-API/package, W08 policy/evidence and native-9P workflow-shape checks passed.
 This is source-health evidence only and does not close P01–P09 or change the
 NO-GO decision.
 
+After origin/main advanced with the WebDAV listener restart/backpressure and
+bounded recursive-mutation fixes, duplicate-header handling and related N-API
+changes, exact merged source
+`7752dd2e26ab5f423dfd984c1f9e5887465fd9c9` was freshly requalified. The full
+locked workspace test and strict workspace Clippy exited 0; all runnable tests
+passed, the WebDAV test group reported 26 passing tests, provider/native rows
+remained explicit opt-in skips, and affected N-API/package, W08 policy/evidence
+and native-9P workflow-shape checks passed. This is source-health evidence only
+and does not close P01–P09 or change the NO-GO decision.
+
 Hosted W08 policy run `35681936375` at source
 `e7be3769dd7c6722ce096c481f30d042d7895dbe`, job `106600554617`, completed
 successfully in 2m48s. Its rollout-ledger and release-identity/provenance
