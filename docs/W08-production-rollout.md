@@ -229,10 +229,20 @@ The public source-equivalent checkpoint
 `62e86dc092dfe9816ef54ca681872ff9f51d8895` passed hosted W08 release-policy
 run `35683936652`, job `106607017325`, which completed successfully in
 approximately 2m47s. Its rollout-ledger and release-identity/provenance steps
-were green. This is hosted implementation/static evidence only; it does not
-provide production topology, provider, candidate-release, registry, canary,
-rollback or owner-approval evidence, so P01–P09 remain open and the decision
-remains NO-GO.
+  were green. This is hosted implementation/static evidence only; it does not
+  provide production topology, provider, candidate-release, registry, canary,
+  rollback or owner-approval evidence, so P01–P09 remain open and the decision
+  remains NO-GO.
+
+The immediately subsequent public merge tip
+`622dd0dc82125ba1979ea7ebf2b6a1b11145c6bb` had W08 policy run `35684358649`
+cancelled before job creation (`jobs=[]`) when concurrent public tip
+`9563d2db8d73b8583212eed00f5b909cbcadf27e` arrived. The surviving current
+public-source-equivalent run `35684400799` at source `9563d2db`, job
+`106608087688`, completed successfully in 2m05s with both W08 policy steps
+green. The cancellation is a hosted scheduling boundary, not evidence of a
+source or production failure; the successful run remains implementation/static
+evidence only and P01–P09 remain open.
 
 A fresh credential-free admission check at **2026-09-22 11:36 AEST** passed the
 positive production-config fixture with a non-secret TLS-policy URL supplied
