@@ -534,6 +534,16 @@ tip and was `pending` at 18:32 AEST. This is a native host/toolchain and hosted
 scheduling boundary, not a provider or production acceptance; P01–P09 remain
 open and the decision remains NO-GO.
 
+The latest S3/N-API source-bearing merge `d81c4f4` (S3 session/gateway cleanup
+and N-API in-flight crash/concurrency coverage) passed compile-only locked
+workspace check and strict Clippy. The linked test remains blocked by the same
+unaccepted Xcode license; `35523b9f` is still the latest full linked-test PASS.
+Public main then added W07 provenance/control and docs-only updates through
+`ab74870c`; hosted W08 run `35705868850` targets that exact public tip and was
+`pending` at 18:38 AEST. No provider, native, production, candidate, canary,
+rollback or approval gate is closed; P01–P09 remain open and the decision
+remains NO-GO.
+
 After origin/main advanced with the 9P EOF/backpressure server fix `1179d9e3`,
 N-API test expansion and site component updates, exact merged source
 `d725248534eb897de4d49e916c47425e6266c05d` was freshly requalified. The full
