@@ -355,6 +355,19 @@ pending for this merge; the last terminal hosted policy result is
 credentials, production deployment, candidate tag, canary, rollback or owner
 approval exists. P01–P09 remain open and the decision remains NO-GO.
 
+The latest source-bearing public reconciliation added the 9P stale-generation,
+TiDB autocommit, N-API session and stable fault-qualification changes through
+public source `8e76aa44`; its W08 policy attempts `35693830823` and
+`35693839548` both cancelled before job creation with `jobs=[]`, so neither is
+hosted evidence. The exact local merge
+`b996cc735ed0d5c2cb6977fb6b63cb623a005bba` includes that source plus the W08
+ledger and passed the full locked workspace test, strict Clippy, six workflow
+YAML parses, N-API/package checks, W07/W08 tracking validators/tests and
+`git diff --check`. The hosted W08 retest for this merge is pending
+publication. No provider credentials, production deployment, candidate tag,
+canary, rollback or owner approval exists. P01–P09 remain open and the
+decision remains NO-GO.
+
 After origin/main advanced with the 9P EOF/backpressure server fix `1179d9e3`,
 N-API test expansion and site component updates, exact merged source
 `d725248534eb897de4d49e916c47425e6266c05d` was freshly requalified. The full
