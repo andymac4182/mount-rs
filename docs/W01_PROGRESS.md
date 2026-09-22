@@ -275,6 +275,14 @@ expanding the advertised 9P scope; the documented legacy/auth/xattr,
 broader-member, supervisor-owned crash/reset, and non-Linux native-mount
 boundaries remain explicit, and W01/release remains **NO-GO**.
 
+The follow-up 9P platform gate also passed the host macOS rootless crate suite
+(`37` tests, zero failures) and the Rust crate's all-target compile check for
+`x86_64-pc-windows-gnu`. This qualifies Windows compile portability only: no
+Windows runtime, N-API, Unix-listener, or native-mount acceptance is claimed.
+The supported production platform boundary therefore remains Linux native
+mounts plus the tested macOS/Linux rootless wire/TCP surface, and W01/release
+remains **NO-GO**.
+
 The preceding W01-9P transport-teardown packet was published at exact SHA
 `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` and passed [Native 9P run
 `35685073733`](https://github.com/andymac4182/mount-rs/actions/runs/35685073733):

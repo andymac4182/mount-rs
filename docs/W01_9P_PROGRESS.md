@@ -20,6 +20,7 @@ upstream stream/attach contract or hosted native mount behavior.
 | Native-listener stream boundary | Explicit supported-scope decision | Native Tokio-accepted connections expose `stream: undefined`; their peer is the transport source string when available (Unix socket path or TCP `address:port`) and is `null` only when absent. Callers requiring a Node `Duplex` use `server.attach`, whose attached connection retains the supplied stream and peer fallback |
 | Mounted 9P view identity | Local + hosted N-API PASS for the covered wrapper slice | `Mounted.server` and `Mounted.connection` cache their lifecycle views, and the mounted connection reuses the matching cached `P9Server.clients` wrapper by stable transport id. The direct native-mount regression checks repeated getter identity and cross-view connection identity. Published SHA `86b88c329d64bcc2a8e7b9d97993fca657458986` passed [Native 9P run `35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373): N-API job `106667799214` passed the direct mounted-I/O/cleanup and adjacent lifecycle gates, and Rust job `106667799016` passed the Linux probe plus all four ignored native lifecycle tests |
 | Linux native 9P | Hosted PASS for the supported Rust and N-API Linux lifecycle scope; process-crash and arbitrary kernel-reset recovery remain outside the library guarantee | Dedicated [Native 9P run `35628187344`](https://github.com/andymac4182/mount-rs/actions/runs/35628187344), job `106427627397`, at `431affd660391a0b8ed99815e389ffe12ad229c2`, passed `9p`/`9pnet_fd` probing and all four ignored Rust native tests: concurrent file I/O/unmount, server-close/kernel-connection release, ordinary mount/unmount, and external umount. Exact SHA `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` passed [Native 9P run `35685073733`](https://github.com/andymac4182/mount-rs/actions/runs/35685073733): Rust job `106610049705` passed the Linux probe plus all four ignored native lifecycle tests, and N-API job `106610049913` passed addon build, TCP/Unix/attached server lifecycle, orderly EOF, reset, paused-peer half-close teardown, and automatic/direct/structural mounted I/O/cleanup. Earlier exact-SHA runs remain below as history |
+| Non-Linux platform boundary | Explicit supported-scope decision | macOS is qualified for the rootless wire/TCP surface only; Windows is compile-qualified for the Rust crate but has no hosted runtime, N-API, Unix-listener, or native-mount acceptance and is not a production-supported platform claim. Native kernel mounts remain Linux-only |
 | Errors, cancellation, concurrency, crash and cleanup | Local deterministic PASS; supported hosted transport and mount lifecycle PASS; process-crash and arbitrary kernel-reset recovery remain supervisor-owned | Focused Rust/N-API lifecycle and fault tests cover broadcast shutdown, accept-loop close races, shutdown-aware in-flight permit waits, bounded pending-frame reaping, transport faults, orderly EOF, TCP reset, paused-peer half-close teardown, session destruction that wakes and drains `Tflush` waiters, version-reset invalidation returning `EIO`, and destroy invalidation returning `ENODEV` even when a late provider error is available; the hosted native harness now passes eight concurrent mounted file write/read/rename/read workers plus server-close, kernel-connection-close, external umount, bounded-unmount cleanup, and the new N-API transport teardown cases. Automatic recovery after process crash or arbitrary kernel reset remains explicitly outside the library contract |
 
 ## Current supported-scope closure audit
@@ -65,8 +66,9 @@ hosted run below:
   expose `stream: undefined` and callers needing a Node stream use `attach`;
   root automatic cross-transport signal ownership is not promised; process
   crash and arbitrary kernel-reset/half-close recovery is supervisor-owned;
-  and macOS provides rootless wire/attached verification rather than a native
-  kernel 9P mount.
+  macOS provides rootless wire/attached verification rather than a native
+  kernel 9P mount; and Windows is compile-qualified only, without production
+  runtime, N-API, Unix-listener, or native-mount acceptance.
 
 The parity ledger therefore remains partial relative to the broader upstream
 oracle by design, while the supported mount-rs 9P contract has no unclassified
@@ -90,6 +92,11 @@ decision are closed.
   passed baseline job `106691472428` with `144/146` and the two explicit
   non-root ownership skips, and privileged root job `106691917345` with
   `146/146`.
+- Retain the platform boundary as an explicit gate: the host rootless
+  `mount-rs-9p` all-target suite must remain green on macOS/Linux, while the
+  Rust crate's Windows `--all-targets` compile check is portability evidence
+  only. Do not promote that compile result to Windows runtime, N-API, Unix
+  listener, or native-mount support without a hosted Windows gate.
 - Keep the isolated `MOUNT_RS_SERVER_PHASE=p9` N-API step as the server and
   attach lifecycle gate: it exercises the real TCP server, attached socket and
   non-socket duplex paths, duplicate attach, backpressure, frame limits,
@@ -722,6 +729,7 @@ so it is not promoted as a 9P result; production remains NO-GO.
 
 | 2026-09-22 | Dedicated hosted upstream 9P conformance gate | Added an explicit Linux `upstream-9p` job to `Native 9P`, checking out pinned oracle revision `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`, building the Rust fixture through `scripts/cargo-shared`, and running the unmodified pinned 9P conformance suite. Published SHA `a6b3e2aa10cfdb3ee730d41c5886436b02c260de` passed hosted [Native 9P run `35707546973`](https://github.com/andymac4182/mount-rs/actions/runs/35707546973): upstream job `106680012604` reported `144 passed`, `2 skipped` root-gated ownership cases out of `146`, N-API job `106680012485` passed the existing N-API lifecycle, and Rust job `106680013203` passed the Linux probe plus all four ignored native lifecycle tests. Local YAML/syntax, focused oracle/public-surface, and diff checks passed; the local full suite remains unavailable on this Mac because the Xcode license is not accepted | The explicit legacy/auth/xattr and broader upstream object-member boundaries, supervisor-owned crash/reset recovery, non-Linux native kernel-mount boundary, and overall W01/release NO-GO remain unchanged |
 | 2026-09-22 | Root-gated upstream 9P ownership coverage | Added a privileged Linux `upstream-9p-root` job that runs the same pinned oracle suite as root while preserving `CI`, Rustup, Cargo, and target-directory environment under `sudo`; the explicit temporary Cargo target keeps the gate isolated from the shared local target. Exact head SHA `d11f458d7f6ef1923091fbca84a93e63f05e9455` passed [Native 9P run `35711056768`](https://github.com/andymac4182/mount-rs/actions/runs/35711056768): baseline job `106691472428` reported `144 passed` and `2 skipped`, root job `106691917345` reported `146/146`, and companion N-API job `106691472270` and Rust job `106691472165` passed. This exercises both previously root-gated symlink-ownership cases; the broader scope boundaries and overall W01/release NO-GO remain unchanged |
+| 2026-09-22 | 9P platform scope gate | The host `aarch64-apple-darwin` rootless `./scripts/cargo-shared test -p mount-rs-9p --all-targets --locked` passed `37` tests with zero failures; the same crate passed `./scripts/cargo-shared check -p mount-rs-9p --all-targets --locked --target x86_64-pc-windows-gnu --message-format=short`. This qualifies macOS rootless execution and Windows Rust compile portability only. Windows runtime/N-API/Unix-listener/native-mount behavior is not claimed, while Linux native mounts remain qualified only by the hosted `9p`/`9pnet_fd` gates; production scope remains Linux native plus the tested macOS/Linux rootless surface |
 
 ## Completion rule
 
