@@ -2071,6 +2071,14 @@ Evidence landed without closing the remaining W01 acceptance gates:
   validations, and clean-consumer smoke. W04.2 remains closed and current-tip
   confirmed. The same run's provider/W26 failures are separate production
   blockers; rollout remains **NO-GO**.
+- Production rollout packet refreshed in
+  [`docs/W04-production-rollout.md`](docs/W04-production-rollout.md): exact
+  candidate `d870f900`, run `35692153251`, aggregate-native package/consumer
+  PASS, and the five retained native artifact IDs/digests are recorded as
+  qualification provenance. The packet explicitly leaves production release,
+  persistent-volume identity, encrypted backup/restore/RPO/RTO, provider
+  scope, collector/pager, named owners, and GO approval open; provider IOPS
+  and W26 failures remain current NO-GO evidence.
 - [x] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
   The rebased packet (`43ded00`, `980cdd7`, `2d2ac5c`, `be2170b`, final
   rebased tip `7235fde`) adds durable PGlite version metadata, reconnect and
