@@ -14,11 +14,11 @@ use mount_rs_webdav::protocol::{
     parse_lock_token, parse_overwrite, parse_range, parse_target_path, parse_xml, status_of_error,
 };
 use mount_rs_webdav::{
-    ALLOW_HEADER, DAV_COMPLIANCE, DAV_NS, DavFault, Depth, WebdavError, WebdavRequestBody,
-    WebdavRequestHead, WebdavServer, WebdavServerError, WebdavServerHooks, WebdavServerOptions,
-    WebdavSession, WebdavSessionHooks, WebdavSessionOptions, WebdavTransportErrorKind,
-    create_webdav_server, create_webdav_server_with_hooks, status_for_error, status_line,
-    status_text,
+    ALLOW_HEADER, DAV_COMPLIANCE, DAV_NS, DavFault, DavLockGrant, DavLockRequest, DavLockTable,
+    DavLockTableOptions, Depth, LockDepth, WebdavError, WebdavRequestBody, WebdavRequestHead,
+    WebdavServer, WebdavServerError, WebdavServerHooks, WebdavServerOptions, WebdavSession,
+    WebdavSessionHooks, WebdavSessionOptions, WebdavTransportErrorKind, create_webdav_server,
+    create_webdav_server_with_hooks, status_for_error, status_line, status_text,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -40,6 +40,47 @@ fn public_constants_and_status_helpers_match_the_transport_contract() {
     assert_eq!(status_text(207), Some("Multi-Status"));
     assert_eq!(status_line(423), "HTTP/1.1 423 Locked");
     assert_eq!(status_for_error(mount_rs_core::ErrorCode::Enoent), 404);
+}
+
+#[test]
+fn lock_snapshots_preserve_grant_order() {
+    let next_token = Arc::new(AtomicUsize::new(0));
+    let token_counter = Arc::clone(&next_token);
+    let mut table = DavLockTable::new(DavLockTableOptions {
+        new_token: Some(Arc::new(move || {
+            format!(
+                "urn:uuid:ordered-{}",
+                token_counter.fetch_add(1, Ordering::SeqCst)
+            )
+        })),
+        ..DavLockTableOptions::default()
+    });
+    let request = |path: &str| DavLockRequest {
+        path: path.to_owned(),
+        collection: false,
+        depth: LockDepth::Zero,
+        exclusive: true,
+        owner: None,
+        timeout: None,
+    };
+
+    assert!(matches!(
+        table.create(request("/first"), 0),
+        DavLockGrant::Granted(_)
+    ));
+    assert!(matches!(
+        table.create(request("/second"), 0),
+        DavLockGrant::Granted(_)
+    ));
+
+    let snapshots = table.all(0);
+    assert_eq!(
+        snapshots
+            .iter()
+            .map(|lock| lock.path.as_str())
+            .collect::<Vec<_>>(),
+        ["/first", "/second"]
+    );
 }
 
 async fn server() -> WebdavServer {

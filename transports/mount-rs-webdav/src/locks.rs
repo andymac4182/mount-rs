@@ -87,6 +87,7 @@ impl Default for DavLockTableOptions {
 
 pub struct DavLockTable {
     locks: HashMap<String, DavLock>,
+    order: Vec<String>,
     options: DavLockTableOptions,
 }
 
@@ -103,6 +104,7 @@ impl DavLockTable {
     pub fn new(options: DavLockTableOptions) -> Self {
         Self {
             locks: HashMap::new(),
+            order: Vec::new(),
             options,
         }
     }
@@ -114,7 +116,10 @@ impl DavLockTable {
 
     pub fn all(&mut self, now: i64) -> Vec<DavLock> {
         self.sweep(now);
-        self.locks.values().cloned().collect()
+        self.order
+            .iter()
+            .filter_map(|token| self.locks.get(token).cloned())
+            .collect()
     }
 
     pub fn covering(&mut self, path: &str, now: i64) -> Vec<DavLock> {
@@ -185,7 +190,11 @@ impl DavLockTable {
             timeout_seconds,
             expires_at: now.saturating_add((timeout_seconds as i64).saturating_mul(1000)),
         };
-        self.locks.insert(token, lock.clone());
+        let new_token = !self.locks.contains_key(&token);
+        self.locks.insert(token.clone(), lock.clone());
+        if new_token {
+            self.order.push(token);
+        }
         DavLockGrant::Granted(lock)
     }
 
@@ -207,7 +216,11 @@ impl DavLockTable {
     }
 
     pub fn remove(&mut self, token: &str) -> bool {
-        self.locks.remove(token).is_some()
+        let removed = self.locks.remove(token).is_some();
+        if removed {
+            self.order.retain(|entry| entry != token);
+        }
+        removed
     }
 
     pub fn remaining(lock: &DavLock, now: i64) -> u64 {
@@ -234,6 +247,7 @@ impl DavLockTable {
 
     fn sweep(&mut self, now: i64) {
         self.locks.retain(|_, lock| lock.expires_at > now);
+        self.order.retain(|token| self.locks.contains_key(token));
     }
 }
 

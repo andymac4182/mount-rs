@@ -1179,7 +1179,7 @@ The Rust WebDAV session now treats unread request-body faults as a framing
 boundary: known 413 limit faults are drained for keep-alive reuse, while any
 other drain fault is reported once and adds `Connection: close`, even when the
 request dispatch itself had already produced a response. The focused WebDAV
-target passes 29/29, and the rebuilt N-API/WebDAV-only host phase remains green.
+target passes 30/30, and the rebuilt N-API/WebDAV-only host phase remains green.
 The pinned WebDAV authority audit confirms Rust `Url::host_str()` retains
 bracketed IPv6, so the existing literal `Destination`/tagged-`If` comparison
 already matches the oracle; focused fixtures cover `[::1]` and `[::1]:8080`,
@@ -1192,6 +1192,10 @@ The public `DavLockTableOptions` finite-timeout path now caps before applying
 the one-second minimum, so even `max_timeout_seconds: 0` cannot reach Rust's
 invalid `clamp(1, 0)` panic; the deterministic regression and the full 29/29
 WebDAV target pass with strict Clippy, formatting, and diff checks green.
+Public WebDAV lock snapshots now preserve grant order like the pinned oracle's
+insertion-ordered lock map, while expiry/removal cleanup and duplicate-token
+replacement retain that order; the focused ordering regression and the full
+30/30 WebDAV target pass with strict Clippy, formatting, and diff checks green.
 The response stream has a native loopback fault regression as well: a short
 driver read fails the client body after `200` headers and produces one
 peer-qualified `Connection` transport report.
