@@ -5595,7 +5595,30 @@ listing a source does not mean it has been reviewed or its code can be reused.
 
 ### W26 current authoritative status — 2026-09-22
 
-#### Latest W26 authority override — exact-SHA qualification dispatch
+#### Latest W26 authority override — terminal exact-SHA packet
+
+Run `35691451007` is terminal for every W26 producer and the aggregate. It
+selected exact code revision
+`dccd8351690ba21b4ea01ab8680369c76c442041`, the parent of the documentation
+only push that followed. Base Ozone `106629129201` passed; compositions
+`106629129102` failed, TiDB `106629129183` failed, FoundationDB
+`106629129105` failed and aggregate `106631474430` failed closed. The retained
+artifact IDs/digests are recorded in `docs/w26-progress-ledger.md`.
+
+The provider rows completed their full 1,200/1,200 lifecycle with zero
+timeouts and cleanup failures: SQLite/R2 `213.947686` IOPS (write/read/delete
+p95 `1751.446370/105.174762/202.276166` ms), PGlite/R2 `2065.669446`
+(`106.518128/7.567658/2.705368` ms), TiDB/R2 `333.356025`
+(`629.659611/36.006496/29.342427` ms) and FoundationDB/R2 `363.254472`
+(`528.842275/97.605869/85.797321` ms). PGlite clears the hard target on this
+packet; SQLite, TiDB and FoundationDB do not. The aggregate emitted
+`W26_OZONE_EVIDENCE_PACKET_FAIL reason=ozone-compositions-log-missing-marker=OZONE_IOPS_PASS providers=mount-rs-split-sqlite-r2,mount-rs-split-pglite-r2 target=1000`.
+Production remains **NO-GO**. The next bounded implementation candidate is
+TiDB's successful metadata CAS autocommit path, while SQLite hosted variance
+and FoundationDB/provider latency remain explicit qualification work; no
+threshold reduction, provider skip or averaging is allowed.
+
+#### Historical W26 authority override — exact-SHA qualification dispatch
 
 The PGlite implementation and progress ledger are published. Manual CI run
 `35691451007` selected exact shared SHA
