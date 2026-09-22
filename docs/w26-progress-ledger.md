@@ -5,6 +5,31 @@ workstream. It distinguishes repository implementation, local evidence, and
 hosted/native/provider acceptance. Estimates are provisional and are intended
 for engineering planning, not a commitment.
 
+## Current authority override — 2026-09-22, local policy and rollout-contract recheck
+
+At 22:30 AEST, the dependency-light W26 contract checks were rerun against
+the current shared checkout. The benchmark/verifier unit suite passed, all
+four positive provider policy fixtures passed without credentials or network,
+and the production rollout contract passed with secrets externalized and
+recovery owned by `customer-ozone`. These checks strengthen W26.7/W26.10/
+W26.13 local evidence only; they do not replace the terminal Ozone/provider
+packet or customer-run security, availability, RPO/RTO and backup/DR gates.
+
+| Gate / item | Current result | Evidence | Remaining action / ownership |
+| --- | --- | --- | --- |
+| Benchmark/verifier contract | **PASS** | `node benchmarks/storage/test.mjs` returned `storage benchmark unit tests: PASS`; its fixtures cover the 4 KiB/400-iteration/concurrency-64/1,000-IOPS fail-closed schema, policy negatives, rollout negatives and aggregate packet negatives. | Retain terminal hosted artifacts from one exact workflow revision. |
+| Provider production policy | **PASS — local credential-free fixtures** | `verify-w26-ozone-production-config.mjs` passed SQLite/R2, PGlite/R2, TiDB/R2 with strict TLS policy, and FoundationDB/R2; each emitted `secrets=external`. | Verify the same policy markers in the terminal hosted Ozone packet and customer deployment. |
+| Rollout contract | **PASS — declaration contract** | `verify-w26-ozone-rollout-contract.mjs` passed all four providers with `recovery_owner=customer-ozone`; it explicitly remains declaration-only. | Customer/Ozone must provide measured Tier-1 99.99%, five-minute RPO/RTO and backup/DR evidence. |
+| Exact-head hosted qualification | **PENDING / unchanged** | Run `35726132846` remains queued on source head `a7e459e6`; all seven W26 provider/base/aggregate jobs remain queued. | Leave the run active and classify exact artifacts only after terminal completion. |
+| Production readiness | **NO-GO / unchanged** | Local policy and security gates are positive, but provider performance, functional/restart/cleanup markers and customer production gates are not terminal. | Keep the goal active; do not promote local contract checks to production acceptance. |
+
+### Session time log — local policy and rollout-contract recheck
+
+| Date / phase | Activity | Engineering time | External wait / gate time | Result |
+| --- | --- | ---: | ---: | --- |
+| 2026-09-22 — local contract verification (22:29–22:30 AEST) | Ran the storage benchmark unit/verifier suite, four positive provider policy fixtures and the positive rollout contract. | ~0.25 h | 0 h | All local W26 policy contracts passed; no credentials or provider network were used. |
+| 2026-09-22 — next gate | Recheck run `35726132846`; after terminal completion, validate every retained provider/base/aggregate artifact against the exact source revision and hard IOPS target. | ~0.25–0.75 h review | External runner/provider capacity | Keep production **NO-GO** until terminal hosted evidence closes the packet. |
+
 ## Current authority override — 2026-09-22, exact-head queue recheck after publication
 
 At 22:22 AEST, manual run

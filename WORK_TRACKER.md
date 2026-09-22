@@ -4,6 +4,24 @@ Updated: 2026-09-22. Baseline: local commit `21803fd` plus the sequentially
 published `main` updates listed below. Overall status: **in progress;
 not release-ready**.
 
+## Current W26 local policy and rollout-contract recheck (2026-09-22)
+
+At 22:30 AEST, `node benchmarks/storage/test.mjs` passed. The four positive
+W26 production-policy fixtures also passed without credentials or network:
+SQLite/R2, PGlite/R2, TiDB/R2 with strict TLS policy, and FoundationDB/R2.
+The rollout contract passed for all four providers with external secrets and
+`recovery_owner=customer-ozone`; this is a declaration-only check, not proof
+of customer availability, RPO/RTO, backup or DR.
+
+The exact-head manual qualification run
+[`35726132846`](https://github.com/andymac4182/mount-rs/actions/runs/35726132846)
+remains queued on source `a7e459e6` with all seven W26 provider/base/aggregate
+jobs queued. W26.15 remains at prior terminal 1/4 provider acceptance, and
+production remains **NO-GO** until the terminal packet proves four individual
+providers at or above 1,000 IOPS/drive plus all end-to-end and customer gates.
+Detailed evidence and the session log are in
+[docs/w26-progress-ledger.md](docs/w26-progress-ledger.md).
+
 ## Current W26 exact-head queue recheck after publication (2026-09-22)
 
 At 22:22 AEST, manual run
