@@ -913,8 +913,8 @@ impl BlockStore for TidbBlockStore {
             .map_err(|error| db_error("put TiDB block", error))?;
         // The duplicate branch updates only the key. It can never replace
         // bytes written by an older layout, even when two writers race.
-        connection
-            .exec_drop(
+        let result = connection
+            .exec_iter(
                 "INSERT INTO mount_rs_tidb_blocks (volume_key, id, bytes)
                  VALUES (?, ?, ?)
                  ON DUPLICATE KEY UPDATE id=id",
@@ -922,6 +922,19 @@ impl BlockStore for TidbBlockStore {
             )
             .await
             .map_err(|error| db_error("put TiDB block", error))?;
+        // A new row is unambiguous: the server reports one affected row and
+        // the bytes in the INSERT are the bytes now protected by the primary
+        // key. Duplicate/no-op and server-specific affected-row results keep
+        // the read-back collision check below; never treat those as verified
+        // merely because the write statement succeeded.
+        let inserted = result.affected_rows() == 1;
+        result
+            .drop_result()
+            .await
+            .map_err(|error| db_error("finish TiDB block put", error))?;
+        if inserted {
+            return Ok(id);
+        }
         let existing: Option<Vec<u8>> = connection
             .exec_first(
                 "SELECT bytes FROM mount_rs_tidb_blocks
