@@ -73,6 +73,10 @@ as `ENOSYS`.
   session's read-only lock records preserve grant order, remove expired or
   deleted tokens from that order, and retain the pinned oracle's duplicate
   token replacement behavior.
+- Keep public lock coverage deterministic: covering and within lookups must
+  preserve grant order for lockdiscovery, locked-member multistatus, and the
+  first conflict selected for a 423 response; a hash-map iteration order must
+  not leak into the supported protocol or public table behavior.
 - Keep lock-root cleanup fail-closed across provider recovery faults: after a
   DELETE or MOVE, remove a lock only when `stat` confirms `ENOENT`; retain it
   when the provider returns an I/O error and the namespace cannot be resolved.
@@ -265,6 +269,7 @@ as `ENOSYS`.
 | 2026-09-22 | WebDAV 64-pair packet hosted cancellation snapshot | For exact packet SHA `d391f9b798df455311177f462ab160736ed3ba4c`, [CI run 35665105286](https://github.com/andymac4182/mount-rs/actions/runs/35665105286), [W08 release policy run 35665105293](https://github.com/andymac4182/mount-rs/actions/runs/35665105293), [W08 release targets run 35665105417](https://github.com/andymac4182/mount-rs/actions/runs/35665105417), [Fault injection run 35665105186](https://github.com/andymac4182/mount-rs/actions/runs/35665105186), and [W04 production policy run 35665105441](https://github.com/andymac4182/mount-rs/actions/runs/35665105441) were cancelled by subsequent mainline publication; [Live Cloudflare R2 run 35665105299](https://github.com/andymac4182/mount-rs/actions/runs/35665105299) remained queued | No hosted WebDAV PASS is claimable from this packet; the local 64-pair evidence remains valid, while hosted/provider/session lifecycle, crash/power-loss durability, and broader concurrency remain OPEN |
 | 2026-09-22 | Package integration boundaries | `node test/webdav-codec.mjs`: explicit SKIP because `MOUNTX_SOURCE` is unset; package-wide `node test/servers.mjs` reached the unrelated NFS lane first and hit its host-permission prerequisite | Do not promote the package-wide NFS failure or the skipped oracle row into WebDAV PASS evidence |
 | 2026-09-22 | WebDAV declared-length preflight observability | The Rust HTTP adapter now routes a declared Content-Length overflow through session rejection bookkeeping before adding Connection: close, so request/reply/error stats and the request-level onError hook remain exact-once; the real-loopback regression verifies the 413 status, original PUT head, and counters, including bodyless HEAD handling in the shared helper. The full WebDAV target passed 36/36, warning-denied workspace Clippy, formatting, git diff --check, and the pinned 40-case S3+WebDAV differential passed | This closes a local HTTP preflight observability boundary only; authentication-ordering policy, hosted/provider qualification, power-loss ordering, crash/power-loss filesystem durability, durable lock persistence, and the explicit same-resource ordering boundary remain open |
+| 2026-09-22 | WebDAV lock coverage ordering | Public covering and within lookups now iterate the grant-order index instead of HashMap values, making lock-discovery lists, locked-member results, and first-conflict selection deterministic like the pinned Map; the focused regression covers ancestor/direct coverage, subtree roots, and the selected 423 conflict, while the full WebDAV target passed 37/37, warning-denied workspace Clippy, formatting, git diff --check, and the pinned 40-case differential passed | This closes a local public/session lock-order boundary only; hosted/provider qualification, power-loss ordering, crash/power-loss filesystem durability, durable lock persistence, and the explicit same-resource ordering boundary remain open |
 
 ## Completion rule
 

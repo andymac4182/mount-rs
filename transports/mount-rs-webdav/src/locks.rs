@@ -124,8 +124,9 @@ impl DavLockTable {
 
     pub fn covering(&mut self, path: &str, now: i64) -> Vec<DavLock> {
         self.sweep(now);
-        self.locks
-            .values()
+        self.order
+            .iter()
+            .filter_map(|token| self.locks.get(token))
             .filter(|lock| {
                 lock.path == path
                     || (lock.depth == LockDepth::Infinity && is_path_inside(path, &lock.path))
@@ -136,8 +137,9 @@ impl DavLockTable {
 
     pub fn within(&mut self, path: &str, now: i64) -> Vec<DavLock> {
         self.sweep(now);
-        self.locks
-            .values()
+        self.order
+            .iter()
+            .filter_map(|token| self.locks.get(token))
             .filter(|lock| is_path_inside(&lock.path, path))
             .cloned()
             .collect()

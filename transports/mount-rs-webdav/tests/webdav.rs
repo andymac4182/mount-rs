@@ -84,6 +84,66 @@ fn lock_snapshots_preserve_grant_order() {
     );
 }
 
+#[test]
+fn lock_coverage_snapshots_preserve_grant_order() {
+    let next_token = Arc::new(AtomicUsize::new(0));
+    let token_counter = Arc::clone(&next_token);
+    let mut table = DavLockTable::new(DavLockTableOptions {
+        new_token: Some(Arc::new(move || {
+            format!(
+                "urn:uuid:coverage-{}",
+                token_counter.fetch_add(1, Ordering::SeqCst)
+            )
+        })),
+        ..DavLockTableOptions::default()
+    });
+    let request = |path: &str, depth: LockDepth| DavLockRequest {
+        path: path.to_owned(),
+        collection: false,
+        depth,
+        exclusive: false,
+        owner: None,
+        timeout: None,
+    };
+
+    assert!(matches!(
+        table.create(request("/root", LockDepth::Infinity), 0),
+        DavLockGrant::Granted(_)
+    ));
+    assert!(matches!(
+        table.create(request("/root/member", LockDepth::Zero), 0),
+        DavLockGrant::Granted(_)
+    ));
+    assert!(matches!(
+        table.create(request("/root/member/child", LockDepth::Zero), 0),
+        DavLockGrant::Granted(_)
+    ));
+
+    assert_eq!(
+        table
+            .covering("/root/member", 0)
+            .iter()
+            .map(|lock| lock.path.as_str())
+            .collect::<Vec<_>>(),
+        ["/root", "/root/member"]
+    );
+    assert_eq!(
+        table
+            .within("/root", 0)
+            .iter()
+            .map(|lock| lock.path.as_str())
+            .collect::<Vec<_>>(),
+        ["/root", "/root/member", "/root/member/child"]
+    );
+    assert_eq!(
+        table
+            .conflict("/root/member", LockDepth::Zero, true, 0)
+            .expect("shared lock must block an exclusive request")
+            .path,
+        "/root"
+    );
+}
+
 async fn server() -> WebdavServer {
     let fs = Arc::new(MemoryFs::empty());
     let server = create_webdav_server(fs, WebdavServerOptions::default()).expect("loopback bind");
