@@ -2388,22 +2388,21 @@ Evidence landed without closing the remaining W01 acceptance gates:
   package/provenance, scope, and final-audit gates remain explicit blockers;
   no credential value was read or stored and no Keychain access was attempted.
 - [ ] W05.10 Close the production release path on one settled revision.
-  The current pushed tip `9e187955` is locally fully qualified after the
-  streamed S3 response-framing fix `4f9120a`: the focused regression, full
-  locked Rust workspace, strict Clippy, optimized N-API build, complete Node
-  SDK/CLI suite, and real PGlite/provider/CLI/oracle matrix pass with Rust SDK
-  `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and all
-  `40 × 621` trace lanes green. Same-SHA CI `35690379471`, fault injection
-  `35690379495`, W04 `35690379497`, W08 targets `35690379501`, and W08 policy
-  `35690379506` were cancelled before terminal acceptance, and no R2 run was
-  admitted because the fail-closed monthly cap remains closed. Remaining
-  production actions are to select a settled final SHA, obtain terminal
-  same-SHA hosted CI/fault/W04/W07/W08 and package/provenance evidence,
-  request security to provision AWS protected inputs and immutable OIDC trust
-  through the approved path, rotate R2 credentials after the UTC-month reset,
-  close advertised-provider/native/platform/scope gates, and run W20.6 for a
-  written GO/NO-GO decision. No credential value was read, stored, printed,
-  or placed in Keychain.
+  The current pushed tip `496ed42b` is locally fully qualified after the
+  direct-9P, PGlite autocommit, S3 pipelining, and structural-driver changes:
+  the full locked Rust workspace, strict Clippy, optimized N-API build,
+  complete Node SDK/CLI suite, and real PGlite/provider/CLI/oracle matrix pass
+  with Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`,
+  and all `40 × 621` trace lanes green. Direct and structural N-API 9P
+  sessions pass, and the S3 gateway has `34/34` passing tests. No terminal
+  hosted release acceptance is claimed for this moving tip; R2 remains
+  fail-closed at the monthly cap. Remaining production actions are to select
+  a settled final SHA, obtain terminal same-SHA hosted CI/fault/W04/W07/W08
+  and package/provenance evidence, request security to provision AWS protected
+  inputs and immutable OIDC trust through the approved path, rotate R2
+  credentials after the UTC-month reset, close advertised-provider/native/
+  platform/scope gates, and run W20.6 for a written GO/NO-GO decision. No
+  credential value was read, stored, printed, or placed in Keychain.
 
 ## W06 — RustFS integration service
 
