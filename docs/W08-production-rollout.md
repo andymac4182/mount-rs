@@ -200,6 +200,14 @@ native-9P workflow YAML parsing and `git diff --check` also passed. This is
 source-health and tracking-control evidence only; provider/native rows remain
 explicit opt-in skips and production P01–P09 remain open.
 
+After a subsequent origin/main advance with W01/W07/S3 N-API and session
+source changes, exact merged source
+`a47dbb75b9830fc83e17cc7dfa78b06ad3b9077b` was freshly requalified. The full
+locked workspace test and strict workspace Clippy exited 0; all runnable tests
+passed, provider/native rows remained explicit opt-in skips, and the affected
+N-API, W07 and W08 static/policy checks also passed. This is source-health
+evidence only and does not close P01–P09 or change the NO-GO decision.
+
 Hosted W08 policy run `35681936375` at source
 `e7be3769dd7c6722ce096c481f30d042d7895dbe`, job `106600554617`, completed
 successfully in 2m48s. Its rollout-ledger and release-identity/provenance
