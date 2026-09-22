@@ -348,6 +348,36 @@ async fn locked_lease_row<C: Queryable>(
     .transpose()
 }
 
+async fn locked_publish_row<C: Queryable>(
+    connection: &mut C,
+    volume_key: &str,
+) -> Result<Option<(u64, LeaseRow)>> {
+    let row: Option<(i64, Option<String>, i64, i64, i64)> = connection
+        .exec_first(
+            format!(
+                "SELECT revision, owner, fence, expires, {NOW_MS}
+                 FROM mount_rs_tidb_metadata
+                 WHERE volume_key=?
+                 FOR UPDATE"
+            ),
+            (volume_key,),
+        )
+        .await
+        .map_err(|error| db_error("read TiDB metadata publication state", error))?;
+    row.map(|(revision, owner, fence, expires_at_ms, now_ms)| {
+        Ok((
+            nonnegative(revision, "metadata revision")?,
+            LeaseRow {
+                owner,
+                fence: nonnegative(fence, "metadata fence")?,
+                expires_at_ms: nonnegative(expires_at_ms, "metadata expiry")?,
+                now_ms: nonnegative(now_ms, "TiDB provider clock")?,
+            },
+        ))
+    })
+    .transpose()
+}
+
 fn ttl_ms(ttl: Duration) -> Result<u64> {
     let value = u64::try_from(ttl.as_millis())
         .map_err(|_| FsError::new(ErrorCode::Eoverflow).with_message("TiDB lease TTL overflow"))?;
@@ -734,52 +764,6 @@ impl MetadataStore for TidbMetadataStore {
             .await
             .map_err(|error| db_error("publish TiDB metadata", error))?;
         let mut transaction = begin_pessimistic(&mut connection).await?;
-        let row: Option<(i64, Option<String>, i64, i64, i64)> = match transaction
-            .exec_first(
-                format!(
-                    "SELECT revision, owner, fence, expires, {NOW_MS}
-                     FROM mount_rs_tidb_metadata
-                     WHERE volume_key=?
-                     FOR UPDATE"
-                ),
-                (&self.0.volume_key,),
-            )
-            .await
-        {
-            Ok(row) => row,
-            Err(error) => {
-                return rollback_and(transaction, db_error("publish TiDB metadata", error)).await;
-            }
-        };
-        let Some((revision, owner, fence, expires, now_ms)) = row else {
-            return rollback_and(transaction, backend_error("TiDB metadata row is missing")).await;
-        };
-        let revision = match nonnegative(revision, "metadata revision") {
-            Ok(value) => value,
-            Err(error) => return rollback_and(transaction, error).await,
-        };
-        let fence = match nonnegative(fence, "metadata fence") {
-            Ok(value) => value,
-            Err(error) => return rollback_and(transaction, error).await,
-        };
-        let expires = match nonnegative(expires, "metadata expiry") {
-            Ok(value) => value,
-            Err(error) => return rollback_and(transaction, error).await,
-        };
-        let now_ms = match nonnegative(now_ms, "TiDB provider clock") {
-            Ok(value) => value,
-            Err(error) => return rollback_and(transaction, error).await,
-        };
-        if owner.as_deref() != Some(&lease.owner)
-            || fence != lease.fence
-            || expires != lease.expires_at_ms
-            || now_ms >= expires
-        {
-            return rollback_and(transaction, stale()).await;
-        }
-        if revision != expected_revision {
-            return rollback_and(transaction, revision_conflict()).await;
-        }
         let changed = match changed_query(
             &mut transaction,
             &format!(
@@ -805,6 +789,27 @@ impl MetadataStore for TidbMetadataStore {
             Err(error) => return rollback_and(transaction, error).await,
         };
         if changed != 1 {
+            // The conditional update is the successful-path CAS. Only the
+            // exceptional path needs the locked read to preserve the former
+            // stale-versus-revision-conflict classification.
+            let row = match locked_publish_row(&mut transaction, &self.0.volume_key).await {
+                Ok(row) => row,
+                Err(error) => return rollback_and(transaction, error).await,
+            };
+            let Some((revision, lease_row)) = row else {
+                return rollback_and(transaction, backend_error("TiDB metadata row is missing"))
+                    .await;
+            };
+            if lease_row.owner.as_deref() != Some(&lease.owner)
+                || lease_row.fence != lease.fence
+                || lease_row.expires_at_ms != lease.expires_at_ms
+                || lease_row.now_ms >= lease_row.expires_at_ms
+            {
+                return rollback_and(transaction, stale()).await;
+            }
+            if revision != expected_revision {
+                return rollback_and(transaction, revision_conflict()).await;
+            }
             return rollback_and(transaction, stale()).await;
         }
         commit(transaction, "publish metadata").await?;
