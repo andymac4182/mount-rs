@@ -108,7 +108,7 @@ import {
   type P9LockTableOptions,
   type P9Server,
   type P9ServerOptions,
-  type P9Session,
+  P9Session,
   type P9SessionOptions,
   type P9SessionStats,
   type P9User,
@@ -695,6 +695,13 @@ function checkServerAndKvSubpaths(): void {
 
   const p9Connection: P9Connection = p9Connections[0]
   const p9Session: P9Session = p9Connection.session
+  const directP9Session: P9Session = new P9Session(filesystem, {
+    msize: 32 * 1024,
+    onError: () => {},
+    onAssertion: () => {},
+  })
+  const directP9Call: Promise<Buffer | null> = directP9Session.handleCall(Buffer.alloc(0))
+  const directP9Destroy: Promise<void> = directP9Session.destroy()
   const p9SessionOptions: P9SessionOptions = p9Session.options
   const p9SessionOptionLocks: P9LockTable | undefined = p9SessionOptions.locks
   const p9SessionStats: P9SessionStats = p9Session.stats
@@ -743,6 +750,8 @@ function checkServerAndKvSubpaths(): void {
   void p9SessionVersion
   void attachedP9Call
   void attachedP9Destroy
+  void directP9Call
+  void directP9Destroy
   void disposal
   const connectionClose: Promise<void> = p9Connection.close()
   const connectionWaitClosed: Promise<void> = p9Connection.waitClosed()

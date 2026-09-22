@@ -691,9 +691,9 @@ function wrapP9Connection(P9Connection) {
   Object.defineProperty(prototype, CONNECTION_WRAPPED, { value: true })
 }
 
-function wrapP9Session(P9Session) {
+function wrapP9Session(P9Session, binding) {
   if (!P9Session || !P9Session.prototype || P9Session.prototype[P9_SESSION_SHAPES_WRAPPED]) {
-    return
+    return P9Session
   }
   const prototype = P9Session.prototype
   for (const name of ["msize", "version"]) {
@@ -735,6 +735,31 @@ function wrapP9Session(P9Session) {
     })
   }
   Object.defineProperty(prototype, P9_SESSION_SHAPES_WRAPPED, { value: true })
+
+  // Direct native construction bypasses createP9Server(), so its request
+  // error callback needs the same marker-to-Node-error revival as the server
+  // factory path. A Proxy preserves the native prototype and instanceof
+  // behavior while translating only the constructor's callback option.
+  return new Proxy(P9Session, {
+    construct(target, args) {
+      const [driver, options] = args
+      if (!options || typeof options !== "object" ||
+          typeof options.onError !== "function") {
+        return Reflect.construct(target, args)
+      }
+      const state = { p9Options: { onError: options.onError } }
+      const forwarded = [
+        driver,
+        {
+          ...options,
+          onError(error, header) {
+            return p9SessionError(binding, state, error, header)
+          },
+        },
+      ]
+      return Reflect.construct(target, forwarded)
+    },
+  })
 }
 
 function wrapP9LockGetter(ctor, marker) {
@@ -946,7 +971,7 @@ module.exports = function installServers(binding) {
   for (const name of ["NfsServer", "P9Server", "S3Server", "WebdavServer"]) {
     wrapServer(binding && binding[name])
   }
-  wrapP9Session(binding && binding.P9Session)
+  binding.P9Session = wrapP9Session(binding && binding.P9Session, binding)
   wrapP9LockTable(binding && binding.P9LockTable)
   wrapP9LockClient(binding && binding.P9LockClient)
   wrapP9Connection(binding && binding.P9Connection)

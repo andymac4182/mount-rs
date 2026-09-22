@@ -26,7 +26,8 @@ use mount_rs_9p::{
     P9LockTableOptions as TransportP9LockTableOptions, P9Server as TransportP9Server,
     P9ServerHooks as TransportP9ServerHooks, P9ServerOptions as TransportP9ServerOptions,
     P9SessionErrorHook as TransportP9SessionErrorHook, P9SessionHooks as TransportP9SessionHooks,
-    P9TransportError as TransportP9Error, P9TransportErrorHook as TransportP9ErrorHook,
+    P9SessionOptions as TransportP9SessionOptions, P9TransportError as TransportP9Error,
+    P9TransportErrorHook as TransportP9ErrorHook,
 };
 use mount_rs_core::{ErrorCode, FileHandle as CoreFileHandle, FsDriver, FsError, OpenFlags, Stats};
 use mount_rs_fuse::{
@@ -3038,11 +3039,15 @@ pub struct P9ServerOptions {
 #[napi(object)]
 pub struct P9SessionOptions {
     pub msize: Option<f64>,
-    pub use_driver_ino: bool,
-    pub read_only: bool,
-    pub claim_ownership: bool,
-    pub debug: bool,
+    pub use_driver_ino: Option<bool>,
+    pub read_only: Option<bool>,
+    pub claim_ownership: Option<bool>,
+    pub debug: Option<bool>,
     pub locks: Option<P9LockTable>,
+    #[napi(ts_type = "(error: unknown, header: NativeP9Header | undefined) => void")]
+    pub on_error: Option<JsP9SessionErrorCallback>,
+    #[napi(ts_type = "(message: string) => void")]
+    pub on_assertion: Option<JsP9AssertionCallback>,
 }
 
 type P9OptionValues = (
@@ -3125,15 +3130,27 @@ struct P9State {
 #[napi]
 pub struct P9Session {
     inner: mount_rs_9p::P9Session,
-    options: P9SessionOptions,
+    options: P9SessionPolicy,
+    session_error: Option<Arc<P9SessionErrorCallback>>,
+    assertion: Option<Arc<P9AssertionCallback>>,
 }
 
 fn p9_lock_client(inner: TransportP9LockClient) -> P9LockClient {
     P9LockClient { inner }
 }
 
-fn p9_session_options(options: &TransportP9ServerOptions) -> P9SessionOptions {
-    P9SessionOptions {
+#[derive(Clone)]
+struct P9SessionPolicy {
+    msize: Option<f64>,
+    use_driver_ino: bool,
+    read_only: bool,
+    claim_ownership: bool,
+    debug: bool,
+    locks: Option<P9LockTable>,
+}
+
+fn p9_session_policy(options: &TransportP9ServerOptions) -> P9SessionPolicy {
+    P9SessionPolicy {
         msize: options.msize.map(f64::from),
         use_driver_ino: options.use_driver_ino,
         read_only: options.read_only,
@@ -3143,6 +3160,48 @@ fn p9_session_options(options: &TransportP9ServerOptions) -> P9SessionOptions {
             inner: inner.clone(),
         }),
     }
+}
+
+fn p9_session_policy_from_options(options: &P9SessionOptions) -> P9SessionPolicy {
+    P9SessionPolicy {
+        msize: options.msize,
+        use_driver_ino: options.use_driver_ino.unwrap_or(true),
+        read_only: options.read_only.unwrap_or(false),
+        claim_ownership: options.claim_ownership.unwrap_or(true),
+        debug: options.debug.unwrap_or(cfg!(debug_assertions)),
+        locks: options.locks.clone(),
+    }
+}
+
+fn p9_session_view(policy: &P9SessionPolicy) -> P9SessionOptions {
+    P9SessionOptions {
+        msize: policy.msize,
+        use_driver_ino: Some(policy.use_driver_ino),
+        read_only: Some(policy.read_only),
+        claim_ownership: Some(policy.claim_ownership),
+        debug: Some(policy.debug),
+        locks: policy.locks.clone(),
+        // Callback lifetimes are owned by the transport hooks. They are not
+        // reflected as reusable JavaScript functions in a live session view.
+        on_error: None,
+        on_assertion: None,
+    }
+}
+
+fn p9_session_transport_options(
+    policy: &P9SessionPolicy,
+) -> napi::Result<TransportP9SessionOptions> {
+    Ok(TransportP9SessionOptions {
+        msize: policy
+            .msize
+            .map(|value| u32_number("msize", Some(value), 0))
+            .transpose()?,
+        use_driver_ino: policy.use_driver_ino,
+        read_only: policy.read_only,
+        claim_ownership: policy.claim_ownership,
+        debug: policy.debug,
+        locks: policy.locks.as_ref().map(|inner| inner.inner.clone()),
+    })
 }
 
 #[napi(object)]
@@ -3191,6 +3250,49 @@ impl From<mount_rs_9p::P9SessionStats> for P9SessionStats {
 
 #[napi]
 impl P9Session {
+    /// Construct a mount-free 9P session over a caller-owned filesystem.
+    ///
+    /// This is the direct Node equivalent of the upstream `new P9Session`
+    /// boundary. Socket ownership remains with `P9Server`; this object only
+    /// owns the protocol/fid/lock session state and the driver's shared Arc.
+    #[napi(constructor)]
+    pub fn new(
+        driver: &crate::Filesystem,
+        options: Option<P9SessionOptions>,
+    ) -> napi::Result<Self> {
+        let options = options.unwrap_or(P9SessionOptions {
+            msize: None,
+            use_driver_ino: None,
+            read_only: None,
+            claim_ownership: None,
+            debug: None,
+            locks: None,
+            on_error: None,
+            on_assertion: None,
+        });
+        let policy = p9_session_policy_from_options(&options);
+        let transport_options = p9_session_transport_options(&policy)?;
+        let session_error = options
+            .on_error
+            .map(P9SessionErrorCallback::new)
+            .transpose()?;
+        let assertion = options
+            .on_assertion
+            .map(P9AssertionCallback::new)
+            .transpose()?;
+        let hooks = p9_session_hooks(session_error.as_ref(), assertion.as_ref());
+        Ok(Self {
+            inner: mount_rs_9p::P9Session::with_options_and_hooks(
+                Arc::clone(&driver.driver),
+                transport_options,
+                hooks,
+            ),
+            options: policy,
+            session_error,
+            assertion,
+        })
+    }
+
     /// Handle one complete 9P frame without a socket. Malformed framing
     /// returns `null`; protocol and driver failures remain encoded as an
     /// `Rlerror`, matching the transport session contract.
@@ -3206,6 +3308,12 @@ impl P9Session {
     #[napi]
     pub async fn destroy(&self) {
         self.inner.destroy().await;
+        if let Some(callback) = &self.session_error {
+            callback.release();
+        }
+        if let Some(callback) = &self.assertion {
+            callback.release();
+        }
     }
 
     /// Read-only N-API wrapper for the session-owned filesystem driver. The
@@ -3218,14 +3326,7 @@ impl P9Session {
     /// The scalar policy used when this session was created.
     #[napi(getter)]
     pub fn options(&self) -> P9SessionOptions {
-        P9SessionOptions {
-            msize: self.options.msize,
-            use_driver_ino: self.options.use_driver_ino,
-            read_only: self.options.read_only,
-            claim_ownership: self.options.claim_ownership,
-            debug: self.options.debug,
-            locks: self.options.locks.clone(),
-        }
+        p9_session_view(&self.options)
     }
 
     /// The attach identity recorded for a live fid, if any.
@@ -3289,7 +3390,7 @@ impl P9Session {
 #[napi]
 pub struct P9Connection {
     inner: mount_rs_9p::P9Connection,
-    options: P9SessionOptions,
+    options: P9SessionPolicy,
 }
 
 impl P9Connection {
@@ -3299,7 +3400,7 @@ impl P9Connection {
     ) -> Self {
         Self {
             inner,
-            options: p9_session_options(options),
+            options: p9_session_policy(options),
         }
     }
 }
@@ -3310,14 +3411,9 @@ impl P9Connection {
     pub fn session(&self) -> P9Session {
         P9Session {
             inner: self.inner.session.clone(),
-            options: P9SessionOptions {
-                msize: self.options.msize,
-                use_driver_ino: self.options.use_driver_ino,
-                read_only: self.options.read_only,
-                claim_ownership: self.options.claim_ownership,
-                debug: self.options.debug,
-                locks: self.options.locks.clone(),
-            },
+            options: self.options.clone(),
+            session_error: None,
+            assertion: None,
         }
     }
 
@@ -3415,7 +3511,9 @@ impl P9Server {
                 self.options.session_options(),
                 p9_session_hooks(self.session_error.as_ref(), self.assertion.as_ref()),
             ),
-            options: p9_session_options(&self.options),
+            options: p9_session_policy(&self.options),
+            session_error: None,
+            assertion: None,
         }
     }
 
@@ -3508,7 +3606,7 @@ impl P9Server {
                         .into_iter()
                         .map(|inner| P9Connection {
                             inner,
-                            options: p9_session_options(&self.options),
+                            options: p9_session_policy(&self.options),
                         })
                         .collect()
                 })

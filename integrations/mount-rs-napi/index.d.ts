@@ -651,6 +651,14 @@ export declare class P9Server {
 
 export declare class P9Session {
   /**
+   * Construct a mount-free 9P session over a caller-owned filesystem.
+   *
+   * This is the direct Node equivalent of the upstream `new P9Session`
+   * boundary. Socket ownership remains with `P9Server`; this object only
+   * owns the protocol/fid/lock session state and the driver's shared Arc.
+   */
+  constructor(driver: Filesystem, options?: P9SessionOptions | undefined | null)
+  /**
    * Handle one complete 9P frame without a socket. Malformed framing
    * returns `null`; protocol and driver failures remain encoded as an
    * `Rlerror`, matching the transport session contract.
@@ -2571,11 +2579,13 @@ export interface P9ServerOptions {
  */
 export interface P9SessionOptions {
   msize?: number
-  useDriverIno: boolean
-  readOnly: boolean
-  claimOwnership: boolean
-  debug: boolean
+  useDriverIno?: boolean
+  readOnly?: boolean
+  claimOwnership?: boolean
+  debug?: boolean
   locks?: P9LockTable
+  onError?: (error: unknown, header: NativeP9Header | undefined) => void
+  onAssertion?: (message: string) => void
 }
 
 export interface P9SessionStats {
