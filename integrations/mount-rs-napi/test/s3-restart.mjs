@@ -1,16 +1,19 @@
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { createNodeFsDriver, createS3Server } from "../index.js"
 
 const directory = await mkdtemp(join(tmpdir(), "mount-rs-napi-s3-restart-"))
+const metadataPath = join(directory, "restart-metadata.json")
 const child = String.raw`
   (async () => {
+    const { writeFileSync } = require("node:fs")
     const { createNodeFsDriver, createS3Server } = require("./index.js")
     const root = process.env.MOUNT_RS_S3_RESTART_ROOT
+    const metadataPath = process.env.MOUNT_RS_S3_RESTART_METADATA
     const xmlField = (body, name) => {
       const match = Buffer.from(body).toString().match(new RegExp("<" + name + ">([^<]*)</" + name + ">"))
       if (!match) throw new Error("missing S3 XML field " + name)
@@ -35,7 +38,10 @@ const child = String.raw`
     if (part.status !== 200) throw new Error("UploadPart failed: " + part.status)
     const etag = part.headers.find(({ name }) => name === "etag")?.value
     if (!etag) throw new Error("UploadPart did not return an ETag")
-    process.stdout.write(JSON.stringify({ uploadId, etag }), () => process.exit(0))
+    writeFileSync(metadataPath, JSON.stringify({ uploadId, etag }))
+    // Simulate an abrupt process crash after the multipart state is written,
+    // without giving the server a chance to run its close sweep.
+    process.abort()
   })().catch((error) => {
     console.error(error)
     process.exit(1)
@@ -44,18 +50,31 @@ const child = String.raw`
 
 let replacement
 try {
-  const output = execFileSync(
-    process.execPath,
-    ["-e", child],
-    {
-      cwd: new URL("..", import.meta.url),
-      env: { ...process.env, MOUNT_RS_S3_RESTART_ROOT: directory },
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "inherit"],
-      timeout: 20_000,
-    },
-  ).trim()
-  const { uploadId, etag } = JSON.parse(output)
+  try {
+    execFileSync(
+      process.execPath,
+      ["-e", child],
+      {
+        cwd: new URL("..", import.meta.url),
+        env: {
+          ...process.env,
+          MOUNT_RS_S3_RESTART_ROOT: directory,
+          MOUNT_RS_S3_RESTART_METADATA: metadataPath,
+        },
+        stdio: ["ignore", "ignore", "ignore"],
+        timeout: 20_000,
+      },
+    )
+    throw new Error("restart child exited cleanly instead of crashing")
+  } catch (error) {
+    const expectedWindowsAbort = process.platform === "win32" && error?.status !== 0
+    assert.ok(
+      error?.signal === "SIGABRT" || expectedWindowsAbort,
+      `restart child did not abort abruptly: ${error}`,
+    )
+  }
+
+  const { uploadId, etag } = JSON.parse(await readFile(metadataPath, "utf8"))
   assert.match(uploadId, /^[0-9a-f]{32}$/)
   assert.match(etag, /^"[0-9a-f-]+"$/)
 
