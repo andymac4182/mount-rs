@@ -10,7 +10,7 @@ hosted or native gate.
 ## Overall position
 
 Current shared-main observation: remote `origin/main` is
-`c57e2ea36f3f30e36a3f26a4ca2ecf88893c7ba5` (`c57e2ea`) at this capture;
+`e984c2321317e9d93b8db1ec98dc428662b17d34` (`e984c232`) at this capture;
 the exact pushed W05 candidate boundary is
 `7efded5424f8ad6c2335e7be1cde98c22b9315fe` (`7efded54`). It is held
 immutable on branch `andymac4182/c/w05-production-candidate-20260922c` while
@@ -35,14 +35,14 @@ but hosted CI, package publication/provenance, native platform acceptance,
 live provider gates, support scope, and W20.6 remain open. Production remains
 **NO-GO**.
 
-Latest immutable release-candidate boundary (2026-09-22 16:39 AEST): the
+Latest immutable release-candidate boundary (2026-09-22 20:31 AEST): the
 candidate branch
-`andymac4182/c/w05-production-candidate-20260922` is pinned to exact
-`25e275ab6d4f918be72dcd8f62a5baca6bbcd251` (`25e275ab`). It is deliberately
+`andymac4182/c/w05-production-candidate-20260922c` is pinned to exact
+`7efded5424f8ad6c2335e7be1cde98c22b9315fe` (`7efded54`). It is deliberately
 stable while shared `origin/main` continues to move, so hosted results cannot
-be cancelled by unrelated pushes. The candidate contains the workflow
-concurrency fixes and the macOS FoundationDB compile gate; its runtime source
-is unchanged from the locally qualified ancestry.
+be cancelled by unrelated pushes. The candidate contains the macOS N-API
+package repair, the provider-matrix lock refresh, the workflow dispatch packet,
+and the locally qualified runtime ancestry.
 
 On the exact candidate checkout, `git diff --check`, formatting, the full
 locked Rust workspace (`./scripts/cargo-shared test --workspace
@@ -404,6 +404,7 @@ gates therefore remain actionable work in this session.
 | W05.50 Repair the prepared TiDB failure injector and harden the Node 9P boundary cleanup | Integration-test implementation + local hosted-reproduction gate | Complete locally for this repair slice; hosted requalification pending | 100% repair slice / 76% provisional overall closure | The TiDB ambiguity proxy now recognizes `COM_STMT_PREPARE`, records the statement ID from `COM_STMT_PREPARE_OK`, and drops the response to the matching `COM_STMT_EXECUTE`; a focused packet-classification test covers the prepared path. The Node 9P port-conflict test now only closes the loser when it actually bound, avoiding a potentially wedged close after `EADDRINUSE`. `./scripts/cargo-shared check -p mount-rs-tidb --test ambiguous_commit --locked`, Rust formatting, `git diff --check`, and `node --check integrations/mount-rs-napi/test/servers.mjs` pass. `MOUNT_RS_SERVER_PHASE=p9 node test/servers.mjs` passed four consecutive local loopback runs. No live TiDB service or executable Rust integration test was claimed locally. | Create a new immutable candidate from `be98aca9` plus this slice; run the live TiDB/TiDB-RustFS ambiguous-outcome jobs, Linux/Windows Node parity and full Rust/Node suites, and classify any remaining 9P timeout; then close Ozone capacity, native-FUSE, AWS/OIDC, post-reset R2, package/publication, support-scope, and W20.6 gates. | 0 h remaining for this local slice; 2–6 h active candidate/hosted triage plus 4–16 h provider/native wait | Live TiDB/TiDB-RustFS services, GitHub Linux/Windows runner timing, Ozone capacity, Xcode license for local executable Rust tests, AWS protected OIDC, R2 cap reset/token rotation, native-FUSE privileges, registries/signing, product scope, and final-audit ownership remain external. |
 | W05.51 Make macOS N-API artifacts dyld-safe and complete the exact pushed Rust/Node/PGlite matrix | Package/platform implementation + local release qualification | Complete for the local implementation slice on exact pushed `515bdc00`; hosted/provider/native/publication closure remains open | 100% local slice / 78% provisional overall closure | `integrations/mount-rs-napi/scripts/build-native.mjs` now detects Darwin with Rust `<1.98` and supplies `MACOSX_DEPLOYMENT_TARGET=11.0` plus the linker platform-version floor, preserving existing `RUSTFLAGS`; this works around the macOS 27 dyld rejection of Rust 1.95/LLVM22 artifacts with misaligned `LC_SYMTAB.stroff` (upstream context: [Rust #157750](https://github.com/rust-lang/rust/issues/157750)). On exact pushed `515bdc00792a62403b0ee7b94e904434d067f43b`, the optimized package build produced a Darwin addon with aligned `stroff=22058472`, `minos=11.0`, `sdk=26.0`, and `node -e require(...)` loaded the real addon. Format, the full locked Rust workspace, strict Clippy, the complete pinned-oracle Node/N-API suite, PGlite lifecycle/N-API/FUSE checks, Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, and the provider-matrix Rust `6 pass / 3 skip / 0 fail` plus Node `5/3/0` and CLI `12/2` packets all passed. The standalone provider lock was refreshed by one checked-in `md-5` dependency entry so the harness executes under `--locked`. No R2/AWS secret or Keychain item was read. | Create a new immutable candidate from the current settled `origin/main` (do not mutate the old `87f3cdf0`/`25e275ab` candidates); rerun exact-SHA Rust/Node/SDK/CLI/PGlite qualification after the concurrent mainline changes; obtain terminal same-SHA CI, Fault, W04, W07, W08/attestation, Native 9P/FUSE, and package/provenance results; close Ozone hard `1000` IOPS and native-FUSE or record approved support-scope exclusions; provision AWS through security/OIDC, run one post-reset bounded R2 packet within the `$100` envelope, close package publication and advertised-provider scope, and issue W20.6 GO/NO-GO. | 1.5–3 h active implementation/qualification; 4–16 h hosted/provider/native/publication wait | Current mainline moved during qualification; GitHub runner and Windows/macOS/Linux native behavior, TiDB/Ozone/FoundationDB services, AWS protected inputs, R2 reset/token rotation, package registries/signing, support scope, and final-audit ownership remain external. |
 | W05.52 Qualify an immutable current-main candidate across local and hosted release gates | Release engineering + local Rust/Node qualification + hosted CI coordination | Local packet complete on `7efded54`; seven same-SHA hosted workflows queued; provider/native/publication gates open | 100% local / 10% hosted provisional | Candidate branch `andymac4182/c/w05-production-candidate-20260922c` is pinned to `7efded5424f8ad6c2335e7be1cde98c22b9315fe`. Local format, full locked Rust workspace, strict Clippy, optimized dyld-safe Darwin addon (`stroff % 8 = 0`, minos 11.0, SDK 26.0, Node load), full Node/N-API suite, PGlite lifecycle/provider/CLI matrix, Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, and explicit R2/native skips all pass. Same-SHA runs: CI `35714144497`, Fault `35714146067`, W04 `35714141926`, W07 `35714147247`, W08 policy `35714144646`, W08 targets with `attest=true` `35714146811`, and Native 9P `35714145176`; all were confirmed queued at the capture boundary with matching head SHA. | Poll every run to terminal and retain artifacts; repair any actionable implementation failure on a new immutable candidate; then close Ozone hard `1000` IOPS, native-FUSE/mount scope, AWS/OIDC, post-reset R2, package publication/provenance, advertised support, and W20.6. Never promote queued/partial/cancelled/old-SHA evidence. | 0.5–1.5 h active tracking; 2–16 h hosted/provider/native/publication wait | GitHub runner backlog, live TiDB/Ozone/FoundationDB/R2 services, protected AWS inputs, native kernel/FSKit privileges, signing/registries, scope ownership, and final audit remain external. |
+| W05.53 Track terminal same-SHA hosted results and classify the first artifact-service failure | Hosted CI evidence + release engineering | Active; functional candidate jobs are green where complete, but the packet is non-terminal | 100% local / 24% hosted provisional | At 2026-09-22 10:31 UTC, exact candidate `7efded54` remains the source for every result. W04 policy `35714141926` is terminal-successful. CI `35714144497` is overall queued: its TiDB TLS compile and Ubuntu ARM Node jobs passed; macOS Intel job `106701528015` failed only at `actions/upload-artifact` after its Node SDK/CLI/N-API, parity, PGlite, benchmark, structural macOS mount, and upstream conformance steps passed. Fault `35714146067` remains queued with Windows and Ubuntu success and macOS pending. W07 `35714147247` is in progress with macOS FoundationDB feature compilation successful and the durable FoundationDB/RustFS/Node/CLI/restart job still running. W08 policy `35714144646` is terminal-successful; W08 targets `35714146811` is in progress with the Linux release build successful and macOS build pending. Native 9P `35714145176` remains queued: native-9P, N-API lifecycle, and pinned conformance jobs passed, while the root-gated companion is queued. No queued, partial, failed-upload, or non-terminal workflow is promoted to release acceptance. | Let parent workflows reach terminal state and retrieve the artifact-service log; if the macOS failure is hosted artifact infrastructure, rerun or retain a clean artifact upload on the same candidate, and if any product step fails, create a new immutable candidate. Then close Ozone hard `1000` IOPS, native-FUSE or approved support scope, AWS/OIDC, post-reset R2, package publication/provenance, advertised support, and W20.6. | 0.5–1.5 h active tracking and classification; 2–16 h hosted/provider/native/publication wait | GitHub runner/artifact service and root-gated native capacity are external. R2 remains closed by the monthly envelope; AWS protected inputs remain absent; no credential or Keychain value was read. |
 
 ### W05.40 exact candidate evidence (2026-09-22 17:09 AEST)
 
@@ -748,6 +749,38 @@ R2 was not dispatched because the monthly usage envelope remains closed, AWS
 was not dispatched because security-provisioned protected OIDC inputs remain
 missing, and the production publisher was not dispatched because W20.6 has no
 GO decision. Production remains **NO-GO**.
+
+### W05.53 hosted packet checkpoint and macOS artifact boundary (2026-09-22 20:31 AEST)
+
+The same-SHA hosted packet has moved beyond the initial queue, but it is not
+terminal and is not release acceptance. Candidate `7efded5424f8ad6c2335e7be1cde98c22b9315fe`
+remains immutable. W04 policy `35714141926` and W08 policy `35714144646` are
+terminal-successful. CI `35714144497` is still overall queued: its TiDB TLS
+compile and Ubuntu ARM Node jobs passed, while macOS Intel job `106701528015`
+failed only at the final `actions/upload-artifact` step. All preceding macOS
+Node SDK/CLI/N-API, parity, PGlite, benchmark, structural macOS mount, and
+upstream conformance steps passed, so the observed failure is currently a
+hosted artifact-service boundary rather than a product-test failure; the
+terminal parent log is still required before that classification is final.
+
+Fault injection `35714146067` remains queued with Windows and Ubuntu jobs
+successful and macOS pending. W07 FoundationDB `35714147247` is in progress:
+the macOS feature compilation job passed and the durable FoundationDB/RustFS/
+Node/CLI/restart job is still executing. W08 release targets `35714146811` is
+in progress with the Linux release target passed and macOS still running.
+Native 9P `35714145176` remains queued: native 9P, N-API lifecycle, and pinned
+conformance jobs passed, while the root-gated companion remains queued. No
+queued, partial, failed-upload, or non-terminal workflow is promoted to
+release acceptance.
+
+The next active step is to let each parent reach terminal state and retrieve
+the artifact-service log. If the macOS upload failure is infrastructure-only,
+the candidate needs a clean artifact upload or a documented retained artifact;
+if any product step fails, a new immutable candidate must carry the repair.
+The production checklist remains blocked by Ozone's hard `1000` IOPS gate,
+native FUSE or an approved support-scope exclusion, security-provisioned AWS
+OIDC inputs, post-reset R2 requalification, package publication/provenance,
+advertised support scope, and W20.6. Production remains **NO-GO**.
 
 ### W05.49 terminal candidate CI failure and repair boundary (2026-09-22 19:01 AEST)
 
@@ -1184,6 +1217,8 @@ in Keychain; no security request was fabricated.
 | PR-12 / W05.51 | macOS N-API artifact, provider-matrix lock, and exact Rust/Node/SDK/CLI/PGlite qualification | Local slice complete; release gate open | 100% local slice / 0% hosted closure | Exact pushed `515bdc00` loaded the rebuilt Darwin addon on macOS 27 after the Rust `<1.98` linker workaround, and passed the full locked Rust workspace, strict Clippy, complete pinned-oracle Node/N-API suite, PGlite lifecycle/provider/CLI packet, Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, and the `--locked` provider matrix after the one-line `md-5` lock refresh. The current shared mainline moved to `e86c9ccb` during qualification and has no replacement same-SHA hosted packet. | Requalify a new immutable candidate from settled main; finish terminal CI/Fault/W04/W07/W08/attestation/Native 9P/FUSE/package evidence, live AWS/R2 provider gates, advertised support scope, and W20.6. | 1.5–3 h active; 4–16 h hosted/provider/native/publication wait | Concurrent mainline movement, hosted runners, provider services, AWS protected OIDC inputs, R2 reset/rotation, native privileges, package registries/signing, scope ownership, and final audit remain external. |
 | PR-13 / W05.52 | Immutable candidate local qualification + same-SHA hosted release packet | Local packet complete; hosted packet queued | 100% local / 10% hosted provisional | Exact candidate `7efded54` passes format, full locked Rust workspace, strict Clippy, current NFS/S3/9P tests, dyld-safe macOS N-API build/load, complete Node/N-API suite, PGlite/Rust/Node/CLI matrix, and explicit provider/native skip accounting. Runs CI `35714144497`, Fault `35714146067`, W04 `35714141926`, W07 `35714147247`, W08 policy `35714144646`, W08 targets `35714146811`, and Native 9P `35714145176` were dispatched against the exact SHA and observed queued. | Wait for terminal same-SHA workflows; retain attestation/package artifacts; repair actionable failures on a new immutable candidate; close provider, native, package/provenance, support-scope, AWS/R2, and W20.6 gates. | 0.5–1.5 h active; 2–16 h hosted/provider/native/publication wait | GitHub queue, provider services, AWS security administration, R2 cap/reset, native privileges, signing/registries, scope and final audit remain external. |
 
+| PR-14 / W05.53 | Hosted candidate packet checkpoint and artifact-service classification | Active; non-terminal hosted packet | 100% local / 24% hosted provisional | Exact candidate `7efded54` is locally green. W04 policy `35714141926` and W08 policy `35714144646` passed. CI `35714144497` remains queued overall with macOS Intel job `106701528015` failing only in final artifact upload after all functional steps passed; Fault `35714146067` is queued with Windows/Ubuntu success; W07 `35714147247` is in progress; W08 targets `35714146811` is in progress; Native 9P `35714145176` is queued with its substantive jobs green and root-gated companion queued. | Retrieve terminal logs, complete the same-SHA packet, rerun or retain the macOS artifact, repair any product failure on a new immutable candidate, and close R2/AWS/Ozone/native/package/scope/W20.6 gates. | 0.5–1.5 h active; 2–16 h hosted/provider/native/publication wait | GitHub queue/artifact service, root privileges, security administration, R2 reset, providers, registries/signing, and final scope/audit remain external. |
+
 ### Current immutable-candidate addendum (2026-09-22 17:09 AEST)
 
 The selected candidate remains `25e275ab6d4f918be72dcd8f62a5baca6bbcd251`.
@@ -1325,6 +1360,7 @@ shown separately from active engineering time.
 
 | UTC time | Activity | Classification | Result / next state |
 | --- | --- | --- | --- |
+| 2026-09-22 10:16–10:31 UTC (20:16–20:31 AEST) | Rebased the W05 ledger over moving `origin/main` `e984c232`, polled the exact candidate hosted packet, and classified the first macOS job failure | Hosted evidence / release-control documentation | W04 and W08 policy passed; completed macOS functional steps passed before the artifact upload failed; W07/W08 targets remained in progress and Native 9P remained root-queued. W05.53/PR-14 records the boundary; production remains NO-GO and no credentials were read. |
 | 2026-09-22 10:01–10:11 UTC (20:01–20:11 AEST) | Created immutable candidate `7efded54`, dispatched the seven non-R2 same-SHA hosted gates, and requalified the current candidate through format, full Rust tests, strict Clippy, dyld-safe N-API build/load, complete Node/N-API suite, and PGlite/Rust/Node/CLI matrix | Release engineering / local production qualification / hosted coordination | All local gates passed with explicit R2/native/provider skips. CI `35714144497`, Fault `35714146067`, W04 `35714141926`, W07 `35714147247`, W08 policy `35714144646`, W08 targets `35714146811`, and Native 9P `35714145176` were queued on exact `7efded54`; production remains NO-GO. |
 | 2026-09-22 09:11–10:01 UTC (19:11–20:01 AEST) | Requalified exact pushed `515bdc00` after the macOS Rust/N-API dyld repair, refreshed the standalone provider-matrix lock for `md-5`, reran the full PGlite/Rust/Node/CLI matrix, rebased the lock repair over concurrent `origin/main` `e86c9ccb`, and prepared the W05.51 production ledger update | Package/platform implementation / local release qualification / concurrent-main reconciliation | Darwin addon load, full Rust/Clippy/Node/N-API/PGlite/provider/CLI packet passed; R2/AWS/TiDB/RustFS/native mounts remained explicit gates. New local lock successor `505cbdcf` is ready to publish; a new immutable hosted candidate is still required and production remains NO-GO. |
 | 2026-09-22 09:06–09:11 UTC (19:06–19:11 AEST) | Repaired prepared TiDB statement interception, hardened Node 9P failed-listener cleanup, ran locked Rust compile/format checks, JavaScript syntax/diff checks, and four focused N-API 9P loopback repetitions | Integration-test implementation / local qualification | TiDB classifier and Node cleanup slice are locally green; hosted TiDB/TiDB-RustFS, Linux/Windows parity, Ozone capacity, and new immutable-candidate rerun remain open. W05.50 recorded and production remains NO-GO. |
