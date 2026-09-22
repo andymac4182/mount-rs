@@ -346,6 +346,12 @@ Current focused behavior:
   N-API job `106616293297`, with Rust job `106616293187` also green. This
   closes the port/framing slice only; remote admission, large payload,
   negotiated `msize`, and broader server-boundary parity remain separate gates.
+- The native TCP wire path now has hosted evidence for a deterministic 256 KiB
+  payload split across many negotiated-8 KiB frames, plus rejection of a frame
+  larger than the negotiated `msize` without affecting a healthy peer. Exact
+  SHA `c42030c1807f6504660892bf829137897e910c5e` passed [Native 9P run `35687955065`](https://github.com/andymac4182/mount-rs/actions/runs/35687955065),
+  N-API job `106618714142`, with Rust job `106618713939` also green. Remote
+  admission and broader server-boundary parity remain separate gates.
 - The N-API object boundary keeps serializable lifecycle views: native
   `P9Server.address()`/`path` use string-or-null representations, and effective
   `onError`/`onAssertion` hooks are omitted from `server.options` and

@@ -91,6 +91,17 @@ N-API execution passed; remote admission, large payload/negotiated `msize`,
 crash/reset, broader parity, and W01 gates remain open, so production remains
 NO-GO.
 
+The latest W01-9P wire-framing packet was published at exact SHA
+`c42030c1807f6504660892bf829137897e910c5e` and passed [Native 9P run
+`35687955065`](https://github.com/andymac4182/mount-rs/actions/runs/35687955065):
+N-API job `106618714142` passed the deterministic 256 KiB multi-frame
+write/read, negotiated-`msize` oversized-frame rejection and survivor, full
+server/attach, shared-lock, and teardown phases, and automatic/direct/
+structural mounted-I/O cleanup. Rust job `106618713939` passed the Linux probe
+plus all four ignored native lifecycle tests. Local elevated N-API execution
+passed; remote admission, crash/reset, broader parity, and W01 gates remain
+open, so production remains NO-GO.
+
 The preceding W01-9P transport-teardown packet was published at exact SHA
 `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` and passed [Native 9P run
 `35685073733`](https://github.com/andymac4182/mount-rs/actions/runs/35685073733):
