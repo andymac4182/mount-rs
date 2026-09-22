@@ -3022,6 +3022,17 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   unavailable `libfdb_c`. This is source/provider compilation qualification
   only, not hosted or production acceptance.
 
+  The latest published-tip source gate on 2026-09-22 tested exact revision
+  `a1fe6c88181350d1429f34911d2bc03f1ed34b44` and passed
+  `./scripts/cargo-shared fmt --all -- --check`, strict locked workspace
+  Clippy with `-D warnings`, and
+  `./scripts/cargo-shared test --workspace --all-targets --locked`. The
+  link-free feature-enabled `mount-rs-foundationdb` `check` and strict Clippy
+  checks also passed. The all-target suite retains explicit environment-gated
+  skips for external credentials, native mount privileges and service-backed
+  rows; this is source/provider qualification only, not production identity,
+  platform, recovery, capacity, observability or release evidence.
+
   W07.7 remains open until every nested gate has concrete production-like
   evidence. No demo, local qualification, queued CI run or installation-only
   result may be promoted to a production PASS.
