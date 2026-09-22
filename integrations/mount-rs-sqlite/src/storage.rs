@@ -647,6 +647,12 @@ impl MetadataStore for SqliteMetadataStore {
         self.0.durable
     }
 
+    fn publish_includes_flush_barrier(&self) -> bool {
+        // SQLite is opened with synchronous=FULL and publish commits an
+        // autocommit transaction before returning.
+        true
+    }
+
     async fn load(&self) -> Result<LoadedMetadata> {
         let connection = self.0.lock()?;
         let (revision, namespace): (u64, Option<String>) = connection

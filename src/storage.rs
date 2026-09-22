@@ -415,6 +415,15 @@ pub trait MetadataStore: Send + Sync {
         lease: &WriterLease,
         namespace: Namespace,
     ) -> Result<u64>;
+    /// Return true only when a successful `publish` already completes the
+    /// provider's same durability/acknowledgement barrier as `flush` for the
+    /// published metadata. The default is conservative for custom providers.
+    /// This does not advertise host or cluster durability; `durable()` remains
+    /// an independent caller assertion, and explicit `syncfs` still calls
+    /// `flush`.
+    fn publish_includes_flush_barrier(&self) -> bool {
+        false
+    }
     /// Complete the store's durability barrier; errors must reach fsync callers.
     async fn flush(&self) -> Result<()>;
 }

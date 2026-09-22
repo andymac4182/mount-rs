@@ -1294,6 +1294,10 @@ impl MetadataStore for DynMetadataStore {
         self.0.durable()
     }
 
+    fn publish_includes_flush_barrier(&self) -> bool {
+        self.0.publish_includes_flush_barrier()
+    }
+
     fn load<'a, 'async_trait>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = CoreResult<LoadedMetadata>> + Send + 'async_trait>>

@@ -474,6 +474,13 @@ impl MetadataStore for TidbMetadataStore {
         self.0.durable
     }
 
+    fn publish_includes_flush_barrier(&self) -> bool {
+        // A successful COMMIT acknowledgement is the same provider barrier
+        // as the extra connection probe; ambiguous COMMIT errors still fail
+        // closed and explicit syncfs retains the probe.
+        true
+    }
+
     async fn load(&self) -> Result<LoadedMetadata> {
         let mut connection = self
             .0

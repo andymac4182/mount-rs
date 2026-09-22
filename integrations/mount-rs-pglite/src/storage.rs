@@ -609,6 +609,13 @@ impl MetadataStore for PgliteMetadataStore {
         self.0.durable
     }
 
+    fn publish_includes_flush_barrier(&self) -> bool {
+        // `publish` awaits the PostgreSQL transaction COMMIT. The provider
+        // flush is only a post-commit acknowledgement/dead-connection probe;
+        // explicit syncfs still performs it.
+        true
+    }
+
     async fn load(&self) -> Result<LoadedMetadata> {
         let client = self.0.lock_client().await?;
         let row = client

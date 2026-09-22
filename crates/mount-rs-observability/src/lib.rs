@@ -1010,6 +1010,10 @@ where
         self.inner.durable()
     }
 
+    fn publish_includes_flush_barrier(&self) -> bool {
+        self.inner.publish_includes_flush_barrier()
+    }
+
     async fn load(&self) -> Result<LoadedMetadata> {
         self.telemetry
             .observe_fs("provider.metadata", "load", None, self.inner.load())
