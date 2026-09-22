@@ -17,6 +17,7 @@ use mount_rs_core::{ErrorCode, FsError, Result, backend_error};
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
 use sha2::{Digest, Sha256};
+use tokio::sync::watch;
 
 const BLOCK_ID_PREFIX: char = 'b';
 const LEGACY_BLOCK_ID_HEX_CHARS: usize = 32;
@@ -136,6 +137,13 @@ impl R2BlockStoreStatsState {
             R2BlockStoreErrorClass::Client => increment(&self.client_errors),
             R2BlockStoreErrorClass::Server => increment(&self.server_errors),
         }
+    }
+
+    fn logical_error(&self, started: Instant) {
+        increment(&self.errors);
+        let elapsed_ms = elapsed_ms(started);
+        add(&self.duration_ms_total, elapsed_ms);
+        update_max(&self.duration_ms_max, elapsed_ms);
     }
 
     fn conditional_conflict(&self) {
@@ -268,6 +276,84 @@ impl R2BlockCache {
     }
 }
 
+type InFlightPutResult = std::result::Result<(), FsError>;
+
+struct InFlightPut {
+    result: watch::Sender<Option<InFlightPutResult>>,
+}
+
+impl InFlightPut {
+    fn new() -> Arc<Self> {
+        let (result, _) = watch::channel(None);
+        Arc::new(Self { result })
+    }
+
+    fn subscribe(&self) -> watch::Receiver<Option<InFlightPutResult>> {
+        self.result.subscribe()
+    }
+
+    fn finish(&self, result: InFlightPutResult) {
+        let _ = self.result.send(Some(result));
+    }
+}
+
+enum InFlightPutClaim {
+    Leader(InFlightPutGuard),
+    Follower(watch::Receiver<Option<InFlightPutResult>>),
+}
+
+struct InFlightPutGuard {
+    id: String,
+    entry: Arc<InFlightPut>,
+    entries: Arc<Mutex<HashMap<String, Arc<InFlightPut>>>>,
+    completed: bool,
+}
+
+impl InFlightPutGuard {
+    fn remove(&self) {
+        let Ok(mut entries) = self.entries.lock() else {
+            return;
+        };
+        if entries
+            .get(&self.id)
+            .is_some_and(|entry| Arc::ptr_eq(entry, &self.entry))
+        {
+            entries.remove(&self.id);
+        }
+    }
+
+    fn finish(mut self, result: InFlightPutResult) {
+        self.remove();
+        self.entry.finish(result);
+        self.completed = true;
+    }
+}
+
+impl Drop for InFlightPutGuard {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        self.remove();
+        self.entry
+            .finish(Err(backend_error("R2 block upload canceled")));
+    }
+}
+
+async fn wait_for_inflight_put(
+    mut receiver: watch::Receiver<Option<InFlightPutResult>>,
+) -> Result<()> {
+    loop {
+        let result = receiver.borrow().clone();
+        if let Some(result) = result {
+            return result;
+        }
+        if receiver.changed().await.is_err() {
+            return Err(backend_error("R2 block upload canceled"));
+        }
+    }
+}
+
 fn increment(value: &AtomicU64) {
     let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
         Some(current.saturating_add(1))
@@ -349,6 +435,7 @@ pub struct R2BlockStore {
     durable: bool,
     stats: Arc<R2BlockStoreStatsState>,
     cache: Arc<R2BlockCache>,
+    inflight_puts: Arc<Mutex<HashMap<String, Arc<InFlightPut>>>>,
 }
 
 impl R2BlockStore {
@@ -370,6 +457,7 @@ impl R2BlockStore {
             durable,
             stats: Arc::new(R2BlockStoreStatsState::default()),
             cache: Arc::new(R2BlockCache::default()),
+            inflight_puts: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -398,27 +486,40 @@ impl R2BlockStore {
         validate_block_id(id)?;
         Ok(ObjectPath::from(format!("{}/{}", self.prefix, id.0)))
     }
-}
 
-#[async_trait]
-impl BlockStore for R2BlockStore {
-    fn durable(&self) -> bool {
-        self.durable
+    fn claim_put(&self, id: &str) -> InFlightPutClaim {
+        let entry = InFlightPut::new();
+        let Ok(mut entries) = self.inflight_puts.lock() else {
+            return InFlightPutClaim::Leader(InFlightPutGuard {
+                id: id.to_owned(),
+                entry,
+                entries: Arc::clone(&self.inflight_puts),
+                completed: false,
+            });
+        };
+        if let Some(existing) = entries.get(id) {
+            return InFlightPutClaim::Follower(existing.subscribe());
+        }
+        entries.insert(id.to_owned(), Arc::clone(&entry));
+        InFlightPutClaim::Leader(InFlightPutGuard {
+            id: id.to_owned(),
+            entry,
+            entries: Arc::clone(&self.inflight_puts),
+            completed: false,
+        })
     }
 
-    async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
-        let started = self.stats.start(BlockOperation::Put);
-        let id = BlockId(block_id(bytes));
-        if self.cache.get(&id.0).is_some() {
-            self.stats.cache_hit();
-            self.stats.success(started, 0, bytes.len() as u64);
-            return Ok(id);
-        }
-        let path = self.object_path(&id)?;
+    async fn put_remote(
+        &self,
+        id: &BlockId,
+        bytes: &[u8],
+        path: &ObjectPath,
+        started: Instant,
+    ) -> Result<()> {
         let result = self
             .store
             .put_opts(
-                &path,
+                path,
                 PutPayload::from(bytes.to_vec()),
                 PutOptions {
                     mode: PutMode::Create,
@@ -430,7 +531,7 @@ impl BlockStore for R2BlockStore {
             Ok(_) => {
                 self.cache.insert(&id.0, bytes);
                 self.stats.success(started, 0, bytes.len() as u64);
-                Ok(id)
+                Ok(())
             }
             // Content addressing makes a conditional-create conflict an
             // idempotent success only after the existing object is checked.
@@ -439,7 +540,7 @@ impl BlockStore for R2BlockStore {
             Err(object_store::Error::AlreadyExists { .. })
             | Err(object_store::Error::Precondition { .. }) => {
                 self.stats.conditional_conflict();
-                let existing = match self.store.get(&path).await {
+                let existing = match self.store.get(path).await {
                     Ok(result) => match result.bytes().await {
                         Ok(bytes) => bytes,
                         Err(error) => {
@@ -458,11 +559,54 @@ impl BlockStore for R2BlockStore {
                 }
                 self.cache.insert(&id.0, bytes);
                 self.stats.success(started, 0, bytes.len() as u64);
-                Ok(id)
+                Ok(())
             }
             Err(error) => {
                 self.stats.error(started, &error);
                 Err(backend_error(format!("put R2 block: {error}")))
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl BlockStore for R2BlockStore {
+    fn durable(&self) -> bool {
+        self.durable
+    }
+
+    async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
+        let started = self.stats.start(BlockOperation::Put);
+        let id = BlockId(block_id(bytes));
+        if self.cache.get(&id.0).is_some() {
+            self.stats.cache_hit();
+            self.stats.success(started, 0, bytes.len() as u64);
+            return Ok(id);
+        }
+        let path = self.object_path(&id)?;
+        match self.claim_put(&id.0) {
+            InFlightPutClaim::Follower(receiver) => match wait_for_inflight_put(receiver).await {
+                Ok(()) => {
+                    self.stats.success(started, 0, bytes.len() as u64);
+                    Ok(id)
+                }
+                Err(error) => {
+                    self.stats.logical_error(started);
+                    Err(error)
+                }
+            },
+            InFlightPutClaim::Leader(guard) => {
+                let result = self.put_remote(&id, bytes, &path, started).await;
+                match result {
+                    Ok(()) => {
+                        guard.finish(Ok(()));
+                        Ok(id)
+                    }
+                    Err(error) => {
+                        guard.finish(Err(error.clone()));
+                        Err(error)
+                    }
+                }
             }
         }
     }
@@ -663,6 +807,66 @@ mod tests {
         let first = R2BlockStore::new(object_store.clone(), "vol-a/blocks", false).unwrap();
         let second = R2BlockStore::new(object_store.clone(), "vol-b/blocks", false).unwrap();
         (first, second, object_store)
+    }
+
+    #[tokio::test]
+    async fn concurrent_put_claims_share_one_completion() {
+        let (store, _, _) = stores().await;
+        let id = "bshared";
+        let leader = match store.claim_put(id) {
+            InFlightPutClaim::Leader(guard) => guard,
+            InFlightPutClaim::Follower(_) => panic!("first claim must be the leader"),
+        };
+        let follower = match store.claim_put(id) {
+            InFlightPutClaim::Follower(receiver) => receiver,
+            InFlightPutClaim::Leader(_) => panic!("second claim must be a follower"),
+        };
+
+        leader.finish(Ok(()));
+        wait_for_inflight_put(follower).await.unwrap();
+        assert!(matches!(store.claim_put(id), InFlightPutClaim::Leader(_)));
+    }
+
+    #[tokio::test]
+    async fn canceled_put_claim_releases_followers() {
+        let (store, _, _) = stores().await;
+        let id = "bcanceled";
+        let leader = match store.claim_put(id) {
+            InFlightPutClaim::Leader(guard) => guard,
+            InFlightPutClaim::Follower(_) => panic!("first claim must be the leader"),
+        };
+        let follower = match store.claim_put(id) {
+            InFlightPutClaim::Follower(receiver) => receiver,
+            InFlightPutClaim::Leader(_) => panic!("second claim must be a follower"),
+        };
+
+        drop(leader);
+        assert!(
+            wait_for_inflight_put(follower)
+                .await
+                .unwrap_err()
+                .is(ErrorCode::Eio)
+        );
+    }
+
+    #[tokio::test]
+    async fn put_reuses_a_completed_inflight_upload() {
+        let (store, _, _) = stores().await;
+        let bytes = b"coalesced bytes";
+        let id = block_id(bytes);
+        let leader = match store.claim_put(&id) {
+            InFlightPutClaim::Leader(guard) => guard,
+            InFlightPutClaim::Follower(_) => panic!("first claim must be the leader"),
+        };
+        let waiting_store = store.clone();
+        let put = tokio::spawn(async move { waiting_store.put(bytes).await });
+        tokio::task::yield_now().await;
+
+        store.cache.insert(&id, bytes);
+        leader.finish(Ok(()));
+        assert_eq!(put.await.unwrap().unwrap(), BlockId(id));
+        assert_eq!(store.stats().puts, 1);
+        assert_eq!(store.stats().successes, 1);
     }
 
     #[tokio::test]
