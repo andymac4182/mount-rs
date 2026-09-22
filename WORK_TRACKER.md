@@ -1873,8 +1873,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   N-API artifact aggregation, focused FUSE 14/14 tests, formatting, and diff
   checks pass locally. The hosted run `35674630831` is excluded because its
   ARM job failed at the pre-`d0a67b22` generated declaration mismatch and was
-  canceled; a replacement exact-tip Node/native/package/provider run is still
-  required. Production remains **NO-GO** for deployment persistence,
+  canceled. Replacement run `35675591961` is also explicitly excluded: its
+  Unix and Windows Node jobs failed before W04 recovery on the generated
+  `Record` versus `Map` declaration mismatch, and native FUSE exceeded its
+  configured timeout. The current published tree `819c663e` retains the
+  corrected P9 normalization and the WebDAV provider-network cleanup retry;
+  a fresh exact-tip Node/native/package/provider run is still required.
+  Production remains **NO-GO** for deployment persistence,
   backup/rollback, provider scope/performance, observability, ownership, and
   release approval.
 
@@ -1941,6 +1946,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   Linux Node, and Ubuntu Rust remain queued at the current snapshot. This is
   not W04 or production acceptance; a current-main run containing `23c0ba7e`
   is still required for Ozone requalification and the complete Node matrix.
+
+- Current published cleanup chunk: `integrations/mount-rs-napi/test/webdav-provider-network-concurrency.mjs`
+  now retries only its temporary-tree removal after provider shutdown, covering
+  the late SQLite journal/WAL directory transition observed locally. Five fresh
+  concurrency-64 NodeFs/SQLite runs passed, the prior 20-run stress packet and
+  full pinned-oracle N-API suite passed, and the focused implementation was
+  rebased and pushed to `origin/main` as `819c663e`. A fresh hosted qualification
+  from this exact published tip is required; this local test hardening does not
+  close the hosted or production gates.
 
 ## W05 — Cloudflare R2
 
