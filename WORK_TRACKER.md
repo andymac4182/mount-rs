@@ -1164,6 +1164,14 @@ prefix recovery, pinned WebDAV barrel/session-member differentials, and the
 local provider/crash, pinned-oracle, and loopback evidence only; hosted
 session/lifecycle/concurrency, live remote-provider behavior, power-loss
 ordering, durable locks, and wider ordering remain open.
+The exact-tip hosted CI run `35674823787` also passed all four N-API `node`
+jobs (Ubuntu x64/arm64 and macOS arm64/Intel), all three Rust jobs, and both
+native WebDAV jobs at `e5ae05d07bbc73184952def0437e58be9efef790`. Its `node`
+workflow builds the locked addon and runs the full pinned-oracle N-API package
+script, providing hosted cross-platform WebDAV session, streaming, lifecycle,
+concurrency, provider, crash, and parity evidence. The workflow remains
+nonterminal on an unrelated native-FUSE job, so mounted-host concurrency,
+live-provider, power-loss, and durable-lock acceptance remain open.
 At final ledger tip `3148aa5a95e5cdcf328014fac7e007db0e16adfe`, exact-SHA CI
 `35673381803` and W08 policy/targets `35673381898`/`35673381797` were pending,
 Fault injection `35673381853` and W04 policy `35673381814` were queued, and no
