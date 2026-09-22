@@ -6254,6 +6254,24 @@ listing a source does not mean it has been reviewed or its code can be reused.
   The credential-free template, bucket-policy, CI-config, and CI-environment
   contract fixtures also passed. Explicitly ignored native/service rows and
   all production deployment gates remain separate prerequisites.
+- [x] The current credential-free W25 harness contract chunk added a
+  fail-closed validator and synthetic regression matrix for W25.2/W25.3.
+  `AWS_S3_TEST_CONFIG_TEST_PASS cases=10` passed without invoking AWS, Cargo,
+  or a provider. The matrix covers profile and explicit temporary-credential
+  inputs, role/account binding, missing or mismatched expected accounts,
+  incomplete or ambiguous credential sources, endpoint overrides, unsafe
+  prefixes, and secret-safe output. The local live harness now runs this guard
+  before AWS CLI access and requires `AWS_S3_TEST_EXPECTED_ACCOUNT_ID` whenever
+  an optional role ARN is supplied.
+- [x] The hosted AWS workflow now triggers and hashes the harness validator
+  and its offline test, and runs the 10-case contract preflight before
+  authentication. Existing credential-free rollout fixtures also passed in
+  the same verification set: `AWS_S3_CI_CONFIG_TEST_PASS cases=7`,
+  `AWS_S3_CI_ENVIRONMENT_TEST_PASS cases=3`,
+  `AWS_S3_BUCKET_POLICY_TEST_PASS cases=2`, and
+  `AWS_S3_TEMPLATE_CONTRACT_PASS statements=5`. These are fail-closed
+  safeguards only; they do not replace live W25.3 service acceptance or
+  production deployment approval.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
