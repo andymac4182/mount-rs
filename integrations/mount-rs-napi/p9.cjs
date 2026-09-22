@@ -626,6 +626,10 @@ function p9Port(value) {
 // cross-transport mounts deliberately remain on the native/supervisor path;
 // this keeps the ./9p facade's signal behavior scoped to the mounts it creates.
 const TEARDOWN_SIGNALS = ["SIGINT", "SIGTERM"]
+// The upstream direct 9P helper is synchronous. Keep the same process-local
+// view here instead of making a read-only inspection call await the root
+// facade's asynchronous all-transport registry.
+const directMounts = new Set()
 const signalMounts = new Set()
 let signalsInstalled = false
 
@@ -659,14 +663,22 @@ function untrackSignalMount(mount) {
   if (signalMounts.size === 0) removeSignalHandlers()
 }
 
-function trackSignalMount(mount) {
-  signalMounts.add(mount)
-  installSignalHandlers()
+function untrackDirectMount(mount) {
+  directMounts.delete(mount)
+  untrackSignalMount(mount)
+}
+
+function trackDirectMount(mount, signals) {
+  directMounts.add(mount)
+  if (signals) {
+    signalMounts.add(mount)
+    installSignalHandlers()
+  }
   const closed = mount?.closed
   if (closed && typeof closed.then === "function") {
     void closed.then(
-      () => untrackSignalMount(mount),
-      () => untrackSignalMount(mount),
+      () => untrackDirectMount(mount),
+      () => untrackDirectMount(mount),
     )
   }
 }
@@ -736,12 +748,20 @@ async function mount9p(driver, mountpoint, options = {}) {
     onTransportError: options.onTransportError,
     p9,
   })
-  if (options.signals !== false) trackSignalMount(mounted)
+  trackDirectMount(mounted, options.signals !== false)
   return mounted
 }
 
-async function live9pMounts() {
-  return (await binding.liveMounts()).filter((mount) => mount.transport === "9p")
+function live9pMounts() {
+  const mounts = []
+  for (const mount of directMounts) {
+    if (mount?.active === false) {
+      untrackDirectMount(mount)
+      continue
+    }
+    mounts.push(mount)
+  }
+  return mounts
 }
 
 async function unmountAll9p() {
