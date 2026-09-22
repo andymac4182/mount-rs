@@ -16,7 +16,10 @@ cargo clippy -p mount-rs-9p --all-targets -- -D warnings
 These tests exercise complete protocol frames, session operations, and a
 loopback TCP connection without requiring a kernel 9P client, a mount point, or
 elevated privileges. They are therefore portable rootless tests on macOS and
-Linux; they do not prove native mount support.
+Linux; they do not prove native mount support. The Rust crate also has an
+all-target compile guard for `x86_64-pc-windows-gnu`, but there is no Windows
+runtime, N-API, or native-mount acceptance gate in this project, so that target
+is not a production-supported platform claim.
 
 ## Native mount prerequisites
 
@@ -32,7 +35,18 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> 127.0.0.1 /mnt/mount-
 The exact module packaging and mount policy are distribution- and kernel-
 specific. macOS has no built-in 9P client, so this crate's macOS verification
 is the rootless wire/TCP suite; an external userspace client would be required
-for an actual macOS mount. The crate does not provide a native mount wrapper.
+for an actual macOS mount. Windows has no qualified native or hosted client
+path in this project; its compile guard is portability evidence only. The crate
+does not provide a native mount wrapper for non-Linux platforms.
+
+## Windows platform boundary
+
+The portable Rust surface is compile-checked with
+`--target x86_64-pc-windows-gnu --all-targets`. That check does not qualify
+Windows runtime behavior, the N-API addon, Unix-domain listeners, or a native
+9P mount. Until a hosted Windows runtime gate is added, production support is
+limited to Linux native mounts and the tested macOS/Linux rootless wire/TCP
+surface.
 
 ## Lifecycle and crash boundary
 

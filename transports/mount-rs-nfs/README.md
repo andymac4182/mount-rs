@@ -32,8 +32,12 @@ orderly TCP transport reconnect while this server process remains alive, and
 that multiple v3 calls can be pipelined on one connection within the configured
 in-flight bound. With `max_in_flight=1`, a second pipelined v3 RPC stays
 undispatched until the first completes, then both replies arrive. A blocked v3
-RPC does not hold a later fast RPC on the same connection behind it: replies
-are matched by XID and may complete in worker
+reply writer also retains its in-flight permit: an in-memory test fills a
+16-byte output buffer, keeps a second call queued, then stops the connection
+and observes bounded writer cancellation without dispatching that call.
+This is userspace backpressure and close evidence, not native socket ordering.
+A backend-blocked v3 RPC does not hold a later fast RPC on the same connection
+behind it: replies are matched by XID and may complete in worker
 completion order, with the focused real-TCP test asserting that neither reply
 is lost. Two independent v4.1 sessions also complete concurrent
 distinct-file OPEN/WRITE/READ round trips. This is rootless in-process

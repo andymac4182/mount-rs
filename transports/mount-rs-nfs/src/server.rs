@@ -793,7 +793,9 @@ mod tests {
     use crate::constants::{MOUNT_PROGRAM, MOUNT_V3, MOUNTPROC3_NULL};
     use crate::rpc::{RecordAssembler, decode_reply, encode_call};
     use mount_rs_core::MemoryFs;
-    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, ReadHalf, WriteHalf};
+    use tokio::io::{
+        AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf, ReadHalf, WriteHalf,
+    };
     use tokio::sync::Notify;
     use tokio::time::timeout;
 
@@ -1129,5 +1131,72 @@ mod tests {
         .expect("concurrent NFS write failures return");
         events.wait_for(1).await;
         assert_eq!(events.snapshot().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn close_cancels_a_backpressured_reply_and_queued_request() {
+        let server = NfsServer::new(MemoryFs::empty(), NfsServerOptions::default());
+        let (mut request_writer, request_reader) = tokio::io::duplex(1024);
+        let (reply_writer, mut reply_reader) = tokio::io::duplex(16);
+        let control = Arc::new(NfsConnectionControl::new());
+        let (events, hooks) = FaultEvents::new();
+        let task = tokio::spawn(serve_connection(NfsConnectionRuntime {
+            reader: request_reader,
+            writer: reply_writer,
+            peer: SocketAddr::from(([127, 0, 0, 1], 12345)),
+            session: server.session.clone(),
+            v4_session: server.v4_session.clone(),
+            record_limit: DEFAULT_RECORD_LIMIT,
+            max_in_flight: 1,
+            hooks,
+            reported: Arc::new(AtomicBool::new(false)),
+            control: Arc::clone(&control),
+        }));
+
+        let mut requests = null_call(1);
+        requests.extend_from_slice(&null_call(2));
+        request_writer
+            .write_all(&requests)
+            .await
+            .expect("write both pipelined calls");
+        timeout(Duration::from_secs(2), async {
+            while server.session().stats().replies < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first RPC reaches reply writer");
+        assert_eq!(server.session().stats().requests, 1);
+
+        // The peer deliberately does not read its 16-byte reply buffer. The
+        // first worker holds the only permit while write_all is pending, so
+        // the second framed RPC must remain undispatched.
+        assert!(
+            timeout(Duration::from_millis(100), async {
+                while server.session().stats().requests < 2 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_err(),
+            "backpressured reply must retain the in-flight slot"
+        );
+
+        control.stop();
+        timeout(Duration::from_secs(2), task)
+            .await
+            .expect("NFS connection closes despite stalled write")
+            .expect("NFS connection task succeeds");
+        let mut partial_reply = Vec::new();
+        timeout(
+            Duration::from_secs(2),
+            reply_reader.read_to_end(&mut partial_reply),
+        )
+        .await
+        .expect("canceled writer closes reply stream")
+        .expect("read partial NFS reply");
+        assert_eq!(partial_reply.len(), 16, "reply writer filled its buffer");
+        assert_eq!(server.session().stats().requests, 1);
+        assert!(events.snapshot().is_empty(), "close is not a write error");
     }
 }

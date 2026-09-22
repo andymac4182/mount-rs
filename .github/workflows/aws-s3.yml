@@ -26,12 +26,14 @@ on:
       - 'scripts/test-aws-s3-bucket-policy.sh'
       - 'scripts/test-aws-s3-ci-config.sh'
       - 'scripts/test-aws-s3-ci-environment.sh'
+      - 'scripts/test-aws-s3-ci-provenance.sh'
       - 'scripts/test-aws-s3-test-config.sh'
       - 'scripts/test-aws-s3-test-identity.sh'
       - 'scripts/test-aws-s3-production-template.rb'
       - 'scripts/test-aws-s3-pglite.sh'
       - 'scripts/test-s3-provider-workflow-paths.sh'
       - 'scripts/validate-aws-s3-ci-config.sh'
+      - 'scripts/validate-aws-s3-ci-provenance.sh'
       - 'scripts/validate-aws-s3-test-config.sh'
       - 'scripts/validate-aws-s3-test-identity.sh'
       - 'tests/aws/**'
@@ -76,14 +78,23 @@ jobs:
 
       - name: Capture locked AWS S3 qualification provenance
         run: |
+          source_sha=$(git rev-parse HEAD)
+          working_tree=$(git status --porcelain=v1)
+          test -z "$working_tree"
           mkdir -p artifacts/aws-s3
           {
-            printf 'source_sha='; git rev-parse HEAD
-            printf 'source_commit='; git log -1 --format=%s
-            printf 'rustc='; rustc --version
-            printf 'cargo='; cargo --version
-            printf 'ruby='; ruby --version
-            printf 'working_tree='; git status --porcelain=v1
+            printf 'source_sha=%s\n' "$source_sha"
+            printf 'source_subject=%s\n' "$(git log -1 --format=%s)"
+            printf 'rustc=%s\n' "$(rustc --version)"
+            printf 'cargo=%s\n' "$(cargo --version)"
+            printf 'ruby=%s\n' "$(ruby --version)"
+            printf 'repository=%s\n' "$GITHUB_REPOSITORY"
+            printf 'workflow=%s\n' "$GITHUB_WORKFLOW"
+            printf 'ref=%s\n' "$GITHUB_REF"
+            printf 'event=%s\n' "$GITHUB_EVENT_NAME"
+            printf 'run_id=%s\n' "$GITHUB_RUN_ID"
+            printf 'run_attempt=%s\n' "$GITHUB_RUN_ATTEMPT"
+            printf 'working_tree=clean\n'
           } > artifacts/aws-s3/provenance.txt
           cargo metadata --locked --no-deps --format-version 1 > artifacts/aws-s3/cargo-metadata.json
           cargo metadata --manifest-path tests/aws/Cargo.toml --locked --no-deps --format-version 1 > artifacts/aws-s3/aws-test-cargo-metadata.json
@@ -91,10 +102,12 @@ jobs:
             scripts/validate-aws-s3-ci-config.sh \
             scripts/test-aws-s3-ci-config.sh \
             scripts/test-aws-s3-ci-environment.sh \
+            scripts/test-aws-s3-ci-provenance.sh \
             scripts/test-aws-s3-test-config.sh \
             scripts/test-aws-s3-test-identity.sh \
             scripts/validate-aws-s3-test-config.sh \
             scripts/validate-aws-s3-test-identity.sh \
+            scripts/validate-aws-s3-ci-provenance.sh \
             scripts/check-aws-s3-bucket-policy.jq \
             scripts/test-aws-s3-bucket-policy.sh \
             scripts/test-aws-s3-production-template.rb \
@@ -108,6 +121,12 @@ jobs:
             tests/aws/Cargo.toml \
             tests/aws/Cargo.lock \
             .github/workflows/aws-s3.yml > artifacts/aws-s3/input-sha256sums.txt
+
+      - name: Validate locked AWS S3 qualification provenance
+        run: ./scripts/validate-aws-s3-ci-provenance.sh artifacts/aws-s3/provenance.txt
+
+      - name: Test AWS S3 qualification provenance contract
+        run: ./scripts/test-aws-s3-ci-provenance.sh
 
       - name: Test protected AWS S3 CI configuration validator
         run: ./scripts/test-aws-s3-ci-config.sh

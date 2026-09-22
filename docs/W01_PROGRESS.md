@@ -275,6 +275,14 @@ expanding the advertised 9P scope; the documented legacy/auth/xattr,
 broader-member, supervisor-owned crash/reset, and non-Linux native-mount
 boundaries remain explicit, and W01/release remains **NO-GO**.
 
+The follow-up 9P platform gate also passed the host macOS rootless crate suite
+(`37` tests, zero failures) and the Rust crate's all-target compile check for
+`x86_64-pc-windows-gnu`. This qualifies Windows compile portability only: no
+Windows runtime, N-API, Unix-listener, or native-mount acceptance is claimed.
+The supported production platform boundary therefore remains Linux native
+mounts plus the tested macOS/Linux rootless wire/TCP surface, and W01/release
+remains **NO-GO**.
+
 The preceding W01-9P transport-teardown packet was published at exact SHA
 `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` and passed [Native 9P run
 `35685073733`](https://github.com/andymac4182/mount-rs/actions/runs/35685073733):
@@ -1350,6 +1358,7 @@ spent waiting for a hosted job or credential approval.
 | 2026-09-22 | W01-NFS | Extended the forced-process-restart NFSv4.1 lane with wire `REMOVE` of a seeded host file before termination; replacement-session wire `LOOKUP` returned `NFS4ERR_NOENT`, while the existing `FILE_SYNC4` readback and stale session/handle checks remained green. Direct process restart passed 2/2; the full locked NFS target passed 41 unit and all applicable integrations, including 20 v4 wire; strict Clippy, formatting, and diff checks passed | — | 75% W01.4 planning view | This is one-host process-crash namespace evidence, not directory-fsync or power-loss durability, persistent NFSv4 state, native-client ordering, exact-tip hosted acceptance, or production acceptance; W01 stays NO-GO |
 | 2026-09-22 | W01-NFS | Extended the forced-process-restart NFSv4.1 lane with successful wire `RENAME` of a seeded host file; after forced termination, replacement-session wire `LOOKUP` found the old name absent and the new name present, and exact host bytes remained at the destination. Direct process restart passed 2/2, the full locked NFS target passed 41 unit and all applicable integrations including 20 v4 wire, and strict Clippy, formatting, and diff checks passed | — | 75% W01.4 planning view | This is same-directory, one-host process-crash namespace evidence, not directory-fsync or power-loss durability, persistent NFSv4 state, native-client ordering, exact-tip hosted acceptance, or production acceptance; W01 stays NO-GO |
 | 2026-09-22 | W01-NFS | Corrected the shared RPC router's unsupported NFS version response from v3-only `3..3` to the actual v3..v4 range. The pre-fix real-TCP regression failed, then passed 1/1 with MOUNT, program, RPC-version, auth, valid v3/v4, and shared-stat boundaries; full locked NFS passed 41 unit and all applicable integrations including 20 v4 wire, pinned upstream parity passed 266 with 18 explicit skips, affected strict Clippy, N-API release compilation/typecheck, formatting, and diff checks passed | — | 75% W01.4 planning view | Direct N-API runtime assertion remains unqualified locally because the built macOS addon fails `dlopen` with mis-aligned LINKEDIT; native/hosted ordering, crash/power-loss durability, exact-tip hosted acceptance, and W01 production acceptance remain NO-GO |
+| 2026-09-22 | W01-NFS | Added a bounded stalled-reply close regression: two pipelined MOUNT NULL calls with `max_in_flight=1` and an unread 16-byte reply buffer leave only the first call dispatched; stopping the connection cancels its blocked writer and the queued call without a spurious transport callback. The focused test and full locked NFS target passed (42 unit tests and all applicable integrations), with strict Clippy, formatting, and diff checks green | — | 75% W01.4 planning view | This is local userspace backpressure/close evidence, not native-client ordering, cross-process concurrency, crash/power-loss durability, exact-tip hosted acceptance, or production readiness; W01 remains NO-GO |
 
 ## Definition of W01 complete
 

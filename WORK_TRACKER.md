@@ -1003,6 +1003,7 @@ patch):
 | Main | W01 9P supported-scope closure audit | `docs/W01_9P_PROGRESS.md`, `docs/W01_PROGRESS.md`, `docs/public-api-parity.md`, `transports/mount-rs-9p/README.md` | Current audit classifies the advertised codec/session/server/connection/attach/mount slice as qualified by local evidence and published SHA `86b88c329d64bcc2a8e7b9d97993fca657458986` / [Native 9P run `35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373), N-API job `106667799214`, and Rust job `106667799016`. Legacy/auth/xattr families, unadvertised upstream members, native-listener Node-stream identity, root automatic cross-transport signals, process-crash/arbitrary kernel-reset recovery, and non-Linux native mounts are explicit scope boundaries; broader oracle parity remains partial by design and overall W01/release remains NO-GO |
 | Main | W01 dedicated hosted upstream 9P conformance gate | `.github/workflows/native-9p.yml`, `tests/upstream/p9-conformance.test.mjs`, `examples/p9_oracle.rs`, `docs/W01_9P_PROGRESS.md`, `docs/W01_PROGRESS.md` | Published SHA `a6b3e2aa10cfdb3ee730d41c5886436b02c260de` adds the revision-matched Linux `upstream-9p` job and routes the fixture through `scripts/cargo-shared`. [Native 9P run `35707546973`](https://github.com/andymac4182/mount-rs/actions/runs/35707546973) passed upstream job `106680012604` with `144 passed` and `2 skipped` root-gated ownership cases out of `146`; N-API job `106680012485` and Rust job `106680013203` also passed. Local YAML/syntax, focused oracle/public-surface, and diff checks passed; local full-suite execution is blocked before tests by the Mac's unaccepted Xcode license. The documented legacy/auth/xattr, broader upstream member, supervisor-owned crash/reset, and non-Linux native-mount boundaries remain explicit, so production remains NO-GO |
 | Main | W01 root-gated upstream 9P ownership coverage | `.github/workflows/native-9p.yml`, `tests/upstream/p9-conformance.test.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/W01_PROGRESS.md` | Follow-up exact head SHA `d11f458d7f6ef1923091fbca84a93e63f05e9455` adds the privileged `upstream-9p-root` companion job while preserving `CI`, Rustup, Cargo, and the explicit temporary target under `sudo`. [Native 9P run `35711056768`](https://github.com/andymac4182/mount-rs/actions/runs/35711056768) passed baseline job `106691472428` with `144 passed` and `2 skipped`, root job `106691917345` with `146/146`, N-API job `106691472270`, and Rust job `106691472165`; both previously root-gated symlink-ownership cases are now exercised. The explicit protocol/member/supervisor/non-Linux boundaries and overall production NO-GO remain unchanged |
+| Main | W01 9P platform scope gate | `transports/mount-rs-9p/README.md`, `transports/mount-rs-9p/src/mount.rs`, `docs/W01_9P_PROGRESS.md`, `docs/W01_PROGRESS.md` | The host `aarch64-apple-darwin` rootless `mount-rs-9p` all-target suite passed `37` tests with zero failures, and the Rust crate passed the all-target `x86_64-pc-windows-gnu` compile check. This qualifies macOS rootless execution and Windows Rust compile portability only; Windows runtime/N-API/Unix-listener/native-mount acceptance is not claimed. Linux native mounts remain qualified only by hosted kernel-client gates, so production scope stays Linux native plus tested macOS/Linux rootless wire/TCP and overall W01 remains NO-GO |
 | Main | W01 N-API 9P Unix listener policy and lifecycle | `.github/workflows/native-9p.yml`, `integrations/mount-rs-napi/test/servers.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet adds the Unix-domain listener phase to `MOUNT_RS_SERVER_PHASE=p9`, independently exercising private-directory refusal, explicit `allowSharedDirectory` opt-in, `0600` socket mode, protocol handshake, native Unix peer/path and `stream: undefined` representation, socket removal on close, and path/port exclusivity. Local syntax/diff checks and elevated isolated N-API execution passed. Exact test commit `dd10ac0564446c9143f8b5f68b2fed51c7eaf57f` was included in descendant head `d43f5ea4e4334912de86ac0db818392531a7d4ec`, whose Native 9P run `35683716217` passed N-API job `106606580352` with Unix policy, server/attach, and automatic/direct/structural mounted I/O/cleanup, and Rust job `106606580326` with the Linux probe plus all four ignored native lifecycle tests. The direct run at the test commit was cancelled before jobs materialized and is not evidence; production remains NO-GO |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
@@ -2152,6 +2153,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   server integration (including unsupported-version routing) passes with
   loopback permission. Native/hosted ordering,
   crash/power-loss durability, and W01-NFS production acceptance remain NO-GO.
+- [x] The NFS transport now has a bounded stalled-reply close regression. An
+  in-memory peer stops reading from a 16-byte reply buffer while two MOUNT
+  NULL calls are pipelined with `max_in_flight=1`: the first write holds the
+  only permit, the second call stays undispatched, and connection stop
+  cancels the writer and retires the task without a false error callback.
+  Focused and full locked NFS tests (42 unit tests plus applicable integration
+  targets), strict Clippy, formatting, and diff checks pass. This is local
+  userspace backpressure evidence, not native-client ordering, cross-process
+  concurrency, crash/power-loss durability, hosted acceptance, or W01 GO.
 - [x] The rootless NFSv4.1 replay-reconnect lane now completes a mutating
   `REMOVE`, disconnects, and retries its cached slot/sequence with a changed
   target. The exact old COMPOUND body returns without removing the second
@@ -6706,6 +6716,15 @@ listing a source does not mean it has been reviewed or its code can be reused.
   environment inputs/secret, GitHub OIDC provider, and immutable-subject role
   trust. It made no GitHub or AWS changes; hosted OIDC evidence remains blocked
   until the deployment owner configures and approves those controls.
+- [x] The hosted qualification provenance boundary is now fail-closed. The
+  workflow records the checked-out source SHA, commit subject, toolchain,
+  repository/workflow/ref/event/run identity, and clean-tree state, then
+  `scripts/validate-aws-s3-ci-provenance.sh` requires the SHA to equal
+  `GITHUB_SHA`, the exact `refs/heads/main` ref, a supported push or manual
+  dispatch event, unique required fields, and a clean checkout before AWS
+  authentication. Credential-free regression coverage passed
+  `AWS_S3_CI_PROVENANCE_TEST_PASS cases=5`; this validates evidence binding
+  only and does not claim hosted AWS acceptance.
 - [ ] W25.9 (deployment track) Production sign-off: record the exact released commit/image,
   reviewed configuration, live smoke result, rollback owner, and evidence for
   every W25.5-W25.8 gate before calling the AWS workstream production-ready.

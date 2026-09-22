@@ -78,6 +78,14 @@ artifact is `aws-s3-qualification-35629600687-1` (7,649 bytes). This artifact
 is available for a completed run or a safe preflight refusal; it does not substitute for
 successful AWS authentication, acceptance, or production deployment evidence.
 
+The workflow now validates that provenance record before authentication. The
+credential-free validator binds the recorded source SHA to `GITHUB_SHA`,
+requires the exact `refs/heads/main` ref and supported event, checks the
+repository/workflow/run identity, rejects duplicate or missing fields, and
+requires a clean checkout. Its synthetic regression suite passed
+`AWS_S3_CI_PROVENANCE_TEST_PASS cases=5`. This is a fail-closed evidence
+binding safeguard, not hosted AWS acceptance or production deployment proof.
+
 The newer observed hosted run [`35635498647`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35635498647)
 at `24408f8` also stopped before AWS authentication at
 `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; its protected bucket, region,
