@@ -270,7 +270,13 @@ Current focused behavior:
   boundary: `p9ClientProbe(platform?)` returns deterministic override facts
   without attempting a mount, and `p9Platform(platform?)` maps the requested
   platform to `"linux" | undefined`; the zero-argument probe remains backed by
-  the native host probe.
+  the native host probe. Exact SHA
+  `9da45327a9e09a9f827a9630869d1a32119674e3` also passed [Native 9P run
+  `35672845113`](https://github.com/andymac4182/mount-rs/actions/runs/35672845113),
+  with N-API job `106573050491` passing automatic/direct/structural mounted
+  I/O and cleanup and Rust job `106573049500` passing all four ignored native
+  tests; the synthetic override branches remain covered by the local
+  host-independent regression.
 - The N-API P9 session now exposes the scalar session policy through
   `session.options` and the attach identity through `userFor(fid)`; the server
   exposes its effective scalar policy through `server.options`. These members

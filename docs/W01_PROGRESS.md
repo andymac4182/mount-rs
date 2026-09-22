@@ -343,7 +343,12 @@ direct `./9p` probe helpers: `p9ClientProbe(platform?)` now reports deterministi
 override facts without attempting a mount, and `p9Platform(platform?)` maps the
 requested platform to `"linux" | undefined`; the no-argument probe remains
 native-backed. Typecheck and the host-independent mount-helper regression cover
-the new calls. Native Linux mount/lifecycle evidence is unchanged, and W01
+the new calls. Exact SHA `9da45327a9e09a9f827a9630869d1a32119674e3` also passed
+[Native 9P run `35672845113`](https://github.com/andymac4182/mount-rs/actions/runs/35672845113),
+with N-API job `106573050491` passing automatic/direct/structural mounted I/O
+and cleanup and Rust job `106573049500` passing all four ignored native tests;
+the hosted mount steps do not replace the local synthetic-override assertions.
+Native Linux mount/lifecycle evidence is current for this revision, and W01
 remains NO-GO.
 
 ## Detailed work items
