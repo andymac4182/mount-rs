@@ -72,6 +72,11 @@ replacement-session lock tables in three repeated runs. This is local
 process-crash evidence only; it does not close power-loss, live-provider,
 durable-lock, hosted lifecycle, or hosted concurrency gates.
 
+For published packet `4719eb50a6e2d48e4539c10f0638fa2f493301c1`, exact-SHA CI,
+Fault injection, and both W08 release workflows were cancelled; W04 production
+policy succeeded, while Live Cloudflare R2 and an unrelated Native 9P workflow
+were still in progress. No hosted WebDAV PASS is claimable from that packet.
+
 The canonical detailed FUSE ledger is
 [docs/W01_FUSE_PROGRESS.md](./W01_FUSE_PROGRESS.md). Its 2026-09-22
 session-controls chunk adds public construction options and lifecycle/error
