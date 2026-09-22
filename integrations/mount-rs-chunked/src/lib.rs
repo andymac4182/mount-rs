@@ -3460,6 +3460,75 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct LeaseCountingMetadataStore {
+        inner: MemoryMetadataStore,
+        active_renewals: Arc<AtomicUsize>,
+        max_active_renewals: Arc<AtomicUsize>,
+        renewals: Arc<AtomicUsize>,
+    }
+
+    impl LeaseCountingMetadataStore {
+        fn record_max_active(&self, active: usize) {
+            let mut observed = self.max_active_renewals.load(Ordering::SeqCst);
+            while active > observed {
+                match self.max_active_renewals.compare_exchange(
+                    observed,
+                    active,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => break,
+                    Err(next) => observed = next,
+                }
+            }
+        }
+    }
+
+    #[async_trait]
+    impl MetadataStore for LeaseCountingMetadataStore {
+        fn durable(&self) -> bool {
+            self.inner.durable()
+        }
+
+        async fn load(&self) -> Result<LoadedMetadata> {
+            self.inner.load().await
+        }
+
+        async fn acquire_writer(&self, owner: &str, ttl: Duration) -> Result<WriterLease> {
+            self.inner.acquire_writer(owner, ttl).await
+        }
+
+        async fn renew_writer(&self, lease: &WriterLease, ttl: Duration) -> Result<WriterLease> {
+            let active = self.active_renewals.fetch_add(1, Ordering::SeqCst) + 1;
+            self.record_max_active(active);
+            self.renewals.fetch_add(1, Ordering::SeqCst);
+            cooperative_yield().await;
+            let result = self.inner.renew_writer(lease, ttl).await;
+            self.active_renewals.fetch_sub(1, Ordering::SeqCst);
+            result
+        }
+
+        async fn release_writer(&self, lease: &WriterLease) -> Result<()> {
+            self.inner.release_writer(lease).await
+        }
+
+        async fn publish(
+            &self,
+            expected_revision: u64,
+            lease: &WriterLease,
+            namespace: Namespace,
+        ) -> Result<u64> {
+            self.inner
+                .publish(expected_revision, lease, namespace)
+                .await
+        }
+
+        async fn flush(&self) -> Result<()> {
+            self.inner.flush().await
+        }
+    }
+
     fn options(owner: &str) -> ChunkedOptions {
         ChunkedOptions::fixed(owner, 4)
             .unwrap()
@@ -3580,6 +3649,35 @@ mod tests {
             let inode = resolve(&namespace, &format!("/file-{index}"), true, "test").unwrap();
             assert_eq!(namespace.nodes[&inode].stats.size, 4);
         }
+        block_on(filesystem.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn concurrent_operation_lease_renewals_share_one_serialized_provider_call() {
+        const PARTICIPANTS: usize = 16;
+        let metadata = LeaseCountingMetadataStore {
+            inner: MemoryMetadataStore::new(),
+            active_renewals: Arc::new(AtomicUsize::new(0)),
+            max_active_renewals: Arc::new(AtomicUsize::new(0)),
+            renewals: Arc::new(AtomicUsize::new(0)),
+        };
+        let filesystem = block_on(ChunkedFs::open(
+            metadata.clone(),
+            MemoryBlockStore::new(),
+            options("lease-renewal-gate"),
+        ))
+        .unwrap();
+        let futures = (0..PARTICIPANTS)
+            .map(|_| {
+                let filesystem = filesystem.clone();
+                Box::pin(async move { filesystem.ensure_operation_lease().await })
+            })
+            .collect();
+        for result in block_on_all(futures) {
+            result.unwrap();
+        }
+        assert_eq!(metadata.renewals.load(Ordering::SeqCst), 1);
+        assert_eq!(metadata.max_active_renewals.load(Ordering::SeqCst), 1);
         block_on(filesystem.shutdown()).unwrap();
     }
 
