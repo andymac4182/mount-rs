@@ -3390,9 +3390,12 @@ reproducible in a production-like environment.
   A repeat read-only audit at 09:25 AEST returned the same repository,
   environment and secret-surface HTTP 404s; release/workflow API queries were
   still unavailable, no production-candidate tag was found, and the workflow
-  file remained present on public `origin/main`. The last successful release
-  observation remains the 08:38 AEST preview-only result. This is still an
-  external hosted boundary, not a W08 implementation pass.
+  file remained present on public `origin/main`. A fresh 10:24 AEST audit again
+  returned repository/environment/secrets/release/workflow HTTP 404s, found no
+  candidate tag, and confirmed the protected workflow file is present in the
+  fetched mainline. The last successful release observation remains the 08:38
+  AEST preview-only result. This is still an external hosted boundary, not a
+  W08 implementation pass.
   *(Release implementation + hosted;
   registry, signing/attestation, deployment controller and approvers are
   external.)*
