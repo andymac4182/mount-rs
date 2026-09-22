@@ -2278,6 +2278,18 @@ Evidence landed without closing the remaining W01 acceptance gates:
   and W26 gates are not terminal. This is partial current-tip evidence only;
   W04 and production rollout remain open/NO-GO until the full matrix is
   inspected and the seven production gates close.
+- The same run then recorded a Windows Node timing failure and a provider
+  failure: Windows Node `106658534774` built successfully and passed the N-API
+  suite through WebDAV provider concurrency, but
+  `webdav-provider-network-concurrency` hit `DOMException [TimeoutError]` at
+  its 10-second fetch boundary before W04 recovery. The focused test passes
+  locally and passed in retained Windows job `106641134169`, so this is a
+  hosted rerun requirement rather than accepted current-tip evidence. TiDB
+  `106658534683` failed `actual_tidb_commit_outcome_is_ambiguous_and_not_replayed`
+  because a dropped publication response was reported as success, with a
+  `[kv:9007]` optimistic write conflict; Windows Rust `106658535184` passed
+  format, strict Clippy, and locked workspace tests. Production remains
+  **NO-GO**.
 - [x] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
   The rebased packet (`43ded00`, `980cdd7`, `2d2ac5c`, `be2170b`, final
   rebased tip `7235fde`) adds durable PGlite version metadata, reconnect and
