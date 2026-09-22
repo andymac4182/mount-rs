@@ -332,14 +332,14 @@ Current focused behavior:
   N-API lifecycle gates, while Rust job `106652303250` passed the Linux probe
   plus all four ignored native lifecycle tests.
 - The mixed native/attached client-order packet at exact SHA
-  `0605ae1b77032c24ada4f403593fa2b6985eb13a` adds one JS arrival ledger for
+  `3bd735f9434ed5f4b487d427f9f2232617c42ef1` adds one JS arrival ledger for
   `P9Server.clients`, so native-listener and `attach()` connections are returned
   in arrival order rather than by backing-store type. Its real-TCP regression
   covers native-first and attached-first order, stable native wrappers, and
   cleanup. Local focused checks passed; hosted verification is pending
   publication and production remains NO-GO.
 - The native connection close-idempotence packet at exact SHA
-  `a30e9dfd567ebad73608382ff3a5bfb88ab26725` memoizes the native
+  `8a47049fd01ee220c2dc5b26758bdf7c493480ae` memoizes the native
   `P9Connection.close()` promise at the JavaScript boundary, matching the
   attached wrapper's and pinned oracle's idempotent teardown behavior. Its
   real-TCP regression covers concurrent/repeated/post-closure calls,
@@ -347,7 +347,7 @@ Current focused behavior:
   Local focused checks passed; hosted verification is pending publication and
   production remains NO-GO.
 - The mounted-view identity packet at exact SHA
-  `56d9aa3476f3e31e972d218eb448e98165f8bbe0` caches the `Mounted.server` and
+  `8737728a9ea55bafeb93ac7d915b82d38ffe7afe` caches the `Mounted.server` and
   `Mounted.connection` wrappers and reuses the matching `P9Server.clients`
   wrapper by stable transport id. The direct native-mount regression checks
   repeated getter identity and cross-view connection identity, alongside the
