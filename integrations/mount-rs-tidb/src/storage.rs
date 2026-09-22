@@ -4,7 +4,9 @@ use mount_rs_core::storage::{
 };
 use mount_rs_core::{ErrorCode, FsError, Result, backend_error};
 use mysql_async::prelude::Queryable;
-use mysql_async::{Conn, Error as MysqlError, IsolationLevel, Params, Pool, Transaction, TxOpts};
+use mysql_async::{
+    Conn, Error as MysqlError, IsolationLevel, Opts, OptsBuilder, Params, Pool, Transaction, TxOpts,
+};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 
@@ -116,7 +118,20 @@ impl Database {
             return Err(FsError::new(ErrorCode::Einval).with_message("TiDB URL must not be empty"));
         }
         options.validate()?;
-        let pool = Pool::from_url(url).map_err(|error| db_error("parse TiDB URL", error))?;
+        let opts = Opts::from_url(url)
+            .map_err(|error| db_error("parse TiDB URL", MysqlError::Url(error)))?;
+        // This pool is private to the mount-rs provider. Keep the verified
+        // pessimistic transaction mode on each session instead of paying
+        // mysql_async's COM_RESET_CONNECTION round trip every time a pooled
+        // connection is returned. The provider owns all statements run on
+        // these connections and every newly created session is configured and
+        // verified by the callback below.
+        let pool_options = opts.pool_opts().clone().with_reset_connection(false);
+        let pool = Pool::new(
+            OptsBuilder::from_opts(opts)
+                .pool_opts(pool_options)
+                .after_connect(|connection| Box::pin(configure_pessimistic_session(connection))),
+        );
         let database = Self {
             pool,
             volume_key: options.volume_key,
@@ -235,29 +250,30 @@ struct LeaseRow {
     now_ms: u64,
 }
 
-async fn begin_pessimistic(connection: &mut Conn) -> Result<Transaction<'_>> {
-    // Set the mode before starting the transaction, then use the driver's
-    // transaction guard so cancellation and early-return paths are rolled
-    // back before a pooled connection can be reused. TiDB defaults to this
-    // mode on current clusters, but making it session-explicit also covers
-    // upgraded clusters whose historical default was optimistic.
+async fn configure_pessimistic_session(
+    connection: &mut Conn,
+) -> std::result::Result<(), MysqlError> {
+    // TiDB Cloud Starter/Essential may expose tidb_txn_mode as a read-only
+    // variable. In that case the provider must verify the effective value,
+    // never infer it from the deployment name.
     match connection
         .query_drop("SET SESSION tidb_txn_mode='pessimistic'")
         .await
     {
         Ok(()) => {}
-        Err(error) if is_read_only_txn_mode(&error) => {
-            // TiDB Cloud Starter/Essential may expose tidb_txn_mode as a
-            // read-only variable. Never infer its value from the deployment
-            // name: verify the effective session mode before using row locks.
-        }
-        Err(error) => return Err(db_error("set TiDB transaction mode", error)),
+        Err(error) if is_read_only_txn_mode(&error) => {}
+        Err(error) => return Err(error),
     }
     let mode: Option<String> = connection
         .query_first("SELECT @@SESSION.tidb_txn_mode")
-        .await
-        .map_err(|error| db_error("verify TiDB transaction mode", error))?;
-    require_pessimistic_mode(mode.as_deref())?;
+        .await?;
+    require_pessimistic_mode(mode.as_deref()).map_err(|error| MysqlError::Other(Box::new(error)))
+}
+
+async fn begin_pessimistic(connection: &mut Conn) -> Result<Transaction<'_>> {
+    // Sessions are configured and verified once when the pool creates them.
+    // Keep the driver's transaction guard so cancellation and early-return
+    // paths are rolled back before a pooled connection is reused.
     let mut options = TxOpts::default();
     options.with_isolation_level(IsolationLevel::RepeatableRead);
     connection

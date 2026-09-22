@@ -195,6 +195,21 @@ observations rather than lease time, and P7 remains open until a named
 collector/pager receives and exercises the signals in the approved
 production-like environment.
 
+After each authority publication attempt and shared-authority read, the
+FoundationDB integration emits a bounded structured event through the
+embedding application's `tracing` subscriber. The stable event target is
+`mount_rs.foundationdb.authority`; publication events use
+`event_name=mount_rs.foundationdb.lease_authority` and `operation=publish`,
+while reader events use `event_name=mount_rs.foundationdb.lease_oracle` and
+`operation=read`. Each event carries only the fixed `outcome` label, attempt /
+success / failure counters and last provider-time/local-observation
+timestamps; zero means that an observation has not happened in that handle.
+There are no cluster paths, key prefixes, credentials or provider error
+messages in the event. An application that installs the repository's OTLP
+subscriber can route these events to its approved collector, but event
+emission alone is not a dashboard, alert route, clock monitor or exercised
+production gate.
+
 The qualification-log verifier fails closed unless the retained hosted log
 contains both `FOUNDATIONDB_AUTHORITY_HEARTBEAT_RUNNING` and
 `FOUNDATIONDB_AUTHORITY_STATS_PASS`. It checks that the heartbeat cadence and

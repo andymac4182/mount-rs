@@ -142,6 +142,17 @@ provider-time policy rather than a local telemetry timestamp. Counters reset
 when a new authority/oracle handle is constructed and are not a substitute
 for durable monitoring or an external alert route.
 
+After each publication or read attempt, the provider also emits a bounded
+structured `tracing` event through the embedding application's subscriber.
+The fixed target is `mount_rs.foundationdb.authority`; publication events use
+`mount_rs.foundationdb.lease_authority` with `operation=publish`, and reader
+events use `mount_rs.foundationdb.lease_oracle` with `operation=read`. Events
+contain only the outcome, counters and provider/local observation timestamps;
+they never include cluster paths, key prefixes, credentials or provider error
+messages. An application may route them through its approved OTLP collector,
+but the library does not install a subscriber or claim that event emission
+proves monitoring, alerting or owner acceptance.
+
 The crate also exposes an explicit `with_persisted_lease_oracle` option for a
 single trusted authority or development/test cluster. That oracle stores one
 encoded Unix-epoch millisecond value under the volume's `meta/lease-oracle` key

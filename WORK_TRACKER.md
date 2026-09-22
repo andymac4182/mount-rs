@@ -893,6 +893,18 @@ complete.
 | W30 | OpenTelemetry traces, metrics and logs | Implementing: opt-in facade, boundary wiring, local collector/failure tests, benchmark and macOS qualification packet landed; external collector/Linux/Windows evidence pending | Main |
 | W31 | Per-drive mounts from one backing datastore | Deferred for future design | Unassigned |
 
+Current W26 unpublished chunk (2026-09-22): the TiDB provider now configures and
+verifies `tidb_txn_mode='pessimistic'` once for each newly created private pool
+session, disables redundant pool-reset round trips, and retains the
+`RepeatableRead` transaction guard, fail-closed mode check, parameterized SQL,
+rollback handling and ambiguous-commit semantics. Focused TiDB tests, strict
+provider/workspace Clippy, full locked workspace tests, formatting and diff
+checks pass locally. Security diff scan `c4fc0012-b0e2-421c-9db8-ca3edfce730c`
+completed with full changed-file coverage and zero reportable findings. This
+is implementation evidence only until the chunk is pushed and the hosted W26
+matrix is rerun on its exact published revision; the 1,000-IOPS production
+gate remains **NO-GO**.
+
 ## Decisions and external prerequisites
 
 - After the app restart, the nine prior worker handles were missing. Their
@@ -2088,6 +2100,21 @@ Evidence landed without closing the remaining W01 acceptance gates:
   Current `origin/main` is `9563d2db`; a fresh exact-tip qualification is
   required and production remains **NO-GO**.
 
+- Active current-tip qualification checkpoint: non-cancelling run
+  `35684808019` was dispatched from exact published head `4cd57723` before
+  concurrent mainline advanced to `87d5eb27`. At the 14:06 AEST snapshot,
+  Windows Node, RustFS, native WebDAV/NFS/9P, observability, Ozone base,
+  TiDB/RustFS, and TiDB had completed successfully; ARM Node `106609248954`,
+  Ubuntu Node `106609249118`, macOS-latest Node `106609248932`, Ubuntu Rust
+  `106609249086`, Ozone/TiDB `106609249034`, and Ozone compositions
+  `106609249144` had failed; macOS-15-intel Node `106609248961`, native FUSE
+  `106609249088`, FoundationDB/RustFS `106609249058`, and
+  Ozone/FoundationDB `106609249069` remained non-terminal. GitHub had not
+  exposed terminal logs while the workflow was still running, so no failure
+  cause, exact PGlite/restart PASS, or W04 acceptance is claimed. Production
+  remains **NO-GO** pending terminal diagnosis and all deployment/provider/
+  operational gates.
+
 ## W05 — Cloudflare R2
 
 - [x] Land object-store/R2 driver code and configurable endpoint support.
@@ -3275,8 +3302,11 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     The FoundationDB authority and shared-reader handles now expose bounded
     process-local `stats()` snapshots for publication/read attempts,
     successes/failures, last provider-time observations and local diagnostic
-    timestamps; the hosted shared-authority path asserts the success/failure
-    accounting and emits `FOUNDATIONDB_AUTHORITY_STATS_PASS`; the
+    timestamps, and each publication/read attempt emits a bounded structured
+    `tracing` event with fixed event names and no cluster paths, prefixes,
+    credentials or provider error text; the hosted shared-authority path
+    asserts the success/failure accounting and emits
+    `FOUNDATIONDB_AUTHORITY_STATS_PASS`; the
     qualification-log verifier now fails closed unless the bounded heartbeat
     and stats markers are present and their counters/policy values reconcile.
     Map these snapshots into the approved collector and pager, publish dashboards,
