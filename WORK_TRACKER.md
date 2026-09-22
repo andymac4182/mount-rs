@@ -25,6 +25,27 @@ W26 continues to own Ozone compatibility and qualification only; customers
 deploy Ozone, backup/DR remains with Ozone/customer ownership, and releases
 remain with the separate stream.
 
+Current W26 FoundationDB optimization boundary (2026-09-22): source commit
+`ff0ccfddcad786fdce142adebc16fa50347b9b13`
+(`perf(w26): avoid redundant FoundationDB chunk clears`) is now on
+`origin/main` after rebase. It preserves the lease/revision and manifest
+transaction controls, skips the redundant full chunk-range clear when the
+chunk count is unchanged, and clears only stale trailing chunks when a
+manifest shrinks; missing-manifest initialization still clears the full
+prefix. Formatting, diff checks, FoundationDB feature lib/test compilation
+and strict Clippy pass. The native FoundationDB test is blocked only by the
+missing `fdb_c` linker library. Security scan
+`fa9447cc-4cff-4680-baef-d7f7c260d8c5` has complete one-file coverage and zero
+reportable findings. Fresh exact-head Ozone qualification run
+`35712159705 <https://github.com/andymac4182/mount-rs/actions/runs/35712159705>`
+was dispatched against this SHA and is not yet terminal; no hosted result is
+promoted. Production remains **NO-GO** until all feasible provider rows pass
+the hard 1,000-IOPS/drive target, the aggregate has every end-to-end marker,
+and customer/Ozone security, Tier-1 99.99% SLO, five-minute RPO/RTO and
+backup/DR evidence are closed. W26 continues to own compatibility and
+qualification only; customers deploy Ozone, backup/DR remains Ozone/customer
+owned, and releases remain with the separate stream.
+
 Current W26 CI-reproducibility boundary (2026-09-22): lockfile fix commit
 `1ceaa96486a96ed4288c079dcde2b3b2d18900bb`
 (`fix(w26): sync Ozone test lockfile`) is published and verified on
