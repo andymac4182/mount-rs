@@ -904,7 +904,30 @@ complete.
 > W26 current-status note: the row above is historical summary text. The
 > authoritative current tip, exact hosted packet, every W26 work-item status
 > and production NO-GO boundary are in the latest W26 authority override
-> below, which records `origin/main=e0180c75` and the post-publication ledger.
+> below, which records `origin/main=4098c7df` and the post-publication ledger.
+
+Current W26 authority override (2026-09-22, TiDB publication chunk): the
+verified shared code tip is `origin/main=4098c7df04a03f65269ef932cb921b96d6368297`.
+Commit `4098c7df` changes only the successful TiDB metadata publication path:
+it uses one parameterized autocommit conditional UPDATE acknowledgement and
+keeps the explicit pessimistic locked transaction for zero-row stale-versus-
+revision classification. Retryable statement conflicts remain `EAGAIN`; lost
+or otherwise ambiguous acknowledgements remain fail-closed `EIO`. Focused
+TiDB tests (8 passed, 5 service-gated ignored), full locked workspace tests,
+strict provider/workspace Clippy, formatting and diff checks all pass. The
+sealed security diff scan `c36f104e-965b-4e85-bfde-2d3d222f0de2` reviewed two
+surfaces with zero reportable findings.
+
+The latest terminal hosted packet is still run `35691451007` on earlier SHA
+`dccd8351`: base Ozone passed, PGlite/R2 reached `2,065.669446` IOPS, while
+SQLite/R2 reached `213.947686`, TiDB/R2 `333.356025` and FoundationDB/R2
+`363.254472`; every provider completed 1,200/1,200 operations with zero
+timeouts and cleanup failures, but the aggregate `106631474430` correctly
+failed closed on missing `OZONE_IOPS_PASS`. W26 remains **NO-GO**. Publish the
+ledger/tracker chunk, dispatch a fresh exact-SHA CI matrix, and promote only a
+terminal all-provider/end-to-end aggregate pass. Customer Ozone deployment,
+secure topology, 99.99% availability, five-minute RPO/RTO, backup/DR and the
+release stream remain external ownership boundaries.
 
 Historical W26 TiDB session-setup chunk (published 2026-09-22): the TiDB provider now configures and
 verifies `tidb_txn_mode='pessimistic'` once for each newly created private pool
