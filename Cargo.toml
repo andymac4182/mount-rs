@@ -28,6 +28,11 @@ members = [
 ]
 resolver = "3"
 
+# Rust 1.95 can emit a misaligned LINKEDIT string pool when stripping the
+# macOS N-API cdylib; dyld on macOS 27 then refuses to load the addon.
+[profile.release.package.mount-rs-napi]
+strip = "none"
+
 [package]
 name = "mount-rs-core"
 version = "0.1.0"

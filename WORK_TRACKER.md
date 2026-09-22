@@ -2125,9 +2125,10 @@ Evidence landed without closing the remaining W01 acceptance gates:
   v3/v4 behavior. TCP and direct N-API dispatch use one Rust router. The full
   locked NFS target, 266 pinned parity cases (18 explicit skips), affected
   strict Clippy, N-API release compilation/typecheck, formatting, and diff
-  checks pass. Local direct N-API runtime execution remains unqualified:
-  the macOS-built addon fails `dlopen` with a mis-aligned LINKEDIT string
-  pool, despite a successful shared-target build. Native/hosted ordering,
+  checks pass. The macOS 27 loader blocker is now fixed by a package-scoped
+  no-strip release profile: the rebuilt addon loads, and direct NFS N-API
+  server integration (including unsupported-version routing) passes with
+  loopback permission. Native/hosted ordering,
   crash/power-loss durability, and W01-NFS production acceptance remain NO-GO.
 - [x] The rootless NFSv4.1 replay-reconnect lane now completes a mutating
   `REMOVE`, disconnects, and retries its cached slot/sequence with a changed
