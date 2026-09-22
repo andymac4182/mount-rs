@@ -685,12 +685,8 @@ pub fn resource_etag(stats: &Stats) -> String {
 }
 
 fn parse_etag(value: &str) -> (String, bool) {
-    let weak = value.trim_start().starts_with("W/");
-    let value = if weak {
-        value.trim_start()[2..].trim()
-    } else {
-        value.trim()
-    };
+    let weak = value.starts_with("W/");
+    let value = if weak { &value[2..] } else { value };
     let value = value
         .strip_prefix('"')
         .and_then(|value| value.strip_suffix('"'))
@@ -706,7 +702,7 @@ fn etag_matches(value: &str, etag: &str, strong: bool) -> bool {
     value
         .split(',')
         .map(|part| {
-            let (candidate, weak) = parse_etag(part);
+            let (candidate, weak) = parse_etag(part.trim());
             (candidate, weak)
         })
         .any(|(candidate, weak)| candidate == target && (!strong || (!weak && !target_weak)))
