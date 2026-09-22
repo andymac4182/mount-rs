@@ -23,9 +23,9 @@ use crate::handles::{
 };
 use crate::protocol::*;
 use crate::rpc::{
-    AUTH_NONE, AUTH_SYS, AUTH_TOOWEAK, RPC_GARBAGE_ARGS, RPC_PROC_UNAVAIL, RPC_PROG_MISMATCH,
-    RPC_PROG_UNAVAIL, RPC_VERSION, RpcCall, RpcCredentials, credentials_of, decode_call,
-    encode_accept_error, encode_auth_error, encode_rpc_mismatch, write_accepted_reply_header,
+    AUTH_NONE, AUTH_SYS, RPC_GARBAGE_ARGS, RPC_PROC_UNAVAIL, RPC_PROG_MISMATCH, RPC_PROG_UNAVAIL,
+    RPC_VERSION, RpcCall, RpcCredentials, checked_credentials_of, decode_call, encode_accept_error,
+    encode_auth_error, encode_rpc_mismatch, write_accepted_reply_header,
 };
 use crate::v4::{NFS_V4, Nfs4Session};
 use crate::xdr::{XdrError, XdrReader, XdrWriter};
@@ -471,8 +471,8 @@ pub async fn route_nfs_call(
             };
             let reply = if call.rpc_version != RPC_VERSION {
                 encode_rpc_mismatch(call.xid, RPC_VERSION, RPC_VERSION)
-            } else if call.cred.flavor != AUTH_NONE && call.cred.flavor != AUTH_SYS {
-                encode_auth_error(call.xid, AUTH_TOOWEAK)
+            } else if let Err(auth_status) = checked_credentials_of(&call.cred) {
+                encode_auth_error(call.xid, auth_status)
             } else if call.program != NFS_PROGRAM {
                 encode_accept_error(call.xid, RPC_PROG_UNAVAIL, None)
             } else {
@@ -746,9 +746,10 @@ impl Nfs3Session {
         if call.rpc_version != RPC_VERSION {
             return Ok(encode_rpc_mismatch(call.xid, RPC_VERSION, RPC_VERSION));
         }
-        if call.cred.flavor != AUTH_NONE && call.cred.flavor != AUTH_SYS {
-            return Ok(encode_auth_error(call.xid, AUTH_TOOWEAK));
-        }
+        let credentials = match checked_credentials_of(&call.cred) {
+            Ok(credentials) => credentials,
+            Err(auth_status) => return Ok(encode_auth_error(call.xid, auth_status)),
+        };
         if call.program != NFS_PROGRAM && call.program != MOUNT_PROGRAM {
             return Ok(encode_accept_error(call.xid, RPC_PROG_UNAVAIL, None));
         }
@@ -781,7 +782,6 @@ impl Nfs3Session {
             .entry(name)
             .and_modify(|count| *count = count.saturating_add(1))
             .or_insert(1);
-        let credentials = credentials_of(&call.cred);
         let mut writer = XdrWriter::with_capacity(256);
         write_accepted_reply_header(&mut writer, call.xid);
         match (call.program, call.procedure) {
@@ -2998,7 +2998,7 @@ mod tests {
         let (reply, results) = crate::rpc::decode_reply(&reply).unwrap();
         assert_eq!(reply.reply_stat, crate::rpc::MSG_DENIED);
         assert_eq!(reply.reject_stat, Some(crate::rpc::RPC_AUTH_ERROR));
-        assert_eq!(reply.auth_stat, Some(AUTH_TOOWEAK));
+        assert_eq!(reply.auth_stat, Some(crate::rpc::AUTH_TOOWEAK));
         results.end("AUTH_TOOWEAK reply").unwrap();
     }
 

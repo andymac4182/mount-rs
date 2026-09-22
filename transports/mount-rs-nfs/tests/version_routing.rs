@@ -5,8 +5,9 @@ use mount_rs_nfs::constants::{
     MOUNT_PROGRAM, MOUNT_V3, MOUNTPROC3_NULL, NFS_PROGRAM, NFS_V3, NFSPROC3_NULL,
 };
 use mount_rs_nfs::rpc::{
-    AUTH_TOOWEAK, MSG_ACCEPTED, MSG_DENIED, OpaqueAuth, RPC_AUTH_ERROR, RPC_MISMATCH,
-    RPC_PROG_MISMATCH, RPC_PROG_UNAVAIL, RPC_SUCCESS, decode_reply, encode_call, frame_record,
+    AUTH_BADCRED, AUTH_SYS, AUTH_TOOWEAK, MSG_ACCEPTED, MSG_DENIED, OpaqueAuth, RPC_AUTH_ERROR,
+    RPC_MISMATCH, RPC_PROG_MISMATCH, RPC_PROG_UNAVAIL, RPC_SUCCESS, auth_sys, decode_reply,
+    encode_call, frame_record,
 };
 use mount_rs_nfs::{NFS_V4, NfsServer, NfsServerOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -103,5 +104,63 @@ async fn shared_router_advertises_both_nfs_versions_and_keeps_mount_separate() {
     assert_eq!(stats.requests, 9);
     assert_eq!(stats.replies, 9);
     assert_eq!(stats.dropped, 0);
+    server.close().await.expect("close NFS router");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn malformed_auth_sys_is_denied_before_any_shared_router_dispatch() {
+    let server = NfsServer::new(MemoryFs::empty(), NfsServerOptions::default());
+    let address = server.listen().await.expect("listen NFS router");
+    let mut stream = TcpStream::connect(address)
+        .await
+        .expect("connect NFS router");
+    let malformed = OpaqueAuth {
+        flavor: AUTH_SYS,
+        body: vec![0, 0, 0, 0], // stamp only; missing name, uid, and gid
+    };
+    let malformed_null = OpaqueAuth {
+        flavor: 0,
+        body: vec![1],
+    };
+    let mut trailing = auth_sys(1000, 1000, "valid-client");
+    trailing.body.extend_from_slice(&[0, 0, 0, 0]);
+    for (xid, program, version, credential) in [
+        (1, MOUNT_PROGRAM, MOUNT_V3, &malformed),
+        (2, NFS_PROGRAM, NFS_V3, &malformed),
+        (3, NFS_PROGRAM, NFS_V4, &malformed),
+        (4, NFS_PROGRAM, 5, &malformed),
+        (5, NFS_PROGRAM, NFS_V4, &malformed_null),
+        (6, NFS_PROGRAM, NFS_V3, &trailing),
+    ] {
+        let record = exchange(
+            &mut stream,
+            &encode_call(xid, program, version, 0, Some(credential), None, &[]),
+        )
+        .await;
+        let (reply, body) = decode_reply(&record).expect("decode malformed credential refusal");
+        assert_eq!(reply.xid, xid);
+        assert_eq!(reply.reply_stat, MSG_DENIED);
+        assert_eq!(reply.reject_stat, Some(RPC_AUTH_ERROR));
+        assert_eq!(reply.auth_stat, Some(AUTH_BADCRED));
+        body.end("malformed credential refusal")
+            .expect("no reply body");
+    }
+
+    let valid = auth_sys(1000, 1000, "valid-client");
+    for (xid, version) in [(7, NFS_V3), (8, NFS_V4)] {
+        let record = exchange(
+            &mut stream,
+            &encode_call(xid, NFS_PROGRAM, version, 0, Some(&valid), None, &[]),
+        )
+        .await;
+        let (reply, body) = decode_reply(&record).expect("decode valid AUTH_SYS reply");
+        assert_eq!(reply.xid, xid);
+        assert_eq!(reply.reply_stat, MSG_ACCEPTED);
+        assert_eq!(reply.accept_stat, Some(RPC_SUCCESS));
+        body.end("valid AUTH_SYS reply").expect("no reply body");
+    }
+    let stats = server.session().stats();
+    assert_eq!(stats.requests, 8);
+    assert_eq!(stats.replies, 8);
     server.close().await.expect("close NFS router");
 }

@@ -23,9 +23,9 @@ use crate::handles::{
     DirectorySnapshots, FileHandleTable, HandleEntry, cookie_verifier, same_verifier,
 };
 use crate::rpc::{
-    AUTH_NONE, AUTH_SYS, AUTH_TOOWEAK, RPC_GARBAGE_ARGS, RPC_PROC_UNAVAIL, RPC_PROG_MISMATCH,
-    RPC_PROG_UNAVAIL, RPC_VERSION, RpcCredentials, credentials_of, decode_call,
-    encode_accept_error, encode_accepted_reply, encode_auth_error, encode_rpc_mismatch,
+    AUTH_NONE, AUTH_SYS, RPC_GARBAGE_ARGS, RPC_PROC_UNAVAIL, RPC_PROG_MISMATCH, RPC_PROG_UNAVAIL,
+    RPC_VERSION, RpcCredentials, checked_credentials_of, decode_call, encode_accept_error,
+    encode_accepted_reply, encode_auth_error, encode_rpc_mismatch,
 };
 use crate::session::{
     NfsRequestContext, NfsSessionError, NfsSessionHooks, NfsSessionOptions, NfsSessionStats,
@@ -1951,15 +1951,18 @@ impl Nfs4Session {
             );
             return Some(encode_rpc_mismatch(call.xid, RPC_VERSION, RPC_VERSION));
         }
-        if call.cred.flavor != AUTH_NONE && call.cred.flavor != AUTH_SYS {
-            v4_trace(
-                "rpc-reply",
-                peer,
-                call.xid,
-                format_args!("status=auth-too-weak"),
-            );
-            return Some(encode_auth_error(call.xid, AUTH_TOOWEAK));
-        }
+        let credentials = match checked_credentials_of(&call.cred) {
+            Ok(credentials) => credentials,
+            Err(auth_status) => {
+                v4_trace(
+                    "rpc-reply",
+                    peer,
+                    call.xid,
+                    format_args!("status=auth-error code={auth_status}"),
+                );
+                return Some(encode_auth_error(call.xid, auth_status));
+            }
+        };
         if call.program != NFS4_PROGRAM {
             v4_trace(
                 "rpc-reply",
@@ -2002,7 +2005,6 @@ impl Nfs4Session {
                 &self.compound_error_body(status, &tag, &[]),
             ));
         }
-        let credentials = credentials_of(&call.cred);
         let _guard = loop {
             // Keep ordinary compounds on the shared read path. Only an actual
             // expired lease needs the exclusive path-map gate for cleanup.

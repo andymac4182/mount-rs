@@ -283,6 +283,15 @@ The supported production platform boundary therefore remains Linux native
 mounts plus the tested macOS/Linux rootless wire/TCP surface, and W01/release
 remains **NO-GO**.
 
+The current-head Native 9P rerun at exact SHA
+`38346fea42b7950e2599103a477d804808262e2b` passed [run
+`35712873612`](https://github.com/andymac4182/mount-rs/actions/runs/35712873612):
+baseline job `106697612285` reported `144 passed` and `2 skipped`, root job
+`106698277708` reported `146/146`, N-API job `106697612716` passed the complete
+Linux lifecycle, and Rust job `106697612506` passed the native lifecycle. This
+rerun covers the shared post-d11 N-API addon-build change; the supported scope
+and overall W01/release **NO-GO** decision are unchanged.
+
 The preceding W01-9P transport-teardown packet was published at exact SHA
 `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` and passed [Native 9P run
 `35685073733`](https://github.com/andymac4182/mount-rs/actions/runs/35685073733):
@@ -1370,6 +1379,7 @@ spent waiting for a hosted job or credential approval.
 | 2026-09-22 | W01-NFS | Extended the forced-process-restart NFSv4.1 lane with successful wire `RENAME` of a seeded host file; after forced termination, replacement-session wire `LOOKUP` found the old name absent and the new name present, and exact host bytes remained at the destination. Direct process restart passed 2/2, the full locked NFS target passed 41 unit and all applicable integrations including 20 v4 wire, and strict Clippy, formatting, and diff checks passed | — | 75% W01.4 planning view | This is same-directory, one-host process-crash namespace evidence, not directory-fsync or power-loss durability, persistent NFSv4 state, native-client ordering, exact-tip hosted acceptance, or production acceptance; W01 stays NO-GO |
 | 2026-09-22 | W01-NFS | Corrected the shared RPC router's unsupported NFS version response from v3-only `3..3` to the actual v3..v4 range. The pre-fix real-TCP regression failed, then passed 1/1 with MOUNT, program, RPC-version, auth, valid v3/v4, and shared-stat boundaries; full locked NFS passed 41 unit and all applicable integrations including 20 v4 wire, pinned upstream parity passed 266 with 18 explicit skips, affected strict Clippy, N-API release compilation/typecheck, formatting, and diff checks passed | — | 75% W01.4 planning view | Direct N-API runtime assertion remains unqualified locally because the built macOS addon fails `dlopen` with mis-aligned LINKEDIT; native/hosted ordering, crash/power-loss durability, exact-tip hosted acceptance, and W01 production acceptance remain NO-GO |
 | 2026-09-22 | W01-NFS | Added a bounded stalled-reply close regression: two pipelined MOUNT NULL calls with `max_in_flight=1` and an unread 16-byte reply buffer leave only the first call dispatched; stopping the connection cancels its blocked writer and the queued call without a spurious transport callback. The focused test and full locked NFS target passed (42 unit tests and all applicable integrations), with strict Clippy, formatting, and diff checks green | — | 75% W01.4 planning view | This is local userspace backpressure/close evidence, not native-client ordering, cross-process concurrency, crash/power-loss durability, exact-tip hosted acceptance, or production readiness; W01 remains NO-GO |
+| 2026-09-22 | W01-NFS | The shared router and direct v3/v4 paths now reject malformed `AUTH_NONE`/`AUTH_SYS` bodies as RPC `AUTH_BADCRED` before dispatch. The pre-fix-failing real-TCP regression covers six malformed and two valid controls; the rebuilt release addon passes direct unified/v3/v4 assertions. Full locked NFS (42 unit plus integrations), pinned upstream parity (266 pass, 18 explicit skips), full N-API server integration, generated typecheck, strict affected Clippy, formatting, and diff checks pass | — | 75% W01.4 planning view | `AUTH_SYS` is client-asserted, not cryptographic identity; native-client ordering, crash/power-loss durability, exact-tip hosted acceptance, and production acceptance remain open. W01 stays NO-GO |
 
 ## Definition of W01 complete
 
@@ -1388,6 +1398,8 @@ W01 can move to complete only when each of these is true:
 
 Until then, the percentage is a progress aid only and the W01 status remains
 **Open**.
+
+| 2026-09-22 | W01-FUSE | Lima Ubuntu 26.04 arm64 VM at published `467da6a7` passed native Rust FUSE `3/3`, automatic facade `2/2`, CLI lifecycle `3/3`, Node N-API/structural/SDK native FUSE, SQLite restart `2/2`, and Python fault injection; backend persistence/reopen passed `3/4`, with PGlite skipped because `PGLITE_DATABASE_URL` was unset | Local Linux `/dev/fuse` qualification is green, but hosted exact-tip acceptance, PGlite environment qualification, and the wider W01 release/provider gates remain open; W01 stays NO-GO |
 
 ## Production-readiness decision
 

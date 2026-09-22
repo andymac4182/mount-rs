@@ -468,6 +468,28 @@ async function exerciseNfs() {
     assert.equal(standaloneV3Mismatch.readUInt32BE(28), 3);
     assert.equal(server.session.stats.requests, 5);
 
+    const malformedAuth = { flavor: nfs.AUTH_SYS, body: Buffer.from([0, 0, 0, 0]) };
+    for (const [xid, program, version, handleCall] of [
+      [50, 100_005, 3, (call) => server.session.handleCall(call)],
+      [51, 100_003, 3, (call) => server.session.v3.handleCall(call)],
+      [52, 100_003, 4, (call) => server.session.v4.handleCall(call)],
+    ]) {
+      const refused = await handleCall(nfs.encodeCall({
+        xid,
+        program,
+        version,
+        procedure: 0,
+        cred: malformedAuth,
+        verf: nfs.AUTH_NULL,
+        args: Buffer.alloc(0),
+      }));
+      assert.equal(refused.readUInt32BE(0), xid);
+      assert.equal(refused.readUInt32BE(8), 1, "malformed AUTH_SYS is denied");
+      assert.equal(refused.readUInt32BE(12), nfs.RPC_AUTH_ERROR);
+      assert.equal(refused.readUInt32BE(16), nfs.AUTH_BADCRED);
+    }
+    assert.equal(server.session.stats.requests, 8);
+
     // Exercise the callback-backed NFSv4 state path through the actual N-API
     // server. The synchronous JS callbacks are invoked from the Rust async
     // worker and their translated owner strings are returned on the wire.
