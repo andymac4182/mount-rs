@@ -1,6 +1,6 @@
 # W05 Cloudflare R2 progress ledger
 
-Last updated: 2026-09-22 22:15 AEST (2026-09-22 12:15 UTC)
+Last updated: 2026-09-22 22:29 AEST (2026-09-22 12:29 UTC)
 
 This is the working ledger for the W05 Cloudflare R2 workstream. Percentages
 and time estimates are provisional. They separate implementation work from
@@ -10,26 +10,30 @@ hosted or native gate.
 ## Overall position
 
 Current shared-main observation: remote `origin/main` is
-`4ed8d24ce49b20dc50ca49823ea9419288d1f4a4` (`4ed8d24`) at this capture. The
-latest successors after the locally requalified `a037d029` are documentation
-updates plus the NFS native-rename lifecycle test; the refreshed NFS
-all-targets suite, strict workspace Clippy, formatting, and diff checks pass on
-the exact current tip. The immutable W05 candidate is now
-`andymac4182/c/w05-production-candidate-20260922f` at exact
-`4ed8d24ce49b20dc50ca49823ea9419288d1f4a4` (`4ed8d24`). Its seven fresh
+`cb0d9c186b93bd92c21032a184e8a3a2e704baba` (`cb0d9c18`) at this capture. The
+latest runtime successors were requalified at `dab1da48` and the remaining
+successors are documentation-only. The refreshed full locked Rust workspace,
+strict Clippy, focused chunked/NFS suites, W08 security/capacity/rollout
+fixtures, optimized macOS N-API build/load, complete Node/N-API SDK/CLI suite,
+and real PGlite Rust/Node/CLI harness all pass. The immutable W05 candidate is
+now `andymac4182/c/w05-production-candidate-20260922g` at exact
+`cb0d9c186b93bd92c21032a184e8a3a2e704baba` (`cb0d9c18`). Its seven fresh
 same-SHA hosted workflows are queued and every run records this exact branch
-and SHA. The earlier candidate `...20260922e` was invalidated because another
-workstream advanced that branch from the intended `849c76a2` to `40a9a3d8`;
-its queued runs were cancellation-requested and contribute no evidence.
+and SHA. Superseded candidate f was cancellation-requested after the runtime
+successors landed; candidate e was already invalidated after another
+workstream advanced it to `40a9a3d8`.
 
-The current code-equivalent local packet passed the full locked Rust workspace,
-strict Clippy, formatting, the optimized macOS N-API build and load (253
-exports, aligned `LC_SYMTAB.stroff`, minimum macOS 11.0, SDK 26.0), the full
-pinned-oracle Node/N-API SDK/CLI suite, and the real PGlite harness. PGlite
-reported Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, with reconnect,
-versioning, VFS, backup/restore rollback, split-store, FUSE, and cleanup
-fail-closed checks green. FoundationDB compile-only qualification passed, but
-the linked test is blocked on the host by `ld: library 'fdb_c' not found`.
+The current runtime packet passed the full locked Rust workspace, strict
+Clippy, formatting, the optimized macOS N-API build and load (253 exports,
+`LC_SYMTAB.stroff=22024400` aligned to 8 bytes, minimum macOS 11.0, SDK
+26.0), the full pinned-oracle Node/N-API SDK/CLI suite, and the real PGlite
+harness. PGlite reported Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, with
+reconnect, versioning, VFS, backup/restore rollback, split-store, FUSE, and
+cleanup fail-closed checks green. W08 production security, rollout, and
+capacity fixture tests passed (`8`, `7`, and `8` cases); package dry-runs
+include the Darwin addon, licenses, and notices, and the locked workspace has
+25/25 Apache-2.0 packages. FoundationDB compile-only qualification passed,
+but the linked test is blocked on the host by `ld: library 'fdb_c' not found`.
 Live R2, AWS, TiDB/RustFS, and privileged native mounts remain explicit
 provider or platform gates. No R2 run was admitted because the September cap
 remains closed, and AWS remains held behind Security issue [#3](https://github.com/andymacclenaghan/mount-rs/issues/3).
@@ -37,12 +41,12 @@ Hosted CI, provider capacity, package publication/provenance, native platform
 acceptance, support scope, and W20.6 remain open. Production remains
 **NO-GO**.
 
-Latest immutable release-candidate boundary (2026-09-22 22:15 AEST): the
-candidate branch `andymac4182/c/w05-production-candidate-20260922f` is pinned
-to exact `4ed8d24ce49b20dc50ca49823ea9419288d1f4a4` (`4ed8d24`) and must not
-be mutated. Hosted runs are CI `35726013391`, Fault `35726014223`, W04
-`35726015313`, W07 `35726011685`, W08 policy `35726013276`, W08 targets with
-attestations `35726014630`, and Native 9P `35726014371`; all were verified
+Latest immutable release-candidate boundary (2026-09-22 22:29 AEST): the
+candidate branch `andymac4182/c/w05-production-candidate-20260922g` is pinned
+to exact `cb0d9c186b93bd92c21032a184e8a3a2e704baba` (`cb0d9c18`) and must not
+be mutated. Hosted runs are CI `35727456536`, Fault `35727454726`, W04
+`35727455560`, W07 `35727457416`, W08 policy `35727455905`, W08 targets with
+attestations `35727456760`, and Native 9P `35727455598`; all were verified
 queued with the exact candidate head SHA. Queued status is coordination state,
 not acceptance.
 
@@ -921,6 +925,45 @@ remains **NO-GO** until this packet is terminal, live providers are closed,
 package/provenance and support scope are approved, and W20.6 issues a written
 GO.
 
+### W05.65 requalify runtime successors and dispatch exact candidate g (2026-09-22 22:29 AEST)
+
+Shared main moved after candidate f through a material runtime successor set:
+W08 security-policy enforcement, chunked lease/concurrency preparation changes,
+and NFS v4 protocol/test changes. The runtime was requalified at `dab1da48`,
+then shared main advanced through documentation-only successors to exact
+`cb0d9c186b93bd92c21032a184e8a3a2e704baba`. The newest local packet passed:
+
+- Focused chunked: `23/23`; focused NFS all-targets with 44 unit tests, 27 v4
+  wire tests, process-restart, rootless wire, concurrency, lifecycle,
+  commit-barrier, and version-routing coverage all green.
+- W08 security policy `8/8`, rollout ledger `7/7`, and production capacity
+  policy `8/8` static cases passed.
+- Full locked Rust workspace and strict workspace Clippy passed; formatting and
+  diff checks passed.
+- Optimized Darwin N-API addon rebuilt and loaded with 253 exports,
+  `LC_SYMTAB.stroff=22024400` aligned to 8 bytes, minimum macOS 11.0, and SDK
+  26.0. The full Node/N-API SDK/CLI/oracle/distribution/restart matrix passed.
+- The real PGlite packet passed Rust SDK `6/3/0`, Node SDK `5/3/0`, and CLI
+  `12/2`, including reconnect, backup/restore rollback, split-store, FUSE,
+  N-API, and cleanup-failure paths.
+- Package dry-runs passed for the N-API and virtual-fs packages, including
+  license/notices and the Darwin artifact; locked metadata reports `25/25`
+  Apache-2.0 workspace packages.
+
+Candidate f's seven queued runs were cancellation-requested after the runtime
+successors landed: CI `35726013391`, Fault `35726014223`, W04 `35726015313`,
+W07 `35726011685`, W08 policy `35726013276`, W08 targets `35726014630`, and
+Native 9P `35726014371`. They are not acceptance. New immutable candidate g
+is pinned to exact `cb0d9c18` on
+`andymac4182/c/w05-production-candidate-20260922g`; CI `35727456536`, Fault
+`35727454726`, W04 `35727455560`, W07 `35727457416`, W08 policy `35727455905`,
+W08 targets/attestations `35727456760`, and Native 9P `35727455598` all record
+the matching branch/SHA and are queued. R2 remains cap-held, AWS remains
+Security/OIDC gated, and the host FoundationDB link gate remains blocked on
+`fdb_c`. Completion is `100%` for the local packet and `5%` for the fresh
+hosted packet, with `68%` overall production-readiness provisional. Production
+remains **NO-GO**.
+
 ### W05.64 current-main requalification, stale-candidate invalidation, and exact candidate f (2026-09-22 22:15 AEST)
 
 Shared `origin/main` advanced from the previously captured `849c76a2` through
@@ -1513,6 +1556,7 @@ in Keychain; no security request was fabricated.
 | PR-23 / W05.62 | Requalify current mainline after FUSE/NFS successors and supersede stale hosted packet | Current-main local packet green; superseded candidate packet cancellation-requested; new candidate not yet dispatched | 100% local / 0% current-tip hosted provisional | Shared `origin/main` `1f8dcd41` includes the FUSE destroy cancellation fix and expanded NFS v3/v4 race coverage. Full locked Rust workspace, strict Clippy, focused NFS/FUSE suites, complete Node/N-API SDK/CLI/oracle/distribution/restart suite, and `scripts/test-pglite.sh` passed. The PGlite matrix reported Rust SDK `6/3/0`, Node SDK `5/3/0`, and CLI `12/2`; live R2/TiDB/RustFS remained explicit skips. The seven queued runs for superseded `d1a81ad4` (CI `35721887870`, Fault `35721895670`, W04 `35721891003`, W07 `35721892642`, W08 policy `35721891447`, W08 targets `35721892593`, Native 9P `35721891380`) were cancellation-requested and are not acceptance. | Publish this ledger update, freeze a new immutable candidate from the resulting shared tip, dispatch the exact-SHA hosted packet, retain terminal artifacts, and close R2/AWS/Ozone/native/package/scope/W20.6. | 1–3 h active local qualification/release coordination; 4–16 h hosted/provider/native/publication wait | GitHub runner backlog, R2 cap/rotation, AWS security/OIDC, Ozone capacity, native privileges, signing/registries, support scope, and final audit remain external. |
 | PR-24 / W05.63 | Freeze settled current candidate and dispatch fresh same-SHA hosted packet | Current candidate published; seven non-R2/AWS workflows running or queued | 100% local / 5% hosted provisional | Immutable branch `andymac4182/c/w05-production-candidate-20260922e` resolves to exact `849c76a2c642141579f4ad75cf504e7e49e818df`. The code was requalified at its immediate implementation predecessor: focused NFS (`43` unit, `25` v4 wire), chunked (`22`), full locked Rust workspace, strict Clippy, optimized Darwin addon load (`253` exports, `stroff` aligned, minos 11.0, SDK 26.0), full Node/N-API suite, diagnostic WebDAV provider concurrency, and PGlite Rust/Node/CLI matrix (`6/3/0`, `5/3/0`, `12/2`). Exact-SHA runs: CI `35723736254`, Fault `35723733151`, W04 `35723736618`, W07 `35723740111`, W08 policy `35723734639`, W08 targets/attestations `35723735941`, and Native 9P `35723734187`. | Poll every run to terminal, retain artifacts/source bindings, repair any actionable product failure on a new immutable candidate, then close post-reset R2, Security-provisioned AWS/OIDC, Ozone/native/package/support-scope gates, and W20.6. | 1–2 h active dispatch/tracking; 4–16 h hosted/provider/native/publication wait | GitHub runner queues, R2 reset/token rotation, AWS security administration, Ozone capacity, native privileges, registries/signing, support scope, and final audit remain external. |
 | PR-25 / W05.64 | Requalify the newest shared mainline, invalidate the contaminated candidate, and dispatch exact candidate f | Current local packet green; fresh hosted packet queued; production NO-GO | 100% local / 5% hosted provisional / 68% overall provisional | Exact shared `origin/main` `4ed8d24ce49b20dc50ca49823ea9419288d1f4a4` includes the latest NFS native rename-handle lifecycle test and docs successors. NFS all-targets, strict workspace Clippy, formatting, and diff checks passed; the full locked Rust workspace, optimized Darwin N-API load, full Node/N-API SDK/CLI/oracle suite, and real PGlite Rust/Node/CLI packet are green on the immediately preceding code-equivalent tip. FoundationDB compile-only check passed, while the linked host test is blocked by missing `fdb_c`. Candidate `andymac4182/c/w05-production-candidate-20260922f` is immutable at exact `4ed8d24`; CI `35726013391`, Fault `35726014223`, W04 `35726015313`, W07 `35726011685`, W08 policy `35726013276`, W08 targets/attestations `35726014630`, and Native 9P `35726014371` all record the matching branch/SHA and are queued. The prior `...20260922e` branch was advanced by another workstream to `40a9a3d8`; its seven queued runs were cancellation-requested and are not evidence. | Poll the exact-f packet to terminal and retain artifacts; repair any implementation failure only on a new immutable candidate; run one post-reset capped R2 packet after approved token rotation; obtain Security-provisioned AWS/OIDC; resolve Ozone `1000` IOPS or scope it out; close native FUSE/Windows/FSKit, clean-install/package publication/signing/provenance, advertised support, and W20.6. | 0–1 h active ledger/dispatch; 4–16 h hosted/provider/native wait; separate security/registry/provider owner time | Hosted runner queues, R2 monthly cap/reset, AWS security/OIDC, Ozone capacity, missing host `fdb_c`, native privileges/signing, package registries, scope ownership, and final-audit approval remain external. |
+| PR-26 / W05.65 | Requalify W08/chunked/NFS runtime successors, close local package evidence, and dispatch exact candidate g | Newest local runtime packet green; candidate g hosted packet queued; production NO-GO | 100% local / 5% hosted provisional / 68% overall provisional | Runtime successor qualification passed focused chunked `23/23`, NFS all-targets, W08 security `8/8`, rollout `7/7`, capacity `8/8`, full locked Rust workspace, strict Clippy, optimized Darwin addon/load (`253` exports, aligned `stroff`, minos 11.0, SDK 26.0), full Node/N-API SDK/CLI/oracle/distribution/restart suite, and real PGlite Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`. N-API and virtual-fs npm dry-runs passed with licenses/notices and the Darwin addon; locked metadata found `25/25` Apache-2.0 packages. Candidate f's queued packet was cancellation-requested after runtime changes. Immutable candidate `andymac4182/c/w05-production-candidate-20260922g` is exact `cb0d9c18`; CI `35727456536`, Fault `35727454726`, W04 `35727455560`, W07 `35727457416`, W08 policy `35727455905`, W08 targets/attestations `35727456760`, and Native 9P `35727455598` are head-verified queued. | Poll candidate g to terminal; repair implementation failures only on a new immutable candidate; execute one post-reset capped R2 packet after approved token rotation; obtain Security AWS/OIDC; resolve Ozone capacity or scope; close native/platform, clean-install/publication/signing/provenance, support scope, and W20.6. | 0–1 h active ledger/dispatch; 4–16 h hosted/provider/native wait; separate security/provider/registry owner time | GitHub queue/cancellation, R2 cap/reset, AWS security/OIDC, Ozone capacity, host `fdb_c`, native privileges/signing, package registries, scope ownership, and final-audit approval remain external. |
 
 ### Current immutable-candidate addendum (2026-09-22 17:09 AEST)
 
@@ -1610,11 +1654,11 @@ necessary provider gate, not a substitute for these release criteria.
    assumed-cost envelope below the `$100` ceiling. It does not qualify the
    current release revision because the September cap is closed and the
    short-lived token rotation is still required.
-2. Let the exact immutable candidate f packet reach terminal results: CI
-   `35726013391`, Fault `35726014223`, W04 `35726015313`, W07 `35726011685`,
-   W08 policy `35726013276`, W08 targets/attestations `35726014630`, and
-   Native 9P `35726014371`. Every run currently records exact head
-   `4ed8d24`; queued, cancelled, skipped, failed, or revision-mismatched
+2. Let the exact immutable candidate g packet reach terminal results: CI
+   `35727456536`, Fault `35727454726`, W04 `35727455560`, W07 `35727457416`,
+   W08 policy `35727455905`, W08 targets/attestations `35727456760`, and
+   Native 9P `35727455598`. Every run currently records exact head
+   `cb0d9c18`; queued, cancelled, skipped, failed, or revision-mismatched
    results are never promoted to acceptance. If implementation work is
    required, create a new immutable candidate and repeat the packet.
    W07 success on older revisions remains revision-specific evidence only.
@@ -1653,6 +1697,8 @@ shown separately from active engineering time.
 
 | UTC time | Activity | Classification | Result / next state |
 | --- | --- | --- | --- |
+| 2026-09-22 12:15–12:29 UTC (22:15–22:29 AEST) | Requalified the W08 security, chunked lease/concurrency, and NFS v4 runtime successors; rebuilt N-API; reran full Rust, Clippy, Node, PGlite, package, and policy packets | Current-tip local production qualification / package gate | Focused chunked `23/23`, NFS all-targets, W08 security `8/8`, rollout `7/7`, capacity `8/8`, full locked Rust, strict Clippy, optimized addon/load, full Node suite, PGlite Rust `6/3/0`, Node `5/3/0`, CLI `12/2`, package dry-runs, and `25/25` Apache-2.0 inventory passed. FoundationDB linked testing remains blocked by missing host `fdb_c`; provider/native credentials and privileges remain explicit gates. |
+| 2026-09-22 12:29 UTC (22:29 AEST) | Cancelled superseded candidate-f queue and froze/dispatched immutable candidate g | Hosted release coordination / concurrent-main hygiene | Candidate f runs `35726013391`, `35726014223`, `35726015313`, `35726011685`, `35726013276`, `35726014630`, and `35726014371` were cancellation-requested. Candidate g exact `cb0d9c18` was published; CI `35727456536`, Fault `35727454726`, W04 `35727455560`, W07 `35727457416`, W08 policy `35727455905`, W08 targets `35727456760`, and Native 9P `35727455598` were verified queued with matching branch/SHA. R2/AWS remain cap/security gated; production is NO-GO. |
 | 2026-09-22 11:50–12:15 UTC (21:50–22:15 AEST) | Fetched moving `origin/main` through `a037d029` to `4ed8d24`, rebased the W05 branch, reran NFS all-targets/Clippy/format checks, rebuilt the optimized N-API addon, reran the complete Node suite and real PGlite Rust/Node/CLI harness, checked FoundationDB compile/link behavior, and froze/dispatched immutable candidate f | Current-tip qualification / release engineering / hosted coordination | Current NFS, Clippy, format/diff, Node, PGlite, and code-equivalent full Rust packet are green. FoundationDB compile-only passes but linked testing is blocked by missing host `fdb_c`. Candidate f is exact `4ed8d24`; CI `35726013391`, Fault `35726014223`, W04 `35726015313`, W07 `35726011685`, W08 policy `35726013276`, W08 targets `35726014630`, and Native 9P `35726014371` were verified queued with matching branch/SHA. R2/AWS remain cap/security gated; production is NO-GO. |
 | 2026-09-22 11:42–11:50 UTC (21:42–21:50 AEST) | Rechecked candidate e after dispatch and invalidated it when another workstream advanced the branch from intended `849c76a2` to `40a9a3d8` | Hosted queue hygiene / concurrent-main reconciliation | Runs `35723736254`, `35723733151`, `35723736618`, `35723740111`, `35723734639`, `35723735941`, and `35723734187` were cancellation-requested and are not evidence. A new immutable candidate was required; no branch was force-updated. |
 | 2026-09-22 11:42–11:51 UTC (21:42–21:51 AEST) | Rechecked the settled implementation tip, froze immutable candidate `849c76a2`, and dispatched the fresh same-SHA non-R2/AWS packet | Release engineering / local qualification / hosted coordination | The exact candidate branch `andymac4182/c/w05-production-candidate-20260922e` was created from `origin/main`; CI `35723736254`, Fault `35723733151`, W04 `35723736618`, W07 `35723740111`, W08 policy `35723734639`, W08 targets `35723735941` with attestations, and Native 9P `35723734187` were dispatched. R2 remains closed by the monthly cap and AWS remains security/OIDC gated; terminal hosted evidence is the next checkpoint. |
