@@ -3669,6 +3669,12 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   9P, W07 and N-API source changes; no source result is inferred from a
   documentation-only merge.
 
+  Hosted W08 policy run `35681936375` at source
+  `e7be3769dd7c6722ce096c481f30d042d7895dbe`, job `106600554617`, completed
+  successfully in 2m48s. Its rollout-ledger and release-identity/provenance
+  checks are hosted implementation/static evidence only; they do not create
+  provider, candidate-release, canary, rollback or owner-approval evidence.
+
   A fresh 11:36 AEST repository-policy check passed the positive production
   config fixture with an out-of-band non-secret TLS-policy URL, failed closed
   on the insecure/inline-secret fixture, passed the pending and strict accepted

@@ -189,6 +189,12 @@ skips. This exact merged source was requalified after the FoundationDB, 9P,
 W07 and N-API source changes; no source result is inferred from a
 documentation-only merge.
 
+Hosted W08 policy run `35681936375` at source
+`e7be3769dd7c6722ce096c481f30d042d7895dbe`, job `106600554617`, completed
+successfully in 2m48s. Its rollout-ledger and release-identity/provenance
+checks are hosted implementation/static evidence only; they do not create
+provider, candidate-release, canary, rollback or owner-approval evidence.
+
 A fresh credential-free admission check at **2026-09-22 11:36 AEST** passed the
 positive production-config fixture with a non-secret TLS-policy URL supplied
 out of band; the insecure/inline-secret fixture failed closed as expected. The
