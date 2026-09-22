@@ -14,7 +14,7 @@ upstream stream/attach contract or hosted native mount behavior.
 
 | Gate | State | Required evidence |
 | --- | --- | --- |
-| Public 9P exports and protocol behavior | Local PASS for the implemented codec, all 124 pinned constants, all 274 upstream runtime `./9p` barrel exports, the synchronous direct live-mount view, and the direct probe shape; broader protocol/session parity remains partial | Pinned 9P differential, generated declarations, malformed/trailing coverage, deterministic fid/qid/cursor lifecycle tests, the six public default values, every upstream `./9p` barrel export, `P9DirentPacker.maxSize`, synchronous direct `live9pMounts()`, required direct `P9ClientProbe` `platform`/`reason` fields, and public-session behavior |
+| Public 9P exports and protocol behavior | Local PASS for the implemented codec, all 124 pinned constants, all 274 upstream runtime `./9p` barrel exports, the synchronous direct live-mount view, the direct probe shape, and the direct `P9Platform` type alias; broader protocol/session parity remains partial | Pinned 9P differential, generated declarations, malformed/trailing coverage, deterministic fid/qid/cursor lifecycle tests, the six public default values, every upstream `./9p` barrel export, `P9DirentPacker.maxSize`, synchronous direct `live9pMounts()`, required direct `P9ClientProbe` `platform`/`reason` fields, exported direct `P9Platform`, and public-session behavior |
 | Session and connection objects | Local PASS for current exposed members and the bounded N-API mount-helper facade; hosted Linux N-API lifecycle PASS for the supported surface; parity remains partial | `P9Session.handleCall`/`destroy`, scalar `options`, live `driver`, `userFor`, debug-gated assertions, request-error/assertion callbacks, live `locks` and `fids`, stats/lifecycle, live property-shaped `clients`, peer, `closed`, attached stream exposure, identity/handle tests, injected shared lock-table option coverage, direct `./9p` probe/refusal/option/mount-helper/synchronous live-mount/signal checks, configured `P9Server` reuse through the native mount option, direct mount-created scalar server-policy/session-callback mapping, and exact-SHA hosted automatic/direct/structural native 9P mounted I/O and cleanup; the direct `MountP9Options` audit found no additional unrepresented fields, while automatic cross-transport signal ownership remains an explicit scope boundary |
 | Attached-stream contract | Local PASS | Node `attach(stream, options)` with typed peer/ownership/frame/in-flight bounds, ownership, duplicate attach, direct session calls, non-socket duplex, backpressure, write failure, and server-close tests |
 | Native-listener stream boundary | Explicit supported-scope decision | Native Tokio-accepted connections expose `stream: undefined`; their peer is the transport source string when available (Unix socket path or TCP `address:port`) and is `null` only when absent. Callers requiring a Node `Duplex` use `server.attach`, whose attached connection retains the supplied stream and peer fallback |
@@ -216,6 +216,19 @@ upstream stream/attach contract or hosted native mount behavior.
   parity, automatic cross-transport signal ownership, supervisor-owned
   crash/reset/half-close recovery, and W01 acceptance remain open, so
   production remains NO-GO.
+- The direct `./9p` declarations now export the oracle's type-only
+  `P9Platform = "linux"` alias and use it in `P9ClientProbe` and `p9Platform()`;
+  the runtime surface is unchanged. The direct type-import/use check, helper,
+  syntax, and diff checks pass. Exact SHA
+  `2bcd9aa4b0d25f284d8ae9fc4ad3de0a5cbbfeff` passed [Native 9P run
+  `35681127657`](https://github.com/andymac4182/mount-rs/actions/runs/35681127657):
+  N-API job `106598109004` passed the Linux probe, addon build, and
+  automatic/direct/structural mounted-I/O and cleanup checks, while Rust job
+  `106598109187` passed the Linux probe and all four ignored native lifecycle
+  tests. This qualifies the direct type export only; broader upstream member
+  parity, automatic cross-transport signal ownership, supervisor-owned
+  crash/reset/half-close recovery, and W01 acceptance remain open, so
+  production remains NO-GO.
 - Graceful server close, external unmount, and retryable unmount are in scope;
   the dedicated hosted run above verifies those Linux lifecycle paths.
   Automatic recovery after process crash or arbitrary kernel reset/half-close
@@ -314,10 +327,20 @@ tests. It normalizes the direct `P9ClientProbe` result to own
 oracle-compatible `platform` and `reason` keys without changing the root
 automatic-probe boundary. Production remains NO-GO for the broader open gates.
 
+The current direct-type packet at exact SHA
+`2bcd9aa4b0d25f284d8ae9fc4ad3de0a5cbbfeff` passed [Native 9P run
+`35681127657`](https://github.com/andymac4182/mount-rs/actions/runs/35681127657):
+N-API job `106598109004` passed the Linux probe, addon build, and
+automatic/direct/structural mounted-I/O and cleanup checks, while Rust job
+`106598109187` passed the Linux probe and all four ignored native lifecycle
+tests. It exports the direct `P9Platform` type alias without changing runtime
+behavior. Production remains NO-GO for the broader open gates.
+
 ## Evidence ledger
 
 | Date | Chunk | Result | Remaining blocker |
 | --- | --- | --- | --- |
+| 2026-09-22 | N-API 9P direct `P9Platform` type export parity | The direct `./9p` declaration now exports the oracle's type-only `P9Platform = "linux"` alias and uses it in `P9ClientProbe` and `p9Platform()`; the runtime surface is unchanged. The direct type-import/use check, helper, syntax, and diff checks pass. Exact SHA `2bcd9aa4b0d25f284d8ae9fc4ad3de0a5cbbfeff` passed [Native 9P run `35681127657`](https://github.com/andymac4182/mount-rs/actions/runs/35681127657): N-API job `106598109004` passed automatic/direct/structural mounted-I/O and cleanup, and Rust job `106598109187` passed all four ignored native lifecycle tests | The type-only export is scoped to direct `./9p`; broader upstream member parity, automatic cross-transport signal ownership, supervisor-owned crash/reset/half-close recovery, and W01 acceptance remain open; production remains NO-GO |
 | 2026-09-22 | N-API 9P direct probe absence-shape parity | The direct `./9p` `p9ClientProbe()` facade now always owns `platform` and `reason`, normalizing native `null`/omitted values to `undefined`; the direct declaration requires `platform: "linux" | undefined` and `reason: string | undefined`, while the root automatic `JsP9ClientProbe` boundary remains unchanged. Local addon/generated build, helper, required-field typecheck, syntax, and diff checks pass. Exact SHA `7389be4d5ea4930075cf5278032614e931054620` passed [Native 9P run `35680542975`](https://github.com/andymac4182/mount-rs/actions/runs/35680542975): N-API job `106596362070` passed automatic/direct/structural mounted-I/O and cleanup, and Rust job `106596362200` passed all four ignored native lifecycle tests | This normalization is scoped to direct `./9p`; broader upstream member parity, automatic cross-transport signal ownership, supervisor-owned crash/reset/half-close recovery, and W01 acceptance remain open; production remains NO-GO |
 | 2026-09-22 | N-API 9P synchronous direct live-mount parity | The direct `./9p` facade now returns a synchronous `Array<P9Mount>` from `live9pMounts()`, matching the pinned oracle. A process-local direct registry tracks every `mount9p()` result regardless of `signals`, prunes inactive mounts, and removes closed mounts; the root all-transport `liveMounts()` registry remains asynchronous. Local helper/typecheck/syntax, 44-case codec, fid/session/observability, formatting, strict Clippy, and 18 focused Rust tests pass. Exact SHA `56291e3f9b4274fec2111e4e2f88696e98f3a548` passed [Native 9P run `35679754417`](https://github.com/andymac4182/mount-rs/actions/runs/35679754417): N-API job `106593941892` passed automatic/direct/structural mounted-I/O and cleanup, and Rust job `106593942012` passed all four ignored native lifecycle tests | The synchronous registry is scoped to direct `./9p` mounts; automatic cross-transport signal ownership, supervisor-owned crash/reset/half-close recovery, broader upstream member parity, and W01 acceptance remain open; production remains NO-GO |
 | 2026-09-22 | N-API 9P typed-reader maximum parity | The native `P9Reader` convenience methods `readRread`, `readTwrite`, and `readRreaddir` now preserve the oracle-compatible optional maximum-item argument, matching the already corrected free helpers; the 44-case differential covers bounded success and oversized-body errors for both surfaces. Generated declarations, typecheck, syntax, fid/runtime, diff, formatting, strict Clippy, and 18 focused Rust tests pass locally. Exact SHA `4ecdb63db64711e0fadf77d4612b6394f57f3f4d` passed [Native 9P run `35678757675`](https://github.com/andymac4182/mount-rs/actions/runs/35678757675): N-API job `106590841909` passed automatic/direct/structural mounted-I/O and cleanup, and Rust job `106590841982` passed all four ignored native lifecycle tests | Broader upstream member parity, automatic cross-transport signal ownership, supervisor-owned crash/reset/half-close recovery, and W01 acceptance remain open; production remains NO-GO |
