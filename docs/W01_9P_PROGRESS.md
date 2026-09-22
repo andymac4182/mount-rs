@@ -14,7 +14,7 @@ upstream stream/attach contract or hosted native mount behavior.
 
 | Gate | State | Required evidence |
 | --- | --- | --- |
-| Public 9P exports and protocol behavior | Local PASS for the implemented codec, all 124 pinned constants, all 274 upstream runtime `./9p` barrel exports, the synchronous direct live-mount view, the direct probe shape, the direct `P9Platform` type alias, the oracle-shaped `P9User.uid` field, the constructible native/structural `P9Session` boundary, and the oracle-backed direct-session member surface; hosted pinned 9P TCP conformance now has a non-root baseline of 144/146 with two explicit root-gated skips and a privileged root run of 146/146; broader protocol/session parity remains partial | Pinned 9P differential, generated declarations, malformed/trailing coverage, deterministic fid/qid/cursor lifecycle tests, the six public default values, every upstream `./9p` barrel export, `P9DirentPacker.maxSize`, synchronous direct `live9pMounts()`, required direct `P9ClientProbe` `platform`/`reason` fields, exported direct `P9Platform`, required `P9User.uid`, direct `P9Session(driver, options?)` construction for `Filesystem | FsDriver`, adapter ownership/release, hook/error and teardown behavior, the oracle-backed 14-member `P9Session` surface audit, public-session behavior, and hosted upstream TCP conformance |
+| Public 9P exports and protocol behavior | Local PASS for the implemented codec, all 124 pinned constants, all 274 upstream runtime `./9p` barrel exports, the synchronous direct live-mount view, the direct probe shape, the direct `P9Platform` type alias, the oracle-shaped `P9User.uid` field, the constructible native/structural `P9Session` boundary, and the oracle-backed direct-session member surface; current-head hosted pinned 9P TCP conformance has a non-root baseline of 144/146 with two explicit root-gated skips and a privileged root run of 146/146; broader protocol/session parity remains partial | Pinned 9P differential, generated declarations, malformed/trailing coverage, deterministic fid/qid/cursor lifecycle tests, the six public default values, every upstream `./9p` barrel export, `P9DirentPacker.maxSize`, synchronous direct `live9pMounts()`, required direct `P9ClientProbe` `platform`/`reason` fields, exported direct `P9Platform`, required `P9User.uid`, direct `P9Session(driver, options?)` construction for `Filesystem | FsDriver`, adapter ownership/release, hook/error and teardown behavior, the oracle-backed 14-member `P9Session` surface audit, public-session behavior, and hosted upstream TCP conformance |
 | Session and connection objects | Local PASS for current exposed members and the bounded N-API mount-helper facade; hosted Linux N-API lifecycle PASS for the supported surface; parity remains partial | Constructible direct `P9Session` over native `Filesystem` or structural `FsDriver` input with adapter lifetime/release, optional scalar policy, lock-table, request-error/assertion hooks, direct frame calls, callback teardown, direct state-machine coverage for `Tflush`, version reset, and destroy invalidation, and an oracle-backed 14-member surface audit; `P9Session.handleCall`/`destroy`, scalar `options`, live `driver`, `userFor` with oracle-shaped `P9User.uid`, debug-gated assertions, request-error/assertion callbacks, live `locks` and `fids`, stats/lifecycle, live property-shaped `clients`, peer, `closed`, attached stream exposure, identity/handle tests, injected shared lock-table option coverage, real TCP shared-lock conflict/holder/release behavior, real TCP per-connection session/fid isolation, completion-order dispatch, direct `./9p` probe/refusal/option/mount-helper/synchronous live-mount/signal checks, configured `P9Server` reuse through the native mount option, direct mount-created scalar server-policy/session-callback mapping, and exact-SHA hosted automatic/direct/structural native 9P mounted I/O and cleanup; the direct `MountP9Options` audit found no additional unrepresented fields, and automatic cross-transport signal ownership remains an explicit scope boundary |
 | Attached-stream contract | Local + hosted N-API PASS for the covered lifecycle slice | Node `attach(stream, options)` with typed peer/ownership/frame/in-flight bounds, ownership, duplicate attach, direct session calls, non-socket duplex, backpressure, write failure, and server-close tests; the Unix listener policy and native-listener teardown phases are also covered. Exact teardown SHA `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` passed [Native 9P run `35685073733`](https://github.com/andymac4182/mount-rs/actions/runs/35685073733), N-API job `106610049913` |
 | Native-listener stream boundary | Explicit supported-scope decision | Native Tokio-accepted connections expose `stream: undefined`; their peer is the transport source string when available (Unix socket path or TCP `address:port`) and is `null` only when absent. Callers requiring a Node `Duplex` use `server.attach`, whose attached connection retains the supplied stream and peer fallback |
@@ -43,18 +43,16 @@ hosted run below:
   SHA `86b88c329d64bcc2a8e7b9d97993fca657458986`, [Native 9P run
   `35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373),
   N-API job `106667799214`, and Rust job `106667799016`.
-- **PASS:** the dedicated hosted pinned-oracle 9P TCP conformance now has
-  paired baseline and privileged-root evidence. At exact head SHA
-  `d11f458d7f6ef1923091fbca84a93e63f05e9455`, [Native 9P run
-  `35711056768`](https://github.com/andymac4182/mount-rs/actions/runs/35711056768)
-  passed the non-root baseline job `106691472428` with `144 passed` and
-  `2 skipped` out of `146`, while root job `106691917345` passed `146/146`,
-  including both root-gated symlink-ownership cases. The same run passed
-  N-API job `106691472270` and Rust job `106691472165`. The root job
-  preserves the CI/toolchain environment under `sudo` and uses an explicit
-  temporary Cargo target; local focused oracle/public-surface checks also
-  passed. The baseline skips are the conformance suite's explicit non-root
-  `lchown` cases, not unreported 9P protocol omissions.
+- **PASS:** the current-head dedicated hosted pinned-oracle 9P TCP conformance
+  has paired baseline and privileged-root evidence. At exact head SHA
+  `38346fea42b7950e2599103a477d804808262e2b`, [Native 9P run
+  `35712873612`](https://github.com/andymac4182/mount-rs/actions/runs/35712873612)
+  passed baseline job `106697612285` with `144 passed` and `2 skipped` out of
+  `146`, root job `106698277708` with `146/146`, N-API job `106697612716`, and
+  Rust job `106697612506`. The root job preserves the CI/toolchain environment
+  under `sudo` and uses an explicit temporary Cargo target; the baseline skips
+  are the conformance suite's explicit non-root `lchown` cases, not unreported
+  9P protocol omissions.
 - **Explicitly outside the advertised contract:** `Tauth`, extended
   attributes, the legacy `Topen`/`Tcreate`/`Tstat`/`Twstat` family, legacy
   error messages, and unknown message types remain deliberate `ENOTSUP`
@@ -87,10 +85,10 @@ decision are closed.
   as the revision-matched pinned-oracle TCP protocol gate. They check out
   oracle revision `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`, build `p9_oracle`
   through `scripts/cargo-shared`, and run `p9-conformance.test.mjs`; at exact
-  hosted SHA `d11f458d7f6ef1923091fbca84a93e63f05e9455`, [Native 9P run
-  `35711056768`](https://github.com/andymac4182/mount-rs/actions/runs/35711056768)
-  passed baseline job `106691472428` with `144/146` and the two explicit
-  non-root ownership skips, and privileged root job `106691917345` with
+  current-head SHA `38346fea42b7950e2599103a477d804808262e2b`, [Native 9P run
+  `35712873612`](https://github.com/andymac4182/mount-rs/actions/runs/35712873612)
+  passed baseline job `106697612285` with `144/146` and the two explicit
+  non-root ownership skips, and privileged root job `106698277708` with
   `146/146`.
 - Retain the platform boundary as an explicit gate: the host rootless
   `mount-rs-9p` all-target suite must remain green on macOS/Linux, while the
@@ -730,6 +728,7 @@ so it is not promoted as a 9P result; production remains NO-GO.
 | 2026-09-22 | Dedicated hosted upstream 9P conformance gate | Added an explicit Linux `upstream-9p` job to `Native 9P`, checking out pinned oracle revision `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`, building the Rust fixture through `scripts/cargo-shared`, and running the unmodified pinned 9P conformance suite. Published SHA `a6b3e2aa10cfdb3ee730d41c5886436b02c260de` passed hosted [Native 9P run `35707546973`](https://github.com/andymac4182/mount-rs/actions/runs/35707546973): upstream job `106680012604` reported `144 passed`, `2 skipped` root-gated ownership cases out of `146`, N-API job `106680012485` passed the existing N-API lifecycle, and Rust job `106680013203` passed the Linux probe plus all four ignored native lifecycle tests. Local YAML/syntax, focused oracle/public-surface, and diff checks passed; the local full suite remains unavailable on this Mac because the Xcode license is not accepted | The explicit legacy/auth/xattr and broader upstream object-member boundaries, supervisor-owned crash/reset recovery, non-Linux native kernel-mount boundary, and overall W01/release NO-GO remain unchanged |
 | 2026-09-22 | Root-gated upstream 9P ownership coverage | Added a privileged Linux `upstream-9p-root` job that runs the same pinned oracle suite as root while preserving `CI`, Rustup, Cargo, and target-directory environment under `sudo`; the explicit temporary Cargo target keeps the gate isolated from the shared local target. Exact head SHA `d11f458d7f6ef1923091fbca84a93e63f05e9455` passed [Native 9P run `35711056768`](https://github.com/andymac4182/mount-rs/actions/runs/35711056768): baseline job `106691472428` reported `144 passed` and `2 skipped`, root job `106691917345` reported `146/146`, and companion N-API job `106691472270` and Rust job `106691472165` passed. This exercises both previously root-gated symlink-ownership cases; the broader scope boundaries and overall W01/release NO-GO remain unchanged |
 | 2026-09-22 | 9P platform scope gate | The host `aarch64-apple-darwin` rootless `./scripts/cargo-shared test -p mount-rs-9p --all-targets --locked` passed `37` tests with zero failures; the same crate passed `./scripts/cargo-shared check -p mount-rs-9p --all-targets --locked --target x86_64-pc-windows-gnu --message-format=short`. This qualifies macOS rootless execution and Windows Rust compile portability only. Windows runtime/N-API/Unix-listener/native-mount behavior is not claimed, while Linux native mounts remain qualified only by the hosted `9p`/`9pnet_fd` gates; production scope remains Linux native plus the tested macOS/Linux rootless surface |
+| 2026-09-22 | Current-head hosted 9P rerun after shared N-API build change | Exact head SHA `38346fea42b7950e2599103a477d804808262e2b` passed [Native 9P run `35712873612`](https://github.com/andymac4182/mount-rs/actions/runs/35712873612): baseline job `106697612285` reported `144 passed` and `2 skipped` out of `146`; root job `106698277708` reported `146 passed` out of `146`; N-API job `106697612716` and Rust job `106697612506` both passed. This rerun covers the post-d11 shared macOS N-API addon-build change and leaves the documented 9P protocol, member, crash/supervisor, and platform boundaries unchanged |
 
 ## Completion rule
 

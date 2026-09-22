@@ -283,6 +283,15 @@ The supported production platform boundary therefore remains Linux native
 mounts plus the tested macOS/Linux rootless wire/TCP surface, and W01/release
 remains **NO-GO**.
 
+The current-head Native 9P rerun at exact SHA
+`38346fea42b7950e2599103a477d804808262e2b` passed [run
+`35712873612`](https://github.com/andymac4182/mount-rs/actions/runs/35712873612):
+baseline job `106697612285` reported `144 passed` and `2 skipped`, root job
+`106698277708` reported `146/146`, N-API job `106697612716` passed the complete
+Linux lifecycle, and Rust job `106697612506` passed the native lifecycle. This
+rerun covers the shared post-d11 N-API addon-build change; the supported scope
+and overall W01/release **NO-GO** decision are unchanged.
+
 The preceding W01-9P transport-teardown packet was published at exact SHA
 `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` and passed [Native 9P run
 `35685073733`](https://github.com/andymac4182/mount-rs/actions/runs/35685073733):
