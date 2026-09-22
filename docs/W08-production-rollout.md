@@ -173,8 +173,8 @@ provider/owner approval. P01 therefore remains open.
 
 The W08.37 implementation commit `263be2f4` was reconciled with concurrent
 mainline changes and published in exact public merge `fab2a0cb`; later
-source-equivalent documentation updates place the public tip at
-`8923a0f4`. Shared-wrapper workspace check and strict Clippy passed on the
+source-equivalent CI/documentation updates place the public tip at
+`232443e1`. Shared-wrapper workspace check and strict Clippy passed on the
 merged implementation tree. Hosted W08 policy run `35709828967`, exact head
 `fab2a0cb`, job `106688181078`, completed successfully in about 2m45s,
 including the topology-control, rollout/evidence and release-policy artifact

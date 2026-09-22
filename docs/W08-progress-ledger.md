@@ -4,8 +4,9 @@ Status snapshot: **2026-09-22 18:46 AEST**
 Repository: `andymacclenaghan/mount-rs`
 Latest publication refresh (**2026-09-22 19:29 AEST**): W08.37 was published
 in merge `fab2a0cb73b4a8c69eb52383e4221900bf2f7dd2` and remains in exact public
-`origin/main` ancestry; concurrent source-equivalent documentation updates
-now place the public tip at `8923a0f4bccabb5363c6a424f256c6ffc33be6f4`. The
+`origin/main` ancestry; subsequent source-equivalent CI/documentation updates
+now place the public tip at `232443e133abf7c8f20f6ffec5a2a22a747270e0`. No
+new W08 Rust/provider result is inferred from those concurrent updates. The
 replicated-durable topology policy and eight-case suite pass; the
 shared-wrapper workspace check and strict Clippy with `-D warnings` pass on
 the reconciled implementation tree, and the W08 rollout/evidence controls pass
@@ -1242,6 +1243,7 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-22 19:00–19:15 AEST | Reconciled concurrent public W26/W01 changes through `58fc18c0`, added W08.37's replicated-durable P01 topology policy, wired its validator/test into release-policy and protected admission workflows, ran the eight-case topology suite, all W08 ledger/evidence controls, shared-target Cargo check and strict Clippy. | ~0.25 engineer-day | ~2m Node/static policy checks plus ~41s shared Cargo check/Clippy execution and mainline reconciliation | Local repository controls and Rust source check/Clippy are green. The topology policy explicitly rejects single-node smoke and validates only repository shape; no provider, staging, hosted or production gate is closed. Publication and hosted retest remain pending for this chunk; production stays NO-GO. |
 | 2026-09-22 19:15–19:21 AEST | Committed W08.37 as `263be2f4`, reconciled the concurrent source/CI updates, reran the W08 controls plus shared Cargo check/Clippy, published exact public merge `fab2a0cb`, and refreshed hosted run `35709828967` and the production boundary. | ~0.1 engineer-day | ~1m merge/requalification plus ~1m push/ref/hosted/live-boundary observation | Local and shared-source qualification remains green; hosted run `35709828967` is pending and not evidence. Production has no release runs, the environment is HTTP 404, the release is preview-only and no candidate tag exists; P01–P09 remain open and NO-GO is preserved. |
 | 2026-09-22 19:21–19:29 AEST | Followed hosted W08 policy run `35709828967` at exact head `fab2a0cb` to terminal success (`w08-release-policy` job `106688181078`, about 2m45s), then refreshed the publication ancestry and clean `origin/main` tip `8923a0f4`. | ~0.05 engineer-day | ~2m45s hosted policy execution plus terminal/public-ref observation | Hosted topology/rollout/evidence/release-policy checks passed as implementation/static evidence. No provider, staging, production, candidate-release, canary, rollback or approval evidence was created; P01–P09 remain open and production remains NO-GO. |
+| 2026-09-22 19:29–19:34 AEST | Reconciled source-equivalent concurrent CI/documentation updates, re-ran the W08 topology/rollout/evidence controls and workflow parsing, and published exact clean public tip `232443e1`. | ~0.05 engineer-day | ~1m fetch/merge/policy/ref verification | No W08 Rust/provider evidence changed after the hosted W08.37 pass. The public tree remains clean and synchronized; P01–P09 remain open and production remains NO-GO. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol
