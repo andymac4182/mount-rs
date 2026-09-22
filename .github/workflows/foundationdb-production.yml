@@ -56,6 +56,28 @@ jobs:
       - name: Test W07 production evidence packet fail-closed cases
         run: node scripts/test-w07-production-evidence.mjs
 
+      - name: Record W07 qualification provenance
+        env:
+          W07_QUALIFICATION_REPOSITORY: ${{ github.repository }}
+          W07_QUALIFICATION_WORKFLOW: ${{ github.workflow }}
+          W07_QUALIFICATION_REF: ${{ github.ref }}
+          W07_QUALIFICATION_SOURCE_REVISION: ${{ github.sha }}
+          W07_QUALIFICATION_RUN_ID: ${{ github.run_id }}
+          W07_QUALIFICATION_RUN_ATTEMPT: ${{ github.run_attempt }}
+          W07_QUALIFICATION_RUNNER: ${{ runner.name }}
+        run: |
+          set -eu
+          mkdir -p artifacts
+          printf 'W07_QUALIFICATION_PROVENANCE repository=%s workflow=%s ref=%s source_revision=%s run_id=%s run_attempt=%s runner=%s\n' \
+            "$W07_QUALIFICATION_REPOSITORY" \
+            "$W07_QUALIFICATION_WORKFLOW" \
+            "$W07_QUALIFICATION_REF" \
+            "$W07_QUALIFICATION_SOURCE_REVISION" \
+            "$W07_QUALIFICATION_RUN_ID" \
+            "$W07_QUALIFICATION_RUN_ATTEMPT" \
+            "$W07_QUALIFICATION_RUNNER" \
+            >> artifacts/foundationdb-production-qualification.log
+
       - name: Verify W07 production config policy without credentials or network
         run: |
           set -o pipefail
