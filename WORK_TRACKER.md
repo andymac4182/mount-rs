@@ -943,6 +943,9 @@ The published provider packet `fb9caec81a7e3fa183f5fa51871117e62fa35036` had
 exact-SHA CI/Fault injection/W08 workflows queued or pending, W04 policy
 succeeded, Live Cloudflare R2 failed, and unrelated Native 9P in progress; no
 hosted WebDAV PASS is claimable from that packet. The
+published provider-network packet `41bd16f08a4ba065046f5da4bd54d90d2a16f028`
+had no associated GitHub Actions workflow runs at the exact-SHA snapshot, so
+no hosted WebDAV PASS is claimable from that packet. The
 opt-in
 `MOUNT_RS_SERVER_PHASE=webdav node test/servers.mjs` phase also passes the
 host-enabled WebDAV network/fault/restart matrix, while the package-wide

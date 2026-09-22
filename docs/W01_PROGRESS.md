@@ -83,6 +83,10 @@ PUT/GET bodies. This is local loopback provider evidence only; hosted
 remote-provider, hosted network, power-loss, durable-lock, and wider ordering
 gates remain open.
 
+For published provider-network packet `41bd16f08a4ba065046f5da4bd54d90d2a16f028`,
+the exact-SHA GitHub Actions API returned no associated workflow runs at the
+snapshot. No hosted WebDAV PASS is claimable from that packet.
+
 For published provider packet `fb9caec81a7e3fa183f5fa51871117e62fa35036`, the
 exact-SHA CI/Fault injection/W08 workflows were queued or pending, W04 policy
 succeeded, Live Cloudflare R2 failed, and an unrelated Native 9P workflow was
