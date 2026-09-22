@@ -1478,3 +1478,23 @@ artifact retrieval time are external gate time, not implementation effort.
 | 2026-09-22 — Code publication/reconciliation | Committed, fetched concurrent mainline work, replayed the code commit after two non-fast-forward races and pushed the tested chunk to `origin/main`. | ~0.5–0.75 h | ~0.5–1 h remote reconciliation | `1e7e75716349f1eff09fd9b77bdeb652c8d0c1b2` verified on `origin/main`; no force push used. |
 | 2026-09-22 — Hosted packet review | Downloaded and parsed composition, TiDB and FoundationDB artifacts; inspected the aggregate fail-closed log. | ~0.75–1.25 h evidence review | ~0.5–1 h hosted provider startup/artifact service | Terminal diagnostic packet recorded above; base passed, three provider rows missed the target, PGlite alone exceeded it. |
 | 2026-09-22 — Ledger/tracker refresh | Added the current published tip, every W26 item’s status/evidence/remaining action/estimate/external gate, current production decision and the terminal packet to this ledger and `WORK_TRACKER.md`. | ~0.5–0.75 h | ~0.25–0.5 h current-tip verification | Documentation is the next push chunk; the next hosted matrix must use the exact current published SHA. |
+
+## Current hosted dispatch — run `35689474986`
+
+The fresh manual `ci.yml` dispatch selected exact SHA
+`1891c36375296bc3695a9d71233c624cad46445c`, which contains the published
+SQLite autocommit chunk and the current ledger/tracker. At capture, no producer
+or aggregate result was acceptance evidence.
+
+| Producer | Job ID | Capture state | Acceptance rule |
+| --- | ---: | --- | --- |
+| Ozone base | `106623193674` | queued | Must pass Ozone gateway policy, block contract, failure/restart/reopen and cleanup markers |
+| Ozone compositions | `106623193668` | queued | SQLite/R2 and PGlite/R2 must each complete the fixed lifecycle and meet >=1,000 IOPS with all composition markers |
+| Ozone TiDB | `106623193474` | in progress | Must pass durable TiDB/Ozone markers, bounded listing/reopen/fencing and >=1,000 IOPS |
+| Ozone FoundationDB | `106623193564` | in progress | Must pass strict lockfile/preflight, durable restart/reopen/bounded listing/cleanup and >=1,000 IOPS |
+| W26 aggregate | not yet created | pending | Must verify exact-SHA artifacts and emit the complete all-provider/end-to-end aggregate pass marker |
+
+This packet remains **NO-GO** until every producer and the aggregate are
+terminally successful on the same revision. Any provider failure, skip,
+configuration failure, missing artifact or missing marker must remain a
+fail-closed diagnostic result.
