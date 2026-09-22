@@ -81,8 +81,16 @@ second connection. The handler takes the exclusive lease-sweep lock only when
 a client has expired; an injected-clock test also proves an expired slot-1
 request waits for the blocked slot-0 call before sweeping and returning
 `NFS4ERR_BADSESSION`. This is bounded same-process independent-slot overlap,
-not canceled-operation reply recovery, crash-durable replay/lease/handle state,
-native-client ordering, or exact-tip hosted acceptance.
+not crash-durable replay/lease/handle state or native-client ordering. A new
+real-TCP canceled-`REMOVE` case now stops a request after its backend deletion
+but before COMPOUND completion and reply caching. The server invalidates that
+unfinished session:
+retrying with a changed target gets `NFS4ERR_BADSESSION` without a second
+deletion, and the same client can create a replacement session and continue.
+The replacement `CREATE_SESSION` reply now echoes its noninitial request
+sequence. Exact-reply recovery for a canceled request, uncached completed-reply
+handling, persistent replay, native-client ordering, and exact-tip hosted
+acceptance remain open.
 
 WebDAV's streamed `PUT` boundary is deliberately oracle-compatible rather
 than an atomic-publication promise: a body failure returns an error and leaves

@@ -657,15 +657,32 @@ struct InFlightSlot {
     sessionid: [u8; NFS4_SESSIONID_SIZE],
     slot: usize,
     sequence: u32,
+    completed: bool,
+}
+
+impl InFlightSlot {
+    fn complete(&mut self) {
+        self.completed = true;
+    }
 }
 
 impl Drop for InFlightSlot {
     fn drop(&mut self) {
-        if let Ok(mut state) = self.state.lock()
-            && let Some(session) = state.sessions.get_mut(&self.sessionid)
-            && session.in_flight.get(self.slot) == Some(&Some(self.sequence))
-        {
-            session.in_flight[self.slot] = None;
+        if let Ok(mut state) = self.state.lock() {
+            let Some(session) = state.sessions.get_mut(&self.sessionid) else {
+                return;
+            };
+            if session.in_flight.get(self.slot) != Some(&Some(self.sequence)) {
+                return;
+            }
+            if self.completed {
+                session.in_flight[self.slot] = None;
+            } else {
+                // The request was canceled after slot admission but before a
+                // reply could be cached. Fence the session: replaying this
+                // sequence might re-execute a partially completed mutation.
+                state.sessions.remove(&self.sessionid);
+            }
         }
     }
 }
@@ -2130,7 +2147,7 @@ impl Nfs4Session {
         else {
             unreachable!("sequence was checked above")
         };
-        let (session, _in_flight) = {
+        let (session, mut in_flight) = {
             let mut state = self.state.lock().expect("NFSv4 state lock");
             let Some(session) = state.sessions.get(sessionid) else {
                 v4_trace_compound_reply(peer, xid, NFS4ERR_BADSESSION, 0, false);
@@ -2167,6 +2184,7 @@ impl Nfs4Session {
                     sessionid: *sessionid,
                     slot: slot_index,
                     sequence: *sequence,
+                    completed: false,
                 };
                 if let Some(client) = state.clients.get_mut(&clientid) {
                     client.renewed = self.now();
@@ -2199,10 +2217,12 @@ impl Nfs4Session {
         };
         if *highest >= session.next_sequence.len() as u32 && *highest != 0 {
             v4_trace_compound_reply(peer, xid, NFS4ERR_BADSLOT, 0, false);
+            in_flight.complete();
             return Ok(self.compound_error_body(NFS4ERR_BADSLOT, &tag, &[]));
         }
         if operations.len() > session.max_operations as usize {
             v4_trace_compound_reply(peer, xid, NFS4ERR_TOO_MANY_OPS, 0, false);
+            in_flight.complete();
             return Ok(self.compound_error_body(NFS4ERR_TOO_MANY_OPS, &tag, &[]));
         }
         debug_assert_eq!(session.id, *sessionid);
@@ -2256,6 +2276,7 @@ impl Nfs4Session {
                 }
             }
         }
+        in_flight.complete();
         Ok(body)
     }
 
@@ -2578,7 +2599,7 @@ impl Nfs4Session {
             };
             let mut body = XdrWriter::with_capacity(128);
             body.fixed_opaque(&id, NFS4_SESSIONID_SIZE);
-            body.u32(1);
+            body.u32(*sequence);
             body.u32(response_flags);
             write_channel_attrs(&mut body, response_fore);
             write_channel_attrs(&mut body, response_back);

@@ -87,6 +87,71 @@ impl FsDriver for GateStatDriver {
     }
 }
 
+struct GateUnlinkDriver {
+    inner: MemoryFs,
+    block_once: Arc<AtomicBool>,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+impl FsDriver for GateUnlinkDriver {
+    fn capabilities(&self) -> mount_rs_core::Capabilities {
+        self.inner.capabilities()
+    }
+
+    fn stat<'a, 'b, 'async_trait>(&'a self, path: &'b str) -> BoxFuture<'async_trait, Result<Stats>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.inner.stat(path).await })
+    }
+
+    fn readdir<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> BoxFuture<'async_trait, Result<Vec<DirEntry>>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.inner.readdir(path).await })
+    }
+
+    fn open<'a, 'b, 'c, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        flags: &'c str,
+        mode: u32,
+    ) -> BoxFuture<'async_trait, Result<Arc<dyn FileHandle>>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        'c: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.inner.open(path, flags, mode).await })
+    }
+
+    fn unlink<'a, 'b, 'async_trait>(&'a self, path: &'b str) -> BoxFuture<'async_trait, Result<()>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            self.inner.unlink(path).await?;
+            if self.block_once.swap(false, Ordering::AcqRel) {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            Ok(())
+        })
+    }
+}
+
 const OP_CLOSE: u32 = 4;
 const OP_COMMIT: u32 = 5;
 const OP_BACKCHANNEL_CTL: u32 = 40;
@@ -246,13 +311,17 @@ fn channel(writer: &mut XdrWriter) {
 }
 
 fn parse_create_session(mut reader: XdrReader<'_>) -> [u8; 16] {
-    parse_compound(&mut reader, &[OP_CREATE_SESSION]);
+    parse_create_session_with_sequence(&mut reader, 1)
+}
+
+fn parse_create_session_with_sequence(reader: &mut XdrReader<'_>, sequence: u32) -> [u8; 16] {
+    parse_compound(reader, &[OP_CREATE_SESSION]);
     let session: [u8; 16] = reader
         .fixed_opaque(16, "session id")
         .unwrap()
         .try_into()
         .unwrap();
-    assert_eq!(reader.u32("create session sequence").unwrap(), 1);
+    assert_eq!(reader.u32("create session sequence").unwrap(), sequence);
     assert_eq!(reader.u32("create session flags").unwrap(), 0);
     for _ in 0..2 {
         let _ = reader.u32("headerpad").unwrap();
@@ -1553,6 +1622,130 @@ fn nfs_v4_busy_slot_delays_retry_and_rejects_next_sequence() {
 }
 
 #[test]
+fn nfs_v4_canceled_mutation_fences_uncached_session_for_recovery() {
+    std::thread::Builder::new()
+        .name("nfs-v4-canceled-compound-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build v4 canceled-compound test runtime")
+                .block_on(async {
+                    let driver = MemoryFs::empty();
+                    driver
+                        .write_file("/canceled-first", b"first")
+                        .await
+                        .unwrap();
+                    driver
+                        .write_file("/canceled-second", b"second")
+                        .await
+                        .unwrap();
+                    let block_once = Arc::new(AtomicBool::new(false));
+                    let entered = Arc::new(Notify::new());
+                    let release = Arc::new(Notify::new());
+                    let server = NfsServer::new(
+                        GateUnlinkDriver {
+                            inner: driver.clone(),
+                            block_once: Arc::clone(&block_once),
+                            entered: Arc::clone(&entered),
+                            release,
+                        },
+                        NfsServerOptions::default(),
+                    );
+                    let address = server.listen().await.expect("listen canceled NFS server");
+                    let (mut first, client) =
+                        connect_v4_client(address, 741, b"canceled-compound-client").await;
+                    let first_connection = server
+                        .clients()
+                        .expect("list canceled-compound connections")
+                        .into_iter()
+                        .next()
+                        .expect("first canceled-compound connection");
+                    let remove = |client: &Client, target: &str| {
+                        compound(
+                            "canceled-remove",
+                            &[
+                                sequence(client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string(target)),
+                            ],
+                        )
+                    };
+                    block_once.store(true, Ordering::Release);
+                    let request = encode_call(
+                        744,
+                        NFS4_PROGRAM,
+                        NFS_V4,
+                        1,
+                        None,
+                        None,
+                        &remove(&client, "canceled-first"),
+                    );
+                    first
+                        .write_all(&frame_record(&request).expect("frame canceled COMPOUND"))
+                        .await
+                        .expect("send canceled COMPOUND");
+                    timeout(Duration::from_secs(2), entered.notified())
+                        .await
+                        .expect("canceled REMOVE deletes the first file and stalls");
+                    timeout(Duration::from_secs(2), first_connection.close())
+                        .await
+                        .expect("connection close cancels blocked COMPOUND")
+                        .expect("close canceled connection");
+                    drop(first);
+                    assert!(driver.stat("/canceled-first").await.is_err());
+                    assert!(driver.stat("/canceled-second").await.is_ok());
+
+                    let mut second = TcpStream::connect(address)
+                        .await
+                        .expect("connect replacement transport");
+                    let mut old_retry =
+                        rpc(&mut second, 745, remove(&client, "canceled-second")).await;
+                    assert_eq!(parse_compound_status(&mut old_retry, 0), NFS4ERR_BADSESSION);
+                    old_retry.end("canceled-session retry").unwrap();
+                    assert!(driver.stat("/canceled-second").await.is_ok());
+
+                    let mut replacement_reply = rpc(
+                        &mut second,
+                        746,
+                        compound(
+                            "replacement-session",
+                            &[create_session_args_with_sequence(client.clientid, 2)],
+                        ),
+                    )
+                    .await;
+                    let replacement = parse_create_session_with_sequence(&mut replacement_reply, 2);
+                    assert_ne!(replacement, client.session);
+                    let replacement_client = Client {
+                        session: replacement,
+                        clientid: client.clientid,
+                        sequence: 1,
+                        slot: 0,
+                    };
+                    let mut recovered = rpc(
+                        &mut second,
+                        747,
+                        remove(&replacement_client, "canceled-second"),
+                    )
+                    .await;
+                    parse_compound_header(&mut recovered, 3);
+                    assert!(driver.stat("/canceled-second").await.is_err());
+                    second
+                        .shutdown()
+                        .await
+                        .expect("close replacement transport");
+                    server.close().await.expect("close canceled NFS server");
+                });
+        })
+        .expect("spawn v4 canceled-compound test thread")
+        .join()
+        .expect("v4 canceled-compound test thread panicked");
+}
+
+#[test]
 fn nfs_v4_independent_slots_overlap_while_one_backend_call_is_blocked() {
     std::thread::Builder::new()
         .name("nfs-v4-independent-slots-test".into())
@@ -2067,17 +2260,17 @@ fn nfs_v4_state_limits_are_advertised_and_enforced() {
                     );
                     response.end("too-small replay response").unwrap();
 
-                    let _small_session = parse_create_session(
-                        rpc(
-                            &mut stream,
-                            406,
-                            compound(
-                                "too-small-retry",
-                                &[create_session_args_with_sequence(small_clientid, 2)],
-                            ),
-                        )
-                        .await,
-                    );
+                    let mut small_session_reply = rpc(
+                        &mut stream,
+                        406,
+                        compound(
+                            "too-small-retry",
+                            &[create_session_args_with_sequence(small_clientid, 2)],
+                        ),
+                    )
+                    .await;
+                    let _small_session =
+                        parse_create_session_with_sequence(&mut small_session_reply, 2);
 
                     let mut response = rpc(
                         &mut stream,

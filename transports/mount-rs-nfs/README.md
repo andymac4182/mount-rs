@@ -191,8 +191,18 @@ TCP connections. A controlled rootless test proves this for two `GETATTR`
 COMPOUNDs while one backend call is blocked. An injected-clock wire test also
 checks that an expired lease waits for the blocked call before sweeping and
 rejecting the next slot. `NfsConnection` close/wait state does not provide
-automatic reconnect, lease recovery, or crash-durable session/reply state;
-the restart-boundary test therefore classifies v4 session/lease/replay state as
+automatic reconnect, lease recovery, or crash-durable session/reply state.
+If a v4.1 request is canceled after slot admission but before COMPOUND
+completion and reply caching, the server invalidates that session rather than
+permitting an uncertain-effect operation to run again under the same
+slot/sequence. A
+rootless test deletes a file before connection cancellation, observes
+`NFS4ERR_BADSESSION` on a changed-target retry, and creates a replacement
+session for the same client. `CREATE_SESSION` echoes its request sequence, so
+this replacement handshake works with a noninitial value. This is fail-closed
+recovery, not preservation of the canceled reply, uncached completed-reply
+handling, or durable replay. The restart-boundary test therefore classifies
+v4 session/lease/replay state as
 process-local. A host-backed forced-process-restart test now proves that one
 NFSv4.1 `FILE_SYNC4` write can be reopened and read through a fresh session
 after rejecting the old session and file handle. This is process-crash data
