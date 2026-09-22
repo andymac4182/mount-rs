@@ -598,7 +598,7 @@ export declare class P9LockClient {
   get id(): number
   get held(): number
   lock(request: P9LockRequest): number
-  getlock(request: P9LockRequest): P9LockHolder | null
+  getlock(request: P9LockRequest): P9LockHolder | undefined
   releaseFid(fid: number): void
   releaseAll(): void
   renamed(from: string, to: string): void
@@ -610,7 +610,7 @@ export declare class P9LockTable {
   get files(): number
   get size(): number
   at(path: string): Array<P9Lock>
-  getlock(request: P9LockRequest): P9LockHolder | null
+  getlock(request: P9LockRequest): P9LockHolder | undefined
   remap(from: string, to: string): void
   release(path: string): void
   client(): P9LockClient
@@ -665,7 +665,7 @@ export declare class P9Session {
   /** The scalar policy used when this session was created. */
   get options(): P9SessionOptions
   /** The attach identity recorded for a live fid, if any. */
-  userFor(fid: number): P9User | null
+  userFor(fid: number): P9User | undefined
   /**
    * The live byte-range lock handle owned by this session. Its client id is
    * stable across getter calls and teardown releases the same ranges.
@@ -676,8 +676,8 @@ export declare class P9Session {
    * transport state used by protocol dispatch.
    */
   get fids(): P9FidTable
-  get msize(): number | null
-  get version(): string | null
+  get msize(): number | undefined
+  get version(): string | undefined
   get generation(): number
   get destroyed(): boolean
   get inflight(): number

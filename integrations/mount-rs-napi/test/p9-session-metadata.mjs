@@ -56,6 +56,8 @@ try {
   assert.equal(connection.peer, "metadata-test");
   assert.equal(connection.isClosed, false);
   assert.equal(connection.session.options.msize, 32 * 1024);
+  assert.equal(connection.session.msize, undefined);
+  assert.equal(connection.session.version, undefined);
   assert.equal(connection.session.options.readOnly, true);
   assert.equal(connection.session.options.onError, undefined);
   assert.equal(connection.session.options.onAssertion, undefined);
@@ -74,7 +76,7 @@ try {
   assert.equal(server.options.locks.at("/").length, 1);
   assert.equal(connection.session.options.locks.at("/").length, 1);
   sharedClient.releaseAll();
-  assert.equal(connection.session.userFor(1), null);
+  assert.equal(connection.session.userFor(1), undefined);
 
   stream.push(encodeMessage(100, 0xffff, (writer) => {
     writer.u32(32 * 1024);
@@ -93,13 +95,15 @@ try {
     writer.u32(0xffff_ffff);
   }));
   await waitUntil(
-    () => connection.session.userFor(1) !== null,
+    () => connection.session.userFor(1) !== undefined,
     "P9 metadata attach identity",
   );
   assert.deepEqual(connection.session.userFor(1), {
     uname: "node",
     aname: "",
   });
+  assert.equal(connection.session.msize, 32 * 1024);
+  assert.equal(connection.session.version, "9P2000.L");
   assert.equal(connection.session.locks.table.files, 0);
   assert.equal(connection.session.locks.lock({
     path: "/",

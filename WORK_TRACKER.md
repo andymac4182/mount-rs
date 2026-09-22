@@ -52,6 +52,11 @@ attempt exposed an incorrect `peer: null` expectation for Unix sockets, so a
 corrected exact SHA `81cc6596c2c9562c3405df50126239a7bcb44f63` passed Native 9P
 run `35670279904`, qualifying native `stream: undefined` and its
 transport-source peer string.
+The next N-API packet normalizes the oracle's optional absence shapes at the
+JavaScript boundary: pre-version `msize`/`version`, unknown `userFor(fid)`, and
+conflict-free table/session `getlock()` now return `undefined`; the focused
+local gates pass and a current-revision hosted direct-mount qualification is
+pending.
 The `./9p` constants/message-name/default barrel is now complete against the
 pinned upstream surface, with all 124 constants and all 274 runtime barrel
 exports differentially checked. The transport
@@ -790,6 +795,7 @@ patch):
 | Main | W01 N-API 9P return-shape and direct-option parity | `integrations/mount-rs-napi/types/p9-codec.d.ts`, `integrations/mount-rs-napi/test/types.test.ts`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: `P9Mount.source` is declared as `string`, compile-time checked, and asserted non-empty by the hosted direct mount; generated typecheck, syntax, helper, and diff checks passed locally. Exact SHA `3c884bd8c0d0199a17e4c355c36d45f660c7c786` passed Native 9P run `35665824215`, N-API job `106552944097`, with automatic/direct/structural mounted I/O and cleanup, and Rust job `106552944349` passed all four ignored native tests; the pinned direct `MountP9Options` audit found no additional unrepresented fields. Automatic cross-transport signal ownership and supervisor-owned crash/reset/half-close recovery remain outside this acceptance slice, so production remains NO-GO |
 | Main | W01 N-API 9P public barrel/default parity | `integrations/mount-rs-napi/p9.cjs`, `integrations/mount-rs-napi/postlude-p9-codec.cjs`, `integrations/mount-rs-napi/test/p9-constants.mjs`, `integrations/mount-rs-napi/test/types.test.ts`, `integrations/mount-rs-napi/types/p9-codec.d.ts`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: the direct facade, postlude binding, and generated declarations expose the six pinned oracle defaults; the runtime parity test passes all 124 constants and all 274 upstream 9P barrel exports, with local typecheck, syntax, helper, and diff checks green. Exact SHA `0ad4928e86af89163c8c87d08fea53ccf7f5f89b` passed Native 9P run `35668145703`, N-API job `106558367429`, with automatic/direct/structural mounted I/O and cleanup, and Rust job `106558367006` passed all four ignored native tests; automatic cross-transport signal ownership, native listener `stream: undefined`, supervisor-owned crash/reset/half-close recovery, and broader W01 gates remain explicit, so production remains NO-GO |
 | Main | W01 N-API 9P member representation boundaries | `integrations/mount-rs-napi/test/p9-session-metadata.mjs`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md` | Current bounded packet: local metadata checks prove effective callback hooks are omitted from serializable option snapshots while attached connections retain the supplied Node `Duplex`, peer, closed state, and string/null server views; the direct native test now asserts the native listener's `stream: undefined` and transport-source peer string. Local typecheck, metadata, mount-helper, syntax, and diff checks passed. Hosted run `35669536706` at exact SHA `03529cf30985c2be6503c2909b94e646565cf6fe` exposed the test's incorrect native-Unix `peer: null` expectation; corrected exact SHA `81cc6596c2c9562c3405df50126239a7bcb44f63` passed Native 9P run `35670279904` with N-API job `106565351978` and Rust job `106565352174`, so this representation boundary is hosted-qualified; production remains NO-GO for the broader outstanding gates |
+| Main | W01 N-API 9P optional absence-shape parity | `integrations/mount-rs-napi/postlude-servers.cjs`, `integrations/mount-rs-napi/index.d.ts`, `integrations/mount-rs-napi/test/types.test.ts`, `integrations/mount-rs-napi/test/p9-session-metadata.mjs`, `integrations/mount-rs-napi/test/p9-locks.mjs`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md` | Current bounded packet: the JavaScript facade converts native `null` absence results to oracle-compatible `undefined` for session `msize`/`version`/`userFor` and table/session `getlock`; declarations and focused runtime/type/syntax/diff checks pass locally, and the direct hosted test now carries native session/lock assertions. Current-revision hosted rerun remains required; production remains NO-GO |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
@@ -939,6 +945,12 @@ provider-backed direct-session matrix also passes 128 concurrent NodeFs and
 SQLite PUT/GET pairs in three repetitions with exact byte readback. The
 host-enabled provider-backed network matrix also passes 64 concurrent NodeFs
 and SQLite HTTP PUT/GET pairs in three repetitions, including streamed bodies.
+The current-tip Rust WebDAV target passes 19/19 with the shared Cargo wrapper,
+and warning-denied WebDAV Clippy passes; this does not close external hosted,
+provider-lifecycle, or durability gates.
+The current shell has no AWS/R2/Cloudflare credential names available; live
+provider acceptance remains externally gated and no credential values were
+read or persisted.
 The published provider packet `fb9caec81a7e3fa183f5fa51871117e62fa35036` had
 exact-SHA CI/Fault injection/W08 workflows queued or pending, W04 policy
 succeeded, Live Cloudflare R2 failed, and unrelated Native 9P in progress; no
