@@ -7,11 +7,13 @@
 //! kernel mount client; native mount prerequisites are platform- and
 //! privilege-specific.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use mount_rs_core::{FsDriver, MemoryFs};
+use mount_rs_core::{DirEntry, FileHandle, FsDriver, MemoryFs, Result, Stats};
 use mount_rs_nfs::v4::{
     CLAIM_FH, CLAIM_NULL, CREATE_SESSION4_FLAG_CONN_BACK_CHAN, FATTR4_LEASE_TIME,
     NFS4ERR_BADSESSION, NFS4ERR_GRACE, NFS4ERR_NOSPC, NFS4ERR_RESOURCE, NFS4ERR_SHARE_DENIED,
@@ -25,7 +27,65 @@ use mount_rs_nfs::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::runtime::Builder;
+use tokio::sync::Notify;
 use tokio::time::timeout;
+
+type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+struct GateStatDriver {
+    inner: MemoryFs,
+    block_once: Arc<AtomicBool>,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+impl FsDriver for GateStatDriver {
+    fn capabilities(&self) -> mount_rs_core::Capabilities {
+        self.inner.capabilities()
+    }
+
+    fn stat<'a, 'b, 'async_trait>(&'a self, path: &'b str) -> BoxFuture<'async_trait, Result<Stats>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            if path == "/" && self.block_once.swap(false, Ordering::AcqRel) {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            self.inner.stat(path).await
+        })
+    }
+
+    fn readdir<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> BoxFuture<'async_trait, Result<Vec<DirEntry>>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.inner.readdir(path).await })
+    }
+
+    fn open<'a, 'b, 'c, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        flags: &'c str,
+        mode: u32,
+    ) -> BoxFuture<'async_trait, Result<Arc<dyn FileHandle>>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        'c: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.inner.open(path, flags, mode).await })
+    }
+}
 
 const OP_CLOSE: u32 = 4;
 const OP_COMMIT: u32 = 5;
@@ -1385,6 +1445,102 @@ fn nfs_v4_cached_remove_reply_survives_tcp_reconnect_without_reexecution() {
         .expect("spawn v4 replay test thread")
         .join()
         .expect("v4 replay test thread panicked");
+}
+
+#[test]
+fn nfs_v4_in_flight_retry_waits_then_replays_without_reexecution() {
+    std::thread::Builder::new()
+        .name("nfs-v4-busy-slot-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build v4 busy-slot test runtime")
+                .block_on(async {
+                    let block_once = Arc::new(AtomicBool::new(false));
+                    let entered = Arc::new(Notify::new());
+                    let release = Arc::new(Notify::new());
+                    let server = NfsServer::new(
+                        GateStatDriver {
+                            inner: MemoryFs::empty(),
+                            block_once: Arc::clone(&block_once),
+                            entered: Arc::clone(&entered),
+                            release: Arc::clone(&release),
+                        },
+                        NfsServerOptions::default(),
+                    );
+                    let address = server.listen().await.expect("listen busy-slot NFS server");
+                    let (mut first, client) =
+                        connect_v4_client(address, 701, b"busy-slot-client").await;
+                    let second = TcpStream::connect(address)
+                        .await
+                        .expect("connect second busy-slot transport");
+                    let getattr = |client: &Client| {
+                        compound(
+                            "busy-slot-getattr",
+                            &[
+                                sequence(client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_GETATTR, |writer| writer.u32(0)),
+                            ],
+                        )
+                    };
+                    block_once.store(true, Ordering::Release);
+                    let first_args = getattr(&client);
+                    let first_task = tokio::spawn(async move {
+                        let mut response = rpc(&mut first, 704, first_args).await;
+                        response.rest()
+                    });
+                    timeout(Duration::from_secs(2), entered.notified())
+                        .await
+                        .expect("first SEQUENCE reaches blocked backend");
+
+                    let requests_before_retry = server.v4_session().stats().requests;
+                    let retry_args = getattr(&client);
+                    let mut retry_task = tokio::spawn(async move {
+                        let mut second = second;
+                        let mut reply = rpc(&mut second, 705, retry_args).await;
+                        (second, reply.rest())
+                    });
+                    timeout(Duration::from_secs(2), async {
+                        while server.v4_session().stats().requests == requests_before_retry {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("retry reaches the NFSv4 server while original is blocked");
+                    assert!(
+                        timeout(Duration::from_millis(25), &mut retry_task)
+                            .await
+                            .is_err(),
+                        "the in-flight retry must not complete before the original"
+                    );
+                    let mut next_client = client.clone();
+                    next_client.sequence += 1;
+                    release.notify_one();
+                    let first_body = timeout(Duration::from_secs(2), first_task)
+                        .await
+                        .expect("blocked original request completes")
+                        .expect("original request task succeeds");
+                    let mut original = XdrReader::new(&first_body);
+                    parse_compound_header(&mut original, 3);
+                    let (mut second, replay_body) = timeout(Duration::from_secs(2), retry_task)
+                        .await
+                        .expect("queued retry finishes after the original")
+                        .expect("queued retry task succeeds");
+                    assert_eq!(replay_body, first_body);
+                    let mut fresh = rpc(&mut second, 708, getattr(&next_client)).await;
+                    parse_compound_header(&mut fresh, 3);
+                    second.shutdown().await.expect("close busy-slot transport");
+                    server.close().await.expect("close busy-slot NFS server");
+                });
+        })
+        .expect("spawn v4 busy-slot test thread")
+        .join()
+        .expect("v4 busy-slot test thread panicked");
 }
 
 #[test]

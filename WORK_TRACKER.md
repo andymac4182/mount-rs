@@ -2021,6 +2021,16 @@ Evidence landed without closing the remaining W01 acceptance gates:
   diff checks passed. This is completed-request replay in one live process,
   not in-flight same-slot ordering, crash-durable replay, native-client
   ordering, or production acceptance; W01-NFS remains NO-GO.
+- [x] A controlled NFSv4.1 `GETATTR` backend stall now proves an in-flight
+  same-slot retry reaches the server, remains pending, and then receives the
+  exact cached original reply after the first operation finishes; the next
+  sequence succeeds. The focused test passed 10 reruns, the complete locked
+  NFS target passed (40 unit, 1 mountpoint claim with 1 native mount ignored,
+  2 restart, 1 rootless wire, 3 concurrency, 4 errors, 5 lifecycle, 1 v4
+  barrier, 9 v4 wire), and strict Clippy, formatting, and diff checks passed.
+  The retry waits at the per-RPC global lease-sweep write lock, so prompt
+  RFC-recommended `NFS4ERR_DELAY` and independent-slot overlap remain open;
+  this is not crash-durable replay or production acceptance. W01-NFS is NO-GO.
 - [x] The manual hosted NFS run `35670927787` at `fb9caec8` passed its macOS
   native job, while Ubuntu passed native v4.1 and then failed before its v3
   mount because parallel tests collided on a timestamp-only mountpoint.

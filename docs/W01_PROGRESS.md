@@ -330,7 +330,11 @@ recorded in the detailed W01-9P ledger; broader W01 acceptance remains NO-GO.
 W01-NFS also passes a rootless NFSv4.1 completed-request replay across an
 orderly TCP reconnect: the same cached slot/sequence returns the original
 mutating `REMOVE` reply without removing a changed target, and the next
-sequence advances normally. In-flight same-slot ordering, crash-durable
+sequence advances normally. A blocked-backend retry of an in-flight
+same-slot request also reaches the server, waits, and then returns the cached
+original body without re-execution. The per-RPC lease-sweep write lock
+currently serializes v4 calls, so these tests do not prove prompt
+`NFS4ERR_DELAY` or overlapping execution on independent slots. Crash-durable
 replay, native-client ordering, and exact-tip hosted acceptance remain open.
 
 WebDAV's streamed `PUT` boundary is deliberately oracle-compatible rather
