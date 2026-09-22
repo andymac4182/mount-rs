@@ -369,6 +369,22 @@ for await (const frame of native.framesFrom([versionFrame, flushFrame], nativeSh
 assert.deepEqual(nativeSharedFrames.map(bytes), upstreamSharedFrames.map(bytes), "9P sync framesFrom")
 assert.equal(nativeSharedAssembler.pending, upstreamSharedAssembler.pending, "9P shared assembler pending")
 
+const boundedBodies = [
+  ["readRread", upstreamWire.encodeP9((writer) => upstreamProtocol.writeRread(writer, { data: Uint8Array.of(1, 2, 3) }))],
+  ["readTwrite", upstreamWire.encodeP9((writer) => upstreamProtocol.writeTwrite(writer, { fid: 1, offset: 2n, data: Uint8Array.of(1, 2, 3) }))],
+  ["readRreaddir", upstreamWire.encodeP9((writer) => upstreamProtocol.writeRreaddir(writer, { data: Uint8Array.of(1, 2, 3) }))],
+]
+for (const [name, body] of boundedBodies) {
+  const upstreamValue = upstreamProtocol[name](new upstreamWire.P9Reader(body), 3)
+  const nativeValue = native[name](new native.P9Reader(body), 3)
+  assert.deepEqual(plain(nativeValue), plain(upstreamValue), `${name} custom max`)
+  assert.deepEqual(
+    errorShape(native, () => native[name](new native.P9Reader(body), 2)),
+    errorShape(upstreamProtocol, () => upstreamProtocol[name](new upstreamWire.P9Reader(body), 2), upstreamWire),
+    `${name} custom max error`,
+  )
+}
+
 for (const operation of [
   (api) => new api.P9FrameAssembler(6),
   (api) => {
