@@ -19,11 +19,11 @@ use mount_rs_host::HostFs;
 use mount_rs_nfs::constants::{
     CREATE_UNCHECKED, MOUNT_PROGRAM, MOUNT_V3, MOUNTPROC3_MNT, NFS_PROGRAM, NFS_V3, NFS3_OK,
     NFS3ERR_NOENT, NFS3ERR_STALE, NFSPROC3_CREATE, NFSPROC3_GETATTR, NFSPROC3_LOOKUP,
-    NFSPROC3_REMOVE,
+    NFSPROC3_REMOVE, NFSPROC3_RENAME,
 };
 use mount_rs_nfs::protocol::{
     Create3args, DirOpArgs, Sattr3, read_create_res, read_getattr_res, read_lookup_res,
-    read_mount_res, read_wcc_res, write_create_args,
+    read_mount_res, read_rename_res, read_wcc_res, write_create_args,
 };
 use mount_rs_nfs::v4::{
     CLAIM_FH, CLAIM_NULL, CREATE_SESSION4_FLAG_CONN_BACK_CHAN, FATTR4_LEASE_TIME,
@@ -1344,6 +1344,147 @@ fn nfs_v4_open_racing_v3_unlink_keeps_the_shared_handle_pathless() {
                         payload
                     );
                     read.end("raced open read response").unwrap();
+                    server.close().await.unwrap();
+                });
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn nfs_v4_open_survives_v3_rename_over_its_name() {
+    std::thread::Builder::new()
+        .name("nfs-cross-version-rename-over-open".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let inner = MemoryFs::empty();
+                    let old_payload = b"held destination";
+                    inner
+                        .write_file("/destination.txt", old_payload)
+                        .await
+                        .unwrap();
+                    inner
+                        .write_file("/source.txt", b"replacement source")
+                        .await
+                        .unwrap();
+                    let server = NfsServer::new(inner, NfsServerOptions::default());
+                    let address = server.listen().await.unwrap();
+                    let mut v3_stream = TcpStream::connect(address).await.unwrap();
+                    let mut mount = rpc_call(
+                        &mut v3_stream,
+                        901,
+                        MOUNT_PROGRAM,
+                        MOUNT_V3,
+                        MOUNTPROC3_MNT,
+                        encode_xdr(|writer| writer.string("/")),
+                        None,
+                    )
+                    .await;
+                    let root = read_mount_res(&mut mount).unwrap().fh.unwrap();
+                    mount.end("rename-over MOUNT response").unwrap();
+                    let (mut v4_stream, mut client) =
+                        connect_v4_client(address, 910, b"rename-over-open-owner").await;
+                    let mut opened = rpc(
+                        &mut v4_stream,
+                        913,
+                        compound(
+                            "open-rename-destination",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_OPEN, |writer| {
+                                    writer.u32(0);
+                                    writer.u32(OPEN4_SHARE_ACCESS_BOTH);
+                                    writer.u32(0);
+                                    writer.u64(client.clientid);
+                                    writer.var_opaque(b"rename-over-state-owner");
+                                    writer.u32(0);
+                                    writer.u32(CLAIM_NULL);
+                                    writer.string("destination.txt");
+                                }),
+                                op(OP_GETFH, |_| {}),
+                            ],
+                        ),
+                    )
+                    .await;
+                    client.sequence += 1;
+                    parse_compound_header(&mut opened, 4);
+                    consume_sequence_result(&mut opened, "open rename destination");
+                    parse_result_header(&mut opened, OP_PUTROOTFH);
+                    let stateid = consume_open_result(&mut opened, "open rename destination");
+                    parse_result_header(&mut opened, OP_GETFH);
+                    let old_handle = opened.var_opaque(128, "held destination handle").unwrap();
+                    opened.end("open rename destination response").unwrap();
+
+                    let mut renamed = rpc_call(
+                        &mut v3_stream,
+                        902,
+                        NFS_PROGRAM,
+                        NFS_V3,
+                        NFSPROC3_RENAME,
+                        encode_xdr(|writer| {
+                            writer.var_opaque(&root);
+                            writer.string("source.txt");
+                            writer.var_opaque(&root);
+                            writer.string("destination.txt");
+                        }),
+                        None,
+                    )
+                    .await;
+                    assert_eq!(read_rename_res(&mut renamed).unwrap().status, NFS3_OK);
+                    renamed.end("v3 rename-over response").unwrap();
+                    let mut replacement = rpc_call(
+                        &mut v3_stream,
+                        903,
+                        NFS_PROGRAM,
+                        NFS_V3,
+                        NFSPROC3_LOOKUP,
+                        encode_xdr(|writer| {
+                            writer.var_opaque(&root);
+                            writer.string("destination.txt");
+                        }),
+                        None,
+                    )
+                    .await;
+                    let new_handle = read_lookup_res(&mut replacement).unwrap().object.unwrap();
+                    replacement.end("replacement LOOKUP response").unwrap();
+                    assert_ne!(old_handle, new_handle);
+
+                    let mut read = rpc(
+                        &mut v4_stream,
+                        914,
+                        compound(
+                            "read-renamed-over-open",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTFH, |writer| writer.var_opaque(&old_handle)),
+                                op(OP_READ, |writer| {
+                                    writer.fixed_opaque(&stateid, 16);
+                                    writer.u64(0);
+                                    writer.u32(old_payload.len() as u32);
+                                }),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut read, 3);
+                    consume_sequence_result(&mut read, "read replaced destination");
+                    parse_result_header(&mut read, OP_PUTFH);
+                    parse_result_header(&mut read, OP_READ);
+                    assert!(read.bool("replaced destination eof").unwrap());
+                    assert_eq!(
+                        read.var_opaque(128, "replaced destination bytes").unwrap(),
+                        old_payload
+                    );
+                    read.end("read replaced destination response").unwrap();
                     server.close().await.unwrap();
                 });
         })

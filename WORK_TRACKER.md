@@ -2529,6 +2529,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   exact 782 MB disposable target was removed after checking for open handles.
   Cross-process arbitration, native v4 ordering, crash/power-loss durability,
   exact-tip hosted acceptance, and production readiness remain open.
+- [x] W01-NFS rename-overwrite now preserves a destination handle pinned by
+  NFSv4 OPEN. The unit regression first returned `ESTALE` after replacing the
+  pinned name; the fix keeps its identity pathless, detaches its inode key, and
+  retires it on final unpin. A real-TCP v4 OPEN/v3 RENAME-over test reads the
+  original bytes while fresh v3 LOOKUP obtains a distinct replacement handle.
+  Ten wire reruns, full locked NFS (43 unit, 25 v4 wire), warning-denied
+  NFS/N-API Clippy, and formatting pass locally. Native v4 ordering,
+  cross-process recovery, crash/power-loss durability, exact-tip hosted
+  acceptance, and production readiness remain open.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
