@@ -25,7 +25,8 @@ mainline work and published in public merge tip `056e7a15`. The latest FUSE
 qualification commit `052dc184` was reconciled and published in public merge
 tip `a921fe76`; the subsequent pointer synchronization was published in
 `ff29dad7`. The current source qualification is public tip `6797a2d8`; the
-ledger refresh below is pending publication.
+source-equivalent ledger refresh was published in public merge tip `2e7d5b47`
+after reconciling a W07 documentation-only change.
 Earlier source-health results at `4b9787f9`, `7addaf12`,
 `77114d4d`, `229a9cd5`,
 `b7d77432`, `be721a20`,
@@ -589,6 +590,7 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-22 11:40–11:43 AEST | Merged concurrent public tip `87b2e2f0`, reran the full locked workspace test and strict Clippy on merged tip `c596c1e6`, reran all W08 policy/evidence suites, and ran diff checks. The new WebDAV native-concurrency test remains explicitly host-gated. | ~0.1 engineer-day | ~1.38s test/Clippy/policy execution plus ~9s merge/static verification | The WebDAV source merge is clean and production remains NO-GO; native host prerequisites and P09 hosted/release prerequisites remain external. This qualification is pending publication. |
 | 2026-09-22 11:43–11:45 AEST | Merged concurrent public tip `412c422e`, reran the full locked workspace test and strict Clippy on merged tip `944c78c6`, syntax-checked changed N-API JavaScript, parsed package JSON, reran all W08 policy/evidence suites, and ran diff checks. | ~0.1 engineer-day | ~2.08s test/Clippy/policy execution plus ~9s merge/static verification | The 9P frame-assembler/source merge is clean and production remains NO-GO; native host prerequisites and P09 hosted/release prerequisites remain external. This qualification is pending publication. |
 | 2026-09-22 11:45–11:49 AEST | Reconciled the post-push public W05 provider-matrix lockfile/documentation tip `6797a2d8`, reran the full locked workspace test and strict Clippy at that exact public source, reran all W08 policy/evidence suites, and reverified diff checks. | ~0.1 engineer-day | ~16s test/Clippy/policy execution plus ~8s public-ref reconciliation | The exact public mainline is source-health clean and production remains NO-GO; W05 changes are unrelated to W08 production evidence. P01–P09 remain open. |
+| 2026-09-22 11:49–11:52 AEST | Committed the public-tip ledger refresh, reconciled concurrent W07 documentation-only changes, pushed public merge tip `2e7d5b47`, and verified exact local/remote equality, public ref, clean tree and ancestry. | ~0.05 engineer-day | ~8s fetch/merge/push verification | The W08 source qualification remains the exact `6797a2d8` public tree; the production packet remains NO-GO with nine open gates and zero evidence records. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol
