@@ -4,8 +4,9 @@ Updated: 2026-09-22. Baseline: local commit `21803fd` plus the sequentially
 published `main` updates listed below. Overall status: **in progress;
 not release-ready**.
 
-Current W26 implementation/qualification boundary (2026-09-22): the ledger
-publication is now at `origin/main=be60087451bd397b3f8a72186550f465dd9819fb`,
+Current W26 implementation/qualification boundary (2026-09-22): the latest
+shared build-on tip before this tracker update is
+`origin/main=8520e362710a4b3fe00fd567cf00fcc13e64c222`,
 with the atomic-write wrapper fix in ancestor commit `116e9ed4`
 (`perf(w26): preserve atomic write path
 through wrappers`). The N-API `DriverSlot`, `MountDriver`, observability and
@@ -17,13 +18,15 @@ diff scan `2582d7c0-130a-454e-beb3-ffba77169e3e` completed with complete
 changed-file coverage and zero reportable findings. The fresh retained manual
 qualification is GitHub Actions run
 `35698854392 <https://github.com/andymac4182/mount-rs/actions/runs/35698854392>`
-on exact implementation SHA `116e9ed4`; at dispatch capture its four W26 producers were queued and
-the aggregate was not yet acceptance evidence. Prior targeted rows remained
-below the hard `>=1,000` IOPS-per-drive target for SQLite/R2 `580.6091135`,
-PGlite/R2 `963.6041014`, TiDB/R2 `385.2624172` and FoundationDB/R2
-`337.4773006`, so production is **NO-GO** until the new exact-SHA packet is
-terminal and all providers, end-to-end markers, security, Tier-1 SLO and
-customer-owned backup/DR gates are separately evidenced. W26 tracks
+on exact implementation SHA `116e9ed4`; its four W26 producers are now
+terminal and aggregate `106656637297` failed closed. The terminal exact-SHA packet
+measured SQLite/R2 `1051.976655` IOPS, PGlite/R2 `837.779225`, TiDB/R2
+`463.080116` and FoundationDB/R2 `450.696578`; all rows had 400/400
+successful lifecycles and zero timeout/cleanup failures, but only SQLite
+passed the hard target. TiDB and FoundationDB also retained `RUSTFS_COMBO_FAIL`.
+Production is **NO-GO** until a new exact-SHA packet passes all providers,
+end-to-end markers, security, Tier-1 SLO and customer-owned backup/DR gates.
+W26 tracks
 compatibility and qualification for customer-deployed Ozone; it does not
 deploy Ozone, own backup/DR or own releases.
 
