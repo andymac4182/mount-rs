@@ -274,9 +274,11 @@ export interface P9Mount extends Mounted {
   waitClosed(): Promise<void>
 }
 
+export type P9Platform = "linux"
+
 export interface P9ClientProbe {
   usable: boolean
-  platform: "linux" | undefined
+  platform: P9Platform | undefined
   kernel: boolean
   transport: boolean
   modules: boolean
@@ -285,7 +287,7 @@ export interface P9ClientProbe {
 }
 
 export declare function p9ClientProbe(platform?: NodeJS.Platform): P9ClientProbe
-export declare function p9Platform(platform?: NodeJS.Platform): "linux" | undefined
+export declare function p9Platform(platform?: NodeJS.Platform): P9Platform | undefined
 export declare function socketPathRefusal(path: string): string | undefined
 export declare function tcpSourceRefusal(host: string): string | undefined
 export declare function p9MountOptions(target: P9MountTarget, options?: MountP9Options): string
