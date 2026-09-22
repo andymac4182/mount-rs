@@ -1058,12 +1058,20 @@ pub fn parse_xml(body: &[u8], max_bytes: usize) -> Result<XmlNode, DavFault> {
 }
 
 fn escape_xml(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
+    let mut escaped = String::new();
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            '\r' => escaped.push_str("&#13;"),
+            character if is_xml_character(character as u32) => escaped.push(character),
+            _ => escaped.push('\u{fffd}'),
+        }
+    }
+    escaped
 }
 
 fn render_node(node: &XmlNode, inherited_ns: &str) -> String {

@@ -81,6 +81,11 @@ as `ENOSYS`.
   the pinned oracle's Unicode token payloads without slicing through a code
   point or panicking, while still rejecting empty and nested-angle tokens. The
   focused `<urn:uuid:é>` regression protects this public parser boundary.
+- Keep public XML serialization safe and oracle-compatible: text and namespace
+  values must escape carriage returns as `&#13;`, replace XML-invalid controls
+  with U+FFFD, and retain ordinary markup escaping. The focused serializer
+  regression covers both output locations and the derived WebDAV documents use
+  the same encoder.
 - Keep lock-root cleanup fail-closed across provider recovery faults: after a
   DELETE or MOVE, remove a lock only when `stat` confirms `ENOENT`; retain it
   when the provider returns an I/O error and the namespace cannot be resolved.
@@ -275,6 +280,7 @@ as `ENOSYS`.
 | 2026-09-22 | WebDAV declared-length preflight observability | The Rust HTTP adapter now routes a declared Content-Length overflow through session rejection bookkeeping before adding Connection: close, so request/reply/error stats and the request-level onError hook remain exact-once; the real-loopback regression verifies the 413 status, original PUT head, and counters, including bodyless HEAD handling in the shared helper. The full WebDAV target passed 36/36, warning-denied workspace Clippy, formatting, git diff --check, and the pinned 40-case S3+WebDAV differential passed | This closes a local HTTP preflight observability boundary only; authentication-ordering policy, hosted/provider qualification, power-loss ordering, crash/power-loss filesystem durability, durable lock persistence, and the explicit same-resource ordering boundary remain open |
 | 2026-09-22 | WebDAV lock coverage ordering | Public covering and within lookups now iterate the grant-order index instead of HashMap values, making lock-discovery lists, locked-member results, and first-conflict selection deterministic like the pinned Map; the focused regression covers ancestor/direct coverage, subtree roots, and the selected 423 conflict, while the full WebDAV target passed 37/37, warning-denied workspace Clippy, formatting, git diff --check, and the pinned 40-case differential passed | This closes a local public/session lock-order boundary only; hosted/provider qualification, power-loss ordering, crash/power-loss filesystem durability, durable lock persistence, and the explicit same-resource ordering boundary remain open |
 | 2026-09-22 | WebDAV Unicode lock-token parser safety | `parse_lock_token` now uses UTF-8-safe delimiter handling instead of byte-offset slicing: the pinned-oracle-compatible `<urn:uuid:é>` token is accepted without panic and `<a><b>` remains rejected. The focused protocol fixture and full WebDAV target passed 37/37, warning-denied workspace Clippy, formatting, `git diff --check`, and the pinned 40-case differential passed | This closes a local public parser safety/parity boundary only; hosted/provider qualification, power-loss ordering, crash/power-loss filesystem durability, durable lock persistence, and the explicit same-resource ordering boundary remain open |
+| 2026-09-22 | WebDAV XML serializer safety/parity | `xml_document` now matches the pinned codec for hostile text and namespace values: CR becomes `&#13;`, invalid XML controls become U+FFFD, and markup remains escaped. The focused text/`xmlns` fixture and full WebDAV target passed 37/37, warning-denied workspace Clippy, formatting, `git diff --check`, and the pinned 40-case differential passed | This closes a local public XML-encoding safety/parity boundary only; hosted/provider qualification, power-loss ordering, crash/power-loss filesystem durability, durable lock persistence, and the explicit same-resource ordering boundary remain open |
 
 ## Completion rule
 

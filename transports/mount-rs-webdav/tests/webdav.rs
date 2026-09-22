@@ -12,6 +12,7 @@ use mount_rs_core::{
 use mount_rs_webdav::protocol::{
     RangeSpec, collect_body, href_of, parse_depth, parse_destination, parse_if, parse_lock_info,
     parse_lock_token, parse_overwrite, parse_range, parse_target_path, parse_xml, status_of_error,
+    xml_document,
 };
 use mount_rs_webdav::{
     ALLOW_HEADER, DAV_COMPLIANCE, DAV_NS, DavFault, DavLockGrant, DavLockRequest, DavLockTable,
@@ -1539,6 +1540,13 @@ async fn protocol_fixtures_match_mountx_path_and_header_rules() {
         Some("urn:uuid:é".to_owned())
     );
     assert_eq!(parse_lock_token(Some("<a><b>")), None);
+    let mut xml = mount_rs_webdav::XmlNode::new("x");
+    xml.ns = "urn:test\r\u{1}".to_owned();
+    xml.text = "a\r\u{1}&<'\"".to_owned();
+    assert_eq!(
+        xml_document(&xml),
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><x xmlns=\"urn:test&#13;�\">a&#13;�&amp;&lt;&apos;&quot;</x>"
+    );
     let lock_info = parse_lock_info(
         br#"<D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype><D:owner><Z:name xmlns:Z="urn:test">A&amp;B&#x21;</Z:name></D:owner></D:lockinfo>"#,
         256 * 1024,
