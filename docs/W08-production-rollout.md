@@ -162,8 +162,9 @@ tests and strict Clippy with `-D warnings` using a bounded external Cargo
 target. This is implementation evidence only; credentialed provider,
 production topology, operational, canary and approval gates remain open.
 
-Tested source base `522390782c5bc42ca7f790f2c8d0e20daebf3165` was freshly
-reverified locally after the 9P platform-type alias and 9P direct-probe
+Tested source base `59d705446608beb69d4c24a03997e21ea6f823db` was freshly
+reverified locally after the W26 fenced-metadata publication fast path, the
+9P platform-type alias and 9P direct-probe
 absence-field normalization and
 WebDAV shared-resource ordering qualification, plus the concurrent WebDAV
 mounted-restart cleanup correction, chunked lease-release fix, 9P synchronous
@@ -182,9 +183,8 @@ packet remains NO-GO with zero evidence records. Changed N-API JavaScript and
 package JSON also passed static checks. This is source-health and tracking-
 control evidence only and does not close any production gate. Provider/native
 rows requiring TiDB, RustFS, PGlite, R2, FUSE or NFS remained explicit opt-in
-skips. The later reconciled `HEAD` `8b364ce8` changed only W07/site
-documentation and provider-copy text and is source-equivalent to this
-qualification.
+skips. This exact merged source was requalified after the W26 source change;
+no source result is inferred from a documentation-only merge.
 
 A fresh credential-free admission check at **2026-09-22 11:36 AEST** passed the
 positive production-config fixture with a non-secret TLS-policy URL supplied
