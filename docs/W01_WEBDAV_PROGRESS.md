@@ -44,8 +44,9 @@ acceptance.
   256-pair live HTTP ceiling through hosted and power-loss/live-provider
   boundaries where applicable.
 - Exercise power-loss and live-provider restart behavior through the N-API
-  boundary; the local NodeFs and SQLite process-crash recovery probes now pass, while
-  orderly close-timeout retry and forced connection cancellation are covered.
+  boundary; the local NodeFs and SQLite orderly and in-flight streamed-PUT
+  process-crash recovery probes now pass, while orderly close-timeout retry and
+  forced connection cancellation are covered.
 - Keep the N-API wrapper lifecycle race regression green; the package-wide
   server harness still has an unrelated NFS prerequisite failure before its
   WebDAV phase, so it is not promoted to WebDAV acceptance.
@@ -63,6 +64,7 @@ acceptance.
 
 | Date | Chunk | Result | Remaining blocker |
 | --- | --- | --- | --- |
+| 2026-09-22 | WebDAV in-flight streamed PUT process-crash recovery | Three parallel repetitions of `node test/webdav-inflight-crash.mjs` passed: each child yielded the exact prefix, independently read it back before forced `SIGKILL`, and a replacement NodeFs and SQLite provider returned `200` with the exact prefix and zero replacement-session locks | This is local process-crash evidence after provider readback only; it does not qualify power-loss ordering, durable locks, live-provider behavior, hosted session/lifecycle, or hosted concurrency |
 | 2026-09-22 | WebDAV in-place PUT failure semantics | `CARGO_TARGET_DIR=/private/tmp/mount-rs-w01-webdav-inplace-target ./scripts/cargo-shared test -p mount-rs-webdav --test webdav --locked failed_streaming_put_preserves_the_written_prefix_by_contract` passed 1/1, and the host-enabled `MOUNT_RS_SERVER_PHASE=webdav node test/servers.mjs` phase passed with the same assertion through N-API: a failed streamed `PUT` returns `500` and leaves exactly `partial` at the destination | This is an explicit match to the pinned oracle's documented in-place PUT contract at `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`; it is not atomic publication, power-loss ordering, live-provider durability, or hosted acceptance |
 | 2026-09-22 | WebDAV pure barrel and buffered N-API session | `./scripts/cargo-shared test -p mount-rs-webdav --locked`: 13 passed, native mount probe explicitly ignored; isolated locked N-API check passed; release N-API build and generated declarations passed; direct buffered session/options/driver/auth check passed | Broader session/server parity, loopback N-API listener in this sandbox (`Operation not permitted` without host execution), streaming, peer-fault, restart/durability, provider, and native/hosted gates remain open |
 | 2026-09-22 | WebDAV pinned pure oracle differential | `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921 node test/webdav-codec.mjs` passed the complete pure constants/path/header/XML/lock/document differential at oracle `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`; the same source-backed host-enabled `node test/servers.mjs` also passed | Full session/server member differential, native/hosted lifecycle, provider qualification, crash/power-loss durability, and broader concurrency remain open |
