@@ -933,6 +933,8 @@ and the focused direct-session concurrency probe passes 256 concurrent PUT/GET
 requests, while the network-concurrency/auth test passes 256 concurrent HTTP
 PUT/GET pairs, a chunked streamed PUT/GET, live Basic-auth
 challenge/acceptance, and one exact-once live request-error callback. The
+provider-backed direct-session matrix also passes 128 concurrent NodeFs and
+SQLite PUT/GET pairs in three repetitions with exact byte readback. The
 opt-in
 `MOUNT_RS_SERVER_PHASE=webdav node test/servers.mjs` phase also passes the
 host-enabled WebDAV network/fault/restart matrix, while the package-wide
@@ -1582,6 +1584,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   locks. This classifies local in-flight process-crash recovery only; power-loss
   ordering, live-provider behavior, durable locks, hosted lifecycle, and hosted
   concurrency remain open.
+- [x] The focused N-API provider-backed WebDAV concurrency probe is now part of
+  the package test sequence: three repetitions at
+  `MOUNT_RS_WEBDAV_PROVIDER_CONCURRENCY=128 node
+  test/webdav-provider-concurrency.mjs` passed 128 concurrent direct-session
+  PUT/GET pairs for both NodeFs and SQLite with exact bytes and matching method
+  counters. This is local provider evidence only; hosted remote-provider,
+  network, power-loss, durable-lock, and wider ordering gates remain open.
 - [x] Direct JavaScript peer-fault qualification now drives abortive Node
   socket resets against both S3 and WebDAV after session-reply readiness. Each
   N-API callback delivered exactly once with the accepted peer, repeated
