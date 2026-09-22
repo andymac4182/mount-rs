@@ -10,8 +10,8 @@ use bytes::Bytes;
 use mount_rs_core::{ErrorCode, FileType, FsDriver, FsError, MkdirOptions, Stats};
 
 use crate::constants::{
-    ALLOW_HEADER, COLLECTION_CONTENT_TYPE, DAV_COMPLIANCE, DAV_NS, MS_AUTHOR_VIA, READ_CHUNK_BYTES,
-    RESOURCE_CONTENT_TYPE, status_for_error,
+    ALLOW_HEADER, COLLECTION_CONTENT_TYPE, DAV_COMPLIANCE, DAV_NS, MAX_PROPFIND_ENTRIES,
+    MS_AUTHOR_VIA, READ_CHUNK_BYTES, RESOURCE_CONTENT_TYPE, status_for_error,
 };
 use crate::locks::{
     DavLock, DavLockGrant, DavLockRequest, DavLockTable, DavLockTableOptions, LockDepth,
@@ -924,8 +924,17 @@ impl WebdavSession {
             for entry in entries {
                 let child = join(source, &entry.name);
                 let target = join(destination, &entry.name);
-                let Some(child_stats) = self.stat_or_absent(&child).await.ok().flatten() else {
-                    continue;
+                let child_stats = match self.stat_or_absent(&child).await {
+                    Ok(Some(stats)) => stats,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        failures.push(Failure {
+                            path: child,
+                            collection: entry.file_type == FileType::Directory,
+                            status: status_of_error(&error),
+                        });
+                        continue;
+                    }
                 };
                 if entry.file_type == FileType::Symlink && child_stats.is_directory() {
                     failures.push(Failure {
@@ -965,7 +974,14 @@ impl WebdavSession {
                 let wanted = (size - position).min(buffer.len() as u64) as usize;
                 let count = from.read(&mut buffer[..wanted], Some(position)).await?;
                 if count == 0 {
-                    break;
+                    return Err(FsError::new(ErrorCode::Eio)
+                        .with_syscall("read")
+                        .with_message("short WebDAV COPY source"));
+                }
+                if count > wanted {
+                    return Err(FsError::new(ErrorCode::Eio)
+                        .with_syscall("read")
+                        .with_message("driver returned more bytes than requested"));
                 }
                 let mut written = 0;
                 while written < count {
@@ -1020,14 +1036,25 @@ impl WebdavSession {
             status: None,
         }];
         if depth == Depth::One && stats.is_directory() {
-            for entry in self.driver.readdir(path).await? {
+            let children = self
+                .driver
+                .readdir_bounded(path, MAX_PROPFIND_ENTRIES)
+                .await
+                .map_err(propfind_directory_error)?;
+            for entry in children {
                 let child = join(path, &entry.name);
-                if let Some(child_stats) = self.stat_or_absent(&child).await? {
-                    entries.push(MultistatusEntry {
+                match self.stat_or_absent(&child).await {
+                    Ok(Some(child_stats)) => entries.push(MultistatusEntry {
                         href: href_of(&child, child_stats.is_directory()),
                         propstat: self.propstats(&child, &child_stats, &request, now).await?,
                         status: None,
-                    });
+                    }),
+                    Ok(None) => {}
+                    Err(error) => entries.push(MultistatusEntry {
+                        href: href_of(&child, entry.file_type == FileType::Directory),
+                        propstat: Vec::new(),
+                        status: Some(status_of_error(&error)),
+                    }),
                 }
             }
         }
@@ -1714,6 +1741,17 @@ fn join(path: &str, name: &str) -> String {
 
 fn now_ms() -> i64 {
     mount_rs_core::types::now_ms()
+}
+
+fn propfind_directory_error(error: FsError) -> WebdavError {
+    if error.code == ErrorCode::Eoverflow {
+        refuse(413)
+            .with_header("connection", "close")
+            .with_message("the PROPFIND directory listing exceeds its entry budget")
+            .into()
+    } else {
+        error.into()
+    }
 }
 
 fn refuse(status: u16) -> DavFault {

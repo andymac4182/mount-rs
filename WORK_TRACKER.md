@@ -1717,6 +1717,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   against one exclusive lock and both receive `423` without its submitted
   token; clients coordinate shared-resource writes through WebDAV lock/`If`
   state. Provider, power-loss, and durable-lock acceptance remain separate.
+- [x] The WebDAV remote-response and recursive-copy failure boundary is now
+  fail-closed: `Depth: 1` `PROPFIND` asks `FsDriver::readdir_bounded` for at
+  most 4,096 child resources and maps provider `EOVERFLOW` to `413` with
+  `Connection: close`; recursive `COPY` reports child-stat failures and
+  rejects premature or over-reported source reads instead of silently
+  returning incomplete success. The focused WebDAV target passed 24/24,
+  package targets and warning-denied Clippy passed, and the native mount test
+  remains explicitly ignored. Provider/native/hosted qualification,
+  power-loss durability, durable locks, and broader ordering remain open.
 - [x] The WebDAV N-API scope decision now records the oracle-only clock,
   assertion-callback, and live-lock-table boundaries explicitly. The focused
   Rust test `./scripts/cargo-shared test -p mount-rs-webdav --test webdav

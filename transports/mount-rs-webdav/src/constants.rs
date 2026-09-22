@@ -13,6 +13,9 @@ pub const MAX_XML_BYTES: usize = 256 * 1024;
 pub const MAX_XML_DEPTH: usize = 32;
 pub const MAX_XML_ELEMENTS: usize = 100_000;
 pub const DEFAULT_MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum number of child resources materialized by a `Depth: 1` PROPFIND.
+/// Drivers enforce the bound before returning the directory listing.
+pub(crate) const MAX_PROPFIND_ENTRIES: usize = 4096;
 pub const READ_CHUNK_BYTES: usize = 128 * 1024;
 pub const LOCK_TOKEN_PREFIX: &str = "urn:uuid:";
 pub const DEFAULT_LOCK_TIMEOUT_SECONDS: u64 = 600;
