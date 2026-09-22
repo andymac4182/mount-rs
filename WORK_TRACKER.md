@@ -4608,6 +4608,14 @@ reproducible in a production-like environment.
   restart/typecheck/distribution checks passed; live providers, power-loss
   durability, broader workload bounds, and native/hosted acceptance remain
   open, so W01-S3 stays **NO-GO**.
+- [x] The automatic provider runs for published packet `4f9120a2` were
+  refreshed: AWS run `35690334807` stopped at
+  `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while R2 run `35690334795`
+  stopped at `R2 CI monthly run cap already exceeded: count=317 limit=20`
+  before live admission. No service PASS is claimable; protected AWS
+  configuration, the R2 budget reset, physical power-loss durability, broader
+  workload bounds, and native/hosted acceptance remain open, so W01-S3 stays
+  **NO-GO**.
 - [x] The automatic provider runs for published packet `f607d445` were
   refreshed: AWS run `35688895917` stopped at
   `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while R2 run `35688895958`
@@ -5528,6 +5536,16 @@ Current hosted dispatch after the published SQLite chunk: manual run
 `106623193474` and FoundationDB `106623193564` were in progress; the
 aggregate was not yet created. This packet is **NO-GO / not evidence** until
 all producers and the aggregate are terminally successful on that one SHA.
+
+Provider-result update for the same run: base Ozone `106623193674` passed;
+compositions `106623193668` failed because PGlite/R2 measured `766.631418`
+IOPS even though SQLite/R2 measured `1,325.636778`; TiDB `106623193474`
+measured `292.606794` IOPS and FoundationDB `106623193564` measured
+`410.703639` IOPS. Every provider completed 1,200/1,200 lifecycle operations
+with zero timeouts and zero cleanup failures. Aggregate `106625464560` remains
+queued, so this is still diagnostic and **NO-GO**; the next implementation
+focus is the remaining PGlite/TiDB/FoundationDB performance gap, not lowering
+the target or weakening the verifier.
 
 The current W26 source of truth is the detailed [progress ledger](docs/w26-progress-ledger.md).
 `origin/main` is `1626d5381625d81696fa28624342f07087593760`, including the

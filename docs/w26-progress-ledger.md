@@ -1498,3 +1498,22 @@ This packet remains **NO-GO** until every producer and the aggregate are
 terminally successful on the same revision. Any provider failure, skip,
 configuration failure, missing artifact or missing marker must remain a
 fail-closed diagnostic result.
+
+## Current exact-SHA provider-result correction — run `35689474986`
+
+The four provider jobs have since become terminal on the selected SHA
+`1891c36375296bc3695a9d71233c624cad46445c`. The aggregate job
+`106625464560` is still queued, so this is a partial packet update and not an
+acceptance result.
+
+| Provider | Terminal result | Lifecycle evidence | Remaining action |
+| --- | --- | --- | --- |
+| SQLite/R2 | **PASS row**: `1,325.636778` IOPS, elapsed `905.225338 ms`; p95 write/read/delete `152.742148/16.861092/15.101845 ms` | 400 writes, 400 verified reads and 400 deletes; 1,200/1,200; timeout 0; cleanup failures 0 | Preserve this result and recheck it on the final aggregate packet; this is the first current-tip SQLite pass after `1e7e7571` |
+| PGlite/R2 | **FAIL**: `766.631418` IOPS, elapsed `1,565.289358 ms`; p95 write/read/delete `258.600725/25.202828/15.859995 ms` | 1,200/1,200; timeout 0; cleanup failures 0; `IOPS_TARGET_NOT_MET` | Continue PGlite-specific publication/remote-latency investigation; do not average with SQLite |
+| TiDB/R2 | **FAIL**: `292.606794` IOPS, elapsed `4,101.066772 ms`; p95 write/read/delete `778.754505/201.422311/65.283270 ms` | 1,200/1,200; timeout 0; cleanup failures 0; `IOPS_TARGET_NOT_MET` | Continue TiDB-specific performance work after the aggregate result; preserve durable/restart/fencing evidence |
+| FoundationDB/R2 | **FAIL**: `410.703639` IOPS, elapsed `2,921.814870 ms`; p95 write/read/delete `457.390808/22.661206/41.907334 ms` | 1,200/1,200; timeout 0; cleanup failures 0; `IOPS_TARGET_NOT_MET`; durable/preflight/restart/bounded-listing markers passed | Continue FoundationDB-specific performance work; retain strict lockfile and durability markers |
+
+The provider rows remain diagnostic until the aggregate verifies the complete
+artifact set and marker contract. The current production decision is **NO-GO**:
+one provider passes the hard row, three do not, and the aggregate is not
+terminal.
