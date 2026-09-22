@@ -397,6 +397,15 @@ Current focused behavior:
   formatting, and diff checks passed. This qualifies the supported reset/
   destroy semantics only; process-crash/arbitrary-kernel-reset recovery and
   broader upstream session parity remain separate.
+- The direct N-API `P9Session` runtime member audit now compares the native
+  semantic set (`driver`, `options`, `fids`, `locks`, `stats`, `assertions`,
+  `msize`, `version`, `generation`, `inflight`, `destroyed`, `userFor`,
+  `handleCall`, and `destroy`) with the pinned oracle's set; both pass locally.
+  Exact SHA `fb532b46fd8b6c5af66dc9b771e84116b2997ca3` has [Native 9P run
+  `35694841984`](https://github.com/andymac4182/mount-rs/actions/runs/35694841984)
+  queued with N-API job `106639369581` and Rust job `106639369868`, so no
+  hosted PASS is claimed yet. Broader protocol/session behavior remains a
+  separate gate.
 - The N-API object boundary keeps serializable lifecycle views: native
   `P9Server.address()`/`path` use string-or-null representations, and effective
   `onError`/`onAssertion` hooks are omitted from `server.options` and

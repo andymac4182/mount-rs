@@ -151,6 +151,16 @@ full `mount-rs-9p`, strict Clippy, formatting, and diff checks passed. Crash/
 reset recovery, broader parity, and W01 gates remain open, so production
 remains NO-GO.
 
+The follow-up W01-9P direct-session member-surface packet was published at
+exact SHA `fb532b46fd8b6c5af66dc9b771e84116b2997ca3`. Its local regression
+compares the native direct `P9Session` semantic member set with the pinned
+oracle's 14-member set and passes alongside the adjacent metadata,
+observability, fid, mount-helper, typecheck, syntax, and diff checks. The
+exact hosted [Native 9P run `35694841984`](https://github.com/andymac4182/mount-rs/actions/runs/35694841984)
+is queued with N-API job `106639369581` and Rust job `106639369868`; it is
+pending evidence, not a hosted PASS. Broader session/protocol parity,
+crash/reset scope, and W01 gates remain open, so production remains NO-GO.
+
 The preceding W01-9P transport-teardown packet was published at exact SHA
 `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` and passed [Native 9P run
 `35685073733`](https://github.com/andymac4182/mount-rs/actions/runs/35685073733):
