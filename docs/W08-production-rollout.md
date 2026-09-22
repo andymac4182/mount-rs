@@ -503,6 +503,17 @@ changes. Hosted W08 run `35703582574` targets the exact merge and remained
 runs, HTTP 404 for `w08-production`, only `v0.1.0-cli-preview`, and no
 production-candidate tag. P01–P09 remain open and the decision remains NO-GO.
 
+The latest source-bearing N-API/9P updates were requalified in exact merged
+source `35523b9f` after public base `24b83a60`: the full locked workspace test,
+strict Clippy, six workflow YAML parses, changed N-API/package checks including
+the 9P lifecycle/order tests, W07 platform-evidence control, all W07/W08
+tracking/evidence suites and diff hygiene passed. Public main then advanced
+with documentation-only W05/W08 reconciliation through `f177e067`; hosted
+W08 run `35704230143` targets that exact public tip and was `pending` at 18:20
+AEST. This is source-health and hosted scheduling evidence only; no provider,
+native, production, candidate, canary, rollback or approval gate is closed.
+P01–P09 remain open and the decision remains NO-GO.
+
 After origin/main advanced with the 9P EOF/backpressure server fix `1179d9e3`,
 N-API test expansion and site component updates, exact merged source
 `d725248534eb897de4d49e916c47425e6266c05d` was freshly requalified. The full
