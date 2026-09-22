@@ -632,12 +632,25 @@ Intel Node jobs completed successfully, while Ubuntu Node and both native
 WebDAV jobs remained queued at the audit. No terminal current hosted WebDAV
 result is claimable, so this does not change the production **NO-GO** decision.
 
+At current published tip `176445b037196f901c80d032a957fbb55eb9b5ed`, the
+shared-wrapper WebDAV Rust requalification passed 41/41; warning-denied
+WebDAV Clippy, formatting, `git diff --check`, and the no-worktree-`target/`
+check also passed. This is current local transport evidence only and does
+not promote the queued Ubuntu native job or the live-provider and durability
+gates.
+
 The preserved non-canceling run remained in the same queue state on the next
 bounded poll: macOS arm64, macOS Intel, and Ubuntu arm64 Node jobs are
 terminal success, while Ubuntu Node `106702902010` and native WebDAV jobs
 `106702902155`/`106702902262` remain queued. This is an external GitHub
 runner-capacity blocker, not a test failure; no current hosted native WebDAV
 result is claimable.
+
+The preserved run then completed macOS native-WebDAV job `106702902262`
+successfully: checkout, toolchain/cache, and the native WebDAV I/O command
+all passed, with only the Linux client-install step skipped by platform. The
+Ubuntu native-WebDAV job `106702902155` remains queued, so the current
+cross-platform hosted native gate is still open.
 
 The same rebuilt package also passed the pinned barrel differential, supported
 session/member differential, and current TypeScript/Rust HTTP differential:
