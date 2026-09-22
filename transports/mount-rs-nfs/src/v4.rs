@@ -2259,14 +2259,17 @@ impl Nfs4Session {
         let mut status = NFS4_OK;
         for operation in operations.iter().skip(1) {
             let mut result = self.execute_op(operation, &mut cursor, credentials).await;
-            if *cachethis && result.status == NFS4_OK && matches!(operation, Op::Readdir { .. }) {
-                // READDIR has no mutation to replay. If its variable-length
-                // result would overflow a required cache, retain the earlier
-                // operation results and cache a bounded error on READDIR.
+            if *cachethis
+                && result.status == NFS4_OK
+                && matches!(operation, Op::Read { .. } | Op::Readdir { .. })
+            {
+                // READ and READDIR have no mutation to replay. If a
+                // variable-length result would overflow a required cache,
+                // retain earlier results and cache a bounded error here.
                 let mut candidate = results.clone();
                 candidate.push(result.clone());
                 if compound_body(NFS4_OK, &tag, &candidate).len() > session.max_cached {
-                    let error = V4OpResult::new(OP_READDIR, NFS4ERR_REP_TOO_BIG_TO_CACHE);
+                    let error = V4OpResult::new(operation.opnum(), NFS4ERR_REP_TOO_BIG_TO_CACHE);
                     candidate.pop();
                     candidate.push(error.clone());
                     if compound_body(NFS4ERR_REP_TOO_BIG_TO_CACHE, &tag, &candidate).len()

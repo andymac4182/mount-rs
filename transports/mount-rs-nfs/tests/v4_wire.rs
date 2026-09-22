@@ -160,6 +160,7 @@ const OP_GETATTR: u32 = 9;
 const OP_GETFH: u32 = 10;
 const OP_LOCK: u32 = 12;
 const OP_LOCKU: u32 = 14;
+const OP_LOOKUP: u32 = 15;
 const OP_OPEN: u32 = 18;
 const OP_OPEN_DOWNGRADE: u32 = 21;
 const OP_PUTFH: u32 = 22;
@@ -1801,6 +1802,121 @@ fn nfs_v4_oversized_uncached_reply_retries_without_repeating_mutation() {
         .expect("spawn oversized replay test thread")
         .join()
         .expect("oversized replay test thread panicked");
+}
+
+#[test]
+fn nfs_v4_cache_required_oversized_read_preserves_mutation_reply() {
+    std::thread::Builder::new()
+        .name("nfs-v4-cache-required-oversized-read-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build oversized READ runtime")
+                .block_on(async {
+                    let driver = MemoryFs::empty();
+                    driver
+                        .write_file("/read-target", &[b'x'; 512])
+                        .await
+                        .unwrap();
+                    driver.write_file("/read-first", b"first").await.unwrap();
+                    driver.write_file("/read-second", b"second").await.unwrap();
+                    let mut options = NfsServerOptions::default();
+                    options.session.nfs4.max_cached_response_size = 256;
+                    let server = NfsServer::new(driver.clone(), options);
+                    let address = server.listen().await.expect("listen NFS server");
+                    let (mut stream, mut client) =
+                        connect_v4_client(address, 1101, b"oversized-read-client").await;
+
+                    let mut original = rpc(
+                        &mut stream,
+                        1104,
+                        compound(
+                            "read-big",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("read-first")),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_LOOKUP, |writer| writer.string("read-target")),
+                                op(OP_READ, |writer| {
+                                    writer.fixed_opaque(&[0; 16], 16);
+                                    writer.u64(0);
+                                    writer.u32(512);
+                                }),
+                            ],
+                        ),
+                    )
+                    .await;
+                    let original_body = original.rest();
+                    assert!(original_body.len() <= 256, "response must be cacheable");
+                    let mut parsed = XdrReader::new(&original_body);
+                    assert_eq!(
+                        parse_compound_status(&mut parsed, 6),
+                        NFS4ERR_REP_TOO_BIG_TO_CACHE
+                    );
+                    consume_sequence_result(&mut parsed, "oversized READ sequence");
+                    parse_result_header(&mut parsed, OP_PUTROOTFH);
+                    parse_result_header(&mut parsed, OP_REMOVE);
+                    let _ = parsed.bool("remove change atomic").unwrap();
+                    let _ = parsed.u64("remove change before").unwrap();
+                    let _ = parsed.u64("remove change after").unwrap();
+                    parse_result_header(&mut parsed, OP_PUTROOTFH);
+                    parse_result_header(&mut parsed, OP_LOOKUP);
+                    assert_eq!(
+                        parse_result_status(&mut parsed, OP_READ),
+                        NFS4ERR_REP_TOO_BIG_TO_CACHE
+                    );
+                    parsed.end("oversized READ response").unwrap();
+                    assert!(driver.stat("/read-first").await.is_err());
+                    assert!(driver.stat("/read-second").await.is_ok());
+
+                    let mut retry = rpc(
+                        &mut stream,
+                        1105,
+                        compound(
+                            "changed-read-target",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("read-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    assert_eq!(retry.rest(), original_body);
+                    assert!(driver.stat("/read-second").await.is_ok());
+
+                    client.sequence += 1;
+                    let mut fresh = rpc(
+                        &mut stream,
+                        1106,
+                        compound(
+                            "fresh-read-sequence",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("read-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut fresh, 3);
+                    consume_sequence_result(&mut fresh, "fresh READ sequence");
+                    parse_result_header(&mut fresh, OP_PUTROOTFH);
+                    parse_result_header(&mut fresh, OP_REMOVE);
+                    assert!(driver.stat("/read-second").await.is_err());
+
+                    stream.shutdown().await.expect("close NFS transport");
+                    server.close().await.expect("close NFS server");
+                });
+        })
+        .expect("spawn oversized READ test thread")
+        .join()
+        .expect("oversized READ test thread panicked");
 }
 
 #[test]
