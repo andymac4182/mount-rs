@@ -162,8 +162,9 @@ tests and strict Clippy with `-D warnings` using a bounded external Cargo
 target. This is implementation evidence only; credentialed provider,
 production topology, operational, canary and approval gates remain open.
 
-Merged source base `ef5cd2ca28a6b9084b50d60788f0a022afc9224f` was freshly
-reverified locally after the concurrent WebDAV mounted-restart qualification,
+Merged source base `ed29016e82c46e23e372f0615916ed3c1608370b` was freshly
+reverified locally after the concurrent WebDAV mounted-restart cleanup
+correction,
 N-API provider-network cleanup, RustFS/Ozone lockfile refreshes, 9P
 bounded-reader fix, 9P frame-assembler, WebDAV native-concurrency, R2 upload
 coalescing, N-API
