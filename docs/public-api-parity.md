@@ -281,7 +281,8 @@ Current focused behavior:
   and generated typecheck pass, and exact SHA
   `ba20d29d7e8ad00b3c4b5270dc21cf6ab913e4c2` passed N-API job `106578252549`
   in [Native 9P run `35674581481`](https://github.com/andymac4182/mount-rs/actions/runs/35674581481);
-  Rust job `106578252700` remains queued.
+  Rust job `106578252700` also passed the Linux probe and all four ignored
+  native lifecycle tests.
 - The direct `./9p` probe helpers also retain the oracle's platform argument
   boundary: `p9ClientProbe(platform?)` returns deterministic override facts
   without attempting a mount, and `p9Platform(platform?)` maps the requested
