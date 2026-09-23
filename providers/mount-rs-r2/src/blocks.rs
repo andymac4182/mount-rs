@@ -10,8 +10,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use mount_rs_core::Result;
-use mount_rs_core::storage::{BlockId, BlockReconcileReport, BlockStore};
-use mount_rs_object_store_blocks::{ObjectStoreBlockStore, probe_configured_concurrent_prefix};
+use mount_rs_core::storage::{BlockId, BlockReconcileReport, BlockStore, ConcurrentBackingId};
+use mount_rs_object_store_blocks::{
+    ObjectStoreBlockStore, prepare_configured_backing_id, probe_configured_concurrent_prefix,
+    verify_configured_backing_id,
+};
 use object_store::ObjectStore;
 
 pub use mount_rs_object_store_blocks::{
@@ -73,6 +76,27 @@ impl BlockStore for R2BlockStore {
             Some(probe) => probe_configured_concurrent_prefix(probe.as_ref(), self.prefix()).await,
             None => self.0.prepare_concurrent_mode().await,
         }
+    }
+
+    async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
+        match &self.1 {
+            Some(probe) => {
+                probe_configured_concurrent_prefix(probe.as_ref(), self.prefix()).await?;
+                prepare_configured_backing_id(probe.as_ref(), &self.0).await
+            }
+            None => self.0.prepare_concurrent_backing().await,
+        }
+    }
+
+    async fn verify_concurrent_backing(&self, expected: ConcurrentBackingId) -> Result<()> {
+        match &self.1 {
+            Some(probe) => verify_configured_backing_id(probe.as_ref(), &self.0, expected).await,
+            None => self.0.verify_concurrent_backing(expected).await,
+        }
+    }
+
+    async fn get_for_migration(&self, id: &BlockId) -> Result<Vec<u8>> {
+        self.0.get_for_migration(id).await
     }
 
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {

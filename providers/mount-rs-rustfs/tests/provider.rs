@@ -157,3 +157,15 @@ async fn concurrent_preflight_rejects_unavailable_rustfs_before_open() {
         "signed RustFS preflight must try the remote backing"
     );
 }
+
+#[tokio::test]
+async fn signed_backing_identity_attempts_the_unavailable_service() {
+    let mut config = local_config();
+    config.endpoint = "http://127.0.0.1:1".to_owned();
+    let blocks = RustFsBlockStore::from_config(&config, "run-owned/unavailable-id", true).unwrap();
+    let error = blocks.prepare_concurrent_backing().await.unwrap_err();
+    assert!(
+        !error.is(ErrorCode::Enotsup),
+        "a signed RustFS client must attempt a remote claim before MRC2 metadata opens"
+    );
+}

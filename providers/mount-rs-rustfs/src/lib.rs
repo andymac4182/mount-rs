@@ -12,7 +12,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use mount_rs_core::storage::{BlockId, BlockReconcileReport, BlockStore};
 use mount_rs_core::{FsError, Result, backend_error};
-use mount_rs_object_store_blocks::{ObjectStoreBlockStore, probe_configured_concurrent_prefix};
+use mount_rs_object_store_blocks::{
+    ObjectStoreBlockStore, prepare_configured_backing_id, probe_configured_concurrent_prefix,
+    verify_configured_backing_id,
+};
 use object_store::aws::{AmazonS3Builder, S3ConditionalPut};
 use object_store::{ClientOptions, ObjectStore, RetryConfig};
 
@@ -295,6 +298,34 @@ impl BlockStore for RustFsBlockStore {
                 .with_message("concurrent RustFS requires a validated signed configuration")
         })?;
         probe_configured_concurrent_prefix(store.as_ref(), self.prefix()).await
+    }
+
+    async fn prepare_concurrent_backing(
+        &self,
+    ) -> Result<mount_rs_core::storage::ConcurrentBackingId> {
+        let probe = self.configured_probe.as_ref().ok_or_else(|| {
+            FsError::new(mount_rs_core::ErrorCode::Enotsup)
+                .with_syscall("prepare concurrent RustFS backing")
+                .with_message("concurrent RustFS requires a validated signed configuration")
+        })?;
+        probe_configured_concurrent_prefix(probe.as_ref(), self.prefix()).await?;
+        prepare_configured_backing_id(probe.as_ref(), &self.blocks).await
+    }
+
+    async fn verify_concurrent_backing(
+        &self,
+        expected: mount_rs_core::storage::ConcurrentBackingId,
+    ) -> Result<()> {
+        let probe = self.configured_probe.as_ref().ok_or_else(|| {
+            FsError::new(mount_rs_core::ErrorCode::Enotsup)
+                .with_syscall("verify concurrent RustFS backing")
+                .with_message("concurrent RustFS requires a validated signed configuration")
+        })?;
+        verify_configured_backing_id(probe.as_ref(), &self.blocks, expected).await
+    }
+
+    async fn get_for_migration(&self, id: &BlockId) -> Result<Vec<u8>> {
+        self.blocks.get_for_migration(id).await
     }
 
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {

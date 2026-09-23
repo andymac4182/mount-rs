@@ -9,10 +9,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use mount_rs_core::storage::{BlockId, BlockReconcileReport, BlockStore};
+use mount_rs_core::storage::{BlockId, BlockReconcileReport, BlockStore, ConcurrentBackingId};
 use mount_rs_core::{FsError, Result};
 use mount_rs_object_store_blocks::{
-    ObjectStoreBlockStore, ObjectStoreBlockStoreStats, probe_configured_concurrent_prefix,
+    ObjectStoreBlockStore, ObjectStoreBlockStoreStats, prepare_configured_backing_id,
+    probe_configured_concurrent_prefix, verify_configured_backing_id,
 };
 use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey, S3ConditionalPut};
 use object_store::client::{ClientConfigKey, ClientOptions};
@@ -143,6 +144,27 @@ impl BlockStore for AwsS3BlockStore {
         }
     }
 
+    async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
+        match &self.1 {
+            Some(probe) => {
+                probe_configured_concurrent_prefix(probe.as_ref(), self.prefix()).await?;
+                prepare_configured_backing_id(probe.as_ref(), &self.0).await
+            }
+            None => self.0.prepare_concurrent_backing().await,
+        }
+    }
+
+    async fn verify_concurrent_backing(&self, expected: ConcurrentBackingId) -> Result<()> {
+        match &self.1 {
+            Some(probe) => verify_configured_backing_id(probe.as_ref(), &self.0, expected).await,
+            None => self.0.verify_concurrent_backing(expected).await,
+        }
+    }
+
+    async fn get_for_migration(&self, id: &BlockId) -> Result<Vec<u8>> {
+        self.0.get_for_migration(id).await
+    }
+
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
         self.0.put(bytes).await
     }
@@ -258,6 +280,45 @@ fn validate_aws_builder(builder: &AmazonS3Builder) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mount_rs_core::storage::{BlockStore, ConcurrentBackingId};
+    use object_store::memory::InMemory;
+
+    #[tokio::test]
+    async fn configured_aws_wrapper_path_claims_a_stable_prefix_identity() {
+        // This private simulated client tests wrapper forwarding only. It is
+        // not evidence about an actual AWS S3 service or configured credentials.
+        let shared = Arc::new(InMemory::new());
+        let direct = AwsS3BlockStore::new(shared.clone(), "unit/blocks", true).unwrap();
+        assert!(
+            direct
+                .prepare_concurrent_backing()
+                .await
+                .expect_err("unsigned constructor must remain unavailable")
+                .is(mount_rs_core::ErrorCode::Enotsup)
+        );
+        let configured = AwsS3BlockStore(
+            ObjectStoreBlockStore::new(shared.clone(), "unit/blocks", true).unwrap(),
+            Some(shared.clone()),
+        );
+        let selected = configured.prepare_concurrent_backing().await.unwrap();
+        let reopened = AwsS3BlockStore(
+            ObjectStoreBlockStore::new(shared.clone(), "unit/blocks", true).unwrap(),
+            Some(shared),
+        );
+        assert_eq!(
+            reopened.prepare_concurrent_backing().await.unwrap(),
+            selected
+        );
+        reopened.verify_concurrent_backing(selected).await.unwrap();
+        let wrong = ConcurrentBackingId::from_bytes([0x55; 16]).unwrap();
+        assert!(
+            reopened
+                .verify_concurrent_backing(wrong)
+                .await
+                .expect_err("different metadata binding must fail")
+                .is(mount_rs_core::ErrorCode::Estale)
+        );
+    }
 
     #[test]
     fn validates_bucket_and_region() {

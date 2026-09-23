@@ -106,6 +106,16 @@ async fn configured_r2_blocks_probe_signed_service_before_concurrent_mode() {
     assert!(!blocks.durable());
     blocks.prepare_concurrent_mode().await.unwrap();
     blocks.prepare_concurrent_mode().await.unwrap();
+    let selected = blocks
+        .prepare_concurrent_backing()
+        .await
+        .expect("signed gateway client claims one prefix identity");
+    let reopened = R2BlockStore::from_config(&config, prefix).unwrap();
+    assert_eq!(
+        reopened.prepare_concurrent_backing().await.unwrap(),
+        selected
+    );
+    reopened.verify_concurrent_backing(selected).await.unwrap();
 
     let mut wrong_credentials = config.clone();
     wrong_credentials.secret_access_key = "secret-must-not-appear-in-error".to_owned();
@@ -132,6 +142,12 @@ async fn configured_r2_blocks_probe_signed_service_before_concurrent_mode() {
     object_store
         .delete(&ObjectPath::from(
             "preflight/blocks/_mount-rs-concurrent-probe-v1",
+        ))
+        .await
+        .unwrap();
+    object_store
+        .delete(&ObjectPath::from(
+            "preflight/blocks/_mount-rs-backing-id-v2",
         ))
         .await
         .unwrap();

@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use mount_rs_core::storage::{BlockId, BlockReconcileReport, BlockStore};
+use mount_rs_core::storage::{BlockId, BlockReconcileReport, BlockStore, ConcurrentBackingId};
 use mount_rs_core::{ErrorCode, FsError, Result, backend_error};
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
@@ -27,12 +27,189 @@ const MAX_CACHE_ENTRIES: usize = 4096;
 const CONCURRENT_PROBE_NAME: &str = "_mount-rs-concurrent-probe-v1";
 const CONCURRENT_PROBE_BYTES: &[u8] = b"mount-rs:object-store:concurrent-preflight:v1\n";
 const CONCURRENT_PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+const BACKING_ID_NAME: &str = "_mount-rs-backing-id-v2";
+const BACKING_ID_MAGIC: &[u8; 4] = b"MRC2";
+
+/// Claim one immutable identity under the exact configured prefix. Both
+/// independently signed clients must directly read the winner before it can
+/// be returned to a metadata provider.
+pub async fn prepare_configured_backing_id(
+    probe: &dyn ObjectStore,
+    blocks: &ObjectStoreBlockStore,
+) -> Result<ConcurrentBackingId> {
+    let candidate = ConcurrentBackingId::from_bytes(*uuid::Uuid::new_v4().as_bytes())?;
+    prepare_configured_backing_id_with_candidate(probe, blocks, candidate).await
+}
+
+async fn prepare_configured_backing_id_with_candidate(
+    probe: &dyn ObjectStore,
+    blocks: &ObjectStoreBlockStore,
+    candidate: ConcurrentBackingId,
+) -> Result<ConcurrentBackingId> {
+    let path = blocks.backing_id_path();
+    tokio::time::timeout(CONCURRENT_PROBE_TIMEOUT, async {
+        let mut attempts = 0_u32;
+        let mut create_accepted = false;
+        let mut backoff_before_retry = false;
+        loop {
+            match read_backing_id_from_both(probe, blocks.store.as_ref(), &path, Some(candidate))
+                .await?
+            {
+                MarkerVisibility::Winner(id) => return Ok(id),
+                MarkerVisibility::Partial => {
+                    tokio::time::sleep(backing_id_backoff(attempts, candidate)).await;
+                    attempts = attempts.saturating_add(1);
+                    continue;
+                }
+                MarkerVisibility::Missing if create_accepted => {
+                    tokio::time::sleep(backing_id_backoff(attempts, candidate)).await;
+                    attempts = attempts.saturating_add(1);
+                    continue;
+                }
+                MarkerVisibility::Missing => {}
+            }
+            if backoff_before_retry {
+                tokio::time::sleep(backing_id_backoff(attempts, candidate)).await;
+            }
+            let mut payload = Vec::with_capacity(20);
+            payload.extend_from_slice(BACKING_ID_MAGIC);
+            payload.extend_from_slice(&candidate.as_bytes());
+            let create = probe
+                .put_opts(
+                    &path,
+                    PutPayload::from(payload),
+                    PutOptions {
+                        mode: PutMode::Create,
+                        ..PutOptions::default()
+                    },
+                )
+                .await;
+            match create {
+                Ok(_) => create_accepted = true,
+                Err(object_store::Error::AlreadyExists { .. })
+                | Err(object_store::Error::Precondition { .. }) => {}
+                Err(error) if is_retryable_backing_claim_error(&error) => {}
+                Err(error) => return Err(backing_id_object_error("create", &error)),
+            }
+            backoff_before_retry = true;
+            attempts = attempts.saturating_add(1);
+        }
+    })
+    .await
+    .map_err(|_| FsError::backend("object-store backing identity claim timed out"))?
+}
+
+/// Verify an established prefix through both configured signed clients.
+/// This path is read-only and never repairs or recreates a missing marker.
+pub async fn verify_configured_backing_id(
+    probe: &dyn ObjectStore,
+    blocks: &ObjectStoreBlockStore,
+    expected: ConcurrentBackingId,
+) -> Result<()> {
+    let path = blocks.backing_id_path();
+    let visibility = tokio::time::timeout(
+        CONCURRENT_PROBE_TIMEOUT,
+        read_backing_id_from_both(probe, blocks.store.as_ref(), &path, None),
+    )
+    .await
+    .map_err(|_| FsError::backend("object-store backing identity verification timed out"))??;
+    match visibility {
+        MarkerVisibility::Winner(id) if id == expected => Ok(()),
+        _ => Err(stale_backing_id()),
+    }
+}
+
+enum MarkerVisibility {
+    Missing,
+    Partial,
+    Winner(ConcurrentBackingId),
+}
+
+async fn read_backing_id_from_both(
+    probe: &dyn ObjectStore,
+    blocks: &dyn ObjectStore,
+    path: &ObjectPath,
+    retry_throttled: Option<ConcurrentBackingId>,
+) -> Result<MarkerVisibility> {
+    let first = read_backing_id(probe, path, retry_throttled).await?;
+    let second = read_backing_id(blocks, path, retry_throttled).await?;
+    match (first, second) {
+        (Some(first), Some(second)) if first == second => Ok(MarkerVisibility::Winner(first)),
+        (None, None) => Ok(MarkerVisibility::Missing),
+        (Some(_), Some(_)) => Err(stale_backing_id()),
+        _ => Ok(MarkerVisibility::Partial),
+    }
+}
+
+async fn read_backing_id(
+    store: &dyn ObjectStore,
+    path: &ObjectPath,
+    retry_throttled: Option<ConcurrentBackingId>,
+) -> Result<Option<ConcurrentBackingId>> {
+    let mut attempts = 0_u32;
+    let bytes = loop {
+        match read_backing_id_bytes_once(store, path).await {
+            Ok(bytes) => break bytes,
+            Err(error) if is_throttled_error(&error) && retry_throttled.is_some() => {
+                tokio::time::sleep(backing_id_backoff(attempts, retry_throttled.unwrap())).await;
+                attempts = attempts.saturating_add(1);
+            }
+            Err(error) => return Err(backing_id_object_error("read", &error)),
+        }
+    };
+    let Some(bytes) = bytes else { return Ok(None) };
+    if bytes.len() != 20 || &bytes[..4] != BACKING_ID_MAGIC {
+        return Err(stale_backing_id());
+    }
+    let id = ConcurrentBackingId::from_bytes(bytes[4..].try_into().expect("length checked"))
+        .map_err(|_| stale_backing_id())?;
+    Ok(Some(id))
+}
+
+async fn read_backing_id_bytes_once(
+    store: &dyn ObjectStore,
+    path: &ObjectPath,
+) -> object_store::Result<Option<Vec<u8>>> {
+    let result = match store.get(path).await {
+        Ok(result) => result,
+        Err(object_store::Error::NotFound { .. }) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    Ok(Some(result.bytes().await?.to_vec()))
+}
+
+fn backing_id_backoff(attempts: u32, candidate: ConcurrentBackingId) -> Duration {
+    let scale = 1_u64 << attempts.min(4);
+    let jitter = u64::from(candidate.as_bytes()[0]) % 101;
+    Duration::from_millis((100 * scale + jitter).min(1_700))
+}
+
+fn is_retryable_backing_claim_error(error: &object_store::Error) -> bool {
+    is_throttled_error(error)
+        || matches!(
+            error,
+            object_store::Error::Generic { .. } | object_store::Error::JoinError { .. }
+        )
+}
+
+fn stale_backing_id() -> FsError {
+    FsError::new(ErrorCode::Estale)
+        .with_syscall("verify object-store backing")
+        .with_message("object-store backing identity is missing, changed, or inconsistent")
+}
+
+fn backing_id_object_error(operation: &str, error: &object_store::Error) -> FsError {
+    FsError::backend(format!(
+        "object-store backing identity {operation} failed ({:?})",
+        classify_error(error)
+    ))
+}
 
 /// Check a configured signed object-store client before enabling concurrent
 /// metadata publication over its blocks.
 ///
-/// This probe performs a conditional create under the same block prefix and
-/// reads the stored bytes directly from the supplied client. The reserved
+/// This probe reads an existing value before performing a conditional create
+/// under the same block prefix. The reserved
 /// object is stable across mounts and excluded from block reconciliation.
 /// Callers must use a client built from a validated service configuration:
 /// an arbitrary injected `ObjectStore` cannot establish a shared backing.
@@ -43,6 +220,22 @@ pub async fn probe_configured_concurrent_prefix(
     let prefix = validate_prefix(prefix)?;
     let path = ObjectPath::from(format!("{prefix}/{CONCURRENT_PROBE_NAME}"));
     tokio::time::timeout(CONCURRENT_PROBE_TIMEOUT, async {
+        match store.get(&path).await {
+            Ok(result) => {
+                let bytes = result
+                    .bytes()
+                    .await
+                    .map_err(|error| probe_error("read", &error))?;
+                if bytes.as_ref() != CONCURRENT_PROBE_BYTES {
+                    return Err(FsError::backend(
+                        "object-store concurrent preflight probe changed unexpectedly",
+                    ));
+                }
+                return Ok(());
+            }
+            Err(object_store::Error::NotFound { .. }) => {}
+            Err(error) => return Err(probe_error("read", &error)),
+        }
         let create = store
             .put_opts(
                 &path,
@@ -662,6 +855,10 @@ impl ObjectStoreBlockStore {
         self.stats.snapshot()
     }
 
+    fn backing_id_path(&self) -> ObjectPath {
+        ObjectPath::from(format!("{}/{BACKING_ID_NAME}", self.prefix))
+    }
+
     fn object_path(&self, id: &BlockId) -> Result<ObjectPath> {
         validate_block_id(id)?;
         Ok(ObjectPath::from(format!("{}/{}", self.prefix, id.0)))
@@ -767,6 +964,31 @@ impl BlockStore for ObjectStoreBlockStore {
         Err(FsError::new(ErrorCode::Enotsup)
             .with_syscall("prepare concurrent object-store blocks")
             .with_message("concurrent object-store blocks require a validated signed service"))
+    }
+
+    async fn get_for_migration(&self, id: &BlockId) -> Result<Vec<u8>> {
+        let path = self.object_path(id)?;
+        // Migration must check the current remote bytes rather than a cached
+        // value from an earlier successful read in this process.
+        let result = self.store.get(&path).await.map_err(|error| match error {
+            object_store::Error::NotFound { .. } => map_get_error(error),
+            error => FsError::backend(format!(
+                "object-store migration block read failed ({:?})",
+                classify_error(&error)
+            )),
+        })?;
+        let bytes = result.bytes().await.map_err(|error| {
+            FsError::backend(format!(
+                "object-store migration block read failed ({:?})",
+                classify_error(&error)
+            ))
+        })?;
+        if id.0.len() == 1 + CONTENT_BLOCK_ID_HEX_CHARS && block_id(&bytes) != id.0 {
+            return Err(FsError::backend(
+                "object-store migration block digest mismatch",
+            ));
+        }
+        Ok(bytes.to_vec())
     }
 
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
@@ -1008,12 +1230,14 @@ fn block_id(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use futures_util::stream::BoxStream;
-    use mount_rs_core::storage::BlockStore;
+    use mount_rs_core::storage::{BlockStore, ConcurrentBackingId};
     use object_store::memory::InMemory;
     use object_store::{
         GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, PutMultipartOptions,
         PutResult,
     };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Barrier;
 
     #[derive(Debug)]
     struct PreEpochListStore {
@@ -1091,6 +1315,403 @@ mod tests {
         ) -> object_store::Result<()> {
             self.inner.copy_if_not_exists(from, to).await
         }
+    }
+
+    #[derive(Debug)]
+    struct InterceptStore {
+        inner: Arc<InMemory>,
+        put_calls: AtomicUsize,
+        marker_fault_once: AtomicUsize,
+        marker_get_fault_once: AtomicUsize,
+    }
+
+    impl InterceptStore {
+        fn new(marker_fault_once: usize) -> Self {
+            Self {
+                inner: Arc::new(InMemory::new()),
+                put_calls: AtomicUsize::new(0),
+                marker_fault_once: AtomicUsize::new(marker_fault_once),
+                marker_get_fault_once: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl std::fmt::Display for InterceptStore {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("InterceptStore")
+        }
+    }
+
+    #[async_trait]
+    impl ObjectStore for InterceptStore {
+        async fn put_opts(
+            &self,
+            location: &ObjectPath,
+            payload: PutPayload,
+            opts: PutOptions,
+        ) -> object_store::Result<PutResult> {
+            self.put_calls.fetch_add(1, Ordering::SeqCst);
+            if location.as_ref().ends_with(BACKING_ID_NAME) {
+                match self.marker_fault_once.swap(0, Ordering::SeqCst) {
+                    1 => {
+                        return Err(object_store::Error::Generic {
+                            store: "InterceptStore",
+                            source: Box::new(std::io::Error::other("HTTP 429 Too Many Requests")),
+                        });
+                    }
+                    2 => {
+                        self.inner.put_opts(location, payload, opts).await?;
+                        return Err(object_store::Error::Generic {
+                            store: "InterceptStore",
+                            source: Box::new(std::io::Error::other("lost create reply")),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &ObjectPath,
+            opts: PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &ObjectPath,
+            options: GetOptions,
+        ) -> object_store::Result<GetResult> {
+            if location.as_ref().ends_with(BACKING_ID_NAME)
+                && self.marker_get_fault_once.swap(0, Ordering::SeqCst) == 1
+            {
+                return Err(object_store::Error::Generic {
+                    store: "InterceptStore",
+                    source: Box::new(std::io::Error::other("HTTP 429 Too Many Requests")),
+                });
+            }
+            self.inner.get_opts(location, options).await
+        }
+
+        async fn delete(&self, location: &ObjectPath) -> object_store::Result<()> {
+            self.inner.delete(location).await
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&ObjectPath>,
+        ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&ObjectPath>,
+        ) -> object_store::Result<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy(&self, from: &ObjectPath, to: &ObjectPath) -> object_store::Result<()> {
+            self.inner.copy(from, to).await
+        }
+
+        async fn copy_if_not_exists(
+            &self,
+            from: &ObjectPath,
+            to: &ObjectPath,
+        ) -> object_store::Result<()> {
+            self.inner.copy_if_not_exists(from, to).await
+        }
+    }
+
+    #[tokio::test]
+    async fn backing_identity_existing_probe_does_not_put_hot_key_again() {
+        let store = InterceptStore::new(0);
+        probe_configured_concurrent_prefix(&store, "probe/blocks")
+            .await
+            .unwrap();
+        probe_configured_concurrent_prefix(&store, "probe/blocks")
+            .await
+            .unwrap();
+        assert_eq!(store.put_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn backing_identity_race_returns_one_persisted_id() {
+        let backing = Arc::new(InMemory::new());
+        let start = Arc::new(Barrier::new(32));
+        let mut clients = Vec::new();
+        for index in 1..=32_u8 {
+            let backing = backing.clone();
+            let start = start.clone();
+            clients.push(tokio::spawn(async move {
+                let blocks = ObjectStoreBlockStore::new(backing.clone(), "race/blocks", true)
+                    .expect("client block scope");
+                let candidate = ConcurrentBackingId::from_bytes([index; 16])
+                    .expect("distinct nonzero candidate");
+                start.wait().await;
+                prepare_configured_backing_id_with_candidate(backing.as_ref(), &blocks, candidate)
+                    .await
+            }));
+        }
+        let mut selected = Vec::new();
+        for client in clients {
+            selected.push(client.await.expect("client task").expect("claimed marker"));
+        }
+        let marker = ObjectPath::from("race/blocks/_mount-rs-backing-id-v2");
+        let stored = backing
+            .get(&marker)
+            .await
+            .expect("one persisted marker")
+            .bytes()
+            .await
+            .expect("marker bytes");
+        assert_eq!(stored.len(), 20);
+        assert_eq!(&stored[..4], b"MRC2");
+        let persisted = ConcurrentBackingId::from_bytes(stored[4..].try_into().unwrap()).unwrap();
+        assert!(selected.iter().all(|id| *id == persisted));
+    }
+
+    #[tokio::test]
+    async fn backing_identity_scope_and_read_only_verification_fail_closed() {
+        let first_store = Arc::new(InterceptStore::new(0));
+        let first = ObjectStoreBlockStore::new(first_store.clone(), "scope/first", true).unwrap();
+        let same_prefix =
+            ObjectStoreBlockStore::new(first_store.clone(), "scope/first", true).unwrap();
+        let sibling =
+            ObjectStoreBlockStore::new(first_store.clone(), "scope/sibling", true).unwrap();
+        let other_store = Arc::new(InMemory::new());
+        let other = ObjectStoreBlockStore::new(other_store.clone(), "scope/first", true).unwrap();
+
+        assert!(
+            first
+                .prepare_concurrent_backing()
+                .await
+                .unwrap_err()
+                .is(ErrorCode::Enotsup)
+        );
+        let selected = prepare_configured_backing_id(first_store.as_ref(), &first)
+            .await
+            .unwrap();
+        let writes = first_store.put_calls.load(Ordering::SeqCst);
+        assert_eq!(
+            prepare_configured_backing_id(first_store.as_ref(), &same_prefix)
+                .await
+                .unwrap(),
+            selected
+        );
+        assert_eq!(
+            first_store.put_calls.load(Ordering::SeqCst),
+            writes,
+            "reopen must GET without PUT"
+        );
+        assert!(
+            first
+                .verify_concurrent_backing(selected)
+                .await
+                .unwrap_err()
+                .is(ErrorCode::Enotsup)
+        );
+        verify_configured_backing_id(first_store.as_ref(), &first, selected)
+            .await
+            .unwrap();
+
+        let sibling_id = prepare_configured_backing_id(first_store.as_ref(), &sibling)
+            .await
+            .unwrap();
+        let other_id = prepare_configured_backing_id(other_store.as_ref(), &other)
+            .await
+            .unwrap();
+        assert_ne!(sibling_id, selected);
+        assert_ne!(other_id, selected);
+        assert!(
+            verify_configured_backing_id(first_store.as_ref(), &first, sibling_id)
+                .await
+                .unwrap_err()
+                .is(ErrorCode::Estale)
+        );
+
+        let path = first.backing_id_path();
+        first_store.inner.delete(&path).await.unwrap();
+        let writes = first_store.put_calls.load(Ordering::SeqCst);
+        assert!(
+            verify_configured_backing_id(first_store.as_ref(), &first, selected)
+                .await
+                .unwrap_err()
+                .is(ErrorCode::Estale)
+        );
+        assert_eq!(
+            first_store.put_calls.load(Ordering::SeqCst),
+            writes,
+            "verification must not repair a missing marker"
+        );
+        assert!(matches!(
+            first_store.inner.get(&path).await,
+            Err(object_store::Error::NotFound { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn backing_identity_rejects_tampering_and_inconsistent_signed_views() {
+        let first_store = Arc::new(InMemory::new());
+        let blocks =
+            ObjectStoreBlockStore::new(first_store.clone(), "tamper/blocks", true).unwrap();
+        let selected = prepare_configured_backing_id(first_store.as_ref(), &blocks)
+            .await
+            .unwrap();
+        let path = blocks.backing_id_path();
+        for replacement in [
+            b"MRC1"
+                .iter()
+                .copied()
+                .chain(selected.as_bytes())
+                .collect::<Vec<_>>(),
+            b"MRC2"
+                .iter()
+                .copied()
+                .chain([0_u8; 16])
+                .collect::<Vec<_>>(),
+            b"MRC2"
+                .iter()
+                .copied()
+                .chain(selected.as_bytes())
+                .chain([0])
+                .collect::<Vec<_>>(),
+        ] {
+            first_store
+                .put(&path, PutPayload::from(replacement))
+                .await
+                .unwrap();
+            assert!(
+                verify_configured_backing_id(first_store.as_ref(), &blocks, selected)
+                    .await
+                    .unwrap_err()
+                    .is(ErrorCode::Estale)
+            );
+            assert!(
+                prepare_configured_backing_id(first_store.as_ref(), &blocks)
+                    .await
+                    .unwrap_err()
+                    .is(ErrorCode::Estale)
+            );
+        }
+
+        let second_store = Arc::new(InMemory::new());
+        let first_id = ConcurrentBackingId::from_bytes([1; 16]).unwrap();
+        let second_id = ConcurrentBackingId::from_bytes([2; 16]).unwrap();
+        for (store, id) in [(&first_store, first_id), (&second_store, second_id)] {
+            let mut marker = b"MRC2".to_vec();
+            marker.extend_from_slice(&id.as_bytes());
+            store.put(&path, PutPayload::from(marker)).await.unwrap();
+        }
+        assert!(
+            verify_configured_backing_id(second_store.as_ref(), &blocks, first_id)
+                .await
+                .unwrap_err()
+                .is(ErrorCode::Estale)
+        );
+    }
+
+    #[tokio::test]
+    async fn backing_identity_reconciles_throttle_and_lost_create_reply_by_direct_get() {
+        for fault in [1, 2] {
+            let store = Arc::new(InterceptStore::new(fault));
+            let blocks = ObjectStoreBlockStore::new(store.clone(), "fault/blocks", true).unwrap();
+            let candidate = ConcurrentBackingId::from_bytes([fault as u8; 16]).unwrap();
+            let selected =
+                prepare_configured_backing_id_with_candidate(store.as_ref(), &blocks, candidate)
+                    .await
+                    .unwrap();
+            assert_eq!(selected, candidate);
+            verify_configured_backing_id(store.as_ref(), &blocks, candidate)
+                .await
+                .unwrap();
+            assert_eq!(
+                store.put_calls.load(Ordering::SeqCst),
+                if fault == 1 { 2 } else { 1 }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn backing_identity_retries_a_throttled_direct_get() {
+        let store = Arc::new(InterceptStore::new(0));
+        store.marker_get_fault_once.store(1, Ordering::SeqCst);
+        let blocks = ObjectStoreBlockStore::new(store.clone(), "get-fault/blocks", true).unwrap();
+        let id = prepare_configured_backing_id_with_candidate(
+            store.as_ref(),
+            &blocks,
+            ConcurrentBackingId::from_bytes([3; 16]).unwrap(),
+        )
+        .await
+        .unwrap();
+        verify_configured_backing_id(store.as_ref(), &blocks, id)
+            .await
+            .unwrap();
+        assert_eq!(store.put_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn backing_identity_marker_is_outside_reconciliation_block_names() {
+        let store = Arc::new(InMemory::new());
+        let blocks =
+            ObjectStoreBlockStore::new(store.clone(), "reconcile-authority/blocks", true).unwrap();
+        let selected = prepare_configured_backing_id(store.as_ref(), &blocks)
+            .await
+            .unwrap();
+        let id = blocks.put(b"one valid data block").await.unwrap();
+        let report = blocks
+            .reconcile(&BTreeSet::from([id]), Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(report.scanned, 1);
+        assert_eq!(report.deleted, 0);
+        verify_configured_backing_id(store.as_ref(), &blocks, selected)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn backing_identity_migration_read_bypasses_stale_cache() {
+        let backing = Arc::new(InMemory::new());
+        let blocks = ObjectStoreBlockStore::new(backing.clone(), "migration/blocks", true).unwrap();
+        let id = blocks.put(b"original immutable bytes").await.unwrap();
+        assert_eq!(blocks.get(&id).await.unwrap(), b"original immutable bytes");
+        let path = ObjectPath::from(format!("migration/blocks/{}", id.0));
+        backing
+            .put(&path, PutPayload::from(b"changed behind cache".to_vec()))
+            .await
+            .unwrap();
+        assert_eq!(blocks.get(&id).await.unwrap(), b"original immutable bytes");
+        assert!(
+            blocks
+                .get_for_migration(&id)
+                .await
+                .expect_err("migration must see the damaged remote content")
+                .is(ErrorCode::Eio)
+        );
+    }
+
+    #[tokio::test]
+    async fn backing_identity_migration_reads_a_legacy_short_id_directly() {
+        let backing = Arc::new(InMemory::new());
+        let blocks = ObjectStoreBlockStore::new(backing.clone(), "legacy/blocks", true).unwrap();
+        let id = BlockId("b0123456789abcdef0123456789abcdef".to_owned());
+        let path = ObjectPath::from(format!("legacy/blocks/{}", id.0));
+        backing
+            .put(&path, PutPayload::from(b"legacy bytes".to_vec()))
+            .await
+            .unwrap();
+        assert_eq!(
+            blocks
+                .get_for_migration(&id)
+                .await
+                .expect("direct legacy read"),
+            b"legacy bytes"
+        );
     }
 
     async fn stores() -> (ObjectStoreBlockStore, ObjectStoreBlockStore, Arc<InMemory>) {
