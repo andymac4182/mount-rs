@@ -831,69 +831,6 @@ impl MetadataStore for PgliteMetadataStore {
         }
     }
 
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
-        let client = self.0.lock_client().await?;
-        // One DML statement is one atomic PGlite autocommit transaction. It
-        // races safely with legacy acquisition because both update this row.
-        let changed = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .execute_typed(
-                "UPDATE mount_rs_metadata SET write_mode=$2, fence=$3
-                 WHERE volume_key=$1 AND write_mode IS NULL
-                   AND revision=0 AND namespace IS NULL
-                   AND owner IS NULL AND fence=0 AND expires=0
-                   AND EXISTS (
-                     SELECT 1 FROM mount_rs_version_state
-                     WHERE volume_key=$1 AND head_id IS NULL
-                       AND next_sequence=1 AND next_read_fence=0)
-                   AND NOT EXISTS (
-                     SELECT 1 FROM mount_rs_versions WHERE volume_key=$1)
-                   AND NOT EXISTS (
-                     SELECT 1 FROM mount_rs_version_pins WHERE volume_key=$1)",
-                &[
-                    (&self.0.volume_key, Type::TEXT),
-                    (&CONCURRENT_WRITE_MODE, Type::TEXT),
-                    (&CONCURRENT_FENCE_SENTINEL, Type::INT8),
-                ],
-            )
-            .await
-            .map_err(postgres_error)?;
-        if changed == 1 {
-            return Ok(());
-        }
-        let row = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .query_typed_opt(
-                "SELECT write_mode, owner, fence, expires
-                 FROM mount_rs_metadata WHERE volume_key=$1",
-                &[(&self.0.volume_key, Type::TEXT)],
-            )
-            .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
-        let mode = row.get::<_, Option<String>>(0);
-        let owner = row.get::<_, Option<String>>(1);
-        let fence = row.get::<_, i64>(2);
-        let expires = row.get::<_, i64>(3);
-        if mode.as_deref() == Some(CONCURRENT_WRITE_MODE)
-            && owner.is_none()
-            && fence == CONCURRENT_FENCE_SENTINEL
-            && expires == 0
-        {
-            return Ok(());
-        }
-        if mode.is_some() || fence == CONCURRENT_FENCE_SENTINEL {
-            return Err(backend_error(
-                "PGlite concurrent mode marker and fence sentinel disagree",
-            ));
-        }
-        Err(FsError::new(ErrorCode::Ebusy)
-            .with_syscall("prepare concurrent PGlite volume")
-            .with_message("a fenced legacy volume needs an offline migration"))
-    }
-
     async fn acquire_writer(&self, owner: &str, ttl: Duration) -> Result<WriterLease> {
         if owner.is_empty() {
             return Err(FsError::new(ErrorCode::Einval));
@@ -1078,83 +1015,6 @@ impl MetadataStore for PgliteMetadataStore {
             return Err(error);
         }
         Ok(next as u64)
-    }
-
-    async fn publish_if_revision(
-        &self,
-        expected_revision: u64,
-        namespace: Namespace,
-    ) -> Result<u64> {
-        namespace.validate()?;
-        let expected =
-            i64::try_from(expected_revision).map_err(|_| FsError::new(ErrorCode::Eoverflow))?;
-        let next = expected
-            .checked_add(1)
-            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-        let namespace = serde_json::to_string(&namespace).map_err(backend_error)?;
-        let client = self.0.lock_client().await?;
-        // This entire CAS is one autocommit statement. A transport error may
-        // mean the server committed before the reply was lost: propagate it
-        // unchanged and never classify it as a retryable revision conflict.
-        let changed = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .execute_typed(
-                "UPDATE mount_rs_metadata SET revision=$2, namespace=$3
-                 WHERE volume_key=$1 AND revision=$4 AND write_mode=$5
-                   AND owner IS NULL AND fence=$6 AND expires=0",
-                &[
-                    (&self.0.volume_key, Type::TEXT),
-                    (&next, Type::INT8),
-                    (&namespace, Type::TEXT),
-                    (&expected, Type::INT8),
-                    (&CONCURRENT_WRITE_MODE, Type::TEXT),
-                    (&CONCURRENT_FENCE_SENTINEL, Type::INT8),
-                ],
-            )
-            .await
-            .map_err(postgres_error)?;
-        if changed == 1 {
-            return Ok(next as u64);
-        }
-        if changed != 0 {
-            return Err(backend_error(
-                "PGlite concurrent metadata CAS changed multiple rows",
-            ));
-        }
-        let row = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .query_typed_opt(
-                "SELECT revision, write_mode, owner, fence, expires
-                 FROM mount_rs_metadata WHERE volume_key=$1",
-                &[(&self.0.volume_key, Type::TEXT)],
-            )
-            .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
-        let revision = row.get::<_, i64>(0);
-        let mode = row.get::<_, Option<String>>(1);
-        let owner = row.get::<_, Option<String>>(2);
-        let fence = row.get::<_, i64>(3);
-        let expires = row.get::<_, i64>(4);
-        if mode.as_deref() != Some(CONCURRENT_WRITE_MODE)
-            || owner.is_some()
-            || fence != CONCURRENT_FENCE_SENTINEL
-            || expires != 0
-        {
-            return Err(FsError::new(ErrorCode::Ebusy)
-                .with_syscall("publish concurrent PGlite metadata")
-                .with_message("concurrent mode or its legacy fence is missing"));
-        }
-        if revision != expected {
-            return Err(
-                FsError::new(ErrorCode::Eagain).with_syscall("publish concurrent PGlite metadata")
-            );
-        }
-        Err(backend_error(
-            "PGlite concurrent metadata CAS returned zero for an unchanged revision",
-        ))
     }
 
     async fn publish_bound_if_revision(
@@ -3019,6 +2879,29 @@ mod tests {
         namespace
     }
 
+    // Only the offline migration tests create an MRC1 volume. Normal
+    // concurrent clients prepare an MRC2 volume with a block authority ID.
+    async fn seed_test_owned_mrc1_volume(metadata: &PgliteMetadataStore) {
+        let client = metadata.0.lock_client().await.unwrap();
+        let changed = client
+            .as_ref()
+            .unwrap()
+            .execute_typed(
+                "UPDATE mount_rs_metadata SET write_mode=$2, fence=$3
+                 WHERE volume_key=$1 AND write_mode IS NULL AND backing_id IS NULL
+                   AND revision=0 AND namespace IS NULL
+                   AND owner IS NULL AND fence=0 AND expires=0",
+                &[
+                    (&metadata.0.volume_key, Type::TEXT),
+                    (&CONCURRENT_WRITE_MODE, Type::TEXT),
+                    (&CONCURRENT_FENCE_SENTINEL, Type::INT8),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(changed, 1, "test-owned MRC1 fixture must start fresh");
+    }
+
     #[test]
     #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
     fn version_head_revision_and_id_share_one_committed_snapshot() {
@@ -3538,15 +3421,32 @@ mod tests {
                 PgliteMetadataStore::connect_with_key(connection_string, "concurrent-fresh")
                     .await
                     .unwrap();
-            metadata.prepare_concurrent_mode().await.unwrap();
-            metadata.prepare_concurrent_mode().await.unwrap();
+            let blocks = PgliteBlockStore::connect_with_key(connection_string, "concurrent-fresh")
+                .await
+                .unwrap();
+            let backing = blocks.prepare_concurrent_backing().await.unwrap();
+            metadata
+                .prepare_bound_concurrent_mode(backing)
+                .await
+                .unwrap();
+            metadata
+                .prepare_bound_concurrent_mode(backing)
+                .await
+                .unwrap();
             metadata.close().await.unwrap();
 
             let reopened =
                 PgliteMetadataStore::connect_with_key(connection_string, "concurrent-fresh")
                     .await
                     .unwrap();
-            reopened.prepare_concurrent_mode().await.unwrap();
+            reopened
+                .prepare_bound_concurrent_mode(backing)
+                .await
+                .unwrap();
+            assert_eq!(
+                reopened.concurrent_mode_state().await.unwrap(),
+                ConcurrentModeState::Mrc2(backing)
+            );
             assert!(
                 reopened
                     .acquire_writer("legacy-writer", Duration::from_secs(60))
@@ -3583,6 +3483,7 @@ mod tests {
             );
             drop(client);
             reopened.close().await.unwrap();
+            blocks.close().await.unwrap();
         });
     }
 
@@ -3610,19 +3511,20 @@ mod tests {
                 .unwrap();
             let block = blocks.put(b"abc").await.unwrap();
             blocks.flush().await.unwrap();
-            first.prepare_concurrent_mode().await.unwrap();
-            second.prepare_concurrent_mode().await.unwrap();
+            let backing = blocks.prepare_concurrent_backing().await.unwrap();
+            first.prepare_bound_concurrent_mode(backing).await.unwrap();
+            second.prepare_bound_concurrent_mode(backing).await.unwrap();
 
             let namespace = namespace(block).await;
             let a = tokio::spawn({
                 let first = first.clone();
                 let namespace = namespace.clone();
-                async move { first.publish_if_revision(0, namespace).await }
+                async move { first.publish_bound_if_revision(backing, 0, namespace).await }
             });
             let b = tokio::spawn({
                 let second = second.clone();
                 let namespace = namespace.clone();
-                async move { second.publish_if_revision(0, namespace).await }
+                async move { second.publish_bound_if_revision(backing, 0, namespace).await }
             });
             let (a, b) = (a.await.unwrap(), b.await.unwrap());
             assert!(
@@ -3655,13 +3557,17 @@ mod tests {
                 PgliteMetadataStore::connect_with_key(connection_string, "concurrent-legacy")
                     .await
                     .unwrap();
+            let blocks = PgliteBlockStore::connect_with_key(connection_string, "concurrent-legacy")
+                .await
+                .unwrap();
+            let backing = blocks.prepare_concurrent_backing().await.unwrap();
             let lease = metadata
                 .acquire_writer("old-client", Duration::from_secs(60))
                 .await
                 .unwrap();
             assert!(
                 metadata
-                    .prepare_concurrent_mode()
+                    .prepare_bound_concurrent_mode(backing)
                     .await
                     .unwrap_err()
                     .is(ErrorCode::Ebusy)
@@ -3669,13 +3575,14 @@ mod tests {
             metadata.release_writer(&lease).await.unwrap();
             assert!(
                 metadata
-                    .prepare_concurrent_mode()
+                    .prepare_bound_concurrent_mode(backing)
                     .await
                     .unwrap_err()
                     .is(ErrorCode::Ebusy),
                 "an expired or released old fence still needs an offline migration"
             );
             metadata.close().await.unwrap();
+            blocks.close().await.unwrap();
         });
     }
 
@@ -3721,6 +3628,10 @@ mod tests {
                 let metadata = PgliteMetadataStore::connect_with_key(connection_string, &key)
                     .await
                     .unwrap();
+                let blocks = PgliteBlockStore::connect_with_key(connection_string, &key)
+                    .await
+                    .unwrap();
+                let backing = blocks.prepare_concurrent_backing().await.unwrap();
                 let client = metadata.0.lock_client().await.unwrap();
                 client
                     .as_ref()
@@ -3730,7 +3641,10 @@ mod tests {
                     .unwrap();
                 drop(client);
 
-                let error = metadata.prepare_concurrent_mode().await.unwrap_err();
+                let error = metadata
+                    .prepare_bound_concurrent_mode(backing)
+                    .await
+                    .unwrap_err();
                 assert!(error.is(ErrorCode::Ebusy), "{suffix}: {error:?}");
                 let client = metadata.0.lock_client().await.unwrap();
                 let row = client
@@ -3747,6 +3661,7 @@ mod tests {
                 assert_eq!(row.get::<_, i64>(1), 0, "{suffix}");
                 drop(client);
                 metadata.close().await.unwrap();
+                blocks.close().await.unwrap();
             }
         });
     }
@@ -3769,9 +3684,13 @@ mod tests {
             let legacy = PgliteMetadataStore::connect_with_options(connection_string, options)
                 .await
                 .unwrap();
+            let blocks = PgliteBlockStore::connect_with_key(connection_string, "concurrent-conversion-race")
+                .await
+                .unwrap();
+            let backing = blocks.prepare_concurrent_backing().await.unwrap();
             let conversion = tokio::spawn({
                 let metadata = metadata.clone();
-                async move { metadata.prepare_concurrent_mode().await }
+                async move { metadata.prepare_bound_concurrent_mode(backing).await }
             });
             let old_acquire = tokio::spawn({
                 let legacy = legacy.clone();
@@ -3781,10 +3700,10 @@ mod tests {
                 (conversion.await.unwrap(), old_acquire.await.unwrap());
             match (conversion, old_acquire) {
                 (Ok(()), Err(error)) if error.is(ErrorCode::Eagain) => {
-                    metadata.prepare_concurrent_mode().await.unwrap();
+                    metadata.prepare_bound_concurrent_mode(backing).await.unwrap();
                 }
                 (Err(error), Ok(lease)) if error.is(ErrorCode::Ebusy) => {
-                    assert!(metadata.prepare_concurrent_mode().await.unwrap_err().is(ErrorCode::Ebusy));
+                    assert!(metadata.prepare_bound_concurrent_mode(backing).await.unwrap_err().is(ErrorCode::Ebusy));
                     legacy.release_writer(&lease).await.unwrap();
                 }
                 (conversion, old_acquire) => {
@@ -3793,6 +3712,7 @@ mod tests {
             }
             metadata.close().await.unwrap();
             legacy.close().await.unwrap();
+            blocks.close().await.unwrap();
         });
     }
 
@@ -3822,18 +3742,24 @@ mod tests {
             });
             let first = first.await.unwrap().unwrap();
             let second = second.await.unwrap().unwrap();
+            let blocks =
+                PgliteBlockStore::connect_with_key(&connection_string, "simultaneous-open")
+                    .await
+                    .unwrap();
+            let backing = blocks.prepare_concurrent_backing().await.unwrap();
             let conversion = tokio::spawn({
                 let first = first.clone();
-                async move { first.prepare_concurrent_mode().await }
+                async move { first.prepare_bound_concurrent_mode(backing).await }
             });
             let other_conversion = tokio::spawn({
                 let second = second.clone();
-                async move { second.prepare_concurrent_mode().await }
+                async move { second.prepare_bound_concurrent_mode(backing).await }
             });
             conversion.await.unwrap().unwrap();
             other_conversion.await.unwrap().unwrap();
             first.close().await.unwrap();
             second.close().await.unwrap();
+            blocks.close().await.unwrap();
         });
     }
 
@@ -3856,6 +3782,7 @@ mod tests {
                 .await
                 .unwrap();
             let block = blocks.put(b"abc").await.unwrap();
+            let backing = blocks.prepare_concurrent_backing().await.unwrap();
             let lease = metadata
                 .acquire_writer("legacy-writer", Duration::from_secs(60))
                 .await
@@ -3864,14 +3791,16 @@ mod tests {
             // correct conversion never leaves a lease live, but operations
             // must fail closed if the marker appears while one is present.
             let client = metadata.0.lock_client().await.unwrap();
+            let backing_text = backing.to_hex();
             client
                 .as_ref()
                 .unwrap()
                 .execute_typed(
-                    "UPDATE mount_rs_metadata SET write_mode=$2 WHERE volume_key=$1",
+                    "UPDATE mount_rs_metadata SET write_mode=$2, backing_id=$3 WHERE volume_key=$1",
                     &[
                         (&metadata.0.volume_key, Type::TEXT),
-                        (&CONCURRENT_WRITE_MODE, Type::TEXT),
+                        (&BOUND_CONCURRENT_WRITE_MODE, Type::TEXT),
+                        (&backing_text, Type::TEXT),
                     ],
                 )
                 .await
@@ -3905,7 +3834,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
-    fn concurrent_publication_rejects_a_damaged_legacy_fence() {
+    fn bound_concurrent_publication_rejects_a_damaged_legacy_fence() {
         let server = PgliteServer::start();
         let connection_string = server.connection_string();
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -3922,7 +3851,11 @@ mod tests {
                 .await
                 .unwrap();
             let block = blocks.put(b"abc").await.unwrap();
-            metadata.prepare_concurrent_mode().await.unwrap();
+            let backing = blocks.prepare_concurrent_backing().await.unwrap();
+            metadata
+                .prepare_bound_concurrent_mode(backing)
+                .await
+                .unwrap();
             let client = metadata.0.lock_client().await.unwrap();
             client
                 .as_ref()
@@ -3936,14 +3869,14 @@ mod tests {
             drop(client);
             assert!(
                 metadata
-                    .prepare_concurrent_mode()
+                    .prepare_bound_concurrent_mode(backing)
                     .await
                     .unwrap_err()
-                    .is(ErrorCode::Eio)
+                    .is(ErrorCode::Estale)
             );
             assert!(
                 metadata
-                    .publish_if_revision(0, namespace(block).await)
+                    .publish_bound_if_revision(backing, 0, namespace(block).await)
                     .await
                     .unwrap_err()
                     .is(ErrorCode::Ebusy),
@@ -3965,14 +3898,23 @@ mod tests {
             .unwrap();
         runtime.block_on(async {
             let options = PgliteStorageOptions::new("concurrent-disconnected-socket");
-            let metadata = PgliteMetadataStore::connect_with_options(&connection_string, options)
+            let metadata =
+                PgliteMetadataStore::connect_with_options(&connection_string, options.clone())
+                    .await
+                    .unwrap();
+            let blocks = PgliteBlockStore::connect_with_options(&connection_string, options)
                 .await
                 .unwrap();
-            metadata.prepare_concurrent_mode().await.unwrap();
+            let backing = blocks.prepare_concurrent_backing().await.unwrap();
+            metadata
+                .prepare_bound_concurrent_mode(backing)
+                .await
+                .unwrap();
+            blocks.close().await.unwrap();
             let namespace = namespace(BlockId("unused-disconnected-block".to_owned())).await;
             drop(server);
             let error = metadata
-                .publish_if_revision(0, namespace)
+                .publish_bound_if_revision(backing, 0, namespace)
                 .await
                 .unwrap_err();
             assert!(
@@ -4239,7 +4181,7 @@ mod tests {
             let blocks = PgliteBlockStore::connect_with_key(url, "bound-migration")
                 .await
                 .unwrap();
-            metadata.prepare_concurrent_mode().await.unwrap();
+            seed_test_owned_mrc1_volume(&metadata).await;
             assert_eq!(
                 metadata.concurrent_mode_state().await.unwrap(),
                 ConcurrentModeState::Mrc1

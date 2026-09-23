@@ -703,6 +703,67 @@ async fn concurrent_backing_keyspace_identity_and_wrong_backing_fence() {
         "backing mismatch takes precedence over stale revision"
     );
     assert_eq!(metadata.load().await.unwrap().revision, 1);
+
+    // Two independently opened bound writers race on the same manifest.
+    // Exactly one can commit revision 2; the loser sees a known CAS conflict.
+    let second_metadata = a_second.metadata();
+    let (first, second) = tokio::join!(
+        metadata.publish_bound_if_revision(id_a, 1, empty_namespace()),
+        second_metadata.publish_bound_if_revision(id_a, 1, empty_namespace()),
+    );
+    let outcomes = [first, second];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|result| matches!(result, Ok(2)))
+            .count(),
+        1,
+        "only one bound writer may commit the next revision"
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|result| matches!(result, Err(error) if error.code == ErrorCode::Eagain))
+            .count(),
+        1,
+        "the losing bound writer must get a known revision conflict"
+    );
+    assert_eq!(second_metadata.load().await.unwrap().revision, 2);
+}
+
+fn mrc1_fixture_key(prefix: &str, suffix: &[u8]) -> Vec<u8> {
+    let mut key = prefix.as_bytes().to_vec();
+    key.push(0);
+    key.extend_from_slice(suffix);
+    key
+}
+
+async fn seed_mrc1_fixture(
+    cluster_file: &str,
+    prefix: &str,
+    namespace: &Namespace,
+) -> (Vec<u8>, Vec<u8>) {
+    // Recreate an old client's committed MRC1 records without exposing an
+    // unbound writer on the current provider trait.
+    let payload = serde_json::to_vec(namespace).unwrap();
+    assert!(payload.len() <= DEFAULT_METADATA_CHUNK_BYTES);
+    let mut manifest = b"MRM1".to_vec();
+    manifest.extend_from_slice(&1_u64.to_be_bytes());
+    manifest.extend_from_slice(&1_u32.to_be_bytes());
+    manifest.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+    let mut chunk_key = mrc1_fixture_key(prefix, b"meta/chunk/");
+    chunk_key.extend_from_slice(&0_u32.to_be_bytes());
+    let db = foundationdb::Database::from_path(cluster_file).unwrap();
+    let trx = db.create_trx().unwrap();
+    trx.set(&mrc1_fixture_key(prefix, b"meta/write-mode"), b"MRC1");
+    trx.set(
+        &mrc1_fixture_key(prefix, b"meta/fence"),
+        b"MRCF\0\0\0\0\0\0\0\0",
+    );
+    trx.set(&mrc1_fixture_key(prefix, b"meta/manifest"), &manifest);
+    trx.set(&chunk_key, &payload);
+    trx.commit().await.unwrap();
+    (manifest, payload)
 }
 
 #[tokio::test]
@@ -722,22 +783,16 @@ async fn concurrent_backing_mrc1_migration_keeps_manifest_and_fences_old_publish
         std::process::id()
     );
     let storage =
-        FoundationDbStorage::connect(&cluster_file, FoundationDbStorageOptions::new(prefix))
+        FoundationDbStorage::connect(&cluster_file, FoundationDbStorageOptions::new(&prefix))
             .expect("open isolated MRC1 fixture");
     let metadata = storage.metadata();
-    metadata.prepare_concurrent_mode().await.unwrap();
+    let namespace = empty_namespace();
+    let (manifest, payload) = seed_mrc1_fixture(&cluster_file, &prefix, &namespace).await;
     assert_eq!(
         metadata.concurrent_mode_state().await.unwrap(),
         ConcurrentModeState::Mrc1
     );
-    let namespace = empty_namespace();
-    assert_eq!(
-        metadata
-            .publish_if_revision(0, namespace.clone())
-            .await
-            .unwrap(),
-        1
-    );
+    assert_eq!(metadata.load().await.unwrap().revision, 1);
     let backing = storage.blocks().prepare_concurrent_backing().await.unwrap();
     assert_eq!(
         metadata
@@ -773,17 +828,44 @@ async fn concurrent_backing_mrc1_migration_keeps_manifest_and_fences_old_publish
     assert_eq!(loaded.revision, 1);
     assert_eq!(
         serde_json::to_vec(&loaded.namespace.unwrap()).unwrap(),
-        serde_json::to_vec(&namespace).unwrap(),
+        payload,
         "migration must retain the exact published namespace"
     );
+    let db = foundationdb::Database::from_path(&cluster_file).unwrap();
+    let trx = db.create_trx().unwrap();
+    let mut chunk_key = mrc1_fixture_key(&prefix, b"meta/chunk/");
+    chunk_key.extend_from_slice(&0_u32.to_be_bytes());
     assert_eq!(
-        metadata
-            .publish_if_revision(1, namespace.clone())
+        trx.get(&mrc1_fixture_key(&prefix, b"meta/manifest"), false)
             .await
-            .unwrap_err()
-            .code,
-        ErrorCode::Eio,
-        "the old MRC1 decoder must reject the new marker"
+            .unwrap()
+            .unwrap()
+            .as_ref(),
+        manifest.as_slice(),
+        "migration must leave the manifest bytes unchanged"
+    );
+    assert_eq!(
+        trx.get(&chunk_key, false).await.unwrap().unwrap().as_ref(),
+        payload.as_slice(),
+        "migration must leave the namespace chunk bytes unchanged"
+    );
+    assert_eq!(
+        trx.get(&mrc1_fixture_key(&prefix, b"meta/fence"), false)
+            .await
+            .unwrap()
+            .unwrap()
+            .as_ref(),
+        b"MRCF\0\0\0\0\0\0\0\0",
+        "migration must keep the old-client fence sentinel"
+    );
+    assert_eq!(
+        trx.get(&mrc1_fixture_key(&prefix, b"meta/write-mode"), false)
+            .await
+            .unwrap()
+            .unwrap()
+            .as_ref(),
+        b"MRC2",
+        "the persisted mode must reject an old client's exact MRC1 decoder"
     );
     assert_eq!(metadata.load().await.unwrap().revision, 1);
     assert_eq!(

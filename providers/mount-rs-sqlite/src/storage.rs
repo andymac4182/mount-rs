@@ -1175,106 +1175,6 @@ impl MetadataStore for SqliteMetadataStore {
         })
     }
 
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
-        if !self.0.durable {
-            return Err(FsError::new(ErrorCode::Enotsup)
-                .with_syscall("prepare concurrent SQLite volume")
-                .with_message(
-                    "independent concurrent writers require a file-backed SQLite database",
-                ));
-        }
-        let mut connection = self.0.lock()?;
-        #[cfg(target_os = "macos")]
-        {
-            let path = connection
-                .path()
-                .filter(|path| !path.is_empty())
-                .ok_or_else(|| {
-                    FsError::new(ErrorCode::Eio)
-                        .with_syscall("inspect concurrent SQLite backing")
-                        .with_message("SQLite metadata file path is unavailable")
-                })?;
-            require_local_concurrent_backing(Path::new(path), "metadata")?;
-        }
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(backend_error)?;
-        let (mode, revision, namespace, owner, fence, expires): (
-            Option<String>,
-            i64,
-            Option<String>,
-            Option<String>,
-            i64,
-            i64,
-        ) = tx
-            .query_row(
-                "SELECT write_mode, revision, namespace, owner, fence, expires
-                 FROM mount_rs_metadata WHERE id=1",
-                [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                    ))
-                },
-            )
-            .map_err(backend_error)?;
-        if mode.as_deref() == Some(CONCURRENT_WRITE_MODE) {
-            if owner.is_none() && fence == CONCURRENT_FENCE_SENTINEL && expires == 0 {
-                return Ok(());
-            }
-            return Err(backend_error(
-                "SQLite concurrent mode marker and fence sentinel disagree",
-            ));
-        }
-        if mode.is_some() {
-            return Err(incompatible_schema(
-                "unsupported SQLite concurrent write mode",
-            ));
-        }
-        let (head, versions, pins): (Option<String>, i64, i64) = tx
-            .query_row(
-                "SELECT head_id,
-                  (SELECT count(*) FROM mount_rs_versions),
-                  (SELECT count(*) FROM mount_rs_version_pins)
-                 FROM mount_rs_version_state WHERE id=1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .map_err(backend_error)?;
-        if revision != 0
-            || namespace.is_some()
-            || owner.is_some()
-            || fence != 0
-            || expires != 0
-            || head.is_some()
-            || versions != 0
-            || pins != 0
-        {
-            return Err(FsError::new(ErrorCode::Ebusy)
-                .with_syscall("prepare concurrent SQLite volume")
-                .with_message("a fenced legacy volume needs an offline migration"));
-        }
-        let changed = tx
-            .execute(
-                "UPDATE mount_rs_metadata SET write_mode=?1, fence=?2
-             WHERE id=1 AND write_mode IS NULL AND revision=0 AND namespace IS NULL
-               AND owner IS NULL AND fence=0 AND expires=0",
-                params![CONCURRENT_WRITE_MODE, CONCURRENT_FENCE_SENTINEL],
-            )
-            .map_err(backend_error)?;
-        if changed != 1 {
-            return Err(backend_error(
-                "SQLite concurrent mode update returned an unexplained zero-row result",
-            ));
-        }
-        tx.commit().map_err(backend_error)
-    }
-
     async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
         let connection = self.0.lock()?;
         let (mode, backing): (Option<String>, Option<String>) = connection
@@ -1547,97 +1447,6 @@ impl MetadataStore for SqliteMetadataStore {
             return Err(stale());
         }
         Ok(next as u64)
-    }
-
-    async fn publish_if_revision(
-        &self,
-        expected_revision: u64,
-        namespace: Namespace,
-    ) -> Result<u64> {
-        namespace.validate()?;
-        let expected =
-            i64::try_from(expected_revision).map_err(|_| FsError::new(ErrorCode::Eoverflow))?;
-        let next = expected
-            .checked_add(1)
-            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-        let namespace_json = serde_json::to_string(&namespace).map_err(backend_error)?;
-        self.0.with_concurrent_publish_timeout(|connection| {
-            let was_autocommit = connection.is_autocommit();
-            let tx = match connection.transaction_with_behavior(TransactionBehavior::Immediate) {
-                Ok(tx) => tx,
-                Err(error) => {
-                    return Err(sqlite_busy_known_noncommit(
-                        &error,
-                        was_autocommit,
-                        "publish concurrent SQLite metadata",
-                    )
-                    .unwrap_or_else(|| backend_error(error)));
-                }
-            };
-            let (mode, owner, fence, expires, actual_revision): (
-                Option<String>,
-                Option<String>,
-                i64,
-                i64,
-                i64,
-            ) = tx
-                .query_row(
-                    "SELECT write_mode, owner, fence, expires, revision
-                 FROM mount_rs_metadata WHERE id=1",
-                    [],
-                    |row| {
-                        Ok((
-                            row.get(0)?,
-                            row.get(1)?,
-                            row.get(2)?,
-                            row.get(3)?,
-                            row.get(4)?,
-                        ))
-                    },
-                )
-                .map_err(backend_error)?;
-            if mode.as_deref() != Some(CONCURRENT_WRITE_MODE)
-                || owner.is_some()
-                || fence != CONCURRENT_FENCE_SENTINEL
-                || expires != 0
-            {
-                return Err(FsError::new(ErrorCode::Ebusy)
-                    .with_syscall("publish concurrent SQLite metadata")
-                    .with_message("concurrent mode is missing or its legacy fence is invalid"));
-            }
-            if actual_revision != expected {
-                return Err(FsError::new(ErrorCode::Eagain)
-                    .with_syscall("publish concurrent SQLite metadata"));
-            }
-            let changed = tx
-                .execute(
-                    "UPDATE mount_rs_metadata SET revision=?1, namespace=?2
-                 WHERE id=1 AND write_mode=?3 AND owner IS NULL AND fence=?4
-                   AND expires=0 AND revision=?5",
-                    params![
-                        next,
-                        namespace_json,
-                        CONCURRENT_WRITE_MODE,
-                        CONCURRENT_FENCE_SENTINEL,
-                        expected
-                    ],
-                )
-                .map_err(backend_error)?;
-            if changed != 1 {
-                return Err(backend_error(
-                    "SQLite concurrent publication CAS returned an unexplained zero-row update",
-                ));
-            }
-            if let Err(error) = tx.commit() {
-                return Err(sqlite_busy_known_noncommit(
-                    &error,
-                    connection.is_autocommit(),
-                    "publish concurrent SQLite metadata",
-                )
-                .unwrap_or_else(|| backend_error(error)));
-            }
-            Ok(next as u64)
-        })
     }
 
     async fn publish_bound_if_revision(
@@ -2700,6 +2509,47 @@ mod tests {
         }
     }
 
+    fn test_backing_id() -> ConcurrentBackingId {
+        ConcurrentBackingId::from_bytes([0x42; 16]).unwrap()
+    }
+
+    fn prepare_bound_metadata(store: &SqliteMetadataStore) -> ConcurrentBackingId {
+        let backing = test_backing_id();
+        run(store.prepare_bound_concurrent_mode(backing)).unwrap();
+        backing
+    }
+
+    // The retired MRC1 writer API is deliberately unavailable. Seed only an
+    // owned test volume to exercise the offline migration and old-client fence.
+    fn seed_mrc1_metadata(
+        store: &SqliteMetadataStore,
+        revision: u64,
+        namespace: Option<Namespace>,
+    ) {
+        let revision = i64::try_from(revision).unwrap();
+        let namespace = namespace.map(|value| serde_json::to_string(&value).unwrap());
+        assert_eq!(
+            store
+                .0
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE mount_rs_metadata
+                     SET write_mode='MRC1', fence=?1, revision=?2, namespace=?3
+                     WHERE id=1 AND write_mode IS NULL AND backing_id IS NULL
+                       AND revision=0 AND namespace IS NULL AND owner IS NULL
+                       AND fence=0 AND expires=0",
+                    params![CONCURRENT_FENCE_SENTINEL, revision, namespace],
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            run(store.concurrent_mode_state()).unwrap(),
+            ConcurrentModeState::Mrc1
+        );
+    }
+
     fn snapshot_publication(
         expected_revision: u64,
         expected_parent: Option<VersionId>,
@@ -2824,7 +2674,7 @@ mod tests {
         let path = super::super::tests::unique_database_path();
         let store = SqliteMetadataStore::open(&path).unwrap();
         let id = ConcurrentBackingId::from_bytes([3; 16]).unwrap();
-        run(store.prepare_concurrent_mode()).unwrap();
+        seed_mrc1_metadata(&store, 0, None);
         let error = run(store.prepare_bound_concurrent_mode(id)).unwrap_err();
         assert_eq!(error.code, ErrorCode::Ebusy);
         assert!(error.to_string().contains("migrate-concurrent-backing"));
@@ -2848,8 +2698,7 @@ mod tests {
         let path = super::super::tests::unique_database_path();
         let store = SqliteMetadataStore::open(&path).unwrap();
         let id = ConcurrentBackingId::from_bytes([4; 16]).unwrap();
-        run(store.prepare_concurrent_mode()).unwrap();
-        assert_eq!(run(store.publish_if_revision(0, namespace())).unwrap(), 1);
+        seed_mrc1_metadata(&store, 1, Some(namespace()));
         assert_eq!(
             run(store.migrate_mrc1_to_bound_mode(id, 0))
                 .unwrap_err()
@@ -3036,7 +2885,7 @@ mod tests {
     fn concurrent_publish_begin_busy_is_a_known_noncommit() {
         let path = super::super::tests::unique_database_path();
         let store = SqliteMetadataStore::open(&path).unwrap();
-        run(store.prepare_concurrent_mode()).unwrap();
+        let backing = prepare_bound_metadata(&store);
         store
             .0
             .lock()
@@ -3046,14 +2895,17 @@ mod tests {
         let holder = Connection::open(&path).unwrap();
         holder.execute_batch("BEGIN IMMEDIATE").unwrap();
 
-        let error = run(store.publish_if_revision(0, namespace())).unwrap_err();
+        let error = run(store.publish_bound_if_revision(backing, 0, namespace())).unwrap_err();
         assert_eq!(error.code, ErrorCode::Eagain, "{error:?}");
         assert!(store.0.lock().unwrap().is_autocommit());
         holder.execute_batch("ROLLBACK").unwrap();
         let unloaded = run(store.load()).unwrap();
         assert_eq!(unloaded.revision, 0);
         assert!(unloaded.namespace.is_none());
-        assert_eq!(run(store.publish_if_revision(0, namespace())).unwrap(), 1);
+        assert_eq!(
+            run(store.publish_bound_if_revision(backing, 0, namespace())).unwrap(),
+            1
+        );
 
         drop(holder);
         drop(store);
@@ -3064,7 +2916,7 @@ mod tests {
     fn concurrent_publish_commit_busy_rolls_back_before_retry() {
         let path = super::super::tests::unique_database_path();
         let store = SqliteMetadataStore::open(&path).unwrap();
-        run(store.prepare_concurrent_mode()).unwrap();
+        let backing = prepare_bound_metadata(&store);
         store
             .0
             .lock()
@@ -3082,14 +2934,17 @@ mod tests {
             .unwrap();
         assert_eq!(revision, 0);
 
-        let error = run(store.publish_if_revision(0, namespace())).unwrap_err();
+        let error = run(store.publish_bound_if_revision(backing, 0, namespace())).unwrap_err();
         assert_eq!(error.code, ErrorCode::Eagain, "{error:?}");
         assert!(store.0.lock().unwrap().is_autocommit());
         reader.execute_batch("ROLLBACK").unwrap();
         let unloaded = run(store.load()).unwrap();
         assert_eq!(unloaded.revision, 0);
         assert!(unloaded.namespace.is_none());
-        assert_eq!(run(store.publish_if_revision(0, namespace())).unwrap(), 1);
+        assert_eq!(
+            run(store.publish_bound_if_revision(backing, 0, namespace())).unwrap(),
+            1
+        );
 
         drop(reader);
         drop(store);
@@ -3100,12 +2955,12 @@ mod tests {
     fn concurrent_publish_begin_busy_uses_scoped_short_timeout() {
         let path = super::super::tests::unique_database_path();
         let store = SqliteMetadataStore::open(&path).unwrap();
-        run(store.prepare_concurrent_mode()).unwrap();
+        let backing = prepare_bound_metadata(&store);
         let holder = Connection::open(&path).unwrap();
         holder.execute_batch("BEGIN IMMEDIATE").unwrap();
 
         let started = Instant::now();
-        let error = run(store.publish_if_revision(0, namespace())).unwrap_err();
+        let error = run(store.publish_bound_if_revision(backing, 0, namespace())).unwrap_err();
         assert_eq!(error.code, ErrorCode::Eagain, "{error:?}");
         assert!(
             started.elapsed() < Duration::from_secs(2),
@@ -3119,7 +2974,10 @@ mod tests {
             .unwrap();
         assert_eq!(timeout, 5000, "scoped CAS timeout must be restored");
         holder.execute_batch("ROLLBACK").unwrap();
-        assert_eq!(run(store.publish_if_revision(0, namespace())).unwrap(), 1);
+        assert_eq!(
+            run(store.publish_bound_if_revision(backing, 0, namespace())).unwrap(),
+            1
+        );
 
         drop(holder);
         drop(store);
@@ -3130,7 +2988,7 @@ mod tests {
     fn concurrent_publish_commit_busy_uses_scoped_short_timeout() {
         let path = super::super::tests::unique_database_path();
         let store = SqliteMetadataStore::open(&path).unwrap();
-        run(store.prepare_concurrent_mode()).unwrap();
+        let backing = prepare_bound_metadata(&store);
         let reader = Connection::open(&path).unwrap();
         reader.execute_batch("BEGIN").unwrap();
         assert_eq!(
@@ -3145,7 +3003,7 @@ mod tests {
         );
 
         let started = Instant::now();
-        let error = run(store.publish_if_revision(0, namespace())).unwrap_err();
+        let error = run(store.publish_bound_if_revision(backing, 0, namespace())).unwrap_err();
         assert_eq!(error.code, ErrorCode::Eagain, "{error:?}");
         assert!(
             started.elapsed() < Duration::from_secs(2),
@@ -3163,7 +3021,10 @@ mod tests {
         let unloaded = run(store.load()).unwrap();
         assert_eq!(unloaded.revision, 0);
         assert!(unloaded.namespace.is_none());
-        assert_eq!(run(store.publish_if_revision(0, namespace())).unwrap(), 1);
+        assert_eq!(
+            run(store.publish_bound_if_revision(backing, 0, namespace())).unwrap(),
+            1
+        );
 
         drop(reader);
         drop(store);
@@ -3338,29 +3199,36 @@ mod tests {
         let path = super::super::tests::unique_database_path();
         let first = SqliteMetadataStore::open(&path).unwrap();
         let second = SqliteMetadataStore::open(&path).unwrap();
+        let backing = test_backing_id();
 
-        run(first.prepare_concurrent_mode()).unwrap();
-        run(second.prepare_concurrent_mode()).unwrap();
+        run(first.prepare_bound_concurrent_mode(backing)).unwrap();
+        run(second.prepare_bound_concurrent_mode(backing)).unwrap();
         assert!(
             run(second.acquire_writer("legacy", Duration::from_secs(60)))
                 .unwrap_err()
                 .is(ErrorCode::Ebusy)
         );
 
-        assert_eq!(run(first.publish_if_revision(0, namespace())).unwrap(), 1);
+        assert_eq!(
+            run(first.publish_bound_if_revision(backing, 0, namespace())).unwrap(),
+            1
+        );
         assert!(
-            run(second.publish_if_revision(0, namespace()))
+            run(second.publish_bound_if_revision(backing, 0, namespace()))
                 .unwrap_err()
                 .is(ErrorCode::Eagain)
         );
         assert_eq!(run(second.load()).unwrap().revision, 1);
-        assert_eq!(run(second.publish_if_revision(1, namespace())).unwrap(), 2);
+        assert_eq!(
+            run(second.publish_bound_if_revision(backing, 1, namespace())).unwrap(),
+            2
+        );
         drop(first);
         drop(second);
 
         let reopened = SqliteMetadataStore::open(&path).unwrap();
         assert_eq!(run(reopened.load()).unwrap().revision, 2);
-        run(reopened.prepare_concurrent_mode()).unwrap();
+        run(reopened.prepare_bound_concurrent_mode(backing)).unwrap();
         let connection = reopened.0.lock().unwrap();
         let (mode, fence): (Option<String>, i64) = connection
             .query_row(
@@ -3369,7 +3237,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert_eq!(mode.as_deref(), Some("MRC1"));
+        assert_eq!(mode.as_deref(), Some("MRC2"));
         assert_eq!(fence, i64::MAX);
         assert_eq!(
             connection
@@ -3391,7 +3259,7 @@ mod tests {
     fn concurrent_mode_rejects_non_durable_and_historically_fenced_volumes() {
         let memory = SqliteMetadataStore::in_memory().unwrap();
         assert!(
-            run(memory.prepare_concurrent_mode())
+            run(memory.prepare_bound_concurrent_mode(test_backing_id()))
                 .unwrap_err()
                 .is(ErrorCode::Enotsup)
         );
@@ -3401,7 +3269,7 @@ mod tests {
         let lease = run(store.acquire_writer("old", Duration::from_secs(60))).unwrap();
         run(store.release_writer(&lease)).unwrap();
         assert!(
-            run(store.prepare_concurrent_mode())
+            run(store.prepare_bound_concurrent_mode(test_backing_id()))
                 .unwrap_err()
                 .is(ErrorCode::Ebusy)
         );
@@ -3425,7 +3293,7 @@ mod tests {
     fn concurrent_publication_fails_closed_on_corrupt_fence_and_sqlite_io_error() {
         let path = super::super::tests::unique_database_path();
         let store = SqliteMetadataStore::open(&path).unwrap();
-        run(store.prepare_concurrent_mode()).unwrap();
+        let backing = prepare_bound_metadata(&store);
 
         store
             .0
@@ -3434,9 +3302,9 @@ mod tests {
             .execute("UPDATE mount_rs_metadata SET fence=0 WHERE id=1", [])
             .unwrap();
         assert!(
-            run(store.publish_if_revision(0, namespace()))
+            run(store.publish_bound_if_revision(backing, 0, namespace()))
                 .unwrap_err()
-                .is(ErrorCode::Ebusy)
+                .is(ErrorCode::Enotsup)
         );
         assert_eq!(run(store.load()).unwrap().revision, 0);
         store
@@ -3454,7 +3322,7 @@ mod tests {
             .unwrap()
             .execute_batch("PRAGMA query_only=ON")
             .unwrap();
-        let error = run(store.publish_if_revision(0, namespace())).unwrap_err();
+        let error = run(store.publish_bound_if_revision(backing, 0, namespace())).unwrap_err();
         assert!(!error.is(ErrorCode::Eagain));
         assert_eq!(run(store.load()).unwrap().revision, 0);
         drop(store);
@@ -3545,6 +3413,7 @@ mod tests {
                     .execute_batch(&format!("PRAGMA journal_mode={journal};"))
                     .unwrap();
                 let concurrent = SqliteMetadataStore::open(&path).unwrap();
+                let backing = test_backing_id();
                 let start = Arc::new(Barrier::new(3));
                 let old_start = Arc::clone(&start);
                 let concurrent_start = Arc::clone(&start);
@@ -3554,7 +3423,7 @@ mod tests {
                 });
                 let concurrent_task = std::thread::spawn(move || {
                     concurrent_start.wait();
-                    run(concurrent.prepare_concurrent_mode())
+                    run(concurrent.prepare_bound_concurrent_mode(backing))
                 });
                 start.wait();
                 let old_result = old_task.join().unwrap();
@@ -3570,14 +3439,15 @@ mod tests {
                         );
                         run(reopened.release_writer(&lease)).unwrap();
                         assert!(
-                            run(reopened.prepare_concurrent_mode())
+                            run(reopened.prepare_bound_concurrent_mode(backing))
                                 .unwrap_err()
                                 .is(ErrorCode::Ebusy)
                         );
                     }
                     (Err(error), Ok(())) if error.is(ErrorCode::Ebusy) => {
                         assert_eq!(
-                            run(reopened.publish_if_revision(0, namespace())).unwrap(),
+                            run(reopened.publish_bound_if_revision(backing, 0, namespace()))
+                                .unwrap(),
                             1
                         );
                     }
@@ -3608,7 +3478,7 @@ mod tests {
                  BEGIN SELECT RAISE(IGNORE); END;",
             )
             .unwrap();
-        let error = run(store.prepare_concurrent_mode()).unwrap_err();
+        let error = run(store.prepare_bound_concurrent_mode(test_backing_id())).unwrap_err();
         assert!(!error.is(ErrorCode::Eagain));
         let (mode, fence): (Option<String>, i64) = store
             .0

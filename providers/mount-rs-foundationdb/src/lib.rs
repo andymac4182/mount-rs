@@ -1670,6 +1670,9 @@ fn decode_concurrent_mode_state(
     }
 }
 
+// The removed MRC1 publisher's exact mode decoder remains as a regression
+// oracle for old-client rejection after migration.
+#[cfg(test)]
 fn decode_concurrent_write_mode(raw: Option<Vec<u8>>) -> TxnResult<bool> {
     match raw {
         None => Ok(false),
@@ -1692,17 +1695,6 @@ fn require_legacy_write_mode(raw: Option<Vec<u8>>) -> TxnResult<()> {
         Some(_) => Err(TxnError::Fs(backend_error(
             "FoundationDB metadata write mode marker is invalid",
         ))),
-    }
-}
-
-fn require_concurrent_write_mode(raw: Option<Vec<u8>>) -> TxnResult<()> {
-    if decode_concurrent_write_mode(raw)? {
-        Ok(())
-    } else {
-        Err(TxnError::Fs(
-            FsError::enotsup("FoundationDB concurrent metadata publication")
-                .with_message("prepare the volume for concurrent writers first"),
-        ))
     }
 }
 
@@ -2319,58 +2311,6 @@ impl MetadataStore for FoundationDbMetadataStore {
             .await
     }
 
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
-        let inner = Arc::clone(&self.0);
-        let keyspace = Keyspace::new(&inner.prefix);
-        let mode_key = keyspace.write_mode();
-        let lease_key = keyspace.lease();
-        let fence_key = keyspace.fence();
-        let limits = inner.limits;
-        inner
-            .transact_metadata((), move |trx, _| {
-                let mode_key = mode_key.clone();
-                let lease_key = lease_key.clone();
-                let fence_key = fence_key.clone();
-                Box::pin(async move {
-                    configure_transaction(trx, limits)?;
-                    // Read the marker and both legacy authority records in
-                    // one transaction. A racing legacy acquire reads this
-                    // marker and writes the fence, so only one mode can win.
-                    let (raw_mode, raw_lease, raw_fence) = futures_util::future::try_join3(
-                        get_owned(trx, &mode_key),
-                        get_owned(trx, &lease_key),
-                        get_owned(trx, &fence_key),
-                    )
-                    .await?;
-                    let prepared = decode_concurrent_write_mode(raw_mode)?;
-                    let has_sentinel = raw_fence.as_deref() == Some(CONCURRENT_FENCE_SENTINEL);
-                    if prepared {
-                        if raw_lease.is_none() && has_sentinel {
-                            return Ok(());
-                        }
-                        return Err(TxnError::Fs(backend_error(
-                            "FoundationDB concurrent mode marker and fence sentinel disagree",
-                        )));
-                    }
-                    if raw_lease.is_some() || raw_fence.is_some() {
-                        return Err(TxnError::Fs(
-                            FsError::new(ErrorCode::Ebusy)
-                                .with_syscall("prepare concurrent FoundationDB volume")
-                                .with_message("a fenced legacy volume needs an offline migration"),
-                        ));
-                    }
-                    // The pair is committed atomically. Old lease acquisition
-                    // reads this fence key before its own write, so a race
-                    // conflicts and an old client that starts later rejects
-                    // the deliberately invalid fence record.
-                    trx.set(&mode_key, CONCURRENT_WRITE_MODE);
-                    trx.set(&fence_key, CONCURRENT_FENCE_SENTINEL);
-                    Ok(())
-                })
-            })
-            .await
-    }
-
     async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
         let inner = Arc::clone(&self.0);
         let keyspace = Keyspace::new(&inner.prefix);
@@ -2707,107 +2647,6 @@ impl MetadataStore for FoundationDbMetadataStore {
                     if current_revision != expected_revision {
                         return Err(TxnError::Fs(
                             FsError::new(ErrorCode::Eagain).with_syscall("publish metadata"),
-                        ));
-                    }
-                    if let Some(clear_start) =
-                        metadata_chunk_clear_start(&chunk_prefix, current_manifest, chunk_count)
-                    {
-                        trx.clear_range(&clear_start, &chunk_end);
-                    }
-                    for index in 0..chunk_count {
-                        let start = index as usize * limits.metadata_chunk_bytes;
-                        let end = (start + limits.metadata_chunk_bytes).min(payload.len());
-                        let key = metadata_chunk_key(&chunk_prefix, index);
-                        trx.set(&key, &payload[start..end]);
-                    }
-                    trx.set(&manifest_key, &manifest);
-                    Ok(next_revision)
-                })
-            })
-            .await
-    }
-
-    async fn publish_if_revision(
-        &self,
-        expected_revision: u64,
-        namespace: Namespace,
-    ) -> Result<u64> {
-        namespace.validate()?;
-        validate_namespace_chunkers(&namespace, self.0.limits)?;
-        let payload = serde_json::to_vec(&namespace).map_err(backend_error)?;
-        let inner = Arc::clone(&self.0);
-        if payload.len() > inner.limits.max_metadata_bytes {
-            return Err(FsError::new(ErrorCode::Efbig)
-                .with_message("FoundationDB namespace exceeds configured limit"));
-        }
-        let affected_bytes = metadata_publication_affected_bytes(
-            &inner.prefix,
-            inner.limits.metadata_chunk_bytes,
-            payload.len(),
-        )?;
-        if affected_bytes > FOUNDATIONDB_MAX_TRANSACTION_BYTES {
-            return Err(metadata_transaction_too_large(affected_bytes));
-        }
-        let next_revision = expected_revision
-            .checked_add(1)
-            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-        let chunk_count = payload.len().div_ceil(inner.limits.metadata_chunk_bytes);
-        let chunk_count = u32::try_from(chunk_count)
-            .map_err(|_| FsError::new(ErrorCode::Efbig).with_message("too many metadata chunks"))?;
-        let manifest = encode_manifest(Manifest {
-            revision: next_revision,
-            chunk_count,
-            payload_len: payload.len() as u64,
-        });
-        let keyspace = Keyspace::new(&inner.prefix);
-        let mode_key = keyspace.write_mode();
-        let lease_key = keyspace.lease();
-        let fence_key = keyspace.fence();
-        let manifest_key = keyspace.manifest();
-        let chunk_prefix = keyspace.chunks();
-        let chunk_end = range_end(&chunk_prefix)?;
-        let limits = inner.limits;
-        inner
-            .transact_metadata((), move |trx, _| {
-                let mode_key = mode_key.clone();
-                let lease_key = lease_key.clone();
-                let fence_key = fence_key.clone();
-                let manifest_key = manifest_key.clone();
-                let chunk_prefix = chunk_prefix.clone();
-                let chunk_end = chunk_end.clone();
-                let payload = payload.clone();
-                let manifest = manifest.clone();
-                Box::pin(async move {
-                    configure_transaction(trx, limits)?;
-                    // All guards and the manifest CAS use one FDB read
-                    // version. Reading the manifest adds a conflict range;
-                    // only one concurrent revision writer can commit.
-                    let (raw_mode, raw_lease, raw_fence, raw_manifest) =
-                        futures_util::future::try_join4(
-                            get_owned(trx, &mode_key),
-                            get_owned(trx, &lease_key),
-                            get_owned(trx, &fence_key),
-                            get_owned(trx, &manifest_key),
-                        )
-                        .await?;
-                    require_concurrent_write_mode(raw_mode)?;
-                    if raw_lease.is_some()
-                        || raw_fence.as_deref() != Some(CONCURRENT_FENCE_SENTINEL)
-                    {
-                        return Err(TxnError::Fs(
-                            FsError::new(ErrorCode::Ebusy)
-                                .with_syscall("publish concurrent FoundationDB metadata")
-                                .with_message("the concurrent fence sentinel is missing or a legacy writer has claimed this volume"),
-                        ));
-                    }
-                    let current_manifest = raw_manifest
-                        .map(|bytes| decode_manifest(&bytes).map_err(TxnError::Fs))
-                        .transpose()?;
-                    let current_revision = current_manifest.map_or(0, |value| value.revision);
-                    if current_revision != expected_revision {
-                        return Err(TxnError::Fs(
-                            FsError::new(ErrorCode::Eagain)
-                                .with_syscall("publish concurrent FoundationDB metadata"),
                         ));
                     }
                     if let Some(clear_start) =
