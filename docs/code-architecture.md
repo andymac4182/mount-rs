@@ -210,7 +210,9 @@ mapping and shutdown coverage.
   namespace through an ID-bound revision CAS. `MRC2` reopens verify the block
   marker without recreating it. `MRC1` volumes require the explicit
   `migrate-concurrent-backing` command while old mounts are stopped. Existing
-  exclusive-writer state needs an offline migration. Memory
+  exclusive-writer `Legacy` state cannot use either current migration command:
+  Legacy-to-MRC2 conversion is not implemented. Retain exclusive mode or use
+  a fresh concurrent volume; the offline commands only enroll `MRC1`. Memory
   metadata and the legacy SQLite/PGlite snapshot facades remain single-writer.
 - Writes complete new immutable blocks and the block barrier before publishing
   their references. Exclusive mode checks both revision and writer fence;
