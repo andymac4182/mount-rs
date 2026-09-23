@@ -132,6 +132,54 @@ pub struct Frame {
     pub body: Vec<u8>,
 }
 
+#[derive(Clone, Copy)]
+struct FrameHeaderFields {
+    magic: [u8; 4],
+    version: u16,
+    kind: u8,
+    flags: u8,
+    body_len: u32,
+}
+
+/// Classify the fixed wire header and length before copying its body. A caller
+/// can only supply header fields when at least `HEADER_LEN` bytes are present.
+fn classify_frame_decode(
+    received_len: usize,
+    header: Option<FrameHeaderFields>,
+) -> Result<(MessageKind, usize), DecodeError> {
+    let Some(header) = header else {
+        return Err(DecodeError::TooShort {
+            actual: received_len,
+        });
+    };
+    if header.magic != MAGIC {
+        return Err(DecodeError::InvalidMagic);
+    }
+    if header.version != PROTOCOL_VERSION {
+        return Err(DecodeError::UnsupportedVersion {
+            version: header.version,
+        });
+    }
+    if header.flags != FLAG_MASK {
+        return Err(DecodeError::UnsupportedFlags {
+            flags: header.flags,
+        });
+    }
+    let kind = MessageKind::try_from(header.kind)?;
+    let body_len = header.body_len as usize;
+    if body_len > MAX_BODY_LEN {
+        return Err(DecodeError::BodyTooLarge { len: body_len });
+    }
+    let expected = HEADER_LEN + body_len;
+    if received_len != expected {
+        return Err(DecodeError::LengthMismatch {
+            expected,
+            actual: received_len,
+        });
+    }
+    Ok((kind, body_len))
+}
+
 impl Frame {
     pub fn new(
         kind: MessageKind,
@@ -168,52 +216,24 @@ impl Frame {
     }
 
     pub fn decode(encoded: &[u8]) -> Result<Self, DecodeError> {
-        if encoded.len() < HEADER_LEN {
-            return Err(DecodeError::TooShort {
-                actual: encoded.len(),
-            });
-        }
-        if encoded[..MAGIC.len()] != MAGIC {
-            return Err(DecodeError::InvalidMagic);
-        }
-
-        let version = u16::from_le_bytes([encoded[4], encoded[5]]);
-        if version != PROTOCOL_VERSION {
-            return Err(DecodeError::UnsupportedVersion { version });
-        }
-
-        let flags = encoded[7];
-        if flags != FLAG_MASK {
-            return Err(DecodeError::UnsupportedFlags { flags });
-        }
-
-        let kind = MessageKind::try_from(encoded[6])?;
+        let header = encoded.get(..HEADER_LEN).map(|bytes| FrameHeaderFields {
+            magic: [bytes[0], bytes[1], bytes[2], bytes[3]],
+            version: u16::from_le_bytes([bytes[4], bytes[5]]),
+            kind: bytes[6],
+            flags: bytes[7],
+            body_len: u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]),
+        });
+        let (kind, body_len) = classify_frame_decode(encoded.len(), header)?;
         let request_id = u64::from_le_bytes(
             encoded[8..16]
                 .try_into()
                 .expect("the fixed header contains eight request-id bytes"),
         );
-        let body_len = u32::from_le_bytes(
-            encoded[16..20]
-                .try_into()
-                .expect("the fixed header contains four body-length bytes"),
-        ) as usize;
-        if body_len > MAX_BODY_LEN {
-            return Err(DecodeError::BodyTooLarge { len: body_len });
-        }
-
-        let expected = HEADER_LEN + body_len;
-        if encoded.len() != expected {
-            return Err(DecodeError::LengthMismatch {
-                expected,
-                actual: encoded.len(),
-            });
-        }
 
         Ok(Self {
             kind,
             request_id,
-            body: encoded[HEADER_LEN..].to_vec(),
+            body: encoded[HEADER_LEN..HEADER_LEN + body_len].to_vec(),
         })
     }
 
@@ -223,6 +243,97 @@ impl Frame {
 
     fn error(request_id: u64, code: ErrorCode) -> Result<Self, FrameError> {
         Self::new(MessageKind::Error, request_id, code.as_u16().to_le_bytes())
+    }
+}
+
+#[cfg(kani)]
+mod frame_decode_proofs {
+    use super::*;
+
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn frame_header_classification_precedes_body_copy() {
+        let received_len: usize = kani::any();
+        let magic: [u8; 4] = kani::any();
+        let version: u16 = kani::any();
+        let kind: u8 = kani::any();
+        let flags: u8 = kani::any();
+        let declared_body_len: u32 = kani::any();
+        let fields = FrameHeaderFields {
+            magic,
+            version,
+            kind,
+            flags,
+            body_len: declared_body_len,
+        };
+        // `get(..HEADER_LEN)` in Frame::decode has exactly this relationship.
+        let header = (received_len >= HEADER_LEN).then_some(fields);
+        let observed = classify_frame_decode(received_len, header);
+
+        let expected_kind = match kind {
+            1 => Some(MessageKind::Hello),
+            2 => Some(MessageKind::Shutdown),
+            3 => Some(MessageKind::Operation),
+            0x80 => Some(MessageKind::Reply),
+            0x81 => Some(MessageKind::Error),
+            _ => None,
+        };
+        let expected_wire_len = HEADER_LEN as u128 + u128::from(declared_body_len);
+        let expected = if received_len < HEADER_LEN {
+            Err(DecodeError::TooShort {
+                actual: received_len,
+            })
+        } else if magic != MAGIC {
+            Err(DecodeError::InvalidMagic)
+        } else if version != PROTOCOL_VERSION {
+            Err(DecodeError::UnsupportedVersion { version })
+        } else if flags != FLAG_MASK {
+            Err(DecodeError::UnsupportedFlags { flags })
+        } else if expected_kind.is_none() {
+            Err(DecodeError::UnknownKind(kind))
+        } else if declared_body_len as u128 > MAX_BODY_LEN as u128 {
+            Err(DecodeError::BodyTooLarge {
+                len: declared_body_len as usize,
+            })
+        } else if received_len as u128 != expected_wire_len {
+            Err(DecodeError::LengthMismatch {
+                expected: expected_wire_len as usize,
+                actual: received_len,
+            })
+        } else {
+            Ok((expected_kind.unwrap(), declared_body_len as usize))
+        };
+        assert_eq!(observed, expected);
+        if let Ok((accepted_kind, accepted_len)) = &observed {
+            assert_eq!(Some(*accepted_kind), expected_kind);
+            assert_eq!(*accepted_len as u128, u128::from(declared_body_len));
+            assert!(*accepted_len <= MAX_BODY_LEN);
+            assert_eq!(
+                received_len as u128,
+                HEADER_LEN as u128 + *accepted_len as u128
+            );
+        }
+
+        kani::cover!(matches!(&observed, Err(DecodeError::TooShort { .. })));
+        kani::cover!(matches!(&observed, Err(DecodeError::InvalidMagic)));
+        kani::cover!(matches!(
+            &observed,
+            Err(DecodeError::UnsupportedVersion { .. })
+        ));
+        kani::cover!(matches!(
+            &observed,
+            Err(DecodeError::UnsupportedFlags { .. })
+        ));
+        kani::cover!(matches!(&observed, Err(DecodeError::UnknownKind(_))));
+        kani::cover!(matches!(&observed, Err(DecodeError::BodyTooLarge { .. })));
+        kani::cover!(
+            matches!(&observed, Err(DecodeError::LengthMismatch { expected, actual }) if actual < expected)
+        );
+        kani::cover!(
+            matches!(&observed, Err(DecodeError::LengthMismatch { expected, actual }) if actual > expected)
+        );
+        kani::cover!(matches!(&observed, Ok((_, 0))));
+        kani::cover!(matches!(&observed, Ok((_, MAX_BODY_LEN))));
     }
 }
 
@@ -1417,6 +1528,57 @@ mod tests {
                 len: MAX_BODY_LEN + 1
             })
         );
+    }
+
+    #[test]
+    fn frame_decode_requires_exact_body_length_at_wire_boundaries() {
+        for body_len in [0, 1, 7, MAX_BODY_LEN] {
+            let body = vec![0x5a; body_len];
+            let expected_frame = frame(MessageKind::Operation, 0x1234, &body);
+            let encoded = expected_frame.encode().expect("bounded frame encodes");
+            assert_eq!(Frame::decode(&encoded), Ok(expected_frame));
+
+            let mut extra = encoded.clone();
+            extra.push(0xff);
+            assert_eq!(
+                Frame::decode(&extra),
+                Err(DecodeError::LengthMismatch {
+                    expected: encoded.len(),
+                    actual: extra.len(),
+                })
+            );
+
+            let short = &encoded[..encoded.len() - 1];
+            if body_len == 0 {
+                assert_eq!(
+                    Frame::decode(short),
+                    Err(DecodeError::TooShort {
+                        actual: HEADER_LEN - 1,
+                    })
+                );
+            } else {
+                assert_eq!(
+                    Frame::decode(short),
+                    Err(DecodeError::LengthMismatch {
+                        expected: encoded.len(),
+                        actual: short.len(),
+                    })
+                );
+            }
+        }
+
+        for too_large in [MAX_BODY_LEN as u32 + 1, u32::MAX] {
+            let mut encoded = frame(MessageKind::Operation, 9, &[])
+                .encode()
+                .expect("header");
+            encoded[16..20].copy_from_slice(&too_large.to_le_bytes());
+            assert_eq!(
+                Frame::decode(&encoded),
+                Err(DecodeError::BodyTooLarge {
+                    len: too_large as usize,
+                })
+            );
+        }
     }
 
     #[test]

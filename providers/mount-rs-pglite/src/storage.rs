@@ -570,6 +570,40 @@ fn stale() -> FsError {
     FsError::new(ErrorCode::Estale).with_syscall("metadata lease")
 }
 
+struct PinRenewalIdentity {
+    volume_matches: bool,
+    version_matches: bool,
+    request_owner_matches: bool,
+    lease_owner_matches: bool,
+}
+
+struct PinRenewalToken {
+    fence: i64,
+    expires_at_ms: i64,
+}
+
+fn plan_view_pin_renewal(
+    identity: PinRenewalIdentity,
+    current: PinRenewalToken,
+    lease: PinRenewalToken,
+    now_ms: i64,
+    ttl_ms: i64,
+) -> Result<i64> {
+    if !identity.volume_matches
+        || !identity.version_matches
+        || !identity.request_owner_matches
+        || !identity.lease_owner_matches
+        || current.fence != lease.fence
+        || current.expires_at_ms != lease.expires_at_ms
+        || current.expires_at_ms <= now_ms
+    {
+        return Err(FsError::new(ErrorCode::Estale).with_syscall("renew view"));
+    }
+    now_ms
+        .checked_add(ttl_ms)
+        .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))
+}
+
 fn nonnegative(value: i64, field: &str) -> Result<u64> {
     u64::try_from(value).map_err(|_| backend_error(format!("invalid PGlite {field}")))
 }
@@ -1542,19 +1576,24 @@ impl VersionedMetadataStore for PgliteMetadataStore {
             .map_err(postgres_error)?
             .ok_or_else(|| backend_error("PGlite clock query returned no row"))?
             .get::<_, i64>(0);
-        if current_volume != self.1.0
-            || current_version != lease.version.encode()
-            || current_owner != request.owner
-            || current_owner != lease.owner
-            || current_fence != fence
-            || current_expires != expires
-            || current_expires <= now_ms
-        {
-            return Err(FsError::new(ErrorCode::Estale).with_syscall("renew view"));
-        }
-        let next_expires = now_ms
-            .checked_add(ttl_ms)
-            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        let next_expires = plan_view_pin_renewal(
+            PinRenewalIdentity {
+                volume_matches: current_volume == self.1.0,
+                version_matches: current_version == lease.version.encode(),
+                request_owner_matches: current_owner == request.owner,
+                lease_owner_matches: current_owner == lease.owner,
+            },
+            PinRenewalToken {
+                fence: current_fence,
+                expires_at_ms: current_expires,
+            },
+            PinRenewalToken {
+                fence,
+                expires_at_ms: expires,
+            },
+            now_ms,
+            ttl_ms,
+        )?;
         let changed = tx
             .execute_typed(
                 "UPDATE mount_rs_version_pins SET expires=$3
@@ -1799,6 +1838,182 @@ impl BlockStore for PgliteBlockStore {
             .await
             .map_err(postgres_error)?;
         Ok(())
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn view_pin_renewal_requires_exact_live_token_and_checked_expiry() {
+        let volume_matches: bool = kani::any();
+        let version_matches: bool = kani::any();
+        let request_owner_matches: bool = kani::any();
+        let lease_owner_matches: bool = kani::any();
+        let current_fence: i64 = kani::any();
+        let lease_fence: i64 = kani::any();
+        let current_expires: i64 = kani::any();
+        let lease_expires: i64 = kani::any();
+        let now_ms: i64 = kani::any();
+        let ttl_ms: i64 = kani::any();
+        kani::assume(current_fence > 0);
+        kani::assume(lease_fence >= 0);
+        kani::assume(current_expires >= 0);
+        kani::assume(lease_expires >= 0);
+        kani::assume(now_ms >= 0);
+        kani::assume(ttl_ms > 0);
+
+        let observed = plan_view_pin_renewal(
+            PinRenewalIdentity {
+                volume_matches,
+                version_matches,
+                request_owner_matches,
+                lease_owner_matches,
+            },
+            PinRenewalToken {
+                fence: current_fence,
+                expires_at_ms: current_expires,
+            },
+            PinRenewalToken {
+                fence: lease_fence,
+                expires_at_ms: lease_expires,
+            },
+            now_ms,
+            ttl_ms,
+        )
+        .map_err(|error| error.code);
+        let exact_identity = volume_matches
+            && version_matches
+            && request_owner_matches
+            && lease_owner_matches
+            && current_fence == lease_fence
+            && current_expires == lease_expires;
+        let wide_expiry = i128::from(now_ms) + i128::from(ttl_ms);
+        let expected = if !exact_identity || current_expires <= now_ms {
+            Err(ErrorCode::Estale)
+        } else if wide_expiry > i128::from(i64::MAX) {
+            Err(ErrorCode::Eoverflow)
+        } else {
+            Ok(wide_expiry as i64)
+        };
+
+        kani::cover!(exact_identity && current_expires > now_ms && observed.is_ok());
+        kani::cover!(exact_identity && current_expires == now_ms && observed.is_err());
+        kani::cover!(
+            exact_identity && current_expires < now_ms && observed == Err(ErrorCode::Estale)
+        );
+        kani::cover!(
+            !volume_matches
+                && version_matches
+                && request_owner_matches
+                && lease_owner_matches
+                && current_fence == lease_fence
+                && current_expires == lease_expires
+                && current_expires > now_ms
+        );
+        kani::cover!(
+            volume_matches
+                && !version_matches
+                && request_owner_matches
+                && lease_owner_matches
+                && current_fence == lease_fence
+                && current_expires == lease_expires
+                && current_expires > now_ms
+        );
+        kani::cover!(
+            volume_matches
+                && version_matches
+                && !request_owner_matches
+                && lease_owner_matches
+                && current_fence == lease_fence
+                && current_expires == lease_expires
+                && current_expires > now_ms
+        );
+        kani::cover!(
+            volume_matches
+                && version_matches
+                && request_owner_matches
+                && lease_owner_matches
+                && current_fence != lease_fence
+                && current_expires == lease_expires
+                && current_expires > now_ms
+        );
+        kani::cover!(
+            volume_matches
+                && version_matches
+                && request_owner_matches
+                && !lease_owner_matches
+                && current_fence == lease_fence
+                && current_expires == lease_expires
+                && current_expires > now_ms
+        );
+        kani::cover!(
+            volume_matches
+                && version_matches
+                && request_owner_matches
+                && lease_owner_matches
+                && current_fence == lease_fence
+                && current_expires != lease_expires
+                && current_expires > now_ms
+        );
+        kani::cover!(
+            exact_identity
+                && current_expires > now_ms
+                && wide_expiry > i128::from(i64::MAX)
+                && observed == Err(ErrorCode::Eoverflow)
+        );
+        kani::cover!(
+            exact_identity && current_expires > now_ms && wide_expiry == i128::from(i64::MAX)
+        );
+        assert_eq!(observed, expected);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn signed_writer_lease_boundaries_are_checked() {
+        let seconds: u64 = kani::any();
+        let nanos: u32 = kani::any();
+        let fence: u64 = kani::any();
+        let expiry: u64 = kani::any();
+        kani::assume(nanos < 1_000_000_000);
+
+        let exact_ms = u128::from(seconds) * 1_000 + u128::from(nanos / 1_000_000);
+        let observed_ttl = ttl_ms(Duration::new(seconds, nanos)).map_err(|error| error.code);
+        let expected_ttl = if exact_ms == 0 || exact_ms > i64::MAX as u128 {
+            Err(ErrorCode::Einval)
+        } else {
+            Ok(exact_ms as i64)
+        };
+        assert_eq!(observed_ttl, expected_ttl);
+
+        let lease = WriterLease {
+            owner: "writer".to_owned(),
+            fence,
+            expires_at_ms: expiry,
+        };
+        let observed_token = lease_numbers(&lease).map_err(|error| error.code);
+        let expected_token = if fence > i64::MAX as u64 || expiry > i64::MAX as u64 {
+            Err(ErrorCode::Estale)
+        } else {
+            Ok((fence as i64, expiry as i64))
+        };
+        assert_eq!(observed_token, expected_token);
+
+        kani::cover!(exact_ms == 0 && observed_ttl == Err(ErrorCode::Einval));
+        kani::cover!(exact_ms == 1 && observed_ttl == Ok(1));
+        kani::cover!(exact_ms == i64::MAX as u128 && observed_ttl == Ok(i64::MAX));
+        kani::cover!(exact_ms > i64::MAX as u128 && observed_ttl == Err(ErrorCode::Einval));
+        kani::cover!(
+            fence <= i64::MAX as u64 && expiry <= i64::MAX as u64 && observed_token.is_ok()
+        );
+        kani::cover!(
+            fence > i64::MAX as u64 && expiry <= i64::MAX as u64 && observed_token.is_err()
+        );
+        kani::cover!(
+            fence <= i64::MAX as u64 && expiry > i64::MAX as u64 && observed_token.is_err()
+        );
     }
 }
 

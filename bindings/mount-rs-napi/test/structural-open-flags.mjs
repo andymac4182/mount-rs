@@ -12,11 +12,13 @@ try {
   await writeFile(join(root, "writable"), "truncate these bytes")
 
   let openCalls = 0
+  const receivedFlags = []
   const structural = {
     stat: async () => { throw new Error("stat should not be called") },
     readdir: async () => { throw new Error("readdir should not be called") },
     open: (path, flags, mode) => {
       openCalls++
+      receivedFlags.push(flags)
       return open(join(root, path.slice(1)), flags, mode)
     },
   }
@@ -43,6 +45,20 @@ try {
     await handle.close()
     assert.equal(openCalls, 1, "truncate with write access must reach the JS callback")
     assert.equal((await readFile(join(root, "writable"))).length, 0)
+
+    for (const [input, expected] of [
+      [NaN, constants.O_RDONLY],
+      [Infinity, constants.O_RDONLY],
+      [-Infinity, constants.O_RDONLY],
+      [1.9, constants.O_WRONLY],
+      [4_294_967_297.9, constants.O_WRONLY],
+    ]) {
+      const coerced = await filesystem.open("/existing", input)
+      await coerced.close()
+      assert.equal(receivedFlags.at(-1), expected, "Node numeric flags must use ToInt32")
+    }
+    assert.equal(openCalls, 6)
+    assert.equal(await readFile(join(root, "existing"), "utf8"), "keep these bytes")
   } finally {
     await filesystem.shutdown()
   }

@@ -283,10 +283,75 @@ fn timestamp_ms(name: &str, seconds: f64) -> Result<i64, Error> {
     Ok(millis as i64)
 }
 
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    test,
+    kani
+))]
+#[derive(Clone, Copy)]
+struct NativeOpenBits {
+    create: u32,
+    exclusive: u32,
+    truncate: u32,
+    append: u32,
+}
+
+#[cfg(any(target_os = "linux", test, kani))]
+const LINUX_NATIVE_BITS: NativeOpenBits = NativeOpenBits {
+    create: 0o100,
+    exclusive: 0o200,
+    truncate: 0o1000,
+    append: 0o2000,
+};
+
+#[cfg(any(target_os = "macos", test, kani))]
+const MACOS_NATIVE_BITS: NativeOpenBits = NativeOpenBits {
+    create: 0x0200,
+    exclusive: 0x0800,
+    truncate: 0x0400,
+    append: 0x0008,
+};
+
+// Node exposes the Microsoft CRT open flags on Windows.
+#[cfg(any(target_os = "windows", test, kani))]
+const WINDOWS_NATIVE_BITS: NativeOpenBits = NativeOpenBits {
+    create: 0x0100,
+    exclusive: 0x0400,
+    truncate: 0x0200,
+    append: 0x0008,
+};
+
+#[cfg(target_os = "linux")]
+const HOST_NATIVE_BITS: NativeOpenBits = LINUX_NATIVE_BITS;
+#[cfg(target_os = "macos")]
+const HOST_NATIVE_BITS: NativeOpenBits = MACOS_NATIVE_BITS;
+#[cfg(target_os = "windows")]
+const HOST_NATIVE_BITS: NativeOpenBits = WINDOWS_NATIVE_BITS;
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    test,
+    kani
+))]
+fn decode_native_flag_bits(bits: u32, namespace: NativeOpenBits) -> OpenFlags {
+    let access = bits & 0x3;
+    OpenFlags {
+        read: access == 0 || access == 2,
+        write: access == 1 || access == 2,
+        create: bits & namespace.create != 0,
+        truncate: bits & namespace.truncate != 0,
+        append: bits & namespace.append != 0,
+        exclusive: bits & namespace.exclusive != 0,
+    }
+}
+
 /// Decode Node's numeric `fs.constants` namespace. O_* values are not shared
 /// between Linux and Darwin (notably O_CREAT/O_EXCL/O_TRUNC/O_APPEND), so this
-/// is deliberately cfg'd instead of using the common Linux table in shared
-/// code.
+/// selects the host namespace instead of the common Linux table in shared code.
 fn decode_numeric_flags(bits: f64, _path: &str) -> Result<OpenFlags, Error> {
     // The upstream parser applies JavaScript's ToInt32 through `&`, rather
     // than validating the number first. Preserve that behavior for unusual
@@ -297,37 +362,7 @@ fn decode_numeric_flags(bits: f64, _path: &str) -> Result<OpenFlags, Error> {
         0
     } else {
         bits.trunc().rem_euclid(4_294_967_296.0) as u32
-    } as u64;
-
-    #[cfg(target_os = "linux")]
-    const O_CREAT: u64 = 0o100;
-    #[cfg(target_os = "linux")]
-    const O_EXCL: u64 = 0o200;
-    #[cfg(target_os = "linux")]
-    const O_TRUNC: u64 = 0o1000;
-    #[cfg(target_os = "linux")]
-    const O_APPEND: u64 = 0o2000;
-
-    #[cfg(target_os = "macos")]
-    const O_CREAT: u64 = 0x0200;
-    #[cfg(target_os = "macos")]
-    const O_EXCL: u64 = 0x0800;
-    #[cfg(target_os = "macos")]
-    const O_TRUNC: u64 = 0x0400;
-    #[cfg(target_os = "macos")]
-    const O_APPEND: u64 = 0x0008;
-
-    // Node exposes the Microsoft CRT open flags on Windows. These are not
-    // the Linux values: _O_CREAT/_O_EXCL/_O_TRUNC/_O_APPEND are 0x0100,
-    // 0x0400, 0x0200, and 0x0008 respectively.
-    #[cfg(target_os = "windows")]
-    const O_CREAT: u64 = 0x0100;
-    #[cfg(target_os = "windows")]
-    const O_EXCL: u64 = 0x0400;
-    #[cfg(target_os = "windows")]
-    const O_TRUNC: u64 = 0x0200;
-    #[cfg(target_os = "windows")]
-    const O_APPEND: u64 = 0x0008;
+    };
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     return Err(to_js_error(
@@ -339,15 +374,61 @@ fn decode_numeric_flags(bits: f64, _path: &str) -> Result<OpenFlags, Error> {
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     {
-        let access = bits & 0x3;
-        Ok(OpenFlags {
-            read: access == 0 || access == 2,
-            write: access == 1 || access == 2,
-            create: bits & O_CREAT != 0,
-            truncate: bits & O_TRUNC != 0,
-            append: bits & O_APPEND != 0,
-            exclusive: bits & O_EXCL != 0,
-        })
+        Ok(decode_native_flag_bits(bits, HOST_NATIVE_BITS))
+    }
+}
+
+#[cfg(kani)]
+mod native_flag_verification {
+    use super::{
+        LINUX_NATIVE_BITS, MACOS_NATIVE_BITS, WINDOWS_NATIVE_BITS, decode_native_flag_bits,
+    };
+
+    #[kani::proof]
+    fn native_numeric_open_bits_preserve_host_rights_and_truncate_guard() {
+        // The production classifier receives the host's constants. Verify
+        // each supported host tuple against independently selected bit
+        // positions, for every possible u32 after JavaScript ToInt32.
+        let bits: u32 = kani::any();
+        let platform: u8 = kani::any();
+        kani::assume(platform < 3);
+
+        let (namespace, create_bit, exclusive_bit, truncate_bit, append_bit) = match platform {
+            0 => (LINUX_NATIVE_BITS, 6, 7, 9, 10),
+            1 => (MACOS_NATIVE_BITS, 9, 11, 10, 3),
+            _ => (WINDOWS_NATIVE_BITS, 8, 10, 9, 3),
+        };
+
+        let flags = decode_native_flag_bits(bits, namespace);
+        let mode = bits % 4;
+        let read = mode == 0 || mode == 2;
+        let write = mode == 1 || mode == 2;
+        let create = (bits >> create_bit) % 2 == 1;
+        let exclusive = (bits >> exclusive_bit) % 2 == 1;
+        let truncate = (bits >> truncate_bit) % 2 == 1;
+        let append = (bits >> append_bit) % 2 == 1;
+
+        assert_eq!(flags.read, read);
+        assert_eq!(flags.write, write);
+        assert_eq!(flags.create, create);
+        assert_eq!(flags.exclusive, exclusive);
+        assert_eq!(flags.truncate, truncate);
+        assert_eq!(flags.append, append);
+        assert_eq!(flags.has_valid_truncate_access(), !truncate || write);
+
+        let known =
+            3 | namespace.create | namespace.exclusive | namespace.truncate | namespace.append;
+        assert_eq!(flags, decode_native_flag_bits(bits & known, namespace));
+
+        kani::cover!(platform == 0 && flags.create && flags.exclusive && flags.append);
+        kani::cover!(platform == 1 && flags.create && flags.exclusive && flags.append);
+        kani::cover!(platform == 2 && flags.create && flags.exclusive && flags.append);
+        kani::cover!(mode == 0 && truncate && !flags.has_valid_truncate_access());
+        kani::cover!(mode == 2 && truncate && flags.has_valid_truncate_access());
+        kani::cover!(mode == 3 && !flags.read && !flags.write);
+        kani::cover!(
+            bits & !known != 0 && flags == decode_native_flag_bits(bits & known, namespace)
+        );
     }
 }
 
@@ -4295,6 +4376,48 @@ mod tests {
         assert!(negative.truncate);
         assert!(negative.append);
         assert!(negative.exclusive);
+    }
+
+    #[test]
+    fn numeric_flags_coerce_nonfinite_values_and_wrap_at_32_bits() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                decode_numeric_flags(value, "/file").unwrap(),
+                OpenFlags::READ_ONLY
+            );
+        }
+
+        assert_eq!(
+            decode_numeric_flags(4_294_967_297.9, "/file").unwrap(),
+            decode_numeric_flags(1.0, "/file").unwrap()
+        );
+        assert_eq!(
+            decode_numeric_flags(-4_294_967_297.9, "/file").unwrap(),
+            decode_numeric_flags(-1.0, "/file").unwrap()
+        );
+    }
+
+    #[test]
+    fn native_flag_classifier_does_not_grant_rights_for_unknown_bits() {
+        for namespace in [LINUX_NATIVE_BITS, MACOS_NATIVE_BITS, WINDOWS_NATIVE_BITS] {
+            let unknown = 1 << 31;
+            assert_eq!(
+                decode_native_flag_bits(unknown, namespace),
+                OpenFlags::READ_ONLY
+            );
+
+            let read_only_truncate = decode_native_flag_bits(namespace.truncate, namespace);
+            assert!(!read_only_truncate.has_valid_truncate_access());
+
+            let write_truncate = decode_native_flag_bits(1 | namespace.truncate, namespace);
+            assert!(write_truncate.write);
+            assert!(write_truncate.has_valid_truncate_access());
+
+            let invalid_access = decode_native_flag_bits(3 | namespace.create, namespace);
+            assert!(!invalid_access.read);
+            assert!(!invalid_access.write);
+            assert!(invalid_access.create);
+        }
     }
 
     #[test]

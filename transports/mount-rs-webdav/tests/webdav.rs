@@ -567,6 +567,77 @@ fn bounded_lock_scope_matrix_matches_the_path_hierarchy() {
 }
 
 #[test]
+fn lock_scope_preserves_literal_depth_zero_and_canonical_infinity() {
+    let mut table = DavLockTable::new(DavLockTableOptions {
+        new_token: Some(Arc::new(|| "urn:uuid:scope-contract".to_owned())),
+        ..DavLockTableOptions::default()
+    });
+    let request = |depth| DavLockRequest {
+        path: "/a/./".to_owned(),
+        collection: false,
+        depth,
+        exclusive: false,
+        owner: None,
+        timeout: None,
+    };
+    let DavLockGrant::Granted(zero) = table.create(request(LockDepth::Zero), 0) else {
+        panic!("depth-zero lock must be granted");
+    };
+    assert!(DavLockTable::in_scope(&zero, "/a/./"));
+    assert!(!DavLockTable::in_scope(&zero, "/a"));
+    assert!(!DavLockTable::in_scope(&zero, "/a/x"));
+    assert_eq!(table.covering("/a", 0).len(), 0);
+    assert!(table.conflict("/a", LockDepth::Zero, true, 0).is_none());
+
+    let DavLockGrant::Granted(infinity) = table.create(request(LockDepth::Infinity), 0) else {
+        panic!("shared infinity lock must be granted");
+    };
+    assert!(DavLockTable::in_scope(&infinity, "/a"));
+    assert!(DavLockTable::in_scope(&infinity, "/a/x"));
+    assert!(!DavLockTable::in_scope(&infinity, "/ab"));
+    assert_eq!(table.covering("/a/x", 0).len(), 1);
+    assert!(table.conflict("/a/x", LockDepth::Zero, true, 0).is_some());
+}
+
+#[test]
+fn conflict_prefers_a_covering_lock_before_an_earlier_descendant() {
+    let next = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&next);
+    let mut table = DavLockTable::new(DavLockTableOptions {
+        new_token: Some(Arc::new(move || {
+            format!(
+                "urn:uuid:priority-{}",
+                counter.fetch_add(1, Ordering::SeqCst)
+            )
+        })),
+        ..DavLockTableOptions::default()
+    });
+    let request = |path: &str| DavLockRequest {
+        path: path.to_owned(),
+        collection: false,
+        depth: LockDepth::Zero,
+        exclusive: false,
+        owner: None,
+        timeout: None,
+    };
+    assert!(matches!(
+        table.create(request("/a/x"), 0),
+        DavLockGrant::Granted(_)
+    ));
+    assert!(matches!(
+        table.create(request("/a"), 0),
+        DavLockGrant::Granted(_)
+    ));
+    assert_eq!(
+        table
+            .conflict("/a", LockDepth::Infinity, true, 0)
+            .expect("both locks overlap")
+            .path,
+        "/a"
+    );
+}
+
+#[test]
 fn large_lock_timeout_does_not_wrap_expiration_into_the_past() {
     let mut table = DavLockTable::new(DavLockTableOptions {
         default_timeout_seconds: u64::MAX,
