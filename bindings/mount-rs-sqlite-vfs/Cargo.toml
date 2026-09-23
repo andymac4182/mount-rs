@@ -6,6 +6,9 @@ rust-version = "1.95"
 description = "Synchronous rollback-journal SQLite VFS boundary for mount-rs integrations"
 license = "Apache-2.0"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 [features]
 default = []
 tokio-executor = ["dep:tokio"]

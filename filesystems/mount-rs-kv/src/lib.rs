@@ -262,6 +262,10 @@ fn prefix_of(key: &str) -> String {
     }
 }
 
+fn representable_key(key: &str) -> bool {
+    key_of(&path_of(key), "scandir").is_ok_and(|canonical| canonical == key)
+}
+
 fn resize_bytes(data: &mut Vec<u8>, length: u64, syscall: &str) -> Result<()> {
     let length = usize::try_from(length)
         .map_err(|_| FsError::new(ErrorCode::Efbig).with_syscall(syscall))?;
@@ -490,13 +494,14 @@ where
         if let Some(value) = scope.keys.get(key) {
             return Ok(value.clone());
         }
+        let prefix = prefix_of(key);
         let value = self
             .store
             .get_keys(key)
             .await
             .map_err(|error| self.store_error(error, syscall, path))?
             .into_iter()
-            .filter(|entry| !entry.ends_with('$'))
+            .filter(|entry| entry.starts_with(&prefix) && representable_key(entry))
             .collect::<Vec<_>>();
         scope.keys.insert(key.to_owned(), value.clone());
         Ok(value)
@@ -509,17 +514,25 @@ where
         syscall: &str,
         path: &str,
     ) -> Result<Option<Vec<String>>> {
-        self.store
+        let keys = self
+            .store
             .get_keys_bounded(key, max_keys)
             .await
-            .map(|value| {
-                value.map(|keys| {
-                    keys.into_iter()
-                        .filter(|entry| !entry.ends_with('$'))
-                        .collect::<Vec<_>>()
-                })
-            })
-            .map_err(|error| self.store_error(error, syscall, path))
+            .map_err(|error| self.store_error(error, syscall, path))?;
+        let Some(keys) = keys else {
+            return Ok(None);
+        };
+        if keys.len() > max_keys {
+            return Err(FsError::new(ErrorCode::Eoverflow)
+                .with_syscall(syscall)
+                .with_path(path)
+                .with_message("directory exceeds the configured entry limit"));
+        }
+        Ok(Some(
+            keys.into_iter()
+                .filter(|entry| representable_key(entry))
+                .collect(),
+        ))
     }
 
     async fn read_value(&self, path: &str, syscall: &str) -> Result<Vec<u8>> {
@@ -1015,7 +1028,13 @@ where
         mode: u32,
     ) -> Result<Arc<dyn FileHandle>> {
         let path = normalize_path(path);
-        if flags.write || flags.create {
+        if !flags.has_valid_truncate_access() {
+            return Err(FsError::new(ErrorCode::Einval)
+                .with_syscall("open")
+                .with_path(&path)
+                .with_message("truncate requires write access"));
+        }
+        if flags.write || flags.create || flags.truncate {
             self.inner.mutable("open", &path)?;
         }
         let mut scope = Scope::default();

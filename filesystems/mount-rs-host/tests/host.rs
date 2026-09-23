@@ -384,6 +384,55 @@ async fn decoded_open_flags_match_string_open() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn decoded_read_only_truncate_rejects_before_touching_host_files() {
+    let root = TempDir::new();
+    fs::write(root.path().join("existing"), b"preserved").expect("seed host file");
+    let driver = HostFs::new(root.path());
+    let read_only_truncate = OpenFlags {
+        read: true,
+        write: false,
+        create: false,
+        truncate: true,
+        append: false,
+        exclusive: false,
+    };
+
+    let existing = driver
+        .open_flags("/existing", read_only_truncate, 0o600)
+        .await;
+    if let Ok(handle) = &existing {
+        handle.close().await.expect("close unexpected handle");
+    }
+    assert_eq!(
+        fs::read(root.path().join("existing")).expect("read host file"),
+        b"preserved"
+    );
+    assert_eq!(
+        existing.err().expect("reject truncate").code,
+        ErrorCode::Einval
+    );
+
+    let missing = driver
+        .open_flags(
+            "/missing",
+            OpenFlags {
+                create: true,
+                ..read_only_truncate
+            },
+            0o600,
+        )
+        .await;
+    if let Ok(handle) = &missing {
+        handle.close().await.expect("close unexpected handle");
+    }
+    assert!(!root.path().join("missing").exists());
+    assert_eq!(
+        missing.err().expect("reject truncate").code,
+        ErrorCode::Einval
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn directory_metadata_links_times_and_statfs_use_host_state() {
     let root = TempDir::new();
     let driver = HostFs::new(root.path());

@@ -4,7 +4,7 @@ use mount_rs_core::storage::{
     BlockExtent, BlockId, BlockStore, DirectoryEntry, FileLayout, Namespace, NodeData, NodeMetadata,
 };
 use mount_rs_core::types::{S_IFDIR, S_IFREG, Stats};
-use mount_rs_core::versioning::BlockStoreId;
+use mount_rs_core::versioning::{BlockStoreId, VersionKind};
 use mount_rs_pglite::{PgliteBlockStore, PgliteMetadataStore, PgliteStorageOptions};
 use mount_rs_versioned::{VersionedCoordinator, VersionedOptions};
 use std::collections::BTreeMap;
@@ -191,6 +191,60 @@ fn pglite_versioning_snapshot_history_view_survives_reconnect() {
         drop(reopened_view);
         drop(reopened);
 
+        reopened_metadata.close().await.unwrap();
+        reopened_blocks.close().await.unwrap();
+    });
+}
+
+#[test]
+#[ignore = "requires PGLITE_DATABASE_URL and an isolated real PGlite server"]
+fn pglite_namespace_publication_kind_survives_reconnect() {
+    let url = std::env::var("PGLITE_DATABASE_URL").expect("PGLITE_DATABASE_URL required");
+    let options = PgliteStorageOptions::new(unique_volume_key());
+    let versioned_options = VersionedOptions::new(
+        "namespace-publication-roundtrip",
+        BlockStoreId::new("pglite-namespace-publication-test").unwrap(),
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let metadata = PgliteMetadataStore::connect_with_options(&url, options.clone())
+            .await
+            .unwrap();
+        let blocks = PgliteBlockStore::connect_with_options(&url, options.clone())
+            .await
+            .unwrap();
+        let block = blocks.put(EXACT_BYTES).await.unwrap();
+        let coordinator =
+            VersionedCoordinator::new(metadata.clone(), blocks.clone(), versioned_options.clone())
+                .unwrap();
+        let first = coordinator
+            .publish_namespace(0, None, namespace(block))
+            .await
+            .unwrap();
+        assert_eq!(first.kind, VersionKind::NamespacePublication);
+        assert_eq!(coordinator.history().await.unwrap()[0].kind, first.kind);
+        metadata.close().await.unwrap();
+        blocks.close().await.unwrap();
+
+        let reopened_metadata = PgliteMetadataStore::connect_with_options(&url, options.clone())
+            .await
+            .unwrap();
+        let reopened_blocks = PgliteBlockStore::connect_with_options(&url, options)
+            .await
+            .unwrap();
+        let reopened = VersionedCoordinator::new(
+            reopened_metadata.clone(),
+            reopened_blocks.clone(),
+            versioned_options,
+        )
+        .unwrap();
+        let history = reopened.history().await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, first.id);
+        assert_eq!(history[0].kind, VersionKind::NamespacePublication);
         reopened_metadata.close().await.unwrap();
         reopened_blocks.close().await.unwrap();
     });

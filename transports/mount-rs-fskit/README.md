@@ -74,6 +74,11 @@ version:u16, kind:u8, flags:u8
 request_id:u64, body_length:u32, body[body_length]
 ```
 
+The Rust C ABI rejects request lengths above 1 MiB plus the 20-byte header
+before forming a slice of caller memory. Non-null C pointers still require
+valid caller-owned regions; the numeric guard does not establish their lifetime
+or non-aliasing.
+
 Malformed outer frames produce no fabricated filesystem response. Operation
 errors retain the Rust provider's errno/code/path/syscall information.
 Data operations use fixed 128 KiB chunks; the Swift client transparently

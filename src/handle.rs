@@ -21,6 +21,12 @@ impl OpenFlags {
         exclusive: false,
     };
 
+    /// A decoded truncation request must also grant write access to the handle.
+    /// Other decoded combinations, including read-only creation, are allowed.
+    pub const fn has_valid_truncate_access(self) -> bool {
+        !self.truncate || self.write
+    }
+
     pub fn parse(value: &str, path: &str) -> Result<Self> {
         let normalized = value.replace('s', "");
         let flags = match normalized.as_str() {
@@ -139,4 +145,35 @@ impl OpenFlags {
 /// Validate a file position before converting it to an allocation index.
 pub fn checked_position(position: u64) -> Result<usize> {
     usize::try_from(position).map_err(|_| FsError::new(ErrorCode::Efbig).with_syscall("seek"))
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::OpenFlags;
+
+    #[kani::proof]
+    fn decoded_truncation_requires_write() {
+        // Six symbolic booleans cover every one of the 2^6 public combinations.
+        let flags = OpenFlags {
+            read: kani::any(),
+            write: kani::any(),
+            create: kani::any(),
+            truncate: kani::any(),
+            append: kani::any(),
+            exclusive: kani::any(),
+        };
+        let accepted = flags.has_valid_truncate_access();
+
+        kani::cover!(accepted && flags.truncate && flags.write);
+        kani::cover!(!accepted && flags.truncate && !flags.write);
+        kani::cover!(accepted && flags.create && !flags.write && !flags.truncate);
+
+        if accepted && flags.truncate {
+            assert!(flags.write);
+        }
+        if !accepted {
+            assert!(flags.truncate);
+            assert!(!flags.write);
+        }
+    }
 }

@@ -81,6 +81,31 @@ permissions, read-only writes, and stale mtime writes. `readFile()` returns a
 
 - Paths are normalized POSIX absolute paths inside the supplied logical drive;
   no host path is accepted or resolved.
+- `writeFile(..., { overwrite: false })` creates files exclusively.
+  No-overwrite regular-file moves first create an exclusive hardlink on the
+  same backend. When hardlinks are unavailable or cross-device, they create an
+  exclusive destination and copy bytes. The copy path checks the destination
+  identity and source mode before removing the source; it returns `ENOTSUP` if
+  the mode cannot be preserved. A copy failure may leave an incomplete
+  destination because path-based cleanup could remove a foreign replacement.
+  A source-removal failure leaves the completed destination available. Symlink
+  moves use an exclusive hardlink to retain the source link's identity and
+  return `ENOTSUP` when hardlinks are unavailable. No-overwrite directory moves return
+  `ENOTSUP` because the public backend has no atomic no-replace directory move.
+  These file and symlink moves have intermediate states visible to other backend
+  users. The adapter checks source identity and file kind immediately before
+  removal, but a replacement after that check can still race with path-based
+  unlink. Destination replacement after its identity check can race with source
+  removal as well. Strict no-clobber moves across uncoordinated backend users
+  need an atomic no-replace move or conditional backend deletion.
+  Moves with overwrite enabled use the backend rename operation.
+- `deleteFile()` and `rmdir()` check entry kind and identity within their
+  operation lease before removal. A replacement after the check can still race
+  with path-based unlink or rmdir; conditional backend deletion is needed to
+  close that window.
+- `expectedMtime` checks the visible mtime before writing. The public backend
+  has no compare-and-write operation, so a concurrent change after that check
+  can race with the write.
 - `readOnly: true` rejects writes while leaving reads available. If omitted,
   the adapter follows the backend capability when it is present.
 - `close()` waits for operations already admitted by the adapter, but has no

@@ -17,13 +17,14 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 #[cfg(unix)]
 use tokio::net::UnixListener;
-use tokio::sync::{Mutex, Notify, Semaphore};
+use tokio::sync::{Mutex, Notify, Semaphore, mpsc, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
 
-use crate::constants::{P9_DEFAULT_MAX_FRAME, P9_HDRSZ};
+use crate::constants::{P9_DEFAULT_MAX_FRAME, P9_HDRSZ, P9_TVERSION};
 use crate::locks::P9LockTable;
-use crate::protocol::P9FrameAssembler;
+use crate::protocol::{P9FrameAssembler, P9VersionScan, decode_message_as, read_tversion};
 use crate::session::{P9Session, P9SessionHooks, P9SessionOptions};
+use crate::wire::P9Error;
 
 pub const DEFAULT_P9_PORT: u16 = 564;
 pub const DEFAULT_MAX_IN_FLIGHT: usize = 16;
@@ -812,6 +813,101 @@ struct ConnectionRuntime {
     max_in_flight: usize,
 }
 
+enum PendingFrame {
+    Request(Vec<u8>),
+    Version(Vec<u8>),
+}
+
+enum FrameTaskOutcome {
+    Request,
+    Version,
+    WriteFailed,
+}
+
+struct ReplyWrite {
+    bytes: Vec<u8>,
+    epoch: u64,
+    version: bool,
+    done: oneshot::Sender<bool>,
+}
+
+const MAX_FRAMES_PER_PARSE: usize = 4_096;
+
+impl PendingFrame {
+    fn len(&self) -> usize {
+        match self {
+            Self::Request(bytes) | Self::Version(bytes) => bytes.len(),
+        }
+    }
+}
+
+fn enqueue_frames(
+    assembler: &mut P9FrameAssembler,
+    chunk: &[u8],
+    pending_frames: &mut VecDeque<PendingFrame>,
+    pending_bytes: &mut usize,
+    pending_limit: usize,
+    pending_frame_limit: usize,
+) -> Result<bool, P9Error> {
+    let mut chunk = chunk;
+    let mut version_queued = false;
+    let mut parsed_frames = 0;
+    loop {
+        if parsed_frames >= MAX_FRAMES_PER_PARSE || pending_frames.len() >= pending_frame_limit {
+            assembler.hold_unparsed(chunk);
+            break;
+        }
+        let frame = assembler.push_one(chunk)?;
+        chunk = &[];
+        let Some(frame) = frame else {
+            break;
+        };
+        parsed_frames += 1;
+        // A malformed Tversion is an ordinary request error. It must not
+        // discard established I/O or change the framing limit.
+        let version = frame[4] == P9_TVERSION && decode_message_as(&frame, read_tversion).is_ok();
+        let pending = if version {
+            PendingFrame::Version(frame)
+        } else {
+            PendingFrame::Request(frame)
+        };
+        if pending.len() > pending_limit.saturating_sub(*pending_bytes) {
+            return Err(P9Error::new(format!(
+                "9P pending request queue exceeds {pending_limit} bytes"
+            )));
+        }
+        *pending_bytes += pending.len();
+        pending_frames.push_back(pending);
+        if version {
+            version_queued = true;
+            break;
+        }
+    }
+    if assembler.pending() > pending_limit.saturating_sub(*pending_bytes) {
+        return Err(P9Error::new(format!(
+            "9P pending request queue exceeds {pending_limit} bytes"
+        )));
+    }
+    Ok(version_queued)
+}
+
+fn discard_prior_calls_for_version(
+    pending_frames: &mut VecDeque<PendingFrame>,
+    pending_bytes: &mut usize,
+    tasks: &mut JoinSet<FrameTaskOutcome>,
+    reply_epoch: &AtomicU64,
+) {
+    // Tversion aborts outstanding I/O and releases fids. Earlier requests
+    // still in the queue must not start in the new session generation.
+    while matches!(pending_frames.front(), Some(PendingFrame::Request(_))) {
+        if let Some(frame) = pending_frames.pop_front() {
+            *pending_bytes = pending_bytes.saturating_sub(frame.len());
+        }
+    }
+    reply_epoch.fetch_add(1, Ordering::AcqRel);
+    tasks.abort_all();
+}
+
 async fn run_connection(runtime: ConnectionRuntime) {
     let ConnectionRuntime {
         stream,
@@ -850,7 +946,55 @@ async fn run_connection(runtime: ConnectionRuntime) {
             return;
         }
     };
-    let mut tasks = JoinSet::new();
+    let mut tasks = JoinSet::<FrameTaskOutcome>::new();
+    let reply_epoch = Arc::new(AtomicU64::new(0));
+    let (reply_sender, mut reply_receiver) = mpsc::channel::<ReplyWrite>(max_in_flight.max(1));
+    let write_control = Arc::clone(&control);
+    let write_hooks = hooks.clone();
+    let write_reported = Arc::clone(&reported);
+    let write_peer = connection.peer.clone();
+    let write_epoch = Arc::clone(&reply_epoch);
+    let write_writer = Arc::clone(&writer);
+    let writer_task = tokio::spawn(async move {
+        while let Some(reply) = reply_receiver.recv().await {
+            // Requests completed before renegotiation may be queued here.
+            // A write already in progress finishes before the new Rversion.
+            if !reply.version && reply.epoch != write_epoch.load(Ordering::Acquire) {
+                let _ = reply.done.send(true);
+                continue;
+            }
+            let mut writer = write_writer.lock().await;
+            if !reply.version && reply.epoch != write_epoch.load(Ordering::Acquire) {
+                let _ = reply.done.send(true);
+                continue;
+            }
+            let result = match writer.write_all(&reply.bytes).await {
+                Ok(()) => writer.flush().await,
+                Err(error) => Err(error),
+            };
+            let failed = if let Err(error) = result {
+                if !is_expected_disconnect(&error) {
+                    report_once(
+                        &write_hooks,
+                        &write_reported,
+                        P9TransportError::from_io(
+                            P9TransportErrorKind::Write,
+                            write_peer.clone(),
+                            &error,
+                        ),
+                    );
+                }
+                write_control.stop();
+                true
+            } else {
+                false
+            };
+            let _ = reply.done.send(!failed);
+            if failed {
+                break;
+            }
+        }
+    });
     let mut buffer = vec![0_u8; 64 * 1024];
     // Keep reading while request work is at the in-flight bound so a peer's
     // EOF can still terminate a connection whose replies are backpressured.
@@ -858,12 +1002,127 @@ async fn run_connection(runtime: ConnectionRuntime) {
     // a paused peer then left the connection task waiting forever for a permit
     // that only a readable peer could release.
     let pending_limit = max_frame.saturating_mul(max_in_flight).max(buffer.len());
-    let mut pending_frames: VecDeque<Vec<u8>> = VecDeque::new();
+    // A byte cap alone permits millions of tiny frames and much larger queue
+    // metadata. Keep one full read's minimal frames, then bound queued items.
+    let pending_frame_limit = max_in_flight
+        .saturating_mul(1_024)
+        .clamp(buffer.len() / P9_HDRSZ, 65_536);
+    let mut pending_frames: VecDeque<PendingFrame> = VecDeque::new();
     let mut pending_bytes = 0_usize;
+    let mut version_fenced = false;
+    let mut version_running = false;
+    let mut version_aborting = false;
+    let mut resume_frames = false;
 
     loop {
         if server_shutdown_requested.load(Ordering::Acquire) {
             break;
+        }
+        if resume_frames
+            || (!version_fenced
+                && assembler.pending() > 0
+                && pending_frames.len() < pending_frame_limit)
+        {
+            resume_frames = false;
+            match enqueue_frames(
+                &mut assembler,
+                &[],
+                &mut pending_frames,
+                &mut pending_bytes,
+                pending_limit,
+                pending_frame_limit,
+            ) {
+                Ok(fenced) => {
+                    version_fenced = fenced;
+                    if fenced && session.msize().is_some() {
+                        discard_prior_calls_for_version(
+                            &mut pending_frames,
+                            &mut pending_bytes,
+                            &mut tasks,
+                            &reply_epoch,
+                        );
+                        version_aborting = true;
+                    }
+                }
+                Err(error) => {
+                    report_once(
+                        &hooks,
+                        &reported,
+                        P9TransportError::from_message(
+                            P9TransportErrorKind::Frame,
+                            connection.peer.clone(),
+                            error.to_string(),
+                        ),
+                    );
+                    break;
+                }
+            }
+        }
+        let mut scan_again = false;
+        if !version_fenced
+            && session.msize().is_some()
+            && pending_frames.len() >= pending_frame_limit
+            && assembler.pending() > 0
+        {
+            match assembler.scan_for_version(MAX_FRAMES_PER_PARSE) {
+                Ok(P9VersionScan::Found) => {
+                    discard_prior_calls_for_version(
+                        &mut pending_frames,
+                        &mut pending_bytes,
+                        &mut tasks,
+                        &reply_epoch,
+                    );
+                    version_aborting = true;
+                    match enqueue_frames(
+                        &mut assembler,
+                        &[],
+                        &mut pending_frames,
+                        &mut pending_bytes,
+                        pending_limit,
+                        pending_frame_limit,
+                    ) {
+                        Ok(true) => version_fenced = true,
+                        Ok(false) => {
+                            report_once(
+                                &hooks,
+                                &reported,
+                                P9TransportError::from_message(
+                                    P9TransportErrorKind::Frame,
+                                    connection.peer.clone(),
+                                    "9P version scan lost its complete frame".to_owned(),
+                                ),
+                            );
+                            break;
+                        }
+                        Err(error) => {
+                            report_once(
+                                &hooks,
+                                &reported,
+                                P9TransportError::from_message(
+                                    P9TransportErrorKind::Frame,
+                                    connection.peer.clone(),
+                                    error.to_string(),
+                                ),
+                            );
+                            break;
+                        }
+                    }
+                }
+                Ok(P9VersionScan::More) => scan_again = true,
+                Ok(P9VersionScan::Incomplete) => {}
+                Err(error) => {
+                    report_once(
+                        &hooks,
+                        &reported,
+                        P9TransportError::from_message(
+                            P9TransportErrorKind::Frame,
+                            connection.peer.clone(),
+                            error.to_string(),
+                        ),
+                    );
+                    break;
+                }
+            }
         }
         let server_shutdown_notified = server_shutdown.notified();
         tokio::pin!(server_shutdown_notified);
@@ -874,21 +1133,48 @@ async fn run_connection(runtime: ConnectionRuntime) {
         tokio::select! {
             _ = control.shutdown.notified() => break,
             _ = server_shutdown_notified => break,
+            _ = tokio::task::yield_now(), if scan_again => {},
             completed = tasks.join_next(), if !tasks.is_empty() => {
-                if let Some(Err(error)) = completed {
-                    report_once(
-                        &hooks,
-                        &reported,
-                        P9TransportError::from_message(
-                            P9TransportErrorKind::Task,
-                            connection.peer.clone(),
-                            format!("9P connection task failed: {error}"),
-                        ),
-                    );
-                    break;
+                match completed {
+                    Some(Ok(FrameTaskOutcome::Version)) => {
+                        version_running = false;
+                        version_fenced = false;
+                        version_aborting = false;
+                        let limit = session.msize().map_or(max_frame.max(P9_HDRSZ), |msize| msize as usize);
+                        if let Err(error) = assembler.set_limit(limit) {
+                            report_once(
+                                &hooks,
+                                &reported,
+                                P9TransportError::from_message(
+                                    P9TransportErrorKind::Frame,
+                                    connection.peer.clone(),
+                                    error.to_string(),
+                                ),
+                            );
+                            break;
+                        }
+                        resume_frames = true;
+                    }
+                    Some(Ok(FrameTaskOutcome::Request)) | None => {}
+                    Some(Ok(FrameTaskOutcome::WriteFailed)) => break,
+                    Some(Err(error)) if error.is_cancelled() && version_aborting && !version_running => {}
+                    Some(Err(error)) => {
+                        report_once(
+                            &hooks,
+                            &reported,
+                            P9TransportError::from_message(
+                                P9TransportErrorKind::Task,
+                                connection.peer.clone(),
+                                format!("9P connection task failed: {error}"),
+                            ),
+                        );
+                        break;
+                    }
                 }
             }
-            permit = permits.clone().acquire_owned(), if !pending_frames.is_empty() => {
+            permit = permits.clone().acquire_owned(), if !scan_again && !pending_frames.is_empty()
+                && !version_running
+                && (!matches!(pending_frames.front(), Some(PendingFrame::Version(_))) || tasks.is_empty()) => {
                 let permit = match permit {
                     Ok(permit) => permit,
                     Err(_) => break,
@@ -898,36 +1184,40 @@ async fn run_connection(runtime: ConnectionRuntime) {
                     continue;
                 };
                 pending_bytes = pending_bytes.saturating_sub(frame.len());
+                let is_version = matches!(&frame, PendingFrame::Version(_));
+                if is_version {
+                    version_running = true;
+                }
                 let session = session.clone();
-                let writer = Arc::clone(&writer);
+                let reply_sender = reply_sender.clone();
+                let request_epoch = reply_epoch.load(Ordering::Acquire);
                 let control = Arc::clone(&control);
-                let hooks = hooks.clone();
-                let reported = Arc::clone(&reported);
-                let peer = connection.peer.clone();
                 tasks.spawn(async move {
+                    let frame = match frame {
+                        PendingFrame::Request(frame) | PendingFrame::Version(frame) => frame,
+                    };
                     let reply = session.handle_call(&frame).await;
                     if let Some(reply) = reply {
-                        let mut writer = writer.lock().await;
-                        let result = match writer.write_all(&reply).await {
-                            Ok(()) => writer.flush().await,
-                            Err(error) => Err(error),
-                        };
-                        if let Err(error) = result {
-                            if !is_expected_disconnect(&error) {
-                                report_once(
-                                    &hooks,
-                                    &reported,
-                                    P9TransportError::from_io(
-                                        P9TransportErrorKind::Write,
-                                        peer,
-                                        &error,
-                                    ),
-                                );
-                            }
+                        let (done, written) = oneshot::channel();
+                        let queued = reply_sender
+                            .send(ReplyWrite {
+                                bytes: reply,
+                                epoch: request_epoch,
+                                version: is_version,
+                                done,
+                            })
+                            .await;
+                        if queued.is_err() || !written.await.unwrap_or(false) {
                             control.stop();
+                            return FrameTaskOutcome::WriteFailed;
                         }
                     }
                     drop(permit);
+                    if is_version {
+                        FrameTaskOutcome::Version
+                    } else {
+                        FrameTaskOutcome::Request
+                    }
                 });
             }
             read = reader.read(&mut buffer) => {
@@ -951,7 +1241,7 @@ async fn run_connection(runtime: ConnectionRuntime) {
                 if count == 0 {
                     break;
                 }
-                if pending_bytes >= pending_limit {
+                if pending_bytes.saturating_add(assembler.pending()) >= pending_limit {
                     report_once(
                         &hooks,
                         &reported,
@@ -966,7 +1256,7 @@ async fn run_connection(runtime: ConnectionRuntime) {
                     );
                     break;
                 }
-                if let Some(msize) = session.msize()
+                if !version_fenced && let Some(msize) = session.msize()
                     && let Err(error) = assembler.set_limit(msize as usize)
                 {
                     report_once(
@@ -980,8 +1270,42 @@ async fn run_connection(runtime: ConnectionRuntime) {
                     );
                     break;
                 }
-                let frames = match assembler.push(&buffer[..count]) {
-                    Ok(frames) => frames,
+                if version_fenced {
+                    if count > pending_limit.saturating_sub(pending_bytes.saturating_add(assembler.pending())) {
+                        report_once(
+                            &hooks,
+                            &reported,
+                            P9TransportError::from_message(
+                                P9TransportErrorKind::Frame,
+                                connection.peer.clone(),
+                                format!("9P pending request queue exceeds {pending_limit} bytes"),
+                            ),
+                        );
+                        break;
+                    }
+                    assembler.hold_unparsed(&buffer[..count]);
+                    continue;
+                }
+                match enqueue_frames(
+                    &mut assembler,
+                    &buffer[..count],
+                    &mut pending_frames,
+                    &mut pending_bytes,
+                    pending_limit,
+                    pending_frame_limit,
+                ) {
+                    Ok(fenced) => {
+                        version_fenced = fenced;
+                        if fenced && session.msize().is_some() {
+                            discard_prior_calls_for_version(
+                                &mut pending_frames,
+                                &mut pending_bytes,
+                                &mut tasks,
+                                &reply_epoch,
+                            );
+                            version_aborting = true;
+                        }
+                    }
                     Err(error) => {
                         report_once(
                             &hooks,
@@ -994,25 +1318,7 @@ async fn run_connection(runtime: ConnectionRuntime) {
                         );
                         break;
                     }
-                };
-                let incoming_bytes = frames.iter().map(Vec::len).sum::<usize>();
-                if incoming_bytes > pending_limit.saturating_sub(pending_bytes) {
-                    report_once(
-                        &hooks,
-                        &reported,
-                        P9TransportError::from_message(
-                            P9TransportErrorKind::Frame,
-                            connection.peer.clone(),
-                            format!(
-                                "9P pending request queue exceeds {} bytes",
-                                pending_limit
-                            ),
-                        ),
-                    );
-                    break;
                 }
-                pending_bytes += incoming_bytes;
-                pending_frames.extend(frames);
             }
         }
     }
@@ -1032,6 +1338,8 @@ async fn run_connection(runtime: ConnectionRuntime) {
             );
         }
     }
+    writer_task.abort();
+    let _ = writer_task.await;
     if own {
         let _ = writer.lock().await.shutdown().await;
     }
@@ -1107,5 +1415,97 @@ fn bind_address(host: &str, port: u16) -> String {
         format!("[{host}]:{port}")
     } else {
         format!("{host}:{port}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::constants::P9_TCLUNK;
+
+    #[test]
+    fn one_extraction_pass_keeps_a_large_coalesced_tail_for_the_next_turn() {
+        let frame = [11, 0, 0, 0, P9_TCLUNK, 7, 0, 1, 0, 0, 0];
+        let burst = frame.repeat(4_097);
+        let mut assembler = P9FrameAssembler::new(8_192).unwrap();
+        let mut queue = VecDeque::new();
+        let mut queued_bytes = 0;
+
+        assert!(
+            !enqueue_frames(
+                &mut assembler,
+                &burst,
+                &mut queue,
+                &mut queued_bytes,
+                64 * 1024,
+                9_362,
+            )
+            .unwrap()
+        );
+        assert!(
+            queue.len() <= 4_096,
+            "one turn queued {} frames",
+            queue.len()
+        );
+        assert!(assembler.pending() > 0, "unparsed tail must remain bounded");
+
+        assert!(
+            !enqueue_frames(
+                &mut assembler,
+                &[],
+                &mut queue,
+                &mut queued_bytes,
+                64 * 1024,
+                9_362,
+            )
+            .unwrap()
+        );
+        assert_eq!(queue.len(), 4_097);
+        assert_eq!(assembler.pending(), 0);
+        assert_eq!(queued_bytes, burst.len());
+    }
+
+    #[test]
+    fn deferred_tiny_frames_stay_in_raw_bytes_when_the_queue_is_full() {
+        let frame = [11, 0, 0, 0, P9_TCLUNK, 7, 0, 1, 0, 0, 0];
+        let burst = frame.repeat(12_000);
+        let mut assembler = P9FrameAssembler::new(8_192).unwrap();
+        let mut queue = VecDeque::new();
+        let mut queued_bytes = 0;
+
+        for chunk in [&burst[..], &[][..], &[][..]] {
+            assert!(
+                !enqueue_frames(
+                    &mut assembler,
+                    chunk,
+                    &mut queue,
+                    &mut queued_bytes,
+                    256 * 1024,
+                    8_192,
+                )
+                .unwrap()
+            );
+        }
+        assert_eq!(queue.len(), 8_192);
+        assert_eq!(assembler.pending(), (12_000 - 8_192) * frame.len());
+        assert_eq!(queued_bytes + assembler.pending(), burst.len());
+
+        for _ in 0..4_096 {
+            queued_bytes -= queue.pop_front().unwrap().len();
+        }
+        assert!(
+            !enqueue_frames(
+                &mut assembler,
+                &[],
+                &mut queue,
+                &mut queued_bytes,
+                256 * 1024,
+                8_192,
+            )
+            .unwrap()
+        );
+        assert_eq!(queue.len(), 12_000 - 4_096);
+        assert_eq!(assembler.pending(), 0);
+        assert_eq!(queued_bytes, queue.len() * frame.len());
     }
 }

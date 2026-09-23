@@ -28,6 +28,11 @@ struct CasMetadata {
     state: Arc<Mutex<CasState>>,
     fail_load: Arc<AtomicBool>,
     ambiguous_after_apply: Arc<AtomicBool>,
+    pending_after_apply: Arc<AtomicBool>,
+    after_apply_resume: Arc<tokio::sync::Notify>,
+    suspend_release_before_apply: Arc<AtomicBool>,
+    release_entered: Arc<AtomicBool>,
+    fail_one_renew: Arc<AtomicBool>,
     forced_conflicts: Arc<AtomicUsize>,
     observed_conflicts: Arc<AtomicUsize>,
 }
@@ -46,6 +51,24 @@ struct CasState {
 impl CasMetadata {
     fn force_one_ambiguous_commit_after_apply(&self) {
         self.ambiguous_after_apply.store(true, Ordering::SeqCst);
+    }
+
+    fn suspend_one_commit_after_apply(&self) {
+        self.pending_after_apply.store(true, Ordering::SeqCst);
+    }
+
+    fn resume_suspended_commit(&self) {
+        self.after_apply_resume.notify_one();
+    }
+
+    fn suspend_one_release_before_apply(&self) {
+        self.release_entered.store(false, Ordering::SeqCst);
+        self.suspend_release_before_apply
+            .store(true, Ordering::SeqCst);
+    }
+
+    fn fail_next_renew(&self) {
+        self.fail_one_renew.store(true, Ordering::SeqCst);
     }
 
     fn fail_load(&self, fail: bool) {
@@ -147,6 +170,11 @@ impl MetadataStore for CasMetadata {
     }
 
     async fn renew_writer(&self, lease: &WriterLease, _ttl: Duration) -> Result<WriterLease> {
+        if self.fail_one_renew.swap(false, Ordering::SeqCst) {
+            return Err(
+                FsError::new(ErrorCode::Eio).with_message("test transient lease renewal error")
+            );
+        }
         let state = self.lock()?;
         if state.concurrent_mode || state.legacy_lease.as_ref() != Some(lease) {
             return Err(FsError::new(ErrorCode::Estale));
@@ -155,6 +183,13 @@ impl MetadataStore for CasMetadata {
     }
 
     async fn release_writer(&self, lease: &WriterLease) -> Result<()> {
+        if self
+            .suspend_release_before_apply
+            .swap(false, Ordering::SeqCst)
+        {
+            self.release_entered.store(true, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+        }
         let mut state = self.lock()?;
         if state.concurrent_mode || state.legacy_lease.as_ref() != Some(lease) {
             return Err(FsError::new(ErrorCode::Estale));
@@ -170,20 +205,26 @@ impl MetadataStore for CasMetadata {
         namespace: Namespace,
     ) -> Result<u64> {
         namespace.validate()?;
-        let mut state = self.lock()?;
-        if state.concurrent_mode || state.legacy_lease.as_ref() != Some(lease) {
-            return Err(FsError::new(ErrorCode::Estale));
+        let revision = {
+            let mut state = self.lock()?;
+            if state.concurrent_mode || state.legacy_lease.as_ref() != Some(lease) {
+                return Err(FsError::new(ErrorCode::Estale));
+            }
+            if state.revision != expected_revision {
+                return Err(FsError::new(ErrorCode::Eagain));
+            }
+            state.revision = state
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+            state.published.push(namespace.clone());
+            state.namespace = Some(namespace);
+            state.revision
+        };
+        if self.pending_after_apply.swap(false, Ordering::SeqCst) {
+            self.after_apply_resume.notified().await;
         }
-        if state.revision != expected_revision {
-            return Err(FsError::new(ErrorCode::Eagain));
-        }
-        state.revision = state
-            .revision
-            .checked_add(1)
-            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-        state.published.push(namespace.clone());
-        state.namespace = Some(namespace);
-        Ok(state.revision)
+        Ok(revision)
     }
 
     async fn publish_if_revision(
@@ -192,80 +233,87 @@ impl MetadataStore for CasMetadata {
         namespace: Namespace,
     ) -> Result<u64> {
         namespace.validate()?;
-        let mut state = self.lock()?;
-        if !state.concurrent_mode {
-            return Err(FsError::new(ErrorCode::Enotsup));
-        }
-        if let Some((first, second)) = state.swap_entries_on_next_cas.take() {
-            // Simulate another coordinator winning the CAS immediately after
-            // this coordinator prepared its guarded candidate. Both inodes
-            // remain linked, so the committed namespace remains valid.
-            let mut replaced = state
-                .namespace
-                .clone()
-                .ok_or_else(|| FsError::backend("forced swap needs a published namespace"))?;
-            let root = replaced.root;
-            let NodeData::Directory { entries } = &mut replaced
-                .nodes
-                .get_mut(&root)
-                .ok_or_else(|| FsError::backend("forced swap needs a root node"))?
-                .data
-            else {
-                return Err(FsError::backend("forced swap needs a root directory"));
-            };
-            let first_index = entries
-                .iter()
-                .position(|entry| entry.name == first)
-                .ok_or_else(|| FsError::backend("forced swap first name is missing"))?;
-            let second_index = entries
-                .iter()
-                .position(|entry| entry.name == second)
-                .ok_or_else(|| FsError::backend("forced swap second name is missing"))?;
-            let first_inode = entries[first_index].inode;
-            entries[first_index].inode = entries[second_index].inode;
-            entries[second_index].inode = first_inode;
-            replaced.validate()?;
+        let revision = {
+            let mut state = self.lock()?;
+            if !state.concurrent_mode {
+                return Err(FsError::new(ErrorCode::Enotsup));
+            }
+            if let Some((first, second)) = state.swap_entries_on_next_cas.take() {
+                // Simulate another coordinator winning the CAS immediately after
+                // this coordinator prepared its guarded candidate. Both inodes
+                // remain linked, so the committed namespace remains valid.
+                let mut replaced = state
+                    .namespace
+                    .clone()
+                    .ok_or_else(|| FsError::backend("forced swap needs a published namespace"))?;
+                let root = replaced.root;
+                let NodeData::Directory { entries } = &mut replaced
+                    .nodes
+                    .get_mut(&root)
+                    .ok_or_else(|| FsError::backend("forced swap needs a root node"))?
+                    .data
+                else {
+                    return Err(FsError::backend("forced swap needs a root directory"));
+                };
+                let first_index = entries
+                    .iter()
+                    .position(|entry| entry.name == first)
+                    .ok_or_else(|| FsError::backend("forced swap first name is missing"))?;
+                let second_index = entries
+                    .iter()
+                    .position(|entry| entry.name == second)
+                    .ok_or_else(|| FsError::backend("forced swap second name is missing"))?;
+                let first_inode = entries[first_index].inode;
+                entries[first_index].inode = entries[second_index].inode;
+                entries[second_index].inode = first_inode;
+                replaced.validate()?;
+                state.revision = state
+                    .revision
+                    .checked_add(1)
+                    .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+                state.published.push(replaced.clone());
+                state.namespace = Some(replaced);
+                self.observed_conflicts.fetch_add(1, Ordering::SeqCst);
+                return Err(FsError::new(ErrorCode::Eagain));
+            }
+            if state.revision != 0
+                && self
+                    .forced_conflicts
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                        count.checked_sub(1)
+                    })
+                    .is_ok()
+            {
+                // A separate writer committed an unrelated metadata revision.
+                // The namespace is still valid, but the caller's base is stale.
+                state.revision = state
+                    .revision
+                    .checked_add(1)
+                    .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+                self.observed_conflicts.fetch_add(1, Ordering::SeqCst);
+                return Err(FsError::new(ErrorCode::Eagain));
+            }
+            if state.revision != expected_revision {
+                self.observed_conflicts.fetch_add(1, Ordering::SeqCst);
+                return Err(FsError::new(ErrorCode::Eagain));
+            }
             state.revision = state
                 .revision
                 .checked_add(1)
                 .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-            state.published.push(replaced.clone());
-            state.namespace = Some(replaced);
-            self.observed_conflicts.fetch_add(1, Ordering::SeqCst);
-            return Err(FsError::new(ErrorCode::Eagain));
+            state.published.push(namespace.clone());
+            state.namespace = Some(namespace);
+            if self.ambiguous_after_apply.swap(false, Ordering::SeqCst) {
+                return Err(FsError::new(ErrorCode::Eio).with_message(
+                    "test FoundationDB commit may have applied; acknowledgement lost",
+                ));
+            }
+            state.revision
+        };
+        if self.pending_after_apply.swap(false, Ordering::SeqCst) {
+            self.after_apply_resume.notified().await;
         }
-        if state.revision != 0
-            && self
-                .forced_conflicts
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
-                    count.checked_sub(1)
-                })
-                .is_ok()
-        {
-            // A separate writer committed an unrelated metadata revision.
-            // The namespace is still valid, but the caller's base is stale.
-            state.revision = state
-                .revision
-                .checked_add(1)
-                .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-            self.observed_conflicts.fetch_add(1, Ordering::SeqCst);
-            return Err(FsError::new(ErrorCode::Eagain));
-        }
-        if state.revision != expected_revision {
-            self.observed_conflicts.fetch_add(1, Ordering::SeqCst);
-            return Err(FsError::new(ErrorCode::Eagain));
-        }
-        state.revision = state
-            .revision
-            .checked_add(1)
-            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-        state.published.push(namespace.clone());
-        state.namespace = Some(namespace);
-        if self.ambiguous_after_apply.swap(false, Ordering::SeqCst) {
-            return Err(FsError::new(ErrorCode::Eio)
-                .with_message("test FoundationDB commit may have applied; acknowledgement lost"));
-        }
-        Ok(state.revision)
+        Ok(revision)
     }
 
     async fn flush(&self) -> Result<()> {
@@ -777,6 +825,239 @@ fn ambiguous_commit_fails_closed_without_replaying_the_whole_file() {
 
     block_on(first.shutdown()).expect("failed coordinator releases terminal state");
     block_on(second.shutdown()).expect("second shuts down");
+}
+
+#[test]
+fn canceled_after_applied_cas_fails_closed_without_replay() {
+    let (metadata, first, second) = open_two();
+    let before = metadata.published_count();
+    metadata.suspend_one_commit_after_apply();
+
+    let mut write = Box::pin(first.write_file("/maybe", b"once"));
+    let waker = Waker::from(Arc::new(NoopWaker));
+    let mut context = Context::from_waker(&waker);
+    for _ in 0..1_000 {
+        assert!(matches!(
+            Future::poll(write.as_mut(), &mut context),
+            Poll::Pending
+        ));
+        if metadata.published_count() == before + 1 {
+            break;
+        }
+    }
+    assert_eq!(metadata.published_count(), before + 1);
+    drop(write);
+
+    assert_eq!(read_file(&second, "/maybe"), b"once");
+    let error = block_on(first.write_file("/later", b"do not replay"))
+        .expect_err("a canceled publication has an unknown outcome");
+    assert_eq!(error.code, ErrorCode::Eio);
+    assert_eq!(metadata.published_count(), before + 1);
+
+    block_on(first.shutdown()).expect("failed coordinator shuts down");
+    block_on(second.shutdown()).expect("second coordinator shuts down");
+}
+
+#[test]
+fn canceled_after_applied_lease_publication_fails_closed_and_releases_lease() {
+    let metadata = CasMetadata::default();
+    let filesystem = block_on(ChunkedFs::open(
+        metadata.clone(),
+        SharedBlocks::default(),
+        ChunkedOptions::fixed("legacy-writer", 4).expect("fixed chunker"),
+    ))
+    .expect("legacy coordinator opens");
+    let before = metadata.published_count();
+    metadata.suspend_one_commit_after_apply();
+
+    let mut write = Box::pin(filesystem.write_file("/maybe", b"once"));
+    let waker = Waker::from(Arc::new(NoopWaker));
+    let mut context = Context::from_waker(&waker);
+    for _ in 0..1_000 {
+        assert!(matches!(
+            Future::poll(write.as_mut(), &mut context),
+            Poll::Pending
+        ));
+        if metadata.published_count() == before + 1 {
+            break;
+        }
+    }
+    assert_eq!(metadata.published_count(), before + 1);
+    drop(write);
+
+    let error = block_on(filesystem.write_file("/later", b"do not replay"))
+        .expect_err("a canceled lease publication has an unknown outcome");
+    assert_eq!(error.code, ErrorCode::Eio);
+    assert_eq!(metadata.published_count(), before + 1);
+    block_on(filesystem.shutdown()).expect("failed coordinator releases the lease");
+    let replacement = block_on(metadata.acquire_writer("replacement", Duration::from_secs(10)))
+        .expect("exact legacy lease was released");
+    block_on(metadata.release_writer(&replacement)).expect("release replacement lease");
+}
+
+#[test]
+fn canceled_batched_follower_after_applied_cas_fails_coordinator_closed() {
+    let (metadata, first, second) = open_two();
+    let before = metadata.published_count();
+    metadata.suspend_one_commit_after_apply();
+
+    let waker = Waker::from(Arc::new(NoopWaker));
+    let mut context = Context::from_waker(&waker);
+    let mut runner = Box::pin(first.write_file("/runner", b"runner"));
+    assert!(matches!(
+        Future::poll(runner.as_mut(), &mut context),
+        Poll::Pending
+    ));
+    let mut follower = Box::pin(first.write_file("/follower", b"follower"));
+    assert!(matches!(
+        Future::poll(follower.as_mut(), &mut context),
+        Poll::Pending
+    ));
+
+    for _ in 0..1_000 {
+        assert!(matches!(
+            Future::poll(runner.as_mut(), &mut context),
+            Poll::Pending
+        ));
+        if metadata.published_count() == before + 1 {
+            break;
+        }
+    }
+    assert_eq!(metadata.published_count(), before + 1);
+    drop(follower);
+    metadata.resume_suspended_commit();
+    block_on(runner).expect("runner's acknowledged write committed");
+
+    assert_eq!(read_file(&second, "/runner"), b"runner");
+    assert_eq!(read_file(&second, "/follower"), b"follower");
+    let error = block_on(first.write_file("/later", b"later"))
+        .expect_err("a committed follower lost its publication acknowledgement");
+    assert_eq!(error.code, ErrorCode::Eio);
+    assert_eq!(metadata.published_count(), before + 1);
+    block_on(first.shutdown()).expect("failed coordinator shuts down");
+    block_on(second.shutdown()).expect("second coordinator shuts down");
+}
+
+#[test]
+fn canceled_batched_follower_before_publication_is_not_committed() {
+    let (metadata, first, second) = open_two();
+    let before = metadata.published_count();
+    let waker = Waker::from(Arc::new(NoopWaker));
+    let mut context = Context::from_waker(&waker);
+    let mut runner = Box::pin(first.write_file("/runner", b"runner"));
+    assert!(matches!(
+        Future::poll(runner.as_mut(), &mut context),
+        Poll::Pending
+    ));
+    let mut follower = Box::pin(first.write_file("/follower", b"follower"));
+    assert!(matches!(
+        Future::poll(follower.as_mut(), &mut context),
+        Poll::Pending
+    ));
+    drop(follower);
+    block_on(runner).expect("runner's write committed");
+
+    assert_eq!(metadata.published_count(), before + 1);
+    assert_eq!(read_file(&second, "/runner"), b"runner");
+    assert_eq!(
+        block_on(second.stat("/follower")).unwrap_err().code,
+        ErrorCode::Enoent
+    );
+    block_on(first.write_file("/later", b"later"))
+        .expect("prepublication cancellation leaves the coordinator usable");
+    block_on(first.shutdown()).expect("first coordinator shuts down");
+    block_on(second.shutdown()).expect("second coordinator shuts down");
+}
+
+#[test]
+fn canceled_batched_follower_after_response_send_fails_coordinator_closed() {
+    let (metadata, first, second) = open_two();
+    let before = metadata.published_count();
+    let waker = Waker::from(Arc::new(NoopWaker));
+    let mut context = Context::from_waker(&waker);
+    let mut runner = Box::pin(first.write_file("/runner", b"runner"));
+    assert!(matches!(
+        Future::poll(runner.as_mut(), &mut context),
+        Poll::Pending
+    ));
+    let mut follower = Box::pin(first.write_file("/follower", b"follower"));
+    assert!(matches!(
+        Future::poll(follower.as_mut(), &mut context),
+        Poll::Pending
+    ));
+
+    block_on(runner).expect("runner completes the shared publication and receives its response");
+    assert_eq!(metadata.published_count(), before + 1);
+    assert_eq!(read_file(&second, "/runner"), b"runner");
+    assert_eq!(read_file(&second, "/follower"), b"follower");
+    // The follower's response was sent successfully but has not been read.
+    drop(follower);
+
+    let error = block_on(first.write_file("/later", b"later"))
+        .expect_err("the follower canceled before consuming its committed response");
+    assert_eq!(error.code, ErrorCode::Eio);
+    assert_eq!(metadata.published_count(), before + 1);
+    block_on(first.shutdown()).expect("failed coordinator shuts down");
+    block_on(second.shutdown()).expect("second coordinator shuts down");
+}
+
+#[test]
+fn canceled_shutdown_retries_the_exact_unreleased_lease() {
+    let metadata = CasMetadata::default();
+    let filesystem = block_on(ChunkedFs::open(
+        metadata.clone(),
+        SharedBlocks::default(),
+        ChunkedOptions::fixed("shutdown-cancel", 4).expect("fixed chunker"),
+    ))
+    .expect("legacy coordinator opens");
+    metadata.suspend_one_release_before_apply();
+
+    let mut shutdown = Box::pin(filesystem.shutdown());
+    let waker = Waker::from(Arc::new(NoopWaker));
+    let mut context = Context::from_waker(&waker);
+    for _ in 0..1_000 {
+        assert!(matches!(
+            Future::poll(shutdown.as_mut(), &mut context),
+            Poll::Pending
+        ));
+        if metadata.release_entered.load(Ordering::SeqCst) {
+            break;
+        }
+    }
+    assert!(metadata.release_entered.load(Ordering::SeqCst));
+    drop(shutdown);
+    assert_eq!(
+        block_on(metadata.acquire_writer("replacement", Duration::from_secs(10)))
+            .unwrap_err()
+            .code,
+        ErrorCode::Eagain,
+        "the suspended release has not changed provider state"
+    );
+
+    block_on(filesystem.shutdown()).expect("retry must release the retained lease token");
+    let replacement = block_on(metadata.acquire_writer("replacement", Duration::from_secs(10)))
+        .expect("retry released the old writer lease");
+    block_on(metadata.release_writer(&replacement)).expect("release replacement lease");
+}
+
+#[test]
+fn shutdown_attempts_lease_release_after_transient_refresh_error() {
+    let metadata = CasMetadata::default();
+    let filesystem = block_on(ChunkedFs::open(
+        metadata.clone(),
+        SharedBlocks::default(),
+        ChunkedOptions::fixed("shutdown-renew-error", 4).expect("fixed chunker"),
+    ))
+    .expect("legacy coordinator opens");
+    metadata.fail_next_renew();
+
+    let error = block_on(filesystem.shutdown())
+        .expect_err("transient renewal error remains visible to the caller");
+    assert_eq!(error.code, ErrorCode::Eio);
+    let replacement = block_on(metadata.acquire_writer("replacement", Duration::from_secs(10)))
+        .expect("renewal error must not strand a valid lease");
+    block_on(metadata.release_writer(&replacement)).expect("release replacement lease");
+    block_on(filesystem.shutdown()).expect("completed release remains idempotent locally");
 }
 
 #[test]

@@ -202,11 +202,23 @@ enum MutationRequest {
     WholeFile {
         mutation: Box<WholeFileMutation>,
         reply: tokio::sync::oneshot::Sender<Result<MutationResult>>,
+        committed: Arc<AtomicBool>,
     },
     Unlink {
         path: String,
         reply: tokio::sync::oneshot::Sender<Result<MutationResult>>,
+        committed: Arc<AtomicBool>,
     },
+}
+
+impl MutationRequest {
+    fn mark_committed(&self) {
+        match self {
+            Self::WholeFile { committed, .. } | Self::Unlink { committed, .. } => {
+                committed.store(true, Ordering::Release);
+            }
+        }
+    }
 }
 
 struct MutationQueue {
@@ -226,6 +238,81 @@ impl MutationQueue {
 struct MutationRunnerGuard<'a> {
     queue: &'a Mutex<MutationQueue>,
     active: bool,
+}
+
+/// Once a metadata publication starts, dropping its future leaves the commit
+/// outcome unknown. Preserve that uncertainty even when the caller cancels
+/// before the provider returns or the local state records its acknowledgement.
+struct PublicationGuard<'a> {
+    state: &'a Mutex<RuntimeState>,
+    active: bool,
+}
+
+impl<'a> PublicationGuard<'a> {
+    fn new(state: &'a Mutex<RuntimeState>) -> Self {
+        Self {
+            state,
+            active: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for PublicationGuard<'_> {
+    fn drop(&mut self) {
+        if self.active
+            && let Ok(mut state) = self.state.lock()
+            && state.failure.is_none()
+        {
+            state.failure = Some(
+                FsError::new(ErrorCode::Eio)
+                    .with_syscall("metadata-publish")
+                    .with_message("metadata publication canceled before its outcome was known"),
+            );
+        }
+    }
+}
+
+/// Sending a committed batch response does not prove that its caller observed
+/// it. A follower may be canceled after the one-shot send and before polling
+/// its queued response; that dropped caller must preserve the uncertain result.
+struct MutationAcknowledgementGuard<'a> {
+    state: &'a Mutex<RuntimeState>,
+    committed: Arc<AtomicBool>,
+    observed: bool,
+}
+
+impl<'a> MutationAcknowledgementGuard<'a> {
+    fn new(state: &'a Mutex<RuntimeState>, committed: Arc<AtomicBool>) -> Self {
+        Self {
+            state,
+            committed,
+            observed: false,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.observed = true;
+    }
+}
+
+impl Drop for MutationAcknowledgementGuard<'_> {
+    fn drop(&mut self) {
+        if !self.observed
+            && self.committed.load(Ordering::Acquire)
+            && let Ok(mut state) = self.state.lock()
+            && state.failure.is_none()
+        {
+            state.failure = Some(
+                FsError::new(ErrorCode::Eio)
+                    .with_syscall("mutation-batch")
+                    .with_message("caller canceled before observing a committed mutation"),
+            );
+        }
+    }
 }
 
 /// Marks a whole-file operation whose immutable block work is still being
@@ -524,7 +611,11 @@ where
         // would strand the provider lease until its TTL expires. The failed
         // instance is already unusable, so release the lease and preserve the
         // fail-closed state instead.
-        if !self.failed() {
+        let (already_closed, failed) = {
+            let state = self.lock_state()?;
+            (state.closed, state.failure.is_some())
+        };
+        if !already_closed && !failed {
             self.flush_pending_atime().await?;
         }
         // Provider I/O can outlive the lease TTL (for example, a bounded
@@ -533,24 +624,30 @@ where
         // last operation was slow. `renew_lease` safely reacquires the next
         // fence when our lease expired without another owner publishing a
         // revision; a fenced instance still fails closed.
-        let refresh = if self.lock_lease()?.is_some() {
+        let refresh = if !already_closed && self.lock_lease()?.is_some() {
             self.validate_lease().await
         } else {
             Ok(())
-        };
-        let lease = {
-            let mut state = self.lock_lease()?;
-            state.take()
         };
         {
             let mut state = self.lock_state()?;
             state.closed = true;
         }
-        refresh?;
+        // A release may be canceled before the provider applies it, or may
+        // return an ambiguous error. Keep the exact token for a later retry
+        // until the provider acknowledges release. A failed refresh does not
+        // prevent an attempt to release a still-valid cached token.
+        let lease = self.lock_lease()?.clone();
         let Some(lease) = lease else {
-            return Ok(());
+            return refresh;
         };
-        self.inner.metadata.release_writer(&lease).await
+        match self.inner.metadata.release_writer(&lease).await {
+            Ok(()) => {
+                self.lock_lease()?.take();
+                refresh
+            }
+            Err(error) => Err(self.fail_closed(with_context(error, "lease-release", None))),
+        }
     }
 
     pub fn metadata_store(&self) -> Arc<M> {
@@ -877,6 +974,7 @@ where
                 .map_err(|error| with_context(error, "block-flush", None))?;
         }
         if self.inner.options.concurrent_writes {
+            let mut publication = PublicationGuard::new(&self.inner.state);
             let revision = match self
                 .inner
                 .metadata
@@ -888,6 +986,7 @@ where
                     // This is a known non-commit. The caller may reload and
                     // reconstruct its original operation; local state stays
                     // unchanged until a successful acknowledgement.
+                    publication.disarm();
                     return Err(with_context(error, "metadata-publish", None));
                 }
                 Err(error) => {
@@ -916,9 +1015,11 @@ where
                 state.revision = revision;
                 state.pending_atime.clear();
             }
+            publication.disarm();
             return Ok(revision);
         }
         let lease = self.renew_lease().await?;
+        let mut publication = PublicationGuard::new(&self.inner.state);
         let revision = match self
             .inner
             .metadata
@@ -939,6 +1040,7 @@ where
         state.namespace = namespace;
         state.revision = revision;
         state.pending_atime.clear();
+        publication.disarm();
         Ok(revision)
     }
 
@@ -965,16 +1067,23 @@ where
         mutation: WholeFileMutation,
     ) -> Result<WholeFileMutationResult> {
         let (reply, response) = tokio::sync::oneshot::channel();
+        let committed = Arc::new(AtomicBool::new(false));
+        let mut acknowledgement =
+            MutationAcknowledgementGuard::new(&self.inner.state, Arc::clone(&committed));
         self.enqueue_mutation(MutationRequest::WholeFile {
             mutation: Box::new(mutation),
             reply,
+            committed,
         })
         .await?;
         match response
             .await
             .map_err(|_| FsError::new(ErrorCode::Eio).with_message("mutation batch stopped"))??
         {
-            MutationResult::WholeFile(result) => Ok(result),
+            MutationResult::WholeFile(result) => {
+                acknowledgement.disarm();
+                Ok(result)
+            }
             MutationResult::Unit => Err(FsError::new(ErrorCode::Eio)
                 .with_syscall("write")
                 .with_message("mutation batch returned the wrong result type")),
@@ -983,13 +1092,23 @@ where
 
     async fn submit_unlink_mutation(&self, path: String) -> Result<()> {
         let (reply, response) = tokio::sync::oneshot::channel();
-        self.enqueue_mutation(MutationRequest::Unlink { path, reply })
-            .await?;
+        let committed = Arc::new(AtomicBool::new(false));
+        let mut acknowledgement =
+            MutationAcknowledgementGuard::new(&self.inner.state, Arc::clone(&committed));
+        self.enqueue_mutation(MutationRequest::Unlink {
+            path,
+            reply,
+            committed,
+        })
+        .await?;
         match response
             .await
             .map_err(|_| FsError::new(ErrorCode::Eio).with_message("mutation batch stopped"))??
         {
-            MutationResult::Unit => Ok(()),
+            MutationResult::Unit => {
+                acknowledgement.disarm();
+                Ok(())
+            }
             MutationResult::WholeFile(_) => Err(FsError::new(ErrorCode::Eio)
                 .with_syscall("unlink")
                 .with_message("mutation batch returned the wrong result type")),
@@ -1108,7 +1227,9 @@ where
 
             for request in &requests {
                 match request {
-                    MutationRequest::WholeFile { mutation, reply } => {
+                    MutationRequest::WholeFile {
+                        mutation, reply, ..
+                    } => {
                         if reply.is_closed() {
                             responses.push(None);
                             continue;
@@ -1142,7 +1263,7 @@ where
                             Err(error) => responses.push(Some(Err(error))),
                         }
                     }
-                    MutationRequest::Unlink { path, reply } => {
+                    MutationRequest::Unlink { path, reply, .. } => {
                         if reply.is_closed() {
                             responses.push(None);
                             continue;
@@ -1184,7 +1305,25 @@ where
             }
             for (request, response) in requests.into_iter().zip(responses) {
                 if let Some(response) = response {
-                    mutation_reply(request, response);
+                    let committed = matches!(
+                        response,
+                        Ok(
+                            MutationResult::WholeFile(WholeFileMutationResult::Committed)
+                                | MutationResult::Unit
+                        )
+                    );
+                    if committed {
+                        request.mark_committed();
+                    }
+                    if !mutation_reply(request, response) && committed {
+                        let _ = self.fail_closed(
+                            FsError::new(ErrorCode::Eio)
+                                .with_syscall("mutation-batch")
+                                .with_message(
+                                    "committed mutation response was canceled before acknowledgement",
+                                ),
+                        );
+                    }
                 }
             }
             return;
@@ -3405,10 +3544,10 @@ fn apply_mknod_mutation(
     Ok(inode)
 }
 
-fn mutation_reply(request: MutationRequest, result: Result<MutationResult>) {
+fn mutation_reply(request: MutationRequest, result: Result<MutationResult>) -> bool {
     match request {
         MutationRequest::WholeFile { reply, .. } | MutationRequest::Unlink { reply, .. } => {
-            let _ = reply.send(result);
+            reply.send(result).is_ok()
         }
     }
 }

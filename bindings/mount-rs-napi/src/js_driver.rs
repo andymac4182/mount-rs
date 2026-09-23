@@ -1552,6 +1552,12 @@ where
 /// such as write-only without create or truncate; passing the numeric form
 /// preserves that decoded intent across the N-API boundary.
 fn encode_open_flags(flags: OpenFlags, path: &str) -> CoreResult<f64> {
+    if !flags.has_valid_truncate_access() {
+        return Err(FsError::new(ErrorCode::Einval)
+            .with_syscall("open")
+            .with_path(path)
+            .with_message("decoded truncate flags require write access"));
+    }
     let access = match (flags.read, flags.write) {
         (true, false) => 0_u64,
         (false, true) => 1_u64,
@@ -2457,5 +2463,21 @@ mod tests {
         };
         let error = encode_open_flags(flags, "/file").unwrap_err();
         assert!(error.is(ErrorCode::Einval));
+    }
+
+    #[test]
+    fn numeric_open_flags_reject_truncate_without_write_access() {
+        let flags = OpenFlags {
+            read: true,
+            write: false,
+            create: false,
+            truncate: true,
+            append: false,
+            exclusive: false,
+        };
+        let error = encode_open_flags(flags, "/existing").unwrap_err();
+        assert!(error.is(ErrorCode::Einval));
+        assert_eq!(error.syscall.as_deref(), Some("open"));
+        assert_eq!(error.path.as_deref(), Some("/existing"));
     }
 }

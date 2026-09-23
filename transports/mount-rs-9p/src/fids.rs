@@ -479,4 +479,33 @@ mod tests {
         table.clear();
         assert!(table.fids().is_empty());
     }
+
+    #[test]
+    fn fid_reservation_duplicate_and_reuse_preserve_the_table() {
+        let mut table = FidTable::new(false);
+        assert!(table.create(P9_NOFID, "/reserved").is_err());
+        assert!(table.is_empty());
+        table.create(7, "/original").unwrap();
+        assert!(table.create(7, "/replacement").is_err());
+        assert_eq!(table.require(7).unwrap().path, "/original");
+        assert_eq!(table.fids(), vec![7]);
+        table.clunk(7).unwrap();
+        table.create(7, "/replacement").unwrap();
+        assert_eq!(table.require(7).unwrap().path, "/replacement");
+    }
+
+    #[test]
+    fn cloned_fid_has_independent_path_and_directory_cursor() {
+        let mut table = FidTable::new(false);
+        table.create(1, "/dir").unwrap();
+        table.snapshot(1, vec!["child".to_owned()]).unwrap();
+        table.note_offset(1, 42, 0);
+        table.clone_fid(1, 2).unwrap();
+        assert_eq!(table.require(2).unwrap().path, "/dir");
+        assert!(table.require(2).unwrap().cursor.is_none());
+        table.get_mut(2).unwrap().set_path("/elsewhere");
+        assert_eq!(table.require(1).unwrap().path, "/dir");
+        assert!(table.resume(1, 42).unwrap().is_some());
+        assert!(table.resume(2, 42).is_err());
+    }
 }

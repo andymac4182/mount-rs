@@ -1285,6 +1285,12 @@ impl FsDriver for HostFs {
         mode: u32,
     ) -> Result<Arc<dyn FileHandle>> {
         let normalized = normalize_path(path);
+        if !flags.has_valid_truncate_access() {
+            return Err(FsError::new(ErrorCode::Einval)
+                .with_syscall("open")
+                .with_path(&normalized)
+                .with_message("truncate requires write access"));
+        }
         if !flags.read && !flags.write {
             return Err(FsError::new(ErrorCode::Einval)
                 .with_syscall("open")

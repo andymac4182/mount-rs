@@ -37,6 +37,26 @@ pub fn xdr_align(length: usize) -> usize {
         .expect("XDR length overflow")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpaqueFrame {
+    OverLimit,
+    Truncated { span: usize },
+    Complete { span: usize },
+}
+
+fn opaque_frame(length: usize, max: usize, remaining: usize) -> OpaqueFrame {
+    if length > max || length > XDR_MAX_ITEM {
+        return OpaqueFrame::OverLimit;
+    }
+
+    let span = xdr_align(length);
+    if span > remaining {
+        OpaqueFrame::Truncated { span }
+    } else {
+        OpaqueFrame::Complete { span }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct XdrReader<'a> {
     bytes: &'a [u8],
@@ -118,17 +138,33 @@ impl<'a> XdrReader<'a> {
         Ok(self.bytes[at..at + length].to_vec())
     }
 
+    fn read_validated_opaque(&mut self, length: usize, span: usize) -> Vec<u8> {
+        let at = self.offset;
+        self.offset += span;
+        self.bytes[at..at + length].to_vec()
+    }
+
     pub fn var_opaque(&mut self, max: usize, what: &str) -> Result<Vec<u8>, XdrError> {
         let length = self.u32(&format!("{what} length"))? as usize;
-        if length > max || length > XDR_MAX_ITEM {
-            return Err(XdrError::new(
-                format!("{what} is {length} bytes, over the {max}-byte limit"),
-                self.offset.saturating_sub(4),
-            ));
-        }
-        let span = xdr_align(length);
-        let at = self.need(span, what)?;
-        Ok(self.bytes[at..at + length].to_vec())
+        let span = match opaque_frame(length, max, self.remaining()) {
+            OpaqueFrame::OverLimit => {
+                return Err(XdrError::new(
+                    format!("{what} is {length} bytes, over the {max}-byte limit"),
+                    self.offset.saturating_sub(4),
+                ));
+            }
+            OpaqueFrame::Truncated { span } => {
+                return Err(XdrError::new(
+                    format!(
+                        "truncated {what}: need {span} bytes, {} left",
+                        self.remaining()
+                    ),
+                    self.offset,
+                ));
+            }
+            OpaqueFrame::Complete { span } => span,
+        };
+        Ok(self.read_validated_opaque(length, span))
     }
 
     pub fn string(&mut self, max: usize, what: &str) -> Result<String, XdrError> {
@@ -355,5 +391,109 @@ mod tests {
         assert!(reader.bool("bool").is_err());
         let mut reader = XdrReader::new(&[0, 0]);
         assert!(reader.u32("u32").is_err());
+    }
+
+    #[test]
+    fn var_opaque_requires_the_length_payload_and_padding() {
+        for prefix_size in 0..4 {
+            let mut reader = XdrReader::new(&[0, 0, 0][..prefix_size]);
+            assert_eq!(reader.var_opaque(8, "opaque").unwrap_err().offset, 0);
+            assert_eq!(reader.offset(), 0);
+        }
+
+        for length in 0..=8usize {
+            let mut encoded = (length as u32).to_be_bytes().to_vec();
+            encoded.extend((0..length).map(|byte| byte as u8 + 1));
+            encoded.extend(std::iter::repeat_n(0xa5, xdr_pad(length)));
+
+            for size in 4..encoded.len() {
+                let mut reader = XdrReader::new(&encoded[..size]);
+                assert_eq!(reader.var_opaque(8, "opaque").unwrap_err().offset, 4);
+                assert_eq!(reader.offset(), 4);
+            }
+
+            let mut reader = XdrReader::new(&encoded);
+            let payload = reader.var_opaque(8, "opaque").unwrap();
+            assert_eq!(payload, encoded[4..4 + length]);
+            assert_eq!(reader.offset(), encoded.len());
+            assert!(reader.at_end());
+        }
+    }
+
+    #[test]
+    fn var_opaque_limit_rejects_before_consuming_payload() {
+        let bytes = [0, 0, 0, 5, 1, 2, 3, 4, 5, 0, 0, 0];
+        for max in 0..5 {
+            let mut reader = XdrReader::new(&bytes);
+            assert_eq!(reader.var_opaque(max, "opaque").unwrap_err().offset, 0);
+            assert_eq!(reader.offset(), 4);
+        }
+
+        let mut reader = XdrReader::new(&[1, 0, 0, 1]);
+        assert_eq!(
+            reader.var_opaque(usize::MAX, "opaque").unwrap_err().offset,
+            0
+        );
+        assert_eq!(reader.offset(), 4);
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Checks all decoded u32 lengths and caller limits; the finite wire tail
+    /// includes enough room to distinguish missing payload from missing pad.
+    #[kani::proof]
+    fn var_opaque_frame_bounds() {
+        let length = kani::any::<u32>() as usize;
+        let max: usize = kani::any();
+        let remaining: usize = kani::any();
+        kani::assume(remaining <= 12);
+
+        match opaque_frame(length, max, remaining) {
+            OpaqueFrame::OverLimit => {
+                assert!(length > max || length > XDR_MAX_ITEM);
+                kani::cover!(length == 5 && max == 4);
+                kani::cover!(length == XDR_MAX_ITEM + 1 && max == usize::MAX);
+            }
+            OpaqueFrame::Truncated { span } => {
+                assert!(length <= max && length <= XDR_MAX_ITEM);
+                assert_eq!(span, length + xdr_pad(length));
+                assert!(span > remaining);
+                kani::cover!(length == 3 && remaining == 2);
+                kani::cover!(length == 3 && remaining == 3);
+            }
+            OpaqueFrame::Complete { span } => {
+                assert!(length <= max && length <= XDR_MAX_ITEM);
+                assert_eq!(span, length + xdr_pad(length));
+                assert!(span <= remaining);
+                kani::cover!(length == 4 && remaining == 4);
+            }
+        }
+    }
+
+    /// Proves the payload extraction called after the frame check. The wire
+    /// prefix was already consumed, so the reader starts at byte four.
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn var_opaque_short_wire_payload() {
+        let bytes: [u8; 12] = kani::any();
+        let wire_size: usize = kani::any();
+        kani::assume(wire_size >= 4 && wire_size <= bytes.len());
+        let length: usize = kani::any();
+        kani::assume(length <= 8);
+        let span = length + xdr_pad(length);
+        kani::assume(4 + span <= wire_size);
+
+        let wire = &bytes[..wire_size];
+        let mut reader = XdrReader::new(wire);
+        reader.offset = 4;
+        let payload = reader.read_validated_opaque(length, span);
+        assert_eq!(payload.as_slice(), &wire[4..4 + length]);
+        assert_eq!(reader.offset(), 4 + span);
+        assert_eq!(reader.remaining(), wire_size - (4 + span));
+        kani::cover!(length == 4 && wire_size == 8);
+        kani::cover!(length == 3 && wire_size == 8 && bytes[7] != 0);
     }
 }

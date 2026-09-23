@@ -147,6 +147,835 @@ fn lock_coverage_snapshots_preserve_grant_order() {
     );
 }
 
+#[test]
+fn duplicate_generated_lock_token_does_not_replace_an_existing_lock() {
+    let mut table = DavLockTable::new(DavLockTableOptions {
+        new_token: Some(Arc::new(|| "urn:uuid:fixed-token".to_owned())),
+        max_locks: 2,
+        ..DavLockTableOptions::default()
+    });
+    let request = |path: &str| DavLockRequest {
+        path: path.to_owned(),
+        collection: false,
+        depth: LockDepth::Zero,
+        exclusive: true,
+        owner: None,
+        timeout: None,
+    };
+    let DavLockGrant::Granted(first) = table.create(request("/first"), 0) else {
+        panic!("first lock must be granted");
+    };
+    let DavLockGrant::Granted(second) = table.create(request("/second"), 0) else {
+        panic!("second disjoint lock must be granted");
+    };
+
+    assert_ne!(first.token, second.token, "lock tokens must be unique");
+    assert_eq!(table.find(&first.token, 0).unwrap().path, "/first");
+    assert_eq!(table.find(&second.token, 0).unwrap().path, "/second");
+    assert_eq!(table.size(0), 2);
+}
+
+#[test]
+fn expired_lock_token_is_not_reissued_for_another_resource() {
+    let mut table = DavLockTable::new(DavLockTableOptions {
+        new_token: Some(Arc::new(|| "urn:uuid:fixed-token".to_owned())),
+        ..DavLockTableOptions::default()
+    });
+    let request = |path: &str| DavLockRequest {
+        path: path.to_owned(),
+        collection: false,
+        depth: LockDepth::Zero,
+        exclusive: true,
+        owner: None,
+        timeout: None,
+    };
+    let DavLockGrant::Granted(first) = table.create(request("/first"), 0) else {
+        panic!("first lock must be granted");
+    };
+    let DavLockGrant::Granted(second) = table.create(request("/second"), first.expires_at) else {
+        panic!("second lock must be granted after expiry");
+    };
+
+    assert_ne!(
+        first.token, second.token,
+        "expired tokens must not be reused"
+    );
+    assert!(table.find(&first.token, first.expires_at).is_none());
+    assert_eq!(
+        table.find(&second.token, first.expires_at).unwrap().path,
+        "/second"
+    );
+}
+
+#[test]
+fn injected_token_history_exhaustion_fails_closed() {
+    let next = Arc::new(AtomicUsize::new(0));
+    let token_counter = Arc::clone(&next);
+    let mut table = DavLockTable::new(DavLockTableOptions {
+        max_locks: 2,
+        new_token: Some(Arc::new(move || {
+            format!(
+                "urn:uuid:history-{}",
+                token_counter.fetch_add(1, Ordering::SeqCst)
+            )
+        })),
+        ..DavLockTableOptions::default()
+    });
+    let request = |path: &str| DavLockRequest {
+        path: path.to_owned(),
+        collection: false,
+        depth: LockDepth::Zero,
+        exclusive: true,
+        owner: None,
+        timeout: None,
+    };
+
+    let mut last_token = String::new();
+    for index in 0..mount_rs_webdav::MAX_LOCKS {
+        let DavLockGrant::Granted(lock) = table.create(request("/history"), 0) else {
+            panic!("grant below the lifetime cap must succeed");
+        };
+        if index + 1 == mount_rs_webdav::MAX_LOCKS {
+            last_token = lock.token;
+        } else {
+            assert!(table.remove(&lock.token));
+        }
+    }
+    assert!(matches!(
+        table.create(request("/next"), 0),
+        DavLockGrant::Full
+    ));
+    assert_eq!(next.load(Ordering::SeqCst), mount_rs_webdav::MAX_LOCKS);
+    assert_eq!(table.size(0), 1);
+    let before = table.find(&last_token, 0).unwrap().expires_at;
+    let refreshed = table.refresh(&last_token, None, 1_000).unwrap();
+    assert_eq!(refreshed.token, last_token);
+    assert!(refreshed.expires_at > before);
+}
+
+#[test]
+fn oversized_generated_token_fails_closed_before_grant() {
+    let oversized = format!("urn:uuid:{}", "x".repeat(1_024));
+    let mut table = DavLockTable::new(DavLockTableOptions {
+        new_token: Some(Arc::new(move || oversized.clone())),
+        ..DavLockTableOptions::default()
+    });
+    let request = DavLockRequest {
+        path: "/oversized".to_owned(),
+        collection: false,
+        depth: LockDepth::Zero,
+        exclusive: true,
+        owner: None,
+        timeout: None,
+    };
+
+    assert!(matches!(table.create(request, 0), DavLockGrant::Full));
+    assert_eq!(table.size(0), 0);
+}
+
+#[test]
+fn unusable_generated_tokens_fail_closed_before_grant() {
+    let mut granted = Vec::new();
+    for token in [
+        "",
+        "<bad>",
+        "urn:uuid:bad>content",
+        "urn:uuid:bad\r\nInjected: value",
+        "urn:uuid:bad\t",
+        "urn:uuid:bad\0",
+        "urn:uuid:bad space",
+        "urn:uuid:bad#fragment",
+        "urn:uuid:bad%GG",
+        "urn:uuid:é",
+        "not-a-uri",
+        "http://",
+        "http://[broken",
+        "DAV:no-lock",
+        "dav:no-lock",
+    ] {
+        let generated = token.to_owned();
+        let mut table = DavLockTable::new(DavLockTableOptions {
+            new_token: Some(Arc::new(move || generated.clone())),
+            ..DavLockTableOptions::default()
+        });
+        let request = DavLockRequest {
+            path: "/unusable".to_owned(),
+            collection: false,
+            depth: LockDepth::Zero,
+            exclusive: true,
+            owner: None,
+            timeout: None,
+        };
+
+        if !matches!(table.create(request, 0), DavLockGrant::Full) || table.size(0) != 0 {
+            granted.push(token);
+        }
+    }
+    assert!(
+        granted.is_empty(),
+        "unusable tokens were granted: {granted:?}"
+    );
+}
+
+#[tokio::test]
+async fn full_lock_table_does_not_create_an_unmapped_resource() {
+    let session = WebdavSession::new(
+        Arc::new(MemoryFs::empty()),
+        WebdavSessionOptions {
+            locks: DavLockTableOptions {
+                max_locks: 0,
+                ..DavLockTableOptions::default()
+            },
+            ..WebdavSessionOptions::default()
+        },
+    );
+    let response = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "LOCK".to_owned(),
+                target: "/unmapped".to_owned(),
+                headers: Default::default(),
+            },
+            br#"<lockinfo xmlns="DAV:"><lockscope><exclusive/></lockscope><locktype><write/></locktype></lockinfo>"#,
+        )
+        .await;
+    assert_eq!(response.status, 503);
+    assert_eq!(session.lock_count(), 0);
+
+    let get = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "GET".to_owned(),
+                target: "/unmapped".to_owned(),
+                headers: Default::default(),
+            },
+            b"".as_slice(),
+        )
+        .await;
+    assert_eq!(
+        get.status, 404,
+        "a rejected LOCK must leave the URL unmapped"
+    );
+}
+
+#[tokio::test]
+async fn failed_unmapped_lock_creation_releases_its_grant() {
+    let driver = DurableBarrierFs::new();
+    driver.fail_next_syncfs.store(true, Ordering::SeqCst);
+    let session = WebdavSession::new(
+        Arc::clone(&driver) as Arc<dyn FsDriver>,
+        WebdavSessionOptions::default(),
+    );
+    let response = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "LOCK".to_owned(),
+                target: "/failed-lock".to_owned(),
+                headers: Default::default(),
+            },
+            br#"<lockinfo xmlns="DAV:"><lockscope><exclusive/></lockscope><locktype><write/></locktype></lockinfo>"#,
+        )
+        .await;
+
+    assert_eq!(response.status, 500);
+    assert_eq!(driver.syncfs_calls(), 1);
+    assert_eq!(
+        session.lock_count(),
+        0,
+        "failed LOCK must release its token"
+    );
+}
+
+#[tokio::test]
+async fn cancelling_lock_at_the_durability_barrier_releases_its_grant() {
+    let driver = DurableBarrierFs::new();
+    driver.stall_next_syncfs.store(true, Ordering::SeqCst);
+    let session = Arc::new(WebdavSession::new(
+        Arc::clone(&driver) as Arc<dyn FsDriver>,
+        WebdavSessionOptions {
+            locks: DavLockTableOptions {
+                new_token: Some(Arc::new(|| "urn:uuid:cancelled-token".to_owned())),
+                ..DavLockTableOptions::default()
+            },
+            ..WebdavSessionOptions::default()
+        },
+    ));
+    let running = Arc::clone(&session);
+    let request = WebdavRequestHead {
+        method: "LOCK".to_owned(),
+        target: "/cancelled-lock".to_owned(),
+        headers: Default::default(),
+    };
+    let task = tokio::spawn(async move {
+        running
+            .handle_request(
+                request,
+                br#"<lockinfo xmlns="DAV:"><lockscope><exclusive/></lockscope><locktype><write/></locktype></lockinfo>"#,
+            )
+            .await
+    });
+    timeout(Duration::from_secs(5), driver.syncfs_started.notified())
+        .await
+        .expect("LOCK must reach the held persistence barrier");
+    let pending = session.lock_records();
+    assert_eq!(pending.len(), 1);
+    let pending_token = pending[0].token.clone();
+
+    task.abort();
+    match task.await {
+        Err(error) => assert!(error.is_cancelled()),
+        Ok(_) => panic!("LOCK task must be cancelled"),
+    }
+    assert_eq!(
+        session.lock_count(),
+        0,
+        "cancelled LOCK left an active token"
+    );
+
+    let retry = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "LOCK".to_owned(),
+                target: "/cancelled-lock".to_owned(),
+                headers: Default::default(),
+            },
+            br#"<lockinfo xmlns="DAV:"><lockscope><exclusive/></lockscope><locktype><write/></locktype></lockinfo>"#,
+        )
+        .await;
+    assert_eq!(retry.status, 200);
+    let retry_token = parse_lock_token(retry.headers.get("lock-token").map(String::as_str))
+        .expect("retry lock token");
+    assert_ne!(
+        retry_token, pending_token,
+        "cancelled token must stay issued"
+    );
+}
+
+#[test]
+fn bounded_lock_scope_matrix_matches_the_path_hierarchy() {
+    let paths = ["/", "/a", "/a/b", "/ab", "/b"];
+    let covers = |root: &str, depth: LockDepth, path: &str| {
+        root == path
+            || (depth == LockDepth::Infinity
+                && match root {
+                    "/" => true,
+                    "/a" => path == "/a/b",
+                    _ => false,
+                })
+    };
+
+    for first_path in paths {
+        for first_depth in [LockDepth::Zero, LockDepth::Infinity] {
+            for first_exclusive in [false, true] {
+                for second_path in paths {
+                    for second_depth in [LockDepth::Zero, LockDepth::Infinity] {
+                        for second_exclusive in [false, true] {
+                            let next = Arc::new(AtomicUsize::new(0));
+                            let token_counter = Arc::clone(&next);
+                            let mut table = DavLockTable::new(DavLockTableOptions {
+                                new_token: Some(Arc::new(move || {
+                                    format!(
+                                        "urn:uuid:matrix-{}",
+                                        token_counter.fetch_add(1, Ordering::SeqCst)
+                                    )
+                                })),
+                                ..DavLockTableOptions::default()
+                            });
+                            let request =
+                                |path: &str, depth: LockDepth, exclusive: bool| DavLockRequest {
+                                    path: path.to_owned(),
+                                    collection: false,
+                                    depth,
+                                    exclusive,
+                                    owner: None,
+                                    timeout: None,
+                                };
+                            let DavLockGrant::Granted(first) =
+                                table.create(request(first_path, first_depth, first_exclusive), 0)
+                            else {
+                                panic!("first lock must be granted");
+                            };
+                            for target in paths {
+                                let expected = covers(first_path, first_depth, target);
+                                assert_eq!(DavLockTable::in_scope(&first, target), expected);
+                                assert_eq!(
+                                    table.covering(target, 0).len() == 1,
+                                    expected,
+                                    "coverage: {first_path} {first_depth} -> {target}"
+                                );
+                            }
+
+                            let overlaps = paths.iter().any(|target| {
+                                covers(first_path, first_depth, target)
+                                    && covers(second_path, second_depth, target)
+                            });
+                            let expected_conflict =
+                                overlaps && (first_exclusive || second_exclusive);
+                            assert_eq!(
+                                table
+                                    .conflict(second_path, second_depth, second_exclusive, 0)
+                                    .is_some(),
+                                expected_conflict,
+                                "conflict: {first_path} {first_depth} {first_exclusive} vs \
+                                 {second_path} {second_depth} {second_exclusive}"
+                            );
+                            match (
+                                table.create(
+                                    request(second_path, second_depth, second_exclusive),
+                                    0,
+                                ),
+                                expected_conflict,
+                            ) {
+                                (DavLockGrant::Conflict(_), true)
+                                | (DavLockGrant::Granted(_), false) => {}
+                                (DavLockGrant::Full, _) => {
+                                    panic!("unexpected Full: {first_path} vs {second_path}")
+                                }
+                                _ => panic!(
+                                    "wrong grant: {first_path} {first_depth} vs \
+                                     {second_path} {second_depth}"
+                                ),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut table = DavLockTable::default();
+    let DavLockGrant::Granted(lock) = table.create(
+        DavLockRequest {
+            path: "/a".to_owned(),
+            collection: true,
+            depth: LockDepth::Infinity,
+            exclusive: true,
+            owner: None,
+            timeout: None,
+        },
+        0,
+    ) else {
+        panic!("expiry fixture lock must be granted");
+    };
+    assert!(table.covering("/a/b", lock.expires_at).is_empty());
+    assert!(
+        table
+            .conflict("/a/b", LockDepth::Zero, true, lock.expires_at)
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn if_token_in_a_false_list_is_still_submitted() {
+    let session = WebdavSession::new(Arc::new(MemoryFs::empty()), WebdavSessionOptions::default());
+    let lock = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "LOCK".to_owned(),
+                target: "/if-list".to_owned(),
+                headers: Default::default(),
+            },
+            br#"<lockinfo xmlns="DAV:"><lockscope><exclusive/></lockscope><locktype><write/></locktype></lockinfo>"#,
+        )
+        .await;
+    assert_eq!(lock.status, 201);
+    let token = lock.headers.get("lock-token").expect("lock token");
+
+    // RFC 4918 section 10.4.8: another true list keeps the request
+    // conditional while a token in the false list is still submitted.
+    let put = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "PUT".to_owned(),
+                target: "/if-list".to_owned(),
+                headers: [(
+                    "if".to_owned(),
+                    format!("({token} [\"stale\"]) (Not <DAV:no-lock>)"),
+                )]
+                .into_iter()
+                .collect(),
+            },
+            b"updated".as_slice(),
+        )
+        .await;
+    assert_eq!(put.status, 204);
+}
+
+#[tokio::test]
+async fn negated_if_token_is_still_submitted() {
+    let session = WebdavSession::new(Arc::new(MemoryFs::empty()), WebdavSessionOptions::default());
+    let lock = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "LOCK".to_owned(),
+                target: "/negated-list".to_owned(),
+                headers: Default::default(),
+            },
+            br#"<lockinfo xmlns="DAV:"><lockscope><exclusive/></lockscope><locktype><write/></locktype></lockinfo>"#,
+        )
+        .await;
+    assert_eq!(lock.status, 201);
+    let token = lock.headers.get("lock-token").expect("lock token");
+
+    let put = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "PUT".to_owned(),
+                target: "/negated-list".to_owned(),
+                headers: [(
+                    "if".to_owned(),
+                    format!("(Not {token}) (Not <DAV:no-lock>)"),
+                )]
+                .into_iter()
+                .collect(),
+            },
+            b"updated".as_slice(),
+        )
+        .await;
+    assert_eq!(put.status, 204);
+}
+
+#[tokio::test]
+async fn bodyless_lock_requires_a_single_lock_token() {
+    let now = Arc::new(AtomicI64::new(0));
+    let clock = Arc::clone(&now);
+    let session = WebdavSession::new(
+        Arc::new(MemoryFs::empty()),
+        WebdavSessionOptions {
+            now: Some(Arc::new(move || clock.load(Ordering::SeqCst))),
+            ..WebdavSessionOptions::default()
+        },
+    );
+    let body = br#"<lockinfo xmlns="DAV:"><lockscope><shared/></lockscope><locktype><write/></locktype></lockinfo>"#;
+    let first = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "LOCK".to_owned(),
+                target: "/shared-refresh".to_owned(),
+                headers: Default::default(),
+            },
+            body.as_slice(),
+        )
+        .await;
+    assert_eq!(first.status, 201);
+    let second = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "LOCK".to_owned(),
+                target: "/shared-refresh".to_owned(),
+                headers: Default::default(),
+            },
+            body.as_slice(),
+        )
+        .await;
+    assert_eq!(second.status, 200);
+    let first_token = first.headers.get("lock-token").expect("first token");
+    let second_token = second.headers.get("lock-token").expect("second token");
+    let before = session
+        .lock_records()
+        .iter()
+        .map(|lock| lock.expires_at)
+        .collect::<Vec<_>>();
+
+    now.store(1_000, Ordering::SeqCst);
+    let refresh = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "LOCK".to_owned(),
+                target: "/shared-refresh".to_owned(),
+                headers: [(
+                    "if".to_owned(),
+                    format!("(Not {first_token}) ({second_token})"),
+                )]
+                .into_iter()
+                .collect(),
+            },
+            b"".as_slice(),
+        )
+        .await;
+    assert_eq!(refresh.status, 400);
+    assert_eq!(session.lock_count(), 2);
+    assert_eq!(
+        session
+            .lock_records()
+            .iter()
+            .map(|lock| lock.expires_at)
+            .collect::<Vec<_>>(),
+        before,
+        "ambiguous refresh must not extend either lock"
+    );
+
+    let unknown = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "LOCK".to_owned(),
+                target: "/shared-refresh".to_owned(),
+                headers: [(
+                    "if".to_owned(),
+                    format!("({second_token}) (Not <urn:uuid:unknown-lock>)"),
+                )]
+                .into_iter()
+                .collect(),
+            },
+            b"".as_slice(),
+        )
+        .await;
+    assert_eq!(unknown.status, 400);
+    assert_eq!(
+        session
+            .lock_records()
+            .iter()
+            .map(|lock| lock.expires_at)
+            .collect::<Vec<_>>(),
+        before,
+        "an unknown second token must not refresh the current lock"
+    );
+
+    let dav_unknown = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "LOCK".to_owned(),
+                target: "/shared-refresh".to_owned(),
+                headers: [(
+                    "if".to_owned(),
+                    format!("({second_token}) (Not <DAV:unknown>)"),
+                )]
+                .into_iter()
+                .collect(),
+            },
+            b"".as_slice(),
+        )
+        .await;
+    assert_eq!(dav_unknown.status, 400);
+    assert_eq!(
+        session
+            .lock_records()
+            .iter()
+            .map(|lock| lock.expires_at)
+            .collect::<Vec<_>>(),
+        before,
+        "a DAV token other than the no-lock sentinel must not refresh"
+    );
+
+    let single = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "LOCK".to_owned(),
+                target: "/shared-refresh".to_owned(),
+                headers: [(
+                    "if".to_owned(),
+                    format!("({second_token}) (Not <DAV:no-lock>)"),
+                )]
+                .into_iter()
+                .collect(),
+            },
+            b"".as_slice(),
+        )
+        .await;
+    assert_eq!(single.status, 200);
+    let after = session
+        .lock_records()
+        .iter()
+        .map(|lock| lock.expires_at)
+        .collect::<Vec<_>>();
+    assert_eq!(after[0], before[0]);
+    assert!(after[1] > before[1]);
+
+    let lowercase_scheme = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "LOCK".to_owned(),
+                target: "/shared-refresh".to_owned(),
+                headers: [(
+                    "if".to_owned(),
+                    format!("({second_token}) (Not <dav:no-lock>)"),
+                )]
+                .into_iter()
+                .collect(),
+            },
+            b"".as_slice(),
+        )
+        .await;
+    assert_eq!(lowercase_scheme.status, 200);
+}
+
+#[tokio::test]
+async fn bodyless_lock_counts_custom_dav_tokens() {
+    let session = WebdavSession::new(
+        Arc::new(MemoryFs::empty()),
+        WebdavSessionOptions {
+            locks: DavLockTableOptions {
+                new_token: Some(Arc::new(|| "DAV:custom".to_owned())),
+                ..DavLockTableOptions::default()
+            },
+            ..WebdavSessionOptions::default()
+        },
+    );
+    let granted = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "LOCK".to_owned(),
+                target: "/dav-token".to_owned(),
+                headers: Default::default(),
+            },
+            br#"<lockinfo xmlns="DAV:"><lockscope><exclusive/></lockscope><locktype><write/></locktype></lockinfo>"#,
+        )
+        .await;
+    assert_eq!(granted.status, 201);
+    assert_eq!(
+        granted.headers.get("lock-token").map(String::as_str),
+        Some("<DAV:custom>")
+    );
+
+    let refresh = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "LOCK".to_owned(),
+                target: "/dav-token".to_owned(),
+                headers: [(
+                    "if".to_owned(),
+                    "(<DAV:custom>) (Not <DAV:other>)".to_owned(),
+                )]
+                .into_iter()
+                .collect(),
+            },
+            b"".as_slice(),
+        )
+        .await;
+    assert_eq!(refresh.status, 400);
+}
+
+#[tokio::test]
+async fn a_write_under_two_covering_locks_requires_both_tokens() {
+    let session = WebdavSession::new(Arc::new(MemoryFs::empty()), WebdavSessionOptions::default());
+    let mkcol = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "MKCOL".to_owned(),
+                target: "/collection".to_owned(),
+                headers: Default::default(),
+            },
+            b"".as_slice(),
+        )
+        .await;
+    assert_eq!(mkcol.status, 201);
+    let shared_lock = br#"<lockinfo xmlns="DAV:"><lockscope><shared/></lockscope><locktype><write/></locktype></lockinfo>"#;
+    let parent_lock = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "LOCK".to_owned(),
+                target: "/collection".to_owned(),
+                headers: Default::default(),
+            },
+            shared_lock.as_slice(),
+        )
+        .await;
+    assert_eq!(parent_lock.status, 200);
+    let parent_token = parent_lock.headers.get("lock-token").expect("parent token");
+    let member_lock = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "LOCK".to_owned(),
+                target: "/collection/member".to_owned(),
+                headers: [
+                    ("depth".to_owned(), "0".to_owned()),
+                    ("if".to_owned(), format!("({parent_token})")),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            shared_lock.as_slice(),
+        )
+        .await;
+    assert_eq!(member_lock.status, 201);
+    let member_token = member_lock.headers.get("lock-token").expect("member token");
+
+    for token in [parent_token, member_token] {
+        let response = session
+            .handle_request(
+                WebdavRequestHead {
+                    method: "PUT".to_owned(),
+                    target: "/collection/member".to_owned(),
+                    headers: [("if".to_owned(), format!("({token})"))]
+                        .into_iter()
+                        .collect(),
+                },
+                b"single token".as_slice(),
+            )
+            .await;
+        assert_eq!(response.status, 423);
+    }
+    let allowed = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "PUT".to_owned(),
+                target: "/collection/member".to_owned(),
+                headers: [("if".to_owned(), format!("({parent_token} {member_token})"))]
+                    .into_iter()
+                    .collect(),
+            },
+            b"both tokens".as_slice(),
+        )
+        .await;
+    assert_eq!(allowed.status, 204);
+}
+
+#[tokio::test]
+async fn depth_zero_parent_lock_protects_member_creation() {
+    let session = WebdavSession::new(Arc::new(MemoryFs::empty()), WebdavSessionOptions::default());
+    let mkcol = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "MKCOL".to_owned(),
+                target: "/members".to_owned(),
+                headers: Default::default(),
+            },
+            b"".as_slice(),
+        )
+        .await;
+    assert_eq!(mkcol.status, 201);
+    let lock = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "LOCK".to_owned(),
+                target: "/members".to_owned(),
+                headers: [("depth".to_owned(), "0".to_owned())]
+                    .into_iter()
+                    .collect(),
+            },
+            br#"<lockinfo xmlns="DAV:"><lockscope><exclusive/></lockscope><locktype><write/></locktype></lockinfo>"#,
+        )
+        .await;
+    assert_eq!(lock.status, 200);
+    let token = lock.headers.get("lock-token").expect("parent token");
+
+    let blocked = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "PUT".to_owned(),
+                target: "/members/new".to_owned(),
+                headers: Default::default(),
+            },
+            b"new member".as_slice(),
+        )
+        .await;
+    assert_eq!(blocked.status, 423);
+
+    let allowed = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "PUT".to_owned(),
+                target: "/members/new".to_owned(),
+                headers: [("if".to_owned(), format!("</members> ({token})"))]
+                    .into_iter()
+                    .collect(),
+            },
+            b"new member".as_slice(),
+        )
+        .await;
+    assert_eq!(allowed.status, 201);
+}
+
 async fn server() -> WebdavServer {
     let fs = Arc::new(MemoryFs::empty());
     let server = create_webdav_server(fs, WebdavServerOptions::default()).expect("loopback bind");
@@ -158,6 +987,9 @@ struct DurableBarrierFs {
     inner: MemoryFs,
     syncfs_calls: AtomicUsize,
     fail_next_syncfs: AtomicBool,
+    stall_next_syncfs: AtomicBool,
+    syncfs_started: Notify,
+    syncfs_released: Notify,
 }
 
 impl DurableBarrierFs {
@@ -166,6 +998,9 @@ impl DurableBarrierFs {
             inner: MemoryFs::empty(),
             syncfs_calls: AtomicUsize::new(0),
             fail_next_syncfs: AtomicBool::new(false),
+            stall_next_syncfs: AtomicBool::new(false),
+            syncfs_started: Notify::new(),
+            syncfs_released: Notify::new(),
         })
     }
 
@@ -184,6 +1019,10 @@ impl FsDriver for DurableBarrierFs {
 
     async fn syncfs(&self) -> FsResult<()> {
         self.syncfs_calls.fetch_add(1, Ordering::SeqCst);
+        if self.stall_next_syncfs.swap(false, Ordering::SeqCst) {
+            self.syncfs_started.notify_one();
+            self.syncfs_released.notified().await;
+        }
         if self.fail_next_syncfs.swap(false, Ordering::SeqCst) {
             return Err(FsError::new(ErrorCode::Eio).with_syscall("syncfs"));
         }

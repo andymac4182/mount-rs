@@ -16,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mount_rs_core::{DirEntry, ErrorCode, FileHandle, FsDriver, FsError, Result, Stats};
 use mount_rs_host::HostFs;
-use mount_rs_memfs::MemoryFs;
+use mount_rs_memfs::{MemoryFs, MemoryOptions};
 use mount_rs_nfs::constants::{
     CREATE_UNCHECKED, MOUNT_PROGRAM, MOUNT_V3, MOUNTPROC3_MNT, NFS_PROGRAM, NFS_V3, NFS3_OK,
     NFS3ERR_NOENT, NFS3ERR_STALE, NFSPROC3_CREATE, NFSPROC3_GETATTR, NFSPROC3_LOOKUP,
@@ -27,6 +27,7 @@ use mount_rs_nfs::protocol::{
     read_mount_res, read_rename_res, read_wcc_res, write_create_args,
 };
 use mount_rs_nfs::v4::{
+    ACCESS4_ALL, ACCESS4_DELETE, ACCESS4_EXTEND, ACCESS4_LOOKUP, ACCESS4_MODIFY, ACCESS4_READ,
     CLAIM_FH, CLAIM_NULL, CREATE_SESSION4_FLAG_CONN_BACK_CHAN, FATTR4_LEASE_TIME,
     NFS4ERR_BAD_HIGH_SLOT, NFS4ERR_BAD_STATEID, NFS4ERR_BADSESSION, NFS4ERR_DELAY, NFS4ERR_GRACE,
     NFS4ERR_NOSPC, NFS4ERR_REP_TOO_BIG_TO_CACHE, NFS4ERR_RESOURCE, NFS4ERR_RETRY_UNCACHED_REP,
@@ -401,6 +402,7 @@ impl FsDriver for GateUnlinkDriver {
     }
 }
 
+const OP_ACCESS: u32 = 3;
 const OP_CLOSE: u32 = 4;
 const OP_COMMIT: u32 = 5;
 const OP_BACKCHANNEL_CTL: u32 = 40;
@@ -2893,6 +2895,77 @@ fn nfs_v4_1_tcp_session_and_file_round_trip_is_rootless() {
         .expect("spawn v4 wire test thread")
         .join()
         .expect("v4 wire test thread panicked");
+}
+
+#[test]
+fn nfs_v4_anonymous_access_does_not_inherit_root_mode() {
+    std::thread::Builder::new()
+        .name("nfs-v4-anonymous-access-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build v4 anonymous access test runtime")
+                .block_on(async {
+                    let driver = MemoryFs::new(MemoryOptions {
+                        root_mode: 0o700,
+                        ..MemoryOptions::default()
+                    });
+                    let server = NfsServer::new(driver, NfsServerOptions::default());
+                    let address = server.listen().await.expect("listen NFS server");
+                    let (mut stream, mut client) =
+                        connect_v4_client(address, 700, b"anonymous-access-client").await;
+
+                    for (credential, expected_access) in [
+                        (None, 0),
+                        (Some(auth_sys(1000, 1000, "other-user")), 0),
+                        (
+                            Some(auth_sys(0, 0, "root-user")),
+                            ACCESS4_READ
+                                | ACCESS4_LOOKUP
+                                | ACCESS4_MODIFY
+                                | ACCESS4_EXTEND
+                                | ACCESS4_DELETE,
+                        ),
+                    ] {
+                        let mut response = rpc_with_credential(
+                            &mut stream,
+                            701 + client.sequence,
+                            compound(
+                                "root-access",
+                                &[
+                                    sequence(&client),
+                                    op(OP_PUTROOTFH, |_| {}),
+                                    op(OP_ACCESS, |writer| writer.u32(ACCESS4_ALL)),
+                                ],
+                            ),
+                            credential.as_ref(),
+                        )
+                        .await;
+                        parse_compound_header(&mut response, 3);
+                        consume_sequence_result(&mut response, "access sequence");
+                        parse_result_header(&mut response, OP_PUTROOTFH);
+                        parse_result_header(&mut response, OP_ACCESS);
+                        assert_eq!(response.u32("supported ACCESS bits").unwrap(), ACCESS4_ALL);
+                        assert_eq!(
+                            response.u32("granted ACCESS bits").unwrap(),
+                            expected_access,
+                            "AUTH_NONE and nonowners must not gain root-only access"
+                        );
+                        response.end("ACCESS response").unwrap();
+                        client.sequence += 1;
+                    }
+
+                    stream.shutdown().await.expect("close NFS transport");
+                    server.close().await.expect("close NFS server");
+                });
+        })
+        .expect("spawn anonymous access test thread")
+        .join()
+        .expect("anonymous access test thread panicked");
 }
 
 #[test]

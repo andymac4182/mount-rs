@@ -433,6 +433,53 @@ fn guarded_open_rejects_a_replaced_regular_file_before_truncating() {
 }
 
 #[test]
+fn guarded_open_rejects_truncation_without_write_and_keeps_file_bytes() {
+    run(async {
+        let fs = MemoryFs::empty();
+        let writer = fs.open("/file", "w", 0o600).await.unwrap();
+        writer.write(b"keep", Some(0)).await.unwrap();
+        writer.close().await.unwrap();
+        let root = identity(&fs.stat("/").await.unwrap());
+        let file = identity(&fs.lstat("/file").await.unwrap());
+        let flags = OpenFlags {
+            read: true,
+            write: false,
+            create: false,
+            truncate: true,
+            append: false,
+            exclusive: false,
+        };
+
+        let outcome = match fs
+            .guarded_mutation(GuardedMutation::Open {
+                parent: PathGuard {
+                    path: "/".into(),
+                    identity: root,
+                },
+                name: "file".into(),
+                observed: ObservedEntry::Identity(file),
+                flags,
+                mode: 0o600,
+            })
+            .await
+        {
+            Ok(GuardedMutationResult::Opened { handle, .. }) => {
+                handle.close().await.unwrap();
+                Ok(())
+            }
+            Ok(_) => panic!("unexpected guarded result"),
+            Err(error) => Err(error.code),
+        };
+        let reader = fs.open("/file", "r", 0).await.unwrap();
+        let mut bytes = [0; 4];
+        let count = reader.read(&mut bytes, Some(0)).await.unwrap();
+        reader.close().await.unwrap();
+        assert_eq!(&bytes[..count], b"keep");
+        assert_eq!(outcome, Err(ErrorCode::Einval));
+    });
+}
+
+#[test]
 fn accepted_snapshot_at_inode_limit_fails_a_new_create_without_reuse() {
     run(async {
         let fs = MemoryFs::empty();

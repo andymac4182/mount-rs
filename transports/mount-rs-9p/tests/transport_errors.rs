@@ -7,7 +7,9 @@ use std::time::Duration;
 use mount_rs_9p::server::{
     P9AttachOptions, P9Server, P9ServerHooks, P9TransportError, P9TransportErrorKind,
 };
-use mount_rs_9p::{P9_NOTAG, P9_TVERSION, Tversion, encode_message, write_tversion};
+use mount_rs_9p::{
+    P9_NOTAG, P9_TAUTH, P9_TVERSION, Tauth, Tversion, encode_message, write_tauth, write_tversion,
+};
 use mount_rs_memfs::MemoryFs;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::Notify;
@@ -238,6 +240,63 @@ fn version_frame() -> Vec<u8> {
         )
     })
     .expect("encode version request")
+}
+
+#[tokio::test]
+async fn coalesced_version_applies_msize_before_framing_the_next_request() {
+    let (events, hooks) = Events::new();
+    let server = Arc::new(P9Server::new_with_hooks(
+        MemoryFs::empty(),
+        mount_rs_9p::P9ServerOptions {
+            max_frame: 8192,
+            ..Default::default()
+        },
+        hooks,
+    ));
+    let mut input = encode_message(P9_TVERSION, P9_NOTAG, 32, |writer| {
+        write_tversion(
+            writer,
+            &Tversion {
+                msize: 4096,
+                version: "9P2000.L".to_owned(),
+            },
+        )
+    })
+    .expect("encode Tversion");
+    let over_msize = encode_message(P9_TAUTH, 7, 8192, |writer| {
+        write_tauth(
+            writer,
+            &Tauth {
+                afid: u32::MAX,
+                uname: "x".repeat(4090),
+                aname: String::new(),
+                n_uname: u32::MAX,
+            },
+        )
+    })
+    .expect("encode oversized Tauth");
+    assert!(over_msize.len() > 4096 && over_msize.len() < 8192);
+    input.extend_from_slice(&over_msize);
+    let connection = server
+        .attach(
+            FaultStream::new(input, None, None, None),
+            P9AttachOptions {
+                peer: Some("coalesced-version".to_owned()),
+                own: true,
+            },
+        )
+        .expect("attach one-read client");
+
+    events.wait_for(1).await;
+    timeout(Duration::from_secs(2), connection.wait_closed())
+        .await
+        .expect("oversized second frame closes connection");
+    let observed = events.snapshot();
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].kind, P9TransportErrorKind::Frame);
+    assert!(observed[0].message.contains("4096-byte limit"));
+    assert_eq!(connection.session.stats().messages.get("Tauth"), None);
+    server.close().await.expect("close 9P test server");
 }
 
 #[tokio::test]

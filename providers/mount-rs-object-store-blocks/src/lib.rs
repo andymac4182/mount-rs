@@ -925,6 +925,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn conditional_create_replay_checks_existing_bytes_before_success() {
+        let object_store = Arc::new(InMemory::new());
+        let matching =
+            ObjectStoreBlockStore::new(object_store.clone(), "matching/blocks", false).unwrap();
+        let conflicting =
+            ObjectStoreBlockStore::new(object_store.clone(), "conflicting/blocks", false).unwrap();
+
+        // Exercise distinct object IDs so each call reaches the provider
+        // instead of the adapter's completed-upload cache.
+        for value in 0..16u8 {
+            let bytes = [value];
+            let id = block_id(&bytes);
+            let matching_path = ObjectPath::from(format!("matching/blocks/{id}"));
+            object_store
+                .put(&matching_path, PutPayload::from(bytes.to_vec()))
+                .await
+                .unwrap();
+            assert_eq!(matching.put(&bytes).await.unwrap(), BlockId(id.clone()));
+            assert_eq!(matching.get(&BlockId(id.clone())).await.unwrap(), bytes);
+
+            let conflicting_path = ObjectPath::from(format!("conflicting/blocks/{id}"));
+            let different_bytes = [value, 0];
+            object_store
+                .put(
+                    &conflicting_path,
+                    PutPayload::from(different_bytes.to_vec()),
+                )
+                .await
+                .unwrap();
+            assert!(
+                conflicting
+                    .put(&bytes)
+                    .await
+                    .unwrap_err()
+                    .is(ErrorCode::Eio),
+                "a different object at a content-addressed path must fail closed"
+            );
+            assert_eq!(
+                object_store
+                    .get(&conflicting_path)
+                    .await
+                    .unwrap()
+                    .bytes()
+                    .await
+                    .unwrap(),
+                different_bytes.as_slice(),
+                "a failed replay must preserve the existing object"
+            );
+        }
+
+        assert_eq!(matching.stats().conditional_conflicts, 16);
+        assert_eq!(matching.stats().successes, 32);
+        assert_eq!(conflicting.stats().conditional_conflicts, 16);
+        assert_eq!(conflicting.stats().errors, 16);
+    }
+
+    #[tokio::test]
     async fn volatility_is_explicit_and_missing_or_invalid_blocks_fail_closed() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let volatile = ObjectStoreBlockStore::new(object_store.clone(), "blocks", false).unwrap();
@@ -1051,5 +1108,45 @@ mod tests {
             .unwrap();
         assert_eq!(deleted.deleted, 1);
         assert!(first.get(&id).await.unwrap_err().is(ErrorCode::Enoent));
+    }
+
+    #[tokio::test]
+    async fn reconciliation_only_deletes_old_direct_valid_ids_in_its_scope() {
+        let object_store = Arc::new(InMemory::new());
+        let store =
+            ObjectStoreBlockStore::new(object_store.clone(), "vol-a/blocks", false).unwrap();
+        let live_id = store.put(b"live").await.unwrap();
+        let dead_id = store.put(b"dead").await.unwrap();
+        let nested = ObjectPath::from(format!("vol-a/blocks/nested/{}", block_id(b"nested")));
+        let sibling = ObjectPath::from(format!("vol-a/blocks-other/{}", block_id(b"sibling")));
+        let malformed = ObjectPath::from("vol-a/blocks/bINVALID");
+
+        for path in [&nested, &sibling, &malformed] {
+            object_store
+                .put(path, PutPayload::from(b"unmanaged".to_vec()))
+                .await
+                .unwrap();
+        }
+
+        // The in-memory store timestamps objects at millisecond precision.
+        // Let every object age past a 1ms grace so the path/live decisions are
+        // exercised rather than the recent-object guard.
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        let report = store
+            .reconcile(
+                &BTreeSet::from([live_id.clone()]),
+                std::time::Duration::from_millis(1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(report.scanned, 2);
+        assert_eq!(report.protected, 1);
+        assert_eq!(report.recent, 0);
+        assert_eq!(report.deleted, 1);
+        assert_eq!(store.get(&live_id).await.unwrap(), b"live");
+        assert!(store.get(&dead_id).await.unwrap_err().is(ErrorCode::Enoent));
+        for path in [&nested, &sibling, &malformed] {
+            assert!(object_store.head(path).await.is_ok(), "{path} must survive");
+        }
     }
 }

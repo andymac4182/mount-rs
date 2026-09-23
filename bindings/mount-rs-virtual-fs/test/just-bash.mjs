@@ -69,6 +69,11 @@ try {
 
   await fs.link("/drive/dir/renamed.txt", "/drive/hard-link.txt");
   assert.equal(await fs.readFile("/drive/hard-link.txt"), "hello\n");
+  await fs.writeFile("/drive/noop-source", "same inode");
+  await fs.link("/drive/noop-source", "/drive/noop-destination");
+  await fs.mv("/drive/noop-source", "/drive/noop-destination");
+  assert.equal(await fs.readFile("/drive/noop-source"), "same inode");
+  assert.equal(fs.getAllPaths().includes("/drive/noop-source"), true);
   await fs.chmod("/drive/dir/renamed.txt", 0o640);
   assert.equal((await fs.stat("/drive/dir/renamed.txt")).mode & 0o777, 0o640);
   const mtime = new Date(1_700_000_000_000);

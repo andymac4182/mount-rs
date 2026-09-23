@@ -1,5 +1,7 @@
 //! Bounded, little-endian 9P wire primitives.
 
+#![allow(unexpected_cfgs)]
+
 use std::fmt;
 
 use crate::constants::{P9_MAX_ITEM, P9_MAX_STRING};
@@ -74,8 +76,15 @@ impl<'a> P9Reader<'a> {
         self.offset == self.bytes.len()
     }
 
+    fn checked_end(&self, count: usize) -> Option<usize> {
+        self.offset
+            .checked_add(count)
+            .filter(|end| *end <= self.bytes.len())
+    }
+
     fn need(&mut self, count: usize, what: &str) -> Result<usize, P9Error> {
-        if self.remaining() < count {
+        let at = self.offset;
+        let Some(end) = self.checked_end(count) else {
             return Err(P9Error::at(
                 format!(
                     "truncated {what}: need {count} bytes, {} left",
@@ -83,9 +92,8 @@ impl<'a> P9Reader<'a> {
                 ),
                 self.offset,
             ));
-        }
-        let at = self.offset;
-        self.offset += count;
+        };
+        self.offset = end;
         Ok(at)
     }
 
@@ -270,6 +278,41 @@ pub fn string_byte_length(value: &str) -> usize {
     value.len()
 }
 
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// The production `raw` parser calls `need`, which uses this checked range.
+    /// The proof covers its bounded range decision, not the byte copy, UTF-8,
+    /// or the full 9P item limit.
+    #[kani::proof]
+    #[kani::unwind(16)]
+    fn bounded_payload_range_stays_within_wire_input() {
+        let bytes: [u8; 8] = kani::any();
+        let length: u8 = kani::any();
+        let offset: u8 = kani::any();
+        let count: u8 = kani::any();
+        kani::assume(length <= 8 && offset <= length && count <= 9);
+        let length = length as usize;
+        let offset = offset as usize;
+        let count = count as usize;
+        let reader = P9Reader {
+            bytes: &bytes[..length],
+            offset,
+        };
+        let end = reader.checked_end(count);
+        let fits = count <= length - offset;
+        assert!(end.is_some() == fits);
+        if let Some(end) = end {
+            assert!(end == offset + count);
+            assert!(end <= length);
+        }
+        kani::cover!(fits && count > 0 && count == length - offset);
+        kani::cover!(!fits);
+        kani::cover!(fits && offset > 0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,5 +345,48 @@ mod tests {
         let bytes = [1, 0, 0xff];
         let mut reader = P9Reader::new(&bytes);
         assert_eq!(reader.string("name").unwrap(), "\u{fffd}");
+    }
+
+    #[test]
+    fn string_limit_accepts_exact_size_and_rejects_one_extra_before_copy() {
+        let mut at_limit = P9Reader::new(&[4, 0, b'a', b'b', b'c', b'd']);
+        assert_eq!(at_limit.string_max(4, "name").unwrap(), "abcd");
+        at_limit.end("name").unwrap();
+
+        let mut over_limit = P9Reader::new(&[5, 0, b'a', b'b', b'c', b'd', b'e']);
+        let error = over_limit.string_max(4, "name").unwrap_err();
+        assert_eq!(error.offset, Some(0));
+        assert!(error.message.contains("over the 4-byte limit"));
+        assert_eq!(over_limit.offset(), 2);
+        assert_eq!(over_limit.remaining(), 5);
+    }
+
+    #[test]
+    fn truncated_payload_does_not_advance_reader_past_available_bytes() {
+        let mut reader = P9Reader::new(&[1, 2, 3]);
+        let error = reader.raw(4, "payload").unwrap_err();
+        assert_eq!(error.offset, Some(0));
+        assert_eq!(reader.offset(), 0);
+        assert_eq!(reader.remaining(), 3);
+    }
+
+    #[test]
+    fn bounded_payload_copy_matches_every_small_length_offset_and_count() {
+        let bytes = [0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87];
+        for length in 0..=bytes.len() {
+            for offset in 0..=length {
+                for count in 0..=bytes.len() {
+                    let mut reader = P9Reader::with_offset(&bytes[..length], offset).unwrap();
+                    let result = reader.raw(count, "payload");
+                    if count <= length - offset {
+                        assert_eq!(result.unwrap(), bytes[offset..offset + count]);
+                        assert_eq!(reader.offset(), offset + count);
+                    } else {
+                        assert_eq!(result.unwrap_err().offset, Some(offset));
+                        assert_eq!(reader.offset(), offset);
+                    }
+                }
+            }
+        }
     }
 }

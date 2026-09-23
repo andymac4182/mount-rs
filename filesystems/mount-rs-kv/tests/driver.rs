@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use mount_rs_core::{ErrorCode, Loopback, MkdirOptions, OpenFlags};
+use mount_rs_core::{ErrorCode, FileType, Loopback, MkdirOptions, OpenFlags};
 use mount_rs_kv::{KeyValueMetadata, KeyValueStore, UnstorageOptions, create_unstorage_driver};
 
 #[derive(Clone, Default)]
@@ -10,6 +10,7 @@ struct MemoryStore {
     values: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     metadata: Arc<Mutex<HashMap<String, KeyValueMetadata>>>,
     bounded_limits: Arc<Mutex<Vec<usize>>>,
+    lexical_listing: Arc<Mutex<bool>>,
     fail_next_set: Arc<Mutex<bool>>,
 }
 
@@ -55,6 +56,16 @@ impl KeyValueStore for MemoryStore {
     }
 
     async fn get_keys(&self, prefix: &str) -> Result<Vec<String>, Self::Error> {
+        if *self.lexical_listing.lock().expect("listing mode lock") {
+            return Ok(self
+                .values
+                .lock()
+                .expect("values lock")
+                .keys()
+                .filter(|key| key.starts_with(prefix))
+                .cloned()
+                .collect());
+        }
         let separator = if prefix.is_empty() { "" } else { ":" };
         let prefix = format!("{prefix}{separator}");
         Ok(self
@@ -80,7 +91,8 @@ impl KeyValueStore for MemoryStore {
             .lock()
             .expect("bounded limits lock")
             .push(max_keys);
-        let keys = self.get_keys(prefix).await?;
+        let mut keys = self.get_keys(prefix).await?;
+        keys.sort();
         Ok(Some(
             keys.into_iter().take(max_keys.saturating_add(1)).collect(),
         ))
@@ -98,6 +110,10 @@ impl KeyValueStore for MemoryStore {
 }
 
 impl MemoryStore {
+    fn use_lexical_listing(&self) {
+        *self.lexical_listing.lock().expect("listing mode lock") = true;
+    }
+
     fn put(&self, key: &str, value: impl AsRef<[u8]>) {
         self.values
             .lock()
@@ -125,6 +141,17 @@ fn setup() -> (MemoryStore, Loopback) {
     let store = MemoryStore::default();
     let driver = create_unstorage_driver(store.clone(), UnstorageOptions::default());
     (store, Loopback::new(driver))
+}
+
+fn decoded_flags(mask: u8) -> OpenFlags {
+    OpenFlags {
+        read: mask & 1 != 0,
+        write: mask & 2 != 0,
+        create: mask & 4 != 0,
+        truncate: mask & 8 != 0,
+        append: mask & 16 != 0,
+        exclusive: mask & 32 != 0,
+    }
 }
 
 async fn read(fs: &Loopback, path: &str) -> Vec<u8> {
@@ -198,6 +225,50 @@ async fn key_wins_over_a_prefix_and_reports_enotdir() {
 }
 
 #[tokio::test]
+async fn lexical_key_prefixes_do_not_create_directories_from_sibling_keys() {
+    for (parent, sibling) in [("a", "ab"), ("é", "éx")] {
+        let (store, fs) = setup();
+        store.use_lexical_listing();
+        store.put(&format!("{sibling}:child"), b"value");
+        let path = format!("/./{parent}/");
+        assert_eq!(
+            fs.stat(&path)
+                .await
+                .expect_err("sibling must not create a directory")
+                .code,
+            ErrorCode::Enoent,
+            "parent {parent}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_unrepresentable_keys_do_not_create_directory_entries() {
+    let (store, fs) = setup();
+    store.put("a:.:child", b"hidden");
+    store.put("a:..:child", b"hidden");
+    store.put("a::child", b"hidden");
+    store.put("a:bad?", b"hidden");
+    store.put("a:slash/name", b"hidden");
+    store.put("a:meta$", b"metadata");
+
+    assert_eq!(
+        fs.stat("/a")
+            .await
+            .expect_err("no addressable descendants")
+            .code,
+        ErrorCode::Enoent
+    );
+    assert!(fs.readdir("/").await.expect("root listing").is_empty());
+    assert!(
+        fs.readdir_bounded("/", 6)
+            .await
+            .expect("complete bounded root listing")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn bounded_readdir_enforces_the_provider_limit() {
     let (store, fs) = setup();
     store.put("one", b"1");
@@ -223,6 +294,90 @@ async fn bounded_readdir_enforces_the_provider_limit() {
         vec![2, 3],
         "the adapter must request the caller's exact provider bound"
     );
+}
+
+#[tokio::test]
+async fn bounded_readdir_reports_truncated_provider_pages_even_when_metadata_is_filtered() {
+    let (store, fs) = setup();
+    store.put("a$", b"metadata");
+    store.put("b", b"one");
+    store.put("c", b"two");
+
+    assert_eq!(
+        fs.readdir_bounded("/", 1)
+            .await
+            .expect_err("provider page contains an overflow signal")
+            .code,
+        ErrorCode::Eoverflow
+    );
+}
+
+#[tokio::test]
+async fn small_keyspaces_preserve_immediate_children_and_fail_closed_bounds() {
+    const KEYS: [&str; 6] = [
+        "a:direct",
+        "a:direct:grand",
+        "a:unicode:深",
+        "a:雪",
+        "ab:sibling",
+        "a:meta$",
+    ];
+    for mask in 0..(1_u8 << KEYS.len()) {
+        let (store, fs) = setup();
+        fs.mkdir("/a", Default::default())
+            .await
+            .expect("local directory");
+        store.use_lexical_listing();
+        for (index, key) in KEYS.iter().enumerate() {
+            if mask & (1 << index) != 0 {
+                store.put(key, b"value");
+            }
+        }
+
+        let mut expected = Vec::new();
+        if mask & 1 != 0 {
+            expected.push(("direct".to_owned(), FileType::File));
+        } else if mask & 2 != 0 {
+            expected.push(("direct".to_owned(), FileType::Directory));
+        }
+        if mask & 4 != 0 {
+            expected.push(("unicode".to_owned(), FileType::Directory));
+        }
+        if mask & 8 != 0 {
+            expected.push(("雪".to_owned(), FileType::File));
+        }
+        expected.sort_by(|left, right| left.0.cmp(&right.0));
+
+        let mut entries = fs
+            .readdir("/a/./")
+            .await
+            .expect("unbounded normalized listing")
+            .into_iter()
+            .map(|entry| (entry.name, entry.file_type))
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(entries, expected, "mask {mask}");
+
+        let raw_key_count = mask.count_ones() as usize;
+        for bound in 1..=KEYS.len() {
+            let bounded = fs.readdir_bounded("/a/./", bound).await;
+            if raw_key_count > bound {
+                assert_eq!(
+                    bounded.expect_err("provider page overflow").code,
+                    ErrorCode::Eoverflow,
+                    "mask {mask}, bound {bound}"
+                );
+            } else {
+                let mut entries = bounded
+                    .expect("complete bounded listing")
+                    .into_iter()
+                    .map(|entry| (entry.name, entry.file_type))
+                    .collect::<Vec<_>>();
+                entries.sort_by(|left, right| left.0.cmp(&right.0));
+                assert_eq!(entries, expected, "mask {mask}, bound {bound}");
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -396,6 +551,74 @@ async fn open_flags_and_truncate_avoid_unneeded_reads() {
     handle.write(b"z", None).await.expect("append");
     handle.close().await.expect("close");
     assert_eq!(read(&fs, "/f").await, b"z");
+}
+
+#[tokio::test]
+async fn every_decoded_flag_combination_checks_truncation_before_mutating() {
+    for mask in 0..64_u8 {
+        let (store, fs) = setup();
+        store.put("f", b"keep");
+        let flags = decoded_flags(mask);
+        let outcome = match fs.open_flags("/f", flags, 0).await {
+            Ok(handle) => {
+                handle.close().await.expect("close");
+                Ok(())
+            }
+            Err(error) => Err(error.code),
+        };
+        let expected_outcome = if flags.truncate && !flags.write {
+            Err(ErrorCode::Einval)
+        } else if flags.exclusive {
+            Err(ErrorCode::Eexist)
+        } else {
+            Ok(())
+        };
+        let expected_bytes: &[u8] = if flags.truncate && flags.write && !flags.exclusive {
+            b""
+        } else {
+            b"keep"
+        };
+        assert_eq!(
+            store.bytes("f"),
+            Some(expected_bytes.to_vec()),
+            "mask {mask}"
+        );
+        assert_eq!(outcome, expected_outcome, "mask {mask}");
+    }
+}
+
+#[tokio::test]
+async fn read_only_driver_preserves_bytes_for_every_decoded_flag_combination() {
+    for mask in 0..64_u8 {
+        let store = MemoryStore::default();
+        store.put("f", b"keep");
+        let fs = Loopback::new(create_unstorage_driver(
+            store.clone(),
+            UnstorageOptions {
+                read_only: true,
+                ..Default::default()
+            },
+        ));
+        let flags = decoded_flags(mask);
+        let outcome = match fs.open_flags("/f", flags, 0).await {
+            Ok(handle) => {
+                handle.close().await.expect("close");
+                Ok(())
+            }
+            Err(error) => Err(error.code),
+        };
+        let expected_outcome = if flags.truncate && !flags.write {
+            Err(ErrorCode::Einval)
+        } else if flags.write || flags.create || flags.truncate {
+            Err(ErrorCode::Erofs)
+        } else if flags.exclusive {
+            Err(ErrorCode::Eexist)
+        } else {
+            Ok(())
+        };
+        assert_eq!(store.bytes("f"), Some(b"keep".to_vec()), "mask {mask}");
+        assert_eq!(outcome, expected_outcome, "mask {mask}");
+    }
 }
 
 #[tokio::test]

@@ -3,14 +3,15 @@ use std::time::Duration;
 
 use mount_rs_9p::{
     P9_GETATTR_ALL, P9_NOFID, P9_NOTAG, P9_O_CREAT, P9_O_RDWR, P9_O_TRUNC, P9_RATTACH, P9_RGETATTR,
-    P9_RLCREATE, P9_RREAD, P9_RREADDIR, P9_RVERSION, P9_RWALK, P9_RWRITE, P9_TATTACH, P9_TGETATTR,
-    P9_TLCREATE, P9_TLOPEN, P9_TREAD, P9_TREADDIR, P9_TVERSION, P9_TWALK, P9_TWRITE, P9Server,
-    P9ServerOptions, P9Session, P9SessionOptions, Tattach, Tgetattr, Tlcreate, Tlopen, Tread,
-    Treaddir, Tversion, Twalk, Twrite, decode_message_as, encode_message, read_dirents,
-    read_rattach, read_rgetattr, read_rlopen, read_rread, read_rreaddir, read_rversion, read_rwalk,
-    read_rwrite, write_tattach, write_tgetattr, write_tlcreate, write_tlopen, write_tread,
-    write_treaddir, write_tversion, write_twalk, write_twrite,
+    P9_RLCREATE, P9_RLERROR, P9_RREAD, P9_RREADDIR, P9_RVERSION, P9_RWALK, P9_RWRITE, P9_TATTACH,
+    P9_TGETATTR, P9_TLCREATE, P9_TLOPEN, P9_TREAD, P9_TREADDIR, P9_TVERSION, P9_TWALK, P9_TWRITE,
+    P9Server, P9ServerOptions, P9Session, P9SessionOptions, Tattach, Tgetattr, Tlcreate, Tlopen,
+    Tread, Treaddir, Tversion, Twalk, Twrite, decode_message_as, encode_message, read_dirents,
+    read_rattach, read_rgetattr, read_rlerror, read_rlopen, read_rread, read_rreaddir,
+    read_rversion, read_rwalk, read_rwrite, write_tattach, write_tgetattr, write_tlcreate,
+    write_tlopen, write_tread, write_treaddir, write_tversion, write_twalk, write_twrite,
 };
+use mount_rs_core::{ErrorCode, FsDriver};
 use mount_rs_memfs::MemoryFs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -74,6 +75,57 @@ async fn attach(session: &P9Session, tag: u16, fid: u32) {
     .await;
     assert_type(&response, P9_RATTACH);
     decode_message_as(&response, read_rattach).expect("Rattach decodes");
+}
+
+#[tokio::test]
+async fn read_only_session_rejects_create_while_root_getattr_stays_available() {
+    let driver = Arc::new(MemoryFs::empty());
+    let session = P9Session::with_options(
+        driver.clone(),
+        P9SessionOptions {
+            read_only: true,
+            ..P9SessionOptions::default()
+        },
+    );
+    negotiate(&session).await;
+    attach(&session, 1, 1).await;
+
+    let rejected = call(
+        &session,
+        frame(P9_TLCREATE, 2, |writer| {
+            write_tlcreate(
+                writer,
+                &Tlcreate {
+                    fid: 1,
+                    name: "denied".to_owned(),
+                    flags: P9_O_RDWR | P9_O_CREAT,
+                    mode: 0o666,
+                    gid: u32::MAX,
+                },
+            )
+        }),
+    )
+    .await;
+    assert_type(&rejected, P9_RLERROR);
+    let (_, error) = decode_message_as(&rejected, read_rlerror).unwrap();
+    assert_eq!(error.ecode, ErrorCode::Erofs.errno().unsigned_abs());
+    assert!(driver.readdir("/").await.unwrap().is_empty());
+
+    let readable = call(
+        &session,
+        frame(P9_TGETATTR, 3, |writer| {
+            write_tgetattr(
+                writer,
+                Tgetattr {
+                    fid: 1,
+                    request_mask: P9_GETATTR_ALL,
+                },
+            );
+            Ok(())
+        }),
+    )
+    .await;
+    assert_type(&readable, P9_RGETATTR);
 }
 
 #[tokio::test]

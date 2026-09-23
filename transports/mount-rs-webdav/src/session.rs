@@ -113,6 +113,37 @@ impl Drop for MutationFileCloseGuard {
     }
 }
 
+/// Removes a provisional lock if its request ends before the reply is built.
+/// Lock table cleanup is synchronous, so dropping a cancelled future removes
+/// the grant before another request can observe it.
+struct LockGrantGuard {
+    locks: Arc<Mutex<DavLockTable>>,
+    token: Option<String>,
+}
+
+impl LockGrantGuard {
+    fn new(locks: Arc<Mutex<DavLockTable>>, token: String) -> Self {
+        Self {
+            locks,
+            token: Some(token),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.token = None;
+    }
+}
+
+impl Drop for LockGrantGuard {
+    fn drop(&mut self) {
+        let Some(token) = self.token.take() else {
+            return;
+        };
+        let mut locks = self.locks.lock().unwrap_or_else(|error| error.into_inner());
+        locks.remove(&token);
+    }
+}
+
 /// Optional server-side Basic authentication.
 #[derive(Debug, Clone)]
 pub struct WebdavCredentials {
@@ -1432,8 +1463,6 @@ impl WebdavSession {
         if existing.is_none() {
             self.require_collection(&parent(path)).await?;
             self.require_writable(path, guard, true)?;
-            self.write_file(path, &[]).await?;
-            self.durability_barrier().await?;
         }
         let grant = self.lock_table()?.create(
             DavLockRequest {
@@ -1453,13 +1482,20 @@ impl WebdavSession {
                 return Err(refuse(503).with_message("the lock table is full").into());
             }
         };
+        let mut grant_guard = LockGrantGuard::new(Arc::clone(&self.locks), lock.token.clone());
+        if existing.is_none() {
+            self.write_file(path, &[]).await?;
+            self.durability_barrier().await?;
+        }
         let mut headers = BTreeMap::new();
         headers.insert("lock-token".to_owned(), format_lock_token(&lock.token));
-        Ok(crate::protocol::xml_body(
+        let response = crate::protocol::xml_body(
             if existing.is_some() { 200 } else { 201 },
             &encode_lock_response(&lock, guard.now),
             headers,
-        ))
+        );
+        grant_guard.disarm();
+        Ok(response)
     }
 
     async fn refresh_lock(
@@ -1473,24 +1509,50 @@ impl WebdavSession {
                 .with_message("a bodyless LOCK needs an If header")
                 .into());
         }
-        let token = {
-            let mut locks = self.lock_table()?;
-            guard.submitted.iter().find_map(|token| {
-                locks
-                    .find(token, guard.now)
-                    .filter(|lock| DavLockTable::in_scope(lock, path))
-                    .map(|lock| lock.token)
+        // The standard DAV:no-lock sentinel does not make a refresh
+        // ambiguous. URI schemes are case-insensitive; other submitted token
+        // URIs count even if stale, including configured DAV scheme tokens.
+        let named_tokens = guard
+            .submitted
+            .iter()
+            .filter(|token| {
+                !token.split_once(':').is_some_and(|(scheme, value)| {
+                    scheme.eq_ignore_ascii_case("DAV") && value == "no-lock"
+                })
             })
+            .count();
+        if named_tokens > 1 {
+            return Err(refuse(400)
+                .with_message("a bodyless LOCK must name one lock token")
+                .into());
+        }
+        let current = {
+            let mut locks = self.lock_table()?;
+            guard
+                .submitted
+                .iter()
+                .filter_map(|token| locks.find(token, guard.now))
+                .collect::<Vec<_>>()
         };
-        let Some(token) = token else {
+        if current.len() > 1 {
+            return Err(refuse(400)
+                .with_message("a bodyless LOCK must name one lock token")
+                .into());
+        }
+        let Some(lock) = current.into_iter().next() else {
             return Err(refuse(412)
                 .with_condition("lock-token-matches-request-uri", Vec::new())
                 .into());
         };
+        if !DavLockTable::in_scope(&lock, path) {
+            return Err(refuse(412)
+                .with_condition("lock-token-matches-request-uri", Vec::new())
+                .into());
+        }
         self.require_if(guard, path).await?;
         let lock = self
             .lock_table()?
-            .refresh(&token, timeout, guard.now)
+            .refresh(&lock.token, timeout, guard.now)
             .ok_or_else(|| {
                 refuse(412).with_condition("lock-token-matches-request-uri", Vec::new())
             })?;

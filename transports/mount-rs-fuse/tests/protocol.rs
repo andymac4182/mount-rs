@@ -1,6 +1,11 @@
 use mount_rs_fuse::constants::*;
 use mount_rs_fuse::protocol::*;
 
+#[test]
+fn alloc_reply_rejects_an_unrepresentable_frame_before_allocation() {
+    assert!(alloc_reply(usize::MAX - FUSE_OUT_HEADER_SIZE).is_err());
+}
+
 fn hex(value: &str) -> Vec<u8> {
     let compact: String = value
         .chars()
@@ -1654,6 +1659,36 @@ fn framing_extensions_and_compatibility_layouts_are_bounded() {
             ..read
         })
     );
+}
+
+#[test]
+fn public_reply_buffer_rejects_invalid_offset_without_panicking() {
+    for (message_len, body_offset) in [(15, 16), (16, 17), (16, 0)] {
+        let mut reply = FuseReplyBuffer {
+            message: vec![0; message_len],
+            body_offset,
+        };
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            finish_reply(&mut reply, 7, None)
+        }));
+        assert!(
+            matches!(outcome, Ok(Err(_))),
+            "message_len={message_len}, body_offset={body_offset}"
+        );
+    }
+}
+
+#[test]
+fn public_reply_body_views_are_empty_for_invalid_offset() {
+    for body_offset in [0, 17] {
+        let mut reply = FuseReplyBuffer {
+            message: vec![0xaa; 16],
+            body_offset,
+        };
+        assert!(reply.body().is_empty(), "body_offset={body_offset}");
+        assert!(reply.body_mut().is_empty(), "body_offset={body_offset}");
+        assert_eq!(reply.message, vec![0xaa; 16]);
+    }
 }
 
 #[test]

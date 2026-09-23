@@ -10,11 +10,11 @@ repository = "https://github.com/andymac4182/mount-rs"
 [dependencies]
 mount-rs-core = { path = "../.." }
 async-trait = "0.1"
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["rt", "sync"] }
 
 [dev-dependencies]
 mount-rs-memory = { path = "../../providers/mount-rs-memory" }
 mount-rs-sqlite = { path = "../../providers/mount-rs-sqlite" }
 mount-rs-chunked = { path = "../mount-rs-chunked" }
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
