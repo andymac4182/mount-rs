@@ -4,6 +4,8 @@
 Set MOUNT_RS_NATIVE_FDB_SERVER, MOUNT_RS_NATIVE_FDB_CLI, and
 MOUNT_RS_NATIVE_FDB_CLIENT_LIB_DIR to matching arm64 FoundationDB 7.4 paths.
 Set MOUNT_RS_NATIVE_FDB_BLOCKS_ONLY=1 for FoundationDB metadata and blocks.
+Set MOUNT_RS_NATIVE_FDB_TEST_TIMEOUT_SECONDS to 1..=1800 for longer stress
+runs; the default native test budget remains 600 seconds.
 For RustFS blocks, invoke this with RUSTFS_COMBO_COMMAND from
 scripts/test-rustfs.sh so the container and bucket are test owned as well.
 """
@@ -25,6 +27,14 @@ from urllib.parse import urlsplit
 
 
 REPO = Path(__file__).resolve().parent.parent
+
+
+def native_test_timeout_seconds(value: str | None) -> int:
+    if value is None:
+        return 600
+    if not value.isascii() or not value.isdecimal() or not 1 <= int(value) <= 1800:
+        raise ValueError("native test timeout must be an integer in 1..=1800 seconds")
+    return int(value)
 
 
 def cluster_connection_string(run_id: str, port: int) -> str:
@@ -314,6 +324,9 @@ def create_owned_native_fixture(
 
 
 def main() -> None:
+    test_timeout = native_test_timeout_seconds(
+        os.environ.get("MOUNT_RS_NATIVE_FDB_TEST_TIMEOUT_SECONDS")
+    )
     def interrupted(_signum: int, _frame: object) -> None:
         raise KeyboardInterrupt("native FDB/RustFS runner interrupted")
 
@@ -479,9 +492,11 @@ def main() -> None:
             env=env,
         )
         try:
-            result = cargo.wait(timeout=600)
+            result = cargo.wait(timeout=test_timeout)
         except subprocess.TimeoutExpired as error:
-            raise RuntimeError("native two-CLI FDB/RustFS test exceeded 600 seconds") from error
+            raise RuntimeError(
+                f"native two-CLI FDB/RustFS test exceeded {test_timeout} seconds"
+            ) from error
         if result != 0:
             raise RuntimeError(f"native two-CLI FDB/RustFS test exited {result}")
         passed = True

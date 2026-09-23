@@ -1648,8 +1648,8 @@ impl Nfs3Session {
         };
         let change = GuardedSetattr {
             mode: (wanted_mode != current_mode).then_some(wanted_mode),
-            uid: (uid != u32::MAX).then_some(uid),
-            gid: (gid != u32::MAX).then_some(gid),
+            uid: (uid != u32::MAX && uid != current.uid).then_some(uid),
+            gid: (gid != u32::MAX && gid != current.gid).then_some(gid),
             ..GuardedSetattr::default()
         };
         if change.mode.is_some() || change.uid.is_some() || change.gid.is_some() {
@@ -4284,6 +4284,9 @@ mod verification {
         kani::cover!(!is_dir && mode == 0o001 && actual & ACCESS3_EXECUTE != 0);
     }
 }
+
+#[cfg(test)]
+mod created_owner_tests;
 
 #[cfg(test)]
 mod tests {

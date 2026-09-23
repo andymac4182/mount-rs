@@ -645,3 +645,108 @@ both revisions. Their functional completion does not qualify the configured
 IOPS target. The Windows Node structural open-flags fixture also failed on
 both revisions with `EINVAL` when opening its writable host file; this is a
 separate baseline failure, not evidence that the full Node test chain passed.
+
+## Native create ownership and bounded RustFS follow-up
+
+The guarded CREATE helper now omits internal uid/gid updates when the newly
+created inode already has the requested AUTH_SYS owner. Its deterministic
+EXCLUSIVE-create regression observed two metadata publications before the
+change and one afterward. Wrong owners, parent setgid inheritance, unknown
+credentials, stale inode identities and explicit client SETATTR remain
+covered separately. This removes a redundant publication; it does not
+establish the cause of the earlier per-OPEN NFS timeouts.
+
+The debug, request-traced source `d6e242f1` ran 200 writes per independent
+writer against disposable native FoundationDB and RustFS. Both writer loops
+completed their 400 acknowledged writes, and their bounded phase summaries
+were retained. The fixed 1,200-second harness deadline then expired before
+`NATIVE_FDB_RUSTFS_LOAD_PASS`. No individual load operation reported
+`ETIMEDOUT` in this attempt. The live checks and fresh reopen were not fully
+qualified, and the complete service packet ended with `RUSTFS_COMBO_FAIL`.
+The mount request deadline was unchanged.
+
+The older output did not retain a completed verification-file count. The
+planned live checks were 400 files through each view, followed by 400 files
+after fresh reopen. Fresh reopen was not reached because it follows the
+missing live-load PASS marker. The writer snapshots retained 20 longest-phase
+entries each and six fresh GETATTR/lstat pending spans in total. These were
+load-window snapshots, not timeout-time verification snapshots.
+
+| Longest traced writer phase | Writer A, ms | Writer B, ms |
+| --- | ---: | ---: |
+| Local filesystem gate wait | 242.591 | 220.801 |
+| Metadata load | 102.185 | 215.969 |
+| Backing authority verification | 43.374 | 13.000 |
+| FoundationDB metadata CAS | 481.139 | 514.557 |
+| CREATE ownership claim | 142.312 | 147.143 |
+| NFS dispatch | 1,223.824 | 1,164.755 |
+
+The traced open/mutate records counted 202 and 195 CAS backoff events, with
+largest zero-based attempt numbers of three and two. These are observed
+metadata conflict retries, not NFS RPC retransmission counts. The maxima
+come from different requests and are not additive; verification-stage
+phase maxima and RPC retry counts were not retained.
+
+One approved read-only sample of the exact owned writer-A CLI requested one
+second of profiling. Its UTC start/end were 2026-09-23 13:29:47.551 and
+13:29:50.451. The sampled guarded-read/lstat stacks showed
+`refresh_concurrent_namespace`, FoundationDB metadata loading, JSON
+deserialization and namespace validation. This matches the full namespace
+reload path, but does not exclude a stalled or retried verification RPC in
+the capped attempt. Both stderr request tracing and stack sampling can
+affect scheduling. These debug diagnostic totals are not release-build
+production throughput measurements.
+
+The retained capped log is
+`/private/tmp/mount-rs-native-stress400-full-traced-d6e242f1-20260923.log`
+(52,548 bytes; SHA-256
+`30e39f70af53c120209ce12e0a9c9a095e6c01f0bda774407fa25f21a488e25e`).
+The full stack sample and UTC metadata are retained beside it as
+`mount-rs-native-stress400-cli-a-sample-d6e242f1-20260923.txt` and `.json`.
+The original failure evidence is unchanged.
+
+After merging the recovery API source, exact debug source `300cd931` on
+merged main `a3e05036` passed one untraced 20-write-per-writer packet.
+`MOUNT_RS_TRACE_REQUESTS` was explicitly unset with `env -u`; only value `1`
+enables tracing. CLI verbose diagnostics were disabled and no profiling was
+performed. The full log contains no request-trace markers. CAS retry counts
+and internal phase metrics are unavailable for this run; marker absence
+does not establish zero contention.
+
+| Completed stage | Count | Elapsed, ms |
+| --- | ---: | ---: |
+| Writes acknowledged | 40 | 17,288 |
+| Live view A file checks | 40 / 40 | 4,499 |
+| Live view B file checks | 40 / 40 | 4,294 |
+| Fresh reopen file checks | 40 / 40 | 4,996 |
+
+The combined writes-plus-live-checks timer was 26,082 ms, and the entire
+native test took 37.92 seconds. The genuine signed provider, SDK, addon,
+SQLite VFS, service fault/restart and reopen packet ended with
+`RUSTFS_INTEGRATION_PASS`. The fixed runner/combo budgets were 600 and 900
+seconds. This single untraced pass does not explain the earlier per-OPEN
+timeouts or complete the capped 400-write qualification.
+
+The immutable successful log is
+`/private/tmp/mount-rs-final-native40-untraced-300cd931-20260923.log`
+(14,198 bytes; SHA-256
+`32b2282098358a4bf5291d1c828e9faa15730a672cfc3a79f9cb3cd6aada9709`).
+Both attempts independently verified removal of their exact containers,
+mounts, sparse images, processes and temporary roots, closure of their
+observed endpoint ports, and preservation of the user's existing NFS mount.
+Their exact transient dependency links were removed too.
+
+Before the final packet, all 32 local workspace package artifacts were
+cleaned in both host and explicit arm64 target layouts, retaining dependency
+caches. Fresh CLI and addon builds used the selected source; the addon
+loaded 259 exports. All nine full offline locked standalone dependency
+graphs passed without lock repairs. The NFS suite passed 156 tests with two
+ignored; feature-enabled CLI checks passed 100 with 19 ignored. Formatting
+and strict feature-enabled CLI/NFS all-targets Clippy passed.
+
+The test now records acknowledged writes separately from verification,
+names each live/reopen view, prints each 25-file checkpoint and exact final
+or error counts, and labels tracing availability. Panic cleanup retains
+bounded pending traces with best-effort output when tracing is enabled.
+An external harness deadline need not unwind Rust, so its last printed
+checkpoint remains the retained verification progress boundary.

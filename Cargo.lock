@@ -1540,9 +1540,11 @@ name = "mount-rs-nfs"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "mount-rs-chunked",
  "mount-rs-core",
  "mount-rs-host",
  "mount-rs-memfs",
+ "mount-rs-memory",
  "tokio",
 ]
 
