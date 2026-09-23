@@ -79,6 +79,63 @@ Focused checks:
   wal_checkpoint_contention_preserves_acknowledged_blocks -- --nocapture
 ```
 
+## Current-source PGlite native requalification
+
+On merged main `d983be89`, the three PGlite-only cases in
+`apps/mount-rs-cli/tests/native_two_process_pglite.rs` passed serially on macOS
+in 20.51 seconds. The isolated checkout was `25d793f6`, with the same complete
+source tree as that main revision. Node 24.18.0, PGlite 0.5.8 and socket server
+0.2.11 were used; the outer 300-second watchdog did not fire.
+
+| Case | Result |
+| --- | --- |
+| One CLI, two writable views | Bidirectional bytes, rename/unlink and clean shutdown passed |
+| Two CLIs, one persisted engine | 20 files per writer; 160 acknowledged write, local read, cross-view read and unlink calls in 12,768 ms; disjoint-range writes and fresh engine/CLI reopen assertions passed |
+| Three socket slots | The second CLI was rejected before mounting; the first CLI's existing file remained readable |
+
+The slot case does not test subsequent slot reuse or a new write from the
+first CLI. The RustFS-block variant was excluded from this packet. This is
+same-host loopback acceptance against one engine, not physical cross-host
+or sustained performance qualification. Each engine owns its data directory;
+the reopen case stops the original engine before opening its replacement.
+
+The exact temporary root and mounts were removed, the entire dedicated
+process group was empty, five sampled test/CLI PIDs and two observed listener
+ports were absent, and the owned dependency symlink was removed. The original
+dependency directory and user's mount/PID 66542/listener 55309 were unchanged.
+Short-lived Node PIDs were not captured by the observer's raw argv match;
+engine restart/stop is asserted by the passing fixture, with the empty process
+group verified independently afterward.
+
+Immutable raw log:
+`/private/tmp/mount-rs-current-pglite-native-20260924.log` (925 bytes; SHA-256
+`a9d16d13ea0c0de60b26bf9aafa82f84c306e2f01d5a2424266a03c17cb8e14d`).
+The command, source/CLI/test hashes and sampled resource registry are in
+`/private/tmp/mount-rs-current-pglite-native-20260924.json`; independent cleanup
+evidence is in `/private/tmp/mount-rs-current-pglite-native-cleanup-20260924.json`.
+
+## Current CI checkpoint
+
+For PR #20 head `25d793f6`, fault workflow `35878531285` passed on Ubuntu,
+macOS and Windows. Primary CI `35878531432` also passed Windows Rust and
+Ubuntu native NFS. The latter freshly built rusqlite 0.39/libsqlite3-sys 0.37,
+rejected NFS metadata and blocks before any marker or namespace publication,
+and passed privileged checkpointed/active-WAL file-alias rejection. Its
+single-view Python application-SQLite restart probe used host SQLite 3.45.1;
+that probe is separate from the bundled 3.51.3 engine gates above.
+
+The same CI run's Ozone compositions completed all 400 exact-byte lifecycles
+(1,200 acknowledged operations), with zero timeouts and cleanup failures,
+but failed the configured 1,000 IOPS floor: TiDB measured 369.94 IOPS and
+FoundationDB 597.83 IOPS. Earlier baseline floor failures remain recorded
+below. These isolated CI windows are not controlled performance comparisons,
+and this checkpoint does not claim all repository CI is green.
+
+Exact current job logs are retained at
+`/private/tmp/mount-rs-pr20-native-nfs-ubuntu-107240666428.log`,
+`/private/tmp/mount-rs-pr20-ozone-tidb-107240666108.log` and
+`/private/tmp/mount-rs-pr20-ozone-foundationdb-107240666543.log`.
+
 ## SQLite coordinator load
 
 `tests/concurrent_sqlite_load.rs` opens independently connected metadata and

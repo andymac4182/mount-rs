@@ -211,8 +211,9 @@ also rejects bind mount aliases of the same inode. A second host
 needs a reachable *shared* FoundationDB cluster and the same client,
 configuration, and block backing. The local macOS test cluster does not verify
 cross-host behavior. A prefix containing a legacy lease or fence key rejects
-`concurrent_writes` with `EBUSY` and needs an offline migration before
-concurrent mounts can use it.
+`concurrent_writes` with `EBUSY`. The current offline migration commands require
+`MRC1`; they do not convert legacy exclusive-writer state to `MRC2`. Retain
+exclusive mode for that volume or use a fresh concurrent volume.
 Stop and upgrade any older mount-rs writers before activating this mode.
 Older binaries do not recognize the concurrent-mode marker. If all writers
 cannot be upgraded together, isolate old clients at the deployment, network,
