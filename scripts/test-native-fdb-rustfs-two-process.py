@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Run the native two-CLI FDB/RustFS NFS case inside the disposable RustFS harness.
+"""Run two native CLIs against one disposable FoundationDB volume.
 
 Set MOUNT_RS_NATIVE_FDB_SERVER, MOUNT_RS_NATIVE_FDB_CLI, and
 MOUNT_RS_NATIVE_FDB_CLIENT_LIB_DIR to matching arm64 FoundationDB 7.4 paths.
-Invoke this with RUSTFS_COMBO_COMMAND from scripts/test-rustfs.sh so the RustFS
-container and bucket are test owned as well.
+Set MOUNT_RS_NATIVE_FDB_BLOCKS_ONLY=1 for FoundationDB metadata and blocks.
+For RustFS blocks, invoke this with RUSTFS_COMBO_COMMAND from
+scripts/test-rustfs.sh so the container and bucket are test owned as well.
 """
 
 from __future__ import annotations
@@ -325,28 +326,30 @@ def main() -> None:
     library_dir = Path(library_dir_value).resolve()
     if not (library_dir / "libfdb_c.dylib").is_file():
         raise RuntimeError("native FoundationDB client library is missing")
-    rustfs_run = os.environ.get("RUSTFS_RUN_DIR")
-    rustfs_container = os.environ.get("RUSTFS_HARNESS_CONTAINER")
-    if not rustfs_run or not rustfs_container:
-        raise RuntimeError("run from scripts/test-rustfs.sh's disposable container harness")
-    rustfs_run_dir = Path(rustfs_run)
-    owned = rustfs_run_dir / ".mount-rs-rustfs-owned"
-    if rustfs_run_dir.is_symlink() or owned.is_symlink() or not owned.is_file():
-        raise RuntimeError("RustFS harness ownership marker is unavailable")
-    if owned.read_text().strip() != rustfs_container:
-        raise RuntimeError("RustFS harness ownership marker does not match")
-    endpoint = urlsplit(os.environ.get("RUSTFS_ENDPOINT", ""))
-    if (
-        endpoint.scheme != "http"
-        or endpoint.hostname != "127.0.0.1"
-        or not endpoint.port
-        or endpoint.path not in ("", "/")
-        or endpoint.query
-        or endpoint.fragment
-        or endpoint.username
-        or endpoint.password
-    ):
-        raise RuntimeError("disposable RustFS endpoint must be loopback HTTP")
+    blocks_only = os.environ.get("MOUNT_RS_NATIVE_FDB_BLOCKS_ONLY") == "1"
+    if not blocks_only:
+        rustfs_run = os.environ.get("RUSTFS_RUN_DIR")
+        rustfs_container = os.environ.get("RUSTFS_HARNESS_CONTAINER")
+        if not rustfs_run or not rustfs_container:
+            raise RuntimeError("run from scripts/test-rustfs.sh's disposable container harness")
+        rustfs_run_dir = Path(rustfs_run)
+        owned = rustfs_run_dir / ".mount-rs-rustfs-owned"
+        if rustfs_run_dir.is_symlink() or owned.is_symlink() or not owned.is_file():
+            raise RuntimeError("RustFS harness ownership marker is unavailable")
+        if owned.read_text().strip() != rustfs_container:
+            raise RuntimeError("RustFS harness ownership marker does not match")
+        endpoint = urlsplit(os.environ.get("RUSTFS_ENDPOINT", ""))
+        if (
+            endpoint.scheme != "http"
+            or endpoint.hostname != "127.0.0.1"
+            or not endpoint.port
+            or endpoint.path not in ("", "/")
+            or endpoint.query
+            or endpoint.fragment
+            or endpoint.username
+            or endpoint.password
+        ):
+            raise RuntimeError("disposable RustFS endpoint must be loopback HTTP")
 
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
@@ -363,7 +366,8 @@ def main() -> None:
     env["MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE"] = str(cluster)
     env["MOUNT_RS_FOUNDATIONDB_DISPOSABLE_CLUSTER"] = "1"
     env["MOUNT_RS_CLI_NATIVE_FOUNDATIONDB_TWO_PROCESS"] = "1"
-    env["MOUNT_RS_CLI_NATIVE_RUSTFS_DISPOSABLE"] = "1"
+    if not blocks_only:
+        env["MOUNT_RS_CLI_NATIVE_RUSTFS_DISPOSABLE"] = "1"
     env["MOUNT_RS_CLI_NATIVE_NFS"] = "1"
     try:
         shared_target = Path(
@@ -445,7 +449,14 @@ def main() -> None:
                 "disposable FoundationDB did not complete a test-owned transaction: "
                 f"last_command={last_output[-300:]} status={last_status[-300:]}"
             )
-        print(f"NATIVE_FDB_RUSTFS_READY cluster=127.0.0.1:{port}", flush=True)
+        mode = "FDB_BLOCKS" if blocks_only else "FDB_RUSTFS"
+        print(f"NATIVE_{mode}_READY cluster=127.0.0.1:{port}", flush=True)
+
+        case = (
+            "cli_two_process_foundationdb_volume_stays_coherent_and_reopens"
+            if blocks_only
+            else "cli_two_process_foundationdb_rustfs_volume_stays_coherent_and_reopens"
+        )
 
         cargo = subprocess.Popen(
             [
@@ -459,7 +470,7 @@ def main() -> None:
                 "--test",
                 "native_two_process_foundationdb",
                 "--",
-                "cli_two_process_foundationdb_rustfs_volume_stays_coherent_and_reopens",
+                case,
                 "--exact",
                 "--ignored",
                 "--nocapture",
@@ -514,9 +525,9 @@ def main() -> None:
                 flush=True,
             )
             raise RuntimeError("native FDB/RustFS runner could not prove exact cleanup")
-        print("NATIVE_FDB_RUSTFS_OWNED_NFS_AND_TEMP_CLEAN", flush=True)
+        print(f"NATIVE_{mode}_OWNED_NFS_AND_TEMP_CLEAN", flush=True)
     if passed:
-        print("NATIVE_FDB_RUSTFS_TWO_PROCESS_PASS", flush=True)
+        print(f"NATIVE_{mode}_TWO_PROCESS_PASS", flush=True)
 
 
 if __name__ == "__main__":
