@@ -1,10 +1,12 @@
 # mount-rs agent instructions
 
-## Shared Cargo target
+## Cargo target cache
 
 Run normal Rust commands through `scripts/cargo-shared` from the repository
-root. It sets one per-user Cargo target directory shared by all mount-rs
-worktrees and preserves an explicitly supplied `CARGO_TARGET_DIR`.
+root. Its default target directory is isolated by the canonical checkout
+root under the per-user cache. It preserves an explicitly supplied
+`CARGO_TARGET_DIR`, then `MOUNT_RS_CARGO_TARGET_DIR`. Keep explicit overrides
+separate across worktrees too, so another branch cannot supply a stale binary.
 
 ```sh
 ./scripts/cargo-shared test --workspace --all-targets --locked
