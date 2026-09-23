@@ -845,53 +845,90 @@ impl MetadataStore for SqliteMetadataStore {
         let sql = format!(
             "UPDATE mount_rs_metadata SET owner=?1, fence=fence+1, expires={NOW}+?2
             WHERE id=1 AND write_mode IS NULL AND (owner IS NULL OR expires<={NOW})
-              AND fence<9223372036854775807 AND ?2<=9223372036854775807-{NOW}
-            RETURNING fence, expires"
+              AND fence<9223372036854775807 AND ?2<=9223372036854775807-{NOW}"
         );
-        let connection = self.0.lock()?;
-        let result = connection
-            .query_row(&sql, params![owner, ttl], |row| {
-                Ok(WriterLease {
-                    owner: owner.to_owned(),
-                    fence: row.get(0)?,
-                    expires_at_ms: row.get(1)?,
-                })
-            })
-            .optional()
+        let mut connection = self.0.lock()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(backend_error)?;
-        if result.is_none() {
-            let mode: Option<String> = connection
+        let changed = tx
+            .execute(&sql, params![owner, ttl])
+            .map_err(backend_error)?;
+        if changed > 1 {
+            return Err(backend_error(
+                "SQLite writer acquisition changed multiple rows",
+            ));
+        }
+        let lease = if changed == 1 {
+            let (fence, expires_at_ms): (u64, u64) = tx
                 .query_row(
-                    "SELECT write_mode FROM mount_rs_metadata WHERE id=1",
-                    [],
-                    |row| row.get(0),
+                    "SELECT fence, expires FROM mount_rs_metadata WHERE id=1 AND owner=?1",
+                    params![owner],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .map_err(backend_error)?;
-            if mode.is_some() {
-                return Err(FsError::new(ErrorCode::Ebusy)
-                    .with_syscall("acquire writer")
-                    .with_message("SQLite volume is in concurrent write mode"));
-            }
+            Some(WriterLease {
+                owner: owner.to_owned(),
+                fence,
+                expires_at_ms,
+            })
+        } else {
+            None
+        };
+        let mode: Option<String> = if lease.is_none() {
+            tx.query_row(
+                "SELECT write_mode FROM mount_rs_metadata WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(backend_error)?
+        } else {
+            None
+        };
+        tx.commit().map_err(backend_error)?;
+        if let Some(lease) = lease {
+            return Ok(lease);
         }
-        result.ok_or_else(|| FsError::new(ErrorCode::Eagain).with_syscall("acquire writer"))
+        if mode.is_some() {
+            return Err(FsError::new(ErrorCode::Ebusy)
+                .with_syscall("acquire writer")
+                .with_message("SQLite volume is in concurrent write mode"));
+        }
+        Err(FsError::new(ErrorCode::Eagain).with_syscall("acquire writer"))
     }
 
     async fn renew_writer(&self, lease: &WriterLease, ttl: Duration) -> Result<WriterLease> {
         let ttl = ttl_ms(ttl)?;
         let (fence, expires) = lease_numbers(lease)?;
-        let connection = self.0.lock()?;
+        let mut connection = self.0.lock()?;
         let sql = format!(
             "UPDATE mount_rs_metadata SET expires={NOW}+?4
             WHERE id=1 AND write_mode IS NULL AND owner=?1 AND fence=?2 AND expires=?3 AND expires>{NOW}
-              AND ?4<=9223372036854775807-{NOW} RETURNING expires"
+              AND ?4<=9223372036854775807-{NOW}"
         );
-        let expiry = connection
-            .query_row(&sql, params![lease.owner, fence, expires, ttl], |row| {
-                row.get(0)
-            })
-            .optional()
-            .map_err(backend_error)?
-            .ok_or_else(stale)?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(backend_error)?;
+        let changed = tx
+            .execute(&sql, params![lease.owner, fence, expires, ttl])
+            .map_err(backend_error)?;
+        if changed > 1 {
+            return Err(backend_error("SQLite writer renewal changed multiple rows"));
+        }
+        let expiry: Option<u64> = if changed == 1 {
+            Some(
+                tx.query_row(
+                    "SELECT expires FROM mount_rs_metadata WHERE id=1 AND owner=?1 AND fence=?2",
+                    params![lease.owner, fence],
+                    |row| row.get(0),
+                )
+                .map_err(backend_error)?,
+            )
+        } else {
+            None
+        };
+        tx.commit().map_err(backend_error)?;
+        let expiry = expiry.ok_or_else(stale)?;
         Ok(WriterLease {
             expires_at_ms: expiry,
             ..lease.clone()
@@ -1604,11 +1641,28 @@ impl BlockStore for SqliteBlockStore {
     }
 
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
-        let connection = self.0.lock()?;
+        let mut connection = self.0.lock()?;
         // Database-generated random identities avoid accidental aliasing when
         // namespaces use distinct block databases. Collisions fail, never overwrite.
-        connection.query_row("INSERT INTO mount_rs_blocks(id,bytes) VALUES(lower(hex(randomblob(32))),?1) RETURNING id",
-            params![bytes], |row| row.get(0)).map(BlockId).map_err(backend_error)
+        let id: String = connection
+            .query_row("SELECT lower(hex(randomblob(32)))", [], |row| row.get(0))
+            .map_err(backend_error)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(backend_error)?;
+        let inserted = transaction
+            .execute(
+                "INSERT INTO mount_rs_blocks(id,bytes) VALUES(?1,?2)",
+                params![id, bytes],
+            )
+            .map_err(backend_error)?;
+        if inserted != 1 {
+            return Err(FsError::new(ErrorCode::Eio)
+                .with_syscall("put block")
+                .with_message("SQLite block insert was not applied"));
+        }
+        transaction.commit().map_err(backend_error)?;
+        Ok(BlockId(id))
     }
 
     async fn get(&self, id: &BlockId) -> Result<Vec<u8>> {
@@ -1753,6 +1807,98 @@ mod tests {
         assert!(third.fence > second.fence);
         run(store.flush()).unwrap();
         assert_eq!(run(store.load()).unwrap().revision, 3);
+    }
+
+    #[test]
+    fn acquire_writer_does_not_acknowledge_a_lease_before_rollback_journal_commit() {
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        {
+            let connection = store.0.lock().unwrap();
+            let journal: String = connection
+                .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(journal, "delete");
+            connection.busy_timeout(Duration::from_millis(40)).unwrap();
+        }
+        let reader = Connection::open(&path).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        let initial: (Option<String>, i64, i64) = reader
+            .query_row(
+                "SELECT owner, fence, expires FROM mount_rs_metadata WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(initial, (None, 0, 0));
+
+        let result = run(store.acquire_writer("ghost-owner", Duration::from_secs(30)));
+        reader.execute_batch("ROLLBACK").unwrap();
+        drop(reader);
+        drop(store);
+        let reopened = Connection::open(&path).unwrap();
+        let durable: (Option<String>, i64, i64) = reopened
+            .query_row(
+                "SELECT owner, fence, expires FROM mount_rs_metadata WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        drop(reopened);
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(durable, initial, "failed commit must leave lease unchanged");
+        assert!(
+            result.is_err(),
+            "acquire acknowledged an uncommitted lease: {result:?}"
+        );
+    }
+
+    #[test]
+    fn renew_writer_does_not_acknowledge_an_expiry_before_rollback_journal_commit() {
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        let lease = run(store.acquire_writer("original-owner", Duration::from_secs(30))).unwrap();
+        {
+            let connection = store.0.lock().unwrap();
+            let journal: String = connection
+                .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(journal, "delete");
+            connection.busy_timeout(Duration::from_millis(40)).unwrap();
+        }
+        let reader = Connection::open(&path).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        let initial_expiry: i64 = reader
+            .query_row(
+                "SELECT expires FROM mount_rs_metadata WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(initial_expiry as u64, lease.expires_at_ms);
+
+        let result = run(store.renew_writer(&lease, Duration::from_secs(120)));
+        reader.execute_batch("ROLLBACK").unwrap();
+        drop(reader);
+        drop(store);
+        let reopened = Connection::open(&path).unwrap();
+        let durable_expiry: i64 = reopened
+            .query_row(
+                "SELECT expires FROM mount_rs_metadata WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(reopened);
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(
+            durable_expiry, initial_expiry,
+            "failed commit must leave expiry unchanged"
+        );
+        assert!(
+            result.is_err(),
+            "renew acknowledged an uncommitted expiry: {result:?}"
+        );
     }
 
     #[test]
@@ -2064,6 +2210,57 @@ mod tests {
         run(file.prepare_concurrent_mode()).unwrap();
         drop(file);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn block_put_does_not_acknowledge_a_returning_row_before_rollback_journal_commit() {
+        let path = super::super::tests::unique_database_path();
+        let blocks = SqliteBlockStore::open(&path).unwrap();
+        {
+            let connection = blocks.0.lock().unwrap();
+            connection
+                .execute_batch("PRAGMA journal_mode=DELETE;")
+                .unwrap();
+            connection.busy_timeout(Duration::from_millis(40)).unwrap();
+            let journal: String = connection
+                .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(journal, "delete");
+        }
+
+        let reader = Connection::open(&path).unwrap();
+        reader.execute_batch("BEGIN;").unwrap();
+        let count: i64 = reader
+            .query_row("SELECT count(*) FROM mount_rs_blocks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "reader must hold a SHARED snapshot before put");
+
+        let result = run(blocks.put(b"commit must precede block acknowledgement"));
+        let reader_count: i64 = reader
+            .query_row("SELECT count(*) FROM mount_rs_blocks", [], |row| row.get(0))
+            .unwrap();
+        reader.execute_batch("ROLLBACK;").unwrap();
+        drop(reader);
+        drop(blocks);
+
+        let reopened = SqliteBlockStore::open(&path).unwrap();
+        let committed_count: i64 = reopened
+            .0
+            .lock()
+            .unwrap()
+            .query_row("SELECT count(*) FROM mount_rs_blocks", [], |row| row.get(0))
+            .unwrap();
+        drop(reopened);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(reader_count, 0, "locked reader cannot see the insert");
+        assert_eq!(
+            committed_count, 0,
+            "failed commit must not publish the insert"
+        );
+        assert!(
+            result.is_err(),
+            "put acknowledged an uncommitted RETURNING row: {result:?}"
+        );
     }
 
     #[test]

@@ -25,6 +25,8 @@ both databases.
 | Rebased layout plus async backoff, retry limit 64 | DELETE | 8 × 100 | 2,008 acknowledged operations; fresh reopen and integrity OK in one run | 55,130 ms | 834 | 383,935 |
 | Rebased layout plus async backoff, retry limit 128 | DELETE | 8 × 100 | 2,008 acknowledged operations; fresh reopen and integrity OK in two runs | 76,250 and 58,470 ms | 835 and 834 | 383,936 and 383,934 |
 | Rebased layout plus async backoff, retry limit 128 | WAL | 8 × 100 | 2,008 acknowledged operations; fresh reopen and integrity OK in one disposable run | 53,570 ms | 834 | about 383,934 |
+| Checked SQLite block and lease commits | DELETE | 8 × 100 | 2,008 acknowledged operations; fresh reopen and integrity OK | 61,671 ms | 834 | 383,933 |
+| Checked SQLite block and lease commits | WAL | 8 × 100 | 2,008 acknowledged operations; fresh reopen and integrity OK, diagnostic mode | 63,871 ms | 834 | 383,936 |
 
 The short fixed retry budget failed because local SQLite writers can advance
 the revision while another writer repeatedly prepares new immutable blocks.
@@ -41,6 +43,26 @@ passed that test and two 8 × 100 DELETE runs. The first temporary 128 run
 above is a measured *before-rebase* baseline with substantially more staged
 blocks. Both final runs retained about 835 blocks instead of 10,019; online
 reclamation is still missing, so capacity can grow indefinitely.
+
+A rollback-journal reader holding a SHARED lock exposed a separate SQLite
+acknowledgement bug. The old `INSERT ... RETURNING` block write returned a
+block ID even though a fresh connection found zero committed rows. SQLite
+[documents this one-row `RETURNING`/reset failure](https://www.sqlite.org/c3ref/reset.html).
+The old lease acquisition and renewal statements could likewise return a
+fence or expiry while the durable row stayed unchanged. Three reader-lock
+regressions failed before the provider change and passed after block IDs and
+legacy leases were returned only after a checked transaction commit. The
+SQLite provider suite passed 21/21. The two new eight-writer timings above
+measure this completed-insert implementation; they are isolated local runs,
+not a controlled IOPS comparison.
+
+On diagnostic head `3ed628e2`, the four-writer DELETE coordinator test passed
+on a Windows push runner but one PR runner returned `database is locked` on its
+first write after about 33 seconds. Its five-second SQLite busy timeout can
+still reject a contended operation; this intermittent Windows case is not
+qualified as a reliable multiwriter result. The test now reports the
+provider stage on failure so block insertion and metadata publication can be
+distinguished in the next CI run.
 
 Reproduction of the bounded load uses only test-owned files:
 
