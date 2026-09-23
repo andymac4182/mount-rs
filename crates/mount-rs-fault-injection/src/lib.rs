@@ -944,6 +944,12 @@ where
         self.inner.durable()
     }
 
+    async fn prepare_concurrent_mode(&self) -> Result<()> {
+        // Capability validation belongs to the provider and must run before
+        // metadata conversion. Fault plans cover data-plane calls only.
+        self.inner.prepare_concurrent_mode().await
+    }
+
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
         self.injector
             .before(FaultBoundary::Blocks, FaultOperation::Put)

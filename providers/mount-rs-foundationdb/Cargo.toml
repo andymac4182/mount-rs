@@ -45,3 +45,8 @@ required-features = ["foundationdb"]
 name = "network_shutdown"
 path = "tests/network_shutdown.rs"
 required-features = ["foundationdb"]
+
+[[test]]
+name = "block_preflight"
+path = "tests/block_preflight.rs"
+required-features = ["foundationdb"]

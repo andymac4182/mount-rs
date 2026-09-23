@@ -129,10 +129,12 @@ MOUNT_RS_OZONE_FOUNDATIONDB_COMPOSITION=1 ./scripts/test-ozone.sh
 ```
 
 The CI workflow runs the durable FoundationDB mode in the dedicated
-`ozone-foundationdb` job. A terminal pass must include the
-`FOUNDATIONDB_TEST_PASS topology=durable ... service_restart=pass` marker,
-the Ozone integration marker, and cleanup; queued, canceled, skipped, or
-failed jobs are not provider acceptance. The hosted lane is still controlled
+`ozone-foundationdb` job. A terminal pass must include Ozone gateway fault
+and reopen evidence, durable FoundationDB readiness, N-API split-store reopen,
+the FoundationDB/R2 workload artifact, the Ozone integration marker, and
+cleanup; queued, canceled, skipped, or failed jobs are not provider acceptance.
+The recovery phase restarts the Ozone gateway before the FoundationDB/R2
+workload. The hosted lane is still controlled
 CI qualification, not customer Ozone availability, TLS, power-loss, or
 replication evidence.
 

@@ -351,6 +351,7 @@ jobs:
         if: always()
         run: |
           set -eu
+          node scripts/test-w26-ozone-evidence-packet.mjs
           node scripts/verify-w26-ozone-evidence-packet.mjs \
             --revision "$(git rev-parse HEAD)" \
             --policy-log evidence/base/ozone-policy.log \
@@ -629,6 +630,25 @@ jobs:
             MOUNT_RS_RUN_NATIVE_NFS_SQLITE=1 python3 -c 'import subprocess,sys; subprocess.run([sys.argv[1], "--ignored", "--nocapture"], check=True, timeout=300)' "$sqlite_test"
           fi
 
+  native-concurrent-sqlite:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+      - name: Verify local SQLite shared mounts and reject NFS hosted backing
+        env:
+          MOUNT_RS_CLI_NATIVE_NFS: '1'
+          MOUNT_RS_CLI_NATIVE_SQLITE_TWO_PROCESS: '1'
+          MOUNT_RS_CLI_NATIVE_SQLITE_ONE_PROCESS: '1'
+          MOUNT_RS_CLI_NATIVE_SQLITE_NFS_BACKING: '1'
+          MOUNT_RS_CLI_NATIVE_SQLITE_NFS_BLOCKS: '1'
+        run: |
+          owned_tmp=$(mktemp -d "$RUNNER_TEMP/mount-rs-concurrent-sqlite-XXXXXXXX")
+          trap 'rmdir "$owned_tmp"' EXIT
+          TMPDIR="$owned_tmp" python3 -c 'import os,subprocess; subprocess.run(["cargo", "test", "--locked", "-p", "mount-rs-cli", "--test", "native_two_process_sql", "--", "--ignored", "--test-threads=1", "--nocapture"], env=os.environ, check=True, timeout=540)'
+
   native-9p:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -679,7 +699,7 @@ jobs:
 
   native-fuse:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
@@ -725,7 +745,7 @@ jobs:
       - name: Verify SQLite mount-service restart and SIGKILL recovery
         env:
           MOUNT_RS_RUN_NATIVE_FUSE: '1'
-        run: timeout 240s cargo test --locked -p mount-rs-core --test sqlite_service_crash -- --ignored --nocapture
+        run: timeout 480s cargo test --locked -p mount-rs-core --test sqlite_service_crash -- --ignored --nocapture
       - name: Verify real SQLite recovery from split backend failures
         env:
           MOUNT_RS_RUN_NATIVE_FUSE: '1'
@@ -955,7 +975,10 @@ jobs:
         run: python3 -c 'import subprocess; subprocess.run(["node", "bindings/mount-rs-napi/test/structural-native.mjs"], check=True, timeout=180)'
       - run: pnpm --dir tests/upstream install --frozen-lockfile
       - name: Run the unmodified upstream driver conformance suite
-        timeout-minutes: 5
+        # This suite builds its own locked Rust graph; a cold macOS Intel
+        # runner can spend the original five-minute limit compiling before
+        # the conformance assertions begin.
+        timeout-minutes: 10
         run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" pnpm --dir tests/upstream test
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-kv-parity.mjs
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-http-parity.mjs

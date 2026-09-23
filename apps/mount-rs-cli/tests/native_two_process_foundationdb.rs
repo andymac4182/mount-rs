@@ -8,7 +8,7 @@
 
 use std::fs;
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Write};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,13 +21,50 @@ const MOUNT_READY_TIMEOUT: Duration = Duration::from_secs(40);
 const VISIBILITY_TIMEOUT: Duration = Duration::from_secs(30);
 const CLEAN_EXIT_TIMEOUT: Duration = Duration::from_secs(30);
 const UNMOUNT_TIMEOUT: Duration = Duration::from_secs(15);
+const RUSTFS_LOAD_FILES_PER_WRITER: usize = 20;
+
+#[test]
+fn test_scope_preserves_root_for_symlinked_mountpoint() {
+    let mut scope = TestScope::new();
+    let unrelated = scope.root.with_extension("unrelated-symlink-target");
+    fs::create_dir(&unrelated).expect("create unrelated dry target");
+    fs::remove_dir(&scope.mountpoint_a).expect("remove empty dry A mountpoint");
+    symlink(&unrelated, &scope.mountpoint_a).expect("redirect dry A mountpoint");
+
+    let result = scope.cleanup();
+    let preserved = scope.root.exists();
+    if preserved {
+        fs::remove_file(&scope.mountpoint_a).expect("remove dry symlink");
+        fs::create_dir(&scope.mountpoint_a).expect("restore run-owned dry mountpoint");
+        scope.cleanup().expect("remove safe dry scope");
+    }
+    fs::remove_dir(&unrelated).expect("remove unrelated dry target");
+    assert!(
+        result.is_err(),
+        "symlinked mountpoint was accepted for cleanup"
+    );
+    assert!(preserved, "uncertain owned root must remain available");
+}
 
 #[test]
 #[ignore = "requires opt-in native NFS, an owned disposable FoundationDB cluster, and native libfdb_c"]
 fn cli_two_process_foundationdb_volume_stays_coherent_and_reopens() {
+    run_two_process(false);
+}
+
+#[test]
+#[ignore = "requires opt-in native NFS, disposable FoundationDB and RustFS services, and native libfdb_c"]
+fn cli_two_process_foundationdb_rustfs_volume_stays_coherent_and_reopens() {
+    run_two_process(true);
+}
+
+fn run_two_process(rustfs_blocks: bool) {
     require_opt_in("MOUNT_RS_CLI_NATIVE_NFS");
     require_opt_in("MOUNT_RS_CLI_NATIVE_FOUNDATIONDB_TWO_PROCESS");
     require_opt_in("MOUNT_RS_FOUNDATIONDB_DISPOSABLE_CLUSTER");
+    if rustfs_blocks {
+        require_opt_in("MOUNT_RS_CLI_NATIVE_RUSTFS_DISPOSABLE");
+    }
     let cluster_file = PathBuf::from(
         std::env::var("MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE")
             .expect("set MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE to the disposable cluster file"),
@@ -41,8 +78,19 @@ fn cli_two_process_foundationdb_volume_stays_coherent_and_reopens() {
 
     let mut scope = TestScope::new();
     let volume_key = format!("mount-rs/cli-two-process/{}", scope.run_name());
-    let config_a = scope.write_config("a", &cluster_file, &volume_key);
-    let config_b = scope.write_config("b", &cluster_file, &volume_key);
+    let blocks = if rustfs_blocks {
+        rustfs_blocks_config(&format!("{volume_key}/rustfs-blocks"))
+    } else {
+        serde_json::json!({
+            "kind": "foundationdb",
+            "cluster_file": cluster_file,
+            "volume_key": volume_key,
+            "durable": true,
+            "lease_authority": "revision-cas"
+        })
+    };
+    let config_a = scope.write_config("a", &cluster_file, &volume_key, &blocks);
+    let config_b = scope.write_config("b", &cluster_file, &volume_key, &blocks);
 
     // Both children stay alive throughout the bidirectional I/O below. The
     // second mount must open the same durable namespace while A is mounted.
@@ -171,6 +219,47 @@ fn cli_two_process_foundationdb_volume_stays_coherent_and_reopens() {
         );
     }
 
+    if rustfs_blocks {
+        // Both independent CLI processes publish separate namespace and block
+        // updates concurrently. Fresh reopen below checks every acknowledged sync.
+        let barrier = Arc::new(Barrier::new(3));
+        let started = Instant::now();
+        let load_a = spawn_load_writer(
+            scope.mountpoint_a.clone(),
+            'a',
+            RUSTFS_LOAD_FILES_PER_WRITER,
+            Arc::clone(&barrier),
+        );
+        let load_b = spawn_load_writer(
+            scope.mountpoint_b.clone(),
+            'b',
+            RUSTFS_LOAD_FILES_PER_WRITER,
+            Arc::clone(&barrier),
+        );
+        barrier.wait();
+        let a_acks = load_a
+            .join()
+            .expect("join RustFS load writer A")
+            .expect("A load writes");
+        let b_acks = load_b
+            .join()
+            .expect("join RustFS load writer B")
+            .expect("B load writes");
+        assert_eq!(a_acks + b_acks, 2 * RUSTFS_LOAD_FILES_PER_WRITER);
+        for mountpoint in [&scope.mountpoint_a, &scope.mountpoint_b] {
+            verify_load_files(mountpoint).expect("both live RustFS mounts see every load write");
+        }
+        assert!(
+            mount_a.is_alive() && mount_b.is_alive(),
+            "both load CLIs must remain mounted"
+        );
+        println!(
+            "NATIVE_FDB_RUSTFS_LOAD_PASS acknowledgements={} elapsed_ms={}",
+            a_acks + b_acks,
+            started.elapsed().as_millis()
+        );
+    }
+
     let nfs_options_before_rename = describe_nfs_mounts(&scope);
     let directory_times_before_a = diagnostic_file_times(&scope.mountpoint_a);
     let directory_times_before_b = diagnostic_file_times(&scope.mountpoint_b);
@@ -251,6 +340,10 @@ fn cli_two_process_foundationdb_volume_stays_coherent_and_reopens() {
         .expect("fresh process sees B's concurrent file");
     await_bytes(&scope.mountpoint_a.join(shared_name), &merged_ranges)
         .expect("fresh process sees both disjoint ranges");
+    if rustfs_blocks {
+        verify_load_files(&scope.mountpoint_a)
+            .expect("fresh process preserves every acknowledged RustFS load file");
+    }
     await_absent(&scope.mountpoint_a.join("renamed-by-a")).expect("fresh process sees B's removal");
     reopened
         .clean_stop()
@@ -266,6 +359,32 @@ fn require_opt_in(name: &str) {
     );
 }
 
+fn rustfs_blocks_config(prefix: &str) -> serde_json::Value {
+    let endpoint = std::env::var("RUSTFS_ENDPOINT").expect("set the disposable RustFS endpoint");
+    assert!(
+        endpoint.starts_with("http://127.0.0.1:") || endpoint.starts_with("http://localhost:"),
+        "native RustFS acceptance requires a loopback disposable endpoint"
+    );
+    let bucket = std::env::var("RUSTFS_BUCKET").expect("set RUSTFS_BUCKET");
+    let region = std::env::var("RUSTFS_REGION").expect("set RUSTFS_REGION");
+    for name in ["RUSTFS_ACCESS_KEY_ID", "RUSTFS_SECRET_ACCESS_KEY"] {
+        assert!(
+            std::env::var(name).is_ok_and(|value| !value.trim().is_empty()),
+            "set {name} for the disposable RustFS service"
+        );
+    }
+    serde_json::json!({
+        "kind": "rustfs",
+        "endpoint": endpoint,
+        "bucket": bucket,
+        "region": region,
+        "prefix": prefix,
+        "access_key_id": { "env": "RUSTFS_ACCESS_KEY_ID" },
+        "secret_access_key": { "env": "RUSTFS_SECRET_ACCESS_KEY" },
+        "durable": true
+    })
+}
+
 fn spawn_writer(
     path: PathBuf,
     bytes: Vec<u8>,
@@ -275,6 +394,49 @@ fn spawn_writer(
         barrier.wait();
         fs::write(path, bytes)
     })
+}
+
+fn load_payload(writer: char, index: usize) -> Vec<u8> {
+    let mut bytes = vec![writer as u8; 4096];
+    let identity = format!("{writer}:{index:02}");
+    bytes[..identity.len()].copy_from_slice(identity.as_bytes());
+    bytes
+}
+
+fn load_name(writer: char, index: usize) -> String {
+    format!("load-{writer}-{index:02}")
+}
+
+fn spawn_load_writer(
+    mountpoint: PathBuf,
+    writer: char,
+    count: usize,
+    barrier: Arc<Barrier>,
+) -> JoinHandle<io::Result<usize>> {
+    thread::spawn(move || {
+        barrier.wait();
+        for index in 0..count {
+            let mut file = fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(mountpoint.join(load_name(writer, index)))?;
+            file.write_all(&load_payload(writer, index))?;
+            file.sync_all()?;
+        }
+        Ok(count)
+    })
+}
+
+fn verify_load_files(mountpoint: &Path) -> io::Result<()> {
+    for writer in ['a', 'b'] {
+        for index in 0..RUSTFS_LOAD_FILES_PER_WRITER {
+            await_bytes(
+                &mountpoint.join(load_name(writer, index)),
+                &load_payload(writer, index),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn spawn_range_writer(
@@ -421,6 +583,7 @@ fn await_absent(path: &Path) -> io::Result<()> {
 
 struct TestScope {
     root: PathBuf,
+    root_identity: (u64, u64),
     cli_binary: PathBuf,
     mountpoint_a: PathBuf,
     mountpoint_b: PathBuf,
@@ -442,6 +605,9 @@ impl TestScope {
         fs::create_dir(&root).expect("create run-owned native test directory");
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
             .expect("restrict run-owned native test directory");
+        let root_metadata =
+            fs::symlink_metadata(&root).expect("stat run-owned native test directory");
+        let root_identity = (root_metadata.dev(), root_metadata.ino());
         let mountpoint_a = root.join("mount-a");
         let mountpoint_b = root.join("mount-b");
         fs::create_dir(&mountpoint_a).expect("create A NFS mountpoint");
@@ -456,6 +622,7 @@ impl TestScope {
             .expect("make run-owned test CLI executable");
         Self {
             root,
+            root_identity,
             cli_binary,
             mountpoint_a,
             mountpoint_b,
@@ -470,13 +637,19 @@ impl TestScope {
             .expect("UTF-8 unique test run name")
     }
 
-    fn write_config(&self, writer: &str, cluster_file: &Path, volume_key: &str) -> PathBuf {
+    fn write_config(
+        &self,
+        writer: &str,
+        cluster_file: &Path,
+        volume_key: &str,
+        blocks: &serde_json::Value,
+    ) -> PathBuf {
         let mountpoint = match writer {
             "a" => &self.mountpoint_a,
             "b" => &self.mountpoint_b,
             _ => panic!("unknown writer"),
         };
-        let provider = serde_json::json!({
+        let metadata = serde_json::json!({
             "kind": "foundationdb",
             "cluster_file": cluster_file,
             "volume_key": volume_key,
@@ -494,8 +667,8 @@ impl TestScope {
                     // This is the sole test-side schema knob for the
                     // manifest-revision CAS concurrent-volume mode.
                     "concurrent_writes": true,
-                    "metadata": provider.clone(),
-                    "blocks": provider,
+                    "metadata": metadata,
+                    "blocks": blocks,
                     "chunk_size_bytes": 4096,
                     "owner": format!("mount-rs-cli-two-process-{writer}")
                 }
@@ -513,6 +686,15 @@ impl TestScope {
         if !self.armed {
             return Ok(());
         }
+        if checked_plain_directory(&self.root)? != self.root_identity {
+            return Err(format!(
+                "run-owned native root changed; preserving {}",
+                self.root.display()
+            ));
+        }
+        // Reject a redirected endpoint before looking up or unmounting either.
+        checked_plain_directory(&self.mountpoint_a)?;
+        checked_plain_directory(&self.mountpoint_b)?;
         let mut errors = Vec::new();
         for target in [&self.mountpoint_a, &self.mountpoint_b] {
             if let Err(error) = unmount_exact_bounded(target) {
@@ -526,6 +708,12 @@ impl TestScope {
                 "run-owned NFS mount remains; preserving {}; cleanup errors: {}",
                 self.root.display(),
                 errors.join("; ")
+            ));
+        }
+        if checked_plain_directory(&self.root)? != self.root_identity {
+            return Err(format!(
+                "run-owned native root changed before removal; preserving {}",
+                self.root.display()
             ));
         }
         fs::remove_dir_all(&self.root)
@@ -569,6 +757,12 @@ impl NativeMount {
             .as_deref()
             == Some("1");
         let mut command = Command::new(cli_binary);
+        // macOS strips DYLD_LIBRARY_PATH when Cargo crosses its /bin/sh
+        // wrapper. Supply the owned native client directory at the final,
+        // unprotected CLI child boundary instead.
+        if let Some(library_dir) = std::env::var_os("MOUNT_RS_NATIVE_FDB_CLIENT_LIB_DIR") {
+            command.env("DYLD_LIBRARY_PATH", library_dir);
+        }
         command.args(["mount", "--config"]).arg(config);
         if trace_native {
             command.arg("--verbose");
@@ -807,8 +1001,15 @@ fn wait_child_bounded(child: &mut Child, timeout: Duration) -> Option<ExitStatus
 }
 
 fn unmount_exact_bounded(mountpoint: &Path) -> Result<(), String> {
+    let original_identity = checked_plain_directory(mountpoint)?;
     if !is_mounted_at(mountpoint)? {
         return Ok(());
+    }
+    if checked_plain_directory(mountpoint)? != original_identity {
+        return Err(format!(
+            "run-owned NFS mountpoint {} changed before umount",
+            mountpoint.display()
+        ));
     }
     let mut child = Command::new("umount")
         .arg("-f")
@@ -833,6 +1034,7 @@ fn unmount_exact_bounded(mountpoint: &Path) -> Result<(), String> {
 }
 
 fn is_mounted_at(target: &Path) -> Result<bool, String> {
+    checked_plain_directory(target)?;
     let output = Command::new("mount")
         .output()
         .map_err(|error| format!("read macOS mount table: {error}"))?;
@@ -850,4 +1052,22 @@ fn is_mounted_at(target: &Path) -> Result<bool, String> {
                     || fs::canonicalize(entry_target).is_ok_and(|path| path == canonical_target)
             }),
     )
+}
+
+fn checked_plain_directory(path: &Path) -> Result<(u64, u64), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("stat run-owned NFS path {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "run-owned NFS path {} is a symlink; preserving owned root",
+            path.display()
+        ));
+    }
+    if !metadata.file_type().is_dir() {
+        return Err(format!(
+            "run-owned NFS path {} is not a directory; preserving owned root",
+            path.display()
+        ));
+    }
+    Ok((metadata.dev(), metadata.ino()))
 }

@@ -58,7 +58,7 @@ pub struct EnvReference {
     pub name: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum StorageProvider {
     Memory,
     Sqlite {
@@ -88,12 +88,111 @@ pub enum StorageProvider {
         secret_access_key: EnvReference,
         durable: bool,
     },
+    RustFs {
+        endpoint: String,
+        bucket: String,
+        region: String,
+        prefix: String,
+        access_key_id: EnvReference,
+        secret_access_key: EnvReference,
+        durable: bool,
+    },
     AwsS3 {
         bucket: String,
         region: String,
         prefix: String,
         durable: bool,
     },
+}
+
+impl fmt::Debug for StorageProvider {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Memory => formatter.write_str("Memory"),
+            Self::Sqlite { path } => formatter
+                .debug_struct("Sqlite")
+                .field("path", path)
+                .finish(),
+            Self::Pglite {
+                connection,
+                volume_key,
+                durable,
+            } => formatter
+                .debug_struct("Pglite")
+                .field("connection", connection)
+                .field("volume_key", volume_key)
+                .field("durable", durable)
+                .finish(),
+            Self::Tidb {
+                connection,
+                volume_key,
+                durable,
+            } => formatter
+                .debug_struct("Tidb")
+                .field("connection", connection)
+                .field("volume_key", volume_key)
+                .field("durable", durable)
+                .finish(),
+            Self::FoundationDb {
+                cluster_file,
+                volume_key,
+                durable,
+                lease_authority,
+            } => formatter
+                .debug_struct("FoundationDb")
+                .field("cluster_file", cluster_file)
+                .field("volume_key", volume_key)
+                .field("durable", durable)
+                .field("lease_authority", lease_authority)
+                .finish(),
+            Self::R2 {
+                endpoint,
+                bucket,
+                prefix,
+                access_key_id,
+                secret_access_key,
+                durable,
+            } => formatter
+                .debug_struct("R2")
+                .field("endpoint", endpoint)
+                .field("bucket", bucket)
+                .field("prefix", prefix)
+                .field("access_key_id", access_key_id)
+                .field("secret_access_key", secret_access_key)
+                .field("durable", durable)
+                .finish(),
+            Self::RustFs {
+                endpoint,
+                bucket,
+                region,
+                prefix,
+                access_key_id,
+                secret_access_key,
+                durable,
+            } => formatter
+                .debug_struct("RustFs")
+                .field("endpoint", &rustfs_debug_endpoint_authority(endpoint))
+                .field("bucket", bucket)
+                .field("region", region)
+                .field("prefix", prefix)
+                .field("access_key_id", access_key_id)
+                .field("secret_access_key", secret_access_key)
+                .field("durable", durable)
+                .finish(),
+            Self::AwsS3 {
+                bucket,
+                region,
+                prefix,
+                durable,
+            } => formatter
+                .debug_struct("AwsS3")
+                .field("bucket", bucket)
+                .field("region", region)
+                .field("prefix", prefix)
+                .field("durable", durable)
+                .finish(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -561,32 +660,66 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
         .transpose()?
         .unwrap_or(false);
     if concurrent_writes {
+        for role in ["metadata", "blocks"] {
+            let raw = object.get(role).and_then(Value::as_object);
+            if raw
+                .and_then(|provider| provider.get("kind"))
+                .and_then(Value::as_str)
+                == Some("sqlite")
+                && raw
+                    .and_then(|provider| provider.get("path"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|path| path == ":memory:" || path.starts_with("file:"))
+            {
+                return Err(ConfigError::at(
+                    &format!("config.driver.storage.{role}.path"),
+                    "concurrent SQLite storage requires a durable local database file path",
+                ));
+            }
+        }
         if lease_ttl_ms.is_some() {
             return Err(ConfigError::at(
                 "config.driver.storage.lease_ttl_ms",
                 "is unused with concurrent_writes; omit the writer lease TTL",
             ));
         }
-        if !matches!(
-            metadata,
+        match &metadata {
             StorageProvider::FoundationDb {
                 lease_authority: mount_rs_sdk::FoundationDbLeaseAuthority::RevisionCas,
                 ..
             }
-        ) {
-            return Err(ConfigError::at(
-                "config.driver.storage.metadata.lease_authority",
-                "concurrent_writes requires FoundationDB metadata with lease_authority 'revision-cas'",
-            ));
+            | StorageProvider::Pglite { .. } => {}
+            StorageProvider::Sqlite { path } if sqlite_durable_path(path) => {}
+            StorageProvider::Sqlite { .. } => {
+                return Err(ConfigError::at(
+                    "config.driver.storage.metadata.path",
+                    "concurrent_writes SQLite metadata requires a durable local database path",
+                ));
+            }
+            _ => {
+                return Err(ConfigError::at(
+                    "config.driver.storage.metadata",
+                    "concurrent_writes requires SQLite, PGlite, or FoundationDB metadata with lease_authority 'revision-cas'",
+                ));
+            }
         }
-        if matches!(
-            &blocks,
-            StorageProvider::Memory | StorageProvider::Sqlite { .. }
-        ) {
-            return Err(ConfigError::at(
-                "config.driver.storage.blocks",
-                "concurrent_writes requires a shared block provider; memory and local SQLite blocks cannot serve independent mounts",
-            ));
+        match &blocks {
+            StorageProvider::Memory => {
+                return Err(ConfigError::at(
+                    "config.driver.storage.blocks",
+                    "concurrent_writes requires a shared block provider; memory blocks cannot serve independent mounts",
+                ));
+            }
+            StorageProvider::Sqlite { path }
+                if !matches!(&metadata, StorageProvider::Sqlite { .. })
+                    || !sqlite_durable_path(path) =>
+            {
+                return Err(ConfigError::at(
+                    "config.driver.storage.blocks",
+                    "concurrent_writes requires a shared block provider; local SQLite blocks require local SQLite metadata and a durable path on the same host",
+                ));
+            }
+            _ => {}
         }
     } else if matches!(
         metadata,
@@ -774,6 +907,51 @@ fn parse_provider(
                     .map(|value| required_value_bool(value, &format!("{path}.durable")))
                     .transpose()?
                     .unwrap_or(true),
+            }
+        }
+        "rustfs" => {
+            if !block_role {
+                return Err(ConfigError::at(
+                    path,
+                    "provider 'rustfs' is block-only; metadata RustFS is unsupported by mount-rs",
+                ));
+            }
+            reject_unknown(
+                object,
+                &[
+                    "kind",
+                    "endpoint",
+                    "bucket",
+                    "region",
+                    "prefix",
+                    "access_key_id",
+                    "secret_access_key",
+                    "durable",
+                ],
+                path,
+            )?;
+            let endpoint = required_nonempty_string(object, "endpoint", path)?;
+            validate_rustfs_endpoint(&endpoint, &format!("{path}.endpoint"))?;
+            StorageProvider::RustFs {
+                endpoint,
+                bucket: required_nonempty_string(object, "bucket", path)?,
+                region: required_nonempty_string(object, "region", path)?,
+                prefix: required_nonempty_string(object, "prefix", path)?,
+                access_key_id: required_env_reference(
+                    object,
+                    "access_key_id",
+                    &format!("{path}.access_key_id"),
+                )?,
+                secret_access_key: required_env_reference(
+                    object,
+                    "secret_access_key",
+                    &format!("{path}.secret_access_key"),
+                )?,
+                durable: object
+                    .get("durable")
+                    .map(|value| required_value_bool(value, &format!("{path}.durable")))
+                    .transpose()?
+                    .unwrap_or(false),
             }
         }
         "aws-s3" => {
@@ -1145,6 +1323,86 @@ fn validate_r2_endpoint(endpoint: &str, path: &str) -> Result<(), ConfigError> {
         ));
     }
     Ok(())
+}
+
+fn validate_rustfs_endpoint(endpoint: &str, path: &str) -> Result<(), ConfigError> {
+    validate_r2_endpoint(endpoint, path)?;
+    let (_, remainder) = endpoint.split_once("://").unwrap_or_default();
+    let authority = remainder.split('/').next().unwrap_or_default();
+    let suffix = remainder.strip_prefix(authority).unwrap_or_default();
+    if (!suffix.is_empty() && suffix != "/") || !rustfs_valid_authority(authority) {
+        return Err(ConfigError::at(
+            path,
+            "RustFS endpoint must be an HTTP(S) authority with optional trailing slash; paths, credentials, query, and fragment are forbidden",
+        ));
+    }
+    Ok(())
+}
+
+fn rustfs_debug_endpoint_authority(endpoint: &str) -> String {
+    let Some((scheme, remainder)) = endpoint.split_once("://") else {
+        return "<redacted>".to_owned();
+    };
+    let authority = remainder.split('/').next().unwrap_or_default();
+    if !matches!(scheme, "http" | "https")
+        || endpoint.contains('?')
+        || endpoint.contains('#')
+        || !rustfs_valid_authority(authority)
+    {
+        return "<redacted>".to_owned();
+    }
+    format!("{scheme}://{authority}")
+}
+
+fn rustfs_valid_authority(authority: &str) -> bool {
+    if authority.is_empty()
+        || !authority.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b':' | b'[' | b']')
+        })
+    {
+        return false;
+    }
+    let port = if let Some(bracketed) = authority.strip_prefix('[') {
+        let Some((host, suffix)) = bracketed.split_once(']') else {
+            return false;
+        };
+        if host.parse::<std::net::Ipv6Addr>().is_err() {
+            return false;
+        }
+        if suffix.is_empty() {
+            None
+        } else {
+            let Some(port) = suffix.strip_prefix(':') else {
+                return false;
+            };
+            Some(port)
+        }
+    } else {
+        if authority.contains(['[', ']']) {
+            return false;
+        }
+        let (host, port) = authority
+            .split_once(':')
+            .map_or((authority, None), |(host, port)| (host, Some(port)));
+        if host.is_empty()
+            || !host
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+        {
+            return false;
+        }
+        port
+    };
+    port.is_none_or(|port| {
+        !port.is_empty()
+            && port.bytes().all(|byte| byte.is_ascii_digit())
+            && port.parse::<u16>().is_ok_and(|value| value > 0)
+    })
+}
+
+fn sqlite_durable_path(path: &Path) -> bool {
+    let value = path.to_string_lossy();
+    !value.is_empty() && value != ":memory:" && !value.starts_with("file:")
 }
 
 fn is_local_http_authority(authority: &str) -> bool {
@@ -1782,12 +2040,13 @@ mod tests {
                             "durable": true
                         },
                         "blocks": {
-                            "kind": "r2",
+                            "kind": "rustfs",
                             "endpoint": "http://127.0.0.1:9878",
                             "bucket": "mount-rs-rustfs",
+                            "region": "us-east-1",
                             "prefix": "mount-rs/tidb-rustfs",
-                            "access_key_id": {"env": "R2_ACCESS_KEY_ID"},
-                            "secret_access_key": {"env": "R2_SECRET_ACCESS_KEY"}
+                            "access_key_id": {"env": "RUSTFS_ACCESS_KEY_ID"},
+                            "secret_access_key": {"env": "RUSTFS_SECRET_ACCESS_KEY"}
                         }
                     }
                 }
@@ -1802,11 +2061,11 @@ mod tests {
                     volume_key,
                     durable,
                 },
-            blocks: StorageProvider::R2 { .. },
+            blocks: StorageProvider::RustFs { .. },
             ..
         }) = spec.storage
         else {
-            panic!("expected TiDB metadata and RustFS-compatible R2 blocks");
+            panic!("expected TiDB metadata and RustFS blocks");
         };
         assert_eq!(connection.name, "MOUNT_RS_TIDB_URL");
         assert_eq!(volume_key, "cli-tidb-rustfs");
@@ -1828,12 +2087,13 @@ mod tests {
                             "lease_authority": "persisted-single-authority"
                         },
                         "blocks": {
-                            "kind": "r2",
+                            "kind": "rustfs",
                             "endpoint": "http://127.0.0.1:9878",
                             "bucket": "mount-rs-rustfs",
+                            "region": "us-east-1",
                             "prefix": "mount-rs/fdb-rustfs",
-                            "access_key_id": {"env": "R2_ACCESS_KEY_ID"},
-                            "secret_access_key": {"env": "R2_SECRET_ACCESS_KEY"}
+                            "access_key_id": {"env": "RUSTFS_ACCESS_KEY_ID"},
+                            "secret_access_key": {"env": "RUSTFS_SECRET_ACCESS_KEY"}
                         }
                     }
                 }
@@ -1849,11 +2109,11 @@ mod tests {
                     lease_authority,
                     ..
                 },
-            blocks: StorageProvider::R2 { .. },
+            blocks: StorageProvider::RustFs { .. },
             ..
         }) = spec.storage
         else {
-            panic!("expected FoundationDB metadata and RustFS-compatible R2 blocks");
+            panic!("expected FoundationDB metadata and RustFS blocks");
         };
         assert_eq!(cluster_file, Path::new("/tmp/config/fdb.cluster"));
         assert_eq!(volume_key, "cli-fdb-rustfs");
@@ -1991,6 +2251,199 @@ mod tests {
             assert!(error.message().contains("config.driver.storage.blocks"));
             assert!(error.message().contains("shared block"));
         }
+    }
+
+    #[test]
+    fn concurrent_sqlite_config_requires_local_durable_metadata_and_blocks() {
+        for (metadata, blocks) in [
+            (
+                serde_json::json!({"kind": "sqlite", "path": ":memory:"}),
+                serde_json::json!({"kind": "sqlite", "path": "blocks.sqlite"}),
+            ),
+            (
+                serde_json::json!({"kind": "sqlite", "path": "metadata.sqlite"}),
+                serde_json::json!({"kind": "memory"}),
+            ),
+            (
+                serde_json::json!({"kind": "pglite", "connection": {"env": "PGLITE_DATABASE_URL"}}),
+                serde_json::json!({"kind": "sqlite", "path": "blocks.sqlite"}),
+            ),
+        ] {
+            let config = serde_json::json!({
+                "version": 1,
+                "driver": {
+                    "kind": "splitstore",
+                    "storage": {
+                        "concurrent_writes": true,
+                        "metadata": metadata,
+                        "blocks": blocks
+                    }
+                }
+            });
+            assert!(parse_config_str(&config.to_string(), Path::new("/tmp")).is_err());
+        }
+        let valid = serde_json::json!({
+            "version": 1,
+            "driver": {
+                "kind": "splitstore",
+                "storage": {
+                    "concurrent_writes": true,
+                    "metadata": {"kind": "sqlite", "path": "metadata.sqlite"},
+                    "blocks": {"kind": "sqlite", "path": "blocks.sqlite"}
+                }
+            }
+        });
+        parse_config_str(&valid.to_string(), Path::new("/tmp"))
+            .expect("two local SQLite files support same-host concurrent mode");
+        let mut legacy = valid;
+        legacy["driver"]["storage"]["concurrent_writes"] = serde_json::json!(false);
+        legacy["driver"]["storage"]["metadata"]["path"] = serde_json::json!(":memory:");
+        parse_config_str(&legacy.to_string(), Path::new("/tmp"))
+            .expect("nonconcurrent SQLite path parsing remains compatible");
+    }
+
+    #[test]
+    fn rustfs_is_named_block_only_provider_with_environment_credentials() {
+        let config = serde_json::json!({
+            "version": 1,
+            "driver": {
+                "kind": "splitstore",
+                "storage": {
+                    "metadata": {"kind": "sqlite", "path": "metadata.sqlite"},
+                    "blocks": {
+                        "kind": "rustfs",
+                        "endpoint": "http://127.0.0.1:9878",
+                        "bucket": "mount-rs-test",
+                        "region": "us-east-1",
+                        "prefix": "mount-rs/test",
+                        "access_key_id": {"env": "RUSTFS_ACCESS_KEY_ID"},
+                        "secret_access_key": {"env": "RUSTFS_SECRET_ACCESS_KEY"}
+                    }
+                }
+            }
+        });
+        let spec = parse_config_str(&config.to_string(), Path::new("/tmp"))
+            .expect("RustFS block config should parse without opening backend");
+        assert!(matches!(
+            spec.storage.unwrap().blocks,
+            StorageProvider::RustFs { .. }
+        ));
+        let metadata = serde_json::json!({
+            "version": 1,
+            "driver": {
+                "kind": "splitstore",
+                "storage": {
+                    "metadata": config["driver"]["storage"]["blocks"],
+                    "blocks": {"kind": "memory"}
+                }
+            }
+        });
+        let error = parse_config_str(&metadata.to_string(), Path::new("/tmp"))
+            .expect_err("RustFS does not publish metadata revision CAS");
+        assert!(error.message().contains("block-only"));
+    }
+
+    #[test]
+    fn rustfs_durability_requires_an_explicit_caller_assertion() {
+        let mut config = serde_json::json!({
+            "version": 1,
+            "driver": {
+                "kind": "splitstore",
+                "storage": {
+                    "metadata": {"kind": "sqlite", "path": "metadata.sqlite"},
+                    "blocks": {
+                        "kind": "rustfs",
+                        "endpoint": "http://127.0.0.1:9878",
+                        "bucket": "mount-rs-test",
+                        "region": "us-east-1",
+                        "prefix": "mount-rs/test",
+                        "access_key_id": {"env": "RUSTFS_ACCESS_KEY_ID"},
+                        "secret_access_key": {"env": "RUSTFS_SECRET_ACCESS_KEY"}
+                    }
+                }
+            }
+        });
+        let spec = parse_config_str(&config.to_string(), Path::new("/tmp"))
+            .expect("RustFS durability defaults to caller-unasserted");
+        assert!(matches!(
+            spec.storage.unwrap().blocks,
+            StorageProvider::RustFs { durable: false, .. }
+        ));
+        config["driver"]["storage"]["blocks"]["durable"] = serde_json::json!(true);
+        let spec = parse_config_str(&config.to_string(), Path::new("/tmp"))
+            .expect("explicit RustFS durability assertion is accepted");
+        assert!(matches!(
+            spec.storage.unwrap().blocks,
+            StorageProvider::RustFs { durable: true, .. }
+        ));
+    }
+
+    #[test]
+    fn rustfs_endpoint_paths_fail_static_validation_without_echoing_them() {
+        let mut config = serde_json::json!({
+            "version": 1,
+            "driver": {
+                "kind": "splitstore",
+                "storage": {
+                    "metadata": {"kind": "sqlite", "path": "metadata.sqlite"},
+                    "blocks": {
+                        "kind": "rustfs",
+                        "endpoint": "https://example.invalid",
+                        "bucket": "mount-rs-test",
+                        "region": "us-east-1",
+                        "prefix": "mount-rs/test",
+                        "access_key_id": {"env": "RUSTFS_ACCESS_KEY_ID"},
+                        "secret_access_key": {"env": "RUSTFS_SECRET_ACCESS_KEY"}
+                    }
+                }
+            }
+        });
+        for endpoint in [
+            "https://example.invalid/tenant-secret",
+            "https://example.invalid//",
+            "https://example.invalid/%2F",
+            "https://example.invalid:tenant-secret",
+            "https://example.invalid:0",
+            "https://example.invalid:65536",
+        ] {
+            config["driver"]["storage"]["blocks"]["endpoint"] = serde_json::json!(endpoint);
+            let error = parse_config_str(&config.to_string(), Path::new("/tmp"))
+                .expect_err("RustFS endpoint paths must be rejected before provider open");
+            assert!(error.message().contains("endpoint"), "{error}");
+            assert!(!error.message().contains("tenant-secret"), "{error}");
+        }
+        config["driver"]["storage"]["blocks"]["endpoint"] =
+            serde_json::json!("https://example.invalid/");
+        parse_config_str(&config.to_string(), Path::new("/tmp"))
+            .expect("one optional trailing slash remains valid");
+        config["driver"]["storage"]["blocks"]["endpoint"] = serde_json::json!("https://[::1]:443/");
+        parse_config_str(&config.to_string(), Path::new("/tmp"))
+            .expect("bracketed IPv6 with a numeric port remains valid");
+    }
+
+    #[test]
+    fn rustfs_provider_debug_omits_endpoint_path_values() {
+        let mut provider = StorageProvider::RustFs {
+            endpoint: "https://example.invalid/tenant-secret".to_owned(),
+            bucket: "mount-rs-test".to_owned(),
+            region: "us-east-1".to_owned(),
+            prefix: "mount-rs/test".to_owned(),
+            access_key_id: EnvReference {
+                name: "RUSTFS_ACCESS_KEY_ID".to_owned(),
+            },
+            secret_access_key: EnvReference {
+                name: "RUSTFS_SECRET_ACCESS_KEY".to_owned(),
+            },
+            durable: false,
+        };
+        let debug = format!("{provider:?}");
+        assert!(debug.contains("https://example.invalid"));
+        assert!(!debug.contains("tenant-secret"), "{debug}");
+        if let StorageProvider::RustFs { endpoint, .. } = &mut provider {
+            *endpoint = "https://example.invalid:tenant-secret".to_owned();
+        }
+        let debug = format!("{provider:?}");
+        assert!(!debug.contains("tenant-secret"), "{debug}");
     }
 
     #[test]

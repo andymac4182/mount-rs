@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "mountpoint": "./mnt",
+  "transport": "nfs",
+  "driver": {
+    "kind": "splitstore",
+    "storage": {
+      "concurrent_writes": true,
+      "metadata": {
+        "kind": "sqlite",
+        "path": "/private/tmp/mount-rs-sqlite-concurrent/metadata.sqlite"
+      },
+      "blocks": {
+        "kind": "sqlite",
+        "path": "/private/tmp/mount-rs-sqlite-concurrent/blocks.sqlite"
+      },
+      "chunk_size_bytes": 65536
+    }
+  }
+}

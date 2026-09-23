@@ -52,6 +52,22 @@ choice does not provide that shared time authority.
 The default SDK build remains portable and returns ENOTSUP if a FoundationDB
 store is selected without the native feature or on an unsupported target.
 
+For opt-in `SplitOptions::with_concurrent_writes(true)`, choose SQLite,
+PGlite, or FoundationDB revision-CAS metadata. SQLite metadata and block
+files must be durable local files on the same host, with the same paths in
+every process; do not place either database on NFS or another network file
+system. PGlite needs one reachable server endpoint shared by all processes or
+hosts. R2, RustFS, AWS S3, PGlite, and FoundationDB can supply immutable
+blocks shared by remote writers. Local SQLite blocks are accepted only with
+local SQLite metadata; memory blocks are rejected for this mode.
+
+`StoreConfig::RustFs` is the separately named RustFS block provider. Supply
+its endpoint, signing region, bucket, prefix, and injected credentials; it
+does not provide the metadata revision authority. Concurrent mode retains
+tombstones and failed publication blocks until a distributed pin and safe
+reclamation protocol exists, so monitor storage growth on long-running
+volumes.
+
 TiDB TLS is also opt-in so the default graph remains small and portable:
 
 ~~~toml

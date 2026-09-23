@@ -12,6 +12,7 @@ pub use blocks::{R2BlockStore, R2BlockStoreErrorClass, R2BlockStoreStats};
 
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use mount_rs_core::{
@@ -19,8 +20,9 @@ use mount_rs_core::{
 };
 use mount_rs_persist::PersistedFs;
 use object_store::aws::{AmazonS3Builder, S3ConditionalPut};
+use object_store::client::ClientOptions;
 use object_store::path::Path as ObjectPath;
-use object_store::{ObjectStore, PutMode, PutOptions, PutPayload, UpdateVersion};
+use object_store::{ObjectStore, PutMode, PutOptions, PutPayload, RetryConfig, UpdateVersion};
 
 #[derive(Clone)]
 pub struct R2Config {
@@ -125,6 +127,14 @@ impl R2Config {
     }
 
     pub fn build_store(&self) -> Result<Arc<dyn ObjectStore>> {
+        self.build_store_with_probe_limits(false)
+    }
+
+    pub(crate) fn build_probe_store(&self) -> Result<Arc<dyn ObjectStore>> {
+        self.build_store_with_probe_limits(true)
+    }
+
+    fn build_store_with_probe_limits(&self, probe: bool) -> Result<Arc<dyn ObjectStore>> {
         self.validate()?;
         // `with_url` is a URL *parser* for a small set of AWS/R2 URL shapes;
         // it rejects ordinary HTTP endpoints used by local S3-compatible test
@@ -143,10 +153,25 @@ impl R2Config {
             .with_region("auto")
             .with_virtual_hosted_style_request(false)
             .with_conditional_put(S3ConditionalPut::ETagMatch);
+        if probe {
+            builder = builder
+                .with_client_options(
+                    ClientOptions::new()
+                        .with_timeout(Duration::from_secs(8))
+                        .with_connect_timeout(Duration::from_secs(3)),
+                )
+                .with_retry(RetryConfig {
+                    max_retries: 1,
+                    retry_timeout: Duration::from_secs(12),
+                    ..RetryConfig::default()
+                });
+        }
         if endpoint.starts_with("http://") {
             builder = builder.with_allow_http(true);
         }
-        let store = builder.build().map_err(backend_error)?;
+        let store = builder
+            .build()
+            .map_err(|_| FsError::backend("R2 signed object-store client could not be built"))?;
         Ok(Arc::new(store))
     }
 }

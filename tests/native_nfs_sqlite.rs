@@ -21,8 +21,12 @@ use mount_rs_nfs::{
 use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
 
 const RUN_ENV: &str = "MOUNT_RS_RUN_NATIVE_NFS_SQLITE";
+const ADVERSARIAL_ENV: &str = "MOUNT_RS_SQLITE_NFS_ADVERSARIAL";
+const SECOND_VIEW_ENV: &str = "MOUNT_RS_SQLITE_NFS_SECOND_VIEW";
+const UNSAFE_NOLOCKS_ENV: &str = "MOUNT_RS_SQLITE_NFS_UNSAFE_NOLOCKS";
 const MOUNT_TIMEOUT: Duration = Duration::from_secs(60);
 const SQLITE_TIMEOUT: Duration = Duration::from_secs(180);
+const ADVERSARIAL_TIMEOUT: Duration = Duration::from_secs(360);
 const UNMOUNT_TIMEOUT: Duration = Duration::from_secs(30);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(45);
 
@@ -344,6 +348,100 @@ async fn run_sqlite_fixture(mountpoint: &Path) -> Result<SqliteFixtureOutcome, S
     Ok(SqliteFixtureOutcome { wal })
 }
 
+async fn run_adversarial_fixture(
+    mountpoint: &Path,
+    second_view: Option<&Path>,
+    lock_only: bool,
+) -> Result<(), String> {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/sqlite_nfs_adversarial.py");
+    let workers =
+        std::env::var("MOUNT_RS_SQLITE_NFS_LOAD_WORKERS").unwrap_or_else(|_| "2".to_owned());
+    let transactions =
+        std::env::var("MOUNT_RS_SQLITE_NFS_LOAD_TRANSACTIONS").unwrap_or_else(|_| "8".to_owned());
+    let mut command = tokio::process::Command::new("python3");
+    command
+        .arg(&script)
+        .arg("--mount")
+        .arg(mountpoint)
+        .arg("--workers")
+        .arg(workers)
+        .arg("--transactions")
+        .arg(transactions)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    if let Some(view) = second_view {
+        command.arg("--second-view").arg(view);
+    }
+    if lock_only {
+        command.arg("--lock-only");
+    }
+    let output = tokio::time::timeout(ADVERSARIAL_TIMEOUT, command.output())
+        .await
+        .map_err(|_| format!("SQLite adversarial fixture exceeded {ADVERSARIAL_TIMEOUT:?}"))?
+        .map_err(|error| format!("could not start SQLite adversarial fixture: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stdout.trim().is_empty() {
+        eprint!("{stdout}");
+    }
+    if !stderr.trim().is_empty() {
+        eprint!("{stderr}");
+    }
+    if !output.status.success() {
+        return Err(format!(
+            "SQLite adversarial fixture failed with {}",
+            output.status
+        ));
+    }
+    Ok(())
+}
+
+async fn probe_unsafe_nolocks(
+    filesystem: &SplitFilesystem,
+    platform: NfsPlatform,
+) -> Result<(), String> {
+    // The default NFSv3 client disables NLM locking. Probe only a competing
+    // BEGIN IMMEDIATE on a test-owned file; the contender rolls back without
+    // writing even if it acquires a lock while the holder is active.
+    let mountpoint = tempfile::tempdir()
+        .map_err(|error| format!("creating unsafe no-lock NFS mountpoint failed: {error}"))?
+        .keep();
+    let mut cleanup = NativeNfsCleanup::new(mountpoint.clone(), platform);
+    let mount_result = tokio::time::timeout(
+        MOUNT_TIMEOUT,
+        mount_nfs(filesystem.clone(), &mountpoint, NfsMountOptions::default()),
+    )
+    .await;
+    match mount_result {
+        Ok(Ok(mount)) => cleanup.set_mount(mount),
+        Ok(Err(error)) => {
+            let cleanup_result = cleanup.cleanup().await;
+            return combine_errors(
+                Some(format!("unsafe no-lock NFS mount failed: {error}")),
+                cleanup_result.err(),
+                None,
+            )
+            .map_or(Ok(()), Err);
+        }
+        Err(_) => {
+            let cleanup_result = cleanup.cleanup().await;
+            return combine_errors(
+                Some(format!(
+                    "unsafe no-lock NFS mount exceeded {MOUNT_TIMEOUT:?}"
+                )),
+                cleanup_result.err(),
+                None,
+            )
+            .map_or(Ok(()), Err);
+        }
+    }
+    let probe = run_adversarial_fixture(&mountpoint, None, true).await;
+    let cleanup_result = cleanup.cleanup().await;
+    combine_errors(probe.err(), cleanup_result.err(), None).map_or(Ok(()), Err)
+}
+
 fn sqlite_mount_options() -> NfsMountOptions {
     NfsMountOptions::sqlite_single_host()
 }
@@ -497,7 +595,62 @@ async fn run_native_sqlite_acceptance() -> Result<(), String> {
         }
     }
 
+    let adversarial_requested = std::env::var(ADVERSARIAL_ENV).as_deref() == Ok("1");
+    let second_view_requested =
+        adversarial_requested && std::env::var(SECOND_VIEW_ENV).as_deref() == Ok("1");
+    let mut second_cleanup = None;
+    let second_view = if second_view_requested {
+        let view = tempfile::tempdir()
+            .map_err(|error| format!("creating second native NFS mountpoint failed: {error}"))?
+            .keep();
+        let mut owned = NativeNfsCleanup::new(view.clone(), platform);
+        let second_result = tokio::time::timeout(
+            MOUNT_TIMEOUT,
+            mount_nfs(filesystem.clone(), &view, sqlite_mount_options()),
+        )
+        .await;
+        match second_result {
+            Ok(Ok(mount)) => owned.set_mount(mount),
+            Ok(Err(error)) => {
+                let _ = owned.cleanup().await;
+                let _ = cleanup.cleanup().await;
+                let _ = filesystem.shutdown().await;
+                return Err(format!("second native NFS mount failed: {error}"));
+            }
+            Err(_) => {
+                let _ = owned.cleanup().await;
+                let _ = cleanup.cleanup().await;
+                let _ = filesystem.shutdown().await;
+                return Err(format!(
+                    "second native NFS mount exceeded {MOUNT_TIMEOUT:?}"
+                ));
+            }
+        }
+        second_cleanup = Some(owned);
+        Some(view)
+    } else {
+        None
+    };
+
     let fixture_result = run_sqlite_fixture(&mountpoint).await;
+    let adversarial_result = if fixture_result.is_ok() && adversarial_requested {
+        run_adversarial_fixture(&mountpoint, second_view.as_deref(), false).await
+    } else {
+        Ok(())
+    };
+    let unsafe_nolocks_result = if fixture_result.is_ok()
+        && adversarial_requested
+        && std::env::var(UNSAFE_NOLOCKS_ENV).as_deref() == Ok("1")
+    {
+        probe_unsafe_nolocks(&filesystem, platform).await
+    } else {
+        Ok(())
+    };
+    let second_cleanup_result = if let Some(owned) = second_cleanup.as_mut() {
+        owned.cleanup().await
+    } else {
+        Ok(())
+    };
     let cleanup_result = cleanup.cleanup().await;
     let shutdown_result = filesystem.shutdown().await;
     if let Some(error) = combine_errors(
@@ -505,9 +658,23 @@ async fn run_native_sqlite_acceptance() -> Result<(), String> {
             .as_ref()
             .err()
             .map(|error| format!("SQLite hosting: {error}")),
-        cleanup_result
-            .err()
-            .map(|error| format!("cleanup: {error}")),
+        combine_errors(
+            adversarial_result
+                .err()
+                .map(|error| format!("SQLite adversarial hosting: {error}")),
+            combine_errors(
+                unsafe_nolocks_result
+                    .err()
+                    .map(|error| format!("unsafe no-lock probe: {error}")),
+                second_cleanup_result
+                    .err()
+                    .map(|error| format!("second-view cleanup: {error}")),
+                cleanup_result
+                    .err()
+                    .map(|error| format!("cleanup: {error}")),
+            ),
+            None,
+        ),
         shutdown_result
             .err()
             .map(|error| format!("split-store shutdown: {error}")),

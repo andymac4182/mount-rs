@@ -6,6 +6,7 @@
 
 use async_trait::async_trait;
 use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
+use mount_rs_core::chunking::{Chunker, ChunkerConfig, FixedSizeChunker};
 use mount_rs_core::storage::{
     BlockId, BlockStore, LoadedMetadata, MetadataStore, Namespace, NodeData, WriterLease,
 };
@@ -21,7 +22,7 @@ use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Default)]
 struct CasMetadata {
@@ -30,6 +31,7 @@ struct CasMetadata {
     ambiguous_after_apply: Arc<AtomicBool>,
     forced_conflicts: Arc<AtomicUsize>,
     observed_conflicts: Arc<AtomicUsize>,
+    hold_conflicts_until: Arc<Mutex<Option<Instant>>>,
 }
 
 #[derive(Default)]
@@ -54,6 +56,10 @@ impl CasMetadata {
 
     fn force_one_known_conflict(&self) {
         self.forced_conflicts.store(1, Ordering::SeqCst);
+    }
+
+    fn hold_known_conflicts_for(&self, duration: Duration) {
+        *self.hold_conflicts_until.lock().expect("CAS hold lock") = Some(Instant::now() + duration);
     }
 
     fn swap_entries_on_next_cas(&self, first: &str, second: &str) {
@@ -234,6 +240,26 @@ impl MetadataStore for CasMetadata {
             self.observed_conflicts.fetch_add(1, Ordering::SeqCst);
             return Err(FsError::new(ErrorCode::Eagain));
         }
+        let held = self
+            .hold_conflicts_until
+            .lock()
+            .map_err(|_| FsError::backend("CAS hold lock poisoned"))?
+            .is_some_and(|until| Instant::now() < until);
+        if state.revision != 0 && held {
+            // A busy remote writer keeps advancing the same valid namespace
+            // while this caller races it. Every EAGAIN is a known noncommit.
+            state.revision = state
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+            let unchanged = state
+                .namespace
+                .clone()
+                .ok_or_else(|| FsError::backend("CAS hold needs a namespace"))?;
+            state.published.push(unchanged);
+            self.observed_conflicts.fetch_add(1, Ordering::SeqCst);
+            return Err(FsError::new(ErrorCode::Eagain));
+        }
         if state.revision != 0
             && self
                 .forced_conflicts
@@ -290,6 +316,11 @@ impl BlockStore for SharedBlocks {
         false
     }
 
+    async fn prepare_concurrent_mode(&self) -> Result<()> {
+        // Every coordinator in this test shares the same Arc-backed block map.
+        Ok(())
+    }
+
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
         let mut text = String::from("test:");
         for byte in bytes {
@@ -325,6 +356,90 @@ impl BlockStore for SharedBlocks {
             .remove(id)
             .map(|_| ())
             .ok_or_else(|| FsError::new(ErrorCode::Enoent))
+    }
+}
+
+#[derive(Clone, Default)]
+struct RejectingConcurrentBlocks(SharedBlocks);
+
+#[async_trait]
+impl BlockStore for RejectingConcurrentBlocks {
+    fn durable(&self) -> bool {
+        self.0.durable()
+    }
+
+    async fn prepare_concurrent_mode(&self) -> Result<()> {
+        Err(FsError::new(ErrorCode::Enotsup).with_message("block backing cannot share writes"))
+    }
+
+    async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
+        self.0.put(bytes).await
+    }
+
+    async fn get(&self, id: &BlockId) -> Result<Vec<u8>> {
+        self.0.get(id).await
+    }
+
+    async fn flush(&self) -> Result<()> {
+        self.0.flush().await
+    }
+
+    async fn delete(&self, id: &BlockId) -> Result<()> {
+        self.0.delete(id).await
+    }
+}
+
+/// Simulates another coordinator committing an unrelated namespace revision
+/// during this coordinator's immutable block preparation.
+#[derive(Clone)]
+struct RevisionAdvancingBlocks {
+    metadata: CasMetadata,
+    blocks: SharedBlocks,
+    puts: Arc<AtomicUsize>,
+    next_default_chunker: Arc<Mutex<Option<ChunkerConfig>>>,
+}
+
+#[async_trait]
+impl BlockStore for RevisionAdvancingBlocks {
+    fn durable(&self) -> bool {
+        false
+    }
+
+    async fn prepare_concurrent_mode(&self) -> Result<()> {
+        self.blocks.prepare_concurrent_mode().await
+    }
+
+    async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
+        let id = self.blocks.put(bytes).await?;
+        self.puts.fetch_add(1, Ordering::SeqCst);
+        let loaded = self.metadata.load().await?;
+        let mut namespace = loaded
+            .namespace
+            .ok_or_else(|| FsError::backend("test root has not been initialized"))?;
+        if let Some(chunker) = self
+            .next_default_chunker
+            .lock()
+            .map_err(|_| FsError::backend("test chunker lock poisoned"))?
+            .take()
+        {
+            namespace.default_chunker = chunker;
+        }
+        self.metadata
+            .publish_if_revision(loaded.revision, namespace)
+            .await?;
+        Ok(id)
+    }
+
+    async fn get(&self, id: &BlockId) -> Result<Vec<u8>> {
+        self.blocks.get(id).await
+    }
+
+    async fn flush(&self) -> Result<()> {
+        self.blocks.flush().await
+    }
+
+    async fn delete(&self, id: &BlockId) -> Result<()> {
+        self.blocks.delete(id).await
     }
 }
 
@@ -413,6 +528,25 @@ fn assert_guarded_applied(fs: &TestFs, request: GuardedMutation) {
 }
 
 #[test]
+fn rejected_shared_block_backing_does_not_convert_metadata() {
+    let metadata = CasMetadata::default();
+    let error = block_on(ChunkedFs::open(
+        metadata.clone(),
+        RejectingConcurrentBlocks::default(),
+        ChunkedOptions::fixed("writer-a", 4096)
+            .unwrap()
+            .with_concurrent_writes(true),
+    ))
+    .err()
+    .expect("block backing must reject concurrent open");
+    assert_eq!(error.code, ErrorCode::Enotsup);
+    let loaded = block_on(metadata.load()).unwrap();
+    assert_eq!(loaded.revision, 0);
+    assert!(loaded.namespace.is_none());
+    assert!(!metadata.lock().unwrap().concurrent_mode);
+}
+
+#[test]
 fn two_live_coordinators_observe_each_others_creates() {
     let (_, first, second) = open_two();
     block_on(first.write_file("/alpha", b"A-one")).expect("first creates alpha");
@@ -475,6 +609,114 @@ fn forced_cas_conflict_replays_disjoint_writes_to_one_inode() {
     block_on(second_handle.close()).expect("close second handle");
     block_on(first.shutdown()).expect("first shuts down");
     block_on(second.shutdown()).expect("second shuts down");
+}
+
+#[test]
+fn whole_file_replay_reuses_prepared_blocks_after_remote_block_put_revision() {
+    let metadata = CasMetadata::default();
+    let blocks = RevisionAdvancingBlocks {
+        metadata: metadata.clone(),
+        blocks: SharedBlocks::default(),
+        puts: Arc::new(AtomicUsize::new(0)),
+        next_default_chunker: Arc::new(Mutex::new(None)),
+    };
+    let fs = block_on(ChunkedFs::open(
+        metadata,
+        blocks.clone(),
+        ChunkedOptions::fixed("writer-a", 4)
+            .expect("fixed chunker")
+            .with_concurrent_writes(true),
+    ))
+    .expect("open concurrent coordinator");
+
+    // The first put advances a remote revision after optimistic preparation,
+    // forcing whole-file replay. Repeating the put on every replay attempt
+    // would make every snapshot stale before its CAS.
+    block_on(fs.write_file("/hot", b"DATA"))
+        .expect("whole-file replay rebases after block preparation");
+    assert_eq!(blocks.puts.load(Ordering::SeqCst), 1);
+    let handle = block_on(fs.open("/hot", "r", 0)).expect("open committed file");
+    let mut bytes = [0_u8; 4];
+    assert_eq!(block_on(handle.read(&mut bytes, Some(0))).unwrap(), 4);
+    assert_eq!(&bytes, b"DATA");
+    block_on(handle.close()).expect("close committed file");
+    block_on(fs.shutdown()).expect("close coordinator");
+}
+
+#[test]
+fn whole_file_replay_reprepares_blocks_when_default_chunker_changes() {
+    let metadata = CasMetadata::default();
+    let blocks = RevisionAdvancingBlocks {
+        metadata: metadata.clone(),
+        blocks: SharedBlocks::default(),
+        puts: Arc::new(AtomicUsize::new(0)),
+        next_default_chunker: Arc::new(Mutex::new(Some(
+            FixedSizeChunker::new(8).unwrap().config(),
+        ))),
+    };
+    let fs = block_on(ChunkedFs::open(
+        metadata.clone(),
+        blocks.clone(),
+        ChunkedOptions::fixed("writer-a", 4)
+            .expect("fixed chunker")
+            .with_concurrent_writes(true),
+    ))
+    .expect("open concurrent coordinator");
+
+    block_on(fs.write_file("/hot", b"ABCDEFGH"))
+        .expect("replay must publish bytes under the new chunker");
+    assert_eq!(blocks.puts.load(Ordering::SeqCst), 3);
+    let loaded = block_on(metadata.load()).unwrap();
+    let namespace = loaded.namespace.unwrap();
+    let root = &namespace.nodes[&namespace.root];
+    let NodeData::Directory { entries } = &root.data else {
+        panic!("root must remain a directory");
+    };
+    let inode = entries
+        .iter()
+        .find(|entry| entry.name == "hot")
+        .unwrap()
+        .inode;
+    let NodeData::File(layout) = &namespace.nodes[&inode].data else {
+        panic!("hot must be a file");
+    };
+    assert_eq!(layout.chunker, FixedSizeChunker::new(8).unwrap().config());
+    assert_eq!(layout.extents.len(), 1);
+    let handle = block_on(fs.open("/hot", "r", 0)).unwrap();
+    let mut bytes = [0_u8; 8];
+    assert_eq!(block_on(handle.read(&mut bytes, Some(0))).unwrap(), 8);
+    assert_eq!(&bytes, b"ABCDEFGH");
+    block_on(handle.close()).unwrap();
+    block_on(fs.shutdown()).unwrap();
+}
+
+#[test]
+fn sustained_known_conflicts_wait_for_other_writer_to_quiet() {
+    let (metadata, first, second) = open_two();
+    metadata.hold_known_conflicts_for(Duration::from_millis(100));
+    let started = Instant::now();
+    block_on(first.write_file("/waiting", b"DATA"))
+        .expect("bounded backoff should outlast a short hot writer");
+    assert!(started.elapsed() >= Duration::from_millis(100));
+    assert!(metadata.conflict_count() > 0);
+    assert_eq!(read_file(&second, "/waiting"), b"DATA");
+    block_on(first.shutdown()).unwrap();
+    block_on(second.shutdown()).unwrap();
+}
+
+#[test]
+fn sustained_known_conflicts_do_not_starve_a_rename() {
+    let (metadata, first, second) = open_two();
+    block_on(first.write_file("/source", b"DATA")).expect("seed source");
+    metadata.hold_known_conflicts_for(Duration::from_millis(1_500));
+    let started = Instant::now();
+    block_on(first.rename("/source", "/destination"))
+        .expect("bounded retry window should outlast a long remote writer burst");
+    assert!(started.elapsed() >= Duration::from_millis(1_500));
+    assert!(metadata.conflict_count() > 0);
+    assert_eq!(read_file(&second, "/destination"), b"DATA");
+    block_on(first.shutdown()).unwrap();
+    block_on(second.shutdown()).unwrap();
 }
 
 #[test]

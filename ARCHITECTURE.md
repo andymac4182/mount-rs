@@ -6,15 +6,16 @@ Transport crates and the napi-rs/CLI frontends consume the filesystem contract.
 
 ## Provider roles
 
-| Provider | Metadata | Immutable blocks | Durability |
-| --- | --- | --- | --- |
-| Memory | Yes | Yes | Volatile |
-| SQLite | Yes | Yes | Persistent file-backed database; memory databases are volatile |
-| PGlite | Yes | Yes | Explicit caller assertion, volatile by default |
-| R2 / S3-compatible endpoint | No | Yes | Explicit caller assertion for completed remote object writes; live service acceptance still required |
-| AWS S3 | No | Yes | Explicit caller assertion for the object-store block adapter; actual AWS S3 acceptance remains separate |
-| TiDB | Yes | Yes | Explicit caller assertion, volatile by default; depends on the TiDB/TiKV deployment |
-| FoundationDB | Yes | Yes | Explicit caller assertion, volatile by default; native client and either lease authority or revision-CAS mode are opt-in |
+| Provider | Metadata | Immutable blocks | Concurrent metadata authority | Durability |
+| --- | --- | --- | --- | --- |
+| Memory | Yes | Yes | No; two mounts can share one opened driver | Volatile |
+| SQLite | Yes | Yes | Yes, through one local file on the same host | Persistent file-backed database; memory databases are volatile |
+| PGlite | Yes | Yes | Yes, through one socket server | Explicit caller assertion, volatile by default |
+| Cloudflare R2 | No | Yes | No | Explicit caller assertion for completed remote object writes; live service acceptance still required |
+| RustFS | No | Yes | No | Explicit caller assertion for completed remote object writes; live service acceptance still required |
+| AWS S3 | No | Yes | No | Explicit caller assertion for the object-store block adapter; actual AWS S3 acceptance remains separate |
+| TiDB | Yes | Yes | No; exclusive-writer mode only | Explicit caller assertion, volatile by default; depends on the TiDB/TiKV deployment |
+| FoundationDB | Yes | Yes | Yes, with the opt-in revision-CAS authority | Explicit caller assertion, volatile by default; native client and either lease authority or revision-CAS mode are opt-in |
 
 Metadata and blocks can use different providers or independent database files.
 Metadata contains inode attributes, directory entries and block references, not
@@ -43,24 +44,44 @@ barrier failure can leave an uncertain commit; the caller receives an error,
 the instance stops accepting operations, and reopening loads authoritative
 metadata. An error is not a promise that a transaction never reached storage.
 
-The experimental, opt-in FoundationDB concurrent-writer mode lets two
-coordinators open a fresh volume without a long writer lease. The provider
-persists a write-mode marker and a legacy-key sentinel so older
-exclusive-writer clients fail before claiming that volume. Each client reloads
-the authoritative namespace before filesystem operations. A FoundationDB
-transaction publishes metadata chunks and the manifest only if the expected
-manifest revision still matches. A known `EAGAIN` conflict permits a bounded
+The experimental, opt-in concurrent-writer mode lets independent coordinators
+open a fresh volume without a long writer lease. SQLite, PGlite and
+FoundationDB each persist a write-mode marker and fence legacy lease clients
+before opening the namespace. Existing exclusive-writer state requires an
+explicit offline migration. Each coordinator reloads the authoritative
+namespace before operations and publishes only if the expected revision still
+matches. SQLite uses an immediate transaction, PGlite uses one atomic
+PostgreSQL-wire update, and FoundationDB uses a transaction containing the
+metadata chunks and manifest. A known `EAGAIN` conflict permits a bounded
 retry after reloading and rebuilding the operation. An ambiguous storage
-error fails closed and is never treated as a
-known non-commit. Local namespace state changes only after publication is
-acknowledged. The mode is available only on a fresh prefix: an existing lease
-or fence key requires an explicit offline migration. All writers must use the
-same shared block backing: independent memory or local SQLite block stores
-cannot supply bytes referenced by another writer's metadata. The CLI rejects
-`memory` and `sqlite` blocks in this mode. The final macOS native
-two-process case passed 1/1 on the guarded source on 2026-09-23. One CLI
-serving two FoundationDB mounts also passed 1/1. Cross-host behavior has not
-been verified.
+error fails closed; it is never treated as a known non-commit. Local namespace
+state changes only after publication is acknowledged.
+
+All writers must read the same immutable blocks. Memory blocks are rejected.
+An injected object-store client is rejected for concurrent startup even when
+its caller declares durability. The named R2, RustFS and AWS S3 config-built
+clients perform a bounded signed create/read probe under a reserved object in
+the selected prefix before metadata is converted to the concurrent marker.
+The probe checks service access at startup; every writer must still choose the
+same bucket and prefix. The reserved object is retained and ignored by block
+reconciliation.
+Local SQLite blocks are accepted only with SQLite metadata when every process
+uses the same file paths on one host. Keep those database files on local disk
+outside every mountpoint; SQLite provider databases on NFS or SMB are outside
+this mode. PGlite clients use one PostgreSQL-wire server reached through TCP
+or a Unix socket and the same volume keys; two CLIs using PGlite for both
+metadata and blocks need at least four server connection slots. The native
+two-CLI test used TCP loopback to one server. R2, RustFS,
+AWS S3, PGlite, and FoundationDB supply block stores that can be reached by
+separate hosts. RustFS is block-only and needs SQLite, PGlite, or FoundationDB
+for metadata; PGlite or FoundationDB is the cross-host pairing. Local macOS
+native tests have exercised both one-CLI/two-view and two-CLI writable mounts
+on local SQLite and PGlite backing, and two-CLI mounts with FoundationDB or
+PGlite metadata paired with RustFS blocks.
+Cross-host physical behavior has not been verified.
+The SQLite local two-CLI DELETE and WAL smoke checks passed, but WAL backing
+is not qualified until the bundled SQLite 3.46 is upgraded past its rare
+[WAL-reset bug](https://www.sqlite.org/wal.html#the_wal_reset_bug).
 
 Concurrent mode does not yet have distributed open-file pins or safe block
 reclamation. It keeps detached file tombstones for remote open handles,
@@ -77,8 +98,9 @@ not watch notifications, control write conflicts.
 
 One CLI can expose the same opened filesystem at several writable NFS
 mountpoints with `--also-mountpoint`. Two independent CLIs can share a fresh
-FoundationDB volume only with `concurrent_writes: true`, FoundationDB metadata
-using `revision-cas`, and the same shared immutable block store. Those two
+volume with `concurrent_writes: true`, CAS-capable SQLite, PGlite, or
+FoundationDB metadata, and block storage visible to both. SQLite backing is
+same-host only; PGlite clients connect to one socket server. These
 arrangements use the same NFSv3 identity safeguards.
 
 An NFS file handle identifies an inode, not its last path. In a shared view,
@@ -149,6 +171,12 @@ rollback/integrity checks and fresh CLI reopen. Those checks do not establish
 power-loss behavior, distributed multi-host SQLite locking, SQLite safety over
 every transport, or live R2 hosting. Do not infer those guarantees from
 userspace driver tests.
+The adversarial two-view NFS probe found a lock bypass: a second mount acquired
+`BEGIN IMMEDIATE` while the first held an uncommitted update on the same inner
+SQLite file. The contender rolled back without writing. SQLite requested WAL
+through the NFS view but selected DELETE. Do not treat two shared NFS views as
+a supported host for one SQLite application database; the local SQLite
+*provider* files remain outside the mounted views.
 Linux FUSE also passes injected block-write, block-barrier, metadata-publication
 and metadata-barrier failures in both journal modes: SQLite receives an error,
 and fresh mounts recover valid database contents. These controlled provider

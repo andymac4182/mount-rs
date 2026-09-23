@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "mountpoint": "./mnt",
+  "transport": "nfs",
+  "driver": {
+    "kind": "splitstore",
+    "storage": {
+      "concurrent_writes": true,
+      "metadata": {
+        "kind": "foundationdb",
+        "cluster_file": "/etc/foundationdb/fdb.cluster",
+        "volume_key": "mount-rs/foundationdb-rustfs-concurrent",
+        "durable": true,
+        "lease_authority": "revision-cas"
+      },
+      "blocks": {
+        "kind": "rustfs",
+        "endpoint": "http://127.0.0.1:9878",
+        "bucket": "mount-rs-rustfs",
+        "region": "us-east-1",
+        "prefix": "mount-rs/foundationdb-rustfs-concurrent",
+        "access_key_id": {
+          "env": "RUSTFS_ACCESS_KEY_ID"
+        },
+        "secret_access_key": {
+          "env": "RUSTFS_SECRET_ACCESS_KEY"
+        },
+        "durable": true
+      },
+      "chunk_size_bytes": 65536
+    }
+  }
+}

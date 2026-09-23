@@ -11,3 +11,8 @@ Use `AwsS3BlockStore::from_config(&config, prefix)` for durable AWS blocks, or
 client and an explicit durability declaration. The shared object-store block
 adapter owns content addressing, conditional creation, diagnostics, and scoped
 reconciliation. Namespace metadata is supplied by a separate provider.
+
+`AwsS3BlockStore::from_config_with_durable` keeps an explicit durability
+setting. Configured clients run a bounded signed create/read probe under the
+same block prefix before concurrent metadata publication. Injected `new`
+clients can run in exclusive mode and reject concurrent startup.

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { promises as fs } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const DRIVERS = new Set(["memory", "host"]);
 const TRANSPORTS = new Set(["auto", "fuse", "9p", "nfs"]);
@@ -209,6 +209,134 @@ function configPath(value, label, baseDirectory) {
   return resolve(baseDirectory, configString(value, label));
 }
 
+async function canonicalPathCandidate(value) {
+  let ancestor = resolve(value);
+  const missing = [];
+  for (;;) {
+    try {
+      return resolve(await fs.realpath(ancestor), ...missing.reverse());
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        throw new CliConfigError("cannot resolve concurrent SQLite backing or mountpoint safely");
+      }
+      const parent = dirname(ancestor);
+      if (parent === ancestor) {
+        throw new CliConfigError("cannot resolve concurrent SQLite backing or mountpoint safely");
+      }
+      missing.push(basename(ancestor));
+      ancestor = parent;
+    }
+  }
+}
+
+function pathIsAtOrBelow(parent, child) {
+  const suffix = relative(parent, child);
+  return suffix === "" || (suffix !== ".." && !suffix.startsWith(`..${sep}`) && !isAbsolute(suffix));
+}
+
+async function ensureMountpointForValidation(mountpoint) {
+  let firstCreated;
+  try {
+    const status = await fs.stat(mountpoint);
+    if (!status.isDirectory()) throw new CliConfigError("concurrent SQLite mountpoint must be a directory");
+  } catch (error) {
+    if (error instanceof CliConfigError) throw error;
+    if (error?.code !== "ENOENT") {
+      throw new CliConfigError("cannot inspect concurrent SQLite mountpoint safely");
+    }
+    try {
+      firstCreated = await fs.mkdir(mountpoint, { recursive: true });
+    } catch {
+      throw new CliConfigError("cannot inspect concurrent SQLite mountpoint safely");
+    }
+  }
+  try {
+    const status = await fs.stat(mountpoint);
+    if (!status.isDirectory()) throw new Error("mountpoint is not a directory");
+    return { firstCreated, status };
+  } catch {
+    await removeCreatedMountpoint(mountpoint, firstCreated);
+    throw new CliConfigError("cannot inspect concurrent SQLite mountpoint safely");
+  }
+}
+
+async function removeCreatedMountpoint(mountpoint, firstCreated) {
+  if (!firstCreated) return;
+  let current = resolve(mountpoint);
+  const first = resolve(firstCreated);
+  for (;;) {
+    try {
+      await fs.rmdir(current);
+    } catch {
+      return; // Leave directories another process has filled or mounted.
+    }
+    if (current === first) return;
+    const parent = dirname(current);
+    if (parent === current) return;
+    current = parent;
+  }
+}
+
+async function backingTouchesMountpoint(backingPath, mountStatus, symlinkDepth = 0) {
+  if (symlinkDepth > 32) {
+    throw new CliConfigError("cannot inspect concurrent SQLite backing safely");
+  }
+  let current = resolve(backingPath);
+  for (;;) {
+    try {
+      const linkStatus = await fs.lstat(current);
+      if (linkStatus.isSymbolicLink()) {
+        const parent = await fs.realpath(dirname(current));
+        const target = resolve(parent, await fs.readlink(current));
+        if (await backingTouchesMountpoint(target, mountStatus, symlinkDepth + 1)) return true;
+      }
+    } catch (error) {
+      if (error instanceof CliConfigError) throw error;
+      if (error?.code !== "ENOENT") {
+        throw new CliConfigError("cannot inspect concurrent SQLite backing safely");
+      }
+    }
+    try {
+      const status = await fs.stat(current);
+      if (status.dev === mountStatus.dev && status.ino === mountStatus.ino) return true;
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        throw new CliConfigError("cannot inspect concurrent SQLite backing safely");
+      }
+    }
+    const parent = dirname(current);
+    if (parent === current) return false;
+    current = parent;
+  }
+}
+
+async function validateConcurrentSqliteMountpoint(provider, mountpoint, checkOnly) {
+  const chunked = provider?.chunked;
+  if (!chunked?.concurrentWrites || !mountpoint) return;
+  if (chunked.metadata.kind !== "sqlite" && chunked.blocks.kind !== "sqlite") return;
+  const prepared = process.platform === "darwin"
+    ? await ensureMountpointForValidation(mountpoint)
+    : undefined;
+  let accepted = false;
+  try {
+    const mountLocation = await canonicalPathCandidate(mountpoint);
+    for (const role of ["metadata", "blocks"]) {
+      const backing = chunked[role];
+      if (backing?.kind !== "sqlite") continue;
+      const backingLocation = await canonicalPathCandidate(backing.uri);
+      if (pathIsAtOrBelow(mountLocation, backingLocation)
+          || (prepared && await backingTouchesMountpoint(backing.uri, prepared.status))) {
+        throw new CliConfigError(`concurrent SQLite ${role} backing must be outside the native mountpoint`);
+      }
+    }
+    accepted = true;
+  } finally {
+    if (prepared && (checkOnly || !accepted)) {
+      await removeCreatedMountpoint(mountpoint, prepared.firstCreated);
+    }
+  }
+}
+
 function configCredential(value, label, resolveValue) {
   const reference = configObject(value, label);
   const name = configString(reference.env, `${label}.env`);
@@ -264,15 +392,15 @@ function configStore(value, role, baseDirectory, resolveValue) {
       store.lease_authority,
       `driver.storage.${role}.lease_authority`,
     );
-    if (!["persisted-single-authority", "shared-provider"].includes(leaseAuthority)) {
+    if (!["persisted-single-authority", "shared-provider", "revision-cas"].includes(leaseAuthority)) {
       throw new CliConfigError(
-        `driver.storage.${role}.lease_authority must be persisted-single-authority or shared-provider`,
+        `driver.storage.${role}.lease_authority must be persisted-single-authority, shared-provider, or revision-cas`,
       );
     }
     if (leaseAuthority === "shared-provider" && store.authority_prefix === undefined) {
       throw new CliConfigError(`driver.storage.${role}.authority_prefix is required for shared-provider`);
     }
-    if (leaseAuthority === "persisted-single-authority" && store.authority_prefix !== undefined) {
+    if (leaseAuthority !== "shared-provider" && store.authority_prefix !== undefined) {
       throw new CliConfigError(`driver.storage.${role}.authority_prefix is only valid for shared-provider`);
     }
     return {
@@ -309,6 +437,25 @@ function configStore(value, role, baseDirectory, resolveValue) {
       durable: configBoolean(store.durable, "driver.storage.blocks.durable", true),
     };
   }
+  if (kind === "rustfs") {
+    if (role !== "blocks") {
+      throw new CliConfigError("RustFS is a block-only provider; metadata needs SQLite, PGlite, or FoundationDB revision CAS");
+    }
+    return {
+      kind: "rustfs",
+      endpoint: configString(store.endpoint, "driver.storage.blocks.endpoint"),
+      bucket: configString(store.bucket, "driver.storage.blocks.bucket"),
+      region: configString(store.region, "driver.storage.blocks.region"),
+      key: configString(store.prefix, "driver.storage.blocks.prefix"),
+      accessKeyId: configCredential(store.access_key_id, "driver.storage.blocks.access_key_id", resolveValue),
+      secretAccessKey: configCredential(
+        store.secret_access_key,
+        "driver.storage.blocks.secret_access_key",
+        resolveValue,
+      ),
+      durable: configBoolean(store.durable, "driver.storage.blocks.durable", false),
+    };
+  }
   throw new CliConfigError(`unknown provider '${kind}' for ${role}`);
 }
 
@@ -339,11 +486,43 @@ function configDriver(driver, baseDirectory, resolveValue) {
       if (storage.metadata === undefined || storage.blocks === undefined) {
         throw new CliConfigError("driver.storage requires metadata and blocks providers");
       }
+      const metadata = configStore(storage.metadata, "metadata", baseDirectory, resolveValue);
+      const blocks = configStore(storage.blocks, "blocks", baseDirectory, resolveValue);
+      const concurrentWrites = configBoolean(
+        storage.concurrent_writes,
+        "driver.storage.concurrent_writes",
+        false,
+      );
+      if (concurrentWrites) {
+        for (const role of ["metadata", "blocks"]) {
+          const raw = storage[role];
+          if (raw.kind === "sqlite"
+              && (raw.path === ":memory:" || (typeof raw.path === "string" && raw.path.startsWith("file:")))) {
+            throw new CliConfigError(`driver.storage.${role}.path must name a durable local database file for concurrent_writes`);
+          }
+        }
+        if (storage.lease_ttl_ms !== undefined) {
+          throw new CliConfigError("driver.storage.lease_ttl_ms is unused with concurrent_writes");
+        }
+        if (!(
+          (metadata.kind === "foundationdb" && metadata.leaseAuthority === "revision-cas")
+          || metadata.kind === "pglite"
+          || metadata.kind === "sqlite"
+        )) {
+          throw new CliConfigError("concurrent_writes requires SQLite, PGlite, or FoundationDB revision-CAS metadata");
+        }
+        if (blocks.kind === "memory" || (blocks.kind === "sqlite" && metadata.kind !== "sqlite")) {
+          throw new CliConfigError("concurrent_writes requires blocks visible to every writer; local SQLite blocks need local SQLite metadata on one host");
+        }
+      } else if (metadata.kind === "foundationdb" && metadata.leaseAuthority === "revision-cas") {
+        throw new CliConfigError("FoundationDB revision-cas metadata requires concurrent_writes");
+      }
       return {
         kind,
         chunked: {
-          metadata: configStore(storage.metadata, "metadata", baseDirectory, resolveValue),
-          blocks: configStore(storage.blocks, "blocks", baseDirectory, resolveValue),
+          metadata,
+          blocks,
+          concurrentWrites,
           chunkSize: configPositiveInteger(
             storage.chunk_size_bytes,
             "driver.storage.chunk_size_bytes",
@@ -414,6 +593,9 @@ async function loadConfiguration(configuration, resolveValue) {
   }
   if (!resolved.sdkSelfTest && !resolved.mountpoint) {
     throw new CliConfigError("config.mountpoint is required unless --sdk-self-test is used");
+  }
+  if (!resolved.sdkSelfTest) {
+    await validateConcurrentSqliteMountpoint(resolved.provider, resolved.mountpoint, resolved.check);
   }
   return resolved;
 }
@@ -571,6 +753,7 @@ async function run(configuration) {
     const mountOptions = {
       ...(configuration.transport === "auto" ? {} : { transport: configuration.transport }),
       ...(configuration.readOnly === undefined ? {} : { readOnly: configuration.readOnly }),
+      ...(chunked?.concurrentWrites ? { nfsSharedView: true } : {}),
     };
     let mounted;
     try {

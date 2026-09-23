@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -24,6 +24,67 @@ const LEGACY_BLOCK_ID_HEX_CHARS: usize = 32;
 const CONTENT_BLOCK_ID_HEX_CHARS: usize = 64;
 const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CACHE_ENTRIES: usize = 4096;
+const CONCURRENT_PROBE_NAME: &str = "_mount-rs-concurrent-probe-v1";
+const CONCURRENT_PROBE_BYTES: &[u8] = b"mount-rs:object-store:concurrent-preflight:v1\n";
+const CONCURRENT_PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Check a configured signed object-store client before enabling concurrent
+/// metadata publication over its blocks.
+///
+/// This probe performs a conditional create under the same block prefix and
+/// reads the stored bytes directly from the supplied client. The reserved
+/// object is stable across mounts and excluded from block reconciliation.
+/// Callers must use a client built from a validated service configuration:
+/// an arbitrary injected `ObjectStore` cannot establish a shared backing.
+pub async fn probe_configured_concurrent_prefix(
+    store: &dyn ObjectStore,
+    prefix: &str,
+) -> Result<()> {
+    let prefix = validate_prefix(prefix)?;
+    let path = ObjectPath::from(format!("{prefix}/{CONCURRENT_PROBE_NAME}"));
+    tokio::time::timeout(CONCURRENT_PROBE_TIMEOUT, async {
+        let create = store
+            .put_opts(
+                &path,
+                PutPayload::from(CONCURRENT_PROBE_BYTES.to_vec()),
+                PutOptions {
+                    mode: PutMode::Create,
+                    ..PutOptions::default()
+                },
+            )
+            .await;
+        match create {
+            Ok(_)
+            | Err(object_store::Error::AlreadyExists { .. })
+            | Err(object_store::Error::Precondition { .. }) => {}
+            Err(error) => return Err(probe_error("write", &error)),
+        }
+        let bytes = store
+            .get(&path)
+            .await
+            .map_err(|error| probe_error("read", &error))?
+            .bytes()
+            .await
+            .map_err(|error| probe_error("read", &error))?;
+        if bytes.as_ref() != CONCURRENT_PROBE_BYTES {
+            return Err(FsError::backend(
+                "object-store concurrent preflight probe changed unexpectedly",
+            ));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| FsError::backend("object-store concurrent preflight probe timed out"))?
+}
+
+fn probe_error(operation: &str, error: &object_store::Error) -> FsError {
+    // Provider error strings may contain service URLs or authorization data.
+    // Report only a bounded error class in startup diagnostics.
+    FsError::backend(format!(
+        "object-store concurrent preflight {operation} failed ({:?})",
+        classify_error(error)
+    ))
+}
 
 /// Stable, bounded classes for object-store block errors.
 ///
@@ -548,6 +609,7 @@ impl ObjectStoreBlockStore {
                     Ok(result) => match result.bytes().await {
                         Ok(bytes) => bytes,
                         Err(error) => {
+                            self.cache.remove(&id.0);
                             self.stats.error(started, &error);
                             return Err(backend_error(format!(
                                 "verify object-store block: {error}"
@@ -555,11 +617,13 @@ impl ObjectStoreBlockStore {
                         }
                     },
                     Err(error) => {
+                        self.cache.remove(&id.0);
                         self.stats.error(started, &error);
                         return Err(map_not_found(error));
                     }
                 };
                 if existing.as_ref() != bytes {
+                    self.cache.remove(&id.0);
                     increment(&self.stats.errors);
                     return Err(backend_error(
                         "object-store content-addressed block collision",
@@ -570,6 +634,7 @@ impl ObjectStoreBlockStore {
                 Ok(())
             }
             Err(error) => {
+                self.cache.remove(&id.0);
                 self.stats.error(started, &error);
                 Err(backend_error(format!("put object-store block: {error}")))
             }
@@ -583,14 +648,15 @@ impl BlockStore for ObjectStoreBlockStore {
         self.durable
     }
 
+    async fn prepare_concurrent_mode(&self) -> Result<()> {
+        Err(FsError::new(ErrorCode::Enotsup)
+            .with_syscall("prepare concurrent object-store blocks")
+            .with_message("concurrent object-store blocks require a validated signed service"))
+    }
+
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
         let started = self.stats.start(BlockOperation::Put);
         let id = BlockId(block_id(bytes));
-        if self.cache.get(&id.0).is_some() {
-            self.stats.cache_hit();
-            self.stats.success(started, 0, bytes.len() as u64);
-            return Ok(id);
-        }
         let path = self.object_path(&id)?;
         match self.claim_put(&id.0) {
             InFlightPutClaim::Follower(receiver) => match wait_for_inflight_put(receiver).await {
@@ -636,6 +702,13 @@ impl BlockStore for ObjectStoreBlockStore {
         };
         match result.bytes().await {
             Ok(bytes) => {
+                if id.0.len() == 1 + CONTENT_BLOCK_ID_HEX_CHARS && block_id(&bytes) != id.0 {
+                    self.cache.remove(&id.0);
+                    self.stats.logical_error(started);
+                    return Err(FsError::backend(
+                        "object-store content-addressed block digest mismatch",
+                    ));
+                }
                 self.cache.insert(&id.0, &bytes);
                 self.stats.success(started, bytes.len() as u64, 0);
                 Ok(bytes.to_vec())
@@ -925,12 +998,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_rejects_remote_bytes_that_do_not_match_content_block_id() {
+        let backing = Arc::new(InMemory::new());
+        let writer = ObjectStoreBlockStore::new(backing.clone(), "volume/blocks", true).unwrap();
+        let id = writer.put(b"original block").await.unwrap();
+        let path = ObjectPath::from(format!("volume/blocks/{}", id.0));
+        backing
+            .put(&path, PutPayload::from(b"corrupted block".to_vec()))
+            .await
+            .unwrap();
+
+        let reader = ObjectStoreBlockStore::new(backing.clone(), "volume/blocks", true).unwrap();
+        let error = reader
+            .get(&id)
+            .await
+            .expect_err("content-addressed block bytes must be verified before returning");
+        assert!(error.is(ErrorCode::Eio));
+
+        backing
+            .put(&path, PutPayload::from(b"original block".to_vec()))
+            .await
+            .unwrap();
+        assert_eq!(reader.get(&id).await.unwrap(), b"original block");
+    }
+
+    #[tokio::test]
+    async fn get_preserves_legacy_short_block_ids_without_a_full_digest() {
+        let backing = Arc::new(InMemory::new());
+        let id = BlockId("b0123456789abcdef0123456789abcdef".to_owned());
+        backing
+            .put(
+                &ObjectPath::from(format!("volume/blocks/{}", id.0)),
+                PutPayload::from(b"legacy block".to_vec()),
+            )
+            .await
+            .unwrap();
+
+        let reader = ObjectStoreBlockStore::new(backing, "volume/blocks", true).unwrap();
+        assert_eq!(reader.get(&id).await.unwrap(), b"legacy block");
+    }
+
+    #[tokio::test]
+    async fn cached_put_recreates_a_block_deleted_by_another_client() {
+        let backing = Arc::new(InMemory::new());
+        let writer = ObjectStoreBlockStore::new(backing.clone(), "volume/blocks", true).unwrap();
+        let body = b"reused after remote deletion";
+        let id = writer.put(body).await.unwrap();
+        let path = ObjectPath::from(format!("volume/blocks/{}", id.0));
+        backing.delete(&path).await.unwrap();
+
+        assert_eq!(writer.put(body).await.unwrap(), id);
+        let fresh_reader = ObjectStoreBlockStore::new(backing, "volume/blocks", true).unwrap();
+        assert_eq!(fresh_reader.get(&id).await.unwrap(), body);
+    }
+
+    #[tokio::test]
+    async fn cached_put_rejects_a_replaced_remote_block() {
+        let backing = Arc::new(InMemory::new());
+        let writer = ObjectStoreBlockStore::new(backing.clone(), "volume/blocks", true).unwrap();
+        let body = b"original immutable block";
+        let id = writer.put(body).await.unwrap();
+        let path = ObjectPath::from(format!("volume/blocks/{}", id.0));
+        backing
+            .put(&path, PutPayload::from(b"different remote bytes".to_vec()))
+            .await
+            .unwrap();
+
+        let error = writer
+            .put(body)
+            .await
+            .expect_err("cached bytes do not prove the remote object still has that identity");
+        assert!(error.is(ErrorCode::Eio));
+        let read_error = writer
+            .get(&id)
+            .await
+            .expect_err("a verified remote collision must invalidate the writer's cached block");
+        assert!(read_error.is(ErrorCode::Eio));
+    }
+
+    #[tokio::test]
     async fn volatility_is_explicit_and_missing_or_invalid_blocks_fail_closed() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let volatile = ObjectStoreBlockStore::new(object_store.clone(), "blocks", false).unwrap();
-        let declared_durable = ObjectStoreBlockStore::new(object_store, "blocks", true).unwrap();
+        let unrelated: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let declared_durable = ObjectStoreBlockStore::new(unrelated, "blocks", true).unwrap();
         assert!(!volatile.durable());
         assert!(declared_durable.durable());
+        assert!(
+            volatile
+                .prepare_concurrent_mode()
+                .await
+                .expect_err("an injected object store does not prove a shared backing")
+                .is(ErrorCode::Enotsup)
+        );
+        assert!(
+            declared_durable
+                .prepare_concurrent_mode()
+                .await
+                .expect_err("durability declarations do not prove a shared backing")
+                .is(ErrorCode::Enotsup)
+        );
 
         let missing = BlockId("b00000000000000000000000000000000".to_owned());
         assert!(
@@ -970,6 +1137,28 @@ mod tests {
         assert!(
             ObjectStoreBlockStore::new(Arc::new(InMemory::new()), "blocks/../other", false,)
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_prefix_probe_is_idempotent_and_detects_a_changed_object() {
+        let backing = InMemory::new();
+        probe_configured_concurrent_prefix(&backing, "volume/blocks")
+            .await
+            .unwrap();
+        probe_configured_concurrent_prefix(&backing, "volume/blocks")
+            .await
+            .unwrap();
+        let path = ObjectPath::from(format!("volume/blocks/{CONCURRENT_PROBE_NAME}"));
+        backing
+            .put(&path, PutPayload::from(b"changed".to_vec()))
+            .await
+            .unwrap();
+        assert!(
+            probe_configured_concurrent_prefix(&backing, "volume/blocks")
+                .await
+                .expect_err("a service changing the capability marker must fail closed")
+                .is(ErrorCode::Eio)
         );
     }
 

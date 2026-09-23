@@ -56,6 +56,11 @@ pub const DEFAULT_MAX_METADATA_BYTES: usize = 512 * 1024;
 pub const DEFAULT_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(5);
 /// Default per-transaction retry limit.
 pub const DEFAULT_TRANSACTION_RETRY_LIMIT: i32 = 8;
+// A client Database handle can exist before its coordinator is reachable.
+// Keep startup verification shorter than ordinary data transactions and
+// independent of caller-provided (possibly much larger) retry bounds.
+const CONCURRENT_BLOCK_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(2);
+const CONCURRENT_BLOCK_PREFLIGHT_RETRY_LIMIT: i32 = 2;
 
 const LEASE_MAGIC: &[u8; 4] = b"MRL1";
 const MANIFEST_MAGIC: &[u8; 4] = b"MRM1";
@@ -2464,6 +2469,45 @@ impl FoundationDbBlockStore {
 impl BlockStore for FoundationDbBlockStore {
     fn durable(&self) -> bool {
         self.0.durable
+    }
+
+    async fn prepare_concurrent_mode(&self) -> Result<()> {
+        // Database::from_path only creates a client handle. Probe a key in
+        // this exact block keyspace before metadata irreversibly enters CAS
+        // mode, so an unavailable second block cluster fails closed at open.
+        // This transaction has no mutation and cannot create a test object.
+        let inner = Arc::clone(&self.0);
+        let key = Keyspace::new(&inner.prefix).block(&block_id(
+            b"mount-rs FoundationDB concurrent block preflight",
+        ));
+        let limits = FoundationDbLimits {
+            transaction_timeout: inner
+                .limits
+                .transaction_timeout
+                .min(CONCURRENT_BLOCK_PREFLIGHT_TIMEOUT),
+            transaction_retry_limit: inner
+                .limits
+                .transaction_retry_limit
+                .min(CONCURRENT_BLOCK_PREFLIGHT_RETRY_LIMIT),
+            ..inner.limits
+        };
+        inner
+            .db
+            .transact_boxed(
+                (),
+                move |trx, _| {
+                    let key = key.clone();
+                    Box::pin(async move {
+                        configure_transaction(trx, limits)?;
+                        let _ = get_owned(trx, &key).await?;
+                        Ok(())
+                    })
+                },
+                transaction_options(limits, TransactionPolicy::Idempotent),
+            )
+            .await
+            .map_err(TxnError::into_fs)
+            .map_err(|error| error.with_syscall("prepare concurrent FoundationDB blocks"))
     }
 
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {

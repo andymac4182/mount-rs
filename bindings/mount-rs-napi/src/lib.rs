@@ -54,6 +54,7 @@ use mount_rs_pglite::{PgliteBlockStore, PgliteMetadataStore, PgliteStorageOption
 use mount_rs_pglite_fs::connect_pglite_with_store;
 use mount_rs_r2::{R2BlockStore, R2Config};
 use mount_rs_r2_fs::open_r2;
+use mount_rs_rustfs::{RustFsBlockStore, RustFsConfig};
 use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
 use mount_rs_sqlite_fs::open_sqlite;
 use mount_rs_tidb::{TidbBlockStore, TidbMetadataStore, TidbStorageOptions};
@@ -1321,8 +1322,8 @@ pub struct JsMountFailure {
 /// backend never falls back to an in-memory store.
 #[napi(object)]
 pub struct JsChunkedStoreOptions {
-    /// Supported values are memory, sqlite, pglite, tidb, foundationdb, and r2
-    /// (blocks only). FoundationDB requires the native feature and an
+    /// Supported values are memory, sqlite, pglite, tidb, foundationdb, r2,
+    /// and rustfs (object stores are blocks only). FoundationDB requires the native feature and an
     /// explicit persisted-single-authority, shared-provider, or revision-cas authority.
     pub kind: String,
     pub uri: Option<String>,
@@ -1334,6 +1335,8 @@ pub struct JsChunkedStoreOptions {
     pub authority_prefix: Option<String>,
     pub endpoint: Option<String>,
     pub bucket: Option<String>,
+    /// RustFS only: signing region for the S3-compatible endpoint.
+    pub region: Option<String>,
     pub access_key_id: Option<String>,
     pub secret_access_key: Option<String>,
 }
@@ -1345,7 +1348,8 @@ pub struct JsChunkedOptions {
     pub chunk_size: f64,
     pub owner: Option<String>,
     pub ttl_ms: Option<f64>,
-    /// Enable persisted multiwriter revision CAS for FoundationDB metadata.
+    /// Enable persisted multiwriter revision CAS for FoundationDB, PGlite, or
+    /// local SQLite metadata. SQLite metadata and blocks are same-host only.
     pub concurrent_writes: Option<bool>,
     /// Defaults to the current process uid, matching the memory driver.
     pub uid: Option<f64>,
@@ -1472,6 +1476,16 @@ struct DynBlockStore(Arc<dyn BlockStore>);
 impl BlockStore for DynBlockStore {
     fn durable(&self) -> bool {
         self.0.durable()
+    }
+
+    fn prepare_concurrent_mode<'a, 'async_trait>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.prepare_concurrent_mode()
     }
 
     fn put<'a, 'b, 'async_trait>(
@@ -2057,6 +2071,7 @@ async fn build_metadata_store(
         reject_set(&options.lease_authority, "metadata.leaseAuthority")?;
         reject_set(&options.authority_prefix, "metadata.authorityPrefix")?;
     }
+    reject_set(&options.region, "metadata.region")?;
     match options.kind.as_str() {
         "memory" => {
             reject_set(&options.uri, "metadata.uri")?;
@@ -2148,8 +2163,8 @@ async fn build_metadata_store(
                 ))
             }
         }
-        "r2" => Err(config_error(
-            "R2 is a block-only backend; metadata must use memory, sqlite, pglite, tidb, or foundationdb",
+        "r2" | "rustfs" => Err(config_error(
+            "R2 and RustFS are block-only backends; metadata must use memory, sqlite, pglite, tidb, or foundationdb",
         )),
         other => Err(config_error(format!("unknown metadata backend: {other}"))),
     }
@@ -2161,6 +2176,9 @@ async fn build_block_store(
     if options.kind != "foundationdb" {
         reject_set(&options.lease_authority, "blocks.leaseAuthority")?;
         reject_set(&options.authority_prefix, "blocks.authorityPrefix")?;
+    }
+    if options.kind != "rustfs" {
+        reject_set(&options.region, "blocks.region")?;
     }
     match options.kind.as_str() {
         "memory" => {
@@ -2271,13 +2289,33 @@ async fn build_block_store(
                 // R2 configuration type and is never opened here.
                 state_key: "mount-rs-napi/unused-state".to_owned(),
             };
-            let blocks = match options.durable {
-                Some(durable) => {
-                    R2BlockStore::new(config.build_store().map_err(to_js_error)?, prefix, durable)
-                }
-                None => R2BlockStore::from_config(&config, prefix),
-            }
+            let blocks = R2BlockStore::from_config_with_durable(
+                &config,
+                prefix,
+                options.durable.unwrap_or(true),
+            )
             .map_err(to_js_error)?;
+            Ok((Arc::new(blocks), None))
+        }
+        "rustfs" => {
+            let prefix = required_string(&options.key, "blocks.key")?;
+            let endpoint = required_string(&options.endpoint, "blocks.endpoint")?;
+            let bucket = required_string(&options.bucket, "blocks.bucket")?;
+            let region = required_string(&options.region, "blocks.region")?;
+            let access_key_id = required_string(&options.access_key_id, "blocks.accessKeyId")?;
+            let secret_access_key =
+                required_string(&options.secret_access_key, "blocks.secretAccessKey")?;
+            reject_set(&options.uri, "blocks.uri")?;
+            let config = RustFsConfig {
+                endpoint,
+                bucket,
+                region,
+                access_key_id,
+                secret_access_key,
+            };
+            let blocks =
+                RustFsBlockStore::from_config(&config, prefix, options.durable.unwrap_or(false))
+                    .map_err(to_js_error)?;
             Ok((Arc::new(blocks), None))
         }
         other => Err(config_error(format!("unknown block backend: {other}"))),
@@ -3670,16 +3708,42 @@ async fn shutdown_chunked_filesystem(
 pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Filesystem> {
     let concurrent_writes = options.concurrent_writes.unwrap_or(false);
     if concurrent_writes {
-        if options.metadata.kind != "foundationdb"
-            || options.metadata.lease_authority.as_deref() != Some("revision-cas")
-        {
+        match options.metadata.kind.as_str() {
+            "foundationdb"
+                if options.metadata.lease_authority.as_deref() == Some("revision-cas") => {}
+            "pglite" => {}
+            "sqlite"
+                if options
+                    .metadata
+                    .uri
+                    .as_deref()
+                    .is_some_and(sqlite_durable_uri) => {}
+            "sqlite" => {
+                return Err(config_error(
+                    "concurrentWrites SQLite metadata requires a durable local database path",
+                ));
+            }
+            _ => {
+                return Err(config_error(
+                    "concurrentWrites requires SQLite, PGlite, or FoundationDB metadata with leaseAuthority 'revision-cas'",
+                ));
+            }
+        }
+        if options.blocks.kind == "memory" {
             return Err(config_error(
-                "concurrentWrites requires FoundationDB metadata with leaseAuthority 'revision-cas'",
+                "concurrentWrites requires durable blocks available to every mount; memory blocks are unsupported",
             ));
         }
-        if matches!(options.blocks.kind.as_str(), "memory" | "sqlite") {
+        if options.blocks.kind == "sqlite"
+            && (options.metadata.kind != "sqlite"
+                || !options
+                    .blocks
+                    .uri
+                    .as_deref()
+                    .is_some_and(sqlite_durable_uri))
+        {
             return Err(config_error(
-                "concurrentWrites requires a shared block provider; memory and local SQLite blocks cannot serve independent mounts",
+                "concurrentWrites SQLite blocks require local SQLite metadata and a durable path on the same host",
             ));
         }
     } else if options.metadata.kind == "foundationdb"
@@ -3748,6 +3812,10 @@ pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Fi
         Some(shutdown),
         Some(reconcile),
     ))
+}
+
+fn sqlite_durable_uri(uri: &str) -> bool {
+    !uri.is_empty() && uri != ":memory:" && !uri.starts_with("file:")
 }
 
 /// Stop and join the process-wide FoundationDB client network at the Node
@@ -3968,6 +4036,65 @@ mod tests {
                 Poll::Pending => std::thread::yield_now(),
             }
         }
+    }
+
+    #[test]
+    fn r2_block_durability_preserves_explicit_override() {
+        let mut options = JsChunkedStoreOptions {
+            kind: "r2".to_owned(),
+            uri: None,
+            key: Some("mount-rs/test".to_owned()),
+            durable: None,
+            lease_authority: None,
+            authority_prefix: None,
+            endpoint: Some("http://127.0.0.1:9878".to_owned()),
+            bucket: Some("mount-rs-test".to_owned()),
+            region: None,
+            access_key_id: Some("test-key".to_owned()),
+            secret_access_key: Some("test-secret".to_owned()),
+        };
+        let (blocks, _) = block_on(build_block_store(&options))
+            .expect("R2 client construction does not require a live service");
+        assert!(blocks.durable(), "the existing R2 default is durable");
+
+        options.durable = Some(false);
+        let (blocks, _) = block_on(build_block_store(&options))
+            .expect("explicit R2 durability override constructs the client");
+        assert!(!blocks.durable());
+    }
+
+    #[test]
+    fn rustfs_block_durability_is_only_asserted_when_configured() {
+        let mut options = JsChunkedStoreOptions {
+            kind: "rustfs".to_owned(),
+            uri: None,
+            key: Some("mount-rs/test".to_owned()),
+            durable: None,
+            lease_authority: None,
+            authority_prefix: None,
+            endpoint: Some("http://127.0.0.1:9878".to_owned()),
+            bucket: Some("mount-rs-test".to_owned()),
+            region: Some("us-east-1".to_owned()),
+            access_key_id: Some("test-key".to_owned()),
+            secret_access_key: Some("test-secret".to_owned()),
+        };
+        let (blocks, _) = block_on(build_block_store(&options))
+            .expect("RustFS client construction does not require a live service");
+        assert!(!blocks.durable(), "durability needs a caller assertion");
+
+        options.durable = Some(true);
+        let (blocks, _) = block_on(build_block_store(&options))
+            .expect("explicit RustFS durability assertion constructs the client");
+        assert!(blocks.durable());
+    }
+
+    #[test]
+    fn dynamic_blocks_forward_concurrent_preflight_failure() {
+        let inner = Arc::new(SqliteBlockStore::open(":memory:").unwrap()) as Arc<dyn BlockStore>;
+        let erased = DynBlockStore(inner);
+        let error = block_on(erased.prepare_concurrent_mode())
+            .expect_err("volatile SQLite block preflight must reach the provider");
+        assert_eq!(error.code, ErrorCode::Enotsup);
     }
 
     #[test]

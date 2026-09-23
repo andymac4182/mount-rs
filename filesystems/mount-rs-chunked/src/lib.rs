@@ -29,7 +29,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const BLOCK_SIZE: u64 = 4096;
 const MAX_SYMLINK_DEPTH: usize = 40;
@@ -37,7 +37,13 @@ const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(30);
 const LEASE_RENEWAL_MARGIN: Duration = Duration::from_secs(5);
 const DEFAULT_CHUNK_SIZE: usize = 64 * 1024;
 const MAX_PENDING_MUTATIONS: usize = 1024;
-const MAX_CONCURRENT_CAS_RETRIES: usize = 32;
+// Eight continuously active writers can exhaust 32 or 64 quick CAS attempts
+// while other writers keep advancing the shared revision. The timed backoff
+// below caps each delay at 20 ms, so 128 attempts bound retry waiting to at
+// most about 2.6 seconds before reporting a known, uncommitted conflict.
+const MAX_CONCURRENT_CAS_RETRIES: usize = 128;
+const CAS_BACKOFF_INITIAL_MICROS: u64 = 250;
+const CAS_BACKOFF_MAX_MICROS: u64 = 20_000;
 // The W26 Ozone qualification uses 64 concurrent lifecycle workers. Start
 // with the small fast-path window used by local providers, then extend it
 // only while newly-prepared remote operations are still arriving. The total
@@ -309,6 +315,24 @@ async fn cooperative_yield() {
     CooperativeYield { yielded: false }.await;
 }
 
+/// A known CAS miss did not commit. Stagger independent coordinators with an
+/// exponentially widening, bounded async delay before reloading the winner's
+/// namespace. One executor turn alone cannot prevent hot workers on separate
+/// threads from repeatedly racing the same next revision. This timer works
+/// without a Tokio runtime, as required by the core and provider tests.
+async fn concurrent_cas_backoff(attempt: usize, owner: &str) {
+    let window = CAS_BACKOFF_INITIAL_MICROS << attempt.min(6);
+    let tick = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| u64::from(duration.subsec_nanos()));
+    let owner_salt = owner.bytes().fold(0xcbf29ce484222325_u64, |salt, byte| {
+        (salt ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+    });
+    let jitter = (owner_salt ^ tick ^ (attempt as u64).wrapping_mul(0x9e3779b97f4a7c15)) % window;
+    let delay = Duration::from_micros((window + jitter).min(CAS_BACKOFF_MAX_MICROS));
+    async_io::Timer::after(delay).await;
+}
+
 struct ChunkedInner<M, B>
 where
     M: MetadataStore,
@@ -363,10 +387,11 @@ where
         let metadata = Arc::new(metadata);
         let blocks = Arc::new(blocks);
         if options.concurrent_writes {
+            blocks.prepare_concurrent_mode().await?;
             metadata.prepare_concurrent_mode().await?;
             // Two clients may initialize one fresh volume together. Only one
             // CAS publishes its root; the loser reloads the winner's root.
-            for _ in 0..MAX_CONCURRENT_CAS_RETRIES {
+            for attempt in 0..MAX_CONCURRENT_CAS_RETRIES {
                 let loaded = metadata.load().await?;
                 loaded.validate()?;
                 let (namespace, revision) = match loaded.namespace {
@@ -383,7 +408,7 @@ where
                                 (namespace, revision)
                             }
                             Err(error) if error.code == ErrorCode::Eagain => {
-                                cooperative_yield().await;
+                                concurrent_cas_backoff(attempt, &options.owner).await;
                                 continue;
                             }
                             Err(error) => return Err(error),
@@ -1171,7 +1196,7 @@ where
                         // The provider confirmed no commit. Replay every
                         // request against a fresh revision before replying;
                         // only an acknowledged batch may report success.
-                        cooperative_yield().await;
+                        concurrent_cas_backoff(attempt, &self.inner.options.owner).await;
                         continue;
                     }
                     Err(error) => {
@@ -1212,7 +1237,7 @@ where
                         && error.code == ErrorCode::Eagain
                         && attempt + 1 < attempts =>
                 {
-                    cooperative_yield().await;
+                    concurrent_cas_backoff(attempt, &self.inner.options.owner).await;
                 }
                 Err(error) => return Err(error),
             }
@@ -1496,7 +1521,7 @@ where
                         && error.code == ErrorCode::Eagain
                         && attempt + 1 < attempts =>
                 {
-                    cooperative_yield().await;
+                    concurrent_cas_backoff(attempt, &self.inner.options.owner).await;
                 }
                 Err(error) => return Err(error),
             }
@@ -1581,6 +1606,10 @@ where
             )
             .await?
         };
+        // Full replacement blocks depend only on the input bytes and the
+        // selected chunker. A known namespace CAS miss can reuse this flushed
+        // immutable layout after rebasing the path and inode metadata.
+        let replay_layout = new_layout.clone();
         if !data.is_empty() {
             self.inner
                 .blocks
@@ -1614,7 +1643,7 @@ where
 
         if self.inner.options.concurrent_writes {
             return self
-                .write_file_atomic_concurrent_replay(&normalized, data)
+                .write_file_atomic_concurrent_replay(&normalized, data, replay_layout)
                 .await;
         }
 
@@ -1657,10 +1686,16 @@ where
     }
 
     /// A prepared whole-file batch can lose its CAS to an unrelated writer.
-    /// Reprepare against the winner's namespace and publish the full layout
-    /// in one transaction. Truncate followed by byte writes would expose an
-    /// empty or partial file between revisions.
-    async fn write_file_atomic_concurrent_replay(&self, path: &str, data: &[u8]) -> Result<()> {
+    /// Rebase path/inode metadata against the winner's namespace while reusing
+    /// the already-flushed immutable layout. Reprepare blocks only if the
+    /// path's chunker changed. The full replacement remains one publication;
+    /// truncate followed by byte writes would expose partial revisions.
+    async fn write_file_atomic_concurrent_replay(
+        &self,
+        path: &str,
+        data: &[u8],
+        mut prepared_layout: FileLayout,
+    ) -> Result<()> {
         let _gate = self.inner.gate.lock().await;
         let data_length = u64::try_from(data.len())
             .map_err(|_| error_with_path(ErrorCode::Efbig, "write", path))?;
@@ -1700,29 +1735,36 @@ where
                     true,
                 )
             };
-            let empty_layout = FileLayout {
-                chunker,
-                extents: Vec::new(),
-            };
-            let new_layout = if data.is_empty() {
-                empty_layout
-            } else {
-                rewrite_layout(
-                    &self.inner.blocks,
-                    &empty_layout,
-                    0,
-                    0,
-                    data,
-                    data_length,
-                    path,
-                )
-                .await?
-            };
-            self.inner
-                .blocks
-                .flush()
-                .await
-                .map_err(|error| with_context(error, "block-flush", Some(path)))?;
+            if prepared_layout.chunker != chunker {
+                let empty_layout = FileLayout {
+                    chunker,
+                    extents: Vec::new(),
+                };
+                prepared_layout = if data.is_empty() {
+                    empty_layout
+                } else {
+                    rewrite_layout(
+                        &self.inner.blocks,
+                        &empty_layout,
+                        0,
+                        0,
+                        data,
+                        data_length,
+                        path,
+                    )
+                    .await?
+                };
+                self.inner
+                    .blocks
+                    .flush()
+                    .await
+                    .map_err(|error| with_context(error, "block-flush", Some(path)))?;
+                // Block preparation may have taken a remote round trip. Reload
+                // before applying inode/path edits instead of publishing a
+                // namespace revision captured before that work.
+                cooperative_yield().await;
+                continue;
+            }
             if new_inode {
                 namespace.next_inode = namespace
                     .next_inode
@@ -1752,7 +1794,7 @@ where
                 .nodes
                 .get_mut(&inode)
                 .ok_or_else(|| error_with_path(ErrorCode::Estale, "write", path))?;
-            target.data = NodeData::File(new_layout);
+            target.data = NodeData::File(prepared_layout.clone());
             set_file_size(&mut target.stats, data_length);
             touch_modified(&mut target.stats, self.inner.options.concurrent_writes)?;
             match self.publish_namespace(revision, namespace, true).await {
@@ -1761,7 +1803,7 @@ where
                     if error.code == ErrorCode::Eagain
                         && attempt + 1 < MAX_CONCURRENT_CAS_RETRIES =>
                 {
-                    cooperative_yield().await;
+                    concurrent_cas_backoff(attempt, &self.inner.options.owner).await;
                 }
                 Err(error) => return Err(error),
             }
@@ -1822,7 +1864,7 @@ where
                         && error.code == ErrorCode::Eagain
                         && attempt + 1 < attempts =>
                 {
-                    cooperative_yield().await;
+                    concurrent_cas_backoff(attempt, &self.inner.options.owner).await;
                 }
                 Err(error) => return Err(error),
             }
@@ -2171,7 +2213,7 @@ where
                             && error.code == ErrorCode::Eagain
                             && attempt + 1 < attempts =>
                     {
-                        cooperative_yield().await;
+                        concurrent_cas_backoff(attempt, &self.inner.options.owner).await;
                         continue;
                     }
                     Err(error) => return Err(error),
@@ -4444,6 +4486,44 @@ mod tests {
             .collect()
     }
 
+    /// A test-only shared backing: both coordinators retain the same inner
+    /// in-memory block map when this wrapper is cloned.
+    #[derive(Clone)]
+    struct SharedTestBlockStore(MemoryBlockStore);
+
+    impl SharedTestBlockStore {
+        fn new() -> Self {
+            Self(MemoryBlockStore::new())
+        }
+    }
+
+    #[async_trait]
+    impl BlockStore for SharedTestBlockStore {
+        fn durable(&self) -> bool {
+            self.0.durable()
+        }
+
+        async fn prepare_concurrent_mode(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn put(&self, bytes: &[u8]) -> Result<mount_rs_core::storage::BlockId> {
+            self.0.put(bytes).await
+        }
+
+        async fn get(&self, id: &mount_rs_core::storage::BlockId) -> Result<Vec<u8>> {
+            self.0.get(id).await
+        }
+
+        async fn flush(&self) -> Result<()> {
+            self.0.flush().await
+        }
+
+        async fn delete(&self, id: &mount_rs_core::storage::BlockId) -> Result<()> {
+            self.0.delete(id).await
+        }
+    }
+
     #[derive(Clone)]
     struct FaultBlockStore {
         inner: MemoryBlockStore,
@@ -4556,7 +4636,7 @@ mod tests {
         let metadata = RevisionRaceMetadata::new();
         let fs = block_on(ChunkedFs::open(
             metadata.clone(),
-            MemoryBlockStore::new(),
+            SharedTestBlockStore::new(),
             ChunkedOptions::fixed("race", 4)
                 .expect("chunker")
                 .with_concurrent_writes(true),
@@ -4591,7 +4671,7 @@ mod tests {
     fn prepared_whole_file_mutation_conflicts_if_same_batch_unlinks_its_path() {
         let fs = block_on(ChunkedFs::open(
             RevisionRaceMetadata::new(),
-            MemoryBlockStore::new(),
+            SharedTestBlockStore::new(),
             ChunkedOptions::fixed("batch-path", 4)
                 .expect("chunker")
                 .with_concurrent_writes(true),
@@ -5786,7 +5866,7 @@ mod tests {
     #[test]
     fn canceled_concurrent_close_can_retry_and_release_ref_after_remote_unlink() {
         let metadata = RevisionRaceMetadata::new();
-        let blocks = MemoryBlockStore::new();
+        let blocks = SharedTestBlockStore::new();
         let first = block_on(ChunkedFs::open(
             metadata.clone(),
             blocks.clone(),

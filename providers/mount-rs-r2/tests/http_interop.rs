@@ -73,6 +73,80 @@ impl FsDriver for FlakyReadOpenDriver {
 }
 
 #[tokio::test]
+async fn configured_r2_blocks_probe_signed_service_before_concurrent_mode() {
+    let session = S3Session::new_with_options(
+        MemoryFs::empty(),
+        S3SessionOptions {
+            credentials: Some(Credentials::new("fixture-key", "fixture-secret")),
+            region: Some("auto".to_owned()),
+            ..Default::default()
+        },
+    );
+    let server = S3Server::start(Arc::new(session), S3ServerOptions::default())
+        .await
+        .unwrap();
+    let config = R2Config {
+        endpoint: format!("http://{}", server.address()),
+        bucket: "mountx".to_owned(),
+        access_key_id: "fixture-key".to_owned(),
+        secret_access_key: "fixture-secret".to_owned(),
+        state_key: "preflight/state.json".to_owned(),
+    };
+    let prefix = "preflight/blocks";
+    let injected = R2BlockStore::new(config.build_store().unwrap(), prefix, true).unwrap();
+    assert!(
+        injected
+            .prepare_concurrent_mode()
+            .await
+            .expect_err("an injected client has no configured-service attestation")
+            .is(ErrorCode::Enotsup)
+    );
+
+    let blocks = R2BlockStore::from_config_with_durable(&config, prefix, false).unwrap();
+    assert!(!blocks.durable());
+    blocks.prepare_concurrent_mode().await.unwrap();
+    blocks.prepare_concurrent_mode().await.unwrap();
+
+    let mut wrong_credentials = config.clone();
+    wrong_credentials.secret_access_key = "secret-must-not-appear-in-error".to_owned();
+    let rejected = R2BlockStore::from_config(&wrong_credentials, prefix).unwrap();
+    let error = rejected
+        .prepare_concurrent_mode()
+        .await
+        .expect_err("an invalid signature must fail before mode conversion");
+    assert!(error.is(ErrorCode::Eio));
+    assert!(!format!("{error:?}").contains(&wrong_credentials.secret_access_key));
+
+    let mut missing_bucket = config.clone();
+    missing_bucket.bucket = "missing-bucket".to_owned();
+    let rejected = R2BlockStore::from_config(&missing_bucket, prefix).unwrap();
+    assert!(
+        rejected
+            .prepare_concurrent_mode()
+            .await
+            .expect_err("a missing signed bucket must fail before mode conversion")
+            .is(ErrorCode::Eio)
+    );
+
+    let object_store = config.build_store().unwrap();
+    object_store
+        .delete(&ObjectPath::from(
+            "preflight/blocks/_mount-rs-concurrent-probe-v1",
+        ))
+        .await
+        .unwrap();
+    server.close().await.unwrap();
+    let offline = R2BlockStore::from_config(&config, prefix).unwrap();
+    assert!(
+        offline
+            .prepare_concurrent_mode()
+            .await
+            .expect_err("an unavailable service must fail before mode conversion")
+            .is(ErrorCode::Eio)
+    );
+}
+
+#[tokio::test]
 async fn signed_r2_client_retries_transient_read_over_http() {
     let remaining_read_failures = Arc::new(AtomicUsize::new(1));
     let session = S3Session::new_with_options(
