@@ -480,6 +480,110 @@ mod verification {
 
         assert_eq!(accepted, expected);
     }
+
+    #[kani::proof]
+    #[kani::unwind(32)]
+    fn three_extent_validation() {
+        let first_file_offset: u64 = kani::any();
+        let first_block_offset: u64 = kani::any();
+        let first_length: u64 = kani::any();
+        let second_file_offset: u64 = kani::any();
+        let second_block_offset: u64 = kani::any();
+        let second_length: u64 = kani::any();
+        let third_file_offset: u64 = kani::any();
+        let third_block_offset: u64 = kani::any();
+        let third_length: u64 = kani::any();
+        let file_size: u64 = kani::any();
+        let extents = [
+            BlockExtent {
+                file_offset: first_file_offset,
+                block: BlockId("first".to_owned()),
+                block_offset: first_block_offset,
+                length: first_length,
+            },
+            BlockExtent {
+                file_offset: second_file_offset,
+                block: BlockId("second".to_owned()),
+                block_offset: second_block_offset,
+                length: second_length,
+            },
+            BlockExtent {
+                file_offset: third_file_offset,
+                block: BlockId("third".to_owned()),
+                block_offset: third_block_offset,
+                length: third_length,
+            },
+        ];
+        let accepted = validate_file_extents(&extents, file_size).is_ok();
+        let first_file_end = u128::from(first_file_offset) + u128::from(first_length);
+        let second_file_end = u128::from(second_file_offset) + u128::from(second_length);
+        let third_file_end = u128::from(third_file_offset) + u128::from(third_length);
+        let expected = first_length > 0
+            && second_length > 0
+            && third_length > 0
+            && first_file_end <= u128::from(file_size)
+            && second_file_end <= u128::from(file_size)
+            && third_file_end <= u128::from(file_size)
+            && u128::from(first_block_offset) + u128::from(first_length) <= u128::from(u64::MAX)
+            && u128::from(second_block_offset) + u128::from(second_length) <= u128::from(u64::MAX)
+            && u128::from(third_block_offset) + u128::from(third_length) <= u128::from(u64::MAX)
+            && u128::from(second_file_offset) >= first_file_end
+            && u128::from(third_file_offset) >= second_file_end;
+
+        kani::cover!(accepted);
+        kani::cover!(
+            accepted
+                && first_file_end == u128::from(second_file_offset)
+                && second_file_end == u128::from(third_file_offset)
+        );
+        kani::cover!(
+            accepted
+                && first_file_end < u128::from(second_file_offset)
+                && second_file_end < u128::from(third_file_offset)
+        );
+        kani::cover!(first_file_end > u128::from(second_file_offset));
+        kani::cover!(
+            first_file_end <= u128::from(second_file_offset)
+                && second_file_end > u128::from(third_file_offset)
+        );
+        kani::cover!(third_length == 0);
+        assert_eq!(accepted, expected);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(16)]
+    fn directory_link_count_boundaries() {
+        let is_root: bool = kani::any();
+        let parent_count: u64 = kani::any();
+        let child_count: u64 = kani::any();
+        let nlink: u64 = kani::any();
+        let observed = validate_directory_link_counts(is_root, parent_count, child_count, nlink)
+            .map_err(|error| error.code);
+        let expected_parent_count = if is_root { 0 } else { 1 };
+        let expected_nlink = u128::from(child_count) + 2;
+        let expected = if parent_count != expected_parent_count {
+            Err(ErrorCode::Einval)
+        } else if expected_nlink > u128::from(u64::MAX) {
+            Err(ErrorCode::Eoverflow)
+        } else if u128::from(nlink) != expected_nlink {
+            Err(ErrorCode::Einval)
+        } else {
+            Ok(())
+        };
+
+        kani::cover!(is_root && observed.is_ok());
+        kani::cover!(!is_root && observed.is_ok());
+        kani::cover!(parent_count != expected_parent_count);
+        kani::cover!(
+            parent_count == expected_parent_count && expected_nlink > u128::from(u64::MAX)
+        );
+        kani::cover!(
+            parent_count == expected_parent_count
+                && expected_nlink <= u128::from(u64::MAX)
+                && u128::from(nlink) != expected_nlink
+        );
+        assert_eq!(observed, expected);
+    }
 }
 
 fn validate_entry_name(name: &str) -> Result<()> {
@@ -499,24 +603,13 @@ fn validate_directory_links(
             continue;
         }
         let parent_count = directory_references.get(&inode).copied().unwrap_or(0);
-        if inode == namespace.root {
-            if parent_count != 0 {
-                return Err(invalid_namespace(
-                    "root directory cannot be linked as a child",
-                ));
-            }
-        } else if parent_count != 1 {
-            return Err(invalid_namespace(
-                "non-root directories must have exactly one parent",
-            ));
-        }
         let child_count = directory_children.get(&inode).copied().unwrap_or(0);
-        let expected_nlink = 2_u64
-            .checked_add(child_count)
-            .ok_or_else(|| overflow_namespace("directory nlink overflows"))?;
-        if node.stats.nlink != expected_nlink {
-            return Err(invalid_namespace("directory nlink is inconsistent"));
-        }
+        validate_directory_link_counts(
+            inode == namespace.root,
+            parent_count,
+            child_count,
+            node.stats.nlink,
+        )?;
     }
 
     // Iterative traversal both avoids recursion depth limits and makes a
@@ -551,6 +644,32 @@ fn validate_directory_links(
         .count();
     if visited.len() != directory_count {
         return Err(invalid_namespace("directory is unreachable from root"));
+    }
+    Ok(())
+}
+
+fn validate_directory_link_counts(
+    is_root: bool,
+    parent_count: u64,
+    child_count: u64,
+    nlink: u64,
+) -> Result<()> {
+    if is_root {
+        if parent_count != 0 {
+            return Err(invalid_namespace(
+                "root directory cannot be linked as a child",
+            ));
+        }
+    } else if parent_count != 1 {
+        return Err(invalid_namespace(
+            "non-root directories must have exactly one parent",
+        ));
+    }
+    let expected_nlink = 2_u64
+        .checked_add(child_count)
+        .ok_or_else(|| overflow_namespace("directory nlink overflows"))?;
+    if nlink != expected_nlink {
+        return Err(invalid_namespace("directory nlink is inconsistent"));
     }
     Ok(())
 }
@@ -1062,6 +1181,34 @@ mod tests {
     }
 
     #[test]
+    fn directory_link_counts_match_independent_integer_oracle() {
+        for is_root in [false, true] {
+            for parents in [0, 1, 2, u64::MAX] {
+                for children in [0, 1, u64::MAX - 2, u64::MAX - 1, u64::MAX] {
+                    for nlink in [0, 1, 2, 3, u64::MAX] {
+                        let expected = if (is_root && parents != 0) || (!is_root && parents != 1) {
+                            Err(ErrorCode::Einval)
+                        } else if u128::from(children) + 2 > u128::from(u64::MAX) {
+                            Err(ErrorCode::Eoverflow)
+                        } else if u128::from(nlink) != u128::from(children) + 2 {
+                            Err(ErrorCode::Einval)
+                        } else {
+                            Ok(())
+                        };
+                        let observed =
+                            validate_directory_link_counts(is_root, parents, children, nlink)
+                                .map_err(|error| error.code);
+                        assert_eq!(
+                            observed, expected,
+                            "root={is_root}, parents={parents}, children={children}, nlink={nlink}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn validates_directory_nlinks_and_orphan_policy() {
         let mut child = valid_namespace();
         child.nodes.insert(
@@ -1209,6 +1356,60 @@ mod tests {
             file.data = NodeData::File(file_layout(extents));
             assert_error_code(namespace.validate(), error);
         }
+    }
+
+    #[test]
+    fn three_extents_are_checked_through_namespace_validation() {
+        let mut namespace = valid_namespace();
+        let file = namespace.nodes.get_mut(&2).unwrap();
+        file.stats.size = 7;
+        file.data = NodeData::File(file_layout(vec![
+            BlockExtent {
+                file_offset: 0,
+                block: BlockId("first".into()),
+                block_offset: 0,
+                length: 2,
+            },
+            BlockExtent {
+                file_offset: 2,
+                block: BlockId("second".into()),
+                block_offset: 0,
+                length: 2,
+            },
+            BlockExtent {
+                file_offset: 5,
+                block: BlockId("third".into()),
+                block_offset: 0,
+                length: 2,
+            },
+        ]));
+        assert!(namespace.validate().is_ok()); // Third extent follows a sparse gap.
+
+        let NodeData::File(layout) = &mut namespace.nodes.get_mut(&2).unwrap().data else {
+            panic!("expected file layout");
+        };
+        layout.extents[2].file_offset = 4;
+        assert!(namespace.validate().is_ok()); // Third extent starts at the prior end.
+
+        let NodeData::File(layout) = &mut namespace.nodes.get_mut(&2).unwrap().data else {
+            panic!("expected file layout");
+        };
+        layout.extents[2].file_offset = 3;
+        assert_error_code(namespace.validate(), ErrorCode::Einval);
+
+        let NodeData::File(layout) = &mut namespace.nodes.get_mut(&2).unwrap().data else {
+            panic!("expected file layout");
+        };
+        layout.extents[2].file_offset = 5;
+        layout.extents[2].block_offset = u64::MAX;
+        assert_error_code(namespace.validate(), ErrorCode::Eoverflow);
+
+        let NodeData::File(layout) = &mut namespace.nodes.get_mut(&2).unwrap().data else {
+            panic!("expected file layout");
+        };
+        layout.extents[2].block_offset = 0;
+        layout.extents[2].length = 3;
+        assert_error_code(namespace.validate(), ErrorCode::Einval);
     }
 
     #[test]

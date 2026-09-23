@@ -3479,6 +3479,138 @@ const MAX_TRAILER_BYTES: usize = 16 * 1024;
 const MAX_STREAMING_FEED_BYTES: usize = 64 * 1024;
 const TRAILER_SIGNATURE_HEADER: &str = "x-amz-trailer-signature";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DecodedSizeError {
+    BodyTooLarge,
+    DeclaredLengthExceeded,
+}
+
+fn checked_decoded_total(
+    decoded: u64,
+    additional: u64,
+    max_body_bytes: usize,
+    decoded_length: Option<u64>,
+) -> Result<u64, DecodedSizeError> {
+    let next = decoded
+        .checked_add(additional)
+        .ok_or(DecodedSizeError::BodyTooLarge)?;
+    if u128::from(next) > max_body_bytes as u128 {
+        return Err(DecodedSizeError::BodyTooLarge);
+    }
+    if decoded_length.is_some_and(|length| next > length) {
+        return Err(DecodedSizeError::DeclaredLengthExceeded);
+    }
+    Ok(next)
+}
+
+fn decoded_size_failure(error: DecodedSizeError) -> S3Failure {
+    match error {
+        DecodedSizeError::BodyTooLarge => S3Failure::s3("EntityTooLarge"),
+        DecodedSizeError::DeclaredLengthExceeded => S3Failure::s3("IncompleteBody"),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrameBoundsError {
+    TooLarge,
+    Incomplete,
+}
+
+fn checked_payload_frame(
+    cursor: usize,
+    size: u64,
+    body_len: usize,
+) -> Result<(usize, usize), FrameBoundsError> {
+    let size = usize::try_from(size).map_err(|_| FrameBoundsError::TooLarge)?;
+    let payload_end = cursor.checked_add(size).ok_or(FrameBoundsError::TooLarge)?;
+    let footer_end = payload_end
+        .checked_add(2)
+        .ok_or(FrameBoundsError::TooLarge)?;
+    if footer_end > body_len {
+        return Err(FrameBoundsError::Incomplete);
+    }
+    Ok((payload_end, footer_end))
+}
+
+fn frame_bounds_failure(error: FrameBoundsError) -> S3Failure {
+    match error {
+        FrameBoundsError::TooLarge => S3Failure::s3("EntityTooLarge"),
+        FrameBoundsError::Incomplete => S3Failure::s3("IncompleteBody"),
+    }
+}
+
+#[cfg(kani)]
+mod chunk_frame_verification {
+    use super::*;
+
+    // Numeric framing model: all counter, limit, declaration, and payload-size
+    // values are symbolic. HTTP headers, signatures, and allocations are out
+    // of scope; the same checked helpers are called by both production decoders.
+    #[kani::proof]
+    #[kani::unwind(2)]
+    fn decoded_chunk_total_never_wraps_or_exceeds_limits() {
+        let decoded: u64 = kani::any();
+        let additional: u64 = kani::any();
+        let max_body_bytes: usize = kani::any();
+        let declared: u64 = kani::any();
+        let has_declared: bool = kani::any();
+        let result = checked_decoded_total(
+            decoded,
+            additional,
+            max_body_bytes,
+            has_declared.then_some(declared),
+        );
+        let exact = u128::from(decoded) + u128::from(additional);
+        let accepted = exact <= u128::from(u64::MAX)
+            && exact <= max_body_bytes as u128
+            && (!has_declared || exact <= u128::from(declared));
+        assert_eq!(result.is_ok(), accepted);
+        if let Ok(next) = result {
+            assert_eq!(u128::from(next), exact);
+        }
+        if result == Err(DecodedSizeError::BodyTooLarge) {
+            assert!(exact > u128::from(u64::MAX) || exact > max_body_bytes as u128);
+        }
+        if result == Err(DecodedSizeError::DeclaredLengthExceeded) {
+            assert!(has_declared && exact > u128::from(declared));
+            assert!(exact <= u128::from(u64::MAX) && exact <= max_body_bytes as u128);
+        }
+        kani::cover!(result.is_ok());
+        kani::cover!(exact > u128::from(u64::MAX) && result == Err(DecodedSizeError::BodyTooLarge));
+        kani::cover!(
+            exact <= u128::from(u64::MAX) && result == Err(DecodedSizeError::BodyTooLarge)
+        );
+        kani::cover!(result == Err(DecodedSizeError::DeclaredLengthExceeded));
+    }
+
+    #[kani::proof]
+    #[kani::unwind(2)]
+    fn chunk_payload_and_footer_stay_within_body() {
+        let cursor: usize = kani::any();
+        let size: u64 = kani::any();
+        let body_len: usize = kani::any();
+        let result = checked_payload_frame(cursor, size, body_len);
+        let payload_end = cursor as u128 + u128::from(size);
+        let footer_end = payload_end + 2;
+        let accepted = u128::from(size) <= usize::MAX as u128 && footer_end <= body_len as u128;
+        assert_eq!(result.is_ok(), accepted);
+        if let Ok((payload, footer)) = result {
+            assert_eq!(payload as u128, payload_end);
+            assert_eq!(footer as u128, footer_end);
+            assert!(cursor <= payload && payload < footer && footer <= body_len);
+        }
+        if result == Err(FrameBoundsError::TooLarge) {
+            assert!(u128::from(size) > usize::MAX as u128 || footer_end > usize::MAX as u128);
+        }
+        if result == Err(FrameBoundsError::Incomplete) {
+            assert!(footer_end <= usize::MAX as u128 && footer_end > body_len as u128);
+        }
+        kani::cover!(result.is_ok());
+        kani::cover!(result == Err(FrameBoundsError::TooLarge));
+        kani::cover!(result == Err(FrameBoundsError::Incomplete));
+    }
+}
+
 fn decode_aws_chunked(
     body: &[u8],
     max_body_bytes: usize,
@@ -3532,27 +3664,20 @@ fn decode_aws_chunked(
         if signing.is_none() && size > MAX_SAFE_LENGTH {
             return Err(S3Failure::s3("EntityTooLarge"));
         }
-        let size_usize = usize::try_from(size).map_err(|_| S3Failure::s3("EntityTooLarge"))?;
-        let payload = if size == 0 {
-            &[]
+        let frame = if size == 0 {
+            None
         } else {
-            if output.len().saturating_add(size_usize) > max_body_bytes {
-                return Err(S3Failure::s3("EntityTooLarge"));
-            }
-            let end = cursor
-                .checked_add(size_usize)
-                .ok_or_else(|| S3Failure::s3("EntityTooLarge"))?;
-            if end.checked_add(2).is_none_or(|end| end > body.len()) {
-                return Err(S3Failure::s3("IncompleteBody"));
-            }
-            let payload = &body[cursor..end];
-            if decoded_length
-                .is_some_and(|length| output.len().saturating_add(size_usize) as u64 > length)
-            {
-                return Err(S3Failure::s3("IncompleteBody"));
-            }
-            payload
+            let decoded =
+                u64::try_from(output.len()).map_err(|_| S3Failure::s3("EntityTooLarge"))?;
+            checked_decoded_total(decoded, size, max_body_bytes, None)
+                .map_err(decoded_size_failure)?;
+            let frame =
+                checked_payload_frame(cursor, size, body.len()).map_err(frame_bounds_failure)?;
+            checked_decoded_total(decoded, size, max_body_bytes, decoded_length)
+                .map_err(decoded_size_failure)?;
+            Some(frame)
         };
+        let payload = frame.map_or(&[][..], |(end, _)| &body[cursor..end]);
         if let Some(signing) = signing.as_ref() {
             let previous = previous_signature
                 .as_deref()
@@ -3590,15 +3715,12 @@ fn decode_aws_chunked(
                 previous_signature.as_deref(),
             );
         }
-        let end = cursor
-            .checked_add(size_usize)
-            .ok_or_else(|| S3Failure::s3("EntityTooLarge"))?;
+        let (end, footer_end) = frame.expect("nonterminal chunk has a checked payload frame");
         output.extend_from_slice(payload);
-        cursor = end;
-        if body.get(cursor..cursor + 2) != Some(b"\r\n") {
+        if body.get(end..footer_end) != Some(b"\r\n") {
             return Err(S3Failure::s3("InvalidRequest"));
         }
-        cursor += 2;
+        cursor = footer_end;
     }
 }
 
@@ -3958,6 +4080,13 @@ impl<'a> StreamingBodyDecoder<'a> {
             return Ok(false);
         }
         let take = self.current_remaining.min(self.encoded.len() as u64) as usize;
+        let next = checked_decoded_total(
+            self.decoded,
+            take as u64,
+            self.max_body_bytes,
+            self.decoded_length,
+        )
+        .map_err(decoded_size_failure)?;
         let bytes = self.encoded.drain(..take).collect::<Vec<_>>();
         if self.signing.is_some() {
             self.current_payload.extend_from_slice(&bytes);
@@ -3965,7 +4094,7 @@ impl<'a> StreamingBodyDecoder<'a> {
             output.push(bytes);
         }
         self.current_remaining -= take as u64;
-        self.decoded = self.decoded.saturating_add(take as u64);
+        self.decoded = next;
         if self.current_remaining == 0 {
             self.state = StreamingDecodeState::PayloadCr;
         }
@@ -4147,13 +4276,13 @@ impl<'a> StreamingBodyDecoder<'a> {
     }
 
     fn check_decoded_size(&self, additional: u64) -> S3Result<()> {
-        let next = self.decoded.saturating_add(additional);
-        if next > self.max_body_bytes as u64 {
-            return Err(S3Failure::s3("EntityTooLarge"));
-        }
-        if self.decoded_length.is_some_and(|length| next > length) {
-            return Err(S3Failure::s3("IncompleteBody"));
-        }
+        checked_decoded_total(
+            self.decoded,
+            additional,
+            self.max_body_bytes,
+            self.decoded_length,
+        )
+        .map_err(decoded_size_failure)?;
         Ok(())
     }
 
@@ -4386,6 +4515,113 @@ mod tests {
             "oversized frame allocated {} encoded bytes",
             decoder.encoded.capacity()
         );
+    }
+
+    #[test]
+    fn streaming_decoder_rejects_decoded_counter_overflow() {
+        let headers = [HeaderEntry::new("content-encoding", "aws-chunked")];
+        let mut decoder = StreamingBodyDecoder::new(&headers, usize::MAX, None, None)
+            .expect("valid decoder configuration")
+            .expect("aws-chunked decoder");
+        decoder.decoded = u64::MAX - 1;
+        let error = decoder
+            .check_decoded_size(2)
+            .expect_err("decoded byte count cannot wrap or saturate");
+        assert!(matches!(error, S3Failure::S3(ref error) if error.code == "EntityTooLarge"));
+    }
+
+    #[test]
+    fn streaming_payload_overflow_preserves_buffer_and_state() {
+        let headers = [HeaderEntry::new("content-encoding", "aws-chunked")];
+        let mut decoder = StreamingBodyDecoder::new(&headers, usize::MAX, None, None)
+            .expect("valid decoder configuration")
+            .expect("aws-chunked decoder");
+        decoder.decoded = u64::MAX - 1;
+        decoder.current_size = 2;
+        decoder.current_remaining = 2;
+        decoder.state = StreamingDecodeState::Payload;
+        decoder.encoded.extend_from_slice(b"xy");
+        let mut output = Vec::new();
+
+        let error = decoder
+            .consume_payload(&mut output)
+            .expect_err("payload bytes cannot overflow decoded count");
+        assert!(matches!(error, S3Failure::S3(ref error) if error.code == "EntityTooLarge"));
+        assert_eq!(decoder.encoded, b"xy");
+        assert_eq!(decoder.decoded, u64::MAX - 1);
+        assert_eq!(decoder.current_remaining, 2);
+        assert_eq!(decoder.state, StreamingDecodeState::Payload);
+        assert!(decoder.current_payload.is_empty());
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn buffered_decoder_rejects_declared_length_before_emitting_payload() {
+        let body = b"2\r\nxy\r\n0\r\n\r\n";
+        let error = decode_aws_chunked(body, 2, Some(1), None, &[])
+            .expect_err("complete frame exceeds declared decoded length");
+        assert!(matches!(error, S3Failure::S3(ref error) if error.code == "IncompleteBody"));
+    }
+
+    #[test]
+    fn buffered_chunk_payload_bounds_reject_overflow_and_truncation() {
+        assert_eq!(
+            checked_payload_frame(usize::MAX - 1, 2, usize::MAX),
+            Err(FrameBoundsError::TooLarge)
+        );
+        assert_eq!(
+            checked_payload_frame(3, 2, 6),
+            Err(FrameBoundsError::Incomplete)
+        );
+        assert_eq!(checked_payload_frame(3, 2, 7), Ok((5, 7)));
+    }
+
+    #[test]
+    fn streaming_decoder_accepts_variable_splits_across_two_chunks() {
+        let headers = [HeaderEntry::new("content-encoding", "aws-chunked")];
+        let frame = b"1\r\na\r\n2\r\nbc\r\n0\r\n\r\n";
+        for first in 0..=frame.len() {
+            for second in first..=frame.len() {
+                let mut decoder = StreamingBodyDecoder::new(&headers, 3, None, None)
+                    .expect("valid decoder configuration")
+                    .expect("aws-chunked decoder");
+                let mut decoded = Vec::new();
+                for fragment in [&frame[..first], &frame[first..second], &frame[second..]] {
+                    let mut consumed = 0;
+                    while consumed < fragment.len() {
+                        let (window_bytes, payloads) =
+                            decoder.feed(&fragment[consumed..]).expect("valid fragment");
+                        assert!(window_bytes > 0 && window_bytes <= fragment.len() - consumed);
+                        consumed += window_bytes;
+                        for payload in payloads {
+                            decoded.extend(payload);
+                        }
+                    }
+                }
+                assert!(decoder.finish().expect("terminal chunk").is_empty());
+                assert_eq!(decoded, b"abc", "split at ({first}, {second})");
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_decoder_rejects_truncated_two_chunk_frame() {
+        let headers = [HeaderEntry::new("content-encoding", "aws-chunked")];
+        let frame = b"1\r\na\r\n2\r\nbc\r\n0\r\n\r\n";
+        for end in 0..frame.len() - 2 {
+            let mut decoder = StreamingBodyDecoder::new(&headers, 3, None, None)
+                .expect("valid decoder configuration")
+                .expect("aws-chunked decoder");
+            let mut consumed = 0;
+            while consumed < end {
+                let (window_bytes, _) = decoder
+                    .feed(&frame[consumed..end])
+                    .expect("valid prefix before finalization");
+                assert!(window_bytes > 0 && window_bytes <= end - consumed);
+                consumed += window_bytes;
+            }
+            assert!(decoder.finish().is_err(), "truncated at {end}");
+        }
     }
 
     #[test]

@@ -6,6 +6,9 @@ rust-version = "1.95"
 description = "Path-style S3 gateway transport for mount-rs filesystem drivers"
 license = "Apache-2.0"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 [dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 base64 = "0.22"

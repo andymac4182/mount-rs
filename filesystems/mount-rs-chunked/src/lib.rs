@@ -54,6 +54,46 @@ const MUTATION_BATCH_MAX_YIELD_ROUNDS: usize = 64;
 const MUTATION_BATCH_IDLE_YIELD_ROUNDS: usize = 2;
 const MUTATION_BATCH_REQUEST_TARGET: usize = 64;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReacquiredFence {
+    Next,
+    Fenced,
+    Overflow,
+}
+
+/// An expired writer may resume only with the immediately next fence token.
+/// A skipped or wrapped token means some other ownership event may have
+/// intervened, even when the provider returns the same owner name.
+fn classify_reacquired_fence(prior: u64, acquired: u64) -> ReacquiredFence {
+    match prior.checked_add(1) {
+        None => ReacquiredFence::Overflow,
+        Some(next) if acquired == next => ReacquiredFence::Next,
+        Some(_) => ReacquiredFence::Fenced,
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::{ReacquiredFence, classify_reacquired_fence};
+
+    /// The production lease-recovery guard accepts only a strict one-step
+    /// increase over full-range fence tokens, never a wrap or skipped token.
+    #[kani::proof]
+    fn reacquired_writer_fence_is_exactly_next() {
+        let prior: u64 = kani::any();
+        let acquired: u64 = kani::any();
+        let decision = classify_reacquired_fence(prior, acquired);
+        let exactly_next = acquired > prior && acquired - prior == 1;
+
+        assert_eq!(decision == ReacquiredFence::Next, exactly_next);
+        assert_eq!(decision == ReacquiredFence::Overflow, prior == u64::MAX);
+        kani::cover!(prior == u64::MAX && decision == ReacquiredFence::Overflow);
+        kani::cover!(prior == 7 && acquired == 8 && decision == ReacquiredFence::Next);
+        kani::cover!(prior == 7 && acquired == 9 && decision == ReacquiredFence::Fenced);
+        kani::cover!(prior == 7 && acquired == 7 && decision == ReacquiredFence::Fenced);
+    }
+}
+
 /// Runtime configuration for a newly-created namespace.
 ///
 /// The chunker's serialized configuration is stored in the namespace and in
@@ -907,18 +947,16 @@ where
             }
         };
 
-        let expected_fence = match current.fence.checked_add(1) {
-            Some(fence) => fence,
-            None => {
-                let _ = self.inner.metadata.release_writer(&acquired).await;
-                return Err(self.fail_closed(
-                    FsError::new(ErrorCode::Eoverflow)
-                        .with_syscall("lease-acquire")
-                        .with_message("writer lease fence overflow"),
-                ));
-            }
-        };
-        if acquired.owner != self.inner.options.owner || acquired.fence != expected_fence {
+        let fence_decision = classify_reacquired_fence(current.fence, acquired.fence);
+        if fence_decision == ReacquiredFence::Overflow {
+            let _ = self.inner.metadata.release_writer(&acquired).await;
+            return Err(self.fail_closed(
+                FsError::new(ErrorCode::Eoverflow)
+                    .with_syscall("lease-acquire")
+                    .with_message("writer lease fence overflow"),
+            ));
+        }
+        if fence_decision != ReacquiredFence::Next || acquired.owner != self.inner.options.owner {
             let _ = self.inner.metadata.release_writer(&acquired).await;
             return Err(self.fail_closed(
                 FsError::new(ErrorCode::Estale)

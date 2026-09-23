@@ -37,8 +37,9 @@ use mount_rs_nfs::v4::{
 };
 use mount_rs_nfs::xdr::encode_xdr;
 use mount_rs_nfs::{
-    NFS_V4, NFS4_PROGRAM, Nfs4Clock, Nfs4IdMap, NfsServer, NfsServerOptions, OpaqueAuth,
-    RecordAssembler, XdrReader, XdrWriter, auth_sys, decode_reply, encode_call, frame_record,
+    AuthSysParams, NFS_V4, NFS4_PROGRAM, Nfs4Clock, Nfs4IdMap, NfsServer, NfsServerOptions,
+    OpaqueAuth, RecordAssembler, XdrReader, XdrWriter, auth_sys, decode_reply, encode_auth_sys,
+    encode_call, frame_record,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -2966,6 +2967,168 @@ fn nfs_v4_anonymous_access_does_not_inherit_root_mode() {
         .expect("spawn anonymous access test thread")
         .join()
         .expect("anonymous access test thread panicked");
+}
+
+#[test]
+fn nfs_v4_auth_sys_access_selects_owner_primary_supplemental_and_other() {
+    std::thread::Builder::new()
+        .name("nfs-v4-auth-sys-access-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build v4 AUTH_SYS access runtime")
+                .block_on(async {
+                    let driver = MemoryFs::new(MemoryOptions {
+                        uid: 1,
+                        gid: 2,
+                        root_mode: 0o714,
+                        ..MemoryOptions::default()
+                    });
+                    let server = NfsServer::new(driver, NfsServerOptions::default());
+                    let address = server.listen().await.expect("listen NFS server");
+                    let (mut stream, mut client) =
+                        connect_v4_client(address, 710, b"auth-sys-access-client").await;
+
+                    let supplemental = OpaqueAuth {
+                        flavor: mount_rs_nfs::rpc::AUTH_SYS,
+                        body: encode_auth_sys(&AuthSysParams {
+                            stamp: 0,
+                            machine_name: "supplemental-user".into(),
+                            uid: 3,
+                            gid: 3,
+                            gids: vec![4, 2],
+                        }),
+                    };
+                    let owner_and_group = auth_sys(1, 2, "owner-and-group");
+                    for (credential, expected_access) in [
+                        (
+                            owner_and_group,
+                            ACCESS4_READ
+                                | ACCESS4_LOOKUP
+                                | ACCESS4_MODIFY
+                                | ACCESS4_EXTEND
+                                | ACCESS4_DELETE,
+                        ),
+                        (auth_sys(3, 2, "primary-group"), ACCESS4_LOOKUP),
+                        (supplemental, ACCESS4_LOOKUP),
+                        (auth_sys(3, 3, "other-user"), ACCESS4_READ),
+                    ] {
+                        let mut response = rpc_with_credential(
+                            &mut stream,
+                            711 + client.sequence,
+                            compound(
+                                "auth-sys-access",
+                                &[
+                                    sequence(&client),
+                                    op(OP_PUTROOTFH, |_| {}),
+                                    op(OP_ACCESS, |writer| writer.u32(ACCESS4_ALL)),
+                                ],
+                            ),
+                            Some(&credential),
+                        )
+                        .await;
+                        parse_compound_header(&mut response, 3);
+                        consume_sequence_result(&mut response, "access sequence");
+                        parse_result_header(&mut response, OP_PUTROOTFH);
+                        parse_result_header(&mut response, OP_ACCESS);
+                        assert_eq!(response.u32("supported ACCESS bits").unwrap(), ACCESS4_ALL);
+                        assert_eq!(
+                            response.u32("granted ACCESS bits").unwrap(),
+                            expected_access,
+                            "AUTH_SYS owner/group/other precedence"
+                        );
+                        response.end("ACCESS response").unwrap();
+                        client.sequence += 1;
+                    }
+
+                    stream.shutdown().await.expect("close NFS transport");
+                    server.close().await.expect("close NFS server");
+                });
+        })
+        .expect("spawn AUTH_SYS access test thread")
+        .join()
+        .expect("AUTH_SYS access test thread panicked");
+}
+
+#[test]
+fn nfs_v4_access_does_not_claim_to_verify_delete_on_regular_file() {
+    std::thread::Builder::new()
+        .name("nfs-v4-regular-access-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build v4 regular ACCESS runtime")
+                .block_on(async {
+                    let driver = MemoryFs::new(MemoryOptions::default());
+                    mount_rs_core::Loopback::new(driver.clone())
+                        .write_file("/regular", b"contents")
+                        .await
+                        .expect("seed regular file");
+                    driver.chmod("/regular", 0o644).await.expect("set mode");
+                    let server = NfsServer::new(driver, NfsServerOptions::default());
+                    let address = server.listen().await.expect("listen NFS server");
+                    let (mut stream, mut client) =
+                        connect_v4_client(address, 720, b"regular-access-client").await;
+
+                    for (requested, expected_supported, expected_granted) in [
+                        (
+                            ACCESS4_ALL,
+                            ACCESS4_ALL & !ACCESS4_DELETE,
+                            ACCESS4_READ | ACCESS4_MODIFY | ACCESS4_EXTEND,
+                        ),
+                        (
+                            ACCESS4_READ | ACCESS4_DELETE | (1 << 30),
+                            ACCESS4_READ,
+                            ACCESS4_READ,
+                        ),
+                    ] {
+                        let mut response = rpc_with_credential(
+                            &mut stream,
+                            721 + client.sequence,
+                            compound(
+                                "regular-access",
+                                &[
+                                    sequence(&client),
+                                    op(OP_PUTROOTFH, |_| {}),
+                                    op(OP_LOOKUP, |writer| writer.string("regular")),
+                                    op(OP_ACCESS, |writer| writer.u32(requested)),
+                                ],
+                            ),
+                            Some(&auth_sys(0, 0, "root-user")),
+                        )
+                        .await;
+                        parse_compound_header(&mut response, 4);
+                        consume_sequence_result(&mut response, "regular access sequence");
+                        parse_result_header(&mut response, OP_PUTROOTFH);
+                        parse_result_header(&mut response, OP_LOOKUP);
+                        parse_result_header(&mut response, OP_ACCESS);
+                        assert_eq!(
+                            response.u32("supported ACCESS bits").unwrap(),
+                            expected_supported,
+                            "regular-file deletion depends on its parent directory"
+                        );
+                        assert_eq!(
+                            response.u32("granted ACCESS bits").unwrap(),
+                            expected_granted
+                        );
+                        response.end("regular ACCESS response").unwrap();
+                        client.sequence += 1;
+                    }
+                    stream.shutdown().await.expect("close NFS transport");
+                    server.close().await.expect("close NFS server");
+                });
+        })
+        .expect("spawn regular ACCESS test thread")
+        .join()
+        .expect("regular ACCESS test thread panicked");
 }
 
 #[test]

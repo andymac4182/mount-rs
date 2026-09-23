@@ -4161,6 +4161,117 @@ mod verification {
         kani::cover!(mode == 0o700 && uid == 0 && is_dir && root_rights.modify);
         kani::cover!(mode == 0o007 && uid == 0 && !is_dir && anonymous_rights.execute);
     }
+
+    /// For valid nonroot AUTH_SYS credentials, the owner column has priority
+    /// over group, and either primary or supplemental membership has priority
+    /// over other. This is an advisory ACCESS-bit calculation, not proof that
+    /// the underlying driver will authorize a future operation.
+    #[kani::proof]
+    fn nonroot_access_selects_owner_primary_supplemental_and_other() {
+        let mode: u16 = kani::any();
+        let user_uid: u8 = kani::any();
+        let file_uid: u8 = kani::any();
+        let primary_gid: u8 = kani::any();
+        let supplemental_gid: u8 = kani::any();
+        let file_gid: u8 = kani::any();
+        let requested: u8 = kani::any();
+        let is_dir: bool = kani::any();
+        kani::assume(mode <= 0o777);
+        kani::assume((1..=3).contains(&user_uid));
+        kani::assume((1..=3).contains(&file_uid));
+        kani::assume((1..=3).contains(&primary_gid));
+        kani::assume((1..=3).contains(&supplemental_gid));
+        kani::assume((1..=3).contains(&file_gid));
+        kani::assume(u32::from(requested) <= ACCESS3_ALL);
+
+        let stats = mount_rs_core::Stats {
+            dev: 0,
+            ino: 1,
+            mode: (if is_dir {
+                S_IFDIR
+            } else {
+                mount_rs_core::S_IFREG
+            }) | u32::from(mode),
+            nlink: 1,
+            uid: u32::from(file_uid),
+            gid: u32::from(file_gid),
+            rdev: 0,
+            size: 0,
+            blksize: 0,
+            blocks: 0,
+            atime_ms: 0,
+            mtime_ms: 0,
+            ctime_ms: 0,
+            birthtime_ms: 0,
+        };
+        let credentials = RpcCredentials {
+            flavor: AUTH_SYS,
+            uid: Some(u32::from(user_uid)),
+            gid: Some(u32::from(primary_gid)),
+            gids: vec![u32::from(supplemental_gid)],
+        };
+
+        // Derive the expected grant from explicit octal masks, independently
+        // of the production helper's shifted three-bit column and Vec search.
+        let owner = user_uid == file_uid;
+        let primary_group = primary_gid == file_gid;
+        let supplemental_group = supplemental_gid == file_gid;
+        let (read_mask, write_mask, execute_mask) = if owner {
+            (0o400, 0o200, 0o100)
+        } else if primary_group || supplemental_group {
+            (0o040, 0o020, 0o010)
+        } else {
+            (0o004, 0o002, 0o001)
+        };
+        let mode = u32::from(mode);
+        let read = mode & read_mask != 0;
+        let write = mode & write_mask != 0;
+        let execute = mode & execute_mask != 0;
+        let expected = (if read { ACCESS3_READ } else { 0 })
+            | (if is_dir && execute { ACCESS3_LOOKUP } else { 0 })
+            | (if write {
+                ACCESS3_MODIFY | ACCESS3_EXTEND
+            } else {
+                0
+            })
+            | (if is_dir && write { ACCESS3_DELETE } else { 0 })
+            | (if !is_dir && execute {
+                ACCESS3_EXECUTE
+            } else {
+                0
+            });
+        let actual = access_bits3(allowed_access(&stats, &credentials));
+        assert_eq!(actual, expected);
+        let granted = u32::from(requested) & actual;
+        assert_eq!(granted, u32::from(requested) & expected);
+        assert_eq!(granted & !u32::from(requested), 0);
+
+        kani::cover!(owner && primary_group && mode == 0o040 && actual & ACCESS3_READ == 0);
+        kani::cover!(!owner && primary_group && mode == 0o004 && actual & ACCESS3_READ == 0);
+        kani::cover!(
+            !owner
+                && !primary_group
+                && supplemental_group
+                && mode == 0o040
+                && actual & ACCESS3_READ != 0
+        );
+        kani::cover!(
+            !owner
+                && !primary_group
+                && supplemental_group
+                && mode == 0o004
+                && actual & ACCESS3_READ == 0
+        );
+        kani::cover!(
+            !owner
+                && !primary_group
+                && !supplemental_group
+                && mode == 0o004
+                && actual & ACCESS3_READ != 0
+        );
+        kani::cover!(is_dir && mode == 0o001 && actual & ACCESS3_LOOKUP != 0);
+        kani::cover!(!is_dir && mode == 0o001 && actual & ACCESS3_EXECUTE != 0);
+    }
 }
 
 #[cfg(test)]
@@ -4349,6 +4460,104 @@ mod tests {
             let access = read_access_res(&mut body).expect("decode ACCESS result");
             assert_eq!(access.status, NFS3_OK);
             assert_eq!(access.attributes.as_ref().expect("root attrs").uid, 0);
+            assert_eq!(access.access, expected, "ACCESS rights for xid {xid}");
+            body.end("ACCESS result").expect("no trailing ACCESS data");
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_sys_access_selects_owner_primary_supplemental_and_other() {
+        let session = Nfs3Session::new(
+            MemoryFs::new(MemoryOptions {
+                uid: 1,
+                gid: 2,
+                root_mode: 0o714,
+                ..MemoryOptions::default()
+            }),
+            NfsSessionOptions::default(),
+        );
+        let mount_call = crate::rpc::encode_call(
+            30,
+            MOUNT_PROGRAM,
+            MOUNT_V3,
+            MOUNTPROC3_MNT,
+            None,
+            None,
+            &crate::xdr::encode_xdr(|writer| writer.string("/")),
+        );
+        let mount_reply = session
+            .handle_call(&mount_call, NfsRequestContext::default())
+            .await
+            .expect("MOUNT reply");
+        let (_, mut body) = crate::rpc::decode_reply(&mount_reply).expect("decode MOUNT reply");
+        let root = read_mount_res(&mut body)
+            .expect("decode MOUNT result")
+            .fh
+            .expect("root handle");
+        body.end("MOUNT result").expect("no trailing MOUNT data");
+
+        let access_args = crate::xdr::encode_xdr(|writer| {
+            write_access_args(
+                writer,
+                &Access3args {
+                    object: root,
+                    access: ACCESS3_ALL,
+                },
+            );
+        });
+        let supplemental = crate::rpc::OpaqueAuth {
+            flavor: AUTH_SYS,
+            body: crate::rpc::encode_auth_sys(&crate::rpc::AuthSysParams {
+                stamp: 0,
+                machine_name: "supplemental-user".into(),
+                uid: 3,
+                gid: 3,
+                gids: vec![4, 2],
+            }),
+        };
+        let owner_and_group = crate::rpc::OpaqueAuth {
+            flavor: AUTH_SYS,
+            body: crate::rpc::encode_auth_sys(&crate::rpc::AuthSysParams {
+                stamp: 0,
+                machine_name: "owner-and-group".into(),
+                uid: 1,
+                gid: 2,
+                gids: Vec::new(),
+            }),
+        };
+        let cases = [
+            (
+                31,
+                owner_and_group,
+                ACCESS3_READ | ACCESS3_LOOKUP | ACCESS3_MODIFY | ACCESS3_EXTEND | ACCESS3_DELETE,
+            ),
+            (
+                32,
+                crate::rpc::auth_sys(3, 2, "primary-group"),
+                ACCESS3_LOOKUP,
+            ),
+            (33, supplemental, ACCESS3_LOOKUP),
+            (34, crate::rpc::auth_sys(3, 3, "other-user"), ACCESS3_READ),
+        ];
+        for (xid, credential, expected) in cases {
+            let call = crate::rpc::encode_call(
+                xid,
+                NFS_PROGRAM,
+                NFS_V3,
+                NFSPROC3_ACCESS,
+                Some(&credential),
+                None,
+                &access_args,
+            );
+            let reply = session
+                .handle_call(&call, NfsRequestContext::default())
+                .await
+                .expect("ACCESS reply");
+            let (_, mut body) = crate::rpc::decode_reply(&reply).expect("decode ACCESS reply");
+            let access = read_access_res(&mut body).expect("decode ACCESS result");
+            assert_eq!(access.status, NFS3_OK);
+            let attributes = access.attributes.as_ref().expect("root attrs");
+            assert_eq!((attributes.uid, attributes.gid), (1, 2));
             assert_eq!(access.access, expected, "ACCESS rights for xid {xid}");
             body.end("ACCESS result").expect("no trailing ACCESS data");
         }

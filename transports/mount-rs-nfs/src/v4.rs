@@ -3358,7 +3358,7 @@ impl Nfs4Session {
             Err(error) => return V4OpResult::new(OP_ACCESS, error_status(&error)),
         };
         let allowed = allowed_access4(&stats, credentials);
-        let supported = requested & ACCESS4_ALL;
+        let supported = supported_access4(requested, stats.mode);
         let access = allowed & supported;
         let mut body = XdrWriter::with_capacity(8);
         body.u32(supported);
@@ -5067,6 +5067,130 @@ mod verification {
         kani::cover!(mode == 0o700 && uid == 0 && is_dir && root & ACCESS4_DELETE != 0);
         kani::cover!(mode == 0o007 && uid == 0 && !is_dir && actual & ACCESS4_EXECUTE != 0);
     }
+
+    /// Valid nonroot AUTH_SYS credentials select owner before either group,
+    /// and group before other. Compare the advertised bit mask with octal
+    /// masks independent of the production shifted-column implementation.
+    #[kani::proof]
+    fn nonroot_access4_selects_owner_primary_supplemental_and_other() {
+        let mode: u16 = kani::any();
+        let user_uid: u8 = kani::any();
+        let file_uid: u8 = kani::any();
+        let primary_gid: u8 = kani::any();
+        let supplemental_gid: u8 = kani::any();
+        let file_gid: u8 = kani::any();
+        let requested: u8 = kani::any();
+        let is_dir: bool = kani::any();
+        kani::assume(mode <= 0o777);
+        kani::assume((1..=3).contains(&user_uid));
+        kani::assume((1..=3).contains(&file_uid));
+        kani::assume((1..=3).contains(&primary_gid));
+        kani::assume((1..=3).contains(&supplemental_gid));
+        kani::assume((1..=3).contains(&file_gid));
+        kani::assume(u32::from(requested) <= ACCESS4_ALL);
+
+        let stats = Stats {
+            dev: 0,
+            ino: 1,
+            mode: (if is_dir { S_IFDIR } else { S_IFREG }) | u32::from(mode),
+            nlink: 1,
+            uid: u32::from(file_uid),
+            gid: u32::from(file_gid),
+            rdev: 0,
+            size: 0,
+            blksize: 0,
+            blocks: 0,
+            atime_ms: 0,
+            mtime_ms: 0,
+            ctime_ms: 0,
+            birthtime_ms: 0,
+        };
+        let credentials = RpcCredentials {
+            flavor: AUTH_SYS,
+            uid: Some(u32::from(user_uid)),
+            gid: Some(u32::from(primary_gid)),
+            gids: vec![u32::from(supplemental_gid)],
+        };
+        let owner = user_uid == file_uid;
+        let primary_group = primary_gid == file_gid;
+        let supplemental_group = supplemental_gid == file_gid;
+        let (read_mask, write_mask, execute_mask) = if owner {
+            (0o400, 0o200, 0o100)
+        } else if primary_group || supplemental_group {
+            (0o040, 0o020, 0o010)
+        } else {
+            (0o004, 0o002, 0o001)
+        };
+        let mode = u32::from(mode);
+        let read = mode & read_mask != 0;
+        let write = mode & write_mask != 0;
+        let execute = mode & execute_mask != 0;
+        let expected = (if read { ACCESS4_READ } else { 0 })
+            | (if is_dir && execute { ACCESS4_LOOKUP } else { 0 })
+            | (if write {
+                ACCESS4_MODIFY | ACCESS4_EXTEND
+            } else {
+                0
+            })
+            | (if is_dir && write { ACCESS4_DELETE } else { 0 })
+            | (if !is_dir && execute {
+                ACCESS4_EXECUTE
+            } else {
+                0
+            });
+        let actual = allowed_access4(&stats, &credentials);
+        assert_eq!(actual, expected);
+        let supported = supported_access4(u32::from(requested), stats.mode);
+        let granted = actual & supported;
+        assert_eq!(granted, expected & supported);
+        assert_eq!(granted & !supported, 0);
+
+        kani::cover!(owner && primary_group && mode == 0o040 && actual & ACCESS4_READ == 0);
+        kani::cover!(!owner && primary_group && mode == 0o004 && actual & ACCESS4_READ == 0);
+        kani::cover!(
+            !owner
+                && !primary_group
+                && supplemental_group
+                && mode == 0o040
+                && actual & ACCESS4_READ != 0
+        );
+        kani::cover!(
+            !owner
+                && !primary_group
+                && supplemental_group
+                && mode == 0o004
+                && actual & ACCESS4_READ == 0
+        );
+        kani::cover!(
+            !owner
+                && !primary_group
+                && !supplemental_group
+                && mode == 0o004
+                && actual & ACCESS4_READ != 0
+        );
+        kani::cover!(is_dir && mode == 0o001 && actual & ACCESS4_LOOKUP != 0);
+        kani::cover!(!is_dir && mode == 0o001 && actual & ACCESS4_EXECUTE != 0);
+    }
+
+    /// The v4 ACCESS response never advertises rights outside the request or
+    /// the implemented set, and DELETE cannot be checked from a non-directory.
+    #[kani::proof]
+    fn supported_access4_mask_respects_request_and_object_kind() {
+        let requested: u32 = kani::any();
+        let is_dir: bool = kani::any();
+        let mode = if is_dir { S_IFDIR } else { S_IFREG };
+        let supported = supported_access4(requested, mode);
+        assert_eq!(supported & !requested, 0);
+        assert_eq!(supported & !ACCESS4_ALL, 0);
+        if is_dir {
+            assert_eq!(supported, requested & ACCESS4_ALL);
+        } else {
+            assert_eq!(supported, requested & (ACCESS4_ALL & !ACCESS4_DELETE));
+        }
+        kani::cover!(!is_dir && requested == ACCESS4_ALL && supported == 47);
+        kani::cover!(is_dir && requested == ACCESS4_ALL && supported == ACCESS4_ALL);
+        kani::cover!(requested == u32::MAX && supported & !ACCESS4_ALL == 0);
+    }
 }
 
 /// Fold the configured boot seed into the high half of an identity while
@@ -5093,6 +5217,16 @@ fn session_id(seed: u32, write_verifier: &[u8; 8], counter: u64) -> [u8; NFS4_SE
     id[4..8].copy_from_slice(&verifier_tag.to_be_bytes());
     id[8..].copy_from_slice(&counter.to_be_bytes());
     id
+}
+
+fn supported_access4(requested: u32, mode: u32) -> u32 {
+    let mut supported = requested & ACCESS4_ALL;
+    // A non-directory's delete authority comes from its parent. Do not claim
+    // to verify DELETE from this object's attributes alone.
+    if mode & S_IFMT != S_IFDIR {
+        supported &= !ACCESS4_DELETE;
+    }
+    supported
 }
 
 fn allowed_access4(stats: &Stats, credentials: &RpcCredentials) -> u32 {

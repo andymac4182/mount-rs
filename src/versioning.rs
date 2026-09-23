@@ -342,6 +342,45 @@ impl ReadLeaseRequest {
     }
 }
 
+#[cfg(kani)]
+mod read_lease_verification {
+    use super::ReadLeaseRequest;
+    use crate::ErrorCode;
+    use std::time::Duration;
+
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn read_lease_ttl_milliseconds_are_checked() {
+        let seconds: u64 = kani::any();
+        let nanos: u32 = kani::any();
+        kani::assume(nanos < 1_000_000_000);
+
+        let request = ReadLeaseRequest {
+            owner: "owner".to_owned(),
+            ttl: Duration::new(seconds, nanos),
+        };
+        let exact_ms = u128::from(seconds) * 1_000 + u128::from(nanos / 1_000_000);
+        let result = request.validate();
+        let admitted = exact_ms > 0 && exact_ms <= u128::from(u64::MAX);
+        assert_eq!(result.is_ok(), admitted);
+        match result {
+            Ok(ttl_ms) => assert_eq!(u128::from(ttl_ms), exact_ms),
+            Err(error) if exact_ms == 0 => {
+                assert!(error.is(ErrorCode::Einval));
+            }
+            Err(error) => {
+                assert!(exact_ms > u128::from(u64::MAX));
+                assert!(error.is(ErrorCode::Eoverflow));
+            }
+        }
+
+        kani::cover!(seconds == 0 && nanos == 999_999 && !admitted);
+        kani::cover!(seconds == 0 && nanos == 1_000_000 && admitted);
+        kani::cover!(exact_ms == u128::from(u64::MAX) && admitted);
+        kani::cover!(seconds == u64::MAX && !admitted);
+    }
+}
+
 /// Additional metadata capability. Existing providers can continue
 /// implementing only [`MetadataStore`]; versioned coordinators require this
 /// trait and therefore fail explicitly at integration selection time rather
@@ -501,6 +540,36 @@ mod tests {
                 crate::ErrorCode::Einval
             );
         }
+    }
+
+    #[test]
+    fn read_lease_ttl_checks_submillisecond_and_u64_boundaries() {
+        let request = |ttl| ReadLeaseRequest {
+            owner: "owner".to_owned(),
+            ttl,
+        };
+
+        assert_eq!(
+            request(Duration::new(0, 999_999))
+                .validate()
+                .unwrap_err()
+                .code,
+            crate::ErrorCode::Einval
+        );
+        assert_eq!(request(Duration::new(0, 1_000_000)).validate().unwrap(), 1);
+        assert_eq!(
+            request(Duration::new(u64::MAX / 1_000, 615_000_000))
+                .validate()
+                .unwrap(),
+            u64::MAX
+        );
+        assert_eq!(
+            request(Duration::new(u64::MAX, 0))
+                .validate()
+                .unwrap_err()
+                .code,
+            crate::ErrorCode::Eoverflow
+        );
     }
 
     #[test]
