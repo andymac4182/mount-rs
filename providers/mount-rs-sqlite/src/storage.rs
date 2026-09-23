@@ -30,6 +30,7 @@ const BOUND_WRITE_MODE: &str = "MRC2";
 const CONCURRENT_FENCE_SENTINEL: i64 = i64::MAX;
 const MAX_SQLITE_BUSY_RETRIES: usize = 16;
 const SQLITE_BUSY_RETRY_BUDGET: Duration = Duration::from_secs(30);
+#[cfg(unix)]
 const CONCURRENT_PUBLISH_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 
 fn sqlite_busy_known_noncommit(
@@ -455,6 +456,7 @@ impl Database {
             .map_err(|_| backend_error("SQLite storage lock poisoned"))
     }
 
+    #[cfg(unix)]
     fn with_concurrent_publish_timeout<T>(
         &self,
         operation: impl FnOnce(&mut Connection) -> Result<T>,
@@ -521,6 +523,7 @@ type MetadataModeRow = (
     Option<String>,
     Option<String>,
 );
+#[cfg(unix)]
 type MetadataClaimRow = (
     Option<String>,
     Option<String>,
@@ -533,6 +536,7 @@ type MetadataClaimRow = (
     Option<String>,
     Option<String>,
 );
+#[cfg(unix)]
 type MetadataPublicationRow = (
     Option<String>,
     Option<String>,
@@ -544,6 +548,7 @@ type MetadataPublicationRow = (
     Option<String>,
     Option<String>,
 );
+#[cfg(unix)]
 type MetadataMigrationRow = (
     Option<String>,
     Option<String>,
@@ -1341,6 +1346,7 @@ fn plan_view_pin_renewal(
         .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))
 }
 
+#[cfg(unix)]
 fn mrc1_migration_required() -> FsError {
     FsError::new(ErrorCode::Ebusy)
         .with_syscall("bound concurrent SQLite metadata")
