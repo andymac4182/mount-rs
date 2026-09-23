@@ -638,10 +638,18 @@ async fn concurrent_backing_keyspace_identity_and_wrong_backing_fence() {
     let mut corrupt_key = prefix_a.as_bytes().to_vec();
     corrupt_key.extend_from_slice(b"\0block/");
     corrupt_key.extend_from_slice(digest.0.as_bytes());
+    let mut corrupt_bytes = migration_bytes.to_vec();
+    corrupt_bytes[0] ^= 1;
+    assert_eq!(corrupt_bytes.len(), migration_bytes.len());
     let db = foundationdb::Database::from_path(&cluster_file).unwrap();
     let trx = db.create_trx().unwrap();
-    trx.set(&corrupt_key, b"different bytes under the same block ID");
+    trx.set(&corrupt_key, &corrupt_bytes);
     trx.commit().await.unwrap();
+    assert_eq!(
+        blocks_a.get(&digest).await.unwrap_err().code,
+        ErrorCode::Eio,
+        "ordinary reads must reject same-length content-addressed block corruption"
+    );
     assert_eq!(
         blocks_a.get_for_migration(&digest).await.unwrap_err().code,
         ErrorCode::Eio,

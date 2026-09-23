@@ -1941,7 +1941,7 @@ impl BlockStore for PgliteBlockStore {
 
     async fn get(&self, id: &BlockId) -> Result<Vec<u8>> {
         let client = self.0.lock_client().await?;
-        client
+        let bytes = client
             .as_ref()
             .ok_or_else(connection_closed)?
             .query_typed_opt(
@@ -1951,7 +1951,12 @@ impl BlockStore for PgliteBlockStore {
             .await
             .map_err(postgres_error)?
             .map(|row| row.get::<_, Vec<u8>>(0))
-            .ok_or_else(|| FsError::new(ErrorCode::Enoent).with_syscall("get block"))
+            .ok_or_else(|| FsError::new(ErrorCode::Enoent).with_syscall("get block"))?;
+        drop(client);
+        if block_id(&bytes) != id.0 {
+            return Err(FsError::new(ErrorCode::Eio).with_syscall("verify PGlite block digest"));
+        }
+        Ok(bytes)
     }
 
     async fn flush(&self) -> Result<()> {
@@ -4027,6 +4032,60 @@ mod tests {
             assert!(blocks.get(&orphan).await.unwrap_err().is(ErrorCode::Enoent));
             competitor.release_writer(&second).await.unwrap();
             metadata.flush().await.unwrap();
+        });
+    }
+
+    #[test]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
+    fn normal_block_read_rejects_same_length_tamper() {
+        let server = PgliteServer::start();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let blocks = PgliteBlockStore::connect_with_key(
+                server.connection_string(),
+                "normal-block-read-tamper",
+            )
+            .await
+            .unwrap();
+            let original = b"original";
+            let tampered = b"tampered".to_vec();
+            assert_eq!(original.len(), tampered.len());
+            let id = blocks.put(original).await.unwrap();
+            assert_eq!(blocks.get(&id).await.unwrap(), original);
+            assert_ne!(block_id(&tampered), id.0);
+
+            let peer = PgliteBlockStore::connect_with_key(
+                server.connection_string(),
+                "normal-block-read-tamper",
+            )
+            .await
+            .unwrap();
+            let client = peer.0.lock_client().await.unwrap();
+            assert_eq!(
+                client
+                    .as_ref()
+                    .unwrap()
+                    .execute_typed(
+                        "UPDATE mount_rs_blocks SET bytes=$3 WHERE volume_key=$1 AND id=$2",
+                        &[
+                            (&peer.0.volume_key, Type::TEXT),
+                            (&id.0, Type::TEXT),
+                            (&tampered, Type::BYTEA),
+                        ],
+                    )
+                    .await
+                    .unwrap(),
+                1
+            );
+            drop(client);
+            peer.close().await.unwrap();
+
+            let error = blocks.get(&id).await.unwrap_err();
+            assert!(error.is(ErrorCode::Eio), "unexpected error: {error:?}");
+            blocks.close().await.unwrap();
         });
     }
 

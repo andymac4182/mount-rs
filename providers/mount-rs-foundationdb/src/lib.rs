@@ -3047,15 +3047,24 @@ impl BlockStore for FoundationDbBlockStore {
         validate_block_id(id)?;
         let inner = Arc::clone(&self.0);
         let key = Keyspace::new(&inner.prefix).block(id);
+        let requested = id.clone();
         let limits = inner.limits;
         inner
             .transact_idempotent((), move |trx, _| {
                 let key = key.clone();
+                let requested = requested.clone();
                 Box::pin(async move {
                     configure_transaction(trx, limits)?;
-                    get_owned(trx, &key).await?.ok_or_else(|| {
+                    let bytes = get_owned(trx, &key).await?.ok_or_else(|| {
                         TxnError::Fs(FsError::new(ErrorCode::Enoent).with_syscall("get block"))
-                    })
+                    })?;
+                    if block_id(&bytes) != requested {
+                        return Err(TxnError::Fs(
+                            FsError::new(ErrorCode::Eio)
+                                .with_syscall("verify FoundationDB block digest"),
+                        ));
+                    }
+                    Ok(bytes)
                 })
             })
             .await
