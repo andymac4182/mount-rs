@@ -1219,6 +1219,7 @@ dependencies = [
 name = "mount-rs-sqlite"
 version = "0.1.0"
 dependencies = [
+ "async-io",
  "async-trait",
  "libc",
  "mount-rs-core",

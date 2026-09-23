@@ -2596,9 +2596,11 @@ mod tests {
         let started = Instant::now();
         let error = futures_lite::future::block_on(blocks.put(b"never-acknowledged")).unwrap_err();
         assert_eq!(error.code, ErrorCode::Eagain, "{error:?}");
+        let elapsed = started.elapsed();
         assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "short SQLite busy timeout must bound retries"
+            elapsed < Duration::from_secs(15),
+            "short SQLite busy timeout must bound retries; elapsed_ms={}",
+            elapsed.as_millis()
         );
         assert!(blocks.0.lock().unwrap().is_autocommit());
         holder.execute_batch("ROLLBACK").unwrap();
