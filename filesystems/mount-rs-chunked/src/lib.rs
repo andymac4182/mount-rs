@@ -16,8 +16,9 @@ use mount_rs_core::error::{ErrorCode, FsError, Result};
 use mount_rs_core::handle::OpenFlags;
 use mount_rs_core::path::{is_path_inside, normalize_path, split_path};
 use mount_rs_core::storage::{
-    BlockExtent, BlockReconcileReport, BlockStore, FileLayout, InodeId, MetadataStore,
-    NAMESPACE_FORMAT_VERSION, Namespace, NodeData, NodeMetadata, WriterLease,
+    BlockExtent, BlockReconcileReport, BlockStore, ConcurrentBackingId, ConcurrentModeState,
+    FileLayout, InodeId, MetadataStore, NAMESPACE_FORMAT_VERSION, Namespace, NodeData,
+    NodeMetadata, WriterLease,
 };
 use mount_rs_core::types::{
     Capabilities, DirEntry, FileType, MkdirOptions, S_IFDIR, S_IFMT, S_IFREG, Stats, StatsFs,
@@ -467,6 +468,7 @@ where
 {
     metadata: Arc<M>,
     blocks: Arc<B>,
+    concurrent_backing: Option<ConcurrentBackingId>,
     options: ChunkedOptions,
     gate: AsyncGate,
     lifecycle: tokio::sync::RwLock<()>,
@@ -514,8 +516,27 @@ where
         let metadata = Arc::new(metadata);
         let blocks = Arc::new(blocks);
         if options.concurrent_writes {
-            blocks.prepare_concurrent_mode().await?;
-            metadata.prepare_concurrent_mode().await?;
+            // Inspect metadata before claiming a block authority. Established
+            // MRC2 volumes must verify their persisted block marker read-only;
+            // recreating a missing marker could bind an unrelated backing.
+            let backing = match metadata.concurrent_mode_state().await? {
+                ConcurrentModeState::Mrc2(id) => {
+                    blocks.verify_concurrent_backing(id).await?;
+                    metadata.prepare_bound_concurrent_mode(id).await?;
+                    id
+                }
+                ConcurrentModeState::Mrc1 => {
+                    return Err(FsError::new(ErrorCode::Ebusy)
+                        .with_syscall("migrate MRC1 backing")
+                        .with_message("stop old mounts and run migrate-concurrent-backing"));
+                }
+                ConcurrentModeState::Legacy => {
+                    let id = blocks.prepare_concurrent_backing().await?;
+                    metadata.prepare_bound_concurrent_mode(id).await?;
+                    blocks.verify_concurrent_backing(id).await?;
+                    id
+                }
+            };
             // Two clients may initialize one fresh volume together. Only one
             // CAS publishes its root; the loser reloads the winner's root.
             for attempt in 0..MAX_CONCURRENT_CAS_RETRIES {
@@ -527,7 +548,11 @@ where
                         let namespace = initial_namespace(&options)?;
                         namespace.validate()?;
                         blocks.flush().await?;
-                        match metadata.publish_if_revision(0, namespace.clone()).await {
+                        blocks.verify_concurrent_backing(backing).await?;
+                        match metadata
+                            .publish_bound_if_revision(backing, 0, namespace.clone())
+                            .await
+                        {
                             Ok(revision) => {
                                 if !metadata.publish_includes_flush_barrier() {
                                     metadata.flush().await?;
@@ -551,6 +576,7 @@ where
                     inner: Arc::new(ChunkedInner {
                         metadata,
                         blocks,
+                        concurrent_backing: Some(backing),
                         options,
                         gate: AsyncGate::new(),
                         lifecycle: tokio::sync::RwLock::new(()),
@@ -622,6 +648,7 @@ where
             inner: Arc::new(ChunkedInner {
                 metadata,
                 blocks,
+                concurrent_backing: None,
                 options,
                 gate: AsyncGate::new(),
                 lifecycle: tokio::sync::RwLock::new(()),
@@ -1037,11 +1064,23 @@ where
                 .map_err(|error| with_context(error, "block-flush", None))?;
         }
         if self.inner.options.concurrent_writes {
+            let backing = self.inner.concurrent_backing.ok_or_else(|| {
+                self.fail_closed(
+                    FsError::new(ErrorCode::Eio)
+                        .with_syscall("publish bound concurrent metadata")
+                        .with_message("concurrent backing ID is missing from runtime state"),
+                )
+            })?;
+            self.inner
+                .blocks
+                .verify_concurrent_backing(backing)
+                .await
+                .map_err(|error| self.fail_closed(with_context(error, "backing-verify", None)))?;
             let mut publication = PublicationGuard::new(&self.inner.state);
             let revision = match self
                 .inner
                 .metadata
-                .publish_if_revision(expected_revision, namespace.clone())
+                .publish_bound_if_revision(backing, expected_revision, namespace.clone())
                 .await
             {
                 Ok(revision) => revision,
@@ -4674,6 +4713,10 @@ mod tests {
         }
     }
 
+    fn test_concurrent_backing() -> ConcurrentBackingId {
+        ConcurrentBackingId::from_bytes([0xc1; 16]).expect("fixed nonzero backing ID")
+    }
+
     #[async_trait]
     impl BlockStore for SharedTestBlockStore {
         fn durable(&self) -> bool {
@@ -4682,6 +4725,18 @@ mod tests {
 
         async fn prepare_concurrent_mode(&self) -> Result<()> {
             Ok(())
+        }
+
+        async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
+            Ok(test_concurrent_backing())
+        }
+
+        async fn verify_concurrent_backing(&self, expected: ConcurrentBackingId) -> Result<()> {
+            if expected == test_concurrent_backing() {
+                Ok(())
+            } else {
+                Err(FsError::new(ErrorCode::Estale))
+            }
         }
 
         async fn put(&self, bytes: &[u8]) -> Result<mount_rs_core::storage::BlockId> {
@@ -4727,6 +4782,7 @@ mod tests {
     #[derive(Clone)]
     struct RevisionRaceMetadata {
         state: Arc<Mutex<LoadedMetadata>>,
+        mode: Arc<Mutex<ConcurrentModeState>>,
         on_flush: Arc<Mutex<Option<FlushHook>>>,
     }
 
@@ -4737,12 +4793,27 @@ mod tests {
                     revision: 0,
                     namespace: None,
                 })),
+                mode: Arc::new(Mutex::new(ConcurrentModeState::Legacy)),
                 on_flush: Arc::new(Mutex::new(None)),
             }
         }
 
         fn on_next_flush(&self, callback: impl FnOnce() + Send + 'static) {
             *self.on_flush.lock().expect("flush hook lock") = Some(Box::new(callback));
+        }
+
+        fn apply_revision(&self, expected_revision: u64, namespace: Namespace) -> Result<u64> {
+            namespace.validate()?;
+            let mut state = self.state.lock().expect("revision state lock");
+            if state.revision != expected_revision {
+                return Err(FsError::new(ErrorCode::Eagain));
+            }
+            state.revision = state
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+            state.namespace = Some(namespace);
+            Ok(state.revision)
         }
     }
 
@@ -4757,7 +4828,29 @@ mod tests {
         }
 
         async fn prepare_concurrent_mode(&self) -> Result<()> {
+            let mut mode = self.mode.lock().expect("concurrent mode lock");
+            if *mode != ConcurrentModeState::Legacy {
+                return Err(FsError::new(ErrorCode::Ebusy));
+            }
+            *mode = ConcurrentModeState::Mrc1;
             Ok(())
+        }
+
+        async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
+            Ok(*self.mode.lock().expect("concurrent mode lock"))
+        }
+
+        async fn prepare_bound_concurrent_mode(&self, backing: ConcurrentBackingId) -> Result<()> {
+            let mut mode = self.mode.lock().expect("concurrent mode lock");
+            match *mode {
+                ConcurrentModeState::Legacy => {
+                    *mode = ConcurrentModeState::Mrc2(backing);
+                    Ok(())
+                }
+                ConcurrentModeState::Mrc2(current) if current == backing => Ok(()),
+                ConcurrentModeState::Mrc2(_) => Err(FsError::new(ErrorCode::Estale)),
+                ConcurrentModeState::Mrc1 => Err(FsError::new(ErrorCode::Ebusy)),
+            }
         }
 
         async fn acquire_writer(&self, _owner: &str, _ttl: Duration) -> Result<WriterLease> {
@@ -4786,17 +4879,24 @@ mod tests {
             expected_revision: u64,
             namespace: Namespace,
         ) -> Result<u64> {
-            namespace.validate()?;
-            let mut state = self.state.lock().expect("revision state lock");
-            if state.revision != expected_revision {
-                return Err(FsError::new(ErrorCode::Eagain));
+            if *self.mode.lock().expect("concurrent mode lock") != ConcurrentModeState::Mrc1 {
+                return Err(FsError::new(ErrorCode::Estale));
             }
-            state.revision = state
-                .revision
-                .checked_add(1)
-                .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-            state.namespace = Some(namespace);
-            Ok(state.revision)
+            self.apply_revision(expected_revision, namespace)
+        }
+
+        async fn publish_bound_if_revision(
+            &self,
+            backing: ConcurrentBackingId,
+            expected_revision: u64,
+            namespace: Namespace,
+        ) -> Result<u64> {
+            if *self.mode.lock().expect("concurrent mode lock")
+                != ConcurrentModeState::Mrc2(backing)
+            {
+                return Err(FsError::new(ErrorCode::Estale));
+            }
+            self.apply_revision(expected_revision, namespace)
         }
 
         async fn flush(&self) -> Result<()> {
@@ -4824,7 +4924,8 @@ mod tests {
         let remote = metadata.clone();
         metadata.on_next_flush(move || {
             let latest = block_on(remote.load()).expect("load after local CAS");
-            let newer = block_on(remote.publish_if_revision(
+            let newer = block_on(remote.publish_bound_if_revision(
+                test_concurrent_backing(),
                 latest.revision,
                 latest.namespace.expect("published namespace"),
             ))

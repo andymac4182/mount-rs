@@ -8,7 +8,8 @@ use async_trait::async_trait;
 use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
 use mount_rs_core::chunking::{Chunker, ChunkerConfig, FixedSizeChunker};
 use mount_rs_core::storage::{
-    BlockId, BlockStore, LoadedMetadata, MetadataStore, Namespace, NodeData, WriterLease,
+    BlockId, BlockStore, ConcurrentBackingId, ConcurrentModeState, LoadedMetadata, MetadataStore,
+    Namespace, NodeData, WriterLease,
 };
 use mount_rs_core::types::now_ms;
 use mount_rs_core::{
@@ -45,6 +46,7 @@ struct CasState {
     namespace: Option<Namespace>,
     published: Vec<Namespace>,
     concurrent_mode: bool,
+    backing_id: Option<ConcurrentBackingId>,
     legacy_lease: Option<WriterLease>,
     last_fence: u64,
     swap_entries_on_next_cas: Option<(String, String)>,
@@ -122,6 +124,10 @@ impl CasMetadata {
     }
 }
 
+fn shared_backing_id() -> ConcurrentBackingId {
+    ConcurrentBackingId::from_bytes([0xd1; 16]).expect("fixed nonzero shared backing ID")
+}
+
 #[async_trait]
 impl MetadataStore for CasMetadata {
     fn durable(&self) -> bool {
@@ -147,6 +153,32 @@ impl MetadataStore for CasMetadata {
             );
         }
         state.concurrent_mode = true;
+        Ok(())
+    }
+
+    async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
+        let state = self.lock()?;
+        Ok(match (state.concurrent_mode, state.backing_id) {
+            (_, Some(id)) => ConcurrentModeState::Mrc2(id),
+            (true, None) => ConcurrentModeState::Mrc1,
+            (false, None) => ConcurrentModeState::Legacy,
+        })
+    }
+
+    async fn prepare_bound_concurrent_mode(&self, backing: ConcurrentBackingId) -> Result<()> {
+        let mut state = self.lock()?;
+        if state.legacy_lease.is_some() || (state.concurrent_mode && state.backing_id.is_none()) {
+            return Err(FsError::new(ErrorCode::Ebusy));
+        }
+        if let Some(current) = state.backing_id {
+            return if current == backing {
+                Ok(())
+            } else {
+                Err(FsError::new(ErrorCode::Estale))
+            };
+        }
+        state.concurrent_mode = true;
+        state.backing_id = Some(backing);
         Ok(())
     }
 
@@ -342,6 +374,18 @@ impl MetadataStore for CasMetadata {
         Ok(revision)
     }
 
+    async fn publish_bound_if_revision(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+        namespace: Namespace,
+    ) -> Result<u64> {
+        if self.lock()?.backing_id != Some(backing) {
+            return Err(FsError::new(ErrorCode::Estale));
+        }
+        self.publish_if_revision(expected_revision, namespace).await
+    }
+
     async fn flush(&self) -> Result<()> {
         Ok(())
     }
@@ -367,6 +411,18 @@ impl BlockStore for SharedBlocks {
     async fn prepare_concurrent_mode(&self) -> Result<()> {
         // Every coordinator in this test shares the same Arc-backed block map.
         Ok(())
+    }
+
+    async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
+        Ok(shared_backing_id())
+    }
+
+    async fn verify_concurrent_backing(&self, expected: ConcurrentBackingId) -> Result<()> {
+        if expected == shared_backing_id() {
+            Ok(())
+        } else {
+            Err(FsError::new(ErrorCode::Estale))
+        }
     }
 
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
@@ -420,6 +476,10 @@ impl BlockStore for RejectingConcurrentBlocks {
         Err(FsError::new(ErrorCode::Enotsup).with_message("block backing cannot share writes"))
     }
 
+    async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
+        Err(FsError::new(ErrorCode::Enotsup).with_message("block backing cannot share writes"))
+    }
+
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
         self.0.put(bytes).await
     }
@@ -457,6 +517,14 @@ impl BlockStore for RevisionAdvancingBlocks {
         self.blocks.prepare_concurrent_mode().await
     }
 
+    async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
+        self.blocks.prepare_concurrent_backing().await
+    }
+
+    async fn verify_concurrent_backing(&self, expected: ConcurrentBackingId) -> Result<()> {
+        self.blocks.verify_concurrent_backing(expected).await
+    }
+
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
         let id = self.blocks.put(bytes).await?;
         self.puts.fetch_add(1, Ordering::SeqCst);
@@ -473,7 +541,7 @@ impl BlockStore for RevisionAdvancingBlocks {
             namespace.default_chunker = chunker;
         }
         self.metadata
-            .publish_if_revision(loaded.revision, namespace)
+            .publish_bound_if_revision(shared_backing_id(), loaded.revision, namespace)
             .await?;
         Ok(id)
     }
@@ -844,7 +912,7 @@ fn concurrent_metadata_mutations_keep_ctime_after_a_newer_revision() {
         .expect("root node")
         .stats
         .ctime_ms = future;
-    block_on(metadata.publish_if_revision(loaded.revision, namespace))
+    block_on(metadata.publish_bound_if_revision(shared_backing_id(), loaded.revision, namespace))
         .expect("publish a newer remote timestamp");
 
     let mut prior = future;

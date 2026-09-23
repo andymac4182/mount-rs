@@ -204,53 +204,207 @@ async fn different_block_databases_cannot_read_a_shared_metadata_reference() {
     let blocks_a = scope.path().join("blocks-a.sqlite");
     let blocks_b = scope.path().join("blocks-b.sqlite");
     let writer_a = open_writer(&metadata, &blocks_a, 0).await;
-    let writer_b = open_writer(&metadata, &blocks_b, 1).await;
+    let second = ChunkedFs::open(
+        SqliteMetadataStore::open(&metadata).expect("open independent shared metadata"),
+        SqliteBlockStore::open(&blocks_b).expect("open different physical blocks"),
+        ChunkedOptions::fixed("sqlite-writer-wrong-backing", 4096)
+            .expect("fixed chunker")
+            .with_concurrent_writes(true),
+    )
+    .await;
+    let error = match second {
+        Ok(writer_b) => {
+            writer_b
+                .shutdown()
+                .await
+                .expect("close unexpected second writer");
+            panic!("different physical blocks opened against one shared metadata authority");
+        }
+        Err(error) => error,
+    };
+    assert_eq!(error.code, mount_rs_core::ErrorCode::Estale);
+
+    let metadata_connection = Connection::open(&metadata).expect("inspect bound metadata");
+    let mode: String = metadata_connection
+        .query_row(
+            "SELECT write_mode FROM mount_rs_metadata WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read persisted concurrent mode");
+    assert_eq!(mode, "MRC2");
+    let metadata_backing: String = metadata_connection
+        .query_row(
+            "SELECT backing_id FROM mount_rs_metadata WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read bound metadata authority");
+    let blocks_a_connection = Connection::open(&blocks_a).expect("inspect correct backing");
+    let block_backing: String = blocks_a_connection
+        .query_row(
+            "SELECT backing_id FROM mount_rs_block_authority WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read correct block authority");
+    assert_eq!(metadata_backing, block_backing);
+    let blocks_b_connection = Connection::open(&blocks_b).expect("inspect rejected blocks");
+    let blocks_b_count: i64 = blocks_b_connection
+        .query_row("SELECT count(*) FROM mount_rs_blocks", [], |row| row.get(0))
+        .expect("count wrong backing blocks");
+    assert_eq!(blocks_b_count, 0);
+    let authority_b_count: i64 = blocks_b_connection
+        .query_row("SELECT count(*) FROM mount_rs_block_authority", [], |row| {
+            row.get(0)
+        })
+        .expect("count wrong backing authority markers");
+    assert_eq!(
+        authority_b_count, 0,
+        "MRC2 reopen cannot claim a missing marker"
+    );
+
     Loopback::new(writer_a.clone())
         .write_file("/from-a", b"shared metadata, private block bytes")
         .await
         .expect("writer A publishes one metadata reference");
-    let error = Loopback::new(writer_b.clone())
-        .read_file("/from-a")
-        .await
-        .expect_err("writer B cannot resolve a block in its different database");
-    assert!(
-        matches!(
-            error.code,
-            mount_rs_core::ErrorCode::Eio | mount_rs_core::ErrorCode::Enoent
-        ),
-        "a mismatched block backing must fail closed: {error}"
-    );
+    writer_a.shutdown().await.expect("close correct writer");
+    let reopened = open_writer(&metadata, &blocks_a, 2).await;
     assert_eq!(
-        Loopback::new(writer_a.clone())
+        Loopback::new(reopened.clone())
             .read_file("/from-a")
             .await
             .expect("correct backing still reads"),
         b"shared metadata, private block bytes"
     );
-    Loopback::new(writer_b.clone())
-        .write_file("/from-b", b"second writer, other private block bytes")
+    reopened.shutdown().await.expect("close reopened writer");
+}
+
+#[tokio::test]
+async fn missing_bound_block_marker_reopen_fails_without_recreating_it() {
+    let scope = TempDir::new().expect("own disposable SQLite marker directory");
+    let metadata = scope.path().join("metadata.sqlite");
+    let blocks = scope.path().join("blocks.sqlite");
+    let writer = open_writer(&metadata, &blocks, 0).await;
+    Loopback::new(writer.clone())
+        .write_file("/seed", b"committed")
         .await
-        .expect("writer B also acknowledges its own metadata reference");
-    let error = Loopback::new(writer_a.clone())
-        .read_file("/from-b")
+        .unwrap();
+    writer.shutdown().await.unwrap();
+
+    let metadata_connection = Connection::open(&metadata).unwrap();
+    let revision: i64 = metadata_connection
+        .query_row(
+            "SELECT revision FROM mount_rs_metadata WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let blocks_connection = Connection::open(&blocks).unwrap();
+    blocks_connection
+        .execute("DELETE FROM mount_rs_block_authority WHERE id=1", [])
+        .unwrap();
+    let result = ChunkedFs::open(
+        SqliteMetadataStore::open(&metadata).unwrap(),
+        SqliteBlockStore::open(&blocks).unwrap(),
+        ChunkedOptions::fixed("missing-marker", 4096)
+            .unwrap()
+            .with_concurrent_writes(true),
+    )
+    .await;
+    let error = match result {
+        Ok(driver) => {
+            driver.shutdown().await.unwrap();
+            panic!("MRC2 reopen recreated a missing block marker");
+        }
+        Err(error) => error,
+    };
+    assert_eq!(error.code, mount_rs_core::ErrorCode::Estale);
+    let marker_count: i64 = blocks_connection
+        .query_row("SELECT count(*) FROM mount_rs_block_authority", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(marker_count, 0);
+    let after: i64 = metadata_connection
+        .query_row(
+            "SELECT revision FROM mount_rs_metadata WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(after, revision);
+}
+
+#[tokio::test]
+async fn changed_bound_block_marker_stops_next_publication() {
+    let scope = TempDir::new().expect("own disposable SQLite tamper directory");
+    let metadata = scope.path().join("metadata.sqlite");
+    let blocks = scope.path().join("blocks.sqlite");
+    let writer = open_writer(&metadata, &blocks, 0).await;
+    let view = Loopback::new(writer.clone());
+    view.write_file("/seed", b"prior commit").await.unwrap();
+    let metadata_connection = Connection::open(&metadata).unwrap();
+    let revision: i64 = metadata_connection
+        .query_row(
+            "SELECT revision FROM mount_rs_metadata WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let blocks_connection = Connection::open(&blocks).unwrap();
+    let original: String = blocks_connection
+        .query_row(
+            "SELECT backing_id FROM mount_rs_block_authority WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    blocks_connection
+        .execute(
+            "UPDATE mount_rs_block_authority SET backing_id=?1 WHERE id=1",
+            ["77777777777777777777777777777777"],
+        )
+        .unwrap();
+    let error = view
+        .write_file("/unpublished", b"must not commit")
         .await
-        .expect_err("writer A cannot resolve a block in writer B's database");
-    assert!(
-        matches!(
-            error.code,
-            mount_rs_core::ErrorCode::Eio | mount_rs_core::ErrorCode::Enoent
-        ),
-        "the reciprocal backing mismatch must fail closed: {error}"
+        .unwrap_err();
+    assert_eq!(error.code, mount_rs_core::ErrorCode::Estale);
+    let after: i64 = metadata_connection
+        .query_row(
+            "SELECT revision FROM mount_rs_metadata WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        after, revision,
+        "wrong backing cannot advance the namespace"
+    );
+
+    blocks_connection
+        .execute(
+            "UPDATE mount_rs_block_authority SET backing_id=?1 WHERE id=1",
+            [&original],
+        )
+        .unwrap();
+    let _ = writer.shutdown().await;
+    let reopened = open_writer(&metadata, &blocks, 1).await;
+    let reopened_view = Loopback::new(reopened.clone());
+    assert_eq!(
+        reopened_view.read_file("/seed").await.unwrap(),
+        b"prior commit"
     );
     assert_eq!(
-        Loopback::new(writer_b.clone())
-            .read_file("/from-b")
+        reopened_view
+            .read_file("/unpublished")
             .await
-            .expect("writer B's backing still reads"),
-        b"second writer, other private block bytes"
+            .unwrap_err()
+            .code,
+        mount_rs_core::ErrorCode::Enoent
     );
-    writer_a.shutdown().await.expect("close first writer");
-    writer_b.shutdown().await.expect("close second writer");
+    reopened.shutdown().await.unwrap();
 }
 
 #[tokio::test]
