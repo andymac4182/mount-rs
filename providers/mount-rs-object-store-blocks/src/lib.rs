@@ -4,6 +4,11 @@
 //! manifest. Each successful \`put\` is one provider-confirmed object upload;
 //! metadata providers remain responsible for publishing references to it.
 
+mod qualification;
+pub use qualification::{
+    PrivateQualificationPrefix, generate_private_qualification_prefix, prove_two_configured_clients,
+};
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -1345,6 +1350,8 @@ mod tests {
     struct InterceptStore {
         inner: Arc<InMemory>,
         put_calls: AtomicUsize,
+        marker_create_calls: AtomicUsize,
+        non_atomic_create: bool,
         marker_fault_once: AtomicUsize,
         marker_get_fault_once: AtomicUsize,
         probe_fault_once: AtomicUsize,
@@ -1353,9 +1360,19 @@ mod tests {
 
     impl InterceptStore {
         fn new(marker_fault_once: usize) -> Self {
+            Self::with_inner(Arc::new(InMemory::new()), marker_fault_once, false)
+        }
+
+        fn with_inner(
+            inner: Arc<InMemory>,
+            marker_fault_once: usize,
+            non_atomic_create: bool,
+        ) -> Self {
             Self {
-                inner: Arc::new(InMemory::new()),
+                inner,
                 put_calls: AtomicUsize::new(0),
+                marker_create_calls: AtomicUsize::new(0),
+                non_atomic_create,
                 marker_fault_once: AtomicUsize::new(marker_fault_once),
                 marker_get_fault_once: AtomicUsize::new(0),
                 probe_fault_once: AtomicUsize::new(0),
@@ -1380,6 +1397,13 @@ mod tests {
         ) -> object_store::Result<PutResult> {
             self.put_calls.fetch_add(1, Ordering::SeqCst);
             if location.as_ref().ends_with(BACKING_ID_NAME) {
+                if opts.mode == PutMode::Create {
+                    self.marker_create_calls.fetch_add(1, Ordering::SeqCst);
+                    if self.non_atomic_create {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                        return self.inner.put(location, payload).await;
+                    }
+                }
                 match self.marker_fault_once.swap(0, Ordering::SeqCst) {
                     1 => {
                         return Err(object_store::Error::Generic {
@@ -1490,6 +1514,41 @@ mod tests {
         ) -> object_store::Result<()> {
             self.inner.copy_if_not_exists(from, to).await
         }
+    }
+
+    #[tokio::test]
+    async fn signed_two_client_gate_rejects_non_atomic_create_before_volume_claim() {
+        let backing = Arc::new(InMemory::new());
+        let first = Arc::new(InterceptStore::with_inner(backing.clone(), 0, true));
+        let second = Arc::new(InterceptStore::with_inner(backing.clone(), 0, true));
+        let selected_prefix = "test-owned/non-atomic/blocks";
+        let prefix = generate_private_qualification_prefix(selected_prefix).unwrap();
+
+        let error = prove_two_configured_clients(
+            first.clone(),
+            second.clone(),
+            first.clone(),
+            second.clone(),
+            &prefix,
+        )
+        .await
+        .expect_err("a backend that accepts both conditional Creates is unsafe for MRC2");
+        assert!(
+            error.is(ErrorCode::Enotsup),
+            "unexpected gate failure: {error}"
+        );
+        assert_eq!(
+            first.marker_create_calls.load(Ordering::SeqCst)
+                + second.marker_create_calls.load(Ordering::SeqCst),
+            2,
+            "both signed clients must attempt distinct Creates"
+        );
+        let path = ObjectPath::from(selected_prefix);
+        let remaining = backing.list(Some(&path)).collect::<Vec<_>>().await;
+        assert!(
+            remaining.is_empty(),
+            "gate leaked a private or production marker: {remaining:?}"
+        );
     }
 
     #[tokio::test]

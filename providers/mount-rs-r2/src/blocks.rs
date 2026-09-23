@@ -6,20 +6,16 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use mount_rs_core::storage::{BlockId, BlockReconcileReport, BlockStore, ConcurrentBackingId};
 use mount_rs_core::{ErrorCode, FsError, Result};
 use mount_rs_object_store_blocks::{
-    ObjectStoreBlockStore, prepare_configured_backing_id, probe_configured_concurrent_prefix,
-    verify_configured_backing_id,
+    ObjectStoreBlockStore, generate_private_qualification_prefix, prepare_configured_backing_id,
+    probe_configured_concurrent_prefix, prove_two_configured_clients, verify_configured_backing_id,
 };
 use object_store::ObjectStore;
-use object_store::path::Path as ObjectPath;
-use object_store::{PutMode, PutOptions, PutPayload, PutResult};
-use tokio::sync::Barrier;
 
 pub use mount_rs_object_store_blocks::{
     ObjectStoreBlockStoreErrorClass as R2BlockStoreErrorClass,
@@ -41,286 +37,18 @@ impl R2ConcurrentQualification {
     pub async fn prove_live_cloudflare_r2(config: &crate::R2Config) -> Result<Self> {
         let endpoint = canonical_cloudflare_r2_endpoint(config)?.to_owned();
         config.validate()?;
-        let prefix = format!(
-            "mount-rs-concurrent-qualification-v2/{}/blocks",
-            uuid::Uuid::new_v4()
-        );
+        let prefix = generate_private_qualification_prefix("mount-rs-concurrent-qualification-v2")?;
         let first_data = config.build_store()?;
         let second_data = config.build_store()?;
         let first_probe = config.build_probe_store()?;
         let second_probe = config.build_probe_store()?;
-        prove_two_signed_clients_on_prefix(
-            first_data,
-            second_data,
-            first_probe,
-            second_probe,
-            &prefix,
-        )
-        .await?;
+        prove_two_configured_clients(first_data, second_data, first_probe, second_probe, &prefix)
+            .await?;
         Ok(Self {
             endpoint,
             bucket: config.bucket.clone(),
         })
     }
-}
-
-async fn prove_two_signed_clients_on_prefix(
-    first_data: Arc<dyn ObjectStore>,
-    second_data: Arc<dyn ObjectStore>,
-    first_probe: Arc<dyn ObjectStore>,
-    second_probe: Arc<dyn ObjectStore>,
-    prefix: &str,
-) -> Result<()> {
-    let marker = ObjectPath::from(format!("{prefix}/_mount-rs-backing-id-v2"));
-    let first_blocks = ObjectStoreBlockStore::new(first_data.clone(), prefix, true)?;
-    let second_blocks = ObjectStoreBlockStore::new(second_data.clone(), prefix, true)?;
-    let attempted_create = AtomicBool::new(false);
-    let creates_in_flight = AtomicUsize::new(0);
-    let creates_overlapped = AtomicBool::new(false);
-    let result = tokio::time::timeout(Duration::from_secs(60), async {
-        // This private, random prefix must start empty. Both clients must send
-        // distinct conditional Creates and one must explicitly lose; a service
-        // that silently overwrites on Create must never issue a qualification.
-        for store in [&first_probe, &second_probe, &first_data, &second_data] {
-            require_initial_marker_missing(store.as_ref(), &marker).await?;
-        }
-        let first = ConcurrentBackingId::from_bytes(*uuid::Uuid::new_v4().as_bytes())?;
-        let second = ConcurrentBackingId::from_bytes(*uuid::Uuid::new_v4().as_bytes())?;
-        let candidate_payload = |id: ConcurrentBackingId| {
-            let mut bytes = Vec::with_capacity(20);
-            bytes.extend_from_slice(b"MRC2");
-            bytes.extend_from_slice(&id.as_bytes());
-            PutPayload::from(bytes)
-        };
-        let create_options = PutOptions {
-            mode: PutMode::Create,
-            ..PutOptions::default()
-        };
-        let second_options = create_options.clone();
-        let first_retry_options = create_options.clone();
-        let second_retry_options = create_options.clone();
-        let start = Barrier::new(2);
-        attempted_create.store(true, Ordering::SeqCst);
-        // A sequential success followed by a conflict cannot test a service's
-        // behavior under simultaneous Creates. Require both request futures
-        // to be active together before examining the winner and loser.
-        let (mut first_result, mut second_result) = tokio::join!(
-            async {
-                start.wait().await;
-                if creates_in_flight.fetch_add(1, Ordering::SeqCst) > 0 {
-                    creates_overlapped.store(true, Ordering::SeqCst);
-                }
-                let result = first_probe
-                    .put_opts(&marker, candidate_payload(first), create_options)
-                    .await;
-                creates_in_flight.fetch_sub(1, Ordering::SeqCst);
-                result
-            },
-            async {
-                start.wait().await;
-                if creates_in_flight.fetch_add(1, Ordering::SeqCst) > 0 {
-                    creates_overlapped.store(true, Ordering::SeqCst);
-                }
-                let result = second_probe
-                    .put_opts(&marker, candidate_payload(second), second_options)
-                    .await;
-                creates_in_flight.fetch_sub(1, Ordering::SeqCst);
-                result
-            }
-        );
-        if !creates_overlapped.load(Ordering::SeqCst) {
-            return Err(unqualified_r2());
-        }
-        if first_result.is_ok() && second_result.as_ref().is_err_and(retryable_cleanup_error) {
-            second_result = retry_losing_conditional_create(|| {
-                second_probe.put_opts(
-                    &marker,
-                    candidate_payload(second),
-                    second_retry_options.clone(),
-                )
-            })
-            .await?;
-        } else if second_result.is_ok() && first_result.as_ref().is_err_and(retryable_cleanup_error)
-        {
-            first_result = retry_losing_conditional_create(|| {
-                first_probe.put_opts(
-                    &marker,
-                    candidate_payload(first),
-                    first_retry_options.clone(),
-                )
-            })
-            .await?;
-        }
-        let winner = qualification_race_winner(first_result, second_result, first, second)?;
-        let bytes = first_data
-            .get(&marker)
-            .await
-            .map_err(|_| FsError::backend("Cloudflare R2 qualification marker read failed"))?
-            .bytes()
-            .await
-            .map_err(|_| FsError::backend("Cloudflare R2 qualification marker read failed"))?;
-        if bytes.len() != 20
-            || &bytes[..4] != b"MRC2"
-            || &bytes[4..] != winner.as_bytes().as_slice()
-        {
-            return Err(FsError::new(ErrorCode::Estale)
-                .with_message("Cloudflare R2 qualification marker read-back changed"));
-        }
-        verify_configured_backing_id(first_probe.as_ref(), &first_blocks, winner).await?;
-        verify_configured_backing_id(second_probe.as_ref(), &second_blocks, winner).await?;
-        Ok(())
-    })
-    .await
-    .map_err(|_| FsError::backend("Cloudflare R2 qualification race timed out"))?;
-    if !attempted_create.load(Ordering::SeqCst) {
-        return result;
-    }
-    delete_owned_marker_with_retry(|| first_probe.delete(&marker)).await?;
-    for store in [&first_probe, &second_probe, &first_data, &second_data] {
-        verify_owned_marker_absent(store.as_ref(), &marker).await?;
-    }
-    result
-}
-
-async fn require_initial_marker_missing(
-    store: &dyn ObjectStore,
-    marker: &ObjectPath,
-) -> Result<()> {
-    tokio::time::timeout(Duration::from_secs(20), async {
-        let mut attempts = 0_u32;
-        loop {
-            match store.get(marker).await {
-                Err(object_store::Error::NotFound { .. }) => return Ok(()),
-                Ok(_) => return Err(unqualified_r2()),
-                Err(error) if retryable_cleanup_error(&error) => {
-                    let scale = 1_u64 << attempts.min(4);
-                    tokio::time::sleep(Duration::from_millis((100 * scale).min(1_700))).await;
-                    attempts = attempts.saturating_add(1);
-                }
-                Err(_) => {
-                    return Err(FsError::backend(
-                        "Cloudflare R2 qualification initial marker read failed",
-                    ));
-                }
-            }
-        }
-    })
-    .await
-    .map_err(|_| FsError::backend("Cloudflare R2 initial marker read timed out"))?
-}
-
-fn qualification_race_winner(
-    first: object_store::Result<PutResult>,
-    second: object_store::Result<PutResult>,
-    first_id: ConcurrentBackingId,
-    second_id: ConcurrentBackingId,
-) -> Result<ConcurrentBackingId> {
-    let conflict = |error: &object_store::Error| {
-        matches!(
-            error,
-            object_store::Error::Precondition { .. } | object_store::Error::AlreadyExists { .. }
-        )
-    };
-    match (first, second) {
-        (Ok(_), Err(error)) if conflict(&error) => Ok(first_id),
-        (Err(error), Ok(_)) if conflict(&error) => Ok(second_id),
-        (Err(first_error), Err(second_error))
-            if conflict(&first_error) && retryable_cleanup_error(&second_error) =>
-        {
-            Ok(second_id)
-        }
-        (Err(first_error), Err(second_error))
-            if conflict(&second_error) && retryable_cleanup_error(&first_error) =>
-        {
-            Ok(first_id)
-        }
-        _ => Err(unqualified_r2()),
-    }
-}
-
-async fn retry_losing_conditional_create<F, Fut>(
-    mut create: F,
-) -> Result<object_store::Result<PutResult>>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = object_store::Result<PutResult>>,
-{
-    tokio::time::timeout(Duration::from_secs(20), async {
-        let mut attempts = 0_u32;
-        loop {
-            match create().await {
-                Err(error) if retryable_cleanup_error(&error) => {
-                    let scale = 1_u64 << attempts.min(4);
-                    tokio::time::sleep(Duration::from_millis((100 * scale).min(1_700))).await;
-                    attempts = attempts.saturating_add(1);
-                }
-                result => return result,
-            }
-        }
-    })
-    .await
-    .map_err(|_| FsError::backend("Cloudflare R2 losing conditional Create timed out"))
-}
-
-async fn delete_owned_marker_with_retry<F, Fut>(mut delete: F) -> Result<()>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = object_store::Result<()>>,
-{
-    tokio::time::timeout(Duration::from_secs(20), async {
-        let mut attempts = 0_u32;
-        loop {
-            match delete().await {
-                Ok(()) | Err(object_store::Error::NotFound { .. }) => return Ok(()),
-                Err(error) if retryable_cleanup_error(&error) => {
-                    let scale = 1_u64 << attempts.min(4);
-                    tokio::time::sleep(Duration::from_millis((100 * scale).min(1_700))).await;
-                    attempts = attempts.saturating_add(1);
-                }
-                Err(_) => {
-                    return Err(FsError::backend(
-                        "Cloudflare R2 qualification marker cleanup failed",
-                    ));
-                }
-            }
-        }
-    })
-    .await
-    .map_err(|_| FsError::backend("Cloudflare R2 qualification marker cleanup timed out"))?
-}
-
-async fn verify_owned_marker_absent(store: &dyn ObjectStore, marker: &ObjectPath) -> Result<()> {
-    tokio::time::timeout(Duration::from_secs(20), async {
-        let mut attempts = 0_u32;
-        loop {
-            match store.get(marker).await {
-                Err(object_store::Error::NotFound { .. }) => return Ok(()),
-                Ok(_) => {}
-                Err(error) if retryable_cleanup_error(&error) => {}
-                Err(_) => {
-                    return Err(FsError::backend(
-                        "Cloudflare R2 qualification marker cleanup read failed",
-                    ));
-                }
-            }
-            let scale = 1_u64 << attempts.min(4);
-            tokio::time::sleep(Duration::from_millis((100 * scale).min(1_700))).await;
-            attempts = attempts.saturating_add(1);
-        }
-    })
-    .await
-    .map_err(|_| FsError::backend("Cloudflare R2 qualification cleanup read timed out"))?
-}
-
-fn retryable_cleanup_error(error: &object_store::Error) -> bool {
-    let message = error.to_string();
-    message.contains("SlowDown")
-        || message.contains(" 429 ")
-        || message.contains(" 503 ")
-        || matches!(
-            error,
-            object_store::Error::Generic { .. } | object_store::Error::JoinError { .. }
-        )
 }
 
 fn canonical_cloudflare_r2_endpoint(config: &crate::R2Config) -> Result<&str> {
@@ -491,8 +219,10 @@ mod qualification_tests {
     use futures_util::stream::BoxStream;
     use mount_rs_core::ErrorCode;
     use object_store::memory::InMemory;
+    use object_store::path::Path as ObjectPath;
     use object_store::{
-        GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, PutMultipartOptions,
+        GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, PutMode,
+        PutMultipartOptions, PutOptions, PutPayload, PutResult,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -632,18 +362,18 @@ mod qualification_tests {
             marker_create_calls: AtomicUsize::new(0),
             non_atomic: false,
         });
-        let prefix = "owned-qualification/blocks";
-        prove_two_signed_clients_on_prefix(
+        let prefix = generate_private_qualification_prefix("owned-qualification/blocks").unwrap();
+        prove_two_configured_clients(
             store.clone(),
             store.clone(),
             store.clone(),
             store.clone(),
-            prefix,
+            &prefix,
         )
         .await
         .unwrap();
         assert_eq!(store.marker_create_calls.load(Ordering::SeqCst), 2);
-        let marker = ObjectPath::from(format!("{prefix}/_mount-rs-backing-id-v2"));
+        let marker = prefix.marker_path();
         assert!(matches!(
             backing.get(&marker).await,
             Err(object_store::Error::NotFound { .. })
@@ -653,13 +383,15 @@ mod qualification_tests {
     #[tokio::test]
     async fn qualification_requires_both_create_requests_to_overlap() {
         let backing = Arc::new(InMemory::new());
+        let prefix =
+            generate_private_qualification_prefix("sequential-qualification/blocks").unwrap();
         assert!(
-            prove_two_signed_clients_on_prefix(
+            prove_two_configured_clients(
                 backing.clone(),
                 backing.clone(),
                 backing.clone(),
                 backing.clone(),
-                "sequential-qualification/blocks",
+                &prefix,
             )
             .await
             .unwrap_err()
@@ -671,20 +403,21 @@ mod qualification_tests {
     #[tokio::test]
     async fn qualification_does_not_delete_a_preexisting_marker() {
         let backing = Arc::new(InMemory::new());
-        let prefix = "preexisting-qualification/blocks";
-        let marker = ObjectPath::from(format!("{prefix}/_mount-rs-backing-id-v2"));
+        let prefix =
+            generate_private_qualification_prefix("preexisting-qualification/blocks").unwrap();
+        let marker = prefix.marker_path();
         let seeded = b"another owner's marker".to_vec();
         backing
             .put(&marker, PutPayload::from(seeded.clone()))
             .await
             .unwrap();
         assert!(
-            prove_two_signed_clients_on_prefix(
+            prove_two_configured_clients(
                 backing.clone(),
                 backing.clone(),
                 backing.clone(),
                 backing.clone(),
-                prefix,
+                &prefix,
             )
             .await
             .unwrap_err()
@@ -704,97 +437,25 @@ mod qualification_tests {
             marker_create_calls: AtomicUsize::new(0),
             non_atomic: true,
         });
-        let prefix = "non-atomic-qualification/blocks";
+        let prefix =
+            generate_private_qualification_prefix("non-atomic-qualification/blocks").unwrap();
         assert!(
-            prove_two_signed_clients_on_prefix(
+            prove_two_configured_clients(
                 store.clone(),
                 store.clone(),
                 store.clone(),
                 store.clone(),
-                prefix,
+                &prefix,
             )
             .await
             .unwrap_err()
             .is(ErrorCode::Enotsup)
         );
         assert_eq!(store.marker_create_calls.load(Ordering::SeqCst), 2);
-        let marker = ObjectPath::from(format!("{prefix}/_mount-rs-backing-id-v2"));
+        let marker = prefix.marker_path();
         assert!(matches!(
             inner.get(&marker).await,
             Err(object_store::Error::NotFound { .. })
         ));
-    }
-
-    #[tokio::test]
-    async fn qualification_cleanup_retries_throttle_and_ambiguous_delete() {
-        for first_error in ["HTTP 429 Too Many Requests", "lost delete reply"] {
-            let attempts = AtomicUsize::new(0);
-            delete_owned_marker_with_retry(|| {
-                let attempt = attempts.fetch_add(1, Ordering::SeqCst);
-                async move {
-                    if attempt == 0 {
-                        Err(object_store::Error::Generic {
-                            store: "qualification-test",
-                            source: Box::new(std::io::Error::other(first_error)),
-                        })
-                    } else {
-                        Ok(())
-                    }
-                }
-            })
-            .await
-            .unwrap();
-            assert_eq!(attempts.load(Ordering::SeqCst), 2);
-        }
-    }
-
-    #[tokio::test]
-    async fn qualification_loser_retries_429_until_conditional_conflict() {
-        let attempts = AtomicUsize::new(0);
-        let result = retry_losing_conditional_create(|| {
-            let attempt = attempts.fetch_add(1, Ordering::SeqCst);
-            async move {
-                if attempt == 0 {
-                    Err(object_store::Error::Generic {
-                        store: "qualification-test",
-                        source: Box::new(std::io::Error::other("HTTP 429 Too Many Requests")),
-                    })
-                } else {
-                    Err(object_store::Error::Precondition {
-                        path: "owned-marker".to_owned(),
-                        source: Box::new(std::io::Error::other("conditional conflict")),
-                    })
-                }
-            }
-        })
-        .await
-        .unwrap();
-        assert!(matches!(
-            result,
-            Err(object_store::Error::Precondition { .. })
-        ));
-        assert_eq!(attempts.load(Ordering::SeqCst), 2);
-    }
-
-    #[test]
-    fn qualification_requires_one_create_and_one_observed_conflict() {
-        let accepted = object_store::PutResult {
-            e_tag: None,
-            version: None,
-        };
-        let conflict = object_store::Error::Precondition {
-            path: "owned-marker".to_owned(),
-            source: Box::new(std::io::Error::other("conditional create conflict")),
-        };
-        let first = ConcurrentBackingId::from_bytes([1; 16]).unwrap();
-        let second = ConcurrentBackingId::from_bytes([2; 16]).unwrap();
-        assert_eq!(
-            qualification_race_winner(Ok(accepted.clone()), Err(conflict), first, second).unwrap(),
-            first
-        );
-        assert!(
-            qualification_race_winner(Ok(accepted.clone()), Ok(accepted), first, second).is_err(),
-            "a gateway accepting both conditional creates is unqualified"
-        );
     }
 }
