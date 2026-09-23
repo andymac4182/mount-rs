@@ -6,6 +6,50 @@ use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
 use std::fs;
 use std::process::Command as ProcessCommand;
 
+#[test]
+fn non_sqlite_offline_migration_does_not_prepare_a_view() {
+    let scope = tempfile::TempDir::new().unwrap();
+    let view = scope.path().join("view");
+    let config_path = scope.path().join("shared.json");
+    let config = serde_json::json!({
+        "version": 1,
+        "mountpoint": view,
+        "driver": {"kind": "splitstore", "storage": {
+            "concurrent_writes": true,
+            "metadata": {
+                "kind": "pglite",
+                "connection": {"env": "MOUNT_RS_OFFLINE_PATH_FIXTURE_PGLITE_URL"},
+                "volume_key": "offline-path-fixture",
+                "durable": true
+            },
+            "blocks": {
+                "kind": "pglite",
+                "connection": {"env": "MOUNT_RS_OFFLINE_PATH_FIXTURE_PGLITE_URL"},
+                "volume_key": "offline-path-fixture",
+                "durable": true
+            }
+        }}
+    });
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_mount-rs"))
+        .args(["migrate-concurrent-backing", "--config"])
+        .arg(&config_path)
+        .args(["--expected-revision", "0"])
+        .env(
+            "MOUNT_RS_OFFLINE_PATH_FIXTURE_PGLITE_URL",
+            "postgres://offline-fixture@127.0.0.1:1/postgres?sslmode=disable",
+        )
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "fixture has no PGlite service");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("error connecting to server"),
+        "migration must reach provider open without mount inspection: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!view.exists(), "non-SQLite migration prepared a view");
+}
+
 #[cfg(unix)]
 #[test]
 fn migrate_concurrent_backing_cli() {

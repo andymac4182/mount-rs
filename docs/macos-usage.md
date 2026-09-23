@@ -273,8 +273,8 @@ Replace `0` with the revision read from the backing. The migration checks
 all referenced block extents and the exact revision before changing the
 metadata marker. On success it prints the unchanged revision and the new
 backing authority ID. A missing or short block, a changed revision, or
-historical version state leaves the metadata in MRC1. The command prepares
-empty view directories to check physical backing placement, then migrates
+historical version state leaves the metadata in MRC1. For SQLite backing,
+the command prepares empty view directories to check physical placement, then migrates
 without starting a native mount. Start the upgraded mounts only after it
 succeeds.
 

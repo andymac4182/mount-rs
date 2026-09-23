@@ -469,7 +469,7 @@ fn initialize_telemetry() {
 }
 
 /// Perform the offline protocol migration using the SDK's storage path. This
-/// command prepares view directories for physical path checks, without
+/// command prepares SQLite view directories for physical path checks, without
 /// constructing a filesystem driver or starting a native transport.
 async fn migrate_concurrent_backing_command(
     config_path: &Path,
@@ -491,7 +491,9 @@ async fn migrate_concurrent_backing_command(
         ));
     }
     let mountpoints = requested_mountpoints(&options)?;
-    prepare_mountpoints_before_driver(&options, &mountpoints, true).await?;
+    if concurrent_sqlite_backing_requested(&options) {
+        prepare_mountpoints_before_driver(&options, &mountpoints, true).await?;
+    }
     let (uid, gid) = effective_identity();
     let split = split_options(&options, uid, gid)?;
     let backing = Filesystem::migrate_concurrent_backing(split, expected_revision).await?;
