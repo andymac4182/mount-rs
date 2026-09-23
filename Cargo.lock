@@ -1615,6 +1615,7 @@ name = "mount-rs-r2"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures-util",
  "mount-rs-core",
  "mount-rs-memfs",
  "mount-rs-object-store-blocks",
@@ -1622,6 +1623,7 @@ dependencies = [
  "mount-rs-s3",
  "object_store",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

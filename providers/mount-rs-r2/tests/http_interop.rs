@@ -2,8 +2,10 @@
 //! This is interoperability evidence, deliberately not live Cloudflare proof.
 use async_trait::async_trait;
 use mount_rs_core::storage::BlockStore;
+use mount_rs_core::storage::ConcurrentBackingId;
 use mount_rs_core::{Capabilities, ErrorCode, FileHandle, FsDriver, FsError, Loopback};
 use mount_rs_memfs::MemoryFs;
+use mount_rs_object_store_blocks::probe_configured_concurrent_prefix;
 use mount_rs_persist::PersistedFs;
 use mount_rs_r2::{R2BlockStore, R2Config, R2Store};
 use mount_rs_s3::{Credentials, S3Server, S3ServerOptions, S3Session, S3SessionOptions};
@@ -73,7 +75,7 @@ impl FsDriver for FlakyReadOpenDriver {
 }
 
 #[tokio::test]
-async fn configured_r2_blocks_probe_signed_service_before_concurrent_mode() {
+async fn configured_r2_gateway_stays_unqualified_for_concurrent_backing() {
     let session = S3Session::new_with_options(
         MemoryFs::empty(),
         S3SessionOptions {
@@ -104,26 +106,69 @@ async fn configured_r2_blocks_probe_signed_service_before_concurrent_mode() {
 
     let blocks = R2BlockStore::from_config_with_durable(&config, prefix, false).unwrap();
     assert!(!blocks.durable());
-    blocks.prepare_concurrent_mode().await.unwrap();
-    blocks.prepare_concurrent_mode().await.unwrap();
-    let selected = blocks
-        .prepare_concurrent_backing()
-        .await
-        .expect("signed gateway client claims one prefix identity");
-    let reopened = R2BlockStore::from_config(&config, prefix).unwrap();
-    assert_eq!(
-        reopened.prepare_concurrent_backing().await.unwrap(),
-        selected
+    assert!(
+        blocks
+            .prepare_concurrent_mode()
+            .await
+            .unwrap_err()
+            .is(ErrorCode::Enotsup)
     );
-    reopened.verify_concurrent_backing(selected).await.unwrap();
+    assert!(
+        blocks
+            .prepare_concurrent_backing()
+            .await
+            .unwrap_err()
+            .is(ErrorCode::Enotsup)
+    );
+    let selected = ConcurrentBackingId::from_bytes([1; 16]).unwrap();
+    assert!(
+        blocks
+            .verify_concurrent_backing(selected)
+            .await
+            .unwrap_err()
+            .is(ErrorCode::Enotsup)
+    );
+    let reopened = R2BlockStore::from_config(&config, prefix).unwrap();
+    assert!(
+        reopened
+            .prepare_concurrent_backing()
+            .await
+            .unwrap_err()
+            .is(ErrorCode::Enotsup)
+    );
+
+    let signed = config.build_store().unwrap();
+    let probe_path = ObjectPath::from("preflight/blocks/_mount-rs-concurrent-probe-v1");
+    let marker_path = ObjectPath::from("preflight/blocks/_mount-rs-backing-id-v2");
+    assert!(matches!(
+        signed.get(&probe_path).await,
+        Err(object_store::Error::NotFound { .. })
+    ));
+    assert!(matches!(
+        signed.get(&marker_path).await,
+        Err(object_store::Error::NotFound { .. })
+    ));
+    probe_configured_concurrent_prefix(signed.as_ref(), prefix)
+        .await
+        .unwrap();
+    probe_configured_concurrent_prefix(signed.as_ref(), prefix)
+        .await
+        .unwrap();
 
     let mut wrong_credentials = config.clone();
     wrong_credentials.secret_access_key = "secret-must-not-appear-in-error".to_owned();
     let rejected = R2BlockStore::from_config(&wrong_credentials, prefix).unwrap();
-    let error = rejected
-        .prepare_concurrent_mode()
+    assert!(
+        rejected
+            .prepare_concurrent_backing()
+            .await
+            .unwrap_err()
+            .is(ErrorCode::Enotsup)
+    );
+    let wrong_signed = wrong_credentials.build_store().unwrap();
+    let error = probe_configured_concurrent_prefix(wrong_signed.as_ref(), prefix)
         .await
-        .expect_err("an invalid signature must fail before mode conversion");
+        .expect_err("an invalid signature must fail the signed service probe");
     assert!(error.is(ErrorCode::Eio));
     assert!(!format!("{error:?}").contains(&wrong_credentials.secret_access_key));
 
@@ -132,32 +177,34 @@ async fn configured_r2_blocks_probe_signed_service_before_concurrent_mode() {
     let rejected = R2BlockStore::from_config(&missing_bucket, prefix).unwrap();
     assert!(
         rejected
-            .prepare_concurrent_mode()
+            .prepare_concurrent_backing()
             .await
-            .expect_err("a missing signed bucket must fail before mode conversion")
+            .unwrap_err()
+            .is(ErrorCode::Enotsup)
+    );
+    let missing_signed = missing_bucket.build_store().unwrap();
+    assert!(
+        probe_configured_concurrent_prefix(missing_signed.as_ref(), prefix)
+            .await
+            .unwrap_err()
             .is(ErrorCode::Eio)
     );
 
     let object_store = config.build_store().unwrap();
-    object_store
-        .delete(&ObjectPath::from(
-            "preflight/blocks/_mount-rs-concurrent-probe-v1",
-        ))
-        .await
-        .unwrap();
-    object_store
-        .delete(&ObjectPath::from(
-            "preflight/blocks/_mount-rs-backing-id-v2",
-        ))
-        .await
-        .unwrap();
+    object_store.delete(&probe_path).await.unwrap();
     server.close().await.unwrap();
     let offline = R2BlockStore::from_config(&config, prefix).unwrap();
     assert!(
         offline
-            .prepare_concurrent_mode()
+            .prepare_concurrent_backing()
             .await
-            .expect_err("an unavailable service must fail before mode conversion")
+            .unwrap_err()
+            .is(ErrorCode::Enotsup)
+    );
+    assert!(
+        probe_configured_concurrent_prefix(config.build_store().unwrap().as_ref(), prefix)
+            .await
+            .expect_err("an unavailable signed gateway must fail its probe")
             .is(ErrorCode::Eio)
     );
 }

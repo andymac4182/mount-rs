@@ -147,11 +147,15 @@ async fn read_backing_id(
     retry_throttled: Option<ConcurrentBackingId>,
 ) -> Result<Option<ConcurrentBackingId>> {
     let mut attempts = 0_u32;
+    let jitter = retry_throttled.map_or_else(
+        || u64::from(uuid::Uuid::new_v4().as_bytes()[0]) % 101,
+        |candidate| u64::from(candidate.as_bytes()[0]) % 101,
+    );
     let bytes = loop {
-        match read_backing_id_bytes_once(store, path).await {
+        match read_direct_object_bytes_once(store, path).await {
             Ok(bytes) => break bytes,
-            Err(error) if is_throttled_error(&error) && retry_throttled.is_some() => {
-                tokio::time::sleep(backing_id_backoff(attempts, retry_throttled.unwrap())).await;
+            Err(error) if is_temporary_object_read_error(&error) => {
+                tokio::time::sleep(probe_backoff(attempts, jitter)).await;
                 attempts = attempts.saturating_add(1);
             }
             Err(error) => return Err(backing_id_object_error("read", &error)),
@@ -166,7 +170,7 @@ async fn read_backing_id(
     Ok(Some(id))
 }
 
-async fn read_backing_id_bytes_once(
+async fn read_direct_object_bytes_once(
     store: &dyn ObjectStore,
     path: &ObjectPath,
 ) -> object_store::Result<Option<Vec<u8>>> {
@@ -219,55 +223,65 @@ pub async fn probe_configured_concurrent_prefix(
 ) -> Result<()> {
     let prefix = validate_prefix(prefix)?;
     let path = ObjectPath::from(format!("{prefix}/{CONCURRENT_PROBE_NAME}"));
+    let jitter = u64::from(uuid::Uuid::new_v4().as_bytes()[0]) % 101;
     tokio::time::timeout(CONCURRENT_PROBE_TIMEOUT, async {
-        match store.get(&path).await {
-            Ok(result) => {
-                let bytes = result
-                    .bytes()
-                    .await
-                    .map_err(|error| probe_error("read", &error))?;
-                if bytes.as_ref() != CONCURRENT_PROBE_BYTES {
+        let mut attempts = 0_u32;
+        let mut attempted_create = false;
+        let mut create_accepted = false;
+        loop {
+            match read_direct_object_bytes_once(store, &path).await {
+                Ok(Some(bytes)) if bytes.as_slice() == CONCURRENT_PROBE_BYTES => return Ok(()),
+                Ok(Some(_)) => {
                     return Err(FsError::backend(
                         "object-store concurrent preflight probe changed unexpectedly",
                     ));
                 }
-                return Ok(());
+                Ok(None) => {}
+                Err(error) if is_temporary_object_read_error(&error) => {
+                    tokio::time::sleep(probe_backoff(attempts, jitter)).await;
+                    attempts = attempts.saturating_add(1);
+                    continue;
+                }
+                Err(error) => return Err(probe_error("read", &error)),
             }
-            Err(object_store::Error::NotFound { .. }) => {}
-            Err(error) => return Err(probe_error("read", &error)),
+
+            if attempted_create {
+                tokio::time::sleep(probe_backoff(attempts, jitter)).await;
+                attempts = attempts.saturating_add(1);
+            }
+            if create_accepted {
+                // A successful Create can still be invisible to a later GET.
+                // Keep reading within the deadline without writing it again.
+                continue;
+            }
+
+            let create = store
+                .put_opts(
+                    &path,
+                    PutPayload::from(CONCURRENT_PROBE_BYTES.to_vec()),
+                    PutOptions {
+                        mode: PutMode::Create,
+                        ..PutOptions::default()
+                    },
+                )
+                .await;
+            attempted_create = true;
+            match create {
+                Ok(_) => create_accepted = true,
+                Err(object_store::Error::AlreadyExists { .. })
+                | Err(object_store::Error::Precondition { .. }) => {}
+                Err(error) if is_retryable_backing_claim_error(&error) => {}
+                Err(error) => return Err(probe_error("write", &error)),
+            }
         }
-        let create = store
-            .put_opts(
-                &path,
-                PutPayload::from(CONCURRENT_PROBE_BYTES.to_vec()),
-                PutOptions {
-                    mode: PutMode::Create,
-                    ..PutOptions::default()
-                },
-            )
-            .await;
-        match create {
-            Ok(_)
-            | Err(object_store::Error::AlreadyExists { .. })
-            | Err(object_store::Error::Precondition { .. }) => {}
-            Err(error) => return Err(probe_error("write", &error)),
-        }
-        let bytes = store
-            .get(&path)
-            .await
-            .map_err(|error| probe_error("read", &error))?
-            .bytes()
-            .await
-            .map_err(|error| probe_error("read", &error))?;
-        if bytes.as_ref() != CONCURRENT_PROBE_BYTES {
-            return Err(FsError::backend(
-                "object-store concurrent preflight probe changed unexpectedly",
-            ));
-        }
-        Ok(())
     })
     .await
     .map_err(|_| FsError::backend("object-store concurrent preflight probe timed out"))?
+}
+
+fn probe_backoff(attempts: u32, jitter: u64) -> Duration {
+    let scale = 1_u64 << attempts.min(4);
+    Duration::from_millis((100 * scale + jitter).min(1_700))
 }
 
 fn probe_error(operation: &str, error: &object_store::Error) -> FsError {
@@ -801,6 +815,22 @@ fn is_throttled_error(error: &object_store::Error) -> bool {
     message.contains("SlowDown") || message.contains(" 429 ") || message.contains(" 503 ")
 }
 
+fn is_temporary_object_read_error(error: &object_store::Error) -> bool {
+    if is_throttled_error(error) || matches!(error, object_store::Error::JoinError { .. }) {
+        return true;
+    }
+    if !matches!(error, object_store::Error::Generic { .. }) {
+        return false;
+    }
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("connection reset")
+        || message.contains("connection refused")
+        || message.contains("connection aborted")
+        || message.contains("timed out")
+        || message.contains("timeout")
+        || message.contains("transport error")
+}
+
 fn has_retry_exhaustion_marker(error: &object_store::Error) -> bool {
     let message = error.to_string();
     message.contains("after ") && message.contains("max_retries:")
@@ -1323,6 +1353,8 @@ mod tests {
         put_calls: AtomicUsize,
         marker_fault_once: AtomicUsize,
         marker_get_fault_once: AtomicUsize,
+        probe_fault_once: AtomicUsize,
+        probe_get_fault_once: AtomicUsize,
     }
 
     impl InterceptStore {
@@ -1332,6 +1364,8 @@ mod tests {
                 put_calls: AtomicUsize::new(0),
                 marker_fault_once: AtomicUsize::new(marker_fault_once),
                 marker_get_fault_once: AtomicUsize::new(0),
+                probe_fault_once: AtomicUsize::new(0),
+                probe_get_fault_once: AtomicUsize::new(0),
             }
         }
     }
@@ -1369,6 +1403,30 @@ mod tests {
                     _ => {}
                 }
             }
+            if location.as_ref().ends_with(CONCURRENT_PROBE_NAME) {
+                match self.probe_fault_once.swap(0, Ordering::SeqCst) {
+                    1 => {
+                        return Err(object_store::Error::Generic {
+                            store: "InterceptStore",
+                            source: Box::new(std::io::Error::other("HTTP 429 Too Many Requests")),
+                        });
+                    }
+                    2 => {
+                        self.inner.put_opts(location, payload, opts).await?;
+                        return Err(object_store::Error::Generic {
+                            store: "InterceptStore",
+                            source: Box::new(std::io::Error::other("lost probe create reply")),
+                        });
+                    }
+                    3 => {
+                        return Err(object_store::Error::Precondition {
+                            path: location.to_string(),
+                            source: Box::new(std::io::Error::other("conflict before visibility")),
+                        });
+                    }
+                    _ => {}
+                }
+            }
             self.inner.put_opts(location, payload, opts).await
         }
 
@@ -1392,6 +1450,19 @@ mod tests {
                     store: "InterceptStore",
                     source: Box::new(std::io::Error::other("HTTP 429 Too Many Requests")),
                 });
+            }
+            if location.as_ref().ends_with(CONCURRENT_PROBE_NAME) {
+                let failure = self.probe_get_fault_once.swap(0, Ordering::SeqCst);
+                if matches!(failure, 1 | 2) {
+                    return Err(object_store::Error::Generic {
+                        store: "InterceptStore",
+                        source: Box::new(std::io::Error::other(if failure == 1 {
+                            "HTTP 429 Too Many Requests"
+                        } else {
+                            "connection reset by peer"
+                        })),
+                    });
+                }
             }
             self.inner.get_opts(location, options).await
         }
@@ -1434,6 +1505,81 @@ mod tests {
             .await
             .unwrap();
         probe_configured_concurrent_prefix(&store, "probe/blocks")
+            .await
+            .unwrap();
+        assert_eq!(store.put_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn configured_prefix_probe_retries_a_throttled_create() {
+        let store = InterceptStore::new(0);
+        store.probe_fault_once.store(1, Ordering::SeqCst);
+        probe_configured_concurrent_prefix(&store, "probe/throttle")
+            .await
+            .unwrap();
+        assert_eq!(store.put_calls.load(Ordering::SeqCst), 2);
+        let path = ObjectPath::from("probe/throttle/_mount-rs-concurrent-probe-v1");
+        assert_eq!(
+            store
+                .inner
+                .get(&path)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap()
+                .as_ref(),
+            CONCURRENT_PROBE_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_prefix_probe_reads_the_winner_after_a_lost_reply() {
+        let store = InterceptStore::new(0);
+        store.probe_fault_once.store(2, Ordering::SeqCst);
+        probe_configured_concurrent_prefix(&store, "probe/lost-reply")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.put_calls.load(Ordering::SeqCst),
+            1,
+            "an accepted create must not be replayed"
+        );
+        probe_configured_concurrent_prefix(&store, "probe/lost-reply")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.put_calls.load(Ordering::SeqCst),
+            1,
+            "reopen must remain read-only"
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_prefix_probe_retries_a_conflict_without_a_visible_winner() {
+        let store = InterceptStore::new(0);
+        store.probe_fault_once.store(3, Ordering::SeqCst);
+        probe_configured_concurrent_prefix(&store, "probe/conflict")
+            .await
+            .unwrap();
+        assert_eq!(store.put_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn configured_prefix_probe_retries_a_throttled_direct_get() {
+        let store = InterceptStore::new(0);
+        store.probe_get_fault_once.store(1, Ordering::SeqCst);
+        probe_configured_concurrent_prefix(&store, "probe/get-throttle")
+            .await
+            .unwrap();
+        assert_eq!(store.put_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn configured_prefix_probe_retries_a_temporary_transport_get() {
+        let store = InterceptStore::new(0);
+        store.probe_get_fault_once.store(2, Ordering::SeqCst);
+        probe_configured_concurrent_prefix(&store, "probe/reset")
             .await
             .unwrap();
         assert_eq!(store.put_calls.load(Ordering::SeqCst), 1);
@@ -1634,6 +1780,22 @@ mod tests {
                 if fault == 1 { 2 } else { 1 }
             );
         }
+    }
+
+    #[tokio::test]
+    async fn backing_identity_verify_retries_temporary_direct_read_without_writing() {
+        let store = Arc::new(InterceptStore::new(0));
+        let blocks =
+            ObjectStoreBlockStore::new(store.clone(), "verify-throttle/blocks", true).unwrap();
+        let selected = prepare_configured_backing_id(store.as_ref(), &blocks)
+            .await
+            .unwrap();
+        let writes = store.put_calls.load(Ordering::SeqCst);
+        store.marker_get_fault_once.store(1, Ordering::SeqCst);
+        verify_configured_backing_id(store.as_ref(), &blocks, selected)
+            .await
+            .unwrap();
+        assert_eq!(store.put_calls.load(Ordering::SeqCst), writes);
     }
 
     #[tokio::test]
