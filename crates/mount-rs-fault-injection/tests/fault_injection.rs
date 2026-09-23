@@ -20,10 +20,13 @@ use std::time::Duration;
 #[derive(Clone)]
 struct FakeMetadata {
     state: Arc<Mutex<MetadataState>>,
+    conditional: bool,
 }
 
 #[derive(Default)]
 struct MetadataState {
+    load_calls: u32,
+    conditional_load_calls: u32,
     publish_calls: u32,
     flush_calls: u32,
     revision: u64,
@@ -33,6 +36,14 @@ impl FakeMetadata {
     fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(MetadataState::default())),
+            conditional: false,
+        }
+    }
+
+    fn with_conditional_load() -> Self {
+        Self {
+            conditional: true,
+            ..Self::new()
         }
     }
 
@@ -48,11 +59,29 @@ impl MetadataStore for FakeMetadata {
     }
 
     async fn load(&self) -> Result<LoadedMetadata> {
-        let revision = self.state.lock().unwrap().revision;
+        let mut state = self.state.lock().unwrap();
+        state.load_calls += 1;
+        let revision = state.revision;
         Ok(LoadedMetadata {
             revision,
             namespace: None,
         })
+    }
+
+    async fn load_if_changed(&self, known_revision: u64) -> Result<Option<LoadedMetadata>> {
+        if !self.conditional {
+            return Ok(Some(self.load().await?));
+        }
+        let mut state = self.state.lock().unwrap();
+        state.conditional_load_calls += 1;
+        if known_revision != 0 && known_revision == state.revision {
+            Ok(None)
+        } else {
+            Ok(Some(LoadedMetadata {
+                revision: state.revision,
+                namespace: None,
+            }))
+        }
     }
 
     async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
@@ -223,6 +252,81 @@ fn authority() -> ConcurrentBackingId {
 }
 
 #[tokio::test]
+async fn conditional_metadata_load_forwards_without_full_load() {
+    let inner = FakeMetadata::with_conditional_load();
+    let metadata = FaultMetadataStore::new(inner.clone(), FaultInjector::disabled(74));
+
+    let loaded = metadata.load_if_changed(1).await.unwrap().unwrap();
+    assert_eq!(loaded.revision, 0);
+    assert!(loaded.namespace.is_none());
+    inner.state.lock().unwrap().revision = 7;
+    assert!(metadata.load_if_changed(7).await.unwrap().is_none());
+    let state = inner.state.lock().unwrap();
+    assert_eq!(state.conditional_load_calls, 2);
+    assert_eq!(state.load_calls, 0);
+    assert!(metadata.injector().trace().is_empty());
+}
+
+#[tokio::test]
+async fn conditional_metadata_load_preserves_before_fault_without_provider_call() {
+    let inner = FakeMetadata::with_conditional_load();
+    let rule = FaultRule::new(
+        FaultBoundary::Metadata,
+        FaultOperation::Load,
+        FaultPhase::Before,
+        FaultOccurrence::Once,
+        FaultAction::Error(ErrorCode::Eio),
+    );
+    let injector = FaultInjector::new(FaultPlan::new(75, 1, vec![rule]).unwrap()).unwrap();
+    let metadata = FaultMetadataStore::new(inner.clone(), injector);
+
+    code(metadata.load_if_changed(0).await, ErrorCode::Eio);
+    let state = inner.state.lock().unwrap();
+    assert_eq!(state.conditional_load_calls, 0);
+    assert_eq!(state.load_calls, 0);
+    let trace = metadata.injector().trace();
+    assert_eq!(trace.events.len(), 1);
+    assert_eq!(trace.events[0].operation, FaultOperation::Load);
+    assert_eq!(trace.events[0].phase, FaultPhase::Before);
+    assert_eq!(
+        trace.events[0].outcome,
+        FaultOutcome::InjectedError {
+            code: ErrorCode::Eio,
+        }
+    );
+}
+
+#[tokio::test]
+async fn conditional_metadata_load_preserves_after_fault_for_unchanged_revision() {
+    let inner = FakeMetadata::with_conditional_load();
+    inner.state.lock().unwrap().revision = 7;
+    let rule = FaultRule::new(
+        FaultBoundary::Metadata,
+        FaultOperation::Load,
+        FaultPhase::After,
+        FaultOccurrence::Once,
+        FaultAction::Error(ErrorCode::Eio),
+    );
+    let injector = FaultInjector::new(FaultPlan::new(76, 1, vec![rule]).unwrap()).unwrap();
+    let metadata = FaultMetadataStore::new(inner.clone(), injector);
+
+    code(metadata.load_if_changed(7).await, ErrorCode::Eio);
+    let state = inner.state.lock().unwrap();
+    assert_eq!(state.conditional_load_calls, 1);
+    assert_eq!(state.load_calls, 0);
+    let trace = metadata.injector().trace();
+    assert_eq!(trace.events.len(), 1);
+    assert_eq!(trace.events[0].operation, FaultOperation::Load);
+    assert_eq!(trace.events[0].phase, FaultPhase::After);
+    assert_eq!(
+        trace.events[0].outcome,
+        FaultOutcome::InjectedError {
+            code: ErrorCode::Eio,
+        }
+    );
+}
+
+#[tokio::test]
 async fn bound_authority_forwards_and_publish_fault_prevents_inner_commit() {
     let inner = FakeMetadata::new();
     let rule = FaultRule::new(
@@ -343,13 +447,20 @@ async fn fault_wrapped_blocks_reject_unsupported_concurrent_backing_before_conve
         .err()
         .expect("volatile blocks must reject concurrent mode");
     assert_eq!(error.code, ErrorCode::Enotsup);
-    assert_eq!(
-        error.syscall.as_deref(),
-        Some("prepare concurrent SQLite blocks")
-    );
+    let expected_syscall = if cfg!(any(
+        target_os = "macos",
+        all(target_os = "linux", target_env = "gnu")
+    )) {
+        "prepare concurrent SQLite blocks"
+    } else if cfg!(not(unix)) {
+        "sqlite schema"
+    } else {
+        "inspect concurrent SQLite backing"
+    };
+    assert_eq!(error.syscall.as_deref(), Some(expected_syscall));
 
-    // The block check runs before the metadata provider persists its MRC1
-    // conversion, so the legacy lease path must still work.
+    // Platform metadata preflight or the block check rejects the open before
+    // the metadata provider persists its conversion, so Legacy still works.
     let lease = metadata
         .acquire_writer("legacy-after-rejected-open", Duration::from_secs(60))
         .await

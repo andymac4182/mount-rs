@@ -759,6 +759,21 @@ pub trait MetadataStore: Send + Sync {
     /// False for volatile stores; never advertise durable commits for memfs.
     fn durable(&self) -> bool;
     async fn load(&self) -> Result<LoadedMetadata>;
+    /// Read the current metadata, omitting its payload only when an exact,
+    /// nonzero revision match proves the caller's validated namespace is current.
+    /// Every namespace publication must increment the revision monotonically;
+    /// revisions must never be reused, including after restore. An optimized
+    /// implementation must make a fresh provider read and must not classify a
+    /// missing, malformed, or different revision as unchanged.
+    ///
+    /// `None` means unchanged, not an uninitialized namespace. `Some` retains
+    /// the validation requirements of `load`. The conservative default always
+    /// loads the payload, so existing and injected providers keep their behavior.
+    /// A revision check does not audit out-of-band payload edits that leave the
+    /// revision unchanged; unconditional `load` remains the full read path.
+    async fn load_if_changed(&self, _known_revision: u64) -> Result<Option<LoadedMetadata>> {
+        Ok(Some(self.load().await?))
+    }
     /// Inspect the persisted writer mode and bound block authority.
     async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
         Err(FsError::new(ErrorCode::Enotsup).with_syscall("inspect concurrent metadata mode"))

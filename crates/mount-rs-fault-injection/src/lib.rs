@@ -845,6 +845,17 @@ where
             .await
     }
 
+    async fn load_if_changed(&self, known_revision: u64) -> Result<Option<LoadedMetadata>> {
+        self.injector
+            .before(FaultBoundary::Metadata, FaultOperation::Load)
+            .await?;
+        self.injector
+            .after(FaultBoundary::Metadata, FaultOperation::Load, || {
+                self.inner.load_if_changed(known_revision)
+            })
+            .await
+    }
+
     async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
         self.inner.concurrent_mode_state().await
     }

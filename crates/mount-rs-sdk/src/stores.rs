@@ -54,6 +54,23 @@ impl MetadataStore for ErasedMetadataStore {
         self.inner.load().await
     }
 
+    async fn load_if_changed(&self, known_revision: u64) -> Result<Option<LoadedMetadata>> {
+        #[cfg(feature = "observability")]
+        {
+            return self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "load",
+                    None,
+                    self.inner.load_if_changed(known_revision),
+                )
+                .await;
+        }
+        #[cfg(not(feature = "observability"))]
+        self.inner.load_if_changed(known_revision).await
+    }
+
     async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
         #[cfg(feature = "observability")]
         {
@@ -555,6 +572,17 @@ mod tests {
             unreachable!()
         }
 
+        async fn load_if_changed(&self, known_revision: u64) -> Result<Option<LoadedMetadata>> {
+            match known_revision {
+                7 => Ok(None),
+                0 => Ok(Some(LoadedMetadata {
+                    revision: 0,
+                    namespace: None,
+                })),
+                _ => Err(FsError::new(ErrorCode::Eio)),
+            }
+        }
+
         async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
             Ok(ConcurrentModeState::Mrc2(self.0))
         }
@@ -651,6 +679,34 @@ mod tests {
 
         async fn flush(&self) -> Result<()> {
             unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn erased_metadata_forwards_conditional_load_and_provider_errors() {
+        let id = ConcurrentBackingId::from_bytes([0x95; 16]).unwrap();
+        let inner = Arc::new(IdentityProbeMetadataStore(id)) as Arc<dyn MetadataStore>;
+        #[cfg(feature = "observability")]
+        let telemetry = Telemetry::new(mount_rs_observability::TelemetryConfig::enabled(
+            "conditional-load-test",
+        ));
+        #[cfg(feature = "observability")]
+        let erased = ErasedMetadataStore::new(inner, telemetry.clone());
+        #[cfg(not(feature = "observability"))]
+        let erased = ErasedMetadataStore::new(inner);
+
+        assert!(erased.load_if_changed(7).await.unwrap().is_none());
+        let loaded = erased.load_if_changed(0).await.unwrap().unwrap();
+        assert_eq!(loaded.revision, 0);
+        assert!(loaded.namespace.is_none());
+        assert_eq!(
+            erased.load_if_changed(8).await.unwrap_err().code,
+            ErrorCode::Eio
+        );
+        #[cfg(feature = "observability")]
+        {
+            assert_eq!(telemetry.snapshot().operations, 3);
+            assert_eq!(telemetry.snapshot().errors, 1);
         }
     }
 

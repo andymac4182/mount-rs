@@ -1513,6 +1513,90 @@ fn decode_manifest(bytes: &[u8]) -> Result<Manifest> {
     Ok(manifest)
 }
 
+/// Keep manifest checks and payload reads in the caller's one transaction.
+/// Revision equality relies on publications changing the manifest atomically
+/// with all chunks. Unconditional loads still read and validate all chunks;
+/// this revision-only unchanged result does not audit raw edits that retain
+/// the revision.
+async fn load_metadata_if_changed<F, Fut>(
+    raw_manifest: Option<Vec<u8>>,
+    metadata_prefix: &[u8],
+    limits: FoundationDbLimits,
+    known_revision: Option<u64>,
+    mut read_chunk: F,
+) -> TxnResult<Option<LoadedMetadata>>
+where
+    F: FnMut(u32) -> Fut,
+    Fut: Future<Output = TxnResult<Option<Vec<u8>>>>,
+{
+    let Some(raw_manifest) = raw_manifest else {
+        if known_revision.is_some_and(|revision| revision != 0) {
+            return Err(TxnError::Fs(backend_error(
+                "FoundationDB metadata manifest is missing",
+            )));
+        }
+        return Ok(Some(LoadedMetadata {
+            revision: 0,
+            namespace: None,
+        }));
+    };
+    let manifest = decode_manifest(&raw_manifest).map_err(TxnError::Fs)?;
+    let payload_len = usize::try_from(manifest.payload_len)
+        .map_err(|_| TxnError::Fs(FsError::new(ErrorCode::Eoverflow)))?;
+    if payload_len > limits.max_metadata_bytes {
+        return Err(TxnError::Fs(backend_error(
+            "FoundationDB metadata exceeds configured limit",
+        )));
+    }
+    let expected_chunks = payload_len.div_ceil(limits.metadata_chunk_bytes);
+    if expected_chunks != manifest.chunk_count as usize {
+        return Err(TxnError::Fs(backend_error(
+            "FoundationDB metadata manifest chunk count is invalid",
+        )));
+    }
+    let affected_bytes =
+        metadata_load_affected_bytes(metadata_prefix, limits.metadata_chunk_bytes, payload_len)
+            .map_err(TxnError::Fs)?;
+    if affected_bytes > FOUNDATIONDB_MAX_TRANSACTION_BYTES {
+        return Err(TxnError::Fs(metadata_transaction_too_large(affected_bytes)));
+    }
+    if known_revision == Some(manifest.revision) {
+        // decode_manifest rejects zero; equality alone admits this fast path.
+        return Ok(None);
+    }
+    let mut payload = Vec::with_capacity(payload_len);
+    for index in 0..manifest.chunk_count {
+        let Some(chunk) = read_chunk(index).await? else {
+            return Err(TxnError::Fs(backend_error(
+                "FoundationDB metadata chunk is missing",
+            )));
+        };
+        if chunk.len() > limits.metadata_chunk_bytes {
+            return Err(TxnError::Fs(backend_error(
+                "FoundationDB metadata chunk exceeds configured limit",
+            )));
+        }
+        payload.extend_from_slice(&chunk);
+    }
+    if payload.len() != payload_len {
+        return Err(TxnError::Fs(backend_error(
+            "FoundationDB metadata payload length is invalid",
+        )));
+    }
+    let namespace = serde_json::from_slice(&payload)
+        .map_err(backend_error)
+        .map_err(TxnError::Fs)?;
+    let loaded = LoadedMetadata {
+        revision: manifest.revision,
+        namespace: Some(namespace),
+    };
+    loaded.validate().map_err(TxnError::Fs)?;
+    if let Some(namespace) = loaded.namespace.as_ref() {
+        validate_namespace_chunkers(namespace, limits).map_err(TxnError::Fs)?;
+    }
+    Ok(Some(loaded))
+}
+
 fn encode_oracle_time(now_ms: u64) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(ORACLE_BYTES);
     bytes.extend_from_slice(ORACLE_MAGIC);
@@ -2216,6 +2300,40 @@ impl FoundationDbMetadataStore {
     pub fn new(storage: &FoundationDbStorage) -> Self {
         storage.metadata()
     }
+
+    async fn load_conditionally(
+        &self,
+        known_revision: Option<u64>,
+    ) -> Result<Option<LoadedMetadata>> {
+        let inner = Arc::clone(&self.0);
+        let keyspace = Keyspace::new(&inner.prefix);
+        let manifest_key = keyspace.manifest();
+        let chunk_prefix = keyspace.chunks();
+        let metadata_prefix = inner.prefix.clone();
+        let limits = inner.limits;
+        inner
+            .transact_idempotent((), move |trx, _| {
+                let manifest_key = manifest_key.clone();
+                let chunk_prefix = chunk_prefix.clone();
+                let metadata_prefix = metadata_prefix.clone();
+                Box::pin(async move {
+                    configure_transaction(trx, limits)?;
+                    let raw_manifest = get_owned(trx, &manifest_key).await?;
+                    load_metadata_if_changed(
+                        raw_manifest,
+                        &metadata_prefix,
+                        limits,
+                        known_revision,
+                        |index| {
+                            let key = metadata_chunk_key(&chunk_prefix, index);
+                            async move { get_owned(trx, &key).await }
+                        },
+                    )
+                    .await
+                })
+            })
+            .await
+    }
 }
 
 #[async_trait]
@@ -2232,83 +2350,13 @@ impl MetadataStore for FoundationDbMetadataStore {
     }
 
     async fn load(&self) -> Result<LoadedMetadata> {
-        let inner = Arc::clone(&self.0);
-        let keyspace = Keyspace::new(&inner.prefix);
-        let manifest_key = keyspace.manifest();
-        let chunk_prefix = keyspace.chunks();
-        let metadata_prefix = inner.prefix.clone();
-        let limits = inner.limits;
-        inner
-            .transact_idempotent((), move |trx, _| {
-                let manifest_key = manifest_key.clone();
-                let chunk_prefix = chunk_prefix.clone();
-                let metadata_prefix = metadata_prefix.clone();
-                Box::pin(async move {
-                    configure_transaction(trx, limits)?;
-                    let Some(raw_manifest) = get_owned(trx, &manifest_key).await? else {
-                        return Ok(LoadedMetadata {
-                            revision: 0,
-                            namespace: None,
-                        });
-                    };
-                    let manifest = decode_manifest(&raw_manifest).map_err(TxnError::Fs)?;
-                    let payload_len = usize::try_from(manifest.payload_len)
-                        .map_err(|_| TxnError::Fs(FsError::new(ErrorCode::Eoverflow)))?;
-                    if payload_len > limits.max_metadata_bytes {
-                        return Err(TxnError::Fs(backend_error(
-                            "FoundationDB metadata exceeds configured limit",
-                        )));
-                    }
-                    let expected_chunks = payload_len.div_ceil(limits.metadata_chunk_bytes);
-                    if expected_chunks != manifest.chunk_count as usize {
-                        return Err(TxnError::Fs(backend_error(
-                            "FoundationDB metadata manifest chunk count is invalid",
-                        )));
-                    }
-                    let affected_bytes = metadata_load_affected_bytes(
-                        &metadata_prefix,
-                        limits.metadata_chunk_bytes,
-                        payload_len,
-                    )
-                    .map_err(TxnError::Fs)?;
-                    if affected_bytes > FOUNDATIONDB_MAX_TRANSACTION_BYTES {
-                        return Err(TxnError::Fs(metadata_transaction_too_large(affected_bytes)));
-                    }
-                    let mut payload = Vec::with_capacity(payload_len);
-                    for index in 0..manifest.chunk_count {
-                        let key = metadata_chunk_key(&chunk_prefix, index);
-                        let Some(chunk) = get_owned(trx, &key).await? else {
-                            return Err(TxnError::Fs(backend_error(
-                                "FoundationDB metadata chunk is missing",
-                            )));
-                        };
-                        if chunk.len() > limits.metadata_chunk_bytes {
-                            return Err(TxnError::Fs(backend_error(
-                                "FoundationDB metadata chunk exceeds configured limit",
-                            )));
-                        }
-                        payload.extend_from_slice(&chunk);
-                    }
-                    if payload.len() != payload_len {
-                        return Err(TxnError::Fs(backend_error(
-                            "FoundationDB metadata payload length is invalid",
-                        )));
-                    }
-                    let namespace = serde_json::from_slice(&payload)
-                        .map_err(backend_error)
-                        .map_err(TxnError::Fs)?;
-                    let loaded = LoadedMetadata {
-                        revision: manifest.revision,
-                        namespace: Some(namespace),
-                    };
-                    loaded.validate().map_err(TxnError::Fs)?;
-                    if let Some(namespace) = loaded.namespace.as_ref() {
-                        validate_namespace_chunkers(namespace, limits).map_err(TxnError::Fs)?;
-                    }
-                    Ok(loaded)
-                })
-            })
-            .await
+        self.load_conditionally(None).await?.ok_or_else(|| {
+            backend_error("unconditional FoundationDB metadata load omitted its payload")
+        })
+    }
+
+    async fn load_if_changed(&self, known_revision: u64) -> Result<Option<LoadedMetadata>> {
+        self.load_conditionally(Some(known_revision)).await
     }
 
     async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
@@ -3216,6 +3264,262 @@ mod tests {
             .finish();
         tracing::subscriber::with_default(subscriber, render);
         String::from_utf8(output.lock().unwrap().clone()).unwrap()
+    }
+
+    fn conditional_metadata_payload() -> Vec<u8> {
+        use mount_rs_core::storage::{NAMESPACE_FORMAT_VERSION, NodeMetadata};
+        use mount_rs_core::types::{S_IFDIR, Stats};
+        let namespace = Namespace {
+            format_version: NAMESPACE_FORMAT_VERSION,
+            root: 1,
+            next_inode: 2,
+            default_uid: 17,
+            default_gid: 0,
+            umask: 0,
+            default_chunker: ChunkerConfig {
+                algorithm: "fixed-size".to_owned(),
+                version: 1,
+                parameters: [("chunk_size".to_owned(), 4096)].into_iter().collect(),
+            },
+            nodes: [(
+                1,
+                NodeMetadata {
+                    stats: Stats {
+                        dev: 1,
+                        ino: 1,
+                        mode: S_IFDIR | 0o755,
+                        nlink: 2,
+                        uid: 0,
+                        gid: 0,
+                        rdev: 0,
+                        size: 0,
+                        blksize: 4096,
+                        blocks: 0,
+                        atime_ms: 1,
+                        mtime_ms: 1,
+                        ctime_ms: 1,
+                        birthtime_ms: 1,
+                    },
+                    data: NodeData::Directory { entries: vec![] },
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        namespace.validate().expect("valid conditional fixture");
+        serde_json::to_vec(&namespace).expect("serialize namespace")
+    }
+
+    fn conditional_manifest(payload: &[u8], limits: FoundationDbLimits) -> Vec<u8> {
+        encode_manifest(Manifest {
+            revision: 7,
+            chunk_count: payload.len().div_ceil(limits.metadata_chunk_bytes) as u32,
+            payload_len: payload.len() as u64,
+        })
+    }
+
+    #[tokio::test]
+    async fn conditional_metadata_load_unchanged_avoids_payload_reads() {
+        let limits = FoundationDbLimits {
+            metadata_chunk_bytes: 128,
+            ..FoundationDbLimits::default()
+        };
+        let payload = conditional_metadata_payload();
+        let reads = AtomicU64::new(0);
+        let loaded = load_metadata_if_changed(
+            Some(conditional_manifest(&payload, limits)),
+            b"volume",
+            limits,
+            Some(7),
+            |_| {
+                reads.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Err(TxnError::Fs(backend_error("unexpected payload read"))))
+            },
+        )
+        .await
+        .expect("unchanged manifest");
+        assert!(loaded.is_none());
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn conditional_metadata_load_changed_reads_and_validates_all_chunks() {
+        let limits = FoundationDbLimits {
+            metadata_chunk_bytes: 128,
+            ..FoundationDbLimits::default()
+        };
+        let payload = conditional_metadata_payload();
+        let chunks: Vec<_> = payload
+            .chunks(limits.metadata_chunk_bytes)
+            .map(<[u8]>::to_vec)
+            .collect();
+        let reads = AtomicU64::new(0);
+        for (attempt, known_revision) in [0, 6, 8].into_iter().enumerate() {
+            let loaded = load_metadata_if_changed(
+                Some(conditional_manifest(&payload, limits)),
+                b"volume",
+                limits,
+                Some(known_revision),
+                |index| {
+                    reads.fetch_add(1, Ordering::SeqCst);
+                    std::future::ready(Ok(chunks.get(index as usize).cloned()))
+                },
+            )
+            .await
+            .expect("changed namespace")
+            .expect("every different revision returns payload");
+            assert_eq!(loaded.revision, 7);
+            assert_eq!(loaded.namespace.expect("namespace").default_uid, 17);
+            assert_eq!(
+                reads.load(Ordering::SeqCst),
+                (chunks.len() * (attempt + 1)) as u64
+            );
+        }
+        let mut invalid: Namespace = serde_json::from_slice(&payload).expect("fixture namespace");
+        invalid.root = 0;
+        let invalid = serde_json::to_vec(&invalid).expect("invalid payload");
+        let error = load_metadata_if_changed(
+            Some(conditional_manifest(&invalid, limits)),
+            b"volume",
+            limits,
+            Some(6),
+            |index| {
+                std::future::ready(Ok(invalid
+                    .chunks(limits.metadata_chunk_bytes)
+                    .nth(index as usize)
+                    .map(<[u8]>::to_vec)))
+            },
+        )
+        .await
+        .expect_err("changed namespace must receive full graph validation")
+        .into_fs();
+        assert_eq!(error.code, ErrorCode::Einval);
+        let mut incompatible: Namespace =
+            serde_json::from_slice(&payload).expect("fixture namespace");
+        incompatible
+            .default_chunker
+            .parameters
+            .insert("chunk_size".to_owned(), limits.max_block_bytes as u64 + 1);
+        let incompatible = serde_json::to_vec(&incompatible).expect("incompatible chunker");
+        let error = load_metadata_if_changed(
+            Some(conditional_manifest(&incompatible, limits)),
+            b"volume",
+            limits,
+            Some(6),
+            |index| {
+                std::future::ready(Ok(incompatible
+                    .chunks(limits.metadata_chunk_bytes)
+                    .nth(index as usize)
+                    .map(<[u8]>::to_vec)))
+            },
+        )
+        .await
+        .expect_err("changed namespace must retain provider chunker limits")
+        .into_fs();
+        assert_eq!(error.code, ErrorCode::Efbig);
+    }
+
+    #[tokio::test]
+    async fn conditional_metadata_load_missing_or_malformed_manifest_fails_closed() {
+        let limits = FoundationDbLimits::default();
+        let payload = conditional_metadata_payload();
+        let valid =
+            decode_manifest(&conditional_manifest(&payload, limits)).expect("valid manifest");
+        let mut bad_magic = conditional_manifest(&payload, limits);
+        bad_magic[0] ^= 1;
+        let invalid = [
+            None,
+            Some(vec![]),
+            Some(b"not a metadata manifest".to_vec()),
+            Some(bad_magic),
+            Some(encode_manifest(Manifest {
+                revision: 0,
+                ..valid
+            })),
+            Some(encode_manifest(Manifest {
+                chunk_count: 0,
+                ..valid
+            })),
+            Some(encode_manifest(Manifest {
+                payload_len: 0,
+                ..valid
+            })),
+            Some(encode_manifest(Manifest {
+                chunk_count: valid.chunk_count + 1,
+                ..valid
+            })),
+            Some(encode_manifest(Manifest {
+                payload_len: limits.max_metadata_bytes as u64 + 1,
+                ..valid
+            })),
+        ];
+        for manifest in invalid {
+            let reads = AtomicU64::new(0);
+            let result = load_metadata_if_changed(manifest, b"volume", limits, Some(7), |_| {
+                reads.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Ok(None))
+            })
+            .await;
+            assert!(
+                result.is_err(),
+                "equal revision must not hide manifest errors"
+            );
+            assert_eq!(reads.load(Ordering::SeqCst), 0);
+        }
+        let loaded = load_metadata_if_changed(None, b"volume", limits, None, |_| {
+            std::future::ready(Ok(None))
+        })
+        .await
+        .expect("full load permits fresh uninitialized volume")
+        .expect("uninitialized record");
+        assert_eq!(loaded.revision, 0);
+        assert!(loaded.namespace.is_none());
+    }
+
+    #[tokio::test]
+    async fn conditional_metadata_load_checks_transaction_budget_before_unchanged() {
+        let limits = FoundationDbLimits {
+            metadata_chunk_bytes: 1,
+            ..FoundationDbLimits::default()
+        };
+        let manifest = encode_manifest(Manifest {
+            revision: 7,
+            payload_len: limits.max_metadata_bytes as u64,
+            chunk_count: limits.max_metadata_bytes as u32,
+        });
+        let error = load_metadata_if_changed(Some(manifest), b"volume", limits, Some(7), |_| {
+            std::future::ready(Ok(None))
+        })
+        .await
+        .expect_err("affected-byte budget checked before unchanged")
+        .into_fs();
+        assert!(error.to_string().contains("transaction"));
+    }
+
+    #[tokio::test]
+    async fn unconditional_metadata_load_still_detects_same_revision_payload_corruption() {
+        let limits = FoundationDbLimits::default();
+        let payload = conditional_metadata_payload();
+        let manifest = conditional_manifest(&payload, limits);
+        let corrupted = vec![b'x'; payload.len()];
+        let unchanged =
+            load_metadata_if_changed(Some(manifest.clone()), b"volume", limits, Some(7), |_| {
+                std::future::ready(Ok(Some(corrupted.clone())))
+            })
+            .await
+            .expect("revision-only check");
+        assert!(
+            unchanged.is_none(),
+            "out-of-band edits under the same revision are not audited"
+        );
+        let full = load_metadata_if_changed(Some(manifest), b"volume", limits, None, |_| {
+            std::future::ready(Ok(Some(corrupted.clone())))
+        })
+        .await;
+        assert!(
+            full.is_err(),
+            "unconditional load must still inspect and reject payload corruption"
+        );
     }
 
     #[test]

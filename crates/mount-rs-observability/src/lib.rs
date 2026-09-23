@@ -1108,6 +1108,17 @@ where
             .await
     }
 
+    async fn load_if_changed(&self, known_revision: u64) -> Result<Option<LoadedMetadata>> {
+        self.telemetry
+            .observe_fs(
+                "provider.metadata",
+                "load",
+                None,
+                self.inner.load_if_changed(known_revision),
+            )
+            .await
+    }
+
     async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
         self.telemetry
             .observe_fs(
@@ -1713,6 +1724,72 @@ mod tests {
         GuardedReadResult, GuardedSetattr, ObservedEntry, OpenFlags, PathGuard, PathIdentity,
     };
     use mount_rs_memfs::{MemoryFs, MemoryOptions};
+
+    struct ConditionalMetadata;
+
+    #[async_trait]
+    impl MetadataStore for ConditionalMetadata {
+        fn durable(&self) -> bool {
+            true
+        }
+
+        async fn load(&self) -> Result<LoadedMetadata> {
+            unreachable!("conditional loads must reach the provider override")
+        }
+
+        async fn load_if_changed(&self, known_revision: u64) -> Result<Option<LoadedMetadata>> {
+            match known_revision {
+                7 => Ok(None),
+                0 => Ok(Some(LoadedMetadata {
+                    revision: 0,
+                    namespace: None,
+                })),
+                _ => Err(FsError::new(ErrorCode::Eio)),
+            }
+        }
+
+        async fn acquire_writer(&self, _owner: &str, _ttl: Duration) -> Result<WriterLease> {
+            unreachable!()
+        }
+
+        async fn renew_writer(&self, _lease: &WriterLease, _ttl: Duration) -> Result<WriterLease> {
+            unreachable!()
+        }
+
+        async fn release_writer(&self, _lease: &WriterLease) -> Result<()> {
+            unreachable!()
+        }
+
+        async fn publish(
+            &self,
+            _expected_revision: u64,
+            _lease: &WriterLease,
+            _namespace: Namespace,
+        ) -> Result<u64> {
+            unreachable!()
+        }
+
+        async fn flush(&self) -> Result<()> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn instrumented_metadata_observes_conditional_results_and_provider_errors() {
+        let telemetry = Telemetry::new(TelemetryConfig::enabled("conditional-load-test"));
+        let metadata = InstrumentedMetadataStore::new(ConditionalMetadata, telemetry.clone());
+
+        assert!(metadata.load_if_changed(7).await.unwrap().is_none());
+        let loaded = metadata.load_if_changed(0).await.unwrap().unwrap();
+        assert_eq!(loaded.revision, 0);
+        assert!(loaded.namespace.is_none());
+        assert_eq!(
+            metadata.load_if_changed(8).await.unwrap_err().code,
+            ErrorCode::Eio
+        );
+        assert_eq!(telemetry.snapshot().operations, 3);
+        assert_eq!(telemetry.snapshot().errors, 1);
+    }
 
     struct RejectingConcurrentBlocks;
 

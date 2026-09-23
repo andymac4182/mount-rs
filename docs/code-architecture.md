@@ -88,6 +88,11 @@ see [DEPENDENCIES.md](../DEPENDENCIES.md).
    every referenced block before the metadata mode changes. A revision
    conflict must be a known non-commit (`EAGAIN`);
    an uncertain publication error must remain ambiguous and fail closed.
+   `load_if_changed` is an optional refresh optimization: its default always
+   returns the full `load` result. An override may omit the payload only after
+   a fresh read proves an exact nonzero revision match. Every publication must
+   increment the revision monotonically, and revisions must never be reused.
+   A missing, malformed, or different revision cannot mean unchanged.
    SQLite performs the mode transition and revision CAS in immediate
    transactions on one local database file; PGlite uses atomic statements
    through one PostgreSQL-wire server that may use TCP or a Unix socket;
@@ -209,12 +214,28 @@ mapping and shutdown coverage.
   concurrent mode checks both backing ID and expected revision in the provider's atomic
   publication (SQLite transaction, PGlite update, or FoundationDB transaction
   containing metadata chunks and manifest). The latter
-  reloads the authoritative namespace before operations and can rebuild an
+  checks the authoritative revision before operations, reloads changed
+  namespaces, and can rebuild an
   operation after a known `EAGAIN` conflict, within a bounded retry count.
   Ambiguous publication or barrier failures fail closed; they cannot be
   replayed as known non-commits. Local namespace changes and related side
   effects follow successful publication. Reopen reads the provider's
   authoritative revision.
+- Initial open and unconditional metadata loads still read and validate the
+  full namespace. FoundationDB can refresh an already validated namespace by
+  reading its manifest in one fresh transaction, checking all manifest size,
+  chunk-count and transaction bounds, and skipping payload reads only for an
+  exact revision match. Changed payloads are read and fully validated in that
+  same transaction. This relies on all namespace changes using the monotonic
+  publication contract: direct chunk edits under an unchanged manifest
+  revision are not audited on every lookup. Use an unconditional load when
+  a full metadata validation pass is needed. A delayed refresh never replaces
+  a newer local acknowledgement, and even an unchanged response rechecks
+  local failure and closure before succeeding.
+  Publications continue to serialize, validate and CAS the entire namespace.
+  FoundationDB's default 512 KiB metadata payload limit and transaction
+  affected-byte bounds still apply. This refresh optimization does not qualify
+  larger volumes or write throughput, and changes no schema or provider limit.
 - Metadata publication and its barrier complete before success is acknowledged.
   `syncfs` remains an explicit filesystem-wide barrier. The composed driver
   advertises durable writes only when **both** providers do. Concurrent mode
