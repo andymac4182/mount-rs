@@ -173,10 +173,19 @@ fn run_journal(journal: &str) {
         load_started.elapsed().as_millis()
     );
 
-    let inner_lock_status = probe_inner_sqlite_lock(&scope);
-    eprintln!(
-        "SQLITE_INNER_NFS_LOCK journal={journal} status={inner_lock_status} clients=2 servers=2"
-    );
+    if journal == "DELETE"
+        && std::env::var("MOUNT_RS_CLI_NATIVE_SQLITE_INNER_MATRIX")
+            .ok()
+            .as_deref()
+            == Some("1")
+    {
+        run_inner_sqlite_matrix(&scope);
+    } else {
+        let inner_lock_status = probe_inner_sqlite_lock(&scope);
+        eprintln!(
+            "SQLITE_INNER_NFS_LOCK journal={journal} status={inner_lock_status} clients=2 servers=2"
+        );
+    }
 
     mount_b
         .clean_stop()
@@ -629,6 +638,37 @@ fn probe_inner_sqlite_lock(scope: &TestScope) -> String {
         .expect("probe SQLite application lock inside both NFS views")
 }
 
+fn run_inner_sqlite_matrix(scope: &TestScope) {
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/sqlite_nfs_adversarial.py");
+    let output = run_python_with_timeout(
+        vec![
+            script.to_string_lossy().into_owned(),
+            "--mount".to_owned(),
+            scope.mountpoint_a.to_string_lossy().into_owned(),
+            "--second-view".to_owned(),
+            scope.mountpoint_b.to_string_lossy().into_owned(),
+            "--workers".to_owned(),
+            "2".to_owned(),
+            "--transactions".to_owned(),
+            "8".to_owned(),
+        ],
+        Duration::from_secs(420),
+    )
+    .expect("run SQLite application journal/load matrix inside two native NFS views");
+    let mut summary = None;
+    for line in output.lines() {
+        let report: serde_json::Value =
+            serde_json::from_str(line).expect("parse SQLite NFS matrix report");
+        if report["case"] == "summary" {
+            summary = Some(report.clone());
+        }
+        eprintln!("SQLITE_INNER_NFS_MATRIX {report}");
+    }
+    let summary = summary.expect("SQLite NFS matrix emitted a summary");
+    assert_eq!(summary["failed"], 0, "SQLite NFS matrix failed: {summary}");
+}
+
 fn probe_sqlite_lock(first: &Path, second: &Path) -> Result<String, String> {
     let script =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/sqlite_nfs_adversarial.py");
@@ -707,6 +747,10 @@ finally:
 }
 
 fn run_python_bounded(args: Vec<String>) -> Result<String, String> {
+    run_python_with_timeout(args, PYTHON_TIMEOUT)
+}
+
+fn run_python_with_timeout(args: Vec<String>, timeout: Duration) -> Result<String, String> {
     let mut child = Command::new("python3")
         .args(&args)
         .env("PYTHONDONTWRITEBYTECODE", "1")
@@ -729,7 +773,7 @@ fn run_python_bounded(args: Vec<String>) -> Result<String, String> {
             .read_to_string(&mut text)
             .map(|_| text)
     });
-    let status = wait_child_bounded(&mut child, PYTHON_TIMEOUT);
+    let status = wait_child_bounded(&mut child, timeout);
     if status.is_none() {
         let _ = child.kill();
         let _ = child.wait();
@@ -742,7 +786,7 @@ fn run_python_bounded(args: Vec<String>) -> Result<String, String> {
         .join()
         .map_err(|_| "join Python stderr reader".to_owned())?
         .map_err(|error| error.to_string())?;
-    let status = status.ok_or_else(|| format!("Python fixture exceeded {PYTHON_TIMEOUT:?}"))?;
+    let status = status.ok_or_else(|| format!("Python fixture exceeded {timeout:?}"))?;
     if !status.success() {
         return Err(format!(
             "Python fixture exited {status}; stdout={stdout}; stderr={stderr}"

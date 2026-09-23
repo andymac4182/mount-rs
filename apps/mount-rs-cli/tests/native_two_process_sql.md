@@ -55,6 +55,20 @@ result is diagnostic only; the test checks the rolled-back value and
 `integrity_check`, and prints `SQLITE_INNER_NFS_LOCK=blocked` or
 `lock_bypassed`. A blocked attempt does not certify general NFS locking.
 
+Set `MOUNT_RS_CLI_NATIVE_SQLITE_INNER_MATRIX=1` for a separate, bounded
+adversarial run inside those **two independent CLI mounts**. It replaces the
+short inner lock probe in the DELETE backing case with SQLite application
+DELETE, TRUNCATE, PERSIST, and WAL capability and process kill/reopen checks,
+plus two workers × eight transactions in DELETE and available WAL. The
+fixture checks exact committed payloads and `integrity_check`, then records
+two-view create/delete visibility and conflicting locks. SQLite may select
+DELETE when WAL is requested through NFS; that fallback is reported as
+unsupported. A two-view lock bypass is a diagnostic failure of that SQLite
+application topology, and the contender rolls back without writing. Each
+JSON report is printed as `SQLITE_INNER_NFS_MATRIX`; the test fails if a
+supported single-view journal/recovery/load case fails. See the standalone
+[adversarial packet](../../../tests/sqlite_nfs_adversarial.md) for limits.
+
 ## Backing path boundary
 
 For concurrent SQLite backing, the CLI rejects metadata or block database
