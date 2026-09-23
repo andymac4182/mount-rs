@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use mount_rs_core::storage::{
-    BlockId, BlockStore, LoadedMetadata, MetadataStore, Namespace, WriterLease,
+    BlockId, BlockStore, ConcurrentBackingId, ConcurrentModeState, LoadedMetadata, MetadataStore,
+    Namespace, WriterLease,
 };
 use mount_rs_core::{ErrorCode, FsError, Result, backend_error};
 use mysql_async::prelude::Queryable;
@@ -22,6 +23,11 @@ const MAX_SCOPE_CHARS: usize = 255;
 const BLOCK_ID_LENGTH: usize = 65;
 const BLOCK_ID_PREFIX: u8 = b'b';
 const NOW_MS: &str = "CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS SIGNED)";
+const CONCURRENT_WRITE_MODE: &str = "MRC1";
+const BOUND_CONCURRENT_WRITE_MODE: &str = "MRC2";
+// Older clients cannot acquire a signed BIGINT fence beyond this value. The
+// marker and exhausted fence are published in the same atomic statement.
+const CONCURRENT_FENCE_SENTINEL: i64 = i64::MAX;
 
 const METADATA_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_tidb_metadata (
     volume_key VARBINARY(1020) NOT NULL,
@@ -30,6 +36,14 @@ const METADATA_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_tidb_metadata
     owner VARBINARY(1020) NULL,
     fence BIGINT NOT NULL,
     expires BIGINT NOT NULL,
+    write_mode VARBINARY(4) NULL,
+    backing_id VARBINARY(32) NULL,
+    PRIMARY KEY (volume_key)
+)";
+
+const BLOCK_AUTHORITY_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_tidb_block_authority (
+    volume_key VARBINARY(1020) NOT NULL,
+    backing_id VARBINARY(32) NOT NULL,
     PRIMARY KEY (volume_key)
 )";
 
@@ -150,6 +164,17 @@ impl Database {
             .await
             .map_err(|error| db_error("initialize TiDB schema", error))?;
         if ensure_metadata_row {
+            // Additive upgrades retain the existing lease row and namespace.
+            // New columns remain NULL until an explicit enrollment/migration.
+            for statement in [
+                "ALTER TABLE mount_rs_tidb_metadata ADD COLUMN IF NOT EXISTS write_mode VARBINARY(4) NULL",
+                "ALTER TABLE mount_rs_tidb_metadata ADD COLUMN IF NOT EXISTS backing_id VARBINARY(32) NULL",
+            ] {
+                connection
+                    .query_drop(statement)
+                    .await
+                    .map_err(|error| db_error("upgrade TiDB metadata schema", error))?;
+            }
             connection
                 .exec_drop(
                     "INSERT INTO mount_rs_tidb_metadata
@@ -160,6 +185,11 @@ impl Database {
                 )
                 .await
                 .map_err(|error| db_error("initialize TiDB metadata row", error))?;
+        } else {
+            connection
+                .query_drop(BLOCK_AUTHORITY_SCHEMA)
+                .await
+                .map_err(|error| db_error("initialize TiDB block authority schema", error))?;
         }
         Ok(database)
     }
@@ -250,9 +280,100 @@ struct LeaseRow {
     now_ms: u64,
 }
 
+#[derive(Debug)]
+struct ConcurrentRow {
+    revision: u64,
+    namespace_empty: bool,
+    mode: Option<Vec<u8>>,
+    backing: Option<Vec<u8>>,
+    owner: Option<Vec<u8>>,
+    fence: i64,
+    expires: i64,
+}
+
+impl ConcurrentRow {
+    fn mode_state(&self) -> Result<ConcurrentModeState> {
+        nonnegative(self.fence, "metadata fence")?;
+        nonnegative(self.expires, "metadata expiry")?;
+        let fenced =
+            self.owner.is_none() && self.fence == CONCURRENT_FENCE_SENTINEL && self.expires == 0;
+        match (self.mode.as_deref(), self.backing.as_deref()) {
+            (None, None) if self.fence != CONCURRENT_FENCE_SENTINEL => {
+                Ok(ConcurrentModeState::Legacy)
+            }
+            (Some(mode), None) if mode == CONCURRENT_WRITE_MODE.as_bytes() && fenced => {
+                Ok(ConcurrentModeState::Mrc1)
+            }
+            (Some(mode), Some(id)) if mode == BOUND_CONCURRENT_WRITE_MODE.as_bytes() && fenced => {
+                Ok(ConcurrentModeState::Mrc2(backing_from_bytes(id)?))
+            }
+            (Some(mode), _) if mode == BOUND_CONCURRENT_WRITE_MODE.as_bytes() => Err(stale()),
+            _ => Err(backend_error(
+                "TiDB concurrent mode, backing ID, and fence disagree",
+            )),
+        }
+    }
+
+    fn is_pristine(&self) -> bool {
+        self.mode.is_none()
+            && self.backing.is_none()
+            && self.revision == 0
+            && self.namespace_empty
+            && self.owner.is_none()
+            && self.fence == 0
+            && self.expires == 0
+    }
+}
+
+type ConcurrentSqlRow = (
+    i64,
+    bool,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    i64,
+    i64,
+);
+
+async fn concurrent_row<C: Queryable>(
+    connection: &mut C,
+    volume_key: &str,
+) -> Result<ConcurrentRow> {
+    let row: Option<ConcurrentSqlRow> = connection
+        .exec_first(
+            "SELECT revision, namespace IS NULL, write_mode, backing_id, owner, fence, expires
+         FROM mount_rs_tidb_metadata WHERE volume_key=?",
+            (volume_key,),
+        )
+        .await
+        .map_err(|error| db_error("read TiDB concurrent mode", error))?;
+    let (revision, namespace_empty, mode, backing, owner, fence, expires) =
+        row.ok_or_else(|| backend_error("TiDB metadata row is missing"))?;
+    Ok(ConcurrentRow {
+        revision: nonnegative(revision, "metadata revision")?,
+        namespace_empty,
+        mode,
+        backing,
+        owner,
+        fence,
+        expires,
+    })
+}
+
+fn concurrent_busy(operation: &str) -> FsError {
+    FsError::new(ErrorCode::Ebusy).with_syscall(operation)
+}
+
 async fn configure_pessimistic_session(
     connection: &mut Conn,
 ) -> std::result::Result<(), MysqlError> {
+    // A server's GLOBAL autocommit=0 must not turn an acknowledged statement
+    // publication into a connection-local, uncommitted transaction.
+    connection.query_drop("SET SESSION autocommit=1").await?;
+    let autocommit: Option<i64> = connection
+        .query_first("SELECT @@SESSION.autocommit")
+        .await?;
+    require_autocommit(autocommit).map_err(|error| MysqlError::Other(Box::new(error)))?;
     // TiDB Cloud Starter/Essential may expose tidb_txn_mode as a read-only
     // variable. In that case the provider must verify the effective value,
     // never infer it from the deployment name.
@@ -297,6 +418,14 @@ fn require_pessimistic_mode(mode: Option<&str>) -> Result<()> {
         Err(backend_error(
             "TiDB session must use pessimistic transactions",
         ))
+    }
+}
+
+fn require_autocommit(autocommit: Option<i64>) -> Result<()> {
+    if autocommit == Some(1) {
+        Ok(())
+    } else {
+        Err(backend_error("TiDB session must enable autocommit"))
     }
 }
 
@@ -479,6 +608,11 @@ fn stale() -> FsError {
     FsError::new(ErrorCode::Estale).with_syscall("TiDB metadata lease")
 }
 
+fn backing_from_bytes(bytes: &[u8]) -> Result<ConcurrentBackingId> {
+    let text = std::str::from_utf8(bytes).map_err(|_| stale())?;
+    ConcurrentBackingId::from_hex(text).map_err(|_| stale())
+}
+
 fn revision_conflict() -> FsError {
     FsError::new(ErrorCode::Eagain).with_syscall("TiDB publish metadata")
 }
@@ -611,6 +745,72 @@ impl MetadataStore for TidbMetadataStore {
         })
     }
 
+    async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
+        let mut connection = self
+            .0
+            .pool
+            .get_conn()
+            .await
+            .map_err(|error| db_error("read TiDB concurrent mode", error))?;
+        concurrent_row(&mut connection, &self.0.volume_key)
+            .await?
+            .mode_state()
+    }
+
+    async fn preflight_new_bound_mode(&self) -> Result<()> {
+        let mut connection = self
+            .0
+            .pool
+            .get_conn()
+            .await
+            .map_err(|error| db_error("preflight new bound TiDB metadata", error))?;
+        let row = concurrent_row(&mut connection, &self.0.volume_key).await?;
+        if row.is_pristine() {
+            Ok(())
+        } else {
+            Err(concurrent_busy("preflight new bound TiDB metadata"))
+        }
+    }
+
+    async fn prepare_bound_concurrent_mode(&self, backing: ConcurrentBackingId) -> Result<()> {
+        let mut connection = self
+            .0
+            .pool
+            .get_conn()
+            .await
+            .map_err(|error| db_error("prepare bound concurrent TiDB metadata", error))?;
+        let changed = changed_autocommit_query(
+            &mut connection,
+            "UPDATE mount_rs_tidb_metadata SET write_mode=?, backing_id=?, fence=?
+             WHERE volume_key=? AND write_mode IS NULL AND backing_id IS NULL
+               AND revision=0 AND namespace IS NULL AND owner IS NULL AND fence=0 AND expires=0",
+            (
+                BOUND_CONCURRENT_WRITE_MODE,
+                backing.to_hex(),
+                CONCURRENT_FENCE_SENTINEL,
+                &self.0.volume_key,
+            ),
+            "prepare bound concurrent TiDB metadata",
+        )
+        .await?;
+        if changed == 1 {
+            return Ok(());
+        }
+        if changed != 0 {
+            return Err(backend_error("TiDB bound enrollment changed multiple rows"));
+        }
+        match concurrent_row(&mut connection, &self.0.volume_key)
+            .await?
+            .mode_state()?
+        {
+            ConcurrentModeState::Mrc2(actual) if actual == backing => Ok(()),
+            ConcurrentModeState::Mrc2(_) => Err(stale()),
+            ConcurrentModeState::Legacy | ConcurrentModeState::Mrc1 => {
+                Err(concurrent_busy("prepare bound concurrent TiDB metadata"))
+            }
+        }
+    }
+
     async fn acquire_writer(&self, owner: &str, ttl: Duration) -> Result<WriterLease> {
         validate_scope(owner, "TiDB writer owner")?;
         let ttl_ms = ttl_ms(ttl)?;
@@ -668,7 +868,8 @@ impl MetadataStore for TidbMetadataStore {
             &mut transaction,
             "UPDATE mount_rs_tidb_metadata
              SET owner=?, fence=?, expires=?
-             WHERE volume_key=? AND fence=? AND expires=?",
+             WHERE volume_key=? AND fence=? AND expires=?
+               AND write_mode IS NULL AND backing_id IS NULL",
             (
                 owner,
                 fence_i64,
@@ -735,6 +936,7 @@ impl MetadataStore for TidbMetadataStore {
             &format!(
                 "UPDATE mount_rs_tidb_metadata SET expires=?
                  WHERE volume_key=? AND owner=? AND fence=? AND expires=?
+                   AND write_mode IS NULL AND backing_id IS NULL
                    AND expires>{NOW_MS}"
             ),
             (
@@ -792,6 +994,7 @@ impl MetadataStore for TidbMetadataStore {
             &format!(
                 "UPDATE mount_rs_tidb_metadata SET owner=NULL, expires=0
                  WHERE volume_key=? AND owner=? AND fence=? AND expires=?
+                   AND write_mode IS NULL AND backing_id IS NULL
                    AND expires>{NOW_MS}"
             ),
             (&self.0.volume_key, &lease.owner, lease_fence, lease_expires),
@@ -845,6 +1048,7 @@ impl MetadataStore for TidbMetadataStore {
                 "UPDATE mount_rs_tidb_metadata
                  SET revision=?, namespace=?
                  WHERE volume_key=? AND revision=? AND owner=? AND fence=? AND expires=?
+                   AND write_mode IS NULL AND backing_id IS NULL
                    AND expires>{NOW_MS}"
             ),
             (
@@ -887,6 +1091,133 @@ impl MetadataStore for TidbMetadataStore {
         Ok(next_revision as u64)
     }
 
+    async fn publish_bound_if_revision(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+        namespace: Namespace,
+    ) -> Result<u64> {
+        namespace.validate()?;
+        let expected = signed(expected_revision, "metadata revision")?;
+        let next = expected
+            .checked_add(1)
+            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        let namespace = serde_json::to_string(&namespace).map_err(backend_error)?;
+        if namespace.len() > self.0.max_namespace_bytes {
+            return Err(FsError::new(ErrorCode::Efbig)
+                .with_syscall("TiDB publish bound metadata")
+                .with_message("serialized namespace exceeds the configured TiDB limit"));
+        }
+        let mut connection = self
+            .0
+            .pool
+            .get_conn()
+            .await
+            .map_err(|error| db_error("publish bound TiDB metadata", error))?;
+        // TiDB may retry its own single-statement autocommit internally. The
+        // revision predicate still permits exactly one committed publication.
+        // An unknown acknowledgement is never replayed by this provider.
+        let changed = changed_autocommit_query(
+            &mut connection,
+            "UPDATE mount_rs_tidb_metadata SET revision=?, namespace=?
+             WHERE volume_key=? AND revision=? AND write_mode=? AND backing_id=?
+               AND owner IS NULL AND fence=? AND expires=0",
+            (
+                next,
+                &namespace,
+                &self.0.volume_key,
+                expected,
+                BOUND_CONCURRENT_WRITE_MODE,
+                backing.to_hex(),
+                CONCURRENT_FENCE_SENTINEL,
+            ),
+            "publish bound TiDB metadata",
+        )
+        .await?;
+        if changed == 1 {
+            return Ok(next as u64);
+        }
+        if changed != 0 {
+            return Err(backend_error("TiDB bound CAS changed multiple rows"));
+        }
+        let row = concurrent_row(&mut connection, &self.0.volume_key).await?;
+        match row.mode_state()? {
+            ConcurrentModeState::Mrc2(actual) if actual != backing => return Err(stale()),
+            ConcurrentModeState::Mrc2(_) => {}
+            ConcurrentModeState::Legacy | ConcurrentModeState::Mrc1 => {
+                return Err(concurrent_busy("publish bound TiDB metadata"));
+            }
+        }
+        if row.revision != expected_revision {
+            return Err(revision_conflict());
+        }
+        Err(backend_error(
+            "TiDB bound CAS returned zero for unchanged revision",
+        ))
+    }
+
+    async fn migrate_mrc1_to_bound_mode(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        let expected = signed(expected_revision, "metadata revision")?;
+        let mut connection = self
+            .0
+            .pool
+            .get_conn()
+            .await
+            .map_err(|error| db_error("migrate MRC1 TiDB metadata", error))?;
+        let changed = changed_autocommit_query(
+            &mut connection,
+            "UPDATE mount_rs_tidb_metadata SET write_mode=?, backing_id=?
+             WHERE volume_key=? AND revision=? AND write_mode=? AND backing_id IS NULL
+               AND owner IS NULL AND fence=? AND expires=0",
+            (
+                BOUND_CONCURRENT_WRITE_MODE,
+                backing.to_hex(),
+                &self.0.volume_key,
+                expected,
+                CONCURRENT_WRITE_MODE,
+                CONCURRENT_FENCE_SENTINEL,
+            ),
+            "migrate MRC1 TiDB metadata",
+        )
+        .await?;
+        if changed == 1 {
+            return Ok(());
+        }
+        if changed != 0 {
+            return Err(backend_error("TiDB MRC1 migration changed multiple rows"));
+        }
+        let row = concurrent_row(&mut connection, &self.0.volume_key).await?;
+        if row.revision != expected_revision {
+            Err(revision_conflict())
+        } else {
+            Err(concurrent_busy("migrate MRC1 TiDB metadata"))
+        }
+    }
+
+    async fn preflight_mrc1_to_bound_mode(&self, expected_revision: u64) -> Result<()> {
+        signed(expected_revision, "metadata revision")?;
+        let mut connection = self
+            .0
+            .pool
+            .get_conn()
+            .await
+            .map_err(|error| db_error("preflight MRC1 TiDB metadata", error))?;
+        let row = concurrent_row(&mut connection, &self.0.volume_key).await?;
+        if row.revision != expected_revision {
+            return Err(revision_conflict());
+        }
+        match row.mode_state()? {
+            ConcurrentModeState::Mrc1 => Ok(()),
+            ConcurrentModeState::Legacy | ConcurrentModeState::Mrc2(_) => {
+                Err(concurrent_busy("preflight MRC1 TiDB metadata"))
+            }
+        }
+    }
+
     async fn flush(&self) -> Result<()> {
         self.0.acknowledgement_barrier().await
     }
@@ -896,6 +1227,73 @@ impl MetadataStore for TidbMetadataStore {
 impl BlockStore for TidbBlockStore {
     fn durable(&self) -> bool {
         self.0.durable
+    }
+
+    async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
+        let mut connection = self
+            .0
+            .pool
+            .get_conn()
+            .await
+            .map_err(|error| db_error("prepare TiDB block authority", error))?;
+        // The server generates the candidate, avoiding a client-local identity
+        // or a dependency on which pool/host first opens the backing scope.
+        let candidate: String = connection
+            .query_first("SELECT LOWER(REPLACE(UUID(), '-', ''))")
+            .await
+            .map_err(|error| db_error("generate TiDB block authority", error))?
+            .ok_or_else(|| backend_error("TiDB UUID query returned no row"))?;
+        ConcurrentBackingId::from_hex(&candidate)
+            .map_err(|_| backend_error("TiDB generated an invalid block authority ID"))?;
+        changed_autocommit_query(
+            &mut connection,
+            "INSERT INTO mount_rs_tidb_block_authority (volume_key, backing_id) VALUES (?, ?)
+             ON DUPLICATE KEY UPDATE volume_key=volume_key",
+            (&self.0.volume_key, candidate),
+            "prepare TiDB block authority",
+        )
+        .await?;
+        let actual: Option<Vec<u8>> = connection
+            .exec_first(
+                "SELECT backing_id FROM mount_rs_tidb_block_authority WHERE volume_key=?",
+                (&self.0.volume_key,),
+            )
+            .await
+            .map_err(|error| db_error("read TiDB block authority", error))?;
+        backing_from_bytes(
+            &actual.ok_or_else(|| backend_error("TiDB block authority disappeared"))?,
+        )
+        .map_err(|_| backend_error("TiDB block authority ID is invalid"))
+    }
+
+    async fn verify_concurrent_backing(&self, expected: ConcurrentBackingId) -> Result<()> {
+        let mut connection = self
+            .0
+            .pool
+            .get_conn()
+            .await
+            .map_err(|error| db_error("verify TiDB block authority", error))?;
+        let actual: Option<Vec<u8>> = connection
+            .exec_first(
+                "SELECT backing_id FROM mount_rs_tidb_block_authority WHERE volume_key=?",
+                (&self.0.volume_key,),
+            )
+            .await
+            .map_err(|error| db_error("verify TiDB block authority", error))?;
+        let actual = backing_from_bytes(&actual.ok_or_else(stale)?)?;
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(stale())
+        }
+    }
+
+    async fn get_for_migration(&self, id: &BlockId) -> Result<Vec<u8>> {
+        let bytes = self.get(id).await?;
+        if block_id(&bytes) != *id {
+            return Err(FsError::new(ErrorCode::Eio).with_syscall("verify TiDB migration block"));
+        }
+        Ok(bytes)
     }
 
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
@@ -995,6 +1393,91 @@ impl BlockStore for TidbBlockStore {
 mod tests {
     use super::*;
     use mysql_async::{DriverError, ServerError};
+
+    fn pristine_concurrent_row() -> ConcurrentRow {
+        ConcurrentRow {
+            revision: 0,
+            namespace_empty: true,
+            mode: None,
+            backing: None,
+            owner: None,
+            fence: 0,
+            expires: 0,
+        }
+    }
+
+    #[test]
+    fn concurrent_markers_require_canonical_identity_and_exhausted_legacy_fence() {
+        let mut row = pristine_concurrent_row();
+        assert_eq!(row.mode_state().unwrap(), ConcurrentModeState::Legacy);
+        assert!(row.is_pristine());
+        row.mode = Some(CONCURRENT_WRITE_MODE.as_bytes().to_vec());
+        row.fence = CONCURRENT_FENCE_SENTINEL;
+        assert_eq!(row.mode_state().unwrap(), ConcurrentModeState::Mrc1);
+        assert!(!row.is_pristine());
+        let backing = ConcurrentBackingId::from_bytes([4; 16]).unwrap();
+        row.mode = Some(BOUND_CONCURRENT_WRITE_MODE.as_bytes().to_vec());
+        row.backing = Some(backing.to_hex().into_bytes());
+        assert_eq!(
+            row.mode_state().unwrap(),
+            ConcurrentModeState::Mrc2(backing)
+        );
+        row.fence = 1;
+        assert!(row.mode_state().unwrap_err().is(ErrorCode::Estale));
+        row.fence = CONCURRENT_FENCE_SENTINEL;
+        row.owner = Some(b"old-writer".to_vec());
+        assert!(row.mode_state().unwrap_err().is(ErrorCode::Estale));
+        row.owner = None;
+        row.expires = 1;
+        assert!(row.mode_state().unwrap_err().is(ErrorCode::Estale));
+        row.expires = 0;
+        for malformed in ["", "00000000000000000000000000000000", "wrong"] {
+            row.backing = Some(malformed.as_bytes().to_vec());
+            assert!(row.mode_state().unwrap_err().is(ErrorCode::Estale));
+        }
+        row.mode = Some(b"bad".to_vec());
+        assert!(row.mode_state().unwrap_err().is(ErrorCode::Eio));
+    }
+
+    #[test]
+    fn unstamped_exhausted_fence_and_partial_markers_are_never_legacy() {
+        let mut row = pristine_concurrent_row();
+        row.fence = CONCURRENT_FENCE_SENTINEL;
+        assert!(row.mode_state().unwrap_err().is(ErrorCode::Eio));
+        row.fence = 0;
+        row.backing = Some(
+            ConcurrentBackingId::from_bytes([4; 16])
+                .unwrap()
+                .to_hex()
+                .into_bytes(),
+        );
+        assert!(row.mode_state().unwrap_err().is(ErrorCode::Eio));
+        assert!(!row.is_pristine());
+    }
+
+    #[test]
+    fn binary_authority_corruption_is_an_error_without_utf8_row_conversion() {
+        let mut row = pristine_concurrent_row();
+        row.mode = Some(BOUND_CONCURRENT_WRITE_MODE.as_bytes().to_vec());
+        row.backing = Some(vec![0xff]);
+        row.fence = CONCURRENT_FENCE_SENTINEL;
+        assert!(row.mode_state().unwrap_err().is(ErrorCode::Estale));
+        assert!(
+            backing_from_bytes(&[0xff])
+                .unwrap_err()
+                .is(ErrorCode::Estale)
+        );
+        row.mode = Some(vec![0xff]);
+        assert!(row.mode_state().unwrap_err().is(ErrorCode::Eio));
+    }
+
+    #[test]
+    fn sessions_must_verify_enabled_autocommit() {
+        assert!(require_autocommit(Some(1)).is_ok());
+        for value in [None, Some(0), Some(-1), Some(2)] {
+            assert!(require_autocommit(value).unwrap_err().is(ErrorCode::Eio));
+        }
+    }
 
     #[test]
     fn effective_transaction_mode_must_be_verified() {

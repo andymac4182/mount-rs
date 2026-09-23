@@ -688,7 +688,8 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
                 lease_authority: mount_rs_sdk::FoundationDbLeaseAuthority::RevisionCas,
                 ..
             }
-            | StorageProvider::Pglite { .. } => {}
+            | StorageProvider::Pglite { .. }
+            | StorageProvider::Tidb { .. } => {}
             StorageProvider::Sqlite { path } if sqlite_durable_path(path) => {}
             StorageProvider::Sqlite { .. } => {
                 return Err(ConfigError::at(
@@ -699,7 +700,7 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
             _ => {
                 return Err(ConfigError::at(
                     "config.driver.storage.metadata",
-                    "concurrent_writes requires SQLite, PGlite, or FoundationDB metadata with lease_authority 'revision-cas'",
+                    "concurrent_writes requires SQLite, PGlite, TiDB, or FoundationDB metadata with lease_authority 'revision-cas'",
                 ));
             }
         }
@@ -2221,6 +2222,44 @@ mod tests {
         let error = validate_resolved_options(&options)
             .expect_err("the local SQLite profile is incompatible with shared views");
         assert!(error.message().contains("shared NFS mounts"));
+    }
+
+    #[test]
+    fn concurrent_tidb_config_accepts_shared_blocks_and_rejects_local_blocks() {
+        let config = |blocks: Value| {
+            serde_json::json!({
+                "version": 1,
+                "driver": {"kind": "splitstore", "storage": {
+                    "concurrent_writes": true,
+                    "metadata": {"kind": "tidb", "connection": {"env": "MOUNT_RS_TIDB_URL"},
+                                 "volume_key": "shared-tidb", "durable": true},
+                    "blocks": blocks
+                }}
+            })
+        };
+        for blocks in [
+            serde_json::json!({"kind": "tidb", "connection": {"env": "MOUNT_RS_TIDB_URL"},
+                               "volume_key": "shared-tidb-blocks", "durable": true}),
+            serde_json::json!({"kind": "rustfs", "endpoint": "http://127.0.0.1:9000",
+                               "bucket": "test", "prefix": "shared-tidb", "region": "us-east-1",
+                               "access_key_id": {"env": "RUSTFS_ACCESS_KEY_ID"},
+                               "secret_access_key": {"env": "RUSTFS_SECRET_ACCESS_KEY"}}),
+        ] {
+            let valid = config(blocks);
+            parse_config_str(&valid.to_string(), Path::new("/tmp"))
+                .expect("TiDB supports independent clients with shared blocks");
+            let mut unused_ttl = valid;
+            unused_ttl["driver"]["storage"]["lease_ttl_ms"] = serde_json::json!(1000);
+            assert!(parse_config_str(&unused_ttl.to_string(), Path::new("/tmp")).is_err());
+        }
+        for blocks in [
+            serde_json::json!({"kind": "memory"}),
+            serde_json::json!({"kind": "sqlite", "path": "blocks.sqlite"}),
+        ] {
+            let error = parse_config_str(&config(blocks).to_string(), Path::new("/tmp"))
+                .expect_err("TiDB requires blocks shared across hosts");
+            assert!(error.message().contains("shared block"));
+        }
     }
 
     #[test]

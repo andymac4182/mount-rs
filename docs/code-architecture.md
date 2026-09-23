@@ -43,7 +43,7 @@ those frontends needs explicit selection and shutdown mapping as well as SDK
 construction.
 `mount-rs-rustfs` provides signed, path-style immutable blocks through the
 shared `mount-rs-object-store-blocks` adapter. It has no `MetadataStore`;
-concurrent mounts on different hosts pair it with FoundationDB or PGlite
+concurrent mounts on different hosts pair it with FoundationDB, PGlite or TiDB
 revision-CAS metadata.
 SQLite, PGlite and R2 providers retain their older `*Fs` factories for
 existing callers. New filesystem consumers should import the matching

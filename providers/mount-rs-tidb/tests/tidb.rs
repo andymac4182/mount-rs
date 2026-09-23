@@ -105,9 +105,11 @@ async fn assert_binary_identity_schema(url: &str) {
              FROM information_schema.columns
              WHERE TABLE_SCHEMA=DATABASE()
                AND ((TABLE_NAME='mount_rs_tidb_metadata'
-                     AND COLUMN_NAME IN ('volume_key', 'owner'))
+                     AND COLUMN_NAME IN ('volume_key', 'owner', 'write_mode', 'backing_id'))
                     OR (TABLE_NAME='mount_rs_tidb_blocks'
-                        AND COLUMN_NAME IN ('volume_key', 'id')))
+                        AND COLUMN_NAME IN ('volume_key', 'id'))
+                    OR (TABLE_NAME='mount_rs_tidb_block_authority'
+                        AND COLUMN_NAME IN ('volume_key', 'backing_id')))
              ORDER BY TABLE_NAME, COLUMN_NAME",
             (),
         )
@@ -116,8 +118,12 @@ async fn assert_binary_identity_schema(url: &str) {
     for (table, column, expected_length) in [
         ("mount_rs_tidb_metadata", "volume_key", 1020_u64),
         ("mount_rs_tidb_metadata", "owner", 1020_u64),
+        ("mount_rs_tidb_metadata", "write_mode", 4_u64),
+        ("mount_rs_tidb_metadata", "backing_id", 32_u64),
         ("mount_rs_tidb_blocks", "volume_key", 1020_u64),
         ("mount_rs_tidb_blocks", "id", 65_u64),
+        ("mount_rs_tidb_block_authority", "volume_key", 1020_u64),
+        ("mount_rs_tidb_block_authority", "backing_id", 32_u64),
     ] {
         let (_, _, data_type, length, collation) = columns
             .iter()

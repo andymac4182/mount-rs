@@ -3901,7 +3901,7 @@ pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Fi
         match options.metadata.kind.as_str() {
             "foundationdb"
                 if options.metadata.lease_authority.as_deref() == Some("revision-cas") => {}
-            "pglite" => {}
+            "pglite" | "tidb" => {}
             "sqlite"
                 if options
                     .metadata
@@ -3915,7 +3915,7 @@ pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Fi
             }
             _ => {
                 return Err(config_error(
-                    "concurrentWrites requires SQLite, PGlite, or FoundationDB metadata with leaseAuthority 'revision-cas'",
+                    "concurrentWrites requires SQLite, PGlite, TiDB, or FoundationDB metadata with leaseAuthority 'revision-cas'",
                 ));
             }
         }

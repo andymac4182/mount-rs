@@ -14,6 +14,7 @@ writer claim. The branch began at fetched `origin/main`
 | SQLite provider backing | Same host and the same canonical local metadata/block files. Bundled SQLite 3.51.3 passed native DELETE and WAL two-CLI checks, one CLI with two views, fresh reopen and integrity checks. Concurrent Windows SQLite backing returns `ENOTSUP`. |
 | PGlite provider backing | Clients share one persisted engine through its socket server; two split-store CLIs need four socket slots. Native bidirectional/disjoint writes and fresh engine/CLI reopen passed. Three slots rejected the second CLI before mount while the first remained readable. |
 | FoundationDB metadata + RustFS blocks | Two independent macOS loopback CLIs passed one current 400-write packet: 400 acknowledged writes, 400 checks through each live view and 400 after fresh CLI reopen. Earlier OOM, sync errors and per-OPEN timeouts remain retained and unexplained where stated below. |
+| TiDB metadata + TiDB or RustFS blocks | MRC2 provider, four-coordinator load, Node, one CLI with two views and two independent macOS NFS CLIs passed. TiDB/PD/TiKV restart checks passed on an explicitly underprovisioned diagnostic cluster; this does not satisfy the durable acceptance floor. |
 | Concurrent online reclamation | Disabled / `ENOTSUP`; distributed handle pins and a capacity policy are still needed. Retained immutable conflict blocks and tombstones can grow. |
 | Application SQLite inside shared NFS views | Unqualified: a retained cross-view locking probe allowed the contender to acquire `BEGIN IMMEDIATE`. Local SQLite provider backing is a separate qualified scope. |
 | Cross-host and recovery | These native packets use one host. Physical cross-host mounts, power-loss recovery and production operation need separate evidence. |
@@ -21,6 +22,103 @@ writer claim. The branch began at fetched `origin/main`
 
 The detailed history below retains each original failure and its source,
 runtime, measurement and cleanup boundary.
+
+## TiDB concurrent qualification, 2026-09-24
+
+The TiDB extension began at fetched main
+`56bab25e1470011fbbca691c54ba0082158ec926`. It adds MRC2 backing enrollment,
+revision CAS, legacy-writer fencing and explicit offline MRC1 migration to the
+existing TiDB crate. CLI, SDK, N-API and Node CLI selection accept TiDB
+metadata with shared blocks; memory and local SQLite block pairings are
+rejected before connecting. Existing populated legacy volumes cannot be
+silently enrolled. The reproducible entry points are
+`scripts/test-tidb.sh`, `scripts/test-tidb-concurrent-consumers.sh` and
+`apps/mount-rs-cli/tests/native_two_process_tidb.rs`.
+
+The service packet used official pinned v8.5.7 ARM64 images: three PD nodes,
+three TiKV nodes and one TiDB frontend, with loopback-only ephemeral ports.
+Docker provided 14 CPUs and 8,318,976,000 memory bytes, below the existing
+10 GiB floor. The explicit diagnostic override was used; the final result is
+`TIDB_ACCEPTANCE evidence=diagnostic-underprovisioned-not-durable-acceptance`.
+The floor and timeouts were retained. The frontend was removed/recreated,
+then TiKV1 and PD1 were restarted, with readiness/quorum checks before fresh
+provider and consumer connections.
+
+| Gate | Observed result |
+| --- | --- |
+| Locked CLI, SDK, N-API and TiDB all-target tests | 156 ordinary tests passed; opt-in service/native tests remained ignored in this gate |
+| Strict all-target Clippy, including TiDB/CLI TLS features; workspace format | Passed |
+| Real TiDB provider contracts | Three legacy and five MRC2/validation/migration/autocommit cases passed before and after component restarts |
+| Four independent filesystem coordinators | 4 × 40 create/rename/unlink lifecycles plus four disjoint-range writes: 405 acknowledged mutations per phase, 81 surviving files checked exactly after fresh reopen; 7,324 ms before restart and 7,634 ms after restart |
+| Load storage accounting | Revision 406, 164 immutable block rows and 78,002 / 78,004 namespace bytes; deleted and original paths absent |
+| Node 24.18.0 concurrent packet | Each phase: 41 writes, 80 live-view checks and 40 surviving files after fresh object reopen. After component restarts all 40 files were checked before any new writes, including deleted-path absence |
+| One CLI with two writable TiDB views | Passed twice, before and after component restarts; bidirectional bytes, rename/unlink and clean detach |
+| Two independent TiDB-backed CLIs | Each phase: 40 acknowledged load files with local/cross-view exact reads, disjoint same-file writes, held handles across remote rename/replacement/unlink and 40 load files after fresh CLI reopen; loads took 12,456 and 12,565 ms |
+| TiDB metadata + RustFS blocks, native two-process case | Passed in the separately owned RustFS packet: 40 acknowledged load files, exact live checks, disjoint writes, held-handle cases and 40 load files after fresh CLI reopen; load took 13,862 ms |
+| Lost successful publication acknowledgement | Both legacy and MRC2 real-server proxy cases passed after the TiDB restart checks; MRC2 returned an unknown outcome and direct reconciliation observed revision 1 without replay |
+| Shell harness failure propagation and Node CLI configuration | Regression checks passed; the full Node CLI argument/configuration suite passed |
+
+The TiDB/RustFS native case's files were reopened across CLI process restart.
+They were not retained for TiDB component restart. The separate RustFS packet
+also passed its existing block, consumer and service restart/recovery checks;
+those do not extend the TiDB/RustFS native file scope beyond fresh CLI reopen.
+
+Failures retained and resolved during this pass:
+
+- The old TiDB provider returned `ENOTSUP` from bound-mode preflight. The new
+  MRC2 contract passed against the same real TiDB release.
+- With global `autocommit=0`, publication reported revision 1 while an
+  independent reader still saw revision 0 without a mode/binding. Every fresh
+  private provider session now explicitly sets and verifies session
+  autocommit. The regression restores the original global setting before
+  asserting and passed with independently visible revision 1 and block bytes.
+- A load fixture incorrectly searched `tidb_version()` for `TiDB`; v8.5.7
+  returns release details there. It now verifies `VERSION()` and release
+  details before writing. A shell script edit during the original held run
+  also disrupted its continuation. Subsequent packets used an immutable
+  harness copy; the disrupted attempt is retained.
+- The baseline Node fixture reopened persistent TiDB metadata with fresh
+  memory blocks, yielding `ENOENT` for existing file data. Its default blocks
+  now use TiDB, and exact truncated payload/listing bytes survive fresh factory
+  reopen. Its unique baseline scopes are separate from the stable concurrent
+  component-restart scope.
+- The Node CLI had a separate whitelist that rejected concurrent TiDB.
+  Config-only RED/GREEN checks now accept TiDB/RustFS shared blocks and reject
+  memory/local SQLite before importing the SDK or attempting a mount.
+
+New negative cases cover malformed/non-UTF-8 mode and backing markers,
+missing/corrupt authority, wrong block scope, namespace limits, active and
+released legacy leases, enrollment races and stale migration revisions.
+Unknown publication acknowledgements are never automatically replayed.
+
+These are debug-runtime, same-host macOS loopback NFS checks, not physical
+cross-host, partition, power-loss, live TLS or sustained performance evidence.
+Concurrent reclamation remains disabled; retained immutable conflict blocks
+and tombstones can accumulate. TiDB's default whole-namespace limit is 4 MiB.
+Application SQLite locking through shared NFS views remains unqualified.
+
+Complete immutable logs:
+
+- `/private/tmp/mount-rs-tidb-concurrent-final-diagnostic-20260924.log`
+  (17,824 bytes; SHA-256
+  `09f70e8d8ed4d7f33e55dba0346000acd1687a7cf517b5105e45982ed5187e8f`).
+- `/private/tmp/mount-rs-tidb-rustfs-native-20260924.log`
+  (11,555 bytes; SHA-256
+  `55f0abe12f9a9e0efab5b1add52a6d1ce521369a9afb415b898817f2829a1673`).
+
+Original failed packets are retained as
+`/private/tmp/mount-rs-tidb-concurrent-{durable,frozen}-diagnostic-20260924.log`;
+the log manifest is `/private/tmp/mount-rs-tidb-complete-packet-logs-20260924.json`.
+Final source/runtime hashes are recorded in
+`/private/tmp/mount-rs-tidb-concurrent-final-source-artifacts-20260924.json`.
+The exact owned TiDB containers, six volumes, network, native roots/PIDs,
+observed listeners and dedicated process group were independently checked
+absent. RustFS's exact service/root and native resources were also checked
+absent. Cleanup records are
+`/private/tmp/mount-rs-tidb-concurrent-final-cleanup-20260924.json` and
+`/private/tmp/mount-rs-tidb-rustfs-cleanup-20260924.json`. The existing Finder
+mount, PID 66542/listener 55309 and unrelated dirty formal-verification plan
+were preserved; borrowed dependency symlinks were removed.
 
 ## Current bundled SQLite engine
 

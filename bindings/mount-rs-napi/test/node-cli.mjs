@@ -96,6 +96,61 @@ assert.match(foundationdbCheck.stdout, /driver=splitstore/);
 assert.match(foundationdbCheck.stdout, /no SDK loaded; no mount attempted/);
 assert.doesNotMatch(output(foundationdbCheck), /^mounted\s+/im);
 
+const concurrentTidbRoot = await fs.mkdtemp(join(temporaryRoot, "mount-rs-node-cli-tidb-concurrent-check-"));
+try {
+  const configPath = join(concurrentTidbRoot, "config.json");
+  const mountpoint = join(concurrentTidbRoot, "mnt");
+  const metadata = {
+    kind: "tidb", connection: { env: "MOUNT_RS_NODE_CLI_TIDB_CONFIG_URL" },
+    volume_key: "shared-tidb-metadata", durable: true,
+  };
+  const storage = { concurrent_writes: true, metadata };
+  const unreachableSdk = {
+    MOUNT_RS_NAPI_PACKAGE: "@mount-rs/this-package-must-not-be-loaded-for-tidb-config",
+    MOUNT_RS_NODE_CLI_TIDB_CONFIG_URL: "mysql://root@127.0.0.1:1/test",
+  };
+  const check = async (blocks, configurationOnly = true) => {
+    storage.blocks = blocks;
+    await fs.writeFile(configPath, JSON.stringify({
+      version: 1, driver: { kind: "splitstore", storage },
+    }));
+    return runCli([
+      "--config", configPath, "--mountpoint", mountpoint,
+      ...(configurationOnly ? ["--check"] : []),
+    ], unreachableSdk);
+  };
+  for (const blocks of [
+    { ...metadata, volume_key: "shared-tidb-blocks" },
+    { kind: "rustfs", endpoint: "http://127.0.0.1:1", bucket: "owned-test",
+      region: "us-east-1", prefix: "shared-tidb-blocks",
+      access_key_id: { env: "RUSTFS_ACCESS_KEY_ID" },
+      secret_access_key: { env: "RUSTFS_SECRET_ACCESS_KEY" }, durable: true },
+  ]) {
+    const accepted = await check(blocks);
+    assert.equal(accepted.code, 0, output(accepted));
+    assert.match(accepted.stdout, /driver=splitstore/);
+    assert.match(accepted.stdout, /no SDK loaded; no mount attempted/);
+    assert.doesNotMatch(output(accepted), /^mounted\s+/im);
+  }
+  for (const blocks of [
+    { kind: "memory" }, { kind: "sqlite", path: "local-blocks.sqlite" },
+  ]) {
+    // Exercise both --check and the mount entry point. Each must reject the
+    // pairing before importing the SDK or connecting to the TiDB endpoint.
+    for (const configurationOnly of [true, false]) {
+      const rejected = await check(blocks, configurationOnly);
+      assert.equal(rejected.code, 1, output(rejected));
+      assert.match(rejected.stderr, /blocks visible to every writer/);
+      assert.doesNotMatch(output(rejected), /this-package-must-not-be-loaded|ECONNREFUSED|^mounted\s+/im);
+    }
+  }
+  assert.equal((await fs.readdir(concurrentTidbRoot)).includes("mnt"), false);
+  assert.equal((await fs.readdir(concurrentTidbRoot)).includes("local-blocks.sqlite"), false);
+  console.log("NODE_CLI_TIDB_CONCURRENT_CONFIG_PASS shared_pairings=2 rejected_local_pairings=2");
+} finally {
+  await fs.rm(concurrentTidbRoot, { recursive: true, force: true });
+}
+
 const rustfsDefaultRoot = await fs.mkdtemp(join(temporaryRoot, "mount-rs-node-cli-rustfs-default-"));
 try {
   const configPath = join(rustfsDefaultRoot, "config.json");

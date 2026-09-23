@@ -100,13 +100,15 @@ metadata volume key and block store. For example:
       concurrentWrites: true,
     })
 
-`concurrentWrites: true` also accepts SQLite or PGlite metadata. For SQLite,
+`concurrentWrites: true` also accepts SQLite, PGlite or TiDB metadata. For SQLite,
 both Node processes must run on one host and use the same durable local
 metadata and block file paths; network file systems are unsupported. PGlite
 clients must reach one shared socket server and use the same volume keys.
+TiDB clients must reach the same TiDB metadata volume and shared block backing;
+TiDB metadata can be paired with TiDB or RustFS blocks across independent clients.
 The separately named `rustfs` block backend takes `endpoint`, `bucket`,
 `region`, `key` (block prefix), `accessKeyId`, and `secretAccessKey`. Pair it
-with PGlite or FoundationDB metadata for a shared cross-host backing design;
+with PGlite, TiDB or FoundationDB metadata for a shared cross-host backing design;
 physical cross-host mounts have not yet been verified.
 RustFS alone has no metadata revision authority. The endpoint must be an
 HTTP(S) authority with at most one trailing slash; an omitted `durable`

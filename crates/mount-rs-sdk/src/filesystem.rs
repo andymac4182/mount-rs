@@ -214,7 +214,8 @@ fn validate_concurrent_split_options(options: &SplitOptions) -> Result<()> {
                 lease_authority: FoundationDbLeaseAuthority::RevisionCas,
                 ..
             }
-            | StoreConfig::Pglite { .. } => {}
+            | StoreConfig::Pglite { .. }
+            | StoreConfig::Tidb { .. } => {}
             StoreConfig::Sqlite { path } if sqlite_durable_path(path) => {}
             StoreConfig::Sqlite { .. } => {
                 return Err(FsError::new(ErrorCode::Einval).with_message(
@@ -223,7 +224,7 @@ fn validate_concurrent_split_options(options: &SplitOptions) -> Result<()> {
             }
             _ => {
                 return Err(FsError::new(ErrorCode::Einval).with_message(
-                    "concurrent_writes requires SQLite, PGlite, or FoundationDB revision-CAS metadata",
+                    "concurrent_writes requires SQLite, PGlite, TiDB, or FoundationDB revision-CAS metadata",
                 ));
             }
         }
@@ -274,6 +275,36 @@ impl Clone for Filesystem {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn concurrent_tidb_validates_shared_pairing_before_connecting() {
+        let tidb = StoreConfig::Tidb {
+            connection: "mysql://root@127.0.0.1:1/test".to_owned(),
+            volume_key: "sdk-tidb".to_owned(),
+            durable: true,
+        };
+        let mut options = SplitOptions {
+            metadata: tidb.clone(),
+            blocks: tidb,
+            ..SplitOptions::memory("sdk-tidb", 4096)
+        }
+        .with_concurrent_writes(true);
+        validate_concurrent_split_options(&options).expect("TiDB pair supports shared writes");
+        for blocks in [
+            StoreConfig::Memory,
+            StoreConfig::Sqlite {
+                path: "blocks.sqlite".into(),
+            },
+        ] {
+            options.blocks = blocks;
+            let error = Filesystem::split(options.clone())
+                .await
+                .err()
+                .expect("reject local blocks before attempting the unreachable endpoint");
+            assert_eq!(error.code, ErrorCode::Einval);
+            assert!(error.to_string().contains("shared block"));
+        }
+    }
 
     #[tokio::test]
     async fn migrate_requires_concurrent_writes_before_opening_backing() {
