@@ -137,6 +137,66 @@ def probe_bounded_native_test_timeout() -> None:
             raise AssertionError(f"accepted invalid native test timeout: {value}")
 
 
+def probe_bounded_native_server_memory() -> None:
+    assert runner.native_server_memory_limit_mib(None) == 8192
+    for value in ("256", "512", "8192", "16384"):
+        assert runner.native_server_memory_limit_mib(value) == int(value)
+    for value in (
+        "255", "16385", "0", "-1", "", "many", "1.5", " 8192", "8192\n", "８１９２"
+    ):
+        try:
+            runner.native_server_memory_limit_mib(value)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted invalid native server memory limit: {value}")
+
+    with (
+        mock.patch.dict(os.environ, {"MOUNT_RS_NATIVE_FDB_MEMORY_LIMIT_MIB": "255"}),
+        mock.patch.object(runner, "required_file") as required,
+        mock.patch.object(runner, "create_owned_native_fixture") as create,
+        mock.patch.object(runner.subprocess, "Popen") as spawn,
+    ):
+        try:
+            runner.main()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid server memory limit did not fail before setup")
+        required.assert_not_called()
+        create.assert_not_called()
+        spawn.assert_not_called()
+
+
+def probe_bounded_native_trace_memory_evidence() -> None:
+    with tempfile.TemporaryDirectory(prefix="mount-rs-fdb-trace-evidence-dry-") as parent:
+        log_dir = Path(parent)
+        (log_dir / "trace.001.xml").write_text(
+            '<Event Type="ProgramStart" Time="1" MemoryLimit="536870912" />\n'
+            '<Event Type="ProcessMetrics" Time="2" ResidentMemory="100" Memory="9999" />\n'
+            '<Event Type="MemoryMetrics" Time="3" HugeArenaMemory="16" />\n'
+        )
+        (log_dir / "trace.002.xml").write_text(
+            '<Event Type="ProcessMetrics" Time="4" ResidentMemory="400" Memory="5000" />\n'
+            '<Event Type="ProcessMetrics" Time="5" ResidentMemory="200" Memory="6000" />\n'
+            '<Event Type="MemoryMetrics" Time="6" HugeArenaMemory="32" />\n'
+        )
+        evidence = runner.native_server_trace_memory_evidence(log_dir)
+        assert evidence["program_start"]["MemoryLimit"] == "536870912"
+        assert evidence["max_process_resident"]["ResidentMemory"] == "400"
+        assert evidence["last_process_metrics"]["ResidentMemory"] == "200"
+        assert evidence["last_allocator_memory_metrics"]["HugeArenaMemory"] == "32"
+        assert evidence["rss_unit"] == "bytes"
+        assert not evidence["scan_truncated"]
+        limited = runner.native_server_trace_memory_evidence(log_dir, max_scan_bytes=64)
+        assert limited["scan_truncated"]
+        assert limited["scan_bytes"] <= 64
+
+        for error in (BrokenPipeError, KeyboardInterrupt):
+            with mock.patch.object(runner, "print", side_effect=error, create=True):
+                runner.emit_native_server_trace_memory_evidence(log_dir)
+
+
 def probe_owned_apfs_detach_and_unrelated_finder_preservation() -> None:
     for fail_detach in (False, True):
         with tempfile.TemporaryDirectory(prefix="mount-rs-native-fdb-rustfs-") as parent_name:
@@ -261,6 +321,8 @@ if __name__ == "__main__":
     probe_exited_leader_with_live_owned_child()
     probe_foundationdb_cluster_id_grammar()
     probe_bounded_native_test_timeout()
+    probe_bounded_native_server_memory()
+    probe_bounded_native_trace_memory_evidence()
     probe_owned_apfs_detach_and_unrelated_finder_preservation()
     probe_stop_failure_preserves_owned_apfs_image()
     probe_partial_pre_attach_setup_removes_only_its_new_root()
