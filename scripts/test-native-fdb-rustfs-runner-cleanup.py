@@ -192,8 +192,9 @@ def probe_bounded_native_trace_memory_evidence() -> None:
         assert limited["scan_truncated"]
         assert limited["scan_bytes"] <= 64
 
-        with mock.patch.object(runner, "print", side_effect=BrokenPipeError, create=True):
-            runner.emit_native_server_trace_memory_evidence(log_dir)
+        for error in (BrokenPipeError, KeyboardInterrupt):
+            with mock.patch.object(runner, "print", side_effect=error, create=True):
+                runner.emit_native_server_trace_memory_evidence(log_dir)
 
 
 def probe_owned_apfs_detach_and_unrelated_finder_preservation() -> None:

@@ -137,7 +137,7 @@ def emit_native_server_trace_memory_evidence(log_dir: Path) -> None:
         if len(encoded.encode()) > 8192:
             encoded = json.dumps({"evidence_output_truncated": True})
         print("NATIVE_FDB_SERVER_MEMORY_EVIDENCE", encoded, flush=True)
-    except Exception:
+    except BaseException:
         pass
 
 
