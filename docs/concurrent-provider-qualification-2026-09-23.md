@@ -412,7 +412,8 @@ XFS, Btrfs, F2FS and tmpfs; it rejects NFS, overlayfs, CIFS, 9P, FUSE and
 unknown types before concurrent claim. tmpfs passes locality but does not
 survive host reboot. The Linux native NFS acceptance fixture places both
 provider database files on its owned NFS view and asserts `ENOTSUP` with no
-metadata revision or block marker change; its live Linux CI run is pending.
+metadata revision or block marker change. The Linux native NFS CI job passed
+that owned fixture on head `2ccf9579` with both markers absent and revision zero.
 
 Concurrent SQLite requires exactly one hard link for each metadata and block
 inode at claim, reopen and publication/authority verification. Different
@@ -426,8 +427,10 @@ inode at different database paths with link count one and different WAL
 sidecars. The canonical pathname stamp now rejects those aliases; symlinks
 resolving to the same canonical path remain usable. The SQLite provider suite
 passed 60/60, including alternate path marker and symlink regressions. The
-owned Linux file bind regression is wired into the native NFS CI job and is
-pending there. Use the same canonical database paths in every SQLite process.
+owned Linux file bind regression passed in the same native NFS CI job on
+`2ccf9579`. That bounded fixture closes both stores before binding; it does
+not qualify a file-only alias opened while a canonical WAL remains active.
+Use the same canonical database paths in every SQLite process.
 Pathless development MRC2 prototypes fail closed before release; see the
 [auxiliary path authority](sqlite-auxiliary-path-authority.md) for the format
 and recovery limits.
@@ -517,5 +520,48 @@ existing trace did not identify the pending publication or NFS response.
 The disposable mount, image, FoundationDB process and RustFS container were
 removed after the failure. Request-phase tracing is being used to diagnose
 this intermittent soft-NFS timeout; it is not a measured production
-reliability rate. The final combined branch still needs its own full fixture
-run.
+reliability rate. The combined traced head `042734b6` then passed the full
+FoundationDB/RustFS fixture: 40/40 native acknowledgements took 27,200 ms,
+followed by `RUSTFS_COMBO_PASS` and `RUSTFS_INTEGRATION_PASS`. The runner
+verified removal of its exact mounts, images, processes, containers and temp
+roots, and closure of all four owned service ports. This pass does not explain
+the earlier failures. An extended 80-write traced load is the next transport
+diagnostic.
+
+The same combined source passed locked workspace all-targets tests after
+cleaning the local workspace package artifacts from its isolated target:
+1,045 tests across 128 passing suites, zero failures, 75 ignored opt-in tests.
+Workspace formatting and strict all-targets Clippy passed. A shared target
+had previously supplied a CLI binary containing a diagnostic absent from
+the selected checkout; those stale artifacts were removed before these gates.
+
+The corrected native SQLite fixture also passed all four owned macOS cases
+on that source: two CLIs in DELETE and WAL, one CLI with two writable views,
+NFS metadata rejection and mixed local-metadata/NFS-block rejection. The
+two-CLI 2 × 12 loads took 879 ms in DELETE and 710 ms in WAL; the one-CLI
+two-view load took 1,205 ms. Both local backing files passed integrity checks
+and fresh reopen returned exact bytes. The test runner removed its exact
+temporary root and left no matching mount. The native concurrent SQLite CI
+job passed on `2ccf9579` as well.
+
+An earlier CI comparison of main `1a8dac33` and PR head `ff58b97d` used
+400 iterations, concurrency 64, 4 KiB payloads and 64 KiB chunks against the
+disposable Ozone object service. Every provider completed all 1,200 successful
+write/read/delete operations with no timeout and owned cleanup. The metric
+called "successful lifecycle IOPS" counts those three operations per
+lifecycle divided by measured wall time; its configured target is 1,000.
+
+| Metadata provider | Main IOPS | PR IOPS | Target result, main / PR |
+| --- | ---: | ---: | --- |
+| SQLite | 1,010.95 | 944.94 | pass / fail |
+| PGlite | 993.62 | 677.65 | fail / fail |
+| TiDB | 314.74 | 291.69 | fail / fail |
+| FoundationDB | 505.07 | 493.33 | fail / fail |
+
+These single CI samples do not establish a controlled performance comparison.
+SQLite crossed the threshold in the PR sample, and a performance regression
+has not been excluded. The three aggregate Ozone performance jobs failed on
+both revisions. Their functional completion does not qualify the configured
+IOPS target. The Windows Node structural open-flags fixture also failed on
+both revisions with `EINVAL` when opening its writable host file; this is a
+separate baseline failure, not evidence that the full Node test chain passed.

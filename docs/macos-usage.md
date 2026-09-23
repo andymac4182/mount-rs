@@ -273,9 +273,10 @@ Replace `0` with the revision read from the backing. The migration checks
 all referenced block extents and the exact revision before changing the
 metadata marker. On success it prints the unchanged revision and the new
 backing authority ID. A missing or short block, a changed revision, or
-historical version state leaves the metadata in MRC1. The command does not
-prepare a mountpoint or start a native mount; start the upgraded mounts only
-after it succeeds.
+historical version state leaves the metadata in MRC1. The command prepares
+empty view directories to check physical backing placement, then migrates
+without starting a native mount. Start the upgraded mounts only after it
+succeeds.
 
 An unstamped historical Legacy SQLite metadata file can still run in its
 earlier exclusive-writer mode, but automatic MRC2 enrollment is refused. An
