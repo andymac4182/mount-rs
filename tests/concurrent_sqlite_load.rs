@@ -432,6 +432,50 @@ async fn changed_bound_block_marker_stops_next_publication() {
 }
 
 #[tokio::test]
+async fn mrc1_open_rejects_before_claiming_a_block_authority() {
+    let scope = TempDir::new().expect("own disposable old-writer directory");
+    let metadata_path = scope.path().join("metadata.sqlite");
+    let blocks_path = scope.path().join("blocks.sqlite");
+    let writer = open_writer(&metadata_path, &blocks_path, 0).await;
+    writer.shutdown().await.expect("stop disposable writer");
+    stamp_owned_mrc1_fixture(&metadata_path, &blocks_path);
+
+    let result = ChunkedFs::open(
+        SqliteMetadataStore::open(&metadata_path).unwrap(),
+        SqliteBlockStore::open(&blocks_path).unwrap(),
+        ChunkedOptions::fixed("old-writer", 4096)
+            .unwrap()
+            .with_concurrent_writes(true),
+    )
+    .await;
+    let error = match result {
+        Ok(driver) => {
+            driver.shutdown().await.unwrap();
+            panic!("MRC1 opened without explicit offline migration");
+        }
+        Err(error) => error,
+    };
+    assert_eq!(error.code, mount_rs_core::ErrorCode::Ebusy);
+    assert!(error.to_string().contains("migrate-concurrent-backing"));
+    let blocks_connection = Connection::open(&blocks_path).unwrap();
+    let markers: i64 = blocks_connection
+        .query_row("SELECT count(*) FROM mount_rs_block_authority", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(markers, 0, "MRC1 rejection must not create a marker");
+    let metadata_connection = Connection::open(&metadata_path).unwrap();
+    let mode: String = metadata_connection
+        .query_row(
+            "SELECT write_mode FROM mount_rs_metadata WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(mode, "MRC1");
+}
+
+#[tokio::test]
 async fn mrc1_migration_binds_sqlite_blocks_without_changing_namespace() {
     let scope = TempDir::new().expect("own disposable MRC1 migration directory");
     let metadata_path = scope.path().join("metadata.sqlite");

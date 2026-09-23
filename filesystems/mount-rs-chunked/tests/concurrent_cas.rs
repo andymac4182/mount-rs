@@ -20,7 +20,7 @@ use mount_rs_core::{
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::{Duration, Instant};
@@ -122,10 +122,126 @@ impl CasMetadata {
             .lock()
             .map_err(|_| FsError::backend("CAS metadata test state lock poisoned"))
     }
-}
 
-fn shared_backing_id() -> ConcurrentBackingId {
-    ConcurrentBackingId::from_bytes([0xd1; 16]).expect("fixed nonzero shared backing ID")
+    fn bound_backing(&self) -> ConcurrentBackingId {
+        self.lock()
+            .expect("bound metadata state")
+            .backing_id
+            .expect("metadata is bound to one fake block map")
+    }
+
+    async fn publish_cas_internal(
+        &self,
+        backing: Option<ConcurrentBackingId>,
+        expected_revision: u64,
+        namespace: Namespace,
+    ) -> Result<u64> {
+        namespace.validate()?;
+        let revision = {
+            let mut state = self.lock()?;
+            if !state.concurrent_mode {
+                return Err(FsError::new(ErrorCode::Enotsup));
+            }
+            if state.backing_id != backing {
+                return Err(FsError::new(ErrorCode::Estale));
+            }
+            if let Some((first, second)) = state.swap_entries_on_next_cas.take() {
+                // Simulate another coordinator winning the CAS immediately after
+                // this coordinator prepared its guarded candidate. Both inodes
+                // remain linked, so the committed namespace remains valid.
+                let mut replaced = state
+                    .namespace
+                    .clone()
+                    .ok_or_else(|| FsError::backend("forced swap needs a published namespace"))?;
+                let root = replaced.root;
+                let NodeData::Directory { entries } = &mut replaced
+                    .nodes
+                    .get_mut(&root)
+                    .ok_or_else(|| FsError::backend("forced swap needs a root node"))?
+                    .data
+                else {
+                    return Err(FsError::backend("forced swap needs a root directory"));
+                };
+                let first_index = entries
+                    .iter()
+                    .position(|entry| entry.name == first)
+                    .ok_or_else(|| FsError::backend("forced swap first name is missing"))?;
+                let second_index = entries
+                    .iter()
+                    .position(|entry| entry.name == second)
+                    .ok_or_else(|| FsError::backend("forced swap second name is missing"))?;
+                let first_inode = entries[first_index].inode;
+                entries[first_index].inode = entries[second_index].inode;
+                entries[second_index].inode = first_inode;
+                replaced.validate()?;
+                state.revision = state
+                    .revision
+                    .checked_add(1)
+                    .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+                state.published.push(replaced.clone());
+                state.namespace = Some(replaced);
+                self.observed_conflicts.fetch_add(1, Ordering::SeqCst);
+                return Err(FsError::new(ErrorCode::Eagain));
+            }
+            let held = self
+                .hold_conflicts_until
+                .lock()
+                .map_err(|_| FsError::backend("CAS hold lock poisoned"))?
+                .is_some_and(|until| Instant::now() < until);
+            if state.revision != 0 && held {
+                // A busy remote writer keeps advancing the same valid namespace
+                // while this caller races it. Every EAGAIN is a known noncommit.
+                state.revision = state
+                    .revision
+                    .checked_add(1)
+                    .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+                let unchanged = state
+                    .namespace
+                    .clone()
+                    .ok_or_else(|| FsError::backend("CAS hold needs a namespace"))?;
+                state.published.push(unchanged);
+                self.observed_conflicts.fetch_add(1, Ordering::SeqCst);
+                return Err(FsError::new(ErrorCode::Eagain));
+            }
+            if state.revision != 0
+                && self
+                    .forced_conflicts
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                        count.checked_sub(1)
+                    })
+                    .is_ok()
+            {
+                // A separate writer committed an unrelated metadata revision.
+                // The namespace is still valid, but the caller's base is stale.
+                state.revision = state
+                    .revision
+                    .checked_add(1)
+                    .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+                self.observed_conflicts.fetch_add(1, Ordering::SeqCst);
+                return Err(FsError::new(ErrorCode::Eagain));
+            }
+            if state.revision != expected_revision {
+                self.observed_conflicts.fetch_add(1, Ordering::SeqCst);
+                return Err(FsError::new(ErrorCode::Eagain));
+            }
+            state.revision = state
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+            state.published.push(namespace.clone());
+            state.namespace = Some(namespace);
+            if self.ambiguous_after_apply.swap(false, Ordering::SeqCst) {
+                return Err(FsError::new(ErrorCode::Eio).with_message(
+                    "test FoundationDB commit may have applied; acknowledgement lost",
+                ));
+            }
+            state.revision
+        };
+        if self.pending_after_apply.swap(false, Ordering::SeqCst) {
+            self.after_apply_resume.notified().await;
+        }
+        Ok(revision)
+    }
 }
 
 #[async_trait]
@@ -270,108 +386,8 @@ impl MetadataStore for CasMetadata {
         expected_revision: u64,
         namespace: Namespace,
     ) -> Result<u64> {
-        namespace.validate()?;
-        let revision = {
-            let mut state = self.lock()?;
-            if !state.concurrent_mode {
-                return Err(FsError::new(ErrorCode::Enotsup));
-            }
-            if let Some((first, second)) = state.swap_entries_on_next_cas.take() {
-                // Simulate another coordinator winning the CAS immediately after
-                // this coordinator prepared its guarded candidate. Both inodes
-                // remain linked, so the committed namespace remains valid.
-                let mut replaced = state
-                    .namespace
-                    .clone()
-                    .ok_or_else(|| FsError::backend("forced swap needs a published namespace"))?;
-                let root = replaced.root;
-                let NodeData::Directory { entries } = &mut replaced
-                    .nodes
-                    .get_mut(&root)
-                    .ok_or_else(|| FsError::backend("forced swap needs a root node"))?
-                    .data
-                else {
-                    return Err(FsError::backend("forced swap needs a root directory"));
-                };
-                let first_index = entries
-                    .iter()
-                    .position(|entry| entry.name == first)
-                    .ok_or_else(|| FsError::backend("forced swap first name is missing"))?;
-                let second_index = entries
-                    .iter()
-                    .position(|entry| entry.name == second)
-                    .ok_or_else(|| FsError::backend("forced swap second name is missing"))?;
-                let first_inode = entries[first_index].inode;
-                entries[first_index].inode = entries[second_index].inode;
-                entries[second_index].inode = first_inode;
-                replaced.validate()?;
-                state.revision = state
-                    .revision
-                    .checked_add(1)
-                    .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-                state.published.push(replaced.clone());
-                state.namespace = Some(replaced);
-                self.observed_conflicts.fetch_add(1, Ordering::SeqCst);
-                return Err(FsError::new(ErrorCode::Eagain));
-            }
-            let held = self
-                .hold_conflicts_until
-                .lock()
-                .map_err(|_| FsError::backend("CAS hold lock poisoned"))?
-                .is_some_and(|until| Instant::now() < until);
-            if state.revision != 0 && held {
-                // A busy remote writer keeps advancing the same valid namespace
-                // while this caller races it. Every EAGAIN is a known noncommit.
-                state.revision = state
-                    .revision
-                    .checked_add(1)
-                    .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-                let unchanged = state
-                    .namespace
-                    .clone()
-                    .ok_or_else(|| FsError::backend("CAS hold needs a namespace"))?;
-                state.published.push(unchanged);
-                self.observed_conflicts.fetch_add(1, Ordering::SeqCst);
-                return Err(FsError::new(ErrorCode::Eagain));
-            }
-            if state.revision != 0
-                && self
-                    .forced_conflicts
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
-                        count.checked_sub(1)
-                    })
-                    .is_ok()
-            {
-                // A separate writer committed an unrelated metadata revision.
-                // The namespace is still valid, but the caller's base is stale.
-                state.revision = state
-                    .revision
-                    .checked_add(1)
-                    .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-                self.observed_conflicts.fetch_add(1, Ordering::SeqCst);
-                return Err(FsError::new(ErrorCode::Eagain));
-            }
-            if state.revision != expected_revision {
-                self.observed_conflicts.fetch_add(1, Ordering::SeqCst);
-                return Err(FsError::new(ErrorCode::Eagain));
-            }
-            state.revision = state
-                .revision
-                .checked_add(1)
-                .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-            state.published.push(namespace.clone());
-            state.namespace = Some(namespace);
-            if self.ambiguous_after_apply.swap(false, Ordering::SeqCst) {
-                return Err(FsError::new(ErrorCode::Eio).with_message(
-                    "test FoundationDB commit may have applied; acknowledgement lost",
-                ));
-            }
-            state.revision
-        };
-        if self.pending_after_apply.swap(false, Ordering::SeqCst) {
-            self.after_apply_resume.notified().await;
-        }
-        Ok(revision)
+        self.publish_cas_internal(None, expected_revision, namespace)
+            .await
     }
 
     async fn publish_bound_if_revision(
@@ -380,10 +396,8 @@ impl MetadataStore for CasMetadata {
         expected_revision: u64,
         namespace: Namespace,
     ) -> Result<u64> {
-        if self.lock()?.backing_id != Some(backing) {
-            return Err(FsError::new(ErrorCode::Estale));
-        }
-        self.publish_if_revision(expected_revision, namespace).await
+        self.publish_cas_internal(Some(backing), expected_revision, namespace)
+            .await
     }
 
     async fn flush(&self) -> Result<()> {
@@ -391,10 +405,31 @@ impl MetadataStore for CasMetadata {
     }
 }
 
-#[derive(Clone, Default)]
-struct SharedBlocks(Arc<Mutex<BTreeMap<BlockId, Vec<u8>>>>);
+#[derive(Clone)]
+struct SharedBlocks(Arc<Mutex<BTreeMap<BlockId, Vec<u8>>>>, ConcurrentBackingId);
+
+static NEXT_FAKE_BACKING: AtomicU64 = AtomicU64::new(1);
+
+impl Default for SharedBlocks {
+    fn default() -> Self {
+        let mut bytes = [0xd1; 16];
+        bytes[8..].copy_from_slice(
+            &NEXT_FAKE_BACKING
+                .fetch_add(1, Ordering::SeqCst)
+                .to_be_bytes(),
+        );
+        Self(
+            Arc::new(Mutex::new(BTreeMap::new())),
+            ConcurrentBackingId::from_bytes(bytes).expect("unique nonzero fake backing ID"),
+        )
+    }
+}
 
 impl SharedBlocks {
+    fn backing_id(&self) -> ConcurrentBackingId {
+        self.1
+    }
+
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, BTreeMap<BlockId, Vec<u8>>>> {
         self.0
             .lock()
@@ -414,11 +449,11 @@ impl BlockStore for SharedBlocks {
     }
 
     async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
-        Ok(shared_backing_id())
+        Ok(self.backing_id())
     }
 
     async fn verify_concurrent_backing(&self, expected: ConcurrentBackingId) -> Result<()> {
-        if expected == shared_backing_id() {
+        if expected == self.backing_id() {
             Ok(())
         } else {
             Err(FsError::new(ErrorCode::Estale))
@@ -541,7 +576,7 @@ impl BlockStore for RevisionAdvancingBlocks {
             namespace.default_chunker = chunker;
         }
         self.metadata
-            .publish_bound_if_revision(shared_backing_id(), loaded.revision, namespace)
+            .publish_bound_if_revision(self.blocks.backing_id(), loaded.revision, namespace)
             .await?;
         Ok(id)
     }
@@ -660,6 +695,41 @@ fn rejected_shared_block_backing_does_not_convert_metadata() {
     assert_eq!(loaded.revision, 0);
     assert!(loaded.namespace.is_none());
     assert!(!metadata.lock().unwrap().concurrent_mode);
+}
+
+#[test]
+fn distinct_fake_block_maps_cannot_open_one_bound_metadata_volume() {
+    let metadata = CasMetadata::default();
+    let first = block_on(ChunkedFs::open(
+        metadata.clone(),
+        SharedBlocks::default(),
+        ChunkedOptions::fixed("first-map", 4096)
+            .unwrap()
+            .with_concurrent_writes(true),
+    ))
+    .expect("first map binds metadata");
+    let error = block_on(ChunkedFs::open(
+        metadata.clone(),
+        SharedBlocks::default(),
+        ChunkedOptions::fixed("second-map", 4096)
+            .unwrap()
+            .with_concurrent_writes(true),
+    ))
+    .err()
+    .expect("different fake block map must not share one authority ID");
+    assert_eq!(error.code, ErrorCode::Estale);
+    block_on(first.shutdown()).unwrap();
+}
+
+#[test]
+fn unbound_fake_cas_cannot_publish_an_mrc2_namespace() {
+    let (metadata, first, _) = open_two();
+    let loaded = block_on(metadata.load()).expect("load bound namespace");
+    let namespace = loaded.namespace.expect("published root");
+    let error = block_on(metadata.publish_if_revision(loaded.revision, namespace))
+        .expect_err("unbound CAS must not publish MRC2");
+    assert_eq!(error.code, ErrorCode::Estale);
+    block_on(first.shutdown()).unwrap();
 }
 
 #[test]
@@ -912,8 +982,12 @@ fn concurrent_metadata_mutations_keep_ctime_after_a_newer_revision() {
         .expect("root node")
         .stats
         .ctime_ms = future;
-    block_on(metadata.publish_bound_if_revision(shared_backing_id(), loaded.revision, namespace))
-        .expect("publish a newer remote timestamp");
+    block_on(metadata.publish_bound_if_revision(
+        metadata.bound_backing(),
+        loaded.revision,
+        namespace,
+    ))
+    .expect("publish a newer remote timestamp");
 
     let mut prior = future;
     block_on(second.chmod("/shared", 0o600)).expect("chmod shared");
