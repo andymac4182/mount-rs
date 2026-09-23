@@ -14,7 +14,7 @@ async-io = "2.6"
 async-trait = "0.1"
 mount-rs-core = { path = "../.." }
 mount-rs-persist = { path = "../../filesystems/mount-rs-persist" }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "=0.39.0", features = ["bundled", "fallible_uint"] }
 serde_json = "1"
 
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]

@@ -761,8 +761,9 @@ fn duplicate_registration_is_rejected_and_name_open_survives_wrapper_drop() {
     let owner = vfs.clone();
     drop(vfs);
 
-    let external = Connection::open_with_flags_and_vfs("registration-external.db", flags(), &name)
-        .expect("name-based open must retain the registration");
+    let external =
+        Connection::open_with_flags_and_vfs("registration-external.db", flags(), name.as_str())
+            .expect("name-based open must retain the registration");
     assert!(matches!(owner.close(), Err(VfsError::Busy)));
     drop(external);
     assert!(matches!(owner.close(), Err(VfsError::Busy)));
@@ -1005,7 +1006,7 @@ fn close_race_with_active_open_fails_closed_and_releases_backend() {
     drop(connection);
 
     vfs.close().expect("close VFS after race quiesces");
-    assert!(Connection::open_with_flags_and_vfs("after-close.db", flags(), &name).is_err());
+    assert!(Connection::open_with_flags_and_vfs("after-close.db", flags(), name.as_str()).is_err());
 
     let replacement = SqliteVfs::new(
         &name,

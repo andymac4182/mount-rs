@@ -109,16 +109,25 @@ the provider databases on NFS or SMB. It does not use the single-mount
 `sqlite_single_host` NFS profile. The CLI checks both SQLite paths against
 the primary mountpoint and every `--also-mountpoint` before opening the driver.
 
-The local native two-CLI test has passed with SQLite DELETE and WAL backing
-smoke checks. WAL is not yet qualified: the bundled SQLite 3.46 is affected
-by SQLite's rare [WAL-reset bug](https://www.sqlite.org/wal.html#the_wal_reset_bug),
-which is fixed in 3.51.3 and selected backports. Use DELETE backing for now.
+The earlier local native two-CLI tests passed DELETE and WAL backing smoke
+checks with bundled SQLite 3.46.0; WAL was diagnostic because that version
+had SQLite's rare [WAL-reset bug](https://www.sqlite.org/wal.html#the_wal_reset_bug).
+The current bundled SQLite 3.51.3 includes the fix. The
+[qualification record](concurrent-provider-qualification-2026-09-23.md#current-bundled-sqlite-engine)
+separates those earlier measurements from verification of this upgrade.
+
+Fresh provider databases default to DELETE journaling, and each provider
+connection sets `synchronous=FULL`. An existing WAL database remains WAL on
+reopen, including with `concurrent_writes`: the provider exposes no journal
+mode option and does not reset the mode to DELETE.
+
 An SQLite *application database inside* two NFS mount views is a different
 case: the [adversarial macOS probe](../tests/sqlite_nfs_adversarial.md)
 observed a second view acquire `BEGIN IMMEDIATE` while the first held an
 uncommitted update. That contender rolled back without writing. A WAL request
-through the NFS view fell back to DELETE. These shared NFS views do not
-provide safe SQLite application-file locking; SQLite also documents the
+through the NFS view fell back to DELETE. SQLite application databases inside
+these shared NFS views remain unqualified because of the observed cross-view
+locking defect; SQLite also documents the
 [network filesystem locking risk](https://www.sqlite.org/useovernet.html).
 
 ### Two CLIs using one PGlite server
@@ -498,9 +507,12 @@ handle-pin/capacity protocol.
 The newer native CLI cases passed for one CLI serving two writable views and
 for two independent writable CLIs on the same local SQLite backing. SQLite's
 two-CLI case exercised DELETE and WAL backing, bounded load, disjoint writes,
-rename/unlink and reopen; WAL remains unqualified with bundled SQLite 3.46
-until the [WAL-reset bug](https://www.sqlite.org/wal.html#the_wal_reset_bug)
-is fixed. The PGlite native suite passed its one-CLI/two-view and two-CLI
+rename/unlink and reopen with the earlier SQLite 3.46.0 bundle; WAL was
+diagnostic at those checkpoints. The current 3.51.3 bundle contains the
+[WAL-reset fix](https://www.sqlite.org/releaselog/3_51_3.html), with upgrade
+verification recorded separately in the
+[qualification record](concurrent-provider-qualification-2026-09-23.md#current-bundled-sqlite-engine).
+The PGlite native suite passed its one-CLI/two-view and two-CLI
 cases against one TCP-loopback PGlite engine, plus the insufficient-connection
 fail-closed case. These are local mount checks. They do not verify a
 cross-host PGlite listener or physical cross-host mounts.

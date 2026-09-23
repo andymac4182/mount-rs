@@ -42,5 +42,5 @@ libc = "0.2"
 [dev-dependencies]
 mount-rs-memfs = { path = "../../filesystems/mount-rs-memfs" }
 mount-rs-sqlite = { path = "../../providers/mount-rs-sqlite" }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "=0.39.0", features = ["bundled", "fallible_uint"] }
 tempfile = "3"

@@ -12,7 +12,7 @@ mount-rs-chunked = { path = "../../filesystems/mount-rs-chunked" }
 mount-rs-core = { path = "../.." }
 mount-rs-fault-injection = { path = "../../crates/mount-rs-fault-injection" }
 mount-rs-sqlite = { path = "../../providers/mount-rs-sqlite" }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "=0.39.0", features = ["bundled", "fallible_uint"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"

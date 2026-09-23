@@ -3392,6 +3392,197 @@ mod tests {
         }
     }
 
+    #[test]
+    fn bundled_sqlite_has_wal_reset_fix() {
+        // The WAL-reset race affects concurrent writers/checkpointers through
+        // SQLite 3.51.2. Our bundled line must include the upstream fix:
+        // https://sqlite.org/wal.html#the_wal_reset_bug
+        assert!(
+            rusqlite::version_number() >= 3_051_003,
+            "bundled SQLite {} lacks the WAL-reset fix",
+            rusqlite::version(),
+        );
+        assert_eq!(
+            rusqlite::version_number(),
+            rusqlite::ffi::SQLITE_VERSION_NUMBER,
+            "runtime SQLite must match the bundled headers",
+        );
+    }
+
+    #[test]
+    fn wal_checkpoint_contention_preserves_acknowledged_blocks() {
+        struct OwnedDirectory(std::path::PathBuf);
+        impl Drop for OwnedDirectory {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let owned = OwnedDirectory(super::super::tests::unique_database_path());
+        std::fs::create_dir(&owned.0).unwrap();
+        let path = owned.0.join("blocks.sqlite");
+        let first = SqliteBlockStore::open(&path).unwrap();
+        {
+            let connection = first.0.lock().unwrap();
+            let journal: String = connection
+                .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(journal, "wal");
+            connection
+                .execute_batch("PRAGMA wal_autocheckpoint=0")
+                .unwrap();
+        }
+        let second = SqliteBlockStore::open(&path).unwrap();
+        second
+            .0
+            .lock()
+            .unwrap()
+            .execute_batch("PRAGMA wal_autocheckpoint=0")
+            .unwrap();
+        let initial = b"before the pinned reader".to_vec();
+        let initial_id = futures_lite::future::block_on(first.put(&initial)).unwrap();
+        let mut acknowledged = vec![(initial_id, initial)];
+
+        let reader = Connection::open(&path).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        let count: i64 = reader
+            .query_row("SELECT count(*) FROM mount_rs_blocks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        let after_reader = b"after the pinned reader".to_vec();
+        let id = futures_lite::future::block_on(second.put(&after_reader)).unwrap();
+        acknowledged.push((id, after_reader));
+
+        let checkpointer = Connection::open(&path).unwrap();
+        checkpointer
+            .busy_timeout(Duration::from_millis(10))
+            .unwrap();
+        let blocked: (i64, i64, i64) = checkpointer
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(blocked.0, 1, "the pinned reader prevents WAL reset");
+        assert!(
+            blocked.1 > blocked.2,
+            "new frames remain after the reader snapshot"
+        );
+
+        // Interleave real provider commits with each checkpoint mode. Every
+        // checkpoint runs while a provider connection holds a reserved writer
+        // transaction, and the next round waits for the preceding commit ACK.
+        // This bounded edge test is not a deterministic reproducer for SQLite's
+        // rare upstream race; the version gate above ensures its fix is present.
+        thread::scope(|scope| {
+            let (round_tx, round_rx) = std::sync::mpsc::channel();
+            let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+            let worker_path = &path;
+            let worker = scope.spawn(move || {
+                let connection = Connection::open(worker_path).unwrap();
+                connection.busy_timeout(Duration::from_millis(10)).unwrap();
+                let mut attempted = 0;
+                let mut saw_frames = false;
+                for attempt in 0..64 {
+                    assert_eq!(
+                        round_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+                        attempt,
+                    );
+                    let mode = ["PASSIVE", "FULL", "RESTART", "TRUNCATE"][attempt % 4];
+                    let result = connection.query_row(
+                        &format!("PRAGMA wal_checkpoint({mode})"),
+                        [],
+                        |row| {
+                            Ok((
+                                row.get::<_, i64>(0)?,
+                                row.get::<_, i64>(1)?,
+                                row.get::<_, i64>(2)?,
+                            ))
+                        },
+                    );
+                    match result {
+                        Ok((busy, frames, copied)) => {
+                            assert!([0, 1].contains(&busy));
+                            if mode != "PASSIVE" {
+                                assert_eq!(busy, 1, "a reserved writer prevents {mode}");
+                            }
+                            assert!(frames >= 0 && copied >= 0 && copied <= frames);
+                            saw_frames |= frames > 0;
+                        }
+                        Err(error) => assert_eq!(
+                            error.sqlite_error_code(),
+                            Some(rusqlite::ErrorCode::DatabaseBusy),
+                            "only checkpoint contention is retryable: {error}",
+                        ),
+                    }
+                    attempted += 1;
+                    completed_tx.send(attempt).unwrap();
+                }
+                (attempted, saw_frames)
+            });
+            for index in 0..64_u8 {
+                let store = if index % 2 == 0 { &first } else { &second };
+                {
+                    let connection = store.0.lock().unwrap();
+                    connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+                    round_tx.send(usize::from(index)).unwrap();
+                    assert_eq!(
+                        completed_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+                        usize::from(index),
+                    );
+                    connection.execute_batch("ROLLBACK").unwrap();
+                }
+                let bytes = vec![index; 4096];
+                let id = futures_lite::future::block_on(store.put(&bytes)).unwrap();
+                assert_eq!(
+                    futures_lite::future::block_on(second.get(&id)).unwrap(),
+                    bytes,
+                    "acknowledged blocks are immediately visible",
+                );
+                acknowledged.push((id, bytes));
+            }
+            let (attempted, saw_frames) = worker.join().unwrap();
+            assert_eq!(attempted, 64);
+            assert!(saw_frames, "checkpoints must inspect a nonempty WAL");
+        });
+        let pinned_count: i64 = reader
+            .query_row("SELECT count(*) FROM mount_rs_blocks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(pinned_count, 1, "the reader retains its original snapshot");
+        reader.execute_batch("ROLLBACK").unwrap();
+        let reset: (i64, i64, i64) = checkpointer
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(
+            reset,
+            (0, 0, 0),
+            "WAL resets after the pinned reader closes"
+        );
+        drop(checkpointer);
+        drop(reader);
+        drop(second);
+        drop(first);
+
+        let reopened = SqliteBlockStore::open(&path).unwrap();
+        for (id, bytes) in &acknowledged {
+            assert_eq!(
+                futures_lite::future::block_on(reopened.get(id)).unwrap(),
+                *bytes
+            );
+        }
+        drop(reopened);
+        let fresh = Connection::open(&path).unwrap();
+        let count: i64 = fresh
+            .query_row("SELECT count(*) FROM mount_rs_blocks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, acknowledged.len() as i64);
+        let integrity: String = fresh
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
+    }
+
     fn namespace() -> Namespace {
         let stats = run(MemoryFs::empty().stat("/")).unwrap();
         let root = stats.ino;

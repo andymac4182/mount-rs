@@ -183,8 +183,11 @@ The backing SQLite provider files must remain on local disk. An application
 SQLite database stored *inside* two shared NFS views is a separate locking
 problem: the [macOS adversarial packet](../tests/sqlite_nfs_adversarial.md)
 observed a competing `BEGIN IMMEDIATE` lock bypass between views and a WAL
-request falling back to DELETE. The one-host `sqlite_single_host()` NFS
-profile is for one mount and cannot be combined with shared views.
+request falling back to DELETE. Application SQLite files inside shared NFS
+views remain unqualified with the fixed bundled engine; the observed
+cross-view locking defect is a separate transport boundary. The one-host
+`sqlite_single_host()` NFS profile is for one mount and cannot be combined
+with shared views.
 
 ### Frontend
 
@@ -247,10 +250,19 @@ mapping and shutdown coverage.
   pending a distributed handle-pin and capacity protocol. Local macOS native
   cases have passed for two writable SQLite, PGlite and FoundationDB CLIs,
   and one CLI with two writable SQLite, PGlite, FoundationDB or memory mounts.
-  PGlite's two-CLI case used TCP loopback to one engine. SQLite's DELETE and
-  WAL backing smoke checks passed, but WAL is unqualified with the bundled
-  SQLite 3.46 until its rare
-  [WAL-reset bug](https://www.sqlite.org/wal.html#the_wal_reset_bug) is fixed.
+  PGlite's two-CLI case used TCP loopback to one engine. SQLite's earlier
+  DELETE and WAL backing smoke checks passed with bundled SQLite 3.46.0;
+  WAL was diagnostic at those checkpoints. The current bundled SQLite 3.51.3
+  includes the [WAL-reset fix](https://www.sqlite.org/releaselog/3_51_3.html).
+  Direct `rusqlite =0.39.0` dependencies consistently enable `fallible_uint`
+  alongside `bundled`. This retains the checked `u64` `FromSql` conversions
+  used by revision, fence and expiry reads; negative SQLite integers still
+  fail range conversion.
+  Fresh provider databases default to DELETE and connections use
+  `synchronous=FULL`; existing WAL databases remain WAL because the provider
+  exposes no journal mode option and does not reset it on open. Upgrade
+  verification is tracked in the
+  [qualification record](concurrent-provider-qualification-2026-09-23.md#current-bundled-sqlite-engine).
   Cross-host physical acceptance remains outstanding.
 - Shared NFS views require a driver that atomically guards handle identity
   during both namespace reads and mutations. A directory handle must identify
