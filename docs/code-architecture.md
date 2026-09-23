@@ -114,7 +114,9 @@ see [DEPENDENCIES.md](../DEPENDENCIES.md).
    published by one writer can be read by the others. Memory blocks are
    rejected. Local SQLite blocks are allowed only with local SQLite metadata
    when every process uses the same file paths on one host; those database
-   files must stay outside every mountpoint and off NFS/SMB. PGlite,
+   files must stay outside every mountpoint and off NFS/SMB. The SQLite block
+   marker binds its ID to a Unix physical file stamp; other platforms reject
+   concurrent SQLite blocks until they can establish the same invariant. PGlite,
    FoundationDB, R2, RustFS and AWS S3
    can provide blocks reachable by independent hosts. RustFS is block-only;
    pair it with PGlite or FoundationDB metadata for cross-host mounts.

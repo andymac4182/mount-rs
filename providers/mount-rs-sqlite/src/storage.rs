@@ -2133,20 +2133,29 @@ impl SqliteBlockStore {
                     "independent concurrent writers require a file-backed SQLite block database",
                 ));
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(not(unix))]
         {
-            let connection = self.0.lock()?;
-            let path = connection
-                .path()
-                .filter(|path| !path.is_empty())
-                .ok_or_else(|| {
-                    FsError::new(ErrorCode::Eio)
-                        .with_syscall("inspect concurrent SQLite backing")
-                        .with_message("SQLite blocks file path is unavailable")
-                })?;
-            require_local_concurrent_backing(Path::new(path), "blocks")?;
+            return Err(FsError::new(ErrorCode::Enotsup)
+                .with_syscall("prepare concurrent SQLite blocks")
+                .with_message("this platform cannot bind a SQLite block ID to a physical file"));
         }
-        Ok(())
+        #[cfg(unix)]
+        {
+            #[cfg(target_os = "macos")]
+            {
+                let connection = self.0.lock()?;
+                let path = connection
+                    .path()
+                    .filter(|path| !path.is_empty())
+                    .ok_or_else(|| {
+                        FsError::new(ErrorCode::Eio)
+                            .with_syscall("inspect concurrent SQLite backing")
+                            .with_message("SQLite blocks file path is unavailable")
+                    })?;
+                require_local_concurrent_backing(Path::new(path), "blocks")?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -3511,8 +3520,17 @@ mod tests {
 
         let path = super::super::tests::unique_database_path();
         let file = SqliteBlockStore::open(&path).unwrap();
-        let id = run(file.prepare_concurrent_backing()).unwrap();
-        run(file.verify_concurrent_backing(id)).unwrap();
+        #[cfg(unix)]
+        {
+            let id = run(file.prepare_concurrent_backing()).unwrap();
+            run(file.verify_concurrent_backing(id)).unwrap();
+        }
+        #[cfg(not(unix))]
+        assert!(
+            run(file.prepare_concurrent_backing())
+                .unwrap_err()
+                .is(ErrorCode::Enotsup)
+        );
         drop(file);
         std::fs::remove_file(path).unwrap();
     }

@@ -379,18 +379,29 @@ persist a 16-byte backing ID and check it in the same transaction as each
 revision CAS. Block stores persist their own stable authority and verify it
 read-only at mount open and again after the block flush, before each metadata
 CAS. An existing `MRC1` volume returns `EBUSY` with the offline migration command
-before it creates a block marker. Migration reads every referenced block
-directly, checks its digest and length, and rechecks metadata revision before
-changing the mode without changing namespace bytes.
+before it creates a block marker. Migration directly reads every referenced
+block, checks that each extent fits the returned bytes, and rechecks metadata
+revision before changing the mode without changing namespace bytes.
+Content-addressed object IDs with a full digest also check their bytes against
+that digest. SQLite random IDs and legacy short object IDs cannot detect a
+same-length replacement because the old metadata has no checksum to compare.
 
 The inverse SQLite mismatch regression now rejects a second physical block
 database against one bound metadata file with `ESTALE` before a write or marker
 claim. Deleting the marker makes reopen fail without recreating it or advancing
 metadata; changing it after open stops the next publication with `ESTALE` and
-no metadata revision advance. Migration rejects missing, short and different
-blocks, retained unlinked-node block damage, stale revisions, and version
+no metadata revision advance. Migration rejects missing and short blocks,
+references selected from a different SQLite block file, retained unlinked-node
+block damage, stale revisions, and version
 history. A revision change during the direct block scan returns `EAGAIN` while
 the volume stays `MRC1`.
+
+The SQLite block ID uses a Unix physical file stamp to reject a copied block
+database. On other platforms, including Windows, concurrent SQLite blocks
+return `ENOTSUP` because a copied file could carry the same marker while its
+contents diverge. This path needs a qualified physical-file identity check
+before it can be enabled there. The Linux local-filesystem guard remains
+unqualified for NFS-backed provider files.
 
 The bounded local SQLite load completed 8 × 100 independent mount lifecycles
 in both modes: DELETE took 48,047 ms and WAL took 41,993 ms. Each run
