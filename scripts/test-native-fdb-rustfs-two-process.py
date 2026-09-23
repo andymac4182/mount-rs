@@ -6,12 +6,16 @@ MOUNT_RS_NATIVE_FDB_CLIENT_LIB_DIR to matching arm64 FoundationDB 7.4 paths.
 Set MOUNT_RS_NATIVE_FDB_BLOCKS_ONLY=1 for FoundationDB metadata and blocks.
 Set MOUNT_RS_NATIVE_FDB_TEST_TIMEOUT_SECONDS to 1..=1800 for longer stress
 runs; the default native test budget remains 600 seconds.
+The native server uses FoundationDB's 8192 MiB resident-memory default.
+MOUNT_RS_NATIVE_FDB_MEMORY_LIMIT_MIB may override it with 256..=16384 MiB.
 For RustFS blocks, invoke this with RUSTFS_COMBO_COMMAND from
 scripts/test-rustfs.sh so the container and bucket are test owned as well.
 """
 
 from __future__ import annotations
 
+import json
+import math
 import os
 import plistlib
 import re
@@ -24,6 +28,7 @@ import tempfile
 import time
 from pathlib import Path
 from urllib.parse import urlsplit
+from xml.etree import ElementTree
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -35,6 +40,105 @@ def native_test_timeout_seconds(value: str | None) -> int:
     if not value.isascii() or not value.isdecimal() or not 1 <= int(value) <= 1800:
         raise ValueError("native test timeout must be an integer in 1..=1800 seconds")
     return int(value)
+
+
+def native_server_memory_limit_mib(value: str | None) -> int:
+    if value is None:
+        return 8192
+    if not value.isascii() or not value.isdecimal() or not 256 <= int(value) <= 16384:
+        raise ValueError("native server memory limit must be an integer in 256..=16384 MiB")
+    return int(value)
+
+
+def native_server_trace_memory_evidence(
+    log_dir: Path, *, max_scan_bytes: int = 32 * 1024 * 1024
+) -> dict[str, object]:
+    """Keep bounded existing startup/RSS/allocator evidence before owned cleanup."""
+    fields = {
+        "ProgramStart": ("Version", "SourceVersion", "MemoryLimit", "VirtualMemoryLimit"),
+        "ProcessMetrics": ("Memory", "ResidentMemory", "UnusedAllocatedMemory"),
+        "MemoryMetrics": ("HugeArenaMemory",) + tuple(
+            f"TotalMemory{size}" for size in (16, 32, 64, 96, 128, 256, 512, 1024, 2048, 4096, 8192, 16384)
+        ),
+    }
+    first_start = last_process = last_allocator = max_resident = None
+    first_time = math.inf
+    last_process_time = last_allocator_time = -math.inf
+    max_resident_bytes = -1
+    scanned = 0
+    truncated = False
+    errors = []
+    for trace in sorted(log_dir.glob("trace.*")):
+        if trace.is_symlink() or not trace.is_file():
+            continue
+        try:
+            with trace.open("rb") as stream:
+                while scanned < max_scan_bytes:
+                    read_limit = min(16 * 1024, max_scan_bytes - scanned)
+                    line = stream.readline(read_limit)
+                    if not line:
+                        break
+                    scanned += len(line)
+                    if len(line) == read_limit and not line.endswith(b"\n"):
+                        truncated = True
+                    match = re.search(rb"<Event\b[^>]*/>", line)
+                    if match is None:
+                        continue
+                    try:
+                        attrs = ElementTree.fromstring(match[0]).attrib
+                        kind = attrs.get("Type", "")
+                        if kind not in fields:
+                            continue
+                        when = float(attrs.get("Time", "0"))
+                        if not math.isfinite(when):
+                            continue
+                    except (ElementTree.ParseError, ValueError):
+                        continue
+                    row = {
+                        key: attrs[key].encode("ascii", "backslashreplace").decode()[:64]
+                        for key in ("Type", "Time", "DateTime") + fields[kind]
+                        if key in attrs
+                    }
+                    if kind == "ProgramStart" and when < first_time:
+                        first_start, first_time = row, when
+                    if kind == "ProcessMetrics":
+                        if when >= last_process_time:
+                            last_process, last_process_time = row, when
+                        resident = attrs.get("ResidentMemory", "")
+                        if resident.isascii() and resident.isdecimal():
+                            value = int(resident)
+                            if value > max_resident_bytes:
+                                max_resident, max_resident_bytes = row, value
+                    if kind == "MemoryMetrics" and when >= last_allocator_time:
+                        last_allocator, last_allocator_time = row, when
+                if scanned >= max_scan_bytes:
+                    truncated = True
+                    break
+        except OSError as error:
+            if len(errors) < 4:
+                errors.append(str(error)[:160])
+    return {
+        "scan_bytes": scanned,
+        "scan_truncated": truncated,
+        "rss_unit": "bytes",
+        "program_start": first_start,
+        "max_process_resident": max_resident,
+        "last_process_metrics": last_process,
+        "last_allocator_memory_metrics": last_allocator,
+        "errors": errors,
+    }
+
+
+def emit_native_server_trace_memory_evidence(log_dir: Path) -> None:
+    # Diagnostic reads/output must never prevent exact owned resource cleanup.
+    try:
+        evidence = native_server_trace_memory_evidence(log_dir)
+        encoded = json.dumps(evidence)
+        if len(encoded.encode()) > 8192:
+            encoded = json.dumps({"evidence_output_truncated": True})
+        print("NATIVE_FDB_SERVER_MEMORY_EVIDENCE", encoded, flush=True)
+    except Exception:
+        pass
 
 
 def cluster_connection_string(run_id: str, port: int) -> str:
@@ -327,6 +431,9 @@ def main() -> None:
     test_timeout = native_test_timeout_seconds(
         os.environ.get("MOUNT_RS_NATIVE_FDB_TEST_TIMEOUT_SECONDS")
     )
+    server_memory_mib = native_server_memory_limit_mib(
+        os.environ.get("MOUNT_RS_NATIVE_FDB_MEMORY_LIMIT_MIB")
+    )
     def interrupted(_signum: int, _frame: object) -> None:
         raise KeyboardInterrupt("native FDB/RustFS runner interrupted")
 
@@ -364,6 +471,12 @@ def main() -> None:
         ):
             raise RuntimeError("disposable RustFS endpoint must be loopback HTTP")
 
+    print(
+        "NATIVE_FDB_SERVER_LIMITS engine=ssd "
+        f"memory_limit_mib={server_memory_mib} storage_memory_mib=128 "
+        f"cache_memory_mib=128 test_timeout_seconds={test_timeout}",
+        flush=True,
+    )
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
@@ -417,7 +530,7 @@ def main() -> None:
                     "-L",
                     str(log_dir),
                     "-m",
-                    "512MiB",
+                    f"{server_memory_mib}MiB",
                     "-M",
                     "128MiB",
                     "--cache-memory",
@@ -528,6 +641,7 @@ def main() -> None:
             except BaseException as error:
                 cleanup_errors.append(f"fdbserver leader: {error}")
         processes_stopped = not cleanup_errors and (server is None or server.poll() is not None)
+        emit_native_server_trace_memory_evidence(log_dir)
         try:
             finish_owned_run_cleanup(
                 run_dir, data_dir, native_root, processes_stopped=processes_stopped
