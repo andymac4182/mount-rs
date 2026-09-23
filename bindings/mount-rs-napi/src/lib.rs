@@ -24,8 +24,8 @@ use mount_rs_auto::{
 };
 use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
 use mount_rs_core::storage::{
-    BlockId, BlockReconcileReport, BlockStore, LoadedMetadata, MetadataStore, Namespace,
-    WriterLease,
+    BlockId, BlockReconcileReport, BlockStore, ConcurrentBackingId, ConcurrentModeState,
+    LoadedMetadata, MetadataStore, Namespace, WriterLease,
 };
 use mount_rs_core::{
     Capabilities, DirEntry, ErrorCode, FileHandle as CoreFileHandle, FsDriver, FsError,
@@ -1476,6 +1476,27 @@ impl MetadataStore for DynMetadataStore {
         self.0.prepare_concurrent_mode()
     }
 
+    fn concurrent_mode_state<'a, 'async_trait>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<ConcurrentModeState>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.concurrent_mode_state()
+    }
+
+    fn prepare_bound_concurrent_mode<'a, 'async_trait>(
+        &'a self,
+        backing: ConcurrentBackingId,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.prepare_bound_concurrent_mode(backing)
+    }
+
     fn acquire_writer<'a, 'b, 'async_trait>(
         &'a self,
         owner: &'b str,
@@ -1540,6 +1561,33 @@ impl MetadataStore for DynMetadataStore {
         self.0.publish_if_revision(expected_revision, namespace)
     }
 
+    fn publish_bound_if_revision<'a, 'async_trait>(
+        &'a self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+        namespace: Namespace,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<u64>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0
+            .publish_bound_if_revision(backing, expected_revision, namespace)
+    }
+
+    fn migrate_mrc1_to_bound_mode<'a, 'async_trait>(
+        &'a self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0
+            .migrate_mrc1_to_bound_mode(backing, expected_revision)
+    }
+
     fn flush<'a, 'async_trait>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
@@ -1567,6 +1615,39 @@ impl BlockStore for DynBlockStore {
         Self: 'async_trait,
     {
         self.0.prepare_concurrent_mode()
+    }
+
+    fn prepare_concurrent_backing<'a, 'async_trait>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<ConcurrentBackingId>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.prepare_concurrent_backing()
+    }
+
+    fn verify_concurrent_backing<'a, 'async_trait>(
+        &'a self,
+        expected: ConcurrentBackingId,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.verify_concurrent_backing(expected)
+    }
+
+    fn get_for_migration<'a, 'b, 'async_trait>(
+        &'a self,
+        id: &'b BlockId,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<Vec<u8>>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.get_for_migration(id)
     }
 
     fn put<'a, 'b, 'async_trait>(

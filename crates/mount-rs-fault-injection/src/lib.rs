@@ -17,8 +17,8 @@
 
 use async_trait::async_trait;
 use mount_rs_core::storage::{
-    BlockId, BlockReconcileReport, BlockStore, LoadedMetadata, MetadataStore, Namespace,
-    WriterLease,
+    BlockId, BlockReconcileReport, BlockStore, ConcurrentBackingId, ConcurrentModeState,
+    LoadedMetadata, MetadataStore, Namespace, WriterLease,
 };
 use mount_rs_core::{ErrorCode, FsError, Result};
 use std::collections::{BTreeMap, BTreeSet};
@@ -844,6 +844,18 @@ where
             .await
     }
 
+    async fn prepare_concurrent_mode(&self) -> Result<()> {
+        self.inner.prepare_concurrent_mode().await
+    }
+
+    async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
+        self.inner.concurrent_mode_state().await
+    }
+
+    async fn prepare_bound_concurrent_mode(&self, backing: ConcurrentBackingId) -> Result<()> {
+        self.inner.prepare_bound_concurrent_mode(backing).await
+    }
+
     async fn acquire_writer(&self, owner: &str, ttl: Duration) -> Result<WriterLease> {
         self.injector
             .before(FaultBoundary::Metadata, FaultOperation::AcquireWriter)
@@ -894,6 +906,48 @@ where
             .after(FaultBoundary::Metadata, FaultOperation::Publish, || {
                 self.inner.publish(expected_revision, lease, namespace)
             })
+            .await
+    }
+
+    async fn publish_if_revision(
+        &self,
+        expected_revision: u64,
+        namespace: Namespace,
+    ) -> Result<u64> {
+        self.injector
+            .before(FaultBoundary::Metadata, FaultOperation::Publish)
+            .await?;
+        self.injector
+            .after(FaultBoundary::Metadata, FaultOperation::Publish, || {
+                self.inner.publish_if_revision(expected_revision, namespace)
+            })
+            .await
+    }
+
+    async fn publish_bound_if_revision(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+        namespace: Namespace,
+    ) -> Result<u64> {
+        self.injector
+            .before(FaultBoundary::Metadata, FaultOperation::Publish)
+            .await?;
+        self.injector
+            .after(FaultBoundary::Metadata, FaultOperation::Publish, || {
+                self.inner
+                    .publish_bound_if_revision(backing, expected_revision, namespace)
+            })
+            .await
+    }
+
+    async fn migrate_mrc1_to_bound_mode(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        self.inner
+            .migrate_mrc1_to_bound_mode(backing, expected_revision)
             .await
     }
 
@@ -948,6 +1002,25 @@ where
         // Capability validation belongs to the provider and must run before
         // metadata conversion. Fault plans cover data-plane calls only.
         self.inner.prepare_concurrent_mode().await
+    }
+
+    async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
+        self.inner.prepare_concurrent_backing().await
+    }
+
+    async fn verify_concurrent_backing(&self, expected: ConcurrentBackingId) -> Result<()> {
+        self.inner.verify_concurrent_backing(expected).await
+    }
+
+    async fn get_for_migration(&self, id: &BlockId) -> Result<Vec<u8>> {
+        self.injector
+            .before(FaultBoundary::Blocks, FaultOperation::Get)
+            .await?;
+        self.injector
+            .after(FaultBoundary::Blocks, FaultOperation::Get, || {
+                self.inner.get_for_migration(id)
+            })
+            .await
     }
 
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
