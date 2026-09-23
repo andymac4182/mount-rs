@@ -256,14 +256,15 @@ fn run_two_process(rustfs_blocks: bool) {
         let b_result = load_b.join().expect("join RustFS load writer B");
         mount_a.drain_output();
         mount_b.drain_output();
-        if std::env::var("MOUNT_RS_TRACE_REQUESTS").ok().as_deref() == Some("1") {
+        let trace_enabled = std::env::var("MOUNT_RS_TRACE_REQUESTS").ok().as_deref() == Some("1");
+        if trace_enabled {
             for (writer, lines) in [
                 ('a', &mount_a.output[trace_start_a..]),
                 ('b', &mount_b.output[trace_start_b..]),
             ] {
                 let (cas_retry_events, max_cas_attempt) = cas_retry_summary(lines);
                 println!(
-                    "NATIVE_FDB_RUSTFS_REQUEST_PHASES writer={writer} cas_retry_events={cas_retry_events} max_cas_attempt={max_cas_attempt} longest_us={:?} pending={:?}",
+                    "NATIVE_FDB_RUSTFS_REQUEST_PHASES writer={writer} trace_enabled={trace_enabled} cas_retry_events={cas_retry_events} max_cas_attempt={max_cas_attempt} longest_us={:?} pending={:?}",
                     longest_request_phases(lines),
                     pending_request_traces(lines),
                 );
@@ -303,7 +304,7 @@ fn run_two_process(rustfs_blocks: bool) {
         let b_acks = b_result.expect("B load writes");
         assert_eq!(a_acks + b_acks, 2 * load_files_per_writer);
         println!(
-            "NATIVE_FDB_RUSTFS_WRITES_ACKNOWLEDGED acknowledgements={} elapsed_ms={}",
+            "NATIVE_FDB_RUSTFS_WRITES_ACKNOWLEDGED trace_enabled={trace_enabled} acknowledgements={} elapsed_ms={}",
             a_acks + b_acks,
             started.elapsed().as_millis(),
         );
