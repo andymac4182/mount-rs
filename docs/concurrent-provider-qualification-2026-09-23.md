@@ -395,8 +395,9 @@ block damage, stale revisions, and version
 history. A revision change during the direct block scan returns `EAGAIN` while
 the volume stays `MRC1`.
 
-SQLite block and metadata files use separate Unix physical dev/inode stamps to
-reject a copied backing with the same persisted authority or volume ID. The
+SQLite block and metadata files use separate Unix physical dev/inode and
+canonical pathname stamps to reject a copied backing with the same persisted
+authority or volume ID. The
 metadata stamp is seeded only when the provider exclusively creates a new
 file; a preclaim copy of that file cannot enroll independently. Historical
 unstamped Legacy SQLite metadata can continue in exclusive-writer mode but
@@ -422,8 +423,14 @@ appeared usable in a bounded sequential probe but did not establish safety.
 New provider regressions reject aliases before a claim and stop publication
 if a link appears after open. Linux file-only bind mounts can also expose one
 inode at different database paths with link count one and different WAL
-sidecars; that alias configuration remains unqualified. Use the same
-canonical database paths in every SQLite process.
+sidecars. The canonical pathname stamp now rejects those aliases; symlinks
+resolving to the same canonical path remain usable. The SQLite provider suite
+passed 60/60, including alternate path marker and symlink regressions. The
+owned Linux file bind regression is wired into the native NFS CI job and is
+pending there. Use the same canonical database paths in every SQLite process.
+Pathless development MRC2 prototypes fail closed before release; see the
+[auxiliary path authority](sqlite-auxiliary-path-authority.md) for the format
+and recovery limits.
 
 The offline migration path currently prepares a block authority before it
 directly reads referenced blocks and attempts the metadata transition. A
@@ -503,6 +510,12 @@ backend request was not retained in that first run. A repeat with bounded
 failure-only CLI and operation diagnostics passed 40/40 native acknowledgements
 in 12,672 ms, and the complete signed provider, SDK, N-API, SQLite VFS,
 service restart and reopen fixture ended with `RUSTFS_INTEGRATION_PASS`.
-This is an intermittent soft-NFS timeout observation, not a measured
-production reliability rate. The final branch with the newer SQLite stamp
-and ordinary block-read checks still needs its own full fixture run.
+The exact post-guard head `ff58b97d` reproduced the timeout at writer A's
+`open /load-a-07`, while writer B acknowledged all 20 operations. A completed
+its filesystem create/open and a later lstat before progress stopped; the
+existing trace did not identify the pending publication or NFS response.
+The disposable mount, image, FoundationDB process and RustFS container were
+removed after the failure. Request-phase tracing is being used to diagnose
+this intermittent soft-NFS timeout; it is not a measured production
+reliability rate. The final combined branch still needs its own full fixture
+run.

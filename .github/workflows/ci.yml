@@ -630,6 +630,13 @@ jobs:
             MOUNT_RS_RUN_NATIVE_NFS_SQLITE=1 python3 -c 'import subprocess,sys; subprocess.run([sys.argv[1], "--ignored", "--nocapture"], check=True, timeout=300)' "$sqlite_test"
           fi
 
+      - name: Reject SQLite file bind aliases of the same inode
+        if: runner.os == 'Linux'
+        run: |
+          sqlite_authority_test=$(cargo test --locked -p mount-rs-sqlite --lib --no-run --message-format=json | python3 -c 'import json,sys; print([x["executable"] for line in sys.stdin if (x:=json.loads(line)).get("executable")][0])')
+          test -x "$sqlite_authority_test"
+          sudo timeout 60s "$sqlite_authority_test" --ignored --exact storage::tests::linux_file_bind_alias_with_one_link_cannot_reuse_bound_authority --nocapture
+
   native-concurrent-sqlite:
     runs-on: macos-latest
     timeout-minutes: 15
