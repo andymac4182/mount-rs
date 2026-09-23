@@ -1362,7 +1362,9 @@ dependencies = [
  "mount-rs-nfs",
  "mount-rs-observability",
  "mount-rs-sdk",
+ "rusqlite",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 

@@ -442,6 +442,10 @@ where
             println!("valid config: {}", path.display());
             Ok(())
         }
+        Command::MigrateConcurrentBacking {
+            config,
+            expected_revision,
+        } => migrate_concurrent_backing_command(&config, expected_revision).await,
         Command::SdkSelfTest { config, reopen } => {
             sdk_self_test_command(config.as_deref(), reopen).await
         }
@@ -462,6 +466,37 @@ fn initialize_telemetry() {
     if telemetry.is_enabled() {
         set_global_telemetry(telemetry);
     }
+}
+
+/// Perform the offline protocol migration using the SDK's storage path. This
+/// command never constructs a filesystem driver or starts a native transport.
+async fn migrate_concurrent_backing_command(
+    config_path: &Path,
+    expected_revision: u64,
+) -> Result<(), CliError> {
+    let raw = CliOptions {
+        config: Some(config_path.to_path_buf()),
+        ..CliOptions::default()
+    };
+    let options = resolve_cli_options(raw)?;
+    if options.driver != DriverChoice::SplitStore
+        || !options
+            .storage
+            .as_ref()
+            .is_some_and(|storage| storage.concurrent_writes)
+    {
+        return Err(CliError::usage(
+            "migrate-concurrent-backing requires a splitstore config with concurrent_writes=true",
+        ));
+    }
+    let (uid, gid) = effective_identity();
+    let split = split_options(&options, uid, gid)?;
+    let backing = Filesystem::migrate_concurrent_backing(split, expected_revision).await?;
+    println!(
+        "migrated MRC1 to MRC2 at revision {expected_revision} with backing ID {}",
+        backing.to_hex()
+    );
+    Ok(())
 }
 
 /// Exercise the public Rust SDK through the actual CLI binary without

@@ -242,6 +242,35 @@ conflicting writes, even when a notification is delayed or missed. Watches
 are a planned signal optimization; mount-rs does not use them yet, and a
 watch cannot directly invalidate the macOS NFS client's cache.
 
+### Migrate an MRC1 concurrent backing
+
+An existing MRC1 metadata volume needs an explicit offline migration before
+the bound MRC2 client can open it. Stop every old mount-rs process using the
+volume, including processes on other hosts. Keep those mounts stopped while
+migration runs and until every client uses the upgraded binary. The command
+cannot detect live writers across hosts.
+
+Use the exact config for the metadata and block backing, with
+`driver.kind: "splitstore"` and `storage.concurrent_writes: true`. Read the
+current metadata revision with provider administration tools and supply that
+value explicitly. For a local SQLite metadata file, one way to read it is:
+
+```sh
+sqlite3 /absolute/path/to/metadata.sqlite \
+  'SELECT revision FROM mount_rs_metadata WHERE id=1;'
+./scripts/cargo-shared run --locked -p mount-rs-cli -- \
+  migrate-concurrent-backing --config /absolute/path/to/shared.json \
+  --expected-revision 0
+```
+
+Replace `0` with the revision read from the backing. The migration checks
+all referenced block extents and the exact revision before changing the
+metadata marker. On success it prints the unchanged revision and the new
+backing authority ID. A missing or short block, a changed revision, or
+historical version state leaves the metadata in MRC1. The command does not
+prepare a mountpoint or start a native mount; start the upgraded mounts only
+after it succeeds.
+
 ## Choose a storage backend
 
 The CLI selects built-in filesystems with `--driver`. Structured JSON

@@ -6,6 +6,9 @@
 //! The implementation is intentionally not a snapshot adapter and does not
 //! provide copy-on-write views.
 
+mod migration;
+pub use migration::migrate_mrc1_backing;
+
 use async_trait::async_trait;
 use mount_rs_core::chunking::{Chunker, FixedSizeChunker, from_config};
 use mount_rs_core::driver::{

@@ -183,6 +183,10 @@ pub enum Command {
     ServeHttp(PathBuf),
     Probe,
     ValidateConfig(PathBuf),
+    MigrateConcurrentBacking {
+        config: PathBuf,
+        expected_revision: u64,
+    },
     SdkSelfTest {
         config: Option<PathBuf>,
         reopen: bool,
@@ -277,6 +281,64 @@ where
             return config_path
                 .map(Command::ValidateConfig)
                 .ok_or_else(|| ParseError::new("validate-config requires --config <path>"));
+        }
+        if first_argument && raw == "migrate-concurrent-backing" {
+            let mut config_path = None;
+            let mut expected_revision = None;
+            while let Some(raw) = args.next() {
+                let raw = raw.to_string_lossy().into_owned();
+                if raw == "--help" || raw == "-h" {
+                    return Ok(Command::Help);
+                }
+                let Some(name) = raw.strip_prefix("--") else {
+                    return Err(ParseError::new(
+                        "migrate-concurrent-backing accepts only --config <path> and --expected-revision <u64>",
+                    ));
+                };
+                let (name, inline_value) = match name.split_once('=') {
+                    Some((name, value)) => (name, Some(value.to_owned())),
+                    None => (name, None),
+                };
+                match name {
+                    "config" => {
+                        if config_path.is_some() {
+                            return Err(ParseError::new(
+                                "migrate-concurrent-backing accepts only one --config <path>",
+                            ));
+                        }
+                        config_path =
+                            Some(PathBuf::from(value("config", inline_value, &mut args)?));
+                    }
+                    "expected-revision" => {
+                        if expected_revision.is_some() {
+                            return Err(ParseError::new(
+                                "migrate-concurrent-backing accepts only one --expected-revision <u64>",
+                            ));
+                        }
+                        let raw = value("expected-revision", inline_value, &mut args)?;
+                        expected_revision = Some(raw.parse::<u64>().map_err(|_| {
+                            ParseError::new(
+                                "--expected-revision must be an unsigned 64-bit integer",
+                            )
+                        })?);
+                    }
+                    _ => {
+                        return Err(ParseError::new(
+                            "migrate-concurrent-backing accepts only --config <path> and --expected-revision <u64>",
+                        ));
+                    }
+                }
+            }
+            let config = config_path.ok_or_else(|| {
+                ParseError::new("migrate-concurrent-backing requires --config <path>")
+            })?;
+            let expected_revision = expected_revision.ok_or_else(|| {
+                ParseError::new("migrate-concurrent-backing requires --expected-revision <u64>")
+            })?;
+            return Ok(Command::MigrateConcurrentBacking {
+                config,
+                expected_revision,
+            });
         }
         if first_argument && raw == "sdk-self-test" {
             let mut config_path = None;
@@ -637,9 +699,19 @@ pub fn help_text(color: Color) -> String {
         d("<path>"),
         d("<path>"),
     );
-    output.replace(
+    let output = output.replace(
+        "       mount-rs sdk-self-test [--config <path>] [--reopen]",
+        "       mount-rs sdk-self-test [--config <path>] [--reopen]\n       mount-rs migrate-concurrent-backing --config <path> --expected-revision <u64>",
+    );
+    let output = output.replace(
         "      --sqlite-single-host",
         &format!("{config_help}      --sqlite-single-host"),
+    );
+    format!(
+        "{output}{}\n",
+        d(
+            "Before MRC1 migration, stop all old mounts on every host and keep them stopped until all clients are upgraded."
+        )
     )
 }
 
@@ -765,6 +837,56 @@ mod tests {
         );
         let error = parse_args(["mount-rs", "sdk-self-test", "--reopen"]).unwrap_err();
         assert!(error.message().contains("requires --config"));
+    }
+
+    #[test]
+    fn migration_requires_exact_config_and_revision_options() {
+        assert_eq!(
+            parse(&[
+                "mount-rs",
+                "migrate-concurrent-backing",
+                "--config",
+                "shared.json",
+                "--expected-revision",
+                "7",
+            ]),
+            Command::MigrateConcurrentBacking {
+                config: PathBuf::from("shared.json"),
+                expected_revision: 7,
+            }
+        );
+        for invalid in [
+            &["mount-rs", "migrate-concurrent-backing"][..],
+            &[
+                "mount-rs",
+                "migrate-concurrent-backing",
+                "--config",
+                "shared.json",
+            ][..],
+            &[
+                "mount-rs",
+                "migrate-concurrent-backing",
+                "--config",
+                "shared.json",
+                "--expected-revision",
+                "not-a-number",
+            ][..],
+            &[
+                "mount-rs",
+                "migrate-concurrent-backing",
+                "--config",
+                "shared.json",
+                "--expected-revision",
+                "7",
+                "--mountpoint",
+                "/tmp/view",
+            ][..],
+        ] {
+            assert!(
+                parse_args(invalid.iter().copied()).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
     }
 
     #[test]
