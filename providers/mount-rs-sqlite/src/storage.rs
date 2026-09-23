@@ -381,6 +381,19 @@ impl Database {
         let opened = self.opened_file.as_ref().ok_or_else(|| {
             FsError::new(ErrorCode::Enotsup).with_syscall("inspect concurrent SQLite backing")
         })?;
+        // SQLite names rollback journals, WAL and shared-memory files from
+        // the opened pathname. Two hard links share dev/inode but select
+        // different auxiliary files, so neither can hold MRC2 authority.
+        let links = std::fs::metadata(&opened.canonical)
+            .map_err(|_| stale())?
+            .nlink();
+        if links != 1 {
+            return Err(FsError::new(ErrorCode::Enotsup)
+                .with_syscall("prepare concurrent SQLite volume")
+                .with_message(format!(
+                    "concurrent SQLite {kind} require a single pathname; hard-linked database files are unsupported"
+                )));
+        }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         require_local_concurrent_backing(&opened.canonical, kind, stamp)?;
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -3222,6 +3235,106 @@ mod tests {
         drop(copied);
         std::fs::remove_file(original_path).unwrap();
         std::fs::remove_file(copy_path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hard_linked_block_database_cannot_claim_or_verify_authority() {
+        let original_path = super::super::tests::unique_database_path();
+        let alias_path = super::super::tests::unique_database_path();
+        let store = SqliteBlockStore::open(&original_path).unwrap();
+        std::fs::hard_link(&original_path, &alias_path).unwrap();
+
+        assert_eq!(
+            run(store.prepare_concurrent_backing()).unwrap_err().code,
+            ErrorCode::Enotsup
+        );
+        let markers: i64 = store
+            .0
+            .lock()
+            .unwrap()
+            .query_row("SELECT count(*) FROM mount_rs_block_authority", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(markers, 0, "rejected alias must not claim authority");
+
+        std::fs::remove_file(&alias_path).unwrap();
+        let backing = run(store.prepare_concurrent_backing()).unwrap();
+        std::fs::hard_link(&original_path, &alias_path).unwrap();
+        assert_eq!(
+            run(store.verify_concurrent_backing(backing))
+                .unwrap_err()
+                .code,
+            ErrorCode::Enotsup
+        );
+        let aliased = SqliteBlockStore::open(&alias_path).unwrap();
+        assert_eq!(
+            run(aliased.verify_concurrent_backing(backing))
+                .unwrap_err()
+                .code,
+            ErrorCode::Enotsup
+        );
+        drop(aliased);
+
+        std::fs::remove_file(&alias_path).unwrap();
+        run(store.verify_concurrent_backing(backing)).unwrap();
+        drop(store);
+        std::fs::remove_file(original_path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hard_linked_wal_metadata_cannot_claim_or_publish_authority() {
+        let original_path = super::super::tests::unique_database_path();
+        let alias_path = super::super::tests::unique_database_path();
+        let store = SqliteMetadataStore::open(&original_path).unwrap();
+        let journal: String = store
+            .0
+            .lock()
+            .unwrap()
+            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal.to_ascii_lowercase(), "wal");
+        let backing = test_backing_id();
+        std::fs::hard_link(&original_path, &alias_path).unwrap();
+
+        assert_eq!(
+            run(store.prepare_bound_concurrent_mode(backing))
+                .unwrap_err()
+                .code,
+            ErrorCode::Enotsup
+        );
+        assert_eq!(
+            run(store.concurrent_mode_state()).unwrap(),
+            ConcurrentModeState::Legacy
+        );
+        assert_eq!(run(store.load()).unwrap().revision, 0);
+
+        std::fs::remove_file(&alias_path).unwrap();
+        run(store.prepare_bound_concurrent_mode(backing)).unwrap();
+        std::fs::hard_link(&original_path, &alias_path).unwrap();
+        assert_eq!(
+            run(store.publish_bound_if_revision(backing, 0, namespace()))
+                .unwrap_err()
+                .code,
+            ErrorCode::Enotsup
+        );
+        assert_eq!(run(store.load()).unwrap().revision, 0);
+        drop(store);
+        match SqliteMetadataStore::open(&original_path) {
+            Err(error) => assert_eq!(error.code, ErrorCode::Enotsup),
+            Ok(_) => panic!("hard-linked bound WAL database reopened"),
+        }
+
+        std::fs::remove_file(&alias_path).unwrap();
+        let reopened = SqliteMetadataStore::open(&original_path).unwrap();
+        assert_eq!(
+            run(reopened.publish_bound_if_revision(backing, 0, namespace())).unwrap(),
+            1
+        );
+        drop(reopened);
+        std::fs::remove_file(original_path).unwrap();
     }
 
     #[cfg(unix)]
