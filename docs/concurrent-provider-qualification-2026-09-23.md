@@ -129,12 +129,17 @@ The same CI run's Ozone compositions completed all 400 exact-byte lifecycles
 but failed the configured 1,000 IOPS floor: TiDB measured 369.94 IOPS and
 FoundationDB 597.83 IOPS. Earlier baseline floor failures remain recorded
 below. These isolated CI windows are not controlled performance comparisons,
-and this checkpoint does not claim all repository CI is green.
+and this checkpoint does not claim all repository CI is green. Windows Node
+job `107240666347` also failed the snapshot-SQLite S3 fixture's 32-request
+fan-out: PUT request 5 hit its 15-second client deadline. Its preceding
+WebDAV SQLite network/crash checks passed. This is an unresolved Windows
+load result; the log does not establish an engine regression or data loss.
 
 Exact current job logs are retained at
 `/private/tmp/mount-rs-pr20-native-nfs-ubuntu-107240666428.log`,
 `/private/tmp/mount-rs-pr20-ozone-tidb-107240666108.log` and
-`/private/tmp/mount-rs-pr20-ozone-foundationdb-107240666543.log`.
+`/private/tmp/mount-rs-pr20-ozone-foundationdb-107240666543.log` and
+`/private/tmp/mount-rs-pr20-windows-node-107240666347.log`.
 
 ## SQLite coordinator load
 
