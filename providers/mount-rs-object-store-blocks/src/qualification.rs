@@ -208,6 +208,11 @@ fn qualification_race_winner(
         {
             Ok(first_id)
         }
+        (Err(object_store::Error::NotFound { .. }), Err(object_store::Error::NotFound { .. })) => {
+            Err(FsError::backend(
+                "object-store qualification conditional Create failed (NotFound)",
+            ))
+        }
         _ => Err(unqualified_object_store()),
     }
 }
@@ -377,6 +382,25 @@ mod tests {
         );
         assert!(
             qualification_race_winner(Ok(accepted.clone()), Ok(accepted), first, second).is_err()
+        );
+    }
+
+    #[test]
+    fn missing_bucket_create_reports_signed_service_failure() {
+        let missing = || object_store::Error::NotFound {
+            path: "private-marker".to_owned(),
+            source: Box::new(std::io::Error::other("HTTP 404 NoSuchBucket")),
+        };
+        let first = ConcurrentBackingId::from_bytes([1; 16]).unwrap();
+        let second = ConcurrentBackingId::from_bytes([2; 16]).unwrap();
+        let error = qualification_race_winner(Err(missing()), Err(missing()), first, second)
+            .expect_err("a missing bucket cannot qualify concurrent mounts");
+        assert!(!error.is(ErrorCode::Enotsup), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("conditional Create failed (NotFound)"),
+            "{error}"
         );
     }
 }
