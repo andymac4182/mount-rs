@@ -341,6 +341,121 @@ impl ObjectStoreBlockCache {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReconcileCandidate {
+    Protected,
+    Recent,
+    Delete,
+}
+
+fn classify_reconcile_candidate(
+    in_scope: bool,
+    valid_id: bool,
+    is_live: bool,
+    last_modified_ms: i64,
+    now_ms: u128,
+    grace_ms: u128,
+) -> Option<ReconcileCandidate> {
+    if !in_scope || !valid_id {
+        return None;
+    }
+    if is_live {
+        return Some(ReconcileCandidate::Protected);
+    }
+    let cutoff_ms = now_ms.saturating_sub(grace_ms);
+    if last_modified_ms < 0 || (last_modified_ms as u128) >= cutoff_ms {
+        return Some(ReconcileCandidate::Recent);
+    }
+    Some(ReconcileCandidate::Delete)
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    #[kani::proof]
+    #[kani::unwind(2)]
+    fn reconciliation_deletes_only_unreferenced_direct_old_blocks() {
+        let in_scope: bool = kani::any();
+        let valid_id: bool = kani::any();
+        let is_live: bool = kani::any();
+        let last_modified_ms: i64 = kani::any();
+        let now_ms: u128 = kani::any();
+        let grace_ms: u128 = kani::any();
+
+        let actual = classify_reconcile_candidate(
+            in_scope,
+            valid_id,
+            is_live,
+            last_modified_ms,
+            now_ms,
+            grace_ms,
+        );
+        let expected = if !in_scope || !valid_id {
+            None
+        } else if is_live {
+            Some(ReconcileCandidate::Protected)
+        } else if last_modified_ms < 0 {
+            Some(ReconcileCandidate::Recent)
+        } else {
+            let modified_ms = last_modified_ms as u128;
+            if modified_ms < now_ms && now_ms - modified_ms > grace_ms {
+                Some(ReconcileCandidate::Delete)
+            } else {
+                Some(ReconcileCandidate::Recent)
+            }
+        };
+        assert_eq!(actual, expected);
+
+        kani::cover!(!in_scope && actual.is_none());
+        kani::cover!(in_scope && !valid_id && actual.is_none());
+        kani::cover!(
+            in_scope && valid_id && is_live && actual == Some(ReconcileCandidate::Protected)
+        );
+        kani::cover!(
+            in_scope
+                && valid_id
+                && !is_live
+                && last_modified_ms < 0
+                && actual == Some(ReconcileCandidate::Recent)
+        );
+        kani::cover!(
+            in_scope
+                && valid_id
+                && !is_live
+                && last_modified_ms >= 0
+                && actual == Some(ReconcileCandidate::Recent)
+        );
+        kani::cover!(actual == Some(ReconcileCandidate::Delete));
+    }
+
+    fn check_block_id_grammar<const N: usize>() {
+        let bytes: [u8; N] = kani::any();
+        let actual = valid_block_id_bytes(&bytes);
+        let expected = bytes[0] == b'b'
+            && bytes[1..]
+                .iter()
+                .all(|byte| (b'0'..=b'9').contains(byte) || (b'a'..=b'f').contains(byte));
+        assert_eq!(actual, expected);
+        kani::cover!(actual);
+        kani::cover!(bytes[0] != b'b' && !actual);
+        kani::cover!(bytes[0] == b'b' && bytes[1] == b'/' && !actual);
+        kani::cover!(bytes[0] == b'b' && bytes[1] == b'A' && !actual);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(70)]
+    fn legacy_block_id_grammar_is_lowercase_hex() {
+        check_block_id_grammar::<{ 1 + LEGACY_BLOCK_ID_HEX_CHARS }>();
+    }
+
+    #[kani::proof]
+    #[kani::unwind(70)]
+    fn content_block_id_grammar_is_lowercase_hex() {
+        check_block_id_grammar::<{ 1 + CONTENT_BLOCK_ID_HEX_CHARS }>();
+    }
+}
+
 type InFlightPutResult = std::result::Result<(), FsError>;
 
 struct InFlightPut {
@@ -767,7 +882,6 @@ impl BlockStore for ObjectStoreBlockStore {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
-        let cutoff_ms = now_ms.saturating_sub(grace.as_millis());
         let prefix = format!("{}/", self.prefix);
         let mut report = BlockReconcileReport::default();
 
@@ -781,30 +895,39 @@ impl BlockStore for ObjectStoreBlockStore {
                     )));
                 }
             };
-            let Some(relative) = object.location.as_ref().strip_prefix(&prefix) else {
+            let relative = object.location.as_ref().strip_prefix(&prefix);
+            let in_scope =
+                relative.is_some_and(|relative| !relative.is_empty() && !relative.contains('/'));
+            let id = relative
+                .filter(|_| in_scope)
+                .map(|relative| BlockId(relative.to_owned()));
+            let valid_id = id.as_ref().is_some_and(|id| validate_block_id(id).is_ok());
+            let is_live = id.as_ref().is_some_and(|id| live.contains(id));
+            let Some(candidate) = classify_reconcile_candidate(
+                in_scope,
+                valid_id,
+                is_live,
+                object.last_modified.timestamp_millis(),
+                now_ms,
+                grace.as_millis(),
+            ) else {
                 continue;
             };
-            if relative.is_empty() || relative.contains('/') {
-                continue;
-            }
-            let id = BlockId(relative.to_owned());
-            if validate_block_id(&id).is_err() {
-                continue;
-            }
             report.scanned = report.scanned.saturating_add(1);
-            if live.contains(&id) {
-                report.protected = report.protected.saturating_add(1);
-                continue;
-            }
-            let is_recent = u128::try_from(object.last_modified.timestamp_millis())
-                .is_ok_and(|timestamp_ms| timestamp_ms >= cutoff_ms);
-            if is_recent {
-                report.recent = report.recent.saturating_add(1);
-                continue;
+            match candidate {
+                ReconcileCandidate::Protected => {
+                    report.protected = report.protected.saturating_add(1);
+                    continue;
+                }
+                ReconcileCandidate::Recent => {
+                    report.recent = report.recent.saturating_add(1);
+                    continue;
+                }
+                ReconcileCandidate::Delete => {}
             }
             match self.store.delete(&object.location).await {
                 Ok(()) | Err(object_store::Error::NotFound { .. }) => {
-                    self.cache.remove(&id.0);
+                    self.cache.remove(&id.expect("validated direct block ID").0);
                     report.deleted = report.deleted.saturating_add(1);
                 }
                 Err(error) => {
@@ -837,15 +960,19 @@ fn validate_prefix(prefix: &str) -> Result<ObjectPath> {
 }
 
 fn validate_block_id(id: &BlockId) -> Result<()> {
-    let mut chars = id.0.chars();
-    if chars.next() != Some(BLOCK_ID_PREFIX)
-        || (id.0.len() != 1 + LEGACY_BLOCK_ID_HEX_CHARS
-            && id.0.len() != 1 + CONTENT_BLOCK_ID_HEX_CHARS)
-        || !chars.all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
-    {
+    if !valid_block_id_bytes(id.0.as_bytes()) {
         return Err(invalid_scope("invalid object-store block ID"));
     }
     Ok(())
+}
+
+fn valid_block_id_bytes(bytes: &[u8]) -> bool {
+    bytes.first() == Some(&(BLOCK_ID_PREFIX as u8))
+        && (bytes.len() == 1 + LEGACY_BLOCK_ID_HEX_CHARS
+            || bytes.len() == 1 + CONTENT_BLOCK_ID_HEX_CHARS)
+        && bytes[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 fn invalid_scope(message: &'static str) -> FsError {
@@ -880,8 +1007,91 @@ fn block_id(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::stream::BoxStream;
     use mount_rs_core::storage::BlockStore;
     use object_store::memory::InMemory;
+    use object_store::{
+        GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, PutMultipartOptions,
+        PutResult,
+    };
+
+    #[derive(Debug)]
+    struct PreEpochListStore {
+        inner: Arc<InMemory>,
+    }
+
+    impl std::fmt::Display for PreEpochListStore {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("PreEpochListStore")
+        }
+    }
+
+    #[async_trait]
+    impl ObjectStore for PreEpochListStore {
+        async fn put_opts(
+            &self,
+            location: &ObjectPath,
+            payload: PutPayload,
+            opts: PutOptions,
+        ) -> object_store::Result<PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &ObjectPath,
+            opts: PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &ObjectPath,
+            options: GetOptions,
+        ) -> object_store::Result<GetResult> {
+            self.inner.get_opts(location, options).await
+        }
+
+        async fn delete(&self, location: &ObjectPath) -> object_store::Result<()> {
+            self.inner.delete(location).await
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&ObjectPath>,
+        ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+            self.inner
+                .list(prefix)
+                .map(|object| {
+                    object.map(|mut meta| {
+                        meta.last_modified =
+                            (UNIX_EPOCH - std::time::Duration::from_secs(1)).into();
+                        meta
+                    })
+                })
+                .boxed()
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&ObjectPath>,
+        ) -> object_store::Result<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy(&self, from: &ObjectPath, to: &ObjectPath) -> object_store::Result<()> {
+            self.inner.copy(from, to).await
+        }
+
+        async fn copy_if_not_exists(
+            &self,
+            from: &ObjectPath,
+            to: &ObjectPath,
+        ) -> object_store::Result<()> {
+            self.inner.copy_if_not_exists(from, to).await
+        }
+    }
 
     async fn stores() -> (ObjectStoreBlockStore, ObjectStoreBlockStore, Arc<InMemory>) {
         let object_store = Arc::new(InMemory::new());
@@ -1297,6 +1507,31 @@ mod tests {
             .unwrap();
         assert_eq!(deleted.deleted, 1);
         assert!(first.get(&id).await.unwrap_err().is(ErrorCode::Enoent));
+    }
+
+    #[tokio::test]
+    async fn reconciliation_retains_a_block_with_an_invalid_pre_epoch_timestamp() {
+        let backing = Arc::new(InMemory::new());
+        let store = ObjectStoreBlockStore::new(
+            Arc::new(PreEpochListStore {
+                inner: backing.clone(),
+            }),
+            "blocks",
+            false,
+        )
+        .unwrap();
+        let id = store.put(b"cannot establish age").await.unwrap();
+        let report = store
+            .reconcile(&BTreeSet::new(), std::time::Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(report.scanned, 1);
+        assert_eq!(report.recent, 1);
+        assert_eq!(report.deleted, 0);
+        backing
+            .head(&store.object_path(&id).unwrap())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

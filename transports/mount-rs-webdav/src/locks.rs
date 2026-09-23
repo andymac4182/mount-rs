@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use mount_rs_core::path::is_path_inside;
+use mount_rs_core::path::normalize_path;
 use url::Url;
 use uuid::Uuid;
 
@@ -52,6 +52,95 @@ fn usable_lock_token_uri(token: &str) -> bool {
 pub enum LockDepth {
     Zero,
     Infinity,
+}
+
+/// Component containment for already normalized absolute paths. Keeping this
+/// decision free of allocation lets a bounded proof exercise the same path
+/// boundary used by lock scope, listing, and conflict checks.
+fn canonical_path_inside(path: &[u8], parent: &[u8]) -> bool {
+    path == parent
+        || (parent == b"/" && path.first() == Some(&b'/'))
+        || (path.starts_with(parent) && path.get(parent.len()) == Some(&b'/'))
+}
+
+fn canonical_lock_covers(lock_path: &[u8], depth: LockDepth, path: &[u8]) -> bool {
+    lock_path == path || (depth == LockDepth::Infinity && canonical_path_inside(path, lock_path))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConflictPhase {
+    Covering,
+    Within,
+}
+
+/// One active lock's conflict decision for canonical paths. `conflict` scans
+/// covering candidates first, then descendants, so it retains the existing
+/// reported-lock priority while using this decision in both phases.
+#[allow(clippy::too_many_arguments)]
+fn canonical_conflict_candidate(
+    lock_path: &[u8],
+    lock_depth: LockDepth,
+    lock_exclusive: bool,
+    expires_at: i64,
+    request_path: &[u8],
+    request_depth: LockDepth,
+    request_exclusive: bool,
+    now: i64,
+    phase: ConflictPhase,
+) -> bool {
+    expires_at > now
+        && (lock_exclusive || request_exclusive)
+        && match phase {
+            ConflictPhase::Covering => canonical_lock_covers(lock_path, lock_depth, request_path),
+            ConflictPhase::Within => {
+                request_depth == LockDepth::Infinity
+                    && canonical_path_inside(lock_path, request_path)
+            }
+        }
+}
+
+fn normalized_path_inside(path: &str, parent: &str) -> bool {
+    let path = normalize_path(path);
+    let parent = normalize_path(parent);
+    canonical_path_inside(path.as_bytes(), parent.as_bytes())
+}
+
+fn lock_covers_path(lock_path: &str, depth: LockDepth, path: &str) -> bool {
+    // Public lock-table callers can supply noncanonical paths. Depth zero
+    // historically compares the original spelling; infinity normalizes.
+    lock_path == path || (depth == LockDepth::Infinity && normalized_path_inside(path, lock_path))
+}
+
+fn conflict_candidate(
+    lock: &DavLock,
+    path: &str,
+    depth: LockDepth,
+    exclusive: bool,
+    now: i64,
+    phase: ConflictPhase,
+) -> bool {
+    if lock.expires_at <= now || !(lock.exclusive || exclusive) {
+        return false;
+    }
+    match phase {
+        ConflictPhase::Covering if lock.path == path => return true,
+        ConflictPhase::Covering if lock.depth == LockDepth::Zero => return false,
+        ConflictPhase::Within if depth == LockDepth::Zero => return false,
+        _ => {}
+    }
+    let lock_path = normalize_path(&lock.path);
+    let request_path = normalize_path(path);
+    canonical_conflict_candidate(
+        lock_path.as_bytes(),
+        lock.depth,
+        lock.exclusive,
+        lock.expires_at,
+        request_path.as_bytes(),
+        depth,
+        exclusive,
+        now,
+        phase,
+    )
 }
 
 impl std::fmt::Display for LockDepth {
@@ -174,10 +263,7 @@ impl DavLockTable {
         self.order
             .iter()
             .filter_map(|token| self.locks.get(token))
-            .filter(|lock| {
-                lock.path == path
-                    || (lock.depth == LockDepth::Infinity && is_path_inside(path, &lock.path))
-            })
+            .filter(|lock| lock_covers_path(&lock.path, lock.depth, path))
             .cloned()
             .collect()
     }
@@ -187,7 +273,7 @@ impl DavLockTable {
         self.order
             .iter()
             .filter_map(|token| self.locks.get(token))
-            .filter(|lock| is_path_inside(&lock.path, path))
+            .filter(|lock| normalized_path_inside(&lock.path, path))
             .cloned()
             .collect()
     }
@@ -198,7 +284,7 @@ impl DavLockTable {
     }
 
     pub fn in_scope(lock: &DavLock, path: &str) -> bool {
-        lock.path == path || (lock.depth == LockDepth::Infinity && is_path_inside(path, &lock.path))
+        lock_covers_path(&lock.path, lock.depth, path)
     }
 
     pub fn conflict(
@@ -208,13 +294,26 @@ impl DavLockTable {
         exclusive: bool,
         now: i64,
     ) -> Option<DavLock> {
-        let mut candidates = self.covering(path, now);
-        if depth == LockDepth::Infinity {
-            candidates.extend(self.within(path, now));
-        }
-        candidates
-            .into_iter()
-            .find(|lock| exclusive || lock.exclusive)
+        self.sweep(now);
+        let covering = self
+            .order
+            .iter()
+            .filter_map(|token| self.locks.get(token))
+            .find(|lock| {
+                conflict_candidate(lock, path, depth, exclusive, now, ConflictPhase::Covering)
+            })
+            .cloned();
+        covering.or_else(|| {
+            (depth == LockDepth::Infinity).then(|| {
+                self.order
+                    .iter()
+                    .filter_map(|token| self.locks.get(token))
+                    .find(|lock| {
+                        conflict_candidate(lock, path, depth, exclusive, now, ConflictPhase::Within)
+                    })
+                    .cloned()
+            })?
+        })
     }
 
     pub fn create(&mut self, request: DavLockRequest, now: i64) -> DavLockGrant {
@@ -326,6 +425,183 @@ fn lock_expiration(now: i64, timeout_seconds: u64) -> i64 {
 #[cfg(kani)]
 mod verification {
     use super::*;
+
+    const PATHS: [&[u8]; 4] = [b"/", b"/a", b"/a/x", b"/ab"];
+    // Rows are parents and columns are candidate members. This explicit
+    // hierarchy is independent of the byte-prefix implementation above.
+    const INSIDE: [[bool; 4]; 4] = [
+        [true, true, true, true],
+        [false, true, true, false],
+        [false, false, true, false],
+        [false, false, false, true],
+    ];
+
+    fn oracle_covers(lock: usize, depth: LockDepth, target: usize) -> bool {
+        lock == target || (depth == LockDepth::Infinity && INSIDE[lock][target])
+    }
+
+    fn oracle_overlaps(
+        lock: usize,
+        lock_depth: LockDepth,
+        request: usize,
+        request_depth: LockDepth,
+    ) -> bool {
+        (0..PATHS.len()).any(|target| {
+            oracle_covers(lock, lock_depth, target) && oracle_covers(request, request_depth, target)
+        })
+    }
+
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn canonical_scope_and_two_lock_conflicts() {
+        let first: u8 = kani::any();
+        let second: u8 = kani::any();
+        let request: u8 = kani::any();
+        let first_expiry: u8 = kani::any();
+        let second_expiry: u8 = kani::any();
+        let now: u8 = kani::any();
+        kani::assume(first < 4 && second < 4 && request < 4);
+        kani::assume(first_expiry <= 2 && second_expiry <= 2 && now <= 2);
+        let first = first as usize;
+        let second = second as usize;
+        let request = request as usize;
+        let first_depth = if kani::any() {
+            LockDepth::Infinity
+        } else {
+            LockDepth::Zero
+        };
+        let second_depth = if kani::any() {
+            LockDepth::Infinity
+        } else {
+            LockDepth::Zero
+        };
+        let request_depth = if kani::any() {
+            LockDepth::Infinity
+        } else {
+            LockDepth::Zero
+        };
+        let first_exclusive: bool = kani::any();
+        let second_exclusive: bool = kani::any();
+        let request_exclusive: bool = kani::any();
+        let now = i64::from(now);
+
+        assert_eq!(
+            canonical_path_inside(PATHS[request], PATHS[first]),
+            INSIDE[first][request]
+        );
+        assert_eq!(
+            canonical_path_inside(PATHS[first], PATHS[request]),
+            INSIDE[request][first]
+        );
+        assert_eq!(
+            canonical_lock_covers(PATHS[first], first_depth, PATHS[request]),
+            oracle_covers(first, first_depth, request)
+        );
+        assert_eq!(
+            canonical_lock_covers(PATHS[second], second_depth, PATHS[request]),
+            oracle_covers(second, second_depth, request)
+        );
+
+        let first_covering = canonical_conflict_candidate(
+            PATHS[first],
+            first_depth,
+            first_exclusive,
+            i64::from(first_expiry),
+            PATHS[request],
+            request_depth,
+            request_exclusive,
+            now,
+            ConflictPhase::Covering,
+        );
+        let first_within = canonical_conflict_candidate(
+            PATHS[first],
+            first_depth,
+            first_exclusive,
+            i64::from(first_expiry),
+            PATHS[request],
+            request_depth,
+            request_exclusive,
+            now,
+            ConflictPhase::Within,
+        );
+        let second_covering = canonical_conflict_candidate(
+            PATHS[second],
+            second_depth,
+            second_exclusive,
+            i64::from(second_expiry),
+            PATHS[request],
+            request_depth,
+            request_exclusive,
+            now,
+            ConflictPhase::Covering,
+        );
+        let second_within = canonical_conflict_candidate(
+            PATHS[second],
+            second_depth,
+            second_exclusive,
+            i64::from(second_expiry),
+            PATHS[request],
+            request_depth,
+            request_exclusive,
+            now,
+            ConflictPhase::Within,
+        );
+
+        let first_active = i64::from(first_expiry) > now;
+        let second_active = i64::from(second_expiry) > now;
+        assert_eq!(
+            first_covering,
+            first_active
+                && (first_exclusive || request_exclusive)
+                && oracle_covers(first, first_depth, request)
+        );
+        assert_eq!(
+            first_within,
+            first_active
+                && (first_exclusive || request_exclusive)
+                && request_depth == LockDepth::Infinity
+                && INSIDE[request][first]
+        );
+        assert_eq!(
+            second_covering,
+            second_active
+                && (second_exclusive || request_exclusive)
+                && oracle_covers(second, second_depth, request)
+        );
+        assert_eq!(
+            second_within,
+            second_active
+                && (second_exclusive || request_exclusive)
+                && request_depth == LockDepth::Infinity
+                && INSIDE[request][second]
+        );
+        let first_conflicts = first_covering || first_within;
+        let second_conflicts = second_covering || second_within;
+        let expected_first = first_active
+            && (first_exclusive || request_exclusive)
+            && oracle_overlaps(first, first_depth, request, request_depth);
+        let expected_second = second_active
+            && (second_exclusive || request_exclusive)
+            && oracle_overlaps(second, second_depth, request, request_depth);
+        assert_eq!(first_conflicts, expected_first);
+        assert_eq!(second_conflicts, expected_second);
+        assert_eq!(
+            first_conflicts || second_conflicts,
+            expected_first || expected_second
+        );
+
+        kani::cover!(first == 1 && request == 3 && !INSIDE[first][request]);
+        kani::cover!(first == 1 && request == 2 && INSIDE[first][request]);
+        kani::cover!(first == 2 && request == 1 && first_within);
+        kani::cover!(first_active && !second_active && first_conflicts);
+        kani::cover!(
+            !first_exclusive
+                && !second_exclusive
+                && !request_exclusive
+                && !first_conflicts
+                && !second_conflicts
+        );
+    }
 
     #[kani::proof]
     fn timeout_and_remaining_are_wide_before_clamping() {

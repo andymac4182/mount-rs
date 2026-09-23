@@ -1726,6 +1726,68 @@ fn plan_writer_renewal(
 mod verification {
     use super::*;
 
+    /// Prove the scalar decision made inside the authority's publication
+    /// transaction. This does not establish the transaction's atomicity,
+    /// clock trust, or the deployment's publication cadence.
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn authority_time_sample_is_monotonic_and_bounds_forward_jumps() {
+        let current_ms: u64 = kani::any();
+        let proposed_ms: u64 = kani::any();
+        let jump_bound_ms: u64 = kani::any();
+        let has_current: bool = kani::any();
+        let has_jump_bound: bool = kani::any();
+
+        let current = has_current.then_some(current_ms);
+        let jump_bound = has_jump_bound.then_some(jump_bound_ms);
+        let result = authority_time_sample(current, proposed_ms, jump_bound);
+
+        let previous = if has_current {
+            u128::from(current_ms)
+        } else {
+            0
+        };
+        let proposed = u128::from(proposed_ms);
+        let excessive_jump = has_jump_bound
+            && previous != 0
+            && proposed > previous
+            && proposed - previous > u128::from(jump_bound_ms);
+        let expected = if previous > proposed {
+            previous
+        } else {
+            proposed
+        };
+
+        kani::cover!(proposed_ms == 0);
+        kani::cover!(result.is_ok() && !has_current && has_jump_bound);
+        kani::cover!(result.is_ok() && has_current && previous > proposed);
+        kani::cover!(
+            result.is_ok()
+                && has_current
+                && has_jump_bound
+                && previous > 0
+                && proposed > previous
+                && proposed - previous == u128::from(jump_bound_ms)
+        );
+        kani::cover!(excessive_jump);
+        kani::cover!(result.is_ok() && has_current && !has_jump_bound && proposed > previous);
+        kani::cover!(result.is_ok() && proposed_ms == u64::MAX);
+
+        match result {
+            Err(error) if proposed_ms == 0 => assert_eq!(error.code, ErrorCode::Einval),
+            Err(error) => {
+                assert!(excessive_jump);
+                assert_eq!(error.code, ErrorCode::Eio);
+            }
+            Ok(published) => {
+                assert!(proposed_ms != 0 && !excessive_jump);
+                assert_eq!(u128::from(published), expected);
+                assert!(u128::from(published) >= previous);
+                assert!(published > 0);
+            }
+        }
+    }
+
     /// One numeric takeover decision, with arbitrary full-range persisted values.
     /// It does not model the FoundationDB transaction or lease-oracle trust boundary.
     #[kani::proof]
@@ -3103,6 +3165,32 @@ mod tests {
         assert_eq!(
             authority_time_sample(None, 62_001, Some(1)).unwrap(),
             62_001
+        );
+    }
+
+    #[test]
+    fn authority_clock_policy_checks_zero_and_maximum_time() {
+        assert_eq!(
+            authority_time_sample(None, 0, None).unwrap_err().code,
+            ErrorCode::Einval
+        );
+        assert_eq!(
+            authority_time_sample(Some(u64::MAX), u64::MAX - 1, Some(1)).unwrap(),
+            u64::MAX
+        );
+        assert_eq!(
+            authority_time_sample(Some(u64::MAX - 1), u64::MAX, Some(1)).unwrap(),
+            u64::MAX
+        );
+        assert_eq!(
+            authority_time_sample(Some(u64::MAX - 1), u64::MAX, Some(0))
+                .unwrap_err()
+                .code,
+            ErrorCode::Eio
+        );
+        assert_eq!(
+            authority_time_sample(Some(1), u64::MAX, None).unwrap(),
+            u64::MAX
         );
     }
 

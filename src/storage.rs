@@ -1180,6 +1180,80 @@ mod tests {
         }
     }
 
+    fn four_directory_topology(mask: u16) -> Namespace {
+        let mut nodes = BTreeMap::new();
+        let names = ["first", "second", "third", "fourth"];
+        for parent in 0..4 {
+            let entries: Vec<_> = (0..4)
+                .filter(|&child| mask & (1 << (parent * 4 + child)) != 0)
+                .map(|child| DirectoryEntry {
+                    name: names[child].to_owned(),
+                    inode: child as u64 + 1,
+                })
+                .collect();
+            let inode = parent as u64 + 1;
+            nodes.insert(
+                inode,
+                NodeMetadata {
+                    stats: stats(inode, S_IFDIR | 0o755, 2 + entries.len() as u64, 0),
+                    data: NodeData::Directory { entries },
+                },
+            );
+        }
+        Namespace {
+            format_version: NAMESPACE_FORMAT_VERSION,
+            root: 1,
+            next_inode: 5,
+            default_uid: 0,
+            default_gid: 0,
+            umask: 0o022,
+            default_chunker: fixed_chunker(4096),
+            nodes,
+        }
+    }
+
+    fn four_directory_rooted_tree_oracle(mask: u16) -> bool {
+        let edge = |parent: usize, child: usize| mask & (1 << (parent * 4 + child)) != 0;
+        for child in 0..4 {
+            let parents = (0..4).filter(|&parent| edge(parent, child)).count();
+            if parents != usize::from(child != 0) {
+                return false;
+            }
+        }
+
+        // Transitive closure is independent of the validator's stack walk.
+        let mut reaches = [[false; 4]; 4];
+        for (parent, row) in reaches.iter_mut().enumerate() {
+            row[parent] = true;
+            for (child, reachable) in row.iter_mut().enumerate() {
+                *reachable |= edge(parent, child);
+            }
+        }
+        for middle in 0..4 {
+            for parent in 0..4 {
+                for child in 0..4 {
+                    reaches[parent][child] |= reaches[parent][middle] && reaches[middle][child];
+                }
+            }
+        }
+        reaches[0].into_iter().all(|reachable| reachable)
+    }
+
+    #[test]
+    fn four_directory_topology_matches_rooted_tree_for_all_edge_sets() {
+        let mut accepted_count = 0;
+        for mask in u16::MIN..=u16::MAX {
+            let accepted = four_directory_topology(mask).validate().is_ok();
+            assert_eq!(
+                accepted,
+                four_directory_rooted_tree_oracle(mask),
+                "four-directory edge mask {mask:#018b}"
+            );
+            accepted_count += usize::from(accepted);
+        }
+        assert_eq!(accepted_count, 16);
+    }
+
     #[test]
     fn directory_link_counts_match_independent_integer_oracle() {
         for is_root in [false, true] {

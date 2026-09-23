@@ -6,6 +6,9 @@ rust-version = "1.95"
 description = "Generic immutable object-store block provider for mount-rs"
 license = "Apache-2.0"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 [dependencies]
 async-trait = "0.1"
 futures-util = "0.3"

@@ -364,6 +364,28 @@ pub fn frame_fragments(message: &[u8], size: usize) -> Result<Vec<u8>, XdrError>
 
 pub const DEFAULT_RECORD_LIMIT: usize = 8 * 1024 * 1024;
 
+fn checked_record_assembled(assembled: usize, fragment: usize, limit: usize) -> Option<usize> {
+    assembled
+        .checked_add(fragment)
+        .filter(|total| *total <= limit)
+}
+
+fn record_pending_fits(buffered: usize, assembled: usize, fragments: usize, limit: usize) -> bool {
+    // Each completed fragment carries a four-byte record mark. Subtract from
+    // the budget before comparing, so even the public usize::MAX limit stays
+    // non-panicking and never hides a wrapped counter.
+    let budget = limit as u128 + 4;
+    let marks = fragments as u128 * 4;
+    if marks > budget {
+        return false;
+    }
+    let budget = budget - marks;
+    if buffered as u128 > budget {
+        return false;
+    }
+    assembled as u128 <= budget - buffered as u128
+}
+
 /// Reassembles TCP record-marking fragments. Returned records own their bytes.
 #[derive(Debug, Clone)]
 pub struct RecordAssembler {
@@ -394,7 +416,10 @@ impl RecordAssembler {
     }
 
     pub fn pending(&self) -> usize {
-        self.buffer.len() + self.assembled + self.fragment_count * 4
+        self.buffer
+            .len()
+            .saturating_add(self.assembled)
+            .saturating_add(self.fragment_count.saturating_mul(4))
     }
 
     pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<Vec<u8>>, XdrError> {
@@ -411,12 +436,13 @@ impl RecordAssembler {
                     .expect("record mark is four bytes"),
             );
             let length = (mark & RM_LENGTH_MASK) as usize;
-            if self.assembled.saturating_add(length) > self.limit {
+            let Some(next_assembled) = checked_record_assembled(self.assembled, length, self.limit)
+            else {
                 return Err(XdrError::new(
                     format!("RPC record exceeds {} bytes", self.limit),
                     consumed,
                 ));
-            }
+            };
             if self.fragment_count >= self.max_fragments {
                 return Err(XdrError::new(
                     format!("RPC record exceeds {} fragments", self.max_fragments),
@@ -432,7 +458,7 @@ impl RecordAssembler {
                     .push(self.buffer[consumed..consumed + length].to_vec());
                 consumed += length;
             }
-            self.assembled += length;
+            self.assembled = next_assembled;
             self.fragment_count += 1;
             if mark & RM_LAST_FRAGMENT != 0 {
                 let mut record = Vec::with_capacity(self.assembled);
@@ -447,16 +473,112 @@ impl RecordAssembler {
         if consumed > 0 {
             self.buffer.drain(..consumed);
         }
-        if self.buffer.len() + self.assembled + self.fragment_count * 4 > self.limit + 4 {
+        if !record_pending_fits(
+            self.buffer.len(),
+            self.assembled,
+            self.fragment_count,
+            self.limit,
+        ) {
             return Err(XdrError::new("RPC record buffer exceeds limit", 0));
         }
         Ok(records)
     }
 }
 
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Every usize counter and configured limit is symbolic. This is the
+    /// production decision used before accepting a new TCP fragment; it does
+    /// not model fragment buffering or a peer's socket schedule.
+    #[kani::proof]
+    #[kani::unwind(2)]
+    fn record_fragment_total_never_wraps_or_exceeds_limit() {
+        let assembled: usize = kani::any();
+        let fragment: usize = kani::any();
+        let limit: usize = kani::any();
+        let result = checked_record_assembled(assembled, fragment, limit);
+        let exact = assembled as u128 + fragment as u128;
+        let admitted = exact <= limit as u128 && exact <= usize::MAX as u128;
+        assert_eq!(result.is_some(), admitted);
+        if let Some(total) = result {
+            assert_eq!(total as u128, exact);
+            assert!(total <= limit);
+        }
+        kani::cover!(assembled == 3 && fragment == 2 && limit == 5 && result == Some(5));
+        kani::cover!(assembled == 3 && fragment == 2 && limit == 4 && result.is_none());
+        kani::cover!(assembled == usize::MAX && fragment == 1 && result.is_none());
+        kani::cover!(assembled == limit && fragment == 0 && result == Some(limit));
+    }
+
+    /// Buffered payload, accumulated fragment data, and four-byte marks must
+    /// fit the exact record envelope. The oracle sums in u128 independently
+    /// of the production helper's subtraction-based budget check.
+    #[kani::proof]
+    #[kani::unwind(2)]
+    fn record_pending_budget_matches_exact_wire_envelope() {
+        let buffered: usize = kani::any();
+        let assembled: usize = kani::any();
+        let fragments: usize = kani::any();
+        let limit: usize = kani::any();
+        let fits = record_pending_fits(buffered, assembled, fragments, limit);
+        let exact = buffered as u128 + assembled as u128 + (fragments as u128 * 4);
+        let envelope = limit as u128 + 4;
+        assert_eq!(fits, exact <= envelope);
+        kani::cover!(limit == 0 && buffered == 4 && assembled == 0 && fragments == 0 && fits);
+        kani::cover!(limit == 0 && buffered == 5 && assembled == 0 && fragments == 0 && !fits);
+        kani::cover!(limit == 0 && buffered == 0 && assembled == 0 && fragments == 1 && fits);
+        kani::cover!(
+            limit == usize::MAX && buffered == 0 && assembled == 0 && fragments == 0 && fits
+        );
+        kani::cover!(limit == 0 && fragments == usize::MAX && !fits);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn max_record_limit_accepts_an_empty_push_without_overflow() {
+        let mut assembler = RecordAssembler::new(usize::MAX);
+        assert!(assembler.push(&[]).unwrap().is_empty());
+        assert_eq!(assembler.pending(), 0);
+    }
+
+    #[test]
+    fn fragment_accumulator_rejects_overflow_even_at_max_limit() {
+        let mut assembler = RecordAssembler::new(usize::MAX);
+        assembler.assembled = usize::MAX;
+        assert!(assembler.push(&[0x80, 0, 0, 1, 0xaa]).is_err());
+    }
+
+    #[test]
+    fn pending_accounting_saturates_when_state_exceeds_usize() {
+        let mut assembler = RecordAssembler::new(usize::MAX);
+        assembler.assembled = usize::MAX;
+        assembler.fragment_count = 1;
+        assert_eq!(assembler.pending(), usize::MAX);
+    }
+
+    #[test]
+    fn every_two_chunk_split_reassembles_one_last_fragment() {
+        for payload in [0, 1, 0x80, 0xff] {
+            let wire = [0x80, 0, 0, 1, payload];
+            for split in 0..=wire.len() {
+                let mut assembler = RecordAssembler::new(1);
+                let mut records = assembler.push(&wire[..split]).unwrap();
+                records.extend(assembler.push(&wire[split..]).unwrap());
+                assert_eq!(
+                    records,
+                    vec![vec![payload]],
+                    "payload {payload} split {split}"
+                );
+                assert_eq!(assembler.pending(), 0);
+            }
+        }
+    }
 
     #[test]
     fn call_and_fragmented_record_round_trip() {

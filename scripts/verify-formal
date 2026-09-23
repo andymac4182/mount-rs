@@ -13,6 +13,7 @@ cd "$(dirname "$0")/.."
 ./scripts/cargo-shared kani -p mount-rs-core --harness decoded_truncation_requires_write
 ./scripts/cargo-shared kani -p mount-rs-core --harness linux_wire_open_bits_preserve_access_and_truncate_guard
 ./scripts/cargo-shared kani -p mount-rs-core --harness read_lease_ttl_milliseconds_are_checked
+./scripts/cargo-shared kani -p mount-rs-napi --harness native_numeric_open_bits_preserve_host_rights_and_truncate_guard
 ./scripts/cargo-shared kani -p mount-rs-9p --harness bounded_payload_range_stays_within_wire_input
 ./scripts/cargo-shared kani -p mount-rs-9p --harness bounded_frame_size_classification_matches_wire_bounds
 ./scripts/cargo-shared kani -p mount-rs-fuse --harness reply_frame_len_bounds
@@ -26,15 +27,27 @@ cd "$(dirname "$0")/.."
 ./scripts/cargo-shared kani -p mount-rs-nfs --harness var_opaque_short_wire_payload
 ./scripts/cargo-shared kani -p mount-rs-nfs --harness var_opaque_short_wire_decision
 ./scripts/cargo-shared kani -p mount-rs-nfs --harness var_opaque_all_wire_prefixes
+./scripts/cargo-shared kani -p mount-rs-nfs --harness record_fragment_total_never_wraps_or_exceeds_limit
+./scripts/cargo-shared kani -p mount-rs-nfs --harness record_pending_budget_matches_exact_wire_envelope
 ./scripts/cargo-shared kani -p mount-rs-s3 --harness part_number_marker_boundary_does_not_wrap
 ./scripts/cargo-shared kani -p mount-rs-s3 --harness decoded_chunk_total_never_wraps_or_exceeds_limits
 ./scripts/cargo-shared kani -p mount-rs-s3 --harness chunk_payload_and_footer_stay_within_body
 ./scripts/cargo-shared kani -p mount-rs-chunked --harness reacquired_writer_fence_is_exactly_next
 ./scripts/cargo-shared kani -p mount-rs-webdav --harness timeout_and_remaining_are_wide_before_clamping
+./scripts/cargo-shared kani -p mount-rs-webdav --harness canonical_scope_and_two_lock_conflicts
 ./scripts/cargo-shared kani -p mount-rs-sqlite-vfs --harness sqlite_io_extent_matches_signed_range
+./scripts/cargo-shared kani -p mount-rs-sqlite --harness view_pin_renewal_requires_exact_live_token_and_checked_expiry
+./scripts/cargo-shared kani -p mount-rs-sqlite --harness signed_writer_lease_boundaries_are_checked
+./scripts/cargo-shared kani -p mount-rs-pglite --harness view_pin_renewal_requires_exact_live_token_and_checked_expiry
+./scripts/cargo-shared kani -p mount-rs-pglite --harness signed_writer_lease_boundaries_are_checked
+./scripts/cargo-shared kani -p mount-rs-object-store-blocks --harness reconciliation_deletes_only_unreferenced_direct_old_blocks
+./scripts/cargo-shared kani -p mount-rs-object-store-blocks --harness legacy_block_id_grammar_is_lowercase_hex
+./scripts/cargo-shared kani -p mount-rs-object-store-blocks --harness content_block_id_grammar_is_lowercase_hex
 (
     cd transports/mount-rs-fskit
     ../../scripts/cargo-shared kani --harness abi_request_slice_preconditions
+    ../../scripts/cargo-shared kani --harness frame_header_classification_precedes_body_copy
 )
 ./scripts/cargo-shared kani -p mount-rs-foundationdb --features foundationdb --harness writer_takeover_is_fenced_and_checked
 ./scripts/cargo-shared kani -p mount-rs-foundationdb --features foundationdb --harness writer_renewal_requires_exact_live_fence_and_checked_expiry
+./scripts/cargo-shared kani -p mount-rs-foundationdb --features foundationdb --harness authority_time_sample_is_monotonic_and_bounds_forward_jumps

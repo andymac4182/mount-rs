@@ -6,6 +6,9 @@ rust-version = "1.95"
 description = "Node.js N-API bindings for mount-rs"
 license = "Apache-2.0"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 [features]
 default = []
 observability = ["dep:mount-rs-observability"]
