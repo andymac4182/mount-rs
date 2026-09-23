@@ -4065,14 +4065,12 @@ struct AccessRights {
 fn allowed_access(stats: &mount_rs_core::Stats, credentials: &RpcCredentials) -> AccessRights {
     let is_dir = stats.mode & S_IFMT == S_IFDIR;
     let mode = stats.mode & 0o777;
-    let uid = credentials.uid.unwrap_or(0);
-    let gid = credentials.gid.unwrap_or(0);
-    let root = uid == 0;
+    let root = credentials.uid == Some(0);
     let bits = if root {
         0b111
-    } else if uid == stats.uid {
+    } else if credentials.uid == Some(stats.uid) {
         (mode >> 6) & 0b111
-    } else if gid == stats.gid || credentials.gids.contains(&stats.gid) {
+    } else if credentials.gid == Some(stats.gid) || credentials.gids.contains(&stats.gid) {
         (mode >> 3) & 0b111
     } else {
         mode & 0b111
@@ -4101,6 +4099,68 @@ fn access_bits3(rights: AccessRights) -> u32 {
         | (if rights.extend { ACCESS3_EXTEND } else { 0 })
         | (if rights.delete { ACCESS3_DELETE } else { 0 })
         | (if rights.execute { ACCESS3_EXECUTE } else { 0 })
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// A missing AUTH_NONE uid/gid uses only the mode's other bits, while an
+    /// explicit AUTH_SYS uid zero retains root's read/write rights.
+    #[kani::proof]
+    fn anonymous_access_uses_other_mode_bits() {
+        let mode: u32 = kani::any();
+        let uid: u32 = kani::any();
+        let gid: u32 = kani::any();
+        let is_dir: bool = kani::any();
+        kani::assume(mode <= 0o777);
+        let stats = mount_rs_core::Stats {
+            dev: 0,
+            ino: 1,
+            mode: (if is_dir {
+                S_IFDIR
+            } else {
+                mount_rs_core::S_IFREG
+            }) | mode,
+            nlink: 1,
+            uid,
+            gid,
+            rdev: 0,
+            size: 0,
+            blksize: 0,
+            blocks: 0,
+            atime_ms: 0,
+            mtime_ms: 0,
+            ctime_ms: 0,
+            birthtime_ms: 0,
+        };
+        let anonymous = RpcCredentials {
+            flavor: AUTH_NONE,
+            uid: None,
+            gid: None,
+            gids: Vec::new(),
+        };
+        let explicit_root = RpcCredentials {
+            flavor: AUTH_SYS,
+            uid: Some(0),
+            gid: Some(0),
+            gids: Vec::new(),
+        };
+        let anonymous_rights = allowed_access(&stats, &anonymous);
+        let root_rights = allowed_access(&stats, &explicit_root);
+        let other = mode & 0o7;
+
+        assert_eq!(anonymous_rights.read, other & 0o4 != 0);
+        assert_eq!(anonymous_rights.modify, other & 0o2 != 0);
+        assert_eq!(anonymous_rights.extend, other & 0o2 != 0);
+        assert_eq!(anonymous_rights.lookup, is_dir && other & 0o1 != 0);
+        assert_eq!(anonymous_rights.delete, is_dir && other & 0o2 != 0);
+        assert_eq!(anonymous_rights.execute, !is_dir && other & 0o1 != 0);
+        assert!(root_rights.read && root_rights.modify && root_rights.extend);
+        kani::cover!(mode == 0o700 && uid == 0 && is_dir && !anonymous_rights.modify);
+        kani::cover!(mode == 0o700 && uid == 0 && is_dir && root_rights.modify);
+        kani::cover!(mode == 0o007 && uid == 0 && !is_dir && anonymous_rights.execute);
+    }
 }
 
 #[cfg(test)]
@@ -4228,6 +4288,70 @@ mod tests {
         let read = read_read_res(&mut reader, 1024).unwrap();
         assert_eq!(read.status, NFS3_OK);
         assert_eq!(read.data, b"hello");
+    }
+
+    #[tokio::test]
+    async fn auth_none_access_does_not_gain_root_only_directory_rights() {
+        let session = Nfs3Session::new(
+            MemoryFs::new(MemoryOptions {
+                root_mode: 0o700,
+                ..MemoryOptions::default()
+            }),
+            NfsSessionOptions::default(),
+        );
+        let mount_call = crate::rpc::encode_call(
+            20,
+            MOUNT_PROGRAM,
+            MOUNT_V3,
+            MOUNTPROC3_MNT,
+            None,
+            None,
+            &crate::xdr::encode_xdr(|writer| writer.string("/")),
+        );
+        let mount_reply = session
+            .handle_call(&mount_call, NfsRequestContext::default())
+            .await
+            .expect("MOUNT reply");
+        let (_, mut body) = crate::rpc::decode_reply(&mount_reply).expect("decode MOUNT reply");
+        let root = read_mount_res(&mut body)
+            .expect("decode MOUNT result")
+            .fh
+            .expect("root handle");
+        body.end("MOUNT result").expect("no trailing MOUNT data");
+
+        let requested =
+            ACCESS3_READ | ACCESS3_LOOKUP | ACCESS3_MODIFY | ACCESS3_EXTEND | ACCESS3_DELETE;
+        let access_args = crate::xdr::encode_xdr(|writer| {
+            write_access_args(
+                writer,
+                &Access3args {
+                    object: root,
+                    access: requested,
+                },
+            );
+        });
+        let explicit_root = crate::rpc::auth_sys(0, 0, "root-client");
+        for (xid, credential, expected) in [(21, None, 0), (22, Some(&explicit_root), requested)] {
+            let call = crate::rpc::encode_call(
+                xid,
+                NFS_PROGRAM,
+                NFS_V3,
+                NFSPROC3_ACCESS,
+                credential,
+                None,
+                &access_args,
+            );
+            let reply = session
+                .handle_call(&call, NfsRequestContext::default())
+                .await
+                .expect("ACCESS reply");
+            let (_, mut body) = crate::rpc::decode_reply(&reply).expect("decode ACCESS reply");
+            let access = read_access_res(&mut body).expect("decode ACCESS result");
+            assert_eq!(access.status, NFS3_OK);
+            assert_eq!(access.attributes.as_ref().expect("root attrs").uid, 0);
+            assert_eq!(access.access, expected, "ACCESS rights for xid {xid}");
+            body.end("ACCESS result").expect("no trailing ACCESS data");
+        }
     }
 
     #[tokio::test]

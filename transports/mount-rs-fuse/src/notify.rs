@@ -116,17 +116,30 @@ pub fn decode_notify(message: &[u8]) -> Result<FuseNotification, NotifyError> {
             "fuse_out_header.unique is {unique}, not a notification"
         )));
     }
+    if code <= 0 {
+        return Err(NotifyError(format!(
+            "fuse_out_header.error is {code}, not a notification code"
+        )));
+    }
+    if len < crate::OUT_HEADER_SIZE {
+        return Err(NotifyError(format!(
+            "fuse_out_header.len is {len}, below the {}-byte header",
+            crate::OUT_HEADER_SIZE
+        )));
+    }
     if len > message.len() {
         return Err(NotifyError(format!(
             "fuse_out_header.len is {len} but only {} byte(s) were read",
             message.len()
         )));
     }
-    let body = if len < crate::OUT_HEADER_SIZE {
-        Vec::new()
-    } else {
-        message[crate::OUT_HEADER_SIZE..len].to_vec()
-    };
+    if len < message.len() {
+        return Err(NotifyError(format!(
+            "fuse_out_header.len is {len} but {} byte(s) were read",
+            message.len()
+        )));
+    }
+    let body = message[crate::OUT_HEADER_SIZE..len].to_vec();
     Ok(FuseNotification { code, body })
 }
 
@@ -165,6 +178,21 @@ pub fn decode_notify_inval_entry(body: &[u8]) -> Result<FuseNotifyInvalEntryOut,
             "fuse_notify_inval_entry_out.namelen is {namelen} but the body is {} byte(s)",
             body.len()
         )));
+    }
+    if namelen > FUSE_NAME_MAX {
+        return Err(NotifyError(format!(
+            "notification name is {namelen} bytes, over FUSE_NAME_MAX ({FUSE_NAME_MAX})"
+        )));
+    }
+    if body[16..16 + namelen].contains(&0) {
+        return Err(NotifyError(
+            "notification name contains a NUL byte".to_owned(),
+        ));
+    }
+    if body[16 + namelen] != 0 {
+        return Err(NotifyError(
+            "notification name is not NUL-terminated".to_owned(),
+        ));
     }
     Ok(FuseNotifyInvalEntryOut {
         parent,

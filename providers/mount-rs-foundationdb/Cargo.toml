@@ -6,6 +6,9 @@ rust-version = "1.95"
 description = "FoundationDB integration for mount-rs"
 license = "Apache-2.0"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 [features]
 # Keep the native FoundationDB client out of ordinary workspace builds. The
 # provider is real when this feature is enabled; the feature-off package is

@@ -6,11 +6,11 @@ use mount_rs_fuse::{
     RequestHeader,
     constants::{
         FUSE_ACCESS, FUSE_BATCH_FORGET, FUSE_BMAP, FUSE_COPY_FILE_RANGE, FUSE_FALLOCATE,
-        FUSE_FORGET, FUSE_GETLK, FUSE_GETXATTR, FUSE_INTERRUPT, FUSE_IOCTL, FUSE_LINK,
-        FUSE_LISTXATTR, FUSE_LOOKUP, FUSE_LSEEK, FUSE_MKDIR, FUSE_MKNOD, FUSE_OPENDIR, FUSE_POLL,
-        FUSE_READLINK, FUSE_RELEASE, FUSE_RELEASEDIR, FUSE_REMOVEXATTR, FUSE_RENAME, FUSE_RENAME2,
-        FUSE_RMDIR, FUSE_SETLK, FUSE_SETLKW, FUSE_SETXATTR, FUSE_SETXATTR_EXT, FUSE_STATFS,
-        FUSE_SYMLINK, FUSE_UNLINK,
+        FUSE_FORGET, FUSE_GETATTR, FUSE_GETLK, FUSE_GETXATTR, FUSE_INTERRUPT, FUSE_IOCTL,
+        FUSE_LINK, FUSE_LISTXATTR, FUSE_LOOKUP, FUSE_LSEEK, FUSE_MKDIR, FUSE_MKNOD, FUSE_OPENDIR,
+        FUSE_PAGE_SIZE, FUSE_POLL, FUSE_READLINK, FUSE_RELEASE, FUSE_RELEASEDIR, FUSE_REMOVEXATTR,
+        FUSE_RENAME, FUSE_RENAME2, FUSE_RMDIR, FUSE_SETATTR, FUSE_SETLK, FUSE_SETLKW,
+        FUSE_SETXATTR, FUSE_SETXATTR_EXT, FUSE_STATFS, FUSE_SYMLINK, FUSE_UNLINK,
     },
     protocol::{FuseReplyBody, ProtocolContext, decode_reply_body},
     session::{FuseFlushMechanism, FuseSession, FuseSessionOptions},
@@ -147,6 +147,241 @@ async fn failed_request(session: &mut FuseSession, op: u32, node: u64, body: &[u
     assert_eq!(number(&reply, 8), 42);
     assert_eq!(reply.len(), 16);
     errno(&reply)
+}
+
+fn getattr_with_handle(fh: u64) -> [u8; 16] {
+    let mut body = [0; 16];
+    body[..4].copy_from_slice(&1u32.to_le_bytes());
+    body[8..].copy_from_slice(&fh.to_le_bytes());
+    body
+}
+
+fn setattr_size_with_handle(fh: u64, size: u64) -> [u8; 88] {
+    let mut body = [0; 88];
+    body[..4].copy_from_slice(&(8u32 | 64).to_le_bytes());
+    body[8..16].copy_from_slice(&fh.to_le_bytes());
+    body[16..24].copy_from_slice(&size.to_le_bytes());
+    body
+}
+
+#[tokio::test]
+async fn getattr_rejects_explicit_handle_for_another_inode() {
+    let fs = Arc::new(MemoryFs::empty());
+    for path in ["/one", "/two"] {
+        let handle = fs.open(path, "w", 0o644).await.unwrap();
+        handle.close().await.unwrap();
+    }
+    let mut session = FuseSession::new(fs);
+    let one = number(&request(&mut session, FUSE_LOOKUP, 1, b"one\0").await, 0);
+    let two = number(&request(&mut session, FUSE_LOOKUP, 1, b"two\0").await, 0);
+    let two_fh = number(&request(&mut session, 14, two, &[0; 8]).await, 0);
+
+    let reply = session
+        .handle(&frame(FUSE_GETATTR, one, &getattr_with_handle(two_fh)))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(errno(&reply), -9);
+}
+
+#[tokio::test]
+async fn setattr_rejects_explicit_handle_for_another_inode_before_truncate() {
+    let fs = Arc::new(MemoryFs::empty());
+    for path in ["/one", "/two"] {
+        let handle = fs.open(path, "w", 0o644).await.unwrap();
+        handle.write(b"contents", None).await.unwrap();
+        handle.close().await.unwrap();
+    }
+    let mut session = FuseSession::new(fs.clone());
+    let one = number(&request(&mut session, FUSE_LOOKUP, 1, b"one\0").await, 0);
+    let two = number(&request(&mut session, FUSE_LOOKUP, 1, b"two\0").await, 0);
+    let two_fh = number(
+        &request(&mut session, 14, two, &[2, 0, 0, 0, 0, 0, 0, 0]).await,
+        0,
+    );
+
+    let reply = session
+        .handle(&frame(
+            FUSE_SETATTR,
+            one,
+            &setattr_size_with_handle(two_fh, 1),
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(errno(&reply), -9);
+    assert_eq!(fs.stat("/one").await.unwrap().size, 8);
+    assert_eq!(fs.stat("/two").await.unwrap().size, 8);
+}
+
+#[tokio::test]
+async fn read_rejects_a_live_handle_for_another_inode() {
+    let fs = Arc::new(MemoryFs::empty());
+    for (path, contents) in [("/one", b"one".as_slice()), ("/two", b"two".as_slice())] {
+        let handle = fs.open(path, "w", 0o644).await.unwrap();
+        handle.write(contents, None).await.unwrap();
+        handle.close().await.unwrap();
+    }
+    let mut session = FuseSession::new(fs);
+    let one = number(&request(&mut session, FUSE_LOOKUP, 1, b"one\0").await, 0);
+    let two = number(&request(&mut session, FUSE_LOOKUP, 1, b"two\0").await, 0);
+    let two_fh = number(&request(&mut session, 14, two, &[0; 8]).await, 0);
+
+    assert_eq!(
+        failed_request(&mut session, 15, one, &io_body(two_fh, 0, 3)).await,
+        -9
+    );
+    assert_eq!(
+        request(&mut session, 15, two, &io_body(two_fh, 0, 3)).await,
+        b"two"
+    );
+}
+
+#[tokio::test]
+async fn write_rejects_a_live_handle_for_another_inode_without_mutation() {
+    let fs = Arc::new(MemoryFs::empty());
+    for (path, contents) in [("/one", b"one".as_slice()), ("/two", b"two".as_slice())] {
+        let handle = fs.open(path, "w", 0o644).await.unwrap();
+        handle.write(contents, None).await.unwrap();
+        handle.close().await.unwrap();
+    }
+    let mut session = FuseSession::new(fs.clone());
+    let one = number(&request(&mut session, FUSE_LOOKUP, 1, b"one\0").await, 0);
+    let two = number(&request(&mut session, FUSE_LOOKUP, 1, b"two\0").await, 0);
+    let two_fh = number(
+        &request(&mut session, 14, two, &[2, 0, 0, 0, 0, 0, 0, 0]).await,
+        0,
+    );
+    let mut body = io_body(two_fh, 0, 4);
+    body.extend(b"evil");
+
+    assert_eq!(failed_request(&mut session, 16, one, &body).await, -9);
+    assert_eq!(fs.stat("/one").await.unwrap().size, 3);
+    assert_eq!(fs.stat("/two").await.unwrap().size, 3);
+    assert_eq!(
+        request(&mut session, 15, two, &io_body(two_fh, 0, 3)).await,
+        b"two"
+    );
+}
+
+#[tokio::test]
+async fn file_handle_control_operations_reject_another_inode_and_keep_handle_live() {
+    let fs = Arc::new(MemoryFs::empty());
+    for path in ["/one", "/two"] {
+        let handle = fs.open(path, "w", 0o644).await.unwrap();
+        handle.write(b"data", None).await.unwrap();
+        handle.close().await.unwrap();
+    }
+    let mut session = FuseSession::new(fs);
+    let one = number(&request(&mut session, FUSE_LOOKUP, 1, b"one\0").await, 0);
+    let two = number(&request(&mut session, FUSE_LOOKUP, 1, b"two\0").await, 0);
+    let two_fh = number(
+        &request(&mut session, 14, two, &[2, 0, 0, 0, 0, 0, 0, 0]).await,
+        0,
+    );
+    let mut fsync = vec![0; 16];
+    fsync[..8].copy_from_slice(&two_fh.to_le_bytes());
+    let controls = [
+        (25, release_body(two_fh)),
+        (20, fsync),
+        (FUSE_GETLK, lock_body(two_fh, 10, 0, 3, 0, 123, 0)),
+        (FUSE_SETLK, lock_body(two_fh, 10, 0, 3, 1, 123, 0)),
+        (FUSE_SETLKW, lock_body(two_fh, 10, 0, 3, 1, 123, 0)),
+        (18, release_body(two_fh)),
+    ];
+    let mut observed = Vec::new();
+    for (opcode, body) in controls {
+        let reply = session
+            .handle(&frame(opcode, one, &body))
+            .await
+            .unwrap()
+            .unwrap();
+        observed.push((opcode, errno(&reply)));
+    }
+    assert_eq!(
+        observed,
+        [
+            (25, -9),
+            (20, -9),
+            (FUSE_GETLK, -9),
+            (FUSE_SETLK, -9),
+            (FUSE_SETLKW, -9),
+            (18, -9)
+        ]
+    );
+    assert_eq!(session.open_handles(), 1);
+    assert_eq!(
+        request(&mut session, 15, two, &io_body(two_fh, 0, 4)).await,
+        b"data"
+    );
+    request(&mut session, 18, two, &release_body(two_fh)).await;
+}
+
+#[tokio::test]
+async fn getattr_rejects_unknown_explicit_handle() {
+    let fs = Arc::new(MemoryFs::empty());
+    let handle = fs.open("/one", "w", 0o644).await.unwrap();
+    handle.close().await.unwrap();
+    let mut session = FuseSession::new(fs);
+    let one = number(&request(&mut session, FUSE_LOOKUP, 1, b"one\0").await, 0);
+
+    let reply = session
+        .handle(&frame(FUSE_GETATTR, one, &getattr_with_handle(999)))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(errno(&reply), -9);
+}
+
+#[tokio::test]
+async fn init_rejects_max_request_too_small_for_a_page_write_frame() {
+    let fs = Arc::new(MemoryFs::empty());
+    let mut session = FuseSession::with_options(
+        fs,
+        FuseSessionOptions {
+            max_request: 80 + FUSE_PAGE_SIZE - 1,
+            ..FuseSessionOptions::default()
+        },
+    );
+    let init: Vec<u8> = [7u32, 41, 65536, u32::MAX, u32::MAX]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect();
+
+    let reply = session.handle(&frame(26, 0, &init)).await.unwrap().unwrap();
+    assert_eq!(errno(&reply), -22);
+    assert!(session.negotiated.is_none());
+}
+
+#[tokio::test]
+async fn init_accepts_exact_page_write_frame_capacity() {
+    let fs = Arc::new(MemoryFs::empty());
+    let handle = fs.open("/file", "w", 0o644).await.unwrap();
+    handle.close().await.unwrap();
+    let mut session = FuseSession::with_options(
+        fs,
+        FuseSessionOptions {
+            max_request: 80 + FUSE_PAGE_SIZE,
+            ..FuseSessionOptions::default()
+        },
+    );
+    negotiate(&mut session).await;
+    assert_eq!(
+        session.negotiated.as_ref().unwrap().max_write,
+        FUSE_PAGE_SIZE as u32
+    );
+    let inode = number(&request(&mut session, FUSE_LOOKUP, 1, b"file\0").await, 0);
+    let fh = number(
+        &request(&mut session, 14, inode, &[2, 0, 0, 0, 0, 0, 0, 0]).await,
+        0,
+    );
+    let mut body = io_body(fh, 0, FUSE_PAGE_SIZE as u32);
+    body.extend(vec![b'x'; FUSE_PAGE_SIZE]);
+    assert_eq!(frame(16, inode, &body).len(), 80 + FUSE_PAGE_SIZE);
+    assert_eq!(
+        number(&request(&mut session, 16, inode, &body).await, 0),
+        FUSE_PAGE_SIZE as u64
+    );
 }
 
 struct NoMknodDriver {
@@ -302,6 +537,46 @@ async fn directory_handles_are_counted_and_released() {
     release[..8].copy_from_slice(&handle.to_le_bytes());
     request(&mut session, FUSE_RELEASEDIR, directory, &release).await;
     assert_eq!(session.open_handles(), 0);
+}
+
+#[tokio::test]
+async fn directory_handle_operations_reject_another_inode_and_keep_handle_live() {
+    let fs = Arc::new(MemoryFs::empty());
+    let mut session = FuseSession::new(fs);
+    let one = number(
+        &request(&mut session, FUSE_MKDIR, 1, &mkdir_body(0o755, "one")).await,
+        0,
+    );
+    let two = number(
+        &request(&mut session, FUSE_MKDIR, 1, &mkdir_body(0o755, "two")).await,
+        0,
+    );
+    let two_fh = number(&request(&mut session, FUSE_OPENDIR, two, &[0; 8]).await, 0);
+    let mut fsync = vec![0; 16];
+    fsync[..8].copy_from_slice(&two_fh.to_le_bytes());
+    let controls = [
+        (28, io_body(two_fh, 0, 4096)),
+        (44, io_body(two_fh, 0, 4096)),
+        (30, fsync),
+        (29, release_body(two_fh)),
+    ];
+    let mut observed = Vec::new();
+    for (opcode, body) in controls {
+        let reply = session
+            .handle(&frame(opcode, one, &body))
+            .await
+            .unwrap()
+            .unwrap();
+        observed.push((opcode, errno(&reply)));
+    }
+    assert_eq!(observed, [(28, -9), (44, -9), (30, -9), (29, -9)]);
+    assert_eq!(session.open_handles(), 1);
+    assert!(
+        !request(&mut session, 28, two, &io_body(two_fh, 0, 4096))
+            .await
+            .is_empty()
+    );
+    request(&mut session, 29, two, &release_body(two_fh)).await;
 }
 
 #[tokio::test]

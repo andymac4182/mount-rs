@@ -1093,6 +1093,59 @@ unsafe extern "C" fn x_close(file: *mut ffi::sqlite3_file) -> c_int {
     })
 }
 
+// This checks only numeric extent and nullness. SQLite must still supply a
+// valid, accessible buffer of `amount` bytes before either callback makes a
+// Rust slice from its pointer.
+fn sqlite_io_extent(
+    amount: c_int,
+    offset: ffi::sqlite3_int64,
+    buffer_present: bool,
+) -> Option<(usize, u64)> {
+    if amount < 0 || offset < 0 || (amount > 0 && !buffer_present) {
+        return None;
+    }
+    offset.checked_add(i64::from(amount))?;
+    Some((amount as usize, offset as u64))
+}
+
+#[cfg(kani)]
+mod sqlite_io_proofs {
+    use super::*;
+
+    #[kani::proof]
+    fn sqlite_io_extent_matches_signed_range() {
+        let amount: c_int = kani::any();
+        let offset: ffi::sqlite3_int64 = kani::any();
+        let buffer_present: bool = kani::any();
+        let accepted = sqlite_io_extent(amount, offset, buffer_present);
+        let expected = amount >= 0
+            && offset >= 0
+            && (amount == 0 || buffer_present)
+            && offset.checked_add(i64::from(amount)).is_some();
+
+        assert_eq!(accepted.is_some(), expected);
+        if let Some((length, file_offset)) = accepted {
+            assert_eq!(length, amount as usize);
+            assert_eq!(file_offset, offset as u64);
+            assert!(file_offset + length as u64 <= i64::MAX as u64);
+        }
+
+        kani::cover!(accepted.is_some() && amount == 0 && !buffer_present);
+        kani::cover!(accepted.is_none() && amount > 0 && !buffer_present);
+        kani::cover!(
+            accepted.is_none()
+                && amount > 0
+                && offset >= 0
+                && offset.checked_add(i64::from(amount)).is_none()
+        );
+        kani::cover!(
+            accepted.is_some()
+                && amount > 0
+                && offset.checked_add(i64::from(amount)) == Some(i64::MAX)
+        );
+    }
+}
+
 unsafe extern "C" fn x_read(
     file: *mut ffi::sqlite3_file,
     output: *mut c_void,
@@ -1100,9 +1153,9 @@ unsafe extern "C" fn x_read(
     offset: ffi::sqlite3_int64,
 ) -> c_int {
     catch_code(|| unsafe {
-        if amount < 0 || offset < 0 || (amount > 0 && output.is_null()) {
+        let Some((amount, offset)) = sqlite_io_extent(amount, offset, !output.is_null()) else {
             return ffi::SQLITE_MISUSE;
-        }
+        };
         let Some(file) = file_from_base(file) else {
             return ffi::SQLITE_MISUSE;
         };
@@ -1116,9 +1169,9 @@ unsafe extern "C" fn x_read(
         let buffer = if amount == 0 {
             &mut []
         } else {
-            std::slice::from_raw_parts_mut(output.cast::<u8>(), amount as usize)
+            std::slice::from_raw_parts_mut(output.cast::<u8>(), amount)
         };
-        match file_impl.read_at(buffer, offset as u64) {
+        match file_impl.read_at(buffer, offset) {
             Ok(read) if read == buffer.len() => ffi::SQLITE_OK,
             Ok(read) if read < buffer.len() => {
                 buffer[read..].fill(0);
@@ -1137,9 +1190,9 @@ unsafe extern "C" fn x_write(
     offset: ffi::sqlite3_int64,
 ) -> c_int {
     catch_code(|| unsafe {
-        if amount < 0 || offset < 0 || (amount > 0 && input.is_null()) {
+        let Some((amount, offset)) = sqlite_io_extent(amount, offset, !input.is_null()) else {
             return ffi::SQLITE_MISUSE;
-        }
+        };
         let Some(file) = file_from_base(file) else {
             return ffi::SQLITE_MISUSE;
         };
@@ -1153,9 +1206,9 @@ unsafe extern "C" fn x_write(
         let buffer = if amount == 0 {
             &[]
         } else {
-            std::slice::from_raw_parts(input.cast::<u8>(), amount as usize)
+            std::slice::from_raw_parts(input.cast::<u8>(), amount)
         };
-        match file_impl.write_at(buffer, offset as u64) {
+        match file_impl.write_at(buffer, offset) {
             Ok(()) => ffi::SQLITE_OK,
             Err(error) => map_error(error, ffi::SQLITE_IOERR_WRITE),
         }
@@ -2738,6 +2791,88 @@ fn fill_randomness(output: &mut [u8]) -> Result<(), VfsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct IoCalls {
+        reads: AtomicUsize,
+        writes: AtomicUsize,
+    }
+
+    struct CountingFile(Arc<IoCalls>);
+
+    impl VfsFile for CountingFile {
+        fn read_at(&mut self, output: &mut [u8], _offset: u64) -> Result<usize, VfsError> {
+            self.0.reads.fetch_add(1, Ordering::SeqCst);
+            output.fill(0);
+            Ok(output.len())
+        }
+
+        fn write_at(&mut self, _input: &[u8], _offset: u64) -> Result<(), VfsError> {
+            self.0.writes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn truncate(&mut self, _size: u64) -> Result<(), VfsError> {
+            Ok(())
+        }
+        fn sync(&mut self, _data_only: bool) -> Result<(), VfsError> {
+            Ok(())
+        }
+        fn size(&mut self) -> Result<u64, VfsError> {
+            Ok(0)
+        }
+        fn lock(&mut self, _level: LockLevel) -> Result<(), VfsError> {
+            Ok(())
+        }
+        fn unlock(&mut self, _level: LockLevel) -> Result<(), VfsError> {
+            Ok(())
+        }
+        fn check_reserved_lock(&mut self) -> Result<bool, VfsError> {
+            Ok(false)
+        }
+    }
+
+    #[test]
+    fn io_callbacks_reject_extents_beyond_sqlite_signed_file_range() {
+        let backend = Arc::new(HostDirectory::new(std::env::temp_dir()).unwrap());
+        let lifecycle = LifecycleState::new(backend);
+        let calls = Arc::new(IoCalls::default());
+        let mut file = VfsFileHandle {
+            base: ffi::sqlite3_file {
+                pMethods: &IO_METHODS,
+            },
+            file: Some(Box::new(CountingFile(Arc::clone(&calls)))),
+            level: LockLevel::None,
+            wal_scope: WalScope::Disabled,
+            require_full_sync: true,
+            file_lease: Some(lifecycle.acquire_file().unwrap()),
+        };
+        let file_ptr = &mut file.base;
+        let mut bytes = [0u8; 2];
+
+        assert_eq!(
+            unsafe { x_write(file_ptr, bytes.as_ptr().cast(), 2, i64::MAX - 1) },
+            ffi::SQLITE_MISUSE
+        );
+        assert_eq!(
+            unsafe { x_read(file_ptr, bytes.as_mut_ptr().cast(), 2, i64::MAX - 1) },
+            ffi::SQLITE_MISUSE
+        );
+        assert_eq!(calls.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.writes.load(Ordering::SeqCst), 0);
+
+        assert_eq!(
+            unsafe { x_read(file_ptr, bytes.as_mut_ptr().cast(), 1, i64::MAX - 1) },
+            ffi::SQLITE_OK
+        );
+        assert_eq!(
+            unsafe { x_write(file_ptr, bytes.as_ptr().cast(), 1, i64::MAX - 1) },
+            ffi::SQLITE_OK
+        );
+        assert_eq!(calls.reads.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.writes.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn julian_epoch_is_exact() {

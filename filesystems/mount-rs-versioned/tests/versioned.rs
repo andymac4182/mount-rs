@@ -12,6 +12,7 @@ use mount_rs_core::{ErrorCode, FsError, Result};
 use mount_rs_memory::{ManualClock, MemoryBlockStore, MemoryMetadataStore};
 use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
 use mount_rs_versioned::{VersionedCoordinator, VersionedOptions};
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -85,6 +86,34 @@ struct FailingPutBlockStore {
     inner: MemoryBlockStore,
 }
 
+#[derive(Clone)]
+struct FailingFlushBlockStore {
+    inner: MemoryBlockStore,
+}
+
+#[async_trait]
+impl BlockStore for FailingFlushBlockStore {
+    fn durable(&self) -> bool {
+        self.inner.durable()
+    }
+
+    async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
+        self.inner.put(bytes).await
+    }
+
+    async fn get(&self, id: &BlockId) -> Result<Vec<u8>> {
+        self.inner.get(id).await
+    }
+
+    async fn flush(&self) -> Result<()> {
+        Err(FsError::new(ErrorCode::Eio).with_syscall("flush blocks"))
+    }
+
+    async fn delete(&self, id: &BlockId) -> Result<()> {
+        self.inner.delete(id).await
+    }
+}
+
 #[async_trait]
 impl BlockStore for FailingPutBlockStore {
     fn durable(&self) -> bool {
@@ -147,12 +176,19 @@ impl BlockStore for SlowBlockStore {
 struct BlockingRenewMetadata {
     inner: MemoryMetadataStore,
     block_renew: Arc<AtomicBool>,
+    block_after_renew: Arc<AtomicBool>,
     renew_calls: Arc<AtomicUsize>,
     block_call: Arc<AtomicUsize>,
     entered: Arc<Notify>,
     release: Arc<Notify>,
+    after_renew_entered: Arc<Notify>,
+    after_renew_release: Arc<Notify>,
+    block_close: Arc<AtomicBool>,
+    close_entered: Arc<Notify>,
+    close_release: Arc<Notify>,
     fail_close: Arc<AtomicBool>,
     fail_after_publish: Arc<AtomicBool>,
+    miss_publication_once: Arc<AtomicBool>,
 }
 
 impl BlockingRenewMetadata {
@@ -160,12 +196,19 @@ impl BlockingRenewMetadata {
         Self {
             inner,
             block_renew: Arc::new(AtomicBool::new(false)),
+            block_after_renew: Arc::new(AtomicBool::new(false)),
             renew_calls: Arc::new(AtomicUsize::new(0)),
             block_call: Arc::new(AtomicUsize::new(usize::MAX)),
             entered: Arc::new(Notify::new()),
             release: Arc::new(Notify::new()),
+            after_renew_entered: Arc::new(Notify::new()),
+            after_renew_release: Arc::new(Notify::new()),
+            block_close: Arc::new(AtomicBool::new(false)),
+            close_entered: Arc::new(Notify::new()),
+            close_release: Arc::new(Notify::new()),
             fail_close: Arc::new(AtomicBool::new(false)),
             fail_after_publish: Arc::new(AtomicBool::new(false)),
+            miss_publication_once: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -173,13 +216,30 @@ impl BlockingRenewMetadata {
         self.block_renew.store(true, Ordering::Release);
     }
 
+    fn block_next_after_renew(&self) {
+        self.block_after_renew.store(true, Ordering::Release);
+    }
+
     fn block_next_finish(&self) {
         let next_finish = self.renew_calls.load(Ordering::Acquire).saturating_add(2);
         self.block_call.store(next_finish, Ordering::Release);
     }
 
+    fn block_next_begin(&self) {
+        let next_begin = self.renew_calls.load(Ordering::Acquire).saturating_add(1);
+        self.block_call.store(next_begin, Ordering::Release);
+    }
+
     fn fail_next_close(&self) {
         self.fail_close.store(true, Ordering::Release);
+    }
+
+    fn block_next_close(&self) {
+        self.block_close.store(true, Ordering::Release);
+    }
+
+    fn miss_next_publication_lookup(&self) {
+        self.miss_publication_once.store(true, Ordering::Release);
     }
 
     fn fail_next_publish_after_commit(&self) {
@@ -244,6 +304,9 @@ impl VersionedMetadataStore for BlockingRenewMetadata {
     }
 
     async fn find_publication(&self, operation_id: &PublicationId) -> Result<Option<VersionInfo>> {
+        if self.miss_publication_once.swap(false, Ordering::AcqRel) {
+            return Ok(None);
+        }
         self.inner.find_publication(operation_id).await
     }
 
@@ -275,10 +338,19 @@ impl VersionedMetadataStore for BlockingRenewMetadata {
             self.entered.notify_one();
             self.release.notified().await;
         }
-        self.inner.renew_view_pin(lease, request).await
+        let result = self.inner.renew_view_pin(lease, request).await;
+        if result.is_ok() && self.block_after_renew.swap(false, Ordering::AcqRel) {
+            self.after_renew_entered.notify_one();
+            self.after_renew_release.notified().await;
+        }
+        result
     }
 
     async fn close_view_pin(&self, lease: &ReadLease) -> Result<()> {
+        if self.block_close.swap(false, Ordering::AcqRel) {
+            self.close_entered.notify_one();
+            self.close_release.notified().await;
+        }
         if self.fail_close.swap(false, Ordering::AcqRel) {
             return Err(FsError::new(ErrorCode::Eio).with_syscall("close view"));
         }
@@ -387,7 +459,7 @@ async fn explicit_publication_ids_reconcile_after_head_moves() {
         operation_id: operation_id.clone(),
         namespace: namespace.clone(),
         block_store_id: BlockStoreId::new("explicit-blocks").unwrap(),
-        kind: VersionKind::Snapshot,
+        kind: VersionKind::NamespacePublication,
         restored_from: None,
         forked_from: None,
         durable: false,
@@ -429,6 +501,316 @@ async fn explicit_publication_ids_reconcile_after_head_moves() {
         .await
         .unwrap();
     assert_eq!(restored_replay.id, restored.id);
+}
+
+#[tokio::test]
+async fn snapshot_retry_rejects_a_different_block_store_before_writer_acquisition() {
+    let metadata = MemoryMetadataStore::new();
+    let blocks = MemoryBlockStore::new();
+    seed_current(metadata.clone(), blocks.clone(), "snapshot-retry-writer").await;
+    let original = VersionedCoordinator::new(
+        metadata.clone(),
+        blocks.clone(),
+        options("snapshot-retry-original", "snapshot-retry-blocks-a"),
+    )
+    .unwrap();
+    let operation_id = PublicationId::new("snapshot-retry-id").unwrap();
+    let first = original
+        .snapshot_with_publication_id(operation_id.clone())
+        .await
+        .unwrap();
+    let _later = original.snapshot().await.unwrap();
+
+    let same_store = VersionedCoordinator::new(
+        metadata.clone(),
+        blocks.clone(),
+        options("snapshot-retry-same-store", "snapshot-retry-blocks-a"),
+    )
+    .unwrap();
+    assert_eq!(
+        same_store
+            .snapshot_with_publication_id(operation_id.clone())
+            .await
+            .unwrap()
+            .id,
+        first.id
+    );
+
+    let different_store = VersionedCoordinator::new(
+        metadata.clone(),
+        blocks,
+        options("snapshot-retry-different-store", "snapshot-retry-blocks-b"),
+    )
+    .unwrap();
+    // A held writer makes an accidental lease acquisition return EAGAIN.
+    // EEXIST proves the mismatched retry is rejected by the first lookup.
+    let held_lease = metadata
+        .acquire_writer("snapshot-retry-held-writer", Duration::from_secs(60))
+        .await
+        .unwrap();
+    assert_eq!(
+        different_store
+            .snapshot_with_publication_id(operation_id)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Eexist
+    );
+    metadata.release_writer(&held_lease).await.unwrap();
+}
+
+#[tokio::test]
+async fn snapshot_retry_rejects_an_explicit_namespace_publication_with_the_same_id() {
+    let metadata = MemoryMetadataStore::new();
+    let blocks = MemoryBlockStore::new();
+    let old_namespace =
+        seed_current(metadata.clone(), blocks.clone(), "snapshot-collision-seed").await;
+    let filesystem = ChunkedFs::open(
+        metadata.clone(),
+        blocks.clone(),
+        ChunkedOptions::fixed("snapshot-collision-update", 4096).unwrap(),
+    )
+    .await
+    .unwrap();
+    write_file(&filesystem, "/hello", b"new bytes").await;
+    filesystem.shutdown().await.unwrap();
+    let coordinator = VersionedCoordinator::new(
+        metadata.clone(),
+        blocks.clone(),
+        options("snapshot-collision", "collision-blocks"),
+    )
+    .unwrap();
+    let operation_id = PublicationId::new("same-id-different-cut").unwrap();
+    let revision = metadata.load().await.unwrap().revision;
+    coordinator
+        .publish_namespace_with_publication_id(revision, None, old_namespace, operation_id.clone())
+        .await
+        .unwrap();
+    // Move the live cut away from the caller-supplied publication before
+    // retrying the ID as an ordinary snapshot.
+    let filesystem = ChunkedFs::open(
+        metadata.clone(),
+        blocks,
+        ChunkedOptions::fixed("snapshot-collision-later", 4096).unwrap(),
+    )
+    .await
+    .unwrap();
+    write_file(&filesystem, "/hello", b"later bytes").await;
+    filesystem.shutdown().await.unwrap();
+
+    assert_eq!(
+        coordinator
+            .snapshot_with_publication_id(operation_id)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Eexist
+    );
+}
+
+#[tokio::test]
+async fn raw_publication_cannot_impersonate_a_live_snapshot() {
+    let metadata = MemoryMetadataStore::new();
+    let blocks = MemoryBlockStore::new();
+    let namespace = seed_current(metadata.clone(), blocks.clone(), "raw-snapshot-seed").await;
+    let revision = metadata.load().await.unwrap().revision;
+    let coordinator = VersionedCoordinator::new(
+        metadata,
+        blocks,
+        options("raw-snapshot", "raw-snapshot-blocks"),
+    )
+    .unwrap();
+    let publication = VersionPublication {
+        expected_revision: revision,
+        expected_parent: None,
+        operation_id: PublicationId::new("raw-snapshot-id").unwrap(),
+        namespace,
+        block_store_id: BlockStoreId::new("raw-snapshot-blocks").unwrap(),
+        kind: VersionKind::Snapshot,
+        restored_from: None,
+        forked_from: None,
+        durable: false,
+    };
+    assert_eq!(
+        coordinator
+            .publish_publication(publication)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Einval
+    );
+    assert!(coordinator.history().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn sqlite_namespace_publication_kind_survives_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let metadata_path = directory.path().join("metadata.db");
+    let blocks_path = directory.path().join("blocks.db");
+    let metadata = SqliteMetadataStore::open(&metadata_path).unwrap();
+    let blocks = SqliteBlockStore::open(&blocks_path).unwrap();
+    let namespace = seed_current(metadata.clone(), blocks.clone(), "sqlite-kind-seed").await;
+    let revision = metadata.load().await.unwrap().revision;
+    let coordinator = VersionedCoordinator::new(
+        metadata.clone(),
+        blocks,
+        options("sqlite-kind", "sqlite-kind-blocks"),
+    )
+    .unwrap();
+    let operation_id = PublicationId::new("sqlite-namespace-kind").unwrap();
+    let first = coordinator
+        .publish_namespace_with_publication_id(revision, None, namespace, operation_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(first.kind, VersionKind::NamespacePublication);
+    drop(coordinator);
+    drop(metadata);
+
+    let reopened = SqliteMetadataStore::open(&metadata_path).unwrap();
+    assert_eq!(
+        reopened.load_version(&first.id).await.unwrap().kind,
+        VersionKind::NamespacePublication
+    );
+    assert_eq!(
+        reopened
+            .find_publication(&operation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        first.id
+    );
+}
+
+#[tokio::test]
+async fn sqlite_legacy_snapshot_kind_replays_only_the_identical_explicit_payload() {
+    let directory = tempfile::tempdir().unwrap();
+    let metadata_path = directory.path().join("legacy-metadata.db");
+    let blocks_path = directory.path().join("legacy-blocks.db");
+    let metadata = SqliteMetadataStore::open(&metadata_path).unwrap();
+    let blocks = SqliteBlockStore::open(&blocks_path).unwrap();
+    let namespace = seed_current(metadata.clone(), blocks.clone(), "legacy-kind-seed").await;
+    let revision = metadata.load().await.unwrap().revision;
+    let operation_id = PublicationId::new("legacy-explicit-publication").unwrap();
+    let lease = metadata
+        .acquire_writer("legacy-kind-writer", Duration::from_secs(60))
+        .await
+        .unwrap();
+    // Older publish_namespace_with_publication_id wrote this exact payload
+    // using VersionKind::Snapshot. Persist it through the provider directly.
+    let legacy = metadata
+        .publish_version(
+            &lease,
+            VersionPublication {
+                expected_revision: revision,
+                expected_parent: None,
+                operation_id: operation_id.clone(),
+                namespace: namespace.clone(),
+                block_store_id: BlockStoreId::new("legacy-kind-blocks").unwrap(),
+                kind: VersionKind::Snapshot,
+                restored_from: None,
+                forked_from: None,
+                durable: true,
+            },
+        )
+        .await
+        .unwrap();
+    metadata.release_writer(&lease).await.unwrap();
+    drop(metadata);
+
+    let reopened = SqliteMetadataStore::open(&metadata_path).unwrap();
+    let coordinator = VersionedCoordinator::new(
+        reopened,
+        blocks,
+        options("legacy-kind-replay", "legacy-kind-blocks"),
+    )
+    .unwrap();
+    let exact_retry = VersionPublication {
+        expected_revision: revision,
+        expected_parent: None,
+        operation_id: operation_id.clone(),
+        namespace: namespace.clone(),
+        block_store_id: BlockStoreId::new("legacy-kind-blocks").unwrap(),
+        kind: VersionKind::NamespacePublication,
+        restored_from: None,
+        forked_from: None,
+        durable: true,
+    };
+    assert_eq!(
+        coordinator
+            .reconcile_publication(&exact_retry)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        legacy.id
+    );
+    assert_eq!(
+        coordinator
+            .publish_namespace_with_publication_id(
+                revision,
+                None,
+                namespace.clone(),
+                operation_id.clone(),
+            )
+            .await
+            .unwrap()
+            .id,
+        legacy.id
+    );
+    let mut changed = namespace;
+    changed.nodes.get_mut(&2).unwrap().stats.mtime_ms += 1;
+    assert_eq!(
+        coordinator
+            .publish_namespace_with_publication_id(revision, None, changed, operation_id)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Eexist
+    );
+}
+
+#[tokio::test]
+async fn snapshot_retry_rejects_a_different_block_store_after_writer_acquisition() {
+    let inner = MemoryMetadataStore::new();
+    let metadata = BlockingRenewMetadata::new(inner.clone());
+    let blocks = MemoryBlockStore::new();
+    seed_current(inner, blocks.clone(), "snapshot-retry-lease-writer").await;
+    let original = VersionedCoordinator::new(
+        metadata.clone(),
+        blocks.clone(),
+        options(
+            "snapshot-retry-lease-original",
+            "snapshot-retry-lease-blocks-a",
+        ),
+    )
+    .unwrap();
+    let operation_id = PublicationId::new("snapshot-retry-lease-id").unwrap();
+    original
+        .snapshot_with_publication_id(operation_id.clone())
+        .await
+        .unwrap();
+
+    let different_store = VersionedCoordinator::new(
+        metadata.clone(),
+        FailingFlushBlockStore { inner: blocks },
+        options(
+            "snapshot-retry-lease-different",
+            "snapshot-retry-lease-blocks-b",
+        ),
+    )
+    .unwrap();
+    // Force the first lookup to miss so the second lookup runs under the writer lease.
+    metadata.miss_next_publication_lookup();
+    assert_eq!(
+        different_store
+            .snapshot_with_publication_id(operation_id)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Eexist
+    );
+    assert_eq!(original.history().await.unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -650,6 +1032,39 @@ async fn explicit_view_close_retries_a_failed_pin_release() {
 }
 
 #[tokio::test]
+async fn cancelled_view_close_retains_the_exact_token_for_retry() {
+    let inner = MemoryMetadataStore::new();
+    let metadata = BlockingRenewMetadata::new(inner.clone());
+    let blocks = MemoryBlockStore::new();
+    seed_current(inner, blocks.clone(), "cancel-close-writer").await;
+    let coordinator = VersionedCoordinator::new(
+        metadata.clone(),
+        blocks,
+        options("cancel-close", "cancel-close-blocks"),
+    )
+    .unwrap();
+    let first = coordinator.snapshot().await.unwrap();
+    let _current = coordinator.snapshot().await.unwrap();
+    let view = Arc::new(coordinator.view(&first.id).await.unwrap());
+
+    metadata.block_next_close();
+    let close_task = tokio::spawn({
+        let view = Arc::clone(&view);
+        async move { view.close().await }
+    });
+    metadata.close_entered.notified().await;
+    close_task.abort();
+    assert!(close_task.await.unwrap_err().is_cancelled());
+    assert_eq!(
+        coordinator.delete(&first.id).await.unwrap_err().code,
+        ErrorCode::Ebusy
+    );
+
+    view.close().await.unwrap();
+    coordinator.delete(&first.id).await.unwrap();
+}
+
+#[tokio::test]
 async fn explicit_handle_close_retries_a_failed_pin_release() {
     let inner = MemoryMetadataStore::new();
     let metadata = BlockingRenewMetadata::new(inner.clone());
@@ -669,6 +1084,41 @@ async fn explicit_handle_close_retries_a_failed_pin_release() {
 
     metadata.fail_next_close();
     assert_eq!(handle.close().await.unwrap_err().code, ErrorCode::Eio);
+    handle.close().await.unwrap();
+    coordinator.delete(&first.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_final_handle_close_retains_the_pin_for_retry() {
+    let inner = MemoryMetadataStore::new();
+    let metadata = BlockingRenewMetadata::new(inner.clone());
+    let blocks = MemoryBlockStore::new();
+    seed_current(inner, blocks.clone(), "cancel-handle-close-writer").await;
+    let coordinator = VersionedCoordinator::new(
+        metadata.clone(),
+        blocks,
+        options("cancel-handle-close", "cancel-handle-close-blocks"),
+    )
+    .unwrap();
+    let first = coordinator.snapshot().await.unwrap();
+    let _current = coordinator.snapshot().await.unwrap();
+    let view = coordinator.view(&first.id).await.unwrap();
+    let handle = view.open("/hello", "r", 0).await.unwrap();
+    view.close().await.unwrap();
+
+    metadata.block_next_close();
+    let close_task = tokio::spawn({
+        let handle = handle.clone();
+        async move { handle.close().await }
+    });
+    metadata.close_entered.notified().await;
+    close_task.abort();
+    assert!(close_task.await.unwrap_err().is_cancelled());
+    assert_eq!(
+        coordinator.delete(&first.id).await.unwrap_err().code,
+        ErrorCode::Ebusy
+    );
+
     handle.close().await.unwrap();
     coordinator.delete(&first.id).await.unwrap();
 }
@@ -848,6 +1298,42 @@ async fn cancelled_begin_renewal_balances_operation_and_closes_pin() {
 }
 
 #[tokio::test]
+async fn committed_renewal_with_lost_reply_does_not_claim_pin_was_closed() {
+    let clock = Arc::new(ManualClock::new(1_000));
+    let inner = MemoryMetadataStore::with_clock(clock.clone());
+    let metadata = BlockingRenewMetadata::new(inner.clone());
+    let blocks = MemoryBlockStore::new();
+    seed_current(inner, blocks.clone(), "ambiguous-renewal-writer").await;
+    let coordinator = VersionedCoordinator::new(
+        metadata.clone(),
+        blocks,
+        options("ambiguous-renewal", "ambiguous-renewal-blocks"),
+    )
+    .unwrap();
+    let first = coordinator.snapshot().await.unwrap();
+    let _current = coordinator.snapshot().await.unwrap();
+    let view = Arc::new(coordinator.view(&first.id).await.unwrap());
+
+    assert!(clock.advance_ms(1));
+    metadata.block_next_after_renew();
+    let renew_task = tokio::spawn({
+        let view = Arc::clone(&view);
+        async move { view.renew(Duration::from_secs(60)).await }
+    });
+    metadata.after_renew_entered.notified().await;
+    renew_task.abort();
+    assert!(renew_task.await.unwrap_err().is_cancelled());
+
+    // The provider committed a newer exact token, but the view only knows
+    // the old one. ESTALE is not an acknowledgement that the pin is gone.
+    assert_eq!(view.close().await.unwrap_err().code, ErrorCode::Estale);
+    assert_eq!(
+        coordinator.delete(&first.id).await.unwrap_err().code,
+        ErrorCode::Ebusy
+    );
+}
+
+#[tokio::test]
 async fn cancelled_with_operation_finish_balances_operation_and_closes_pin() {
     let inner = MemoryMetadataStore::new();
     let metadata = BlockingRenewMetadata::new(inner.clone());
@@ -871,6 +1357,97 @@ async fn cancelled_with_operation_finish_balances_operation_and_closes_pin() {
     metadata.entered.notified().await;
     stat_task.abort();
     assert!(stat_task.await.unwrap_err().is_cancelled());
+    view.close().await.unwrap();
+    coordinator.delete(&first.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_final_operation_pin_release_retries_without_losing_token() {
+    let inner = MemoryMetadataStore::new();
+    let metadata = BlockingRenewMetadata::new(inner.clone());
+    let blocks = MemoryBlockStore::new();
+    seed_current(inner, blocks.clone(), "cancel-operation-release-writer").await;
+    let coordinator = VersionedCoordinator::new(
+        metadata.clone(),
+        blocks,
+        options(
+            "cancel-operation-release",
+            "cancel-operation-release-blocks",
+        ),
+    )
+    .unwrap();
+    let first = coordinator.snapshot().await.unwrap();
+    let _current = coordinator.snapshot().await.unwrap();
+    let view = Arc::new(coordinator.view(&first.id).await.unwrap());
+
+    metadata.block_next_begin();
+    let stat_task = tokio::spawn({
+        let view = Arc::clone(&view);
+        async move { view.stat("/hello").await }
+    });
+    metadata.entered.notified().await;
+    // Poll close once while begin holds the state mutex. Tokio's FIFO mutex
+    // queues this close ahead of the operation's later finish lock attempt.
+    let mut close_future = Box::pin(view.close());
+    let first_poll =
+        std::future::poll_fn(|cx| std::task::Poll::Ready(close_future.as_mut().poll(cx))).await;
+    assert!(first_poll.is_pending());
+    metadata.block_next_close();
+    metadata.release.notify_one();
+    close_future.await.unwrap();
+    metadata.close_entered.notified().await;
+    // The first close is still suspended. Make the automatic retry suspend
+    // too, so the provider pin must stay active until it acknowledges release.
+    metadata.block_next_close();
+    stat_task.abort();
+    assert!(stat_task.await.unwrap_err().is_cancelled());
+    metadata.close_entered.notified().await;
+    assert_eq!(
+        coordinator.delete(&first.id).await.unwrap_err().code,
+        ErrorCode::Ebusy
+    );
+    metadata.close_release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match coordinator.delete(&first.id).await {
+                Ok(()) => break,
+                Err(error) if error.is(ErrorCode::Ebusy) => tokio::task::yield_now().await,
+                Err(error) => panic!("unexpected delete error: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("automatic retry must release the exact pin");
+}
+
+#[tokio::test]
+async fn cancelled_open_after_handle_reservation_does_not_leak_a_pin() {
+    let inner = MemoryMetadataStore::new();
+    let metadata = BlockingRenewMetadata::new(inner.clone());
+    let blocks = MemoryBlockStore::new();
+    seed_current(inner, blocks.clone(), "cancel-open-reservation-writer").await;
+    let coordinator = VersionedCoordinator::new(
+        metadata.clone(),
+        blocks,
+        options("cancel-open-reservation", "cancel-open-reservation-blocks"),
+    )
+    .unwrap();
+    let first = coordinator.snapshot().await.unwrap();
+    let _current = coordinator.snapshot().await.unwrap();
+    let view = Arc::new(coordinator.view(&first.id).await.unwrap());
+
+    metadata.block_next_finish();
+    let open_task = tokio::spawn({
+        let view = Arc::clone(&view);
+        async move { view.open("/hello", "r", 0).await }
+    });
+    metadata.entered.notified().await;
+    open_task.abort();
+    match open_task.await {
+        Err(error) => assert!(error.is_cancelled()),
+        Ok(_) => panic!("open task should be cancelled"),
+    }
+
     view.close().await.unwrap();
     coordinator.delete(&first.id).await.unwrap();
 }

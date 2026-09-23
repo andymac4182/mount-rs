@@ -31,6 +31,7 @@ pub const MAGIC: [u8; 4] = *b"MRFS";
 pub const PROTOCOL_VERSION: u16 = 1;
 pub const HEADER_LEN: usize = 20;
 pub const MAX_BODY_LEN: usize = 1024 * 1024;
+pub const MAX_FRAME_LEN: usize = HEADER_LEN + MAX_BODY_LEN;
 
 const DEFAULT_CHUNK_SIZE: usize = 64 * 1024;
 
@@ -293,6 +294,70 @@ pub const STATUS_MALFORMED_REQUEST: i32 = -2;
 pub const STATUS_RESPONSE_TOO_SMALL: i32 = -3;
 pub const STATUS_INTERNAL_ERROR: i32 = -4;
 
+/// Decide whether the C ABI may form a request slice and write its out-parameter.
+/// Pointer presence is only a numeric precheck; the caller still owns validity,
+/// alignment, and aliasing for every non-null region.
+fn abi_dispatch_buffers_valid(
+    request_len: usize,
+    request_present: bool,
+    response_capacity: usize,
+    response_present: bool,
+    response_len_present: bool,
+) -> bool {
+    response_len_present
+        && request_len <= MAX_FRAME_LEN
+        && (request_len == 0 || request_present)
+        && (response_capacity == 0 || response_present)
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::{MAX_FRAME_LEN, abi_dispatch_buffers_valid};
+
+    /// Symbolic lengths span the full `usize` range and pointer-presence
+    /// flags span both states. The proof covers the numeric preconditions
+    /// before either C entrypoint forms a Rust slice. Non-null pointers must
+    /// still denote live, correctly aligned, non-aliasing caller regions.
+    #[kani::proof]
+    fn abi_request_slice_preconditions() {
+        let request_len: usize = kani::any();
+        let request_present: bool = kani::any();
+        let response_capacity: usize = kani::any();
+        let response_present: bool = kani::any();
+        let response_len_present: bool = kani::any();
+
+        let valid = abi_dispatch_buffers_valid(
+            request_len,
+            request_present,
+            response_capacity,
+            response_present,
+            response_len_present,
+        );
+        kani::cover!(
+            valid
+                && request_len == 0
+                && !request_present
+                && response_capacity == 0
+                && !response_present
+        );
+        kani::cover!(valid && request_len == MAX_FRAME_LEN && request_present);
+        kani::cover!(request_len > MAX_FRAME_LEN && !valid);
+        kani::cover!(request_len > 0 && !request_present && !valid);
+        kani::cover!(response_capacity > 0 && !response_present && !valid);
+        kani::cover!(!response_len_present && !valid);
+
+        if valid {
+            assert!(request_len <= MAX_FRAME_LEN);
+            assert!(request_len == 0 || request_present);
+            assert!(response_capacity == 0 || response_present);
+            assert!(response_len_present);
+        }
+        if request_len > MAX_FRAME_LEN {
+            assert!(!valid);
+        }
+    }
+}
+
 /// The largest data payload accepted by a single worker read or write.
 ///
 /// The outer frame is limited to one MiB. Keeping a margin for the JSON
@@ -332,10 +397,13 @@ pub unsafe extern "C" fn mount_rs_fskit_dispatch(
     response_capacity: usize,
     response_len: *mut usize,
 ) -> i32 {
-    if response_len.is_null()
-        || (request_len != 0 && request_ptr.is_null())
-        || (response_capacity != 0 && response_ptr.is_null())
-    {
+    if !abi_dispatch_buffers_valid(
+        request_len,
+        !request_ptr.is_null(),
+        response_capacity,
+        !response_ptr.is_null(),
+        !response_len.is_null(),
+    ) {
         return STATUS_INVALID_ARGUMENT;
     }
 
@@ -1200,9 +1268,13 @@ pub unsafe extern "C" fn mount_rs_fskit_worker_dispatch(
     response_len: *mut usize,
 ) -> i32 {
     if worker.is_null()
-        || response_len.is_null()
-        || (request_len != 0 && request_ptr.is_null())
-        || (response_capacity != 0 && response_ptr.is_null())
+        || !abi_dispatch_buffers_valid(
+            request_len,
+            !request_ptr.is_null(),
+            response_capacity,
+            !response_ptr.is_null(),
+            !response_len.is_null(),
+        )
     {
         return STATUS_INVALID_ARGUMENT;
     }
@@ -1447,6 +1519,71 @@ mod tests {
             )
         };
         assert_eq!(status, STATUS_MALFORMED_REQUEST);
+    }
+
+    #[test]
+    fn c_abi_rejects_oversized_request_before_reading_caller_memory() {
+        let mut request = vec![0_u8; HEADER_LEN + MAX_BODY_LEN + 1];
+        let hello = frame(MessageKind::Hello, 22, &[])
+            .encode()
+            .expect("hello frame");
+        request[..hello.len()].copy_from_slice(&hello);
+        let mut response = [0_u8; HEADER_LEN + 2];
+        let mut response_len = 91;
+
+        let status = unsafe {
+            mount_rs_fskit_dispatch(
+                request.as_ptr(),
+                request.len(),
+                response.as_mut_ptr(),
+                response.len(),
+                &mut response_len,
+            )
+        };
+        assert_eq!(status, STATUS_INVALID_ARGUMENT);
+        assert_eq!(response_len, 91);
+
+        let worker = mount_rs_fskit_create_memory_worker(0);
+        assert!(!worker.is_null());
+        let status = unsafe {
+            mount_rs_fskit_worker_dispatch(
+                worker,
+                request.as_ptr(),
+                request.len(),
+                response.as_mut_ptr(),
+                response.len(),
+                &mut response_len,
+            )
+        };
+        assert_eq!(status, STATUS_INVALID_ARGUMENT);
+        assert_eq!(response_len, 91);
+        unsafe { mount_rs_fskit_destroy_worker(worker) };
+    }
+
+    #[test]
+    fn c_abi_accepts_exact_maximum_frame_length() {
+        let request = frame(MessageKind::Hello, 23, &vec![0_u8; MAX_BODY_LEN])
+            .encode()
+            .expect("maximum body encodes");
+        assert_eq!(request.len(), MAX_FRAME_LEN);
+        let mut response = [0_u8; HEADER_LEN + 2];
+        let mut response_len = 0;
+
+        let status = unsafe {
+            mount_rs_fskit_dispatch(
+                request.as_ptr(),
+                request.len(),
+                response.as_mut_ptr(),
+                response.len(),
+                &mut response_len,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(response_len, response.len());
+        assert_eq!(
+            Frame::decode(&response),
+            Ok(frame(MessageKind::Reply, 23, &[1, 0]))
+        );
     }
 
     #[test]

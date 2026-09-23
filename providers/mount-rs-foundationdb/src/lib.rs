@@ -1682,6 +1682,72 @@ fn lease_matches(current: &LeaseRecord, requested: &LeaseRecord, now_ms: u64) ->
         && current.expires_at_ms > now_ms
 }
 
+/// Decide a fenced writer takeover using only persisted fence/expiry values.
+/// The transaction still owns the read/write conflict boundary around this decision.
+fn plan_writer_acquisition(
+    current: Option<(u64, u64)>,
+    last_fence: Option<u64>,
+    now_ms: u64,
+    ttl_ms: u64,
+) -> Result<(u64, u64)> {
+    if current.is_some_and(|(_, expires_at_ms)| expires_at_ms > now_ms) {
+        return Err(FsError::new(ErrorCode::Eagain).with_syscall("acquire writer"));
+    }
+    let previous_fence = last_fence
+        .unwrap_or(0)
+        .max(current.map_or(0, |(fence, _)| fence));
+    let fence = previous_fence
+        .checked_add(1)
+        .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+    let expires_at_ms = now_ms
+        .checked_add(ttl_ms)
+        .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+    Ok((fence, expires_at_ms))
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// One numeric takeover decision, with arbitrary full-range persisted values.
+    /// It does not model the FoundationDB transaction or lease-oracle trust boundary.
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn writer_takeover_is_fenced_and_checked() {
+        let now_ms: u64 = kani::any();
+        let ttl_ms: u64 = kani::any();
+        let current_fence: u64 = kani::any();
+        let current_expiry: u64 = kani::any();
+        let last_fence: u64 = kani::any();
+        let has_current: bool = kani::any();
+        let has_last: bool = kani::any();
+        kani::assume(now_ms > 0 && ttl_ms > 0);
+        kani::assume(!has_current || (current_fence > 0 && current_expiry > 0));
+        kani::assume(!has_last || last_fence > 0);
+
+        let current = has_current.then_some((current_fence, current_expiry));
+        let last = has_last.then_some(last_fence);
+        let planned = plan_writer_acquisition(current, last, now_ms, ttl_ms);
+        let live = has_current && current_expiry > now_ms;
+        let previous_fence = last.unwrap_or(0).max(current.map_or(0, |value| value.0));
+        let grantable = !live
+            && previous_fence.checked_add(1).is_some()
+            && now_ms.checked_add(ttl_ms).is_some();
+
+        kani::cover!(planned.is_ok());
+        kani::cover!(live);
+        kani::cover!(!live && previous_fence == u64::MAX);
+        kani::cover!(!live && previous_fence < u64::MAX && now_ms.checked_add(ttl_ms).is_none());
+        assert_eq!(planned.is_ok(), grantable);
+        if let Ok((fence, expiry)) = planned {
+            assert!(fence > 0 && fence > last.unwrap_or(0));
+            assert!(!has_current || fence > current_fence);
+            assert_eq!(expiry, now_ms.checked_add(ttl_ms).unwrap());
+            assert!(expiry > now_ms);
+        }
+    }
+}
+
 struct Keyspace {
     prefix: Vec<u8>,
 }
@@ -2123,25 +2189,15 @@ impl MetadataStore for FoundationDbMetadataStore {
                         .now_ms_in_transaction(trx)
                         .await
                         .map_err(TxnError::Fs)?;
-                    if let Some(current) = &current
-                        && current.expires_at_ms > now_ms
-                    {
-                        return Err(TxnError::Fs(
-                            FsError::new(ErrorCode::Eagain).with_syscall("acquire writer"),
-                        ));
-                    }
-                    let previous_fence = last_fence
-                        .unwrap_or(0)
-                        .max(current.as_ref().map_or(0, |lease| lease.fence));
-                    let fence = match previous_fence {
-                        0 => 1,
-                        previous => previous
-                            .checked_add(1)
-                            .ok_or_else(|| TxnError::Fs(FsError::new(ErrorCode::Eoverflow)))?,
-                    };
-                    let expires_at_ms = now_ms
-                        .checked_add(ttl)
-                        .ok_or_else(|| TxnError::Fs(FsError::new(ErrorCode::Eoverflow)))?;
+                    let (fence, expires_at_ms) = plan_writer_acquisition(
+                        current
+                            .as_ref()
+                            .map(|lease| (lease.fence, lease.expires_at_ms)),
+                        last_fence,
+                        now_ms,
+                        ttl,
+                    )
+                    .map_err(TxnError::Fs)?;
                     let record = LeaseRecord {
                         owner: owner.clone(),
                         fence,
@@ -2820,6 +2876,46 @@ mod tests {
         );
         assert_eq!(decode_oracle_time(&encode_oracle_time(123)).unwrap(), 123);
         assert_eq!(decode_last_fence(&encode_last_fence(17)).unwrap(), 17);
+    }
+
+    #[test]
+    fn writer_acquisition_numbers_fence_expired_leases_and_reject_overflow() {
+        assert_eq!(
+            plan_writer_acquisition(None, None, 1_000, 30).unwrap(),
+            (1, 1_030)
+        );
+        assert_eq!(
+            plan_writer_acquisition(Some((7, 1_000)), Some(5), 1_000, 30).unwrap(),
+            (8, 1_030)
+        );
+        assert_eq!(
+            plan_writer_acquisition(Some((3, 999)), Some(9), 1_000, 30).unwrap(),
+            (10, 1_030)
+        );
+        assert_eq!(
+            plan_writer_acquisition(Some((7, 1_001)), Some(5), 1_000, 30)
+                .unwrap_err()
+                .code,
+            ErrorCode::Eagain
+        );
+        assert_eq!(
+            plan_writer_acquisition(Some((u64::MAX, 1_000)), None, 1_000, 30)
+                .unwrap_err()
+                .code,
+            ErrorCode::Eoverflow
+        );
+        assert_eq!(
+            plan_writer_acquisition(None, Some(u64::MAX), 1_000, 30)
+                .unwrap_err()
+                .code,
+            ErrorCode::Eoverflow
+        );
+        assert_eq!(
+            plan_writer_acquisition(None, None, u64::MAX, 1)
+                .unwrap_err()
+                .code,
+            ErrorCode::Eoverflow
+        );
     }
 
     #[test]

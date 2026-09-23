@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+# Keep every proof a separate Kani invocation so a failing harness is named
+# unambiguously and its own assumptions/covers remain visible.
+./scripts/cargo-shared kani -p mount-rs-core --harness single_extent_validation
+./scripts/cargo-shared kani -p mount-rs-core --harness two_extent_validation
+./scripts/cargo-shared kani -p mount-rs-core --harness namespace_path_boundaries
+./scripts/cargo-shared kani -p mount-rs-core --harness decoded_truncation_requires_write
+./scripts/cargo-shared kani -p mount-rs-9p --harness bounded_payload_range_stays_within_wire_input
+./scripts/cargo-shared kani -p mount-rs-fuse --harness reply_frame_len_bounds
+./scripts/cargo-shared kani -p mount-rs-nfs --harness stateid_tokens_are_injective
+./scripts/cargo-shared kani -p mount-rs-nfs --harness anonymous_access_uses_other_mode_bits
+./scripts/cargo-shared kani -p mount-rs-nfs --harness anonymous_access4_uses_other_mode_bits
+./scripts/cargo-shared kani -p mount-rs-nfs --harness var_opaque_frame_bounds
+./scripts/cargo-shared kani -p mount-rs-nfs --harness var_opaque_short_wire_payload
+./scripts/cargo-shared kani -p mount-rs-s3 --harness part_number_marker_boundary_does_not_wrap
+./scripts/cargo-shared kani -p mount-rs-sqlite-vfs --harness sqlite_io_extent_matches_signed_range
+(
+    cd transports/mount-rs-fskit
+    ../../scripts/cargo-shared kani --harness abi_request_slice_preconditions
+)
+./scripts/cargo-shared kani -p mount-rs-foundationdb --features foundationdb --harness writer_takeover_is_fenced_and_checked

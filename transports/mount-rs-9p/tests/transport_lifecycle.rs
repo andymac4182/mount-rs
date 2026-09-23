@@ -3,17 +3,23 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 #[cfg(unix)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mount_rs_9p::{
-    P9_NOFID, P9_NOTAG, P9_RATTACH, P9_RVERSION, P9_TATTACH, P9_TVERSION, P9AttachOptions, P9Error,
-    P9Server, P9ServerOptions, P9Writer, Tattach, Tversion, decode_message, encode_message,
-    read_rattach, read_rversion, write_tattach, write_tversion,
+    FidOpenState, P9_GETATTR_BASIC, P9_NOFID, P9_NOTAG, P9_RATTACH, P9_RFLUSH, P9_RGETATTR,
+    P9_RLERROR, P9_RVERSION, P9_TATTACH, P9_TFLUSH, P9_TGETATTR, P9_TVERSION, P9AttachOptions,
+    P9Error, P9Server, P9ServerOptions, P9Writer, Tattach, Tflush, Tgetattr, Tversion,
+    decode_message, encode_message, read_rattach, read_rlerror, read_rversion, write_tattach,
+    write_tflush, write_tgetattr, write_tversion,
 };
+use mount_rs_core::{ErrorCode, FileHandle, FsError, OpenFlags, Result as FsResult, Stats};
 use mount_rs_memfs::MemoryFs;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::Notify;
 use tokio::time::{sleep, timeout};
@@ -151,6 +157,147 @@ struct BlockingStatDriver {
     release: Arc<Notify>,
 }
 
+struct BlockingCloseHandle {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+struct PartialReplyControl {
+    stage: AtomicU8,
+    prefix_written: Notify,
+    stalled_waker: StdMutex<Option<Waker>>,
+}
+
+impl PartialReplyControl {
+    fn new() -> Self {
+        Self {
+            stage: AtomicU8::new(0),
+            prefix_written: Notify::new(),
+            stalled_waker: StdMutex::new(None),
+        }
+    }
+
+    fn release(&self) {
+        self.stage.store(3, Ordering::Release);
+        if let Some(waker) = self.stalled_waker.lock().unwrap().take() {
+            waker.wake();
+        }
+    }
+}
+
+struct PartialReplyStream {
+    inner: tokio::io::DuplexStream,
+    control: Arc<PartialReplyControl>,
+}
+
+impl AsyncRead for PartialReplyStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for PartialReplyStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        if self.control.stage.load(Ordering::Acquire) == 1 {
+            let written = std::task::ready!(Pin::new(&mut self.inner).poll_write(cx, &buf[..4]));
+            if written.as_ref().is_ok_and(|written| *written > 0) {
+                self.control.stage.store(2, Ordering::Release);
+                self.control.prefix_written.notify_one();
+            }
+            return Poll::Ready(written);
+        }
+        if self.control.stage.load(Ordering::Acquire) == 2 {
+            *self.control.stalled_waker.lock().unwrap() = Some(cx.waker().clone());
+            if self.control.stage.load(Ordering::Acquire) == 2 {
+                return Poll::Pending;
+            }
+        }
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+impl FileHandle for BlockingCloseHandle {
+    fn read<'a, 'b, 'async_trait>(
+        &'a self,
+        _buffer: &'b mut [u8],
+        _position: Option<u64>,
+    ) -> Pin<Box<dyn Future<Output = FsResult<usize>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async { Err(FsError::new(ErrorCode::Enosys)) })
+    }
+
+    fn write<'a, 'b, 'async_trait>(
+        &'a self,
+        _buffer: &'b [u8],
+        _position: Option<u64>,
+    ) -> Pin<Box<dyn Future<Output = FsResult<usize>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async { Err(FsError::new(ErrorCode::Enosys)) })
+    }
+
+    fn stat<'a, 'async_trait>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = FsResult<Stats>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async { Err(FsError::new(ErrorCode::Enosys)) })
+    }
+
+    fn truncate<'a, 'async_trait>(
+        &'a self,
+        _length: u64,
+    ) -> Pin<Box<dyn Future<Output = FsResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async { Err(FsError::new(ErrorCode::Enosys)) })
+    }
+
+    fn close<'a, 'async_trait>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = FsResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            let release = self.release.notified();
+            tokio::pin!(release);
+            release.as_mut().enable();
+            self.entered.notify_one();
+            release.await;
+            Ok(())
+        })
+    }
+}
+
 impl mount_rs_core::FsDriver for BlockingStatDriver {
     fn capabilities(&self) -> mount_rs_core::Capabilities {
         self.inner.capabilities()
@@ -237,6 +384,277 @@ async fn attached_stream_serves_frames_and_closes_without_a_listener() {
         .expect("attached connection closes");
     wait_for_no_connections(&server).await;
     server.close().await.expect("close attach-only server");
+}
+
+#[tokio::test]
+async fn request_before_coalesced_version_is_rejected_in_arrival_order() {
+    let server = Arc::new(P9Server::new(
+        MemoryFs::empty(),
+        P9ServerOptions {
+            max_in_flight: 1,
+            ..Default::default()
+        },
+    ));
+    let (server_stream, mut client_stream) = tokio::io::duplex(64 * 1024);
+    let connection = server
+        .attach(server_stream, P9AttachOptions::default())
+        .expect("attach one-read client");
+    let burst = [&attach_request()[..], &version_request()[..]].concat();
+    client_stream
+        .write_all(&burst)
+        .await
+        .expect("send one burst");
+
+    let first = timeout(Duration::from_secs(2), read_frame(&mut client_stream))
+        .await
+        .expect("first response");
+    assert_eq!(decode_message(&first).unwrap().0.type_, P9_RLERROR);
+    let (_, mut body) = decode_message(&first).unwrap();
+    assert_eq!(
+        read_rlerror(&mut body).unwrap().ecode,
+        ErrorCode::Eproto.errno().unsigned_abs()
+    );
+    let second = timeout(Duration::from_secs(2), read_frame(&mut client_stream))
+        .await
+        .expect("version response");
+    assert_eq!(decode_message(&second).unwrap().0.type_, P9_RVERSION);
+    assert!(connection.session.fid_ids().is_empty());
+
+    connection.close().await.unwrap();
+    server.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn coalesced_renegotiation_discards_earlier_queued_request() {
+    let server = Arc::new(P9Server::new(
+        MemoryFs::empty(),
+        P9ServerOptions {
+            max_in_flight: 1,
+            ..Default::default()
+        },
+    ));
+    let (server_stream, mut client_stream) = tokio::io::duplex(64 * 1024);
+    let connection = server
+        .attach(server_stream, P9AttachOptions::default())
+        .unwrap();
+    client_stream.write_all(&version_request()).await.unwrap();
+    assert_eq!(
+        decode_message(&read_frame(&mut client_stream).await)
+            .unwrap()
+            .0
+            .type_,
+        P9_RVERSION
+    );
+    let burst = [&attach_request()[..], &version_request()[..]].concat();
+    client_stream.write_all(&burst).await.unwrap();
+
+    let response = timeout(Duration::from_secs(2), read_frame(&mut client_stream))
+        .await
+        .expect("renegotiation response");
+    assert_eq!(decode_message(&response).unwrap().0.type_, P9_RVERSION);
+    assert!(connection.session.fid_ids().is_empty());
+    assert_eq!(connection.session.stats().messages.get("Tattach"), None);
+
+    connection.close().await.unwrap();
+    server.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn renegotiation_aborts_stalled_old_request_and_replies_without_release() {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let server = Arc::new(P9Server::new(
+        BlockingStatDriver {
+            inner: MemoryFs::empty(),
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        },
+        P9ServerOptions::default(),
+    ));
+    let (server_stream, mut client_stream) = tokio::io::duplex(64 * 1024);
+    let connection = server
+        .attach(server_stream, P9AttachOptions::default())
+        .unwrap();
+    client_stream.write_all(&version_request()).await.unwrap();
+    assert_eq!(
+        decode_message(&read_frame(&mut client_stream).await)
+            .unwrap()
+            .0
+            .type_,
+        P9_RVERSION
+    );
+    connection.session.fid_create(1, "/").unwrap();
+    let blocked = frame(P9_TGETATTR, 7, |writer| {
+        write_tgetattr(
+            writer,
+            Tgetattr {
+                fid: 1,
+                request_mask: P9_GETATTR_BASIC,
+            },
+        );
+        Ok(())
+    });
+    client_stream.write_all(&blocked).await.unwrap();
+    timeout(Duration::from_secs(1), entered.notified())
+        .await
+        .expect("old request enters blocked driver");
+    client_stream.write_all(&version_request()).await.unwrap();
+
+    let result = timeout(Duration::from_millis(250), read_frame(&mut client_stream)).await;
+    if result.is_err() {
+        connection.close().await.unwrap();
+        release.notify_waiters();
+        server.close().await.unwrap();
+        panic!("Rversion waited for an outstanding old request");
+    }
+    assert_eq!(
+        decode_message(&result.unwrap()).unwrap().0.type_,
+        P9_RVERSION
+    );
+    assert!(connection.session.fid_ids().is_empty());
+    assert_eq!(
+        connection.session.inflight(),
+        0,
+        "version must drain old tags"
+    );
+    let flush = frame(P9_TFLUSH, 8, |writer| {
+        write_tflush(writer, Tflush { oldtag: 7 });
+        Ok(())
+    });
+    client_stream.write_all(&flush).await.unwrap();
+    let response = timeout(Duration::from_millis(250), read_frame(&mut client_stream))
+        .await
+        .expect("flush after version must not wait on an aborted old tag");
+    assert_eq!(decode_message(&response).unwrap().0.type_, P9_RFLUSH);
+    connection.session.fid_create(1, "/").unwrap();
+    client_stream.write_all(&blocked).await.unwrap();
+    release.notify_one();
+    let response = timeout(Duration::from_millis(250), read_frame(&mut client_stream))
+        .await
+        .expect("tag reuse after version completes");
+    assert_eq!(decode_message(&response).unwrap().0.type_, P9_RGETATTR);
+    connection.close().await.unwrap();
+    release.notify_waiters();
+    server.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn close_preempts_renegotiation_stalled_in_handle_close() {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let server = Arc::new(P9Server::new(MemoryFs::empty(), P9ServerOptions::default()));
+    let (server_stream, mut client_stream) = tokio::io::duplex(64 * 1024);
+    let connection = server
+        .attach(server_stream, P9AttachOptions::default())
+        .expect("attach close-stall client");
+    client_stream.write_all(&version_request()).await.unwrap();
+    assert_eq!(
+        decode_message(&read_frame(&mut client_stream).await)
+            .unwrap()
+            .0
+            .type_,
+        P9_RVERSION
+    );
+    connection.session.fid_create(77, "/held").unwrap();
+    connection
+        .session
+        .fid_set_open(
+            77,
+            Some(FidOpenState {
+                flags: OpenFlags::READ_ONLY,
+                wire_flags: 0,
+                handle: Some(Arc::new(BlockingCloseHandle {
+                    entered: Arc::clone(&entered),
+                    release: Arc::clone(&release),
+                })),
+                directory: false,
+                qid: None,
+            }),
+        )
+        .unwrap();
+    client_stream.write_all(&version_request()).await.unwrap();
+    timeout(Duration::from_secs(1), entered.notified())
+        .await
+        .expect("renegotiation reaches handle close");
+
+    let closing = connection.clone();
+    let mut close_task = tokio::spawn(async move { closing.close().await });
+    let close_result = timeout(Duration::from_millis(250), &mut close_task).await;
+    if close_result.is_err() {
+        release.notify_waiters();
+        let _ = timeout(Duration::from_secs(2), close_task).await;
+        panic!("connection close waited for a stalled version reset");
+    }
+    close_result.unwrap().unwrap().unwrap();
+    server.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn renegotiation_finishes_a_started_old_reply_before_rversion() {
+    let control = Arc::new(PartialReplyControl::new());
+    let close_entered = Arc::new(Notify::new());
+    let close_release = Arc::new(Notify::new());
+    let server = Arc::new(P9Server::new(MemoryFs::empty(), P9ServerOptions::default()));
+    let (server_stream, mut client_stream) = tokio::io::duplex(64 * 1024);
+    let connection = server
+        .attach(
+            PartialReplyStream {
+                inner: server_stream,
+                control: Arc::clone(&control),
+            },
+            P9AttachOptions::default(),
+        )
+        .unwrap();
+    handshake(&mut client_stream).await;
+    connection
+        .session
+        .fid_set_open(
+            1,
+            Some(FidOpenState {
+                flags: OpenFlags::READ_ONLY,
+                wire_flags: 0,
+                handle: Some(Arc::new(BlockingCloseHandle {
+                    entered: Arc::clone(&close_entered),
+                    release: Arc::clone(&close_release),
+                })),
+                directory: false,
+                qid: None,
+            }),
+        )
+        .unwrap();
+    control.stage.store(1, Ordering::Release);
+    let getattr = frame(P9_TGETATTR, 7, |writer| {
+        write_tgetattr(
+            writer,
+            Tgetattr {
+                fid: 1,
+                request_mask: P9_GETATTR_BASIC,
+            },
+        );
+        Ok(())
+    });
+    client_stream.write_all(&getattr).await.unwrap();
+    timeout(Duration::from_secs(1), control.prefix_written.notified())
+        .await
+        .expect("the old reply writes a prefix");
+    client_stream.write_all(&version_request()).await.unwrap();
+    timeout(Duration::from_secs(1), close_entered.notified())
+        .await
+        .expect("the version request passes the abort boundary");
+    control.release();
+    close_release.notify_waiters();
+
+    let old_reply = timeout(Duration::from_millis(250), read_frame(&mut client_stream))
+        .await
+        .expect("the started old reply completes before Rversion");
+    assert_eq!(decode_message(&old_reply).unwrap().0.type_, P9_RGETATTR);
+    let version = timeout(Duration::from_millis(250), read_frame(&mut client_stream))
+        .await
+        .expect("Rversion follows the complete old frame");
+    assert_eq!(decode_message(&version).unwrap().0.type_, P9_RVERSION);
+
+    connection.close().await.unwrap();
+    server.close().await.unwrap();
 }
 
 #[tokio::test]

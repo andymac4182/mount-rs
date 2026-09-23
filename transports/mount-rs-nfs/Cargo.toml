@@ -14,3 +14,6 @@ tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-
 async-trait = "0.1"
 mount-rs-memfs = { path = "../../filesystems/mount-rs-memfs" }
 mount-rs-host = { path = "../../filesystems/mount-rs-host" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

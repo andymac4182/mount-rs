@@ -481,30 +481,46 @@ impl P9Session {
             cancelled: AtomicBool::new(false),
             notify: Notify::new(),
         });
-        {
-            let mut inflight = self
-                .inner
-                .inflight
-                .lock()
-                .expect("9P session mutex poisoned");
-            if inflight.contains_key(&header.tag) {
-                let message = format!(
-                    "tag {} is already in flight ({})",
-                    header.tag,
-                    message_name(header.type_)
-                );
-                self.assertion(message);
-                return Some(
-                    self.error_reply(
+        let valid_version =
+            header.type_ == P9_TVERSION && decode_message_as(bytes, read_tversion).is_ok();
+        let replaced =
+            {
+                let mut inflight = self
+                    .inner
+                    .inflight
+                    .lock()
+                    .expect("9P session mutex poisoned");
+                if valid_version {
+                    // A valid Tversion aborts every old call, including one that
+                    // used the version tag. Pending completion is tied to its Arc,
+                    // so a late old handler cannot remove this new entry.
+                    let replaced = inflight.drain().map(|(_, old)| old).collect::<Vec<_>>();
+                    inflight.insert(header.tag, Arc::clone(&pending));
+                    replaced
+                } else if let std::collections::hash_map::Entry::Vacant(slot) =
+                    inflight.entry(header.tag)
+                {
+                    slot.insert(Arc::clone(&pending));
+                    Vec::new()
+                } else {
+                    let message = format!(
+                        "tag {} is already in flight ({})",
+                        header.tag,
+                        message_name(header.type_)
+                    );
+                    self.assertion(message);
+                    return Some(self.error_reply(
                         header,
                         FsError::new(ErrorCode::Eproto).with_message(format!(
                             "EPROTO: tag {} is already in flight",
                             header.tag
                         )),
-                    ),
-                );
-            }
-            inflight.insert(header.tag, Arc::clone(&pending));
+                    ));
+                }
+            };
+        for old in replaced {
+            old.cancelled.store(true, Ordering::Release);
+            old.notify.notify_waiters();
         }
 
         let generation = self.generation();
@@ -514,11 +530,17 @@ impl P9Session {
             *result = Some(reply.clone());
         }
         pending.notify.notify_waiters();
-        self.inner
+        let mut inflight = self
+            .inner
             .inflight
             .lock()
-            .expect("9P session mutex poisoned")
-            .remove(&header.tag);
+            .expect("9P session mutex poisoned");
+        if inflight
+            .get(&header.tag)
+            .is_some_and(|active| Arc::ptr_eq(active, &pending))
+        {
+            inflight.remove(&header.tag);
+        }
         Some(reply)
     }
 
@@ -832,7 +854,7 @@ impl P9Session {
     }
 
     async fn version_exchange(&self, header: P9Header, request: Tversion) -> FsResult<Vec<u8>> {
-        self.reset().await;
+        self.reset(header.tag).await;
         let ceiling = self.inner.options.msize.unwrap_or(DEFAULT_MSIZE);
         let msize = request.msize.min(ceiling);
         let agreed = request.version == P9_VERSION_DOTL && msize >= P9_MIN_MSIZE;
@@ -857,16 +879,33 @@ impl P9Session {
         })
     }
 
-    async fn reset(&self) {
-        let handles = {
+    async fn reset(&self, version_tag: u16) {
+        let (handles, pending) = {
             let mut state = self.inner.state.lock().expect("9P session mutex poisoned");
             state.generation = state.generation.wrapping_add(1);
             let handles = state.fids.open_handles();
             state.fids.clear();
             state.users.clear();
             state.msize = None;
-            handles
+            let mut pending = Vec::new();
+            self.inner
+                .inflight
+                .lock()
+                .expect("9P session mutex poisoned")
+                .retain(|tag, request| {
+                    if *tag == version_tag {
+                        true
+                    } else {
+                        pending.push(Arc::clone(request));
+                        false
+                    }
+                });
+            (handles, pending)
         };
+        for request in pending {
+            request.cancelled.store(true, Ordering::Release);
+            request.notify.notify_waiters();
+        }
         self.inner.locks.release_all();
         for (_, handle) in handles {
             let _ = handle.close().await;
@@ -2129,16 +2168,11 @@ mod tests {
                     notify: Notify::new(),
                 }),
             );
-        let request = encode_message(P9_TVERSION, 7, 256, |writer| {
-            write_tversion(
-                writer,
-                &Tversion {
-                    msize: 8192,
-                    version: P9_VERSION_DOTL.to_owned(),
-                },
-            )
+        let request = encode_message(P9_TCLUNK, 7, 256, |writer| {
+            write_fid_request(writer, FidRequest { fid: 1 });
+            Ok(())
         })
-        .expect("Tversion encodes");
+        .expect("Tclunk encodes");
 
         let response = session
             .handle_call(&request)
@@ -2151,7 +2185,63 @@ mod tests {
         assert_eq!(assertions.lock().expect("assertion sink mutex").len(), 1);
         assert_eq!(
             errors.lock().expect("error sink mutex").as_slice(),
-            &[(ErrorCode::Eproto, Some((P9_TVERSION, 7)),)]
+            &[(ErrorCode::Eproto, Some((P9_TCLUNK, 7)),)]
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn overlapping_calls_with_the_same_tag_reject_the_second_call() {
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let session = P9Session::new(BlockingErrorDriver {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        });
+        let version = encode_message(P9_TVERSION, P9_NOTAG, 32, |writer| {
+            write_tversion(
+                writer,
+                &Tversion {
+                    msize: 8192,
+                    version: P9_VERSION_DOTL.to_owned(),
+                },
+            )
+        })
+        .unwrap();
+        let version_reply = session.handle_call(&version).await.unwrap();
+        assert_eq!(decode_message(&version_reply).unwrap().0.type_, P9_RVERSION);
+        session.fid_create(1, "/").unwrap();
+        let request = encode_message(P9_TGETATTR, 7, 32, |writer| {
+            write_tgetattr(
+                writer,
+                Tgetattr {
+                    fid: 1,
+                    request_mask: P9_GETATTR_BASIC,
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
+        let first_session = session.clone();
+        let first_request = request.clone();
+        let first = tokio::spawn(async move { first_session.handle_call(&first_request).await });
+        timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("first call reaches the blocked driver");
+        assert_eq!(session.inflight(), 1);
+
+        let second_reply = session.handle_call(&request).await.unwrap();
+        assert_eq!(decode_message(&second_reply).unwrap().0.type_, P9_RLERROR);
+        assert_eq!(session.inflight(), 1);
+        assert_eq!(session.stats().assertions, 1);
+        assert!(session.assertions()[0].contains("tag 7"));
+
+        release.notify_waiters();
+        let first_reply = timeout(Duration::from_secs(1), first)
+            .await
+            .expect("first call resumes")
+            .expect("first task joins")
+            .expect("first call receives a reply");
+        assert_eq!(decode_message(&first_reply).unwrap().0.type_, P9_RLERROR);
+        assert_eq!(session.inflight(), 0);
     }
 }

@@ -698,12 +698,21 @@ struct V4State {
     seed: u32,
     next_clientid: u64,
     next_session: u64,
+    next_stateid: u64,
     clients: HashMap<u64, ClientState>,
     owners: HashMap<Vec<u8>, u64>,
     sessions: HashMap<[u8; NFS4_SESSIONID_SIZE], SessionState>,
     opens: HashMap<[u8; NFS4_OTHER_SIZE], OpenState>,
     locks: HashMap<[u8; NFS4_OTHER_SIZE], LockState>,
     exclusive_creates: HashMap<String, ExclusiveV4>,
+}
+
+impl V4State {
+    fn allocate_stateid(&mut self) -> Option<Stateid4> {
+        let token = self.next_stateid;
+        self.next_stateid = token.checked_add(1)?;
+        Some(server_stateid(1, self.seed, token))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1677,7 +1686,7 @@ fn join_path(directory: &str, name: &str) -> String {
 }
 
 fn check_name(name: &str) -> Result<(), FsError> {
-    if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+    if name.is_empty() || name.contains(['/', '\0']) || name == "." || name == ".." {
         return Err(FsError::new(ErrorCode::Einval)
             .with_message(format!("invalid NFSv4 directory entry name {name:?}")));
     }
@@ -1777,6 +1786,7 @@ impl Nfs4Session {
                 seed: options.nfs4.seed,
                 next_clientid: 1,
                 next_session: 1,
+                next_stateid: 1,
                 ..V4State::default()
             })),
             destroyed: Arc::new(Mutex::new(false)),
@@ -4126,6 +4136,15 @@ impl Nfs4Session {
             return V4OpResult::new(OP_LOCK, NFS4ERR_RESOURCE);
         }
 
+        let new_stateid = if target_key.is_some() {
+            None
+        } else {
+            let Some(stateid) = state.allocate_stateid() else {
+                return V4OpResult::new(OP_LOCK, NFS4ERR_RESOURCE);
+            };
+            Some(stateid)
+        };
+
         // A granted range replaces the requesting lock owner's overlapping
         // ranges, including ranges formerly assigned through another OPEN.
         // This is the POSIX-style ownership rule used by the upstream oracle.
@@ -4153,7 +4172,7 @@ impl Nfs4Session {
             coalesce_lock_ranges(&mut target.ranges);
             target.stateid.clone()
         } else {
-            let stateid = lock_stateid(1, clientid, entry.fileid, &owner);
+            let stateid = new_stateid.expect("new lock owner received a stateid");
             state.locks.insert(
                 stateid.other,
                 LockState {
@@ -4446,7 +4465,7 @@ impl Nfs4Session {
             }
             return V4OpResult::new(OP_OPEN, NFS4ERR_SHARE_DENIED);
         }
-        let (stateid, open_limit_reached) = {
+        let (stateid, resource_exhausted) = {
             let mut state = self.state.lock().expect("NFSv4 state lock");
             let existing_key = state
                 .opens
@@ -4486,8 +4505,7 @@ impl Nfs4Session {
                     .count();
                 if open_count >= self.options.nfs4.max_opens_per_file.max(1) {
                     (None, true)
-                } else {
-                    let stateid = open_stateid(1, clientid, entry.fileid, &args.owner);
+                } else if let Some(stateid) = state.allocate_stateid() {
                     if should_create
                         && exclusive
                         && let Some(verifier) = args.create_verf
@@ -4516,10 +4534,12 @@ impl Nfs4Session {
                         }
                     });
                     (Some(stateid), false)
+                } else {
+                    (None, true)
                 }
             }
         };
-        if open_limit_reached {
+        if resource_exhausted {
             self.handles.unpin(entry.id);
             if let Some(handle) = handle.take() {
                 let _ = handle.close().await;
@@ -4950,32 +4970,103 @@ fn compare_stateid_seqid(requested: u32, current: u32) -> SeqidOrdering {
     }
 }
 
-fn lock_stateid(seqid: u32, clientid: u64, fileid: u64, owner: &[u8]) -> Stateid4 {
-    let mut stateid = owner_stateid(seqid, clientid, fileid, owner);
-    stateid.other[0] ^= 0x80;
-    stateid
-}
-
-fn open_stateid(seqid: u32, clientid: u64, fileid: u64, owner: &[u8]) -> Stateid4 {
-    owner_stateid(seqid, clientid, fileid, owner)
-}
-
-fn owner_stateid(seqid: u32, clientid: u64, fileid: u64, owner: &[u8]) -> Stateid4 {
-    let mut stateid = make_stateid(seqid, clientid, fileid);
-    let mut hash = 2_166_136_261_u32;
-    for byte in owner {
-        hash ^= u32::from(*byte);
-        hash = hash.wrapping_mul(16_777_619);
-    }
-    stateid.other[8..].copy_from_slice(&hash.to_be_bytes());
-    stateid
-}
-
-fn make_stateid(seqid: u32, clientid: u64, fileid: u64) -> Stateid4 {
+fn server_stateid(seqid: u32, seed: u32, token: u64) -> Stateid4 {
     let mut other = [0_u8; NFS4_OTHER_SIZE];
-    other[..8].copy_from_slice(&clientid.to_be_bytes());
-    other[8..].copy_from_slice(&(fileid as u32).to_be_bytes());
+    other[..4].copy_from_slice(&seed.to_be_bytes());
+    other[4..].copy_from_slice(&token.to_be_bytes());
     Stateid4 { seqid, other }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Distinct server tokens encode distinct state IDs for any boot seed.
+    #[kani::proof]
+    fn stateid_tokens_are_injective() {
+        let seed: u32 = kani::any();
+        let left: u64 = kani::any();
+        let right: u64 = kani::any();
+        kani::assume(left != right);
+
+        assert_ne!(
+            server_stateid(1, seed, left).other,
+            server_stateid(1, seed, right).other
+        );
+        kani::cover!(left == 10 && right == 11);
+    }
+
+    /// AUTH_NONE has no numeric identity: every ACCESS bit follows the
+    /// mode's other column. An explicit AUTH_SYS UID zero keeps root access.
+    #[kani::proof]
+    fn anonymous_access4_uses_other_mode_bits() {
+        let mode: u32 = kani::any();
+        let uid: u32 = kani::any();
+        let gid: u32 = kani::any();
+        let is_dir: bool = kani::any();
+        kani::assume(mode <= 0o777);
+        let stats = Stats {
+            dev: 0,
+            ino: 1,
+            mode: (if is_dir { S_IFDIR } else { S_IFREG }) | mode,
+            nlink: 1,
+            uid,
+            gid,
+            rdev: 0,
+            size: 0,
+            blksize: 0,
+            blocks: 0,
+            atime_ms: 0,
+            mtime_ms: 0,
+            ctime_ms: 0,
+            birthtime_ms: 0,
+        };
+        let anonymous = RpcCredentials {
+            flavor: AUTH_NONE,
+            uid: None,
+            gid: None,
+            gids: Vec::new(),
+        };
+        let explicit_root = RpcCredentials {
+            flavor: AUTH_SYS,
+            uid: Some(0),
+            gid: Some(0),
+            gids: Vec::new(),
+        };
+        let actual = allowed_access4(&stats, &anonymous);
+        let other = mode & 0o7;
+        let expected = (if other & 0o4 != 0 { ACCESS4_READ } else { 0 })
+            | (if is_dir && other & 0o1 != 0 {
+                ACCESS4_LOOKUP
+            } else {
+                0
+            })
+            | (if other & 0o2 != 0 {
+                ACCESS4_MODIFY | ACCESS4_EXTEND
+            } else {
+                0
+            })
+            | (if is_dir && other & 0o2 != 0 {
+                ACCESS4_DELETE
+            } else {
+                0
+            })
+            | (if !is_dir && other & 0o1 != 0 {
+                ACCESS4_EXECUTE
+            } else {
+                0
+            });
+        assert_eq!(actual, expected);
+
+        let root = allowed_access4(&stats, &explicit_root);
+        assert_eq!(
+            root & (ACCESS4_READ | ACCESS4_MODIFY | ACCESS4_EXTEND),
+            ACCESS4_READ | ACCESS4_MODIFY | ACCESS4_EXTEND
+        );
+        kani::cover!(mode == 0o700 && uid == 0 && is_dir && actual == 0);
+        kani::cover!(mode == 0o700 && uid == 0 && is_dir && root & ACCESS4_DELETE != 0);
+        kani::cover!(mode == 0o007 && uid == 0 && !is_dir && actual & ACCESS4_EXECUTE != 0);
+    }
 }
 
 /// Fold the configured boot seed into the high half of an identity while
@@ -5007,14 +5098,14 @@ fn session_id(seed: u32, write_verifier: &[u8; 8], counter: u64) -> [u8; NFS4_SE
 fn allowed_access4(stats: &Stats, credentials: &RpcCredentials) -> u32 {
     let is_dir = stats.mode & S_IFMT == S_IFDIR;
     let mode = stats.mode & 0o777;
-    let uid = credentials.uid.unwrap_or(0);
-    let gid = credentials.gid.unwrap_or(0);
-    let root = uid == 0;
+    // AUTH_NONE has no effective UID or GID. Missing identity must use the
+    // "other" mode bits, never the root, owner, or group bits of UID/GID 0.
+    let root = credentials.uid == Some(0);
     let bits = if root {
         0b111
-    } else if uid == stats.uid {
+    } else if credentials.uid == Some(stats.uid) {
         (mode >> 6) & 0b111
-    } else if gid == stats.gid || credentials.gids.contains(&stats.gid) {
+    } else if credentials.gid == Some(stats.gid) || credentials.gids.contains(&stats.gid) {
         (mode >> 3) & 0b111
     } else {
         mode & 0b111
@@ -5040,8 +5131,10 @@ fn allowed_access4(stats: &Stats, credentials: &RpcCredentials) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
+    use mount_rs_core::FsDriver;
     use mount_rs_memfs::MemoryFs;
 
     use super::{Nfs4Session, SeqidOrdering, bump_stateid_seq, compare_stateid_seqid, session_id};
@@ -5135,6 +5228,149 @@ mod tests {
             "the half-range boundary is treated as older"
         );
         assert_eq!(compare_stateid_seqid(17, 17), SeqidOrdering::Equal);
+    }
+
+    #[test]
+    fn same_open_owner_has_distinct_stateids_for_different_files() {
+        assert_distinct_stateids_for_files([10, 11]);
+    }
+
+    #[test]
+    fn same_open_owner_high_fileid_bits_do_not_alias() {
+        assert_distinct_stateids_for_files([10, (1_u64 << 32) + 10]);
+    }
+
+    fn assert_distinct_stateids_for_files(fileids: [u64; 2]) {
+        let mut state = super::V4State {
+            seed: 5,
+            next_stateid: 1,
+            ..super::V4State::default()
+        };
+        let mut opens = HashMap::new();
+        for fileid in fileids {
+            let stateid = state.allocate_stateid().expect("available stateid token");
+            assert!(
+                opens
+                    .insert(stateid.other, (7_u64, fileid, b"same-owner"))
+                    .is_none(),
+                "a second OPEN must not replace a different file's state"
+            );
+        }
+        assert_eq!(opens.len(), 2);
+    }
+
+    #[test]
+    fn stateid_allocator_rejects_counter_wrap() {
+        let mut state = super::V4State {
+            seed: 5,
+            next_stateid: u64::MAX,
+            ..super::V4State::default()
+        };
+
+        assert!(state.allocate_stateid().is_none());
+        assert_eq!(state.next_stateid, u64::MAX);
+    }
+
+    #[tokio::test]
+    async fn compound_opens_keep_files_with_equal_low_fileid_bits() {
+        let original = MemoryFs::empty();
+        let first = original.open("/first", "w+", 0o666).await.unwrap();
+        first.close().await.unwrap();
+        assert_eq!(original.stat("/first").await.unwrap().ino, 2);
+
+        let snapshot = String::from_utf8(original.snapshot_bytes().unwrap()).unwrap();
+        let next_ino = (1_u64 << 32) + 2;
+        let changed = snapshot.replacen("\"next_ino\":3", &format!("\"next_ino\":{next_ino}"), 1);
+        assert_ne!(changed, snapshot, "the snapshot must advance next_ino");
+        let backing = MemoryFs::from_snapshot(changed.as_bytes()).unwrap();
+        let second = backing.open("/second", "w+", 0o666).await.unwrap();
+        second.close().await.unwrap();
+        assert_eq!(backing.stat("/second").await.unwrap().ino, next_ino);
+
+        let session = Nfs4Session::new(backing, NfsSessionOptions::default());
+        let id = [9_u8; super::NFS4_SESSIONID_SIZE];
+        {
+            let mut state = session.state.lock().unwrap();
+            state.clients.insert(
+                7,
+                super::ClientState {
+                    owner: b"client".to_vec(),
+                    verifier: vec![0; 8],
+                    id: 7,
+                    confirmed: true,
+                    sequence: 1,
+                    renewed: session.now(),
+                    reclaim_complete: true,
+                    create_session_replay: None,
+                },
+            );
+            state.sessions.insert(
+                id,
+                super::SessionState {
+                    id,
+                    clientid: 7,
+                    next_sequence: vec![1],
+                    in_flight: vec![None],
+                    cached: vec![None],
+                    max_operations: 3,
+                    max_cached: 1024,
+                },
+            );
+        }
+        let credentials = crate::rpc::RpcCredentials {
+            flavor: crate::rpc::AUTH_NONE,
+            uid: None,
+            gid: None,
+            gids: Vec::new(),
+        };
+        for (sequence, name) in [(1, "first"), (2, "second")] {
+            let mut writer = crate::XdrWriter::new();
+            writer.string("high-fileid-open");
+            writer.u32(super::NFS4_MINOR_VERSION_1);
+            writer.u32(3);
+            writer.u32(super::OP_SEQUENCE);
+            writer.fixed_opaque(&id, super::NFS4_SESSIONID_SIZE);
+            writer.u32(sequence);
+            writer.u32(0);
+            writer.u32(0);
+            writer.bool(true);
+            writer.u32(super::OP_PUTROOTFH);
+            writer.u32(super::OP_OPEN);
+            writer.u32(0);
+            writer.u32(super::OPEN4_SHARE_ACCESS_READ);
+            writer.u32(0);
+            writer.u64(7);
+            writer.var_opaque(b"same-owner");
+            writer.u32(super::OPEN4_NOCREATE);
+            writer.u32(super::CLAIM_NULL);
+            writer.string(name);
+            let body = writer.into_bytes();
+            let mut request = crate::XdrReader::new(&body);
+            let reply = session
+                .dispatch_compound(&mut request, &credentials, None, sequence)
+                .await
+                .expect("dispatch OPEN COMPOUND");
+            assert_eq!(
+                crate::XdrReader::new(&reply)
+                    .u32("compound status")
+                    .unwrap(),
+                super::NFS4_OK,
+                "OPEN {name} must succeed"
+            );
+        }
+        let state = session.state.lock().unwrap();
+        assert_eq!(state.opens.len(), 2, "both OPEN states must remain live");
+        assert!(state.opens.values().any(|open| open.file_id == 2));
+        assert!(state.opens.values().any(|open| open.file_id == next_ino));
+    }
+
+    #[test]
+    fn directory_entry_names_reject_embedded_nul() {
+        assert_eq!(
+            super::check_name("bad\0name").map_err(|error| super::error_status(&error)),
+            Err(super::NFS4ERR_INVAL)
+        );
+        assert!(super::check_name("valid-name").is_ok());
     }
 
     #[tokio::test]

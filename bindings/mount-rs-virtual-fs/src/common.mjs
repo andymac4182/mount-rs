@@ -128,6 +128,9 @@ export class PathIndex {
         replacements.push([current, posix.join(newPath, posix.relative(oldPath, current))]);
       }
     }
+    for (const current of this.#paths) {
+      if (hasExitedPath(current, newPath)) this.#paths.delete(current);
+    }
     for (const [oldPathValue] of replacements) this.#paths.delete(oldPathValue);
     this.add(newPath);
     for (const [, replacement] of replacements) this.#paths.add(normalizeVirtualPath(replacement));
@@ -335,13 +338,14 @@ export class MountRsFilesystemBase {
     }
   }
 
-  async _writeBytes(pathValue, bytes, { createParents = true, overwrite = true } = {}) {
+  async _writeBytes(pathValue, bytes, { createParents = true, overwrite = true, onCreate, createMode = 0o666 } = {}) {
     const filePath = this._path(pathValue);
     if (createParents) await this.filesystem.mkdir(virtualParent(filePath), { recursive: true });
     if (!overwrite) {
       const flags = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL;
-      const handle = await this.filesystem.open(filePath, flags, 0o666);
+      const handle = await this.filesystem.open(filePath, flags, createMode);
       try {
+        await onCreate?.(handle);
         await this._writeHandleFully(handle, bytes, 0, filePath);
       } finally {
         await handle.close();
@@ -365,7 +369,7 @@ export class MountRsFilesystemBase {
     this.pathIndex.add(filePath);
   }
 
-  async _remove(pathValue, { recursive = false, force = false } = {}) {
+  async _remove(pathValue, { recursive = false, force = false, expectedIdentity } = {}) {
     const filePath = this._path(pathValue);
     let stats;
     try {
@@ -373,6 +377,18 @@ export class MountRsFilesystemBase {
     } catch (error) {
       if (force && isErrorCode(error, "ENOENT")) return;
       throw error;
+    }
+
+    if (expectedIdentity &&
+        (!sameStatIdentity(expectedIdentity, stats) ||
+          expectedIdentity.isFile() !== stats.isFile() ||
+          expectedIdentity.isDirectory() !== stats.isDirectory() ||
+          expectedIdentity.isSymbolicLink() !== stats.isSymbolicLink())) {
+      throw fsError("EAGAIN", {
+        syscall: "unlink",
+        path: filePath,
+        message: "entry changed before removal",
+      });
     }
 
     if (stats.isDirectory()) {
@@ -391,7 +407,7 @@ export class MountRsFilesystemBase {
     this.pathIndex.remove(filePath);
   }
 
-  async _copy(sourceValue, destinationValue, { recursive = false, overwrite = true } = {}) {
+  async _copy(sourceValue, destinationValue, { recursive = false, overwrite = true, onCreate } = {}) {
     const source = this._path(sourceValue);
     const destination = this._path(destinationValue);
     const sourceStats = await this.filesystem.lstat(source);
@@ -446,6 +462,7 @@ export class MountRsFilesystemBase {
       }
       await this.filesystem.mkdir(virtualParent(destination), { recursive: true });
       await this.filesystem.symlink(symlinkTarget, destination);
+      await onCreate?.();
       this.pathIndex.add(destination);
       return;
     }
@@ -472,11 +489,14 @@ export class MountRsFilesystemBase {
         if (!isErrorCode(error, "ENOENT")) throw error;
       }
     }
+    const sourceMode = sourceStats.mode & 0o7777;
     await this._writeBytes(destination, await this._readBytes(source), {
       createParents: true,
       overwrite,
+      onCreate,
+      createMode: sourceMode,
     });
-    await this.filesystem.chmod(destination, sourceStats.mode & 0o7777);
+    if (overwrite) await this.filesystem.chmod(destination, sourceMode);
   }
 
   async readFileBuffer(pathValue) {
@@ -575,6 +595,13 @@ export class MountRsFilesystemBase {
       this._assertWritable("mv", destination);
       await this.filesystem.rename(this._path(source), this._path(destination));
       this.pathIndex.rename(source, destination);
+      try {
+        await this._lstat(source);
+        this.pathIndex.add(source);
+      } catch (error) {
+        if (!isErrorCode(error, "ENOENT")) this.pathIndex.add(source);
+        // Renaming two hardlink names to the same inode can leave both names.
+      }
     });
   }
 

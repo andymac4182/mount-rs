@@ -56,7 +56,10 @@ const BLOCK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_blocks (
 
 const NOW_SELECT: &str = "SELECT CAST(EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS BIGINT)";
 const VERSION_SCHEMA_NAME: &str = "mount-rs-versioning";
-const VERSION_SCHEMA_VERSION: i64 = 1;
+// Version 2 marks stores that can contain the namespace-publication kind.
+// Keep version 1 until the first such record commits so older readers can reopen.
+const VERSION_SCHEMA_BASE_VERSION: i64 = 1;
+const VERSION_SCHEMA_VERSION: i64 = 2;
 const VERSION_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS mount_rs_schema_versions (
  schema_name TEXT PRIMARY KEY NOT NULL,
@@ -484,12 +487,9 @@ async fn initialize_version_schema(database: &Database) -> Result<()> {
                 "PGlite version head belongs to another provider volume",
             ));
         }
-        let exists = tx
+        let row = tx
             .query_typed_opt(
-                "SELECT EXISTS(
-                     SELECT 1 FROM mount_rs_versions
-                     WHERE volume_key=$1 AND id=$2 AND volume_id=$3
-                 )",
+                &format!("{VERSION_SELECT} WHERE volume_key=$1 AND id=$2 AND volume_id=$3"),
                 &[
                     (&database.volume_key, Type::TEXT),
                     (&head_id, Type::TEXT),
@@ -498,22 +498,34 @@ async fn initialize_version_schema(database: &Database) -> Result<()> {
             )
             .await
             .map_err(postgres_error)?
-            .ok_or_else(|| incompatible_schema("PGlite schema query returned no row"))?
-            .get::<_, bool>(0);
-        if !exists {
+            .ok_or_else(|| {
+                incompatible_schema("PGlite version head references a missing version")
+            })?;
+        let record = decode_version_row(&row)
+            .and_then(|record| {
+                record.validate_for_volume(&volume_id)?;
+                Ok(record)
+            })
+            .map_err(|_| incompatible_schema("PGlite version head record is invalid"))?;
+        if record.id != head {
             return Err(incompatible_schema(
-                "PGlite version head references a missing version",
+                "PGlite version head differs from its record identity",
             ));
         }
     }
 
+    let schema_version = if stored_version == Some(VERSION_SCHEMA_VERSION) {
+        VERSION_SCHEMA_VERSION
+    } else {
+        VERSION_SCHEMA_BASE_VERSION
+    };
     tx.execute_typed(
         "INSERT INTO mount_rs_schema_versions(schema_name, schema_version)
          VALUES ($1, $2)
          ON CONFLICT(schema_name) DO UPDATE SET schema_version=excluded.schema_version",
         &[
             (&VERSION_SCHEMA_NAME, Type::TEXT),
-            (&VERSION_SCHEMA_VERSION, Type::INT8),
+            (&schema_version, Type::INT8),
         ],
     )
     .await
@@ -566,6 +578,7 @@ fn version_kind_name(kind: &VersionKind) -> &'static str {
     match kind {
         VersionKind::Initial => "initial",
         VersionKind::Snapshot => "snapshot",
+        VersionKind::NamespacePublication => "namespace-publication",
         VersionKind::Restore => "restore",
         VersionKind::Fork => "fork",
     }
@@ -575,6 +588,7 @@ fn parse_version_kind(value: &str) -> Result<VersionKind> {
     match value {
         "initial" => Ok(VersionKind::Initial),
         "snapshot" => Ok(VersionKind::Snapshot),
+        "namespace-publication" => Ok(VersionKind::NamespacePublication),
         "restore" => Ok(VersionKind::Restore),
         "fork" => Ok(VersionKind::Fork),
         _ => Err(FsError::new(ErrorCode::Enotsup)
@@ -584,10 +598,14 @@ fn parse_version_kind(value: &str) -> Result<VersionKind> {
 }
 
 fn decode_version_row(row: &tokio_postgres::Row) -> Result<VersionInfo> {
-    let id_text = row.get::<_, String>(0);
-    let volume_text = row.get::<_, String>(2);
+    decode_version_row_at(row, 0)
+}
+
+fn decode_version_row_at(row: &tokio_postgres::Row, base: usize) -> Result<VersionInfo> {
+    let id_text = row.get::<_, String>(base);
+    let volume_text = row.get::<_, String>(base + 2);
     let volume = VolumeId::new(volume_text)?;
-    let sequence = nonnegative(row.get::<_, i64>(3), "version sequence")?;
+    let sequence = nonnegative(row.get::<_, i64>(base + 3), "version sequence")?;
     let id = VersionId::new(volume.clone(), sequence)?;
     if id.encode() != id_text {
         return Err(FsError::new(ErrorCode::Eio)
@@ -595,35 +613,60 @@ fn decode_version_row(row: &tokio_postgres::Row) -> Result<VersionInfo> {
             .with_message("stored PGlite version id does not match its volume and sequence"));
     }
     let parent = row
-        .get::<_, Option<String>>(4)
+        .get::<_, Option<String>>(base + 4)
         .as_deref()
         .map(VersionId::decode)
         .transpose()?;
     let restored_from = row
-        .get::<_, Option<String>>(5)
+        .get::<_, Option<String>>(base + 5)
         .as_deref()
         .map(VersionId::decode)
         .transpose()?;
     let forked_from = row
-        .get::<_, Option<String>>(6)
+        .get::<_, Option<String>>(base + 6)
         .as_deref()
         .map(VersionId::decode)
         .transpose()?;
-    let namespace = serde_json::from_str(&row.get::<_, String>(7)).map_err(backend_error)?;
-    let block_store_id = mount_rs_core::versioning::BlockStoreId::new(row.get::<_, String>(8))?;
+    let namespace = serde_json::from_str(&row.get::<_, String>(base + 7)).map_err(backend_error)?;
+    let block_store_id =
+        mount_rs_core::versioning::BlockStoreId::new(row.get::<_, String>(base + 8))?;
     let info = VersionInfo {
         id,
         parent,
         restored_from,
         forked_from,
-        kind: parse_version_kind(&row.get::<_, String>(9))?,
+        kind: parse_version_kind(&row.get::<_, String>(base + 9))?,
         namespace,
         block_store_id,
-        created_at_ms: row.get::<_, i64>(10),
-        durable: row.get::<_, bool>(11),
+        created_at_ms: row.get::<_, i64>(base + 10),
+        durable: row.get::<_, bool>(base + 11),
     };
     info.validate()?;
     Ok(info)
+}
+
+fn check_stored_version_row_at(
+    row: &tokio_postgres::Row,
+    base: usize,
+    expected: &VersionId,
+    syscall: &'static str,
+) -> Result<()> {
+    let record = decode_version_row_at(row, base)
+        .and_then(|record| {
+            record.validate_for_volume(&expected.volume)?;
+            Ok(record)
+        })
+        .map_err(|_| {
+            FsError::new(ErrorCode::Eio)
+                .with_syscall(syscall)
+                .with_message("stored PGlite version record is unreadable")
+        })?;
+    if &record.id != expected {
+        return Err(FsError::new(ErrorCode::Eio)
+            .with_syscall(syscall)
+            .with_message("stored PGlite version identity differs from its record"));
+    }
+    Ok(())
 }
 
 const VERSION_SELECT: &str = "SELECT id, volume_key, volume_id, sequence,
@@ -1006,28 +1049,31 @@ impl VersionedMetadataStore for PgliteMetadataStore {
 
     async fn version_head(&self) -> Result<Option<VersionHead>> {
         let client = self.0.lock_client().await?;
-        let metadata = client
+        // One statement observes one committed snapshot; successive SELECTs
+        // could mix a pre-publication revision with a post-publication head.
+        let row = client
             .as_ref()
             .ok_or_else(connection_closed)?
             .query_typed_opt(
-                "SELECT revision FROM mount_rs_metadata WHERE volume_key=$1",
-                &[(&self.0.volume_key, Type::TEXT)],
+                "SELECT m.revision, s.head_id, s.volume_key IS NOT NULL,
+                        v.id, v.volume_key, v.volume_id, v.sequence,
+                        v.parent_id, v.restored_from, v.forked_from, v.namespace,
+                        v.block_store_id, v.kind, v.created_at_ms, v.durable
+                 FROM mount_rs_metadata m
+                 LEFT JOIN mount_rs_version_state s ON s.volume_key=m.volume_key
+                 LEFT JOIN mount_rs_versions v ON v.volume_key=m.volume_key
+                      AND v.id=s.head_id AND v.volume_id=$2
+                 WHERE m.volume_key=$1",
+                &[(&self.0.volume_key, Type::TEXT), (&self.1.0, Type::TEXT)],
             )
             .await
             .map_err(postgres_error)?
             .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
-        let revision = nonnegative(metadata.get::<_, i64>(0), "metadata revision")?;
-        let state = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .query_typed_opt(
-                "SELECT head_id FROM mount_rs_version_state WHERE volume_key=$1",
-                &[(&self.0.volume_key, Type::TEXT)],
-            )
-            .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| incompatible_schema("PGlite version state is missing"))?;
-        let Some(head_id) = state.get::<_, Option<String>>(0) else {
+        let revision = nonnegative(row.get::<_, i64>(0), "metadata revision")?;
+        if !row.get::<_, bool>(2) {
+            return Err(incompatible_schema("PGlite version state is missing"));
+        }
+        let Some(head_id) = row.get::<_, Option<String>>(1) else {
             return Ok(None);
         };
         let version = VersionId::decode(&head_id).map_err(|_| {
@@ -1040,29 +1086,12 @@ impl VersionedMetadataStore for PgliteMetadataStore {
                 .with_syscall("version head")
                 .with_message("stored PGlite version head belongs to another volume"));
         }
-        let exists = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .query_typed_opt(
-                "SELECT EXISTS(
-                     SELECT 1 FROM mount_rs_versions
-                     WHERE volume_key=$1 AND id=$2 AND volume_id=$3
-                 )",
-                &[
-                    (&self.0.volume_key, Type::TEXT),
-                    (&head_id, Type::TEXT),
-                    (&self.1.0, Type::TEXT),
-                ],
-            )
-            .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| incompatible_schema("PGlite version query returned no row"))?
-            .get::<_, bool>(0);
-        if !exists {
+        if row.get::<_, Option<String>>(3).is_none() {
             return Err(FsError::new(ErrorCode::Eio)
                 .with_syscall("version head")
                 .with_message("stored PGlite version head references a missing version"));
         }
+        check_stored_version_row_at(&row, 3, &version, "version head")?;
         Ok(Some(VersionHead { version, revision }))
     }
 
@@ -1217,12 +1246,14 @@ impl VersionedMetadataStore for PgliteMetadataStore {
                 .with_message("version head changed concurrently"));
         }
         if let Some(head_id) = head_id.as_deref() {
-            let exists = tx
+            let head = VersionId::decode(head_id).map_err(|_| {
+                FsError::new(ErrorCode::Eio)
+                    .with_syscall("publish version")
+                    .with_message("stored PGlite version head is malformed")
+            })?;
+            let row = tx
                 .query_typed_opt(
-                    "SELECT EXISTS(
-                         SELECT 1 FROM mount_rs_versions
-                         WHERE volume_key=$1 AND id=$2 AND volume_id=$3
-                     )",
+                    &format!("{VERSION_SELECT} WHERE volume_key=$1 AND id=$2 AND volume_id=$3"),
                     &[
                         (&self.0.volume_key, Type::TEXT),
                         (&head_id, Type::TEXT),
@@ -1231,13 +1262,12 @@ impl VersionedMetadataStore for PgliteMetadataStore {
                 )
                 .await
                 .map_err(postgres_error)?
-                .ok_or_else(|| incompatible_schema("PGlite version query returned no row"))?
-                .get::<_, bool>(0);
-            if !exists {
-                return Err(FsError::new(ErrorCode::Eio)
-                    .with_syscall("publish version")
-                    .with_message("stored PGlite version head references a missing version"));
-            }
+                .ok_or_else(|| {
+                    FsError::new(ErrorCode::Eio)
+                        .with_syscall("publish version")
+                        .with_message("stored PGlite version head references a missing version")
+                })?;
+            check_stored_version_row_at(&row, 0, &head, "publish version")?;
         }
 
         let state_row = tx
@@ -1290,6 +1320,23 @@ impl VersionedMetadataStore for PgliteMetadataStore {
         )
         .await
         .map_err(postgres_error)?;
+        if publication.kind == VersionKind::NamespacePublication {
+            let changed = tx
+                .execute_typed(
+                    "UPDATE mount_rs_schema_versions SET schema_version=$2
+                     WHERE schema_name=$1 AND schema_version BETWEEN $3 AND $2",
+                    &[
+                        (&VERSION_SCHEMA_NAME, Type::TEXT),
+                        (&VERSION_SCHEMA_VERSION, Type::INT8),
+                        (&VERSION_SCHEMA_BASE_VERSION, Type::INT8),
+                    ],
+                )
+                .await
+                .map_err(postgres_error)?;
+            if changed != 1 {
+                return Err(incompatible_schema("version kind schema gate is missing"));
+            }
+        }
         let next_revision = expected_revision
             .checked_add(1)
             .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
@@ -1362,12 +1409,18 @@ impl VersionedMetadataStore for PgliteMetadataStore {
             .transaction()
             .await
             .map_err(postgres_error)?;
-        let exists = tx
+        // Serialize with deletion before observing version existence, then
+        // retain the volume lock until the new pin commits.
+        tx.query_typed_opt(
+            "SELECT 1 FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE",
+            &[(&self.0.volume_key, Type::TEXT)],
+        )
+        .await
+        .map_err(postgres_error)?
+        .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
+        let row = tx
             .query_typed_opt(
-                "SELECT EXISTS(
-                     SELECT 1 FROM mount_rs_versions
-                     WHERE volume_key=$1 AND id=$2 AND volume_id=$3
-                 )",
+                &format!("{VERSION_SELECT} WHERE volume_key=$1 AND id=$2 AND volume_id=$3"),
                 &[
                     (&self.0.volume_key, Type::TEXT),
                     (&encoded, Type::TEXT),
@@ -1376,11 +1429,8 @@ impl VersionedMetadataStore for PgliteMetadataStore {
             )
             .await
             .map_err(postgres_error)?
-            .ok_or_else(|| incompatible_schema("PGlite version query returned no row"))?
-            .get::<_, bool>(0);
-        if !exists {
-            return Err(FsError::new(ErrorCode::Enoent).with_syscall("open version view"));
-        }
+            .ok_or_else(|| FsError::new(ErrorCode::Enoent).with_syscall("open version view"))?;
+        check_stored_version_row_at(&row, 0, id, "open version view")?;
         let state = tx
             .query_typed_opt(
                 "SELECT next_read_fence FROM mount_rs_version_state
@@ -1442,6 +1492,9 @@ impl VersionedMetadataStore for PgliteMetadataStore {
         lease: &ReadLease,
         request: ReadLeaseRequest,
     ) -> Result<ReadLease> {
+        if lease.volume != self.1 || lease.version.volume != self.1 {
+            return Err(FsError::new(ErrorCode::Estale).with_syscall("renew view"));
+        }
         let ttl_ms =
             i64::try_from(request.validate()?).map_err(|_| FsError::new(ErrorCode::Eoverflow))?;
         let fence = i64::try_from(lease.fence).map_err(|_| FsError::new(ErrorCode::Estale))?;
@@ -1454,6 +1507,15 @@ impl VersionedMetadataStore for PgliteMetadataStore {
             .transaction()
             .await
             .map_err(postgres_error)?;
+        // An expired pin can be deleted while it is being renewed unless both
+        // operations lock this same volume row before checking the pin.
+        tx.query_typed_opt(
+            "SELECT 1 FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE",
+            &[(&self.0.volume_key, Type::TEXT)],
+        )
+        .await
+        .map_err(postgres_error)?
+        .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
         let current = tx
             .query_typed_opt(
                 "SELECT volume_id, version_id, owner, fence, expires
@@ -1537,7 +1599,7 @@ impl VersionedMetadataStore for PgliteMetadataStore {
                 &[
                     (&self.0.volume_key, Type::TEXT),
                     (&lease.view_id, Type::TEXT),
-                    (&self.1.0, Type::TEXT),
+                    (&lease.volume.0, Type::TEXT),
                     (&encoded, Type::TEXT),
                     (&lease.owner, Type::TEXT),
                     (&fence, Type::INT8),
@@ -1921,8 +1983,467 @@ mod tests {
     use mount_rs_core::FsDriver;
     use mount_rs_core::chunking::{Chunker, FixedSizeChunker};
     use mount_rs_core::storage::{BlockExtent, FileLayout, NodeData, NodeMetadata};
+    use mount_rs_core::versioning::BlockStoreId;
     use mount_rs_memfs::MemoryFs;
     use std::collections::BTreeMap;
+
+    mod wire_pause {
+        use std::io::{self, Read, Write};
+        use std::net::{Shutdown, TcpListener, TcpStream};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, mpsc};
+        use std::thread::{self, JoinHandle};
+        use std::time::Duration;
+
+        pub(super) struct QueryPause {
+            pub(super) connection_string: String,
+            armed: Arc<AtomicBool>,
+            capture_first: Arc<AtomicBool>,
+            first_query: Option<mpsc::Receiver<String>>,
+            paused: Option<mpsc::Receiver<()>>,
+            release: mpsc::Sender<()>,
+            worker: JoinHandle<io::Result<()>>,
+        }
+
+        impl QueryPause {
+            pub(super) fn new(server_url: &str, sql_fragment: &'static str) -> Self {
+                let server_port: u16 = server_url
+                    .split('@')
+                    .nth(1)
+                    .unwrap()
+                    .split('/')
+                    .next()
+                    .unwrap()
+                    .rsplit(':')
+                    .next()
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+                let proxy_port = listener.local_addr().unwrap().port();
+                let armed = Arc::new(AtomicBool::new(false));
+                let capture_first = Arc::new(AtomicBool::new(false));
+                let pending = Arc::new(AtomicBool::new(false));
+                let (first_query_tx, first_query) = mpsc::channel();
+                let (paused_tx, paused) = mpsc::channel();
+                let (release, release_rx) = mpsc::channel();
+                let worker = thread::spawn({
+                    let armed = armed.clone();
+                    let capture_first = capture_first.clone();
+                    move || {
+                        let (frontend, _) = listener.accept()?;
+                        let backend = TcpStream::connect(("127.0.0.1", server_port))?;
+                        let forward = thread::spawn({
+                            let pending = pending.clone();
+                            let armed = armed.clone();
+                            let capture_first = capture_first.clone();
+                            let frontend = frontend.try_clone()?;
+                            let backend = backend.try_clone()?;
+                            move || {
+                                let result = forward_frontend(
+                                    frontend,
+                                    backend.try_clone()?,
+                                    armed,
+                                    capture_first,
+                                    first_query_tx,
+                                    pending,
+                                    sql_fragment,
+                                );
+                                backend.shutdown(Shutdown::Write)?;
+                                result
+                            }
+                        });
+                        let result =
+                            forward_backend(backend, frontend, pending, paused_tx, release_rx);
+                        forward.join().unwrap()?;
+                        result
+                    }
+                });
+                Self {
+                    connection_string: format!(
+                        "postgresql://postgres:postgres@127.0.0.1:{proxy_port}/postgres?sslmode=disable"
+                    ),
+                    armed,
+                    capture_first,
+                    first_query: Some(first_query),
+                    paused: Some(paused),
+                    release,
+                    worker,
+                }
+            }
+
+            pub(super) fn arm(&self) {
+                self.capture_first.store(true, Ordering::SeqCst);
+                self.armed.store(true, Ordering::SeqCst);
+            }
+
+            pub(super) async fn first_query(&mut self) -> String {
+                let first_query = self.first_query.take().unwrap();
+                tokio::task::spawn_blocking(move || {
+                    first_query
+                        .recv_timeout(Duration::from_secs(10))
+                        .expect("provider did not send a query after the wire trace was armed")
+                })
+                .await
+                .unwrap()
+            }
+
+            pub(super) async fn wait_until_paused(&mut self) {
+                let paused = self.paused.take().unwrap();
+                tokio::task::spawn_blocking(move || {
+                    paused
+                        .recv_timeout(Duration::from_secs(10))
+                        .expect("reader query did not reach the wire pause");
+                })
+                .await
+                .unwrap();
+            }
+
+            pub(super) fn release(&self) {
+                self.release.send(()).unwrap();
+            }
+
+            pub(super) fn finish(self) {
+                self.worker.join().unwrap().unwrap();
+            }
+        }
+
+        fn read_frame(input: &mut TcpStream) -> io::Result<Option<(u8, Vec<u8>)>> {
+            let mut tag = [0];
+            match input.read_exact(&mut tag) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+                Err(error) => return Err(error),
+            }
+            let mut length = [0; 4];
+            input.read_exact(&mut length)?;
+            let length = u32::from_be_bytes(length) as usize;
+            if !(4..=1024 * 1024).contains(&length) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "wire frame length",
+                ));
+            }
+            let mut frame = Vec::with_capacity(1 + length);
+            frame.push(tag[0]);
+            frame.extend_from_slice(&(length as u32).to_be_bytes());
+            frame.resize(1 + length, 0);
+            input.read_exact(&mut frame[5..])?;
+            Ok(Some((tag[0], frame)))
+        }
+
+        fn forward_frontend(
+            mut frontend: TcpStream,
+            mut backend: TcpStream,
+            armed: Arc<AtomicBool>,
+            capture_first: Arc<AtomicBool>,
+            first_query: mpsc::Sender<String>,
+            pending: Arc<AtomicBool>,
+            sql_fragment: &str,
+        ) -> io::Result<()> {
+            // Startup is the only frontend frame without a type byte.
+            let mut length = [0; 4];
+            frontend.read_exact(&mut length)?;
+            let length = u32::from_be_bytes(length) as usize;
+            if !(4..=1024 * 1024).contains(&length) {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "startup length"));
+            }
+            let mut startup = vec![0; length];
+            startup[..4].copy_from_slice(&(length as u32).to_be_bytes());
+            frontend.read_exact(&mut startup[4..])?;
+            backend.write_all(&startup)?;
+            while let Some((tag, frame)) = read_frame(&mut frontend)? {
+                let sql = match tag {
+                    b'P' => frame[5..].split(|byte| *byte == 0).nth(1),
+                    b'Q' => frame[5..].split(|byte| *byte == 0).next(),
+                    _ => None,
+                };
+                if let Some(sql) = sql {
+                    if sql.windows(6).any(|window| window == b"SELECT")
+                        && capture_first.swap(false, Ordering::SeqCst)
+                    {
+                        first_query
+                            .send(String::from_utf8_lossy(sql).into_owned())
+                            .map_err(io::Error::other)?;
+                    }
+                    if sql
+                        .windows(sql_fragment.len())
+                        .any(|window| window == sql_fragment.as_bytes())
+                        && armed.swap(false, Ordering::SeqCst)
+                    {
+                        pending.store(true, Ordering::SeqCst);
+                    }
+                }
+                backend.write_all(&frame)?;
+            }
+            Ok(())
+        }
+
+        fn forward_backend(
+            mut backend: TcpStream,
+            mut frontend: TcpStream,
+            pending: Arc<AtomicBool>,
+            paused: mpsc::Sender<()>,
+            release: mpsc::Receiver<()>,
+        ) -> io::Result<()> {
+            let mut held = Vec::new();
+            while let Some((tag, frame)) = read_frame(&mut backend)? {
+                if pending.load(Ordering::SeqCst) {
+                    held.extend_from_slice(&frame);
+                    if tag == b'Z' {
+                        paused.send(()).map_err(io::Error::other)?;
+                        release
+                            .recv_timeout(Duration::from_secs(10))
+                            .map_err(io::Error::other)?;
+                        frontend.write_all(&held)?;
+                        held.clear();
+                        pending.store(false, Ordering::SeqCst);
+                    }
+                } else {
+                    frontend.write_all(&frame)?;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    fn version_publication(
+        revision: u64,
+        parent: Option<VersionId>,
+        operation: &str,
+        namespace: Namespace,
+    ) -> VersionPublication {
+        VersionPublication {
+            expected_revision: revision,
+            expected_parent: parent,
+            operation_id: PublicationId::new(operation).unwrap(),
+            namespace,
+            block_store_id: BlockStoreId::new("pglite-race-test").unwrap(),
+            kind: VersionKind::Snapshot,
+            restored_from: None,
+            forked_from: None,
+            durable: false,
+        }
+    }
+
+    async fn read_lease_fixture(
+        url: &str,
+        volume_key: &str,
+    ) -> (PgliteMetadataStore, PgliteBlockStore, ReadLease) {
+        let options = PgliteStorageOptions::new(volume_key);
+        let metadata = PgliteMetadataStore::connect_with_options(url, options.clone())
+            .await
+            .unwrap();
+        let blocks = PgliteBlockStore::connect_with_options(url, options)
+            .await
+            .unwrap();
+        let block = blocks.put(b"abc").await.unwrap();
+        let writer = metadata
+            .acquire_writer("forged-token-writer", Duration::from_secs(60))
+            .await
+            .unwrap();
+        let version = metadata
+            .publish_version(
+                &writer,
+                version_publication(0, None, "forged-token-version", namespace(block).await),
+            )
+            .await
+            .unwrap();
+        metadata.release_writer(&writer).await.unwrap();
+        let pin = metadata
+            .open_view_pin(
+                &version.id,
+                ReadLeaseRequest {
+                    owner: "forged-token-reader".to_owned(),
+                    ttl: Duration::from_secs(60),
+                },
+            )
+            .await
+            .unwrap();
+        (metadata, blocks, pin)
+    }
+
+    #[test]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
+    fn version_one_schema_stays_readable_until_publication_and_rejects_future_schema() {
+        let server = PgliteServer::start();
+        let url = server.connection_string();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let options = PgliteStorageOptions::new("version-kind-schema-upgrade");
+            let store = PgliteMetadataStore::connect_with_options(url, options.clone())
+                .await
+                .unwrap();
+            let blocks = PgliteBlockStore::connect_with_options(url, options.clone())
+                .await
+                .unwrap();
+            let block = blocks.put(b"abc").await.unwrap();
+            let namespace = namespace(block).await;
+            let lease = store
+                .acquire_writer("schema-upgrade", Duration::from_secs(60))
+                .await
+                .unwrap();
+            let first = store
+                .publish_version(
+                    &lease,
+                    version_publication(0, None, "before-upgrade", namespace.clone()),
+                )
+                .await
+                .unwrap();
+            store.release_writer(&lease).await.unwrap();
+            let volume = store.volume_id();
+            {
+                let client = store.0.lock_client().await.unwrap();
+                let schema = client
+                    .as_ref()
+                    .unwrap()
+                    .query_typed_one(
+                        "SELECT schema_version FROM mount_rs_schema_versions WHERE schema_name=$1",
+                        &[(&VERSION_SCHEMA_NAME, Type::TEXT)],
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(schema.get::<_, i64>(0), VERSION_SCHEMA_BASE_VERSION);
+            }
+            store.close().await.unwrap();
+
+            let reopened = PgliteMetadataStore::connect_with_options(url, options.clone())
+                .await
+                .unwrap();
+            assert_eq!(reopened.volume_id(), volume);
+            assert_eq!(reopened.version_head().await.unwrap().unwrap().version, first.id);
+            assert_eq!(reopened.list_versions().await.unwrap().len(), 1);
+            {
+                let client = reopened.0.lock_client().await.unwrap();
+                let schema = client
+                    .as_ref()
+                    .unwrap()
+                    .query_typed_one(
+                        "SELECT schema_version FROM mount_rs_schema_versions WHERE schema_name=$1",
+                        &[(&VERSION_SCHEMA_NAME, Type::TEXT)],
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(schema.get::<_, i64>(0), VERSION_SCHEMA_BASE_VERSION);
+            }
+            let lease = reopened
+                .acquire_writer("schema-upgrade", Duration::from_secs(60))
+                .await
+                .unwrap();
+            let mut next = version_publication(
+                1,
+                Some(first.id),
+                "after-upgrade",
+                namespace,
+            );
+            next.kind = VersionKind::NamespacePublication;
+            let second = reopened.publish_version(&lease, next).await.unwrap();
+            reopened.release_writer(&lease).await.unwrap();
+            {
+                let client = reopened.0.lock_client().await.unwrap();
+                let client = client.as_ref().unwrap();
+                let schema = client
+                    .query_typed_one(
+                        "SELECT schema_version FROM mount_rs_schema_versions WHERE schema_name=$1",
+                        &[(&VERSION_SCHEMA_NAME, Type::TEXT)],
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(schema.get::<_, i64>(0), VERSION_SCHEMA_VERSION);
+                let kind = client
+                    .query_typed_one(
+                        "SELECT kind FROM mount_rs_versions WHERE volume_key=$1 AND id=$2",
+                        &[
+                            (&options.volume_key, Type::TEXT),
+                            (&second.id.encode(), Type::TEXT),
+                        ],
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(kind.get::<_, String>(0), "namespace-publication");
+                client
+                    .execute_typed(
+                        "UPDATE mount_rs_schema_versions SET schema_version=99 WHERE schema_name=$1",
+                        &[(&VERSION_SCHEMA_NAME, Type::TEXT)],
+                    )
+                    .await
+                    .unwrap();
+            }
+            let error = match PgliteMetadataStore::connect_with_options(url, options).await {
+                Ok(_) => panic!("future version schema must be rejected"),
+                Err(error) => error,
+            };
+            assert!(error.is(ErrorCode::Enotsup));
+            {
+                let client = reopened.0.lock_client().await.unwrap();
+                let schema = client
+                    .as_ref()
+                    .unwrap()
+                    .query_typed_one(
+                        "SELECT schema_version FROM mount_rs_schema_versions WHERE schema_name=$1",
+                        &[(&VERSION_SCHEMA_NAME, Type::TEXT)],
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(schema.get::<_, i64>(0), 99);
+            }
+            reopened.close().await.unwrap();
+            blocks.close().await.unwrap();
+        });
+    }
+
+    async fn published_version_fixture(
+        url: &str,
+        volume_key: &str,
+    ) -> (
+        PgliteMetadataStore,
+        PgliteBlockStore,
+        WriterLease,
+        VersionInfo,
+        Namespace,
+    ) {
+        let options = PgliteStorageOptions::new(volume_key);
+        let metadata = PgliteMetadataStore::connect_with_options(url, options.clone())
+            .await
+            .unwrap();
+        let blocks = PgliteBlockStore::connect_with_options(url, options)
+            .await
+            .unwrap();
+        let block = blocks.put(b"abc").await.unwrap();
+        let namespace = namespace(block).await;
+        let writer = metadata
+            .acquire_writer("corrupt-row-writer", Duration::from_secs(60))
+            .await
+            .unwrap();
+        let version = metadata
+            .publish_version(
+                &writer,
+                version_publication(0, None, "corrupt-row-first", namespace.clone()),
+            )
+            .await
+            .unwrap();
+        (metadata, blocks, writer, version, namespace)
+    }
+
+    async fn corrupt_version_row(metadata: &PgliteMetadataStore, id: &VersionId, sql: &str) {
+        let client = metadata.0.lock_client().await.unwrap();
+        let encoded = id.encode();
+        assert_eq!(
+            client
+                .as_ref()
+                .unwrap()
+                .execute_typed(
+                    sql,
+                    &[(&metadata.0.volume_key, Type::TEXT), (&encoded, Type::TEXT),],
+                )
+                .await
+                .unwrap(),
+            1
+        );
+    }
 
     #[test]
     fn block_id_matches_postgresql_md5_hex_contract() {
@@ -2001,6 +2522,511 @@ mod tests {
         };
         namespace.validate().unwrap();
         namespace
+    }
+
+    #[test]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
+    fn version_head_revision_and_id_share_one_committed_snapshot() {
+        let server = PgliteServer::start();
+        let url = server.connection_string();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let options = PgliteStorageOptions::new("version-head-snapshot");
+            let writer = PgliteMetadataStore::connect_with_options(url, options.clone())
+                .await
+                .unwrap();
+            let blocks = PgliteBlockStore::connect_with_options(url, options.clone())
+                .await
+                .unwrap();
+            let block = blocks.put(b"abc").await.unwrap();
+            let namespace = namespace(block).await;
+            let lease = writer
+                .acquire_writer("snapshot-writer", Duration::from_secs(60))
+                .await
+                .unwrap();
+            let first = writer
+                .publish_version(
+                    &lease,
+                    version_publication(0, None, "snapshot-first", namespace.clone()),
+                )
+                .await
+                .unwrap();
+
+            let mut proxy = wire_pause::QueryPause::new(url, "mount_rs_metadata");
+            let reader =
+                PgliteMetadataStore::connect_with_options(&proxy.connection_string, options)
+                    .await
+                    .unwrap();
+            proxy.arm();
+            let reading = tokio::spawn(async move {
+                let head = reader.version_head().await;
+                reader.close().await.unwrap();
+                head
+            });
+            proxy.wait_until_paused().await;
+            let second = writer
+                .publish_version(
+                    &lease,
+                    version_publication(1, Some(first.id.clone()), "snapshot-second", namespace),
+                )
+                .await
+                .unwrap();
+            proxy.release();
+            let observed = reading.await.unwrap().unwrap().unwrap();
+            proxy.finish();
+            assert_eq!(
+                observed,
+                VersionHead {
+                    version: first.id,
+                    revision: 1,
+                },
+                "the first statement completed before the second publication committed"
+            );
+            assert_eq!(
+                writer.version_head().await.unwrap().unwrap(),
+                VersionHead {
+                    version: second.id,
+                    revision: 2,
+                }
+            );
+            writer.release_writer(&lease).await.unwrap();
+            writer.close().await.unwrap();
+            blocks.close().await.unwrap();
+        });
+    }
+
+    /// One historical version and one pin exercise both serialized lock
+    /// orders: opening before deletion, then deletion before another opening.
+    #[test]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
+    fn opening_a_pin_serializes_with_deleting_its_version() {
+        let server = PgliteServer::start();
+        let url = server.connection_string();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let options = PgliteStorageOptions::new("pin-delete-race");
+            let writer = PgliteMetadataStore::connect_with_options(url, options.clone())
+                .await
+                .unwrap();
+            let blocks = PgliteBlockStore::connect_with_options(url, options.clone())
+                .await
+                .unwrap();
+            let block = blocks.put(b"abc").await.unwrap();
+            let namespace = namespace(block).await;
+            let lease = writer
+                .acquire_writer("pin-delete-writer", Duration::from_secs(60))
+                .await
+                .unwrap();
+            let first = writer
+                .publish_version(
+                    &lease,
+                    version_publication(0, None, "pin-delete-first", namespace.clone()),
+                )
+                .await
+                .unwrap();
+            writer
+                .publish_version(
+                    &lease,
+                    version_publication(1, Some(first.id.clone()), "pin-delete-second", namespace),
+                )
+                .await
+                .unwrap();
+
+            let mut proxy = wire_pause::QueryPause::new(url, "mount_rs_versions");
+            let reader =
+                PgliteMetadataStore::connect_with_options(&proxy.connection_string, options)
+                    .await
+                    .unwrap();
+            proxy.arm();
+            let opening = tokio::spawn({
+                let reader = reader.clone();
+                let id = first.id.clone();
+                async move {
+                    reader
+                        .open_view_pin(
+                            &id,
+                            ReadLeaseRequest {
+                                owner: "pin-delete-reader".to_owned(),
+                                ttl: Duration::from_secs(60),
+                            },
+                        )
+                        .await
+                }
+            });
+            proxy.wait_until_paused().await;
+            let first_query = proxy.first_query().await;
+            let mut deletion = tokio::spawn({
+                let writer = writer.clone();
+                let lease = lease.clone();
+                let id = first.id.clone();
+                async move { writer.delete_version(&lease, &id).await }
+            });
+            let early_delete = tokio::time::timeout(Duration::from_secs(2), &mut deletion).await;
+            let deleted_early = early_delete.is_ok();
+            proxy.release();
+            let pin = opening.await.unwrap().unwrap();
+            let deletion_result = match early_delete {
+                Ok(result) => result.unwrap(),
+                Err(_) => deletion.await.unwrap(),
+            };
+            assert!(
+                !deleted_early,
+                "deletion completed while the pin opener was still in its transaction"
+            );
+            assert!(deletion_result.unwrap_err().is(ErrorCode::Ebusy));
+            assert_eq!(writer.load_version(&first.id).await.unwrap().id, first.id);
+            reader.close_view_pin(&pin).await.unwrap();
+            writer.delete_version(&lease, &first.id).await.unwrap();
+            assert!(
+                writer
+                    .load_version(&first.id)
+                    .await
+                    .unwrap_err()
+                    .is(ErrorCode::Enoent)
+            );
+            assert!(
+                reader
+                    .open_view_pin(
+                        &first.id,
+                        ReadLeaseRequest {
+                            owner: "pin-delete-reader".to_owned(),
+                            ttl: Duration::from_secs(60),
+                        },
+                    )
+                    .await
+                    .unwrap_err()
+                    .is(ErrorCode::Enoent)
+            );
+
+            reader.close().await.unwrap();
+            proxy.finish();
+            assert!(
+                first_query.contains("mount_rs_metadata") && first_query.contains("FOR UPDATE"),
+                "pin opener checked version existence before locking its volume: {first_query:?}"
+            );
+            writer.release_writer(&lease).await.unwrap();
+            writer.close().await.unwrap();
+            blocks.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
+    fn renewing_a_pin_locks_the_volume_before_reading_the_pin() {
+        let server = PgliteServer::start();
+        let url = server.connection_string();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let options = PgliteStorageOptions::new("renew-pin-lock");
+            let writer = PgliteMetadataStore::connect_with_options(url, options.clone())
+                .await
+                .unwrap();
+            let blocks = PgliteBlockStore::connect_with_options(url, options.clone())
+                .await
+                .unwrap();
+            let block = blocks.put(b"abc").await.unwrap();
+            let lease = writer
+                .acquire_writer("renew-pin-writer", Duration::from_secs(60))
+                .await
+                .unwrap();
+            let version = writer
+                .publish_version(
+                    &lease,
+                    version_publication(0, None, "renew-pin-version", namespace(block).await),
+                )
+                .await
+                .unwrap();
+            let pin = writer
+                .open_view_pin(
+                    &version.id,
+                    ReadLeaseRequest {
+                        owner: "renew-pin-reader".to_owned(),
+                        ttl: Duration::from_secs(60),
+                    },
+                )
+                .await
+                .unwrap();
+
+            let mut proxy = wire_pause::QueryPause::new(url, "mount_rs_version_pins");
+            let renewer =
+                PgliteMetadataStore::connect_with_options(&proxy.connection_string, options)
+                    .await
+                    .unwrap();
+            proxy.arm();
+            let renewing = tokio::spawn({
+                let renewer = renewer.clone();
+                let pin = pin.clone();
+                async move {
+                    renewer
+                        .renew_view_pin(
+                            &pin,
+                            ReadLeaseRequest {
+                                owner: "renew-pin-reader".to_owned(),
+                                ttl: Duration::from_secs(120),
+                            },
+                        )
+                        .await
+                }
+            });
+            proxy.wait_until_paused().await;
+            let first_query = proxy.first_query().await;
+            proxy.release();
+            let renewed = renewing.await.unwrap().unwrap();
+            renewer.close_view_pin(&renewed).await.unwrap();
+            renewer.close().await.unwrap();
+            proxy.finish();
+            assert!(
+                first_query.contains("mount_rs_metadata") && first_query.contains("FOR UPDATE"),
+                "pin renewer read the pin before locking its volume: {first_query:?}"
+            );
+            writer.release_writer(&lease).await.unwrap();
+            writer.close().await.unwrap();
+            blocks.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
+    fn forged_volume_cannot_renew_a_live_pin() {
+        let server = PgliteServer::start();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (metadata, blocks, pin) =
+                read_lease_fixture(server.connection_string(), "forged-renew-volume").await;
+            let mut forged = pin.clone();
+            forged.volume = VolumeId::new("wrong-renew-volume").unwrap();
+            let request = ReadLeaseRequest {
+                owner: "forged-token-reader".to_owned(),
+                ttl: Duration::from_secs(120),
+            };
+            assert!(
+                metadata
+                    .renew_view_pin(&forged, request.clone())
+                    .await
+                    .unwrap_err()
+                    .is(ErrorCode::Estale)
+            );
+            let renewed = metadata.renew_view_pin(&pin, request).await.unwrap();
+            metadata.close_view_pin(&renewed).await.unwrap();
+            metadata.close().await.unwrap();
+            blocks.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
+    fn forged_volume_cannot_close_a_live_pin_and_missing_close_is_idempotent() {
+        let server = PgliteServer::start();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (metadata, blocks, pin) =
+                read_lease_fixture(server.connection_string(), "forged-close-volume").await;
+            let mut forged = pin.clone();
+            forged.volume = VolumeId::new("wrong-close-volume").unwrap();
+            assert!(
+                metadata
+                    .close_view_pin(&forged)
+                    .await
+                    .unwrap_err()
+                    .is(ErrorCode::Estale)
+            );
+            let renewed = metadata
+                .renew_view_pin(
+                    &pin,
+                    ReadLeaseRequest {
+                        owner: "forged-token-reader".to_owned(),
+                        ttl: Duration::from_secs(120),
+                    },
+                )
+                .await
+                .unwrap();
+            metadata.close_view_pin(&renewed).await.unwrap();
+            metadata.close_view_pin(&forged).await.unwrap();
+            metadata.close().await.unwrap();
+            blocks.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
+    fn version_head_rejects_an_unloadable_record_in_one_snapshot() {
+        let server = PgliteServer::start();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let corruptions = [
+                (
+                    "sequence",
+                    "UPDATE mount_rs_versions SET sequence=sequence+1 WHERE volume_key=$1 AND id=$2",
+                ),
+                (
+                    "namespace",
+                    "UPDATE mount_rs_versions SET namespace='not-json' WHERE volume_key=$1 AND id=$2",
+                ),
+                (
+                    "kind",
+                    "UPDATE mount_rs_versions SET kind='unknown' WHERE volume_key=$1 AND id=$2",
+                ),
+                (
+                    "block-store",
+                    "UPDATE mount_rs_versions SET block_store_id='' WHERE volume_key=$1 AND id=$2",
+                ),
+                (
+                    "lineage",
+                    "UPDATE mount_rs_versions SET parent_id='wrong-volume:1' WHERE volume_key=$1 AND id=$2",
+                ),
+            ];
+            for (case, sql) in corruptions {
+                let volume_key = format!("unloadable-head-{case}");
+                let (metadata, blocks, writer, version, _) =
+                    published_version_fixture(server.connection_string(), &volume_key).await;
+                corrupt_version_row(&metadata, &version.id, sql).await;
+                assert!(metadata.load_version(&version.id).await.is_err());
+                let error = match metadata.version_head().await {
+                    Ok(head) => panic!("{case} head remained visible: {head:?}"),
+                    Err(error) => error,
+                };
+                assert!(error.is(ErrorCode::Eio), "{case} head error: {error:?}");
+                metadata.release_writer(&writer).await.unwrap();
+                metadata.close().await.unwrap();
+                blocks.close().await.unwrap();
+            }
+        });
+    }
+
+    #[test]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
+    fn publication_rejects_an_unloadable_current_parent() {
+        let server = PgliteServer::start();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (metadata, blocks, writer, version, namespace) =
+                published_version_fixture(server.connection_string(), "corrupt-current-parent")
+                    .await;
+            corrupt_version_row(
+                &metadata,
+                &version.id,
+                "UPDATE mount_rs_versions SET namespace='not-json' WHERE volume_key=$1 AND id=$2",
+            )
+            .await;
+            let result = metadata
+                .publish_version(
+                    &writer,
+                    version_publication(
+                        1,
+                        Some(version.id.clone()),
+                        "corrupt-row-second",
+                        namespace,
+                    ),
+                )
+                .await;
+            let error = match result {
+                Ok(_) => panic!("published from an unreadable parent"),
+                Err(error) => error,
+            };
+            assert!(error.is(ErrorCode::Eio));
+            assert_eq!(metadata.load().await.unwrap().revision, 1);
+            metadata.release_writer(&writer).await.unwrap();
+            metadata.close().await.unwrap();
+            blocks.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
+    fn reconnect_rejects_an_unloadable_current_head() {
+        let server = PgliteServer::start();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let volume_key = "corrupt-reconnect-head";
+            let (metadata, blocks, writer, version, _) =
+                published_version_fixture(server.connection_string(), volume_key).await;
+            corrupt_version_row(
+                &metadata,
+                &version.id,
+                "UPDATE mount_rs_versions SET namespace='not-json' WHERE volume_key=$1 AND id=$2",
+            )
+            .await;
+            metadata.release_writer(&writer).await.unwrap();
+            metadata.close().await.unwrap();
+            let reopened =
+                PgliteMetadataStore::connect_with_key(server.connection_string(), volume_key).await;
+            let error = match reopened {
+                Ok(_) => panic!("reconnected to an unloadable head"),
+                Err(error) => error,
+            };
+            assert!(error.is(ErrorCode::Enotsup));
+            blocks.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
+    fn opening_a_pin_rejects_an_unloadable_historical_version() {
+        let server = PgliteServer::start();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (metadata, blocks, writer, first, namespace) =
+                published_version_fixture(server.connection_string(), "corrupt-pin-target").await;
+            metadata
+                .publish_version(
+                    &writer,
+                    version_publication(1, Some(first.id.clone()), "corrupt-pin-second", namespace),
+                )
+                .await
+                .unwrap();
+            corrupt_version_row(
+                &metadata,
+                &first.id,
+                "UPDATE mount_rs_versions SET namespace='not-json' WHERE volume_key=$1 AND id=$2",
+            )
+            .await;
+            assert!(metadata.load_version(&first.id).await.is_err());
+            let pin = metadata
+                .open_view_pin(
+                    &first.id,
+                    ReadLeaseRequest {
+                        owner: "corrupt-pin-reader".to_owned(),
+                        ttl: Duration::from_secs(60),
+                    },
+                )
+                .await;
+            let error = match pin {
+                Ok(_) => panic!("opened a pin for an unreadable historical version"),
+                Err(error) => error,
+            };
+            assert!(error.is(ErrorCode::Eio));
+            metadata.delete_version(&writer, &first.id).await.unwrap();
+            metadata.release_writer(&writer).await.unwrap();
+            metadata.close().await.unwrap();
+            blocks.close().await.unwrap();
+        });
     }
 
     #[test]

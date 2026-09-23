@@ -424,6 +424,24 @@ impl FuseSession {
         self.inode_handles.entry(inode).or_default().push(id);
     }
 
+    fn file_handle(&self, fh: u64, inode: u64) -> Result<&Arc<dyn FileHandle>> {
+        let handle = self
+            .handles
+            .get(&fh)
+            .ok_or_else(|| FsError::new(ErrorCode::Ebadf))?;
+        if self.handle_nodes.get(&fh).copied() != Some(inode) {
+            return Err(FsError::new(ErrorCode::Ebadf));
+        }
+        Ok(handle)
+    }
+
+    fn require_directory_handle(&self, fh: u64, inode: u64) -> Result<()> {
+        if self.directories.get(&fh).map(|(node, _)| *node) != Some(inode) {
+            return Err(FsError::new(ErrorCode::Ebadf));
+        }
+        Ok(())
+    }
+
     fn lock_request(body: &[u8]) -> Result<FuseLkIn> {
         Ok(FuseLkIn {
             fh: u64_at(body, 0)?,
@@ -556,8 +574,8 @@ impl FuseSession {
             .inodes
             .get(inode)
             .ok_or_else(|| FsError::new(ErrorCode::Estale))?;
-        if let Some(handle) = explicit.and_then(|fh| self.handles.get(&fh)) {
-            return Ok(Some(handle.clone()));
+        if let Some(fh) = explicit {
+            return Ok(Some(self.file_handle(fh, inode)?.clone()));
         }
         if !node.paths.is_empty() {
             return Ok(None);
@@ -673,12 +691,12 @@ impl FuseSession {
         if size > self.max_request {
             return Ok(None);
         }
-        let Some(handle) = self.handles.get(&handle_id).cloned() else {
+        let Ok(handle) = self.file_handle(handle_id, request.header.nodeid) else {
             return Ok(None);
         };
         Ok(Some(PreparedRead {
             unique: request.header.unique,
-            handle,
+            handle: handle.clone(),
             offset,
             size,
         }))
@@ -808,12 +826,17 @@ impl FuseSession {
                 return Err(FsError::new(ErrorCode::Eproto));
             }
             let mut preferences = self.session_options.init.clone();
-            preferences.max_write = preferences
-                .max_write
-                .min(self.max_request.saturating_sub(80).min(u32::MAX as usize) as u32);
+            let write_capacity = self
+                .max_request
+                .saturating_sub(crate::constants::FUSE_IN_HEADER_SIZE + 40)
+                .min(u32::MAX as usize) as u32;
+            preferences.max_write = preferences.max_write.min(write_capacity);
             return match crate::init::negotiate(kernel, &preferences) {
                 crate::init::Negotiation::UnsupportedMajor => Err(FsError::new(ErrorCode::Eproto)),
                 crate::init::Negotiation::Retry(reply) => Ok(reply.encode()),
+                crate::init::Negotiation::Ready(reply) if reply.max_write > write_capacity => {
+                    Err(FsError::new(ErrorCode::Einval))
+                }
                 crate::init::Negotiation::Ready(reply) => {
                     let bytes = reply.encode();
                     self.negotiated = Some(reply);
@@ -849,10 +872,7 @@ impl FuseSession {
                 self.created_entry(&path, &r.header).await
             }
             25 => {
-                let handle = self
-                    .handles
-                    .get(&u64_at(r.body, 0)?)
-                    .ok_or_else(|| FsError::new(ErrorCode::Ebadf))?;
+                let handle = self.file_handle(u64_at(r.body, 0)?, r.header.nodeid)?;
                 if self.driver.capabilities().durable_writes {
                     match self.session_options.flush_mechanism {
                         FuseFlushMechanism::Sync => handle.sync().await?,
@@ -863,9 +883,7 @@ impl FuseSession {
                 Ok(vec![])
             }
             30 => {
-                if !self.directories.contains_key(&u64_at(r.body, 0)?) {
-                    return Err(FsError::new(ErrorCode::Ebadf));
-                }
+                self.require_directory_handle(u64_at(r.body, 0)?, r.header.nodeid)?;
                 self.driver.syncfs().await?;
                 Ok(vec![])
             }
@@ -999,6 +1017,7 @@ impl FuseSession {
                 Ok(body)
             }
             29 => {
+                self.require_directory_handle(u64_at(r.body, 0)?, r.header.nodeid)?;
                 self.directories
                     .remove(&u64_at(r.body, 0)?)
                     .ok_or_else(|| FsError::new(ErrorCode::Ebadf))?;
@@ -1012,6 +1031,7 @@ impl FuseSession {
                 let budget = (u32_at(r.body, 16)? as usize).min(self.max_request);
                 let entry_timeout = self.session_options.entry_timeout;
                 let attr_timeout = self.session_options.attr_timeout;
+                self.require_directory_handle(fh, r.header.nodeid)?;
                 let (inode, snapshot) = self
                     .directories
                     .get_mut(&fh)
@@ -1120,6 +1140,7 @@ impl FuseSession {
             }
             FUSE_GETLK => {
                 let request = Self::lock_request(r.body)?;
+                self.file_handle(request.fh, r.header.nodeid)?;
                 let lock = self.get_lock(request)?;
                 encode_wire_reply(
                     FUSE_GETLK,
@@ -1129,6 +1150,7 @@ impl FuseSession {
             }
             FUSE_SETLK | FUSE_SETLKW => {
                 let request = Self::lock_request(r.body)?;
+                self.file_handle(request.fh, r.header.nodeid)?;
                 self.set_lock(request, r.header.opcode == FUSE_SETLKW)?;
                 Ok(vec![])
             }
@@ -1161,10 +1183,7 @@ impl FuseSession {
                 )))
             }
             20 => {
-                let handle = self
-                    .handles
-                    .get(&u64_at(r.body, 0)?)
-                    .ok_or_else(|| FsError::new(ErrorCode::Ebadf))?;
+                let handle = self.file_handle(u64_at(r.body, 0)?, r.header.nodeid)?;
                 if u32_at(r.body, 8)? & 1 != 0 {
                     handle.datasync().await?;
                 } else {
@@ -1327,10 +1346,7 @@ impl FuseSession {
                 Ok(body)
             }
             15 | 16 => {
-                let handle = self
-                    .handles
-                    .get(&u64_at(r.body, 0)?)
-                    .ok_or_else(|| FsError::new(ErrorCode::Ebadf))?;
+                let handle = self.file_handle(u64_at(r.body, 0)?, r.header.nodeid)?;
                 let offset = u64_at(r.body, 8)?;
                 let size = u32_at(r.body, 16)? as usize;
                 if size > self.max_request {
@@ -1361,6 +1377,7 @@ impl FuseSession {
             18 => {
                 let id = u64_at(r.body, 0)?;
                 let lock_owner = u64_at(r.body, 16)?;
+                self.file_handle(id, r.header.nodeid)?;
                 let handle = self
                     .handles
                     .remove(&id)
@@ -1391,5 +1408,67 @@ impl FuseSession {
             let _ = handle.close().await;
         }
         self.inodes = InodeTable::new(self.session_options.use_driver_ino);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod fast_read_tests {
+    use super::*;
+    use mount_rs_memfs::MemoryFs;
+
+    fn frame(opcode: u32, nodeid: u64, body: &[u8]) -> Vec<u8> {
+        let mut bytes = crate::RequestHeader {
+            len: (40 + body.len()) as u32,
+            opcode,
+            unique: 42,
+            nodeid,
+            uid: 0,
+            gid: 0,
+            pid: 0,
+            total_extlen: 0,
+        }
+        .encode()
+        .to_vec();
+        bytes.extend_from_slice(body);
+        bytes
+    }
+
+    #[tokio::test]
+    async fn prepared_read_rejects_a_foreign_live_handle() {
+        let fs = Arc::new(MemoryFs::empty());
+        for path in ["/one", "/two"] {
+            let handle = fs.open(path, "w", 0o644).await.unwrap();
+            handle.close().await.unwrap();
+        }
+        let mut session = FuseSession::new(fs.clone());
+        let init: Vec<u8> = [7u32, 41, 65536, u32::MAX, u32::MAX]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        session.handle(&frame(26, 0, &init)).await.unwrap().unwrap();
+        let one = session
+            .inodes
+            .bind("/one", &fs.lstat("/one").await.unwrap());
+        let two = session
+            .inodes
+            .bind("/two", &fs.lstat("/two").await.unwrap());
+        let two_handle = fs.open("/two", "r", 0).await.unwrap();
+        session.register_handle(9, two, two_handle);
+        let mut read = [0; 40];
+        read[..8].copy_from_slice(&9u64.to_le_bytes());
+        read[16..20].copy_from_slice(&1u32.to_le_bytes());
+
+        assert!(
+            session
+                .prepare_read(&frame(FUSE_READ, one, &read))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            session
+                .prepare_read(&frame(FUSE_READ, two, &read))
+                .unwrap()
+                .is_some()
+        );
     }
 }

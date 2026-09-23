@@ -175,7 +175,10 @@ const BLOCK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_blocks (
  id TEXT PRIMARY KEY NOT NULL, bytes BLOB NOT NULL);";
 const SCHEMA_VERSION_TABLE: &str = "mount_rs_schema_versions";
 const VERSION_SCHEMA_NAME: &str = "mount-rs-versioning";
-const VERSION_SCHEMA_VERSION: i64 = 1;
+// Version 2 marks stores that can contain the namespace-publication kind.
+// Keep version 1 until the first such record commits so older readers can reopen.
+const VERSION_SCHEMA_BASE_VERSION: i64 = 1;
+const VERSION_SCHEMA_VERSION: i64 = 2;
 
 const VERSION_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS mount_rs_version_state (
@@ -242,7 +245,8 @@ fn initialize_version_schema(database: &Database) -> Result<()> {
             "unsupported mount-rs versioning schema version",
         ));
     }
-    let schema_is_current = stored_version == Some(VERSION_SCHEMA_VERSION);
+    let schema_is_current =
+        stored_version.is_some_and(|version| version >= VERSION_SCHEMA_BASE_VERSION);
 
     let metadata_columns = table_columns(&tx, "mount_rs_metadata")?
         .ok_or_else(|| incompatible_schema("mount_rs_metadata table is missing"))?;
@@ -445,26 +449,23 @@ fn initialize_version_schema(database: &Database) -> Result<()> {
                 "stored version head belongs to another provider volume",
             ));
         }
-        let exists: bool = tx
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM mount_rs_versions
-                 WHERE id=?1 AND volume_id=?2)",
-                params![head_id, volume.0],
-                |row| row.get(0),
-            )
-            .map_err(backend_error)?;
-        if !exists {
+        if !stored_version_is_loadable(&tx, &head)? {
             return Err(incompatible_schema(
-                "stored version head references a missing version",
+                "stored version head references an unreadable version",
             ));
         }
     }
 
+    let schema_version = if stored_version == Some(VERSION_SCHEMA_VERSION) {
+        VERSION_SCHEMA_VERSION
+    } else {
+        VERSION_SCHEMA_BASE_VERSION
+    };
     tx.execute(
         "INSERT INTO mount_rs_schema_versions(schema_name, schema_version)
          VALUES (?1, ?2)
          ON CONFLICT(schema_name) DO UPDATE SET schema_version=excluded.schema_version",
-        params![VERSION_SCHEMA_NAME, VERSION_SCHEMA_VERSION],
+        params![VERSION_SCHEMA_NAME, schema_version],
     )
     .map_err(backend_error)?;
     tx.commit().map_err(backend_error)
@@ -688,6 +689,7 @@ fn version_kind_name(kind: &VersionKind) -> &'static str {
     match kind {
         VersionKind::Initial => "initial",
         VersionKind::Snapshot => "snapshot",
+        VersionKind::NamespacePublication => "namespace-publication",
         VersionKind::Restore => "restore",
         VersionKind::Fork => "fork",
     }
@@ -697,6 +699,7 @@ fn parse_version_kind(value: &str) -> Result<VersionKind> {
     match value {
         "initial" => Ok(VersionKind::Initial),
         "snapshot" => Ok(VersionKind::Snapshot),
+        "namespace-publication" => Ok(VersionKind::NamespacePublication),
         "restore" => Ok(VersionKind::Restore),
         "fork" => Ok(VersionKind::Fork),
         _ => Err(FsError::new(ErrorCode::Enotsup)
@@ -780,22 +783,40 @@ const VERSION_SELECT: &str = "SELECT id, parent_id, restored_from, forked_from,
  namespace, block_store_id, kind, created_at_ms, durable, volume_id, sequence
  FROM mount_rs_versions";
 
-fn load_version_from_connection(connection: &Connection, id: &VersionId) -> Result<VersionInfo> {
-    let raw = connection
+fn raw_version_from_connection(
+    connection: &Connection,
+    id: &VersionId,
+) -> Result<Option<RawVersion>> {
+    connection
         .query_row(
             &format!("{VERSION_SELECT} WHERE id=?1"),
             params![id.encode()],
             raw_version,
         )
         .optional()
-        .map_err(backend_error)?
-        .ok_or_else(|| FsError::new(ErrorCode::Enoent).with_syscall("load version"))?;
+        .map_err(backend_error)
+}
+
+fn decode_version_for_id(raw: RawVersion, id: &VersionId) -> Result<VersionInfo> {
     let info = decode_raw_version(raw)?;
     info.validate_for_volume(&id.volume)?;
     if info.id != *id {
         return Err(FsError::new(ErrorCode::Enoent).with_syscall("load version"));
     }
     Ok(info)
+}
+
+fn load_version_from_connection(connection: &Connection, id: &VersionId) -> Result<VersionInfo> {
+    let raw = raw_version_from_connection(connection, id)?
+        .ok_or_else(|| FsError::new(ErrorCode::Enoent).with_syscall("load version"))?;
+    decode_version_for_id(raw, id)
+}
+
+fn stored_version_is_loadable(connection: &Connection, id: &VersionId) -> Result<bool> {
+    let Some(raw) = raw_version_from_connection(connection, id)? else {
+        return Ok(false);
+    };
+    Ok(decode_version_for_id(raw, id).is_ok())
 }
 
 #[async_trait]
@@ -1236,18 +1257,10 @@ impl VersionedMetadataStore for SqliteMetadataStore {
                     .with_syscall("version head")
                     .with_message("stored version head belongs to another volume"));
             }
-            let exists: bool = tx
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM mount_rs_versions
-                     WHERE id=?1 AND volume_id=?2)",
-                    params![id, self.1.0],
-                    |row| row.get(0),
-                )
-                .map_err(backend_error)?;
-            if !exists {
+            if !stored_version_is_loadable(&tx, &version)? {
                 return Err(FsError::new(ErrorCode::Eio)
                     .with_syscall("version head")
-                    .with_message("stored version head references a missing version"));
+                    .with_message("stored version head references an unreadable version"));
             }
             Some(VersionHead {
                 version,
@@ -1381,18 +1394,15 @@ impl VersionedMetadataStore for SqliteMetadataStore {
                 )));
         }
         if let Some(head_id) = head_id.as_deref() {
-            let exists: bool = tx
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM mount_rs_versions
-                     WHERE id=?1 AND volume_id=?2)",
-                    params![head_id, self.1.0],
-                    |row| row.get(0),
-                )
-                .map_err(backend_error)?;
-            if !exists {
+            let head = VersionId::decode(head_id).map_err(|_| {
+                FsError::new(ErrorCode::Eio)
+                    .with_syscall("publish version")
+                    .with_message("stored version head is malformed")
+            })?;
+            if head.volume != self.1 || !stored_version_is_loadable(&tx, &head)? {
                 return Err(FsError::new(ErrorCode::Eio)
                     .with_syscall("publish version")
-                    .with_message("stored version head references a missing version"));
+                    .with_message("stored version head references an unreadable version"));
             }
         }
         let expected_parent = publication.expected_parent.as_ref().map(VersionId::encode);
@@ -1440,6 +1450,22 @@ impl VersionedMetadataStore for SqliteMetadataStore {
             ],
         )
         .map_err(backend_error)?;
+        if publication.kind == VersionKind::NamespacePublication {
+            let changed = tx
+                .execute(
+                    "UPDATE mount_rs_schema_versions SET schema_version=?1
+                     WHERE schema_name=?2 AND schema_version BETWEEN ?3 AND ?1",
+                    params![
+                        VERSION_SCHEMA_VERSION,
+                        VERSION_SCHEMA_NAME,
+                        VERSION_SCHEMA_BASE_VERSION
+                    ],
+                )
+                .map_err(backend_error)?;
+            if changed != 1 {
+                return Err(incompatible_schema("version kind schema gate is missing"));
+            }
+        }
         let revision = expected_revision
             .checked_add(1)
             .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
@@ -1490,17 +1516,15 @@ impl VersionedMetadataStore for SqliteMetadataStore {
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(backend_error)?;
-        let exists: bool = tx
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM mount_rs_versions
-                 WHERE id=?1 AND volume_id=?2)",
-                params![id.encode(), self.1.0],
-                |row| row.get(0),
-            )
-            .map_err(backend_error)?;
-        if !exists {
+        let raw = raw_version_from_connection(&tx, id)?;
+        let Some(raw) = raw else {
             return Err(FsError::new(ErrorCode::Enoent).with_syscall("open version view"));
-        }
+        };
+        decode_version_for_id(raw, id).map_err(|_| {
+            FsError::new(ErrorCode::Eio)
+                .with_syscall("open version view")
+                .with_message("stored version is unreadable")
+        })?;
         let now_ms: i64 = tx
             .query_row(NOW_SELECT, [], |row| row.get(0))
             .map_err(backend_error)?;
@@ -1552,6 +1576,9 @@ impl VersionedMetadataStore for SqliteMetadataStore {
         lease: &ReadLease,
         request: ReadLeaseRequest,
     ) -> Result<ReadLease> {
+        if lease.volume != self.1 || lease.version.volume != self.1 {
+            return Err(FsError::new(ErrorCode::Estale).with_syscall("renew view"));
+        }
         let ttl_ms = request.validate()?;
         let ttl_ms = i64::try_from(ttl_ms).map_err(|_| FsError::new(ErrorCode::Eoverflow))?;
         let fence = i64::try_from(lease.fence).map_err(|_| FsError::new(ErrorCode::Estale))?;
@@ -1622,14 +1649,16 @@ impl VersionedMetadataStore for SqliteMetadataStore {
             .execute(
                 "DELETE FROM mount_rs_version_pins
                  WHERE view_id=?1 AND volume_id=?2 AND version_id=?3 AND owner=?4
-                   AND fence=?5 AND expires=?6",
+                   AND fence=?5 AND expires=?6 AND ?7=?2 AND ?8=?2",
                 params![
                     lease.view_id,
                     self.1.0,
                     lease.version.encode(),
                     lease.owner,
                     fence,
-                    expires
+                    expires,
+                    lease.volume.0,
+                    lease.version.volume.0,
                 ],
             )
             .map_err(backend_error)?;
@@ -1808,7 +1837,9 @@ mod tests {
     use std::{
         collections::BTreeMap,
         future::Future,
+        sync::Barrier,
         task::{Context, Poll, Waker},
+        thread,
         time::Instant,
     };
 
@@ -1841,6 +1872,32 @@ mod tests {
                     data: NodeData::Directory { entries: vec![] },
                 },
             )]),
+        }
+    }
+
+    fn snapshot_publication(
+        expected_revision: u64,
+        expected_parent: Option<VersionId>,
+        operation_id: &str,
+        durable: bool,
+    ) -> VersionPublication {
+        VersionPublication {
+            expected_revision,
+            expected_parent,
+            operation_id: PublicationId::new(operation_id).unwrap(),
+            namespace: namespace(),
+            block_store_id: mount_rs_core::versioning::BlockStoreId::new("blocks").unwrap(),
+            kind: VersionKind::Snapshot,
+            restored_from: None,
+            forked_from: None,
+            durable,
+        }
+    }
+
+    fn reader_request() -> ReadLeaseRequest {
+        ReadLeaseRequest {
+            owner: "reader".to_owned(),
+            ttl: Duration::from_secs(60),
         }
     }
 
@@ -2693,7 +2750,17 @@ mod tests {
                     |row| row.get::<_, i64>(0),
                 )
                 .unwrap(),
-            VERSION_SCHEMA_VERSION
+            VERSION_SCHEMA_BASE_VERSION
+        );
+        assert!(
+            connection
+                .query_row(
+                    "SELECT write_mode FROM mount_rs_metadata WHERE id=1",
+                    [],
+                    |row| { row.get::<_, Option<String>>(0) }
+                )
+                .unwrap()
+                .is_none()
         );
         assert_eq!(
             connection
@@ -2704,6 +2771,126 @@ mod tests {
                 )
                 .unwrap(),
             1
+        );
+        drop(connection);
+        drop(reopened);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn version_one_schema_stays_readable_until_namespace_publication() {
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        let volume = store.volume_id();
+        let lease = run(store.acquire_writer("schema-upgrade", Duration::from_secs(60))).unwrap();
+        let first = run(store.publish_version(
+            &lease,
+            snapshot_publication(0, None, "before-upgrade", false),
+        ))
+        .unwrap();
+        run(store.release_writer(&lease)).unwrap();
+        drop(store);
+
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT schema_version FROM mount_rs_schema_versions WHERE schema_name=?1",
+                    params![VERSION_SCHEMA_NAME],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            VERSION_SCHEMA_BASE_VERSION
+        );
+        drop(connection);
+
+        let reopened = SqliteMetadataStore::open(&path).unwrap();
+        assert_eq!(reopened.volume_id(), volume);
+        assert_eq!(
+            run(reopened.version_head()).unwrap().unwrap().version,
+            first.id
+        );
+        assert_eq!(run(reopened.list_versions()).unwrap().len(), 1);
+        assert_eq!(
+            reopened
+                .0
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT schema_version FROM mount_rs_schema_versions WHERE schema_name=?1",
+                    params![VERSION_SCHEMA_NAME],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            VERSION_SCHEMA_BASE_VERSION
+        );
+        let lease =
+            run(reopened.acquire_writer("schema-upgrade", Duration::from_secs(60))).unwrap();
+        let mut next = snapshot_publication(1, Some(first.id), "after-upgrade", false);
+        next.kind = VersionKind::NamespacePublication;
+        reopened
+            .0
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_namespace_activation
+                 BEFORE UPDATE OF revision ON mount_rs_metadata
+                 BEGIN SELECT RAISE(ABORT, 'injected activation failure'); END;",
+            )
+            .unwrap();
+        assert!(
+            run(reopened.publish_version(&lease, next.clone()))
+                .unwrap_err()
+                .is(ErrorCode::Eio)
+        );
+        {
+            let connection = reopened.0.lock().unwrap();
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT schema_version FROM mount_rs_schema_versions WHERE schema_name=?1",
+                        params![VERSION_SCHEMA_NAME],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                VERSION_SCHEMA_BASE_VERSION
+            );
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT count(*) FROM mount_rs_versions WHERE operation_id='after-upgrade'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                0
+            );
+            connection
+                .execute_batch("DROP TRIGGER fail_namespace_activation")
+                .unwrap();
+        }
+        let second = run(reopened.publish_version(&lease, next)).unwrap();
+        run(reopened.release_writer(&lease)).unwrap();
+        let connection = reopened.0.lock().unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT schema_version FROM mount_rs_schema_versions WHERE schema_name=?1",
+                    params![VERSION_SCHEMA_NAME],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            VERSION_SCHEMA_VERSION
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT kind FROM mount_rs_versions WHERE id=?1",
+                    params![second.id.encode()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "namespace-publication"
         );
         drop(connection);
         drop(reopened);
@@ -2934,6 +3121,303 @@ mod tests {
             )
             .unwrap();
         assert!(run(metadata.version_head()).unwrap_err().is(ErrorCode::Eio));
+    }
+
+    #[test]
+    fn version_head_rejects_a_record_whose_sequence_disagrees_with_its_id() {
+        let path = super::super::tests::unique_database_path();
+        let metadata = SqliteMetadataStore::open(&path).unwrap();
+        let writer = run(metadata.acquire_writer("head-writer", Duration::from_secs(60))).unwrap();
+        let version = run(metadata.publish_version(
+            &writer,
+            snapshot_publication(0, None, "head-identity", true),
+        ))
+        .unwrap();
+        assert_eq!(
+            run(metadata.version_head()).unwrap().unwrap().version,
+            version.id
+        );
+        metadata
+            .0
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE mount_rs_versions SET sequence=sequence+1 WHERE id=?1",
+                params![version.id.encode()],
+            )
+            .unwrap();
+
+        assert!(run(metadata.version_head()).unwrap_err().is(ErrorCode::Eio));
+        drop(metadata);
+        let error = match SqliteMetadataStore::open(&path) {
+            Ok(_) => panic!("a head with mismatched row identity must be rejected during open"),
+            Err(error) => error,
+        };
+        assert!(error.is(ErrorCode::Enotsup));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn publication_rejects_a_head_with_mismatched_row_identity() {
+        let metadata = SqliteMetadataStore::in_memory().unwrap();
+        let writer = run(metadata.acquire_writer("head-writer", Duration::from_secs(60))).unwrap();
+        let version =
+            run(metadata
+                .publish_version(&writer, snapshot_publication(0, None, "first-head", false)))
+            .unwrap();
+        metadata
+            .0
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE mount_rs_versions SET sequence=sequence+1 WHERE id=?1",
+                params![version.id.encode()],
+            )
+            .unwrap();
+        let result = run(metadata.publish_version(
+            &writer,
+            snapshot_publication(1, Some(version.id.clone()), "second-head", false),
+        ));
+        assert!(result.unwrap_err().is(ErrorCode::Eio));
+        assert_eq!(run(metadata.load()).unwrap().revision, 1);
+    }
+
+    #[test]
+    fn head_lookup_and_publication_reject_an_unloadable_head_record() {
+        let path = super::super::tests::unique_database_path();
+        let metadata = SqliteMetadataStore::open(&path).unwrap();
+        let writer = run(metadata.acquire_writer("writer", Duration::from_secs(60))).unwrap();
+        let first =
+            run(metadata
+                .publish_version(&writer, snapshot_publication(0, None, "valid-head", true)))
+            .unwrap();
+        metadata
+            .0
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE mount_rs_versions SET namespace='not-json' WHERE id=?1",
+                params![first.id.encode()],
+            )
+            .unwrap();
+        assert!(run(metadata.version_head()).unwrap_err().is(ErrorCode::Eio));
+        assert!(
+            run(metadata.publish_version(
+                &writer,
+                snapshot_publication(1, Some(first.id), "child-of-corrupt-head", true),
+            ))
+            .unwrap_err()
+            .is(ErrorCode::Eio)
+        );
+        assert_eq!(run(metadata.load()).unwrap().revision, 1);
+        drop(metadata);
+        let error = match SqliteMetadataStore::open(&path) {
+            Ok(_) => panic!("an unloadable version head must be rejected during open"),
+            Err(error) => error,
+        };
+        assert!(error.is(ErrorCode::Enotsup));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn open_pin_rejects_an_unloadable_historical_record_without_a_pin() {
+        let metadata = SqliteMetadataStore::in_memory().unwrap();
+        let writer = run(metadata.acquire_writer("writer", Duration::from_secs(60))).unwrap();
+        let first = run(metadata.publish_version(
+            &writer,
+            snapshot_publication(0, None, "historical-first", false),
+        ))
+        .unwrap();
+        run(metadata.publish_version(
+            &writer,
+            snapshot_publication(1, Some(first.id.clone()), "historical-second", false),
+        ))
+        .unwrap();
+        metadata
+            .0
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE mount_rs_versions SET namespace='not-json' WHERE id=?1",
+                params![first.id.encode()],
+            )
+            .unwrap();
+        assert!(
+            run(metadata.open_view_pin(&first.id, reader_request()))
+                .unwrap_err()
+                .is(ErrorCode::Eio)
+        );
+        let pins: i64 = metadata
+            .0
+            .lock()
+            .unwrap()
+            .query_row("SELECT count(*) FROM mount_rs_version_pins", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(pins, 0);
+        run(metadata.delete_version(&writer, &first.id)).unwrap();
+    }
+
+    #[test]
+    fn read_lease_rejects_a_forged_volume_on_renew_and_close() {
+        let metadata = SqliteMetadataStore::in_memory().unwrap();
+        let writer = run(metadata.acquire_writer("writer", Duration::from_secs(60))).unwrap();
+        let version =
+            run(metadata
+                .publish_version(&writer, snapshot_publication(0, None, "pin-volume", false)))
+            .unwrap();
+        let pin = run(metadata.open_view_pin(&version.id, reader_request())).unwrap();
+        let forged = ReadLease {
+            volume: VolumeId::new("other-volume").unwrap(),
+            ..pin.clone()
+        };
+        assert!(
+            run(metadata.renew_view_pin(&forged, reader_request()))
+                .unwrap_err()
+                .is(ErrorCode::Estale)
+        );
+        assert!(
+            run(metadata.close_view_pin(&forged))
+                .unwrap_err()
+                .is(ErrorCode::Estale)
+        );
+        run(metadata.close_view_pin(&pin)).unwrap();
+        run(metadata.close_view_pin(&forged)).unwrap();
+    }
+
+    #[test]
+    fn concurrent_pin_and_delete_have_only_serial_outcomes_across_connections() {
+        let path = super::super::tests::unique_database_path();
+        let metadata = SqliteMetadataStore::open(&path).unwrap();
+        let writer = run(metadata.acquire_writer("writer", Duration::from_secs(60))).unwrap();
+        let first = run(metadata.publish_version(
+            &writer,
+            snapshot_publication(0, None, "first-version", true),
+        ))
+        .unwrap();
+        let second = run(metadata.publish_version(
+            &writer,
+            snapshot_publication(1, Some(first.id.clone()), "second-version", true),
+        ))
+        .unwrap();
+        let third = run(metadata.publish_version(
+            &writer,
+            snapshot_publication(2, Some(second.id.clone()), "third-version", true),
+        ))
+        .unwrap();
+        assert_eq!(
+            run(metadata.version_head()).unwrap(),
+            Some(VersionHead {
+                version: third.id.clone(),
+                revision: 3,
+            })
+        );
+
+        let pin_store = SqliteMetadataStore::open(&path).unwrap();
+        let delete_store = SqliteMetadataStore::open(&path).unwrap();
+        let barrier = Arc::new(Barrier::new(3));
+        let pin_barrier = Arc::clone(&barrier);
+        let pin_id = first.id.clone();
+        let pin_thread = thread::spawn(move || {
+            pin_barrier.wait();
+            run(pin_store.open_view_pin(&pin_id, reader_request()))
+        });
+        let delete_barrier = Arc::clone(&barrier);
+        let delete_id = first.id.clone();
+        let delete_writer = writer.clone();
+        let delete_thread = thread::spawn(move || {
+            delete_barrier.wait();
+            run(delete_store.delete_version(&delete_writer, &delete_id))
+        });
+        barrier.wait();
+        let pin_result = pin_thread.join().unwrap();
+        let delete_result = delete_thread.join().unwrap();
+        match (pin_result, delete_result) {
+            (Ok(pin), Err(error)) if error.is(ErrorCode::Ebusy) => {
+                assert_eq!(run(metadata.load_version(&first.id)).unwrap().id, first.id);
+                run(metadata.close_view_pin(&pin)).unwrap();
+                run(metadata.delete_version(&writer, &first.id)).unwrap();
+                assert!(
+                    run(metadata.open_view_pin(&first.id, reader_request()))
+                        .unwrap_err()
+                        .is(ErrorCode::Enoent)
+                );
+            }
+            (Err(error), Ok(())) if error.is(ErrorCode::Enoent) => {
+                assert!(
+                    run(metadata.load_version(&first.id))
+                        .unwrap_err()
+                        .is(ErrorCode::Enoent)
+                );
+            }
+            (pin, delete) => panic!("non-serial pin/delete result: pin={pin:?}, delete={delete:?}"),
+        }
+        let pin = run(metadata.open_view_pin(&second.id, reader_request())).unwrap();
+        assert!(
+            run(metadata.delete_version(&writer, &second.id))
+                .unwrap_err()
+                .is(ErrorCode::Ebusy)
+        );
+        run(metadata.close_view_pin(&pin)).unwrap();
+        run(metadata.delete_version(&writer, &second.id)).unwrap();
+        assert!(
+            run(metadata.open_view_pin(&second.id, reader_request()))
+                .unwrap_err()
+                .is(ErrorCode::Enoent)
+        );
+        assert_eq!(
+            run(metadata.version_head()).unwrap(),
+            Some(VersionHead {
+                version: third.id,
+                revision: 3,
+            })
+        );
+        drop(metadata);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn concurrent_head_read_observes_a_committed_version_revision_pair() {
+        let path = super::super::tests::unique_database_path();
+        let metadata = SqliteMetadataStore::open(&path).unwrap();
+        let writer = run(metadata.acquire_writer("writer", Duration::from_secs(60))).unwrap();
+        run(metadata.publish_version(&writer, snapshot_publication(0, None, "initial-head", true)))
+            .unwrap();
+
+        for iteration in 0..8 {
+            let before = run(metadata.version_head()).unwrap().unwrap();
+            let reader = SqliteMetadataStore::open(&path).unwrap();
+            let barrier = Arc::new(Barrier::new(2));
+            let read_barrier = Arc::clone(&barrier);
+            let read_thread = thread::spawn(move || {
+                read_barrier.wait();
+                run(reader.version_head())
+            });
+            barrier.wait();
+            let committed = run(metadata.publish_version(
+                &writer,
+                snapshot_publication(
+                    before.revision,
+                    Some(before.version.clone()),
+                    &format!("head-race-{iteration}"),
+                    true,
+                ),
+            ))
+            .unwrap();
+            let after = VersionHead {
+                version: committed.id,
+                revision: before.revision + 1,
+            };
+            let observed = read_thread.join().unwrap().unwrap();
+            assert!(
+                observed == Some(before) || observed == Some(after.clone()),
+                "version_head returned a mixed revision/version pair: {observed:?}"
+            );
+            assert_eq!(run(metadata.version_head()).unwrap(), Some(after));
+        }
+        drop(metadata);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

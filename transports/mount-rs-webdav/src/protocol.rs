@@ -584,8 +584,9 @@ fn parse_if_list(value: &str, start: usize) -> Option<(Vec<IfCondition>, usize)>
 pub fn submitted_tokens(lists: &[IfList]) -> Vec<String> {
     let mut tokens = Vec::new();
     for condition in lists.iter().flat_map(|list| list.conditions.iter()) {
-        if !condition.negated
-            && let Some(token) = &condition.token
+        // RFC 4918 section 10.4.1 counts a state token as submitted merely
+        // by its appearance, independently of list or condition evaluation.
+        if let Some(token) = &condition.token
             && !tokens.iter().any(|submitted| submitted == token)
         {
             tokens.push(token.clone());

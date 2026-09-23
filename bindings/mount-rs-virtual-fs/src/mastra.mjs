@@ -10,12 +10,14 @@ import {
   WorkspaceReadOnlyError,
 } from "@mastra/core/workspace";
 import path from "node:path";
+import { fsError } from "@mount-rs/core";
 
 import {
   MountRsFilesystemBase,
   errorCode,
   isErrorCode,
   normalizeVirtualPath,
+  toBytes,
 } from "./common.mjs";
 
 const posix = path.posix;
@@ -64,6 +66,12 @@ function extensionMatches(name, extension) {
   const extensions = Array.isArray(extension) ? extension : [extension];
   const actual = posix.extname(name);
   return extensions.some((value) => value === actual || value === actual.slice(1));
+}
+
+function sameEntryIdentity(left, right) {
+  return left?.dev !== undefined && left?.ino !== undefined &&
+    right?.dev !== undefined && right?.ino !== undefined &&
+    String(left.dev) === String(right.dev) && String(left.ino) === String(right.ino);
 }
 
 /**
@@ -138,37 +146,40 @@ export class MountRsMastraFilesystem extends MountRsFilesystemBase {
     this._assertMastraWritable("writeFile");
     const normalized = normalizeVirtualPath(pathValue);
     try {
-      const parent = posix.dirname(normalized);
-      if (options.recursive === false) {
-        try {
-          const parentStats = await this._lstat(parent);
-          if (!parentStats.isDirectory()) throw new NotDirectoryError(parent);
-        } catch (error) {
-          if (isErrorCode(error, "ENOENT")) throw new DirectoryNotFoundError(parent);
-          throw error;
-        }
-      }
-      if (options.expectedMtime) {
-        try {
-          const current = await this._stat(normalized);
-          const actual = new Date(current.mtimeMs);
-          if (actual.getTime() !== options.expectedMtime.getTime()) {
-            throw new StaleFileError(normalized, options.expectedMtime, actual);
+      await this._run(async () => {
+        const parent = posix.dirname(normalized);
+        if (options.recursive === false) {
+          try {
+            const parentStats = await this._lstat(parent);
+            if (!parentStats.isDirectory()) throw new NotDirectoryError(parent);
+          } catch (error) {
+            if (isErrorCode(error, "ENOENT")) throw new DirectoryNotFoundError(parent);
+            throw error;
           }
-        } catch (error) {
-          if (!isErrorCode(error, "ENOENT")) throw error;
         }
-      }
-      if (options.overwrite === false) {
-        try {
-          await this._lstat(normalized);
-          throw new FileExistsError(normalized);
-        } catch (error) {
-          if (!isErrorCode(error, "ENOENT")) throw error;
+        if (options.expectedMtime) {
+          try {
+            const current = await this._stat(normalized);
+            const actual = new Date(current.mtimeMs);
+            if (actual.getTime() !== options.expectedMtime.getTime()) {
+              throw new StaleFileError(normalized, options.expectedMtime, actual);
+            }
+          } catch (error) {
+            if (!isErrorCode(error, "ENOENT")) throw error;
+          }
         }
-      }
-      await super.writeFile(normalized, Buffer.isBuffer(content) ? content : content, {
-        overwrite: options.overwrite !== false,
+        if (options.overwrite === false) {
+          try {
+            await this._lstat(normalized);
+            throw new FileExistsError(normalized);
+          } catch (error) {
+            if (!isErrorCode(error, "ENOENT")) throw error;
+          }
+        }
+        await this._writeBytes(normalized, toBytes(content), {
+          overwrite: options.overwrite !== false,
+          createParents: options.recursive !== false,
+        });
       });
     } catch (error) {
       throw mapMastraError(error, normalized, "writeFile");
@@ -187,9 +198,14 @@ export class MountRsMastraFilesystem extends MountRsFilesystemBase {
   async deleteFile(pathValue, options = {}) {
     this._assertMastraWritable("deleteFile");
     try {
-      const stats = await this._lstat(pathValue);
-      if (stats.isDirectory()) throw new IsDirectoryError(normalizeVirtualPath(pathValue));
-      await super.rm(pathValue, { force: options.force === true });
+      await this._run(async () => {
+        const stats = await this._lstat(pathValue);
+        if (stats.isDirectory()) throw new IsDirectoryError(normalizeVirtualPath(pathValue));
+        await this._remove(pathValue, {
+          force: options.force === true,
+          expectedIdentity: stats,
+        });
+      });
     } catch (error) {
       if (options.force === true && isErrorCode(error, "ENOENT")) return;
       throw mapMastraError(error, pathValue, "deleteFile");
@@ -213,15 +229,91 @@ export class MountRsMastraFilesystem extends MountRsFilesystemBase {
     const normalizedDestination = normalizeVirtualPath(destination);
     try {
       if (options.overwrite === false) {
-        try {
-          await this._lstat(normalizedDestination);
-          throw new FileExistsError(normalizedDestination);
-        } catch (error) {
-          if (!isErrorCode(error, "ENOENT")) throw error;
-        }
+        await this._run(async () => {
+          const sourceStats = await this._lstat(source);
+          if (sourceStats.isDirectory()) {
+            throw fsError("ENOTSUP", {
+              syscall: "move",
+              path: normalizeVirtualPath(source),
+              message: "exclusive directory moves require an atomic no-replace backend operation",
+            });
+          }
+          if (sourceStats.isSymbolicLink()) {
+            await this.filesystem.mkdir(posix.dirname(normalizedDestination), { recursive: true });
+            await this.filesystem.link(normalizeVirtualPath(source), normalizedDestination);
+            const destinationStats = await this._lstat(normalizedDestination);
+            if (!destinationStats.isSymbolicLink() ||
+                !sameEntryIdentity(sourceStats, destinationStats)) {
+              throw new FileExistsError(normalizedDestination);
+            }
+            this.pathIndex.add(normalizedDestination);
+            await this._remove(source, { recursive: false, expectedIdentity: sourceStats });
+            return;
+          }
+          if (sourceStats.isFile()) {
+            await this.filesystem.mkdir(posix.dirname(normalizedDestination), { recursive: true });
+            let linked = false;
+            try {
+              await this.filesystem.link(normalizeVirtualPath(source), normalizedDestination);
+              linked = true;
+            } catch (error) {
+              if (!["ENOTSUP", "EOPNOTSUPP", "EXDEV"].includes(errorCode(error))) throw error;
+            }
+            if (linked) {
+              const destinationStats = await this._lstat(normalizedDestination);
+              if (!destinationStats.isFile() ||
+                  !sameEntryIdentity(sourceStats, destinationStats)) {
+                throw new FileExistsError(normalizedDestination);
+              }
+              this.pathIndex.add(normalizedDestination);
+              await this._remove(source, { recursive: false, expectedIdentity: sourceStats });
+              return;
+            }
+          }
+          let createdIdentity;
+          const markCreated = async (handle) => {
+            createdIdentity = handle
+              ? await handle.stat()
+              : await this._lstat(normalizedDestination);
+          };
+          await this._copy(source, normalizedDestination, {
+            recursive: false,
+            overwrite: false,
+            onCreate: markCreated,
+          });
+          let current;
+          try {
+            current = await this._lstat(normalizedDestination);
+          } catch (error) {
+            if (!isErrorCode(error, "ENOENT")) throw error;
+          }
+          if (!current?.isFile() || !sameEntryIdentity(createdIdentity, current)) {
+            throw new FileExistsError(normalizedDestination);
+          }
+          if ((current.mode & 0o7777) !== (sourceStats.mode & 0o7777)) {
+            throw fsError("ENOTSUP", {
+              syscall: "move",
+              path: normalizedDestination,
+              message: "exclusive copy could not preserve the source mode",
+            });
+          }
+          await this._remove(source, { recursive: false, expectedIdentity: sourceStats });
+        });
+        return;
       }
-      await this.filesystem.mkdir(posix.dirname(normalizedDestination), { recursive: true });
-      await super.mv(source, normalizedDestination);
+      await this._run(async () => {
+        await this.filesystem.mkdir(posix.dirname(normalizedDestination), { recursive: true });
+        await this.filesystem.rename(normalizeVirtualPath(source), normalizedDestination);
+        this.pathIndex.rename(source, normalizedDestination);
+        try {
+          await this._lstat(source);
+          this.pathIndex.add(source);
+        } catch (error) {
+          if (!isErrorCode(error, "ENOENT")) this.pathIndex.add(source);
+          // Some backends leave two hardlink names unchanged when renaming
+          // between them. A missing source means the index rename was final.
+        }
+      });
     } catch (error) {
       throw mapMastraError(error, errorCode(error) === "EEXIST" ? normalizedDestination : source, "moveFile");
     }
@@ -239,11 +331,14 @@ export class MountRsMastraFilesystem extends MountRsFilesystemBase {
   async rmdir(pathValue, options = {}) {
     this._assertMastraWritable("rmdir");
     try {
-      const stats = await this._lstat(pathValue);
-      if (!stats.isDirectory()) throw new NotDirectoryError(normalizeVirtualPath(pathValue));
-      await super.rmdir(pathValue, {
-        recursive: options.recursive === true,
-        force: options.force === true,
+      await this._run(async () => {
+        const stats = await this._lstat(pathValue);
+        if (!stats.isDirectory()) throw new NotDirectoryError(normalizeVirtualPath(pathValue));
+        await this._remove(pathValue, {
+          recursive: options.recursive === true,
+          force: options.force === true,
+          expectedIdentity: stats,
+        });
       });
     } catch (error) {
       if (options.force === true && isErrorCode(error, "ENOENT")) return;

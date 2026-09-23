@@ -1068,8 +1068,17 @@ pub fn read_rgetlock(reader: &mut P9Reader<'_>) -> Result<Rgetlock, P9Error> {
 #[derive(Debug, Clone)]
 pub struct P9FrameAssembler {
     buffer: Vec<u8>,
+    offset: usize,
+    scan_offset: usize,
     limit: usize,
     failed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum P9VersionScan {
+    Found,
+    More,
+    Incomplete,
 }
 
 impl P9FrameAssembler {
@@ -1081,6 +1090,8 @@ impl P9FrameAssembler {
         }
         Ok(Self {
             buffer: Vec::new(),
+            offset: 0,
+            scan_offset: 0,
             limit,
             failed: false,
         })
@@ -1096,12 +1107,15 @@ impl P9FrameAssembler {
                 "frame limit {limit} is below the {P9_HDRSZ}-byte header"
             )));
         }
-        self.limit = limit;
+        if self.limit != limit {
+            self.scan_offset = self.offset;
+            self.limit = limit;
+        }
         Ok(())
     }
 
     pub fn pending(&self) -> usize {
-        self.buffer.len()
+        self.buffer.len() - self.offset
     }
 
     pub fn failed(&self) -> bool {
@@ -1110,6 +1124,8 @@ impl P9FrameAssembler {
 
     pub fn reset(&mut self) {
         self.buffer.clear();
+        self.offset = 0;
+        self.scan_offset = 0;
         self.failed = false;
     }
 
@@ -1119,12 +1135,125 @@ impl P9FrameAssembler {
                 "frame stream is unusable after a framing error",
             ));
         }
+        self.compact();
         let result = self.parse(chunk);
+        self.scan_offset = self.offset;
         if result.is_err() {
             self.failed = true;
             self.buffer.clear();
+            self.offset = 0;
+            self.scan_offset = 0;
         }
         result
+    }
+
+    /// Extract one frame, retaining coalesced bytes so the caller can change
+    /// the frame limit at a protocol negotiation boundary.
+    pub(crate) fn push_one(&mut self, chunk: &[u8]) -> Result<Option<Vec<u8>>, P9Error> {
+        if self.failed {
+            return Err(P9Error::new(
+                "frame stream is unusable after a framing error",
+            ));
+        }
+        if !chunk.is_empty() {
+            self.hold_unparsed(chunk);
+        }
+        let result = (|| {
+            if self.pending() < P9_HDRSZ {
+                Ok(None)
+            } else {
+                let size = u32::from_le_bytes([
+                    self.buffer[self.offset],
+                    self.buffer[self.offset + 1],
+                    self.buffer[self.offset + 2],
+                    self.buffer[self.offset + 3],
+                ]) as usize;
+                self.check_size(size, 0)?;
+                if self.pending() < size {
+                    Ok(None)
+                } else {
+                    let frame = self.buffer[self.offset..self.offset + size].to_vec();
+                    self.offset += size;
+                    if self.offset == self.buffer.len() {
+                        self.buffer.clear();
+                        self.offset = 0;
+                        self.scan_offset = 0;
+                    } else {
+                        self.scan_offset = self.scan_offset.max(self.offset);
+                    }
+                    Ok(Some(frame))
+                }
+            }
+        })();
+        if result.is_err() {
+            self.failed = true;
+            self.buffer.clear();
+            self.offset = 0;
+            self.scan_offset = 0;
+        }
+        result
+    }
+
+    /// Inspect complete raw frames without allocating them, so an established
+    /// Tversion can still abort queued work when the frame-count cap is full.
+    pub(crate) fn scan_for_version(&mut self, budget: usize) -> Result<P9VersionScan, P9Error> {
+        if self.failed {
+            return Err(P9Error::new(
+                "frame stream is unusable after a framing error",
+            ));
+        }
+        let result = (|| {
+            for _ in 0..budget {
+                let available = self.buffer.len() - self.scan_offset;
+                if available < P9_HDRSZ {
+                    return Ok(P9VersionScan::Incomplete);
+                }
+                let at = self.scan_offset;
+                let size = u32::from_le_bytes([
+                    self.buffer[at],
+                    self.buffer[at + 1],
+                    self.buffer[at + 2],
+                    self.buffer[at + 3],
+                ]) as usize;
+                self.check_size(size, at - self.offset)?;
+                if available < size {
+                    return Ok(P9VersionScan::Incomplete);
+                }
+                let frame = &self.buffer[at..at + size];
+                if frame[4] == P9_TVERSION && decode_message_as(frame, read_tversion).is_ok() {
+                    self.offset = at;
+                    self.scan_offset = at;
+                    return Ok(P9VersionScan::Found);
+                }
+                self.scan_offset += size;
+            }
+            Ok(P9VersionScan::More)
+        })();
+        if result.is_err() {
+            self.failed = true;
+            self.buffer.clear();
+            self.offset = 0;
+            self.scan_offset = 0;
+        }
+        result
+    }
+
+    /// Retain bytes received while a version exchange is pending. They are
+    /// framed only after the negotiated limit has been installed.
+    pub(crate) fn hold_unparsed(&mut self, chunk: &[u8]) {
+        if chunk.is_empty() {
+            return;
+        }
+        self.compact();
+        self.buffer.extend_from_slice(chunk);
+    }
+
+    fn compact(&mut self) {
+        if self.offset != 0 {
+            self.buffer.drain(..self.offset);
+            self.scan_offset -= self.offset;
+            self.offset = 0;
+        }
     }
 
     fn parse(&mut self, chunk: &[u8]) -> Result<Vec<Vec<u8>>, P9Error> {
@@ -1226,6 +1355,141 @@ mod tests {
             .push(&[&first[3..], &second[..]].concat())
             .unwrap();
         assert_eq!(frames, vec![first, second]);
+    }
+
+    #[test]
+    fn single_frame_extraction_rechecks_coalesced_tail_after_limit_change() {
+        let first = encode_message(P9_TVERSION, P9_NOTAG, 32, |writer| {
+            write_tversion(
+                writer,
+                &Tversion {
+                    msize: 128,
+                    version: P9_VERSION_DOTL.to_owned(),
+                },
+            )
+        })
+        .unwrap();
+        let second = encode_message(P9_TAUTH, 7, 256, |writer| {
+            write_tauth(
+                writer,
+                &Tauth {
+                    afid: P9_NOFID,
+                    uname: "x".repeat(128),
+                    aname: String::new(),
+                    n_uname: u32::MAX,
+                },
+            )
+        })
+        .unwrap();
+        let mut assembler = P9FrameAssembler::new(256).unwrap();
+        let coalesced = [&first[..], &second[..]].concat();
+        assert_eq!(assembler.push_one(&coalesced).unwrap(), Some(first));
+        assert_eq!(assembler.pending(), second.len());
+        assembler.set_limit(128).unwrap();
+        let error = assembler.push_one(&[]).unwrap_err();
+        assert!(error.message.contains("128-byte limit"));
+        assert_eq!(error.offset, Some(0));
+        assert!(assembler.failed());
+        assert_eq!(assembler.pending(), 0);
+    }
+
+    #[test]
+    fn framing_error_stays_terminal_until_reset() {
+        let valid = encode_message(P9_TCLUNK, 1, 16, |writer| {
+            write_fid_request(writer, FidRequest { fid: 1 });
+            Ok(())
+        })
+        .unwrap();
+        let mut assembler = P9FrameAssembler::new(64).unwrap();
+        let error = assembler
+            .push_one(&[6, 0, 0, 0, P9_TCLUNK, 1, 0])
+            .unwrap_err();
+        assert!(error.message.contains("below the"));
+        assert!(assembler.failed());
+        assert!(assembler.push_one(&valid).is_err());
+        assembler.reset();
+        assert_eq!(assembler.push_one(&valid).unwrap(), Some(valid));
+    }
+
+    #[test]
+    fn coalesced_frame_extraction_retains_backing_bytes_until_tail_is_drained() {
+        let frame = encode_message(P9_TCLUNK, 1, 16, |writer| {
+            write_fid_request(writer, FidRequest { fid: 1 });
+            Ok(())
+        })
+        .unwrap();
+        let coalesced = frame.repeat(1024);
+        let mut assembler = P9FrameAssembler::new(64).unwrap();
+        assert_eq!(assembler.push_one(&coalesced).unwrap(), Some(frame.clone()));
+        // Advancing an extraction cursor leaves the backing allocation in
+        // place; front draining would shift the unread tail on every frame.
+        assert_eq!(assembler.buffer.len(), coalesced.len());
+        let backing = assembler.buffer.as_ptr();
+        for remaining in (0..1023).rev() {
+            assert_eq!(assembler.push_one(&[]).unwrap(), Some(frame.clone()));
+            assert_eq!(assembler.pending(), remaining * frame.len());
+            if remaining > 0 {
+                assert_eq!(assembler.buffer.as_ptr(), backing);
+            }
+        }
+        assert_eq!(assembler.pending(), 0);
+    }
+
+    #[test]
+    fn bounded_version_scan_survives_append_compaction_and_keeps_the_tail() {
+        let clunk = encode_message(P9_TCLUNK, 7, 16, |writer| {
+            write_fid_request(writer, FidRequest { fid: 1 });
+            Ok(())
+        })
+        .unwrap();
+        let version = encode_message(P9_TVERSION, P9_NOTAG, 64, |writer| {
+            write_tversion(
+                writer,
+                &Tversion {
+                    msize: 64,
+                    version: P9_VERSION_DOTL.to_owned(),
+                },
+            )
+        })
+        .unwrap();
+        let burst = [&clunk[..], &clunk[..], &version[..], &clunk[..]].concat();
+        let mut assembler = P9FrameAssembler::new(128).unwrap();
+        assert_eq!(assembler.push_one(&burst).unwrap(), Some(clunk.clone()));
+        assert_eq!(assembler.scan_for_version(1).unwrap(), P9VersionScan::More);
+        let scanned_at = assembler.scan_offset;
+        assembler.set_limit(128).unwrap();
+        assert_eq!(
+            assembler.scan_offset, scanned_at,
+            "an unchanged limit must retain bounded scan progress"
+        );
+        assembler.hold_unparsed(&clunk);
+        assert_eq!(assembler.scan_for_version(1).unwrap(), P9VersionScan::Found);
+        assert_eq!(assembler.pending(), version.len() + clunk.len() * 2);
+        assert_eq!(assembler.push_one(&[]).unwrap(), Some(version));
+        assembler.set_limit(64).unwrap();
+        assert_eq!(assembler.push_one(&[]).unwrap(), Some(clunk.clone()));
+        assert_eq!(assembler.push_one(&[]).unwrap(), Some(clunk));
+        assert_eq!(assembler.pending(), 0);
+    }
+
+    #[test]
+    fn typed_decode_rejects_trailing_body_bytes() {
+        let mut frame = encode_message(P9_TVERSION, P9_NOTAG, 32, |writer| {
+            write_tversion(
+                writer,
+                &Tversion {
+                    msize: 4096,
+                    version: P9_VERSION_DOTL.to_owned(),
+                },
+            )
+        })
+        .unwrap();
+        frame.push(0xff);
+        let size = frame.len() as u32;
+        frame[..4].copy_from_slice(&size.to_le_bytes());
+        let error = decode_message_as(&frame, read_tversion).unwrap_err();
+        assert!(error.message.contains("trailing bytes"));
+        assert_eq!(error.offset, Some(frame.len() - 1));
     }
 
     #[test]

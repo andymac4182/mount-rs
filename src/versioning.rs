@@ -10,12 +10,12 @@
 use crate::Result;
 use crate::storage::{BlockId, MetadataStore, Namespace, WriterLease};
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
 use std::time::Duration;
 
 /// Stable identity of one logical filesystem timeline.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct VolumeId(pub String);
 
 impl VolumeId {
@@ -33,6 +33,16 @@ impl VolumeId {
     }
 }
 
+impl<'de> Deserialize<'de> for VolumeId {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
 impl fmt::Display for VolumeId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
@@ -40,7 +50,7 @@ impl fmt::Display for VolumeId {
 }
 
 /// Stable, ordered identity of a committed version in one volume.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct VersionId {
     pub volume: VolumeId,
     pub sequence: u64,
@@ -62,15 +72,34 @@ impl VersionId {
     }
 
     pub fn decode(value: &str) -> Result<Self> {
-        let (volume, sequence) = value.rsplit_once(':').ok_or_else(|| {
+        let (volume, sequence_text) = value.rsplit_once(':').ok_or_else(|| {
             crate::FsError::new(crate::ErrorCode::Einval)
                 .with_message("invalid version id; expected volume:sequence")
         })?;
         let volume = VolumeId::new(volume.to_owned())?;
-        let sequence = sequence.parse().map_err(|_| {
+        let sequence: u64 = sequence_text.parse().map_err(|_| {
             crate::FsError::new(crate::ErrorCode::Einval).with_message("invalid version sequence")
         })?;
+        if sequence.to_string() != sequence_text {
+            return Err(crate::FsError::new(crate::ErrorCode::Einval)
+                .with_message("version sequence must use canonical decimal text"));
+        }
         Self::new(volume, sequence)
+    }
+}
+
+impl<'de> Deserialize<'de> for VersionId {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Fields {
+            volume: VolumeId,
+            sequence: u64,
+        }
+        let Fields { volume, sequence } = Fields::deserialize(deserializer)?;
+        Self::new(volume, sequence).map_err(serde::de::Error::custom)
     }
 }
 
@@ -111,6 +140,8 @@ pub struct BlockRef {
 pub enum VersionKind {
     Initial,
     Snapshot,
+    /// Caller-supplied namespace published through the versioned coordinator.
+    NamespacePublication,
     Restore,
     Fork,
 }
@@ -148,12 +179,18 @@ impl VersionInfo {
                 .with_message("version parent belongs to another volume"));
         }
         if self
-            .restored_from
+            .parent
             .as_ref()
-            .is_some_and(|source| source == &self.id)
+            .is_some_and(|parent| parent.sequence >= self.id.sequence)
         {
             return Err(crate::FsError::new(crate::ErrorCode::Einval)
-                .with_message("version cannot restore from itself"));
+                .with_message("version parent must precede its child"));
+        }
+        if self.restored_from.as_ref().is_some_and(|source| {
+            source.volume == self.id.volume && source.sequence >= self.id.sequence
+        }) {
+            return Err(crate::FsError::new(crate::ErrorCode::Einval)
+                .with_message("restore source must precede the restored version"));
         }
         self.namespace.validate()
     }
@@ -384,4 +421,105 @@ pub trait VersionedMetadataStore: MetadataStore {
     /// Block reclamation remains a coordinator operation over all volumes
     /// sharing a qualified block-store identity.
     async fn delete_version(&self, lease: &WriterLease, id: &VersionId) -> Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chunking::ChunkerConfig;
+    use crate::storage::{NAMESPACE_FORMAT_VERSION, NodeData, NodeMetadata};
+    use crate::types::{S_IFDIR, Stats};
+    use std::collections::BTreeMap;
+
+    fn root_namespace() -> Namespace {
+        Namespace {
+            format_version: NAMESPACE_FORMAT_VERSION,
+            root: 1,
+            next_inode: 2,
+            default_uid: 0,
+            default_gid: 0,
+            umask: 0o022,
+            default_chunker: ChunkerConfig {
+                algorithm: "fixed-size".to_owned(),
+                version: 1,
+                parameters: BTreeMap::from([("chunk_size".to_owned(), 4096)]),
+            },
+            nodes: BTreeMap::from([(
+                1,
+                NodeMetadata {
+                    stats: Stats {
+                        dev: 0,
+                        ino: 1,
+                        mode: S_IFDIR | 0o755,
+                        nlink: 2,
+                        uid: 0,
+                        gid: 0,
+                        rdev: 0,
+                        size: 0,
+                        blksize: 4096,
+                        blocks: 0,
+                        atime_ms: 0,
+                        mtime_ms: 0,
+                        ctime_ms: 0,
+                        birthtime_ms: 0,
+                    },
+                    data: NodeData::Directory { entries: vec![] },
+                },
+            )]),
+        }
+    }
+
+    fn version(sequence: u64) -> VersionInfo {
+        VersionInfo {
+            id: VersionId::new(VolumeId::new("team").unwrap(), sequence).unwrap(),
+            parent: None,
+            restored_from: None,
+            forked_from: None,
+            kind: VersionKind::Snapshot,
+            namespace: root_namespace(),
+            block_store_id: BlockStoreId::new("blocks").unwrap(),
+            created_at_ms: 0,
+            durable: true,
+        }
+    }
+
+    #[test]
+    fn deserialization_rejects_invalid_version_identity() {
+        assert!(serde_json::from_str::<VolumeId>(r#""team:prod""#).is_err());
+        assert!(serde_json::from_str::<VolumeId>(r#""""#).is_err());
+        assert!(serde_json::from_str::<VersionId>(r#"{"volume":"team","sequence":0}"#).is_err());
+        assert!(
+            serde_json::from_str::<VersionId>(r#"{"volume":"team:prod","sequence":1}"#).is_err()
+        );
+    }
+
+    #[test]
+    fn decode_rejects_noncanonical_sequence_text() {
+        for text in ["team:01", "team:+1"] {
+            assert_eq!(
+                VersionId::decode(text).unwrap_err().code,
+                crate::ErrorCode::Einval
+            );
+        }
+    }
+
+    #[test]
+    fn committed_lineage_cannot_point_to_same_or_future_version() {
+        let mut record = version(3);
+        assert!(record.validate().is_ok());
+        for sequence in [3, 4] {
+            record.parent = Some(VersionId::new(record.id.volume.clone(), sequence).unwrap());
+            assert_eq!(
+                record.validate().unwrap_err().code,
+                crate::ErrorCode::Einval
+            );
+        }
+        record.parent = Some(VersionId::new(record.id.volume.clone(), 2).unwrap());
+        assert!(record.validate().is_ok());
+        record.restored_from = Some(VersionId::new(record.id.volume.clone(), 4).unwrap());
+        assert_eq!(
+            record.validate().unwrap_err().code,
+            crate::ErrorCode::Einval
+        );
+    }
 }

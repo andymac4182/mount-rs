@@ -1,6 +1,8 @@
 //! S3 request routing, key validation, HTTP metadata, XML codecs, and error
 //! mapping. This module contains no sockets and no filesystem calls.
 
+#![allow(unexpected_cfgs)]
+
 use std::{cmp::Ordering, fmt};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -335,6 +337,39 @@ pub fn parse_unsigned(value: &str) -> Option<u64> {
         return None;
     }
     value.parse().ok()
+}
+
+fn checked_part_number_marker(value: u64) -> Option<u32> {
+    u32::try_from(value).ok()
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    // The one symbolic digit spans both sides of u32::MAX without a symbolic
+    // string length. The harness checks the production parser and checked
+    // conversion for this ten-digit boundary slice only.
+    #[kani::proof]
+    #[kani::unwind(16)]
+    fn part_number_marker_boundary_does_not_wrap() {
+        let last_digit: u8 = kani::any();
+        kani::assume(last_digit.is_ascii_digit());
+        let digits = [
+            b'4', b'2', b'9', b'4', b'9', b'6', b'7', b'2', b'9', last_digit,
+        ];
+        let text = std::str::from_utf8(&digits).expect("ASCII decimal marker");
+        let marker = parse_unsigned(text).and_then(checked_part_number_marker);
+        kani::cover!(marker.is_some());
+        kani::cover!(marker.is_none());
+        assert_eq!(marker.is_some(), last_digit <= b'5');
+        if let Some(marker) = marker {
+            assert_eq!(
+                u64::from(marker),
+                4_294_967_290 + u64::from(last_digit - b'0')
+            );
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -697,10 +732,12 @@ pub fn route_request(
                     .min(MAX_PARTS_PER_PAGE as u64) as usize;
                 let marker = query_value(&target.query, "part-number-marker")
                     .map(|value| {
-                        parse_unsigned(&value).ok_or_else(|| S3Failure::s3("InvalidArgument"))
+                        parse_unsigned(&value)
+                            .and_then(checked_part_number_marker)
+                            .ok_or_else(|| S3Failure::s3("InvalidArgument"))
                     })
                     .transpose()?
-                    .unwrap_or(0) as u32;
+                    .unwrap_or(0);
                 Ok(Operation::ListParts {
                     target: destination,
                     upload_id,

@@ -95,6 +95,76 @@ fn notify_validation_matches_upstream_errors() {
 }
 
 #[test]
+fn notify_decode_rejects_claimed_length_shorter_than_output_header() {
+    let mut frame = encode_notify_inval_inode(FuseNotifyInvalInodeOut {
+        ino: 1,
+        off: -1,
+        len: 0,
+    });
+    frame[..4].copy_from_slice(&15u32.to_le_bytes());
+    assert!(decode_notify(&frame).is_err());
+}
+
+#[test]
+fn notify_decode_rejects_bytes_after_declared_frame() {
+    let mut frame = encode_notify_inval_inode(FuseNotifyInvalInodeOut {
+        ino: 1,
+        off: -1,
+        len: 0,
+    });
+    frame.push(0);
+    assert!(decode_notify(&frame).is_err());
+}
+
+#[test]
+fn notify_decode_requires_positive_notification_code() {
+    let frame = encode_notify_inval_inode(FuseNotifyInvalInodeOut {
+        ino: 1,
+        off: -1,
+        len: 0,
+    });
+    for code in [0i32, -9] {
+        let mut invalid = frame.clone();
+        invalid[4..8].copy_from_slice(&code.to_le_bytes());
+        assert!(decode_notify(&invalid).is_err(), "code={code}");
+    }
+}
+
+#[test]
+fn notify_entry_decode_requires_final_nul_byte() {
+    let frame = encode_notify_inval_entry(FuseNotifyInvalEntryOut {
+        parent: 1,
+        name: "child".to_owned(),
+        flags: 0,
+    })
+    .unwrap();
+    let mut body = decode_notify(&frame).unwrap().body;
+    *body.last_mut().unwrap() = b'x';
+    assert!(decode_notify_inval_entry(&body).is_err());
+}
+
+#[test]
+fn notify_entry_decode_rejects_interior_nul_byte() {
+    let frame = encode_notify_inval_entry(FuseNotifyInvalEntryOut {
+        parent: 1,
+        name: "child".to_owned(),
+        flags: 0,
+    })
+    .unwrap();
+    let mut body = decode_notify(&frame).unwrap().body;
+    body[16] = 0;
+    assert!(decode_notify_inval_entry(&body).is_err());
+}
+
+#[test]
+fn notify_entry_decode_rejects_name_over_kernel_limit() {
+    let mut body = vec![0; 16 + 1025 + 1];
+    body[8..12].copy_from_slice(&1025u32.to_le_bytes());
+    body[16..16 + 1025].fill(b'x');
+    assert!(decode_notify_inval_entry(&body).is_err());
+}
+
+#[test]
 fn transcript_wire_fixture_matches_upstream() {
     // This is the byte-for-byte v1 output of pinned src/fuse/record.ts.
     assert_eq!(record::TRANSCRIPT_MAGIC, u32::from_be_bytes(*b"UMFT"));

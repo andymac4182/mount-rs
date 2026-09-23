@@ -404,6 +404,7 @@ mod tests {
     use super::*;
     use mount_rs_core::{FsDriver, OpenFlags};
     use mount_rs_memfs::MemoryFs;
+    use std::collections::VecDeque;
     use std::future::Future;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::Wake;
@@ -418,6 +419,249 @@ mod tests {
             match Future::poll(future.as_mut(), &mut context) {
                 Poll::Ready(value) => return value,
                 Poll::Pending => thread::yield_now(),
+            }
+        }
+    }
+
+    struct QueuedWake {
+        task: usize,
+        runnable: Arc<Mutex<VecDeque<usize>>>,
+    }
+
+    impl Wake for QueuedWake {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.runnable.lock().unwrap().push_back(self.task);
+        }
+    }
+
+    fn acquire_uncontended_gate(
+        gate: &SaveGate,
+        runnable: &Arc<Mutex<VecDeque<usize>>>,
+    ) -> SaveGateGuard {
+        let waker = Waker::from(Arc::new(QueuedWake {
+            task: usize::MAX,
+            runnable: Arc::clone(runnable),
+        }));
+        let mut future = Box::pin(gate.lock());
+        match future.as_mut().poll(&mut Context::from_waker(&waker)) {
+            Poll::Ready(guard) => guard,
+            Poll::Pending => panic!("an uncontended gate did not resolve on its first poll"),
+        }
+    }
+
+    #[test]
+    fn cancelled_save_gate_waiter_does_not_strand_a_live_waiter() {
+        const LIVE: usize = 0;
+        const CANCELLED: usize = 1;
+
+        let gate = SaveGate::new();
+        let runnable = Arc::new(Mutex::new(VecDeque::new()));
+        let holder = acquire_uncontended_gate(&gate, &runnable);
+        let live_waker = Waker::from(Arc::new(QueuedWake {
+            task: LIVE,
+            runnable: Arc::clone(&runnable),
+        }));
+        let cancelled_waker = Waker::from(Arc::new(QueuedWake {
+            task: CANCELLED,
+            runnable: Arc::clone(&runnable),
+        }));
+        let mut live = Box::pin(gate.lock());
+        let mut cancelled = Box::pin(gate.lock());
+
+        assert!(matches!(
+            live.as_mut().poll(&mut Context::from_waker(&live_waker)),
+            Poll::Pending
+        ));
+        assert!(matches!(
+            cancelled
+                .as_mut()
+                .poll(&mut Context::from_waker(&cancelled_waker)),
+            Poll::Pending
+        ));
+        drop(cancelled);
+        drop(holder);
+
+        // Drive only tasks the gate actually schedules. A cancelled task can
+        // still have a queued wakeup, but it has no future left to poll.
+        let mut live_acquired = false;
+        loop {
+            let task = { runnable.lock().unwrap().pop_front() };
+            let Some(task) = task else { break };
+            if task == LIVE {
+                live_acquired = matches!(
+                    live.as_mut().poll(&mut Context::from_waker(&live_waker)),
+                    Poll::Ready(_)
+                );
+                break;
+            }
+            assert_eq!(task, CANCELLED);
+        }
+        assert!(live_acquired, "the live waiter was never scheduled");
+    }
+
+    #[test]
+    fn repeated_save_gate_unlocks_wake_distinct_waiters() {
+        const FIRST: usize = 0;
+        const SECOND: usize = 1;
+        const NEWCOMER: usize = 2;
+
+        let gate = SaveGate::new();
+        let runnable = Arc::new(Mutex::new(VecDeque::new()));
+        let holder = acquire_uncontended_gate(&gate, &runnable);
+        let first_waker = Waker::from(Arc::new(QueuedWake {
+            task: FIRST,
+            runnable: Arc::clone(&runnable),
+        }));
+        let second_waker = Waker::from(Arc::new(QueuedWake {
+            task: SECOND,
+            runnable: Arc::clone(&runnable),
+        }));
+        let newcomer_waker = Waker::from(Arc::new(QueuedWake {
+            task: NEWCOMER,
+            runnable: Arc::clone(&runnable),
+        }));
+        let mut first = Box::pin(gate.lock());
+        let mut second = Box::pin(gate.lock());
+        assert!(matches!(
+            first.as_mut().poll(&mut Context::from_waker(&first_waker)),
+            Poll::Pending
+        ));
+        assert!(matches!(
+            second
+                .as_mut()
+                .poll(&mut Context::from_waker(&second_waker)),
+            Poll::Pending
+        ));
+
+        drop(holder);
+        // A later caller joins behind the queued waiters, and each completed
+        // handoff schedules the next distinct waiter.
+        let mut newcomer = Box::pin(gate.lock());
+        assert!(matches!(
+            newcomer
+                .as_mut()
+                .poll(&mut Context::from_waker(&newcomer_waker)),
+            Poll::Pending
+        ));
+        assert_eq!(runnable.lock().unwrap().pop_front(), Some(FIRST));
+        let first_guard = match first.as_mut().poll(&mut Context::from_waker(&first_waker)) {
+            Poll::Ready(guard) => guard,
+            Poll::Pending => panic!("the first waiter stayed asleep"),
+        };
+        drop(first_guard);
+        assert_eq!(runnable.lock().unwrap().pop_front(), Some(SECOND));
+        let second_guard = match second
+            .as_mut()
+            .poll(&mut Context::from_waker(&second_waker))
+        {
+            Poll::Ready(guard) => guard,
+            Poll::Pending => panic!("the second waiter stayed asleep"),
+        };
+        drop(second_guard);
+        assert_eq!(runnable.lock().unwrap().pop_front(), Some(NEWCOMER));
+        assert!(matches!(
+            newcomer
+                .as_mut()
+                .poll(&mut Context::from_waker(&newcomer_waker)),
+            Poll::Ready(_)
+        ));
+    }
+
+    #[test]
+    fn bounded_save_gate_cancellation_schedules_wake_both_live_waiters() {
+        const ORDERS: [[usize; 3]; 6] = [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ];
+
+        // Explore all three-waiter registration orders and every cancellation
+        // position, before or after the holder unlocks. Re-poll the first
+        // waiter with a replacement waker in each schedule.
+        for order in ORDERS {
+            for cancelled in 0..3 {
+                for cancel_after_unlock in [false, true] {
+                    let gate = SaveGate::new();
+                    let runnable = Arc::new(Mutex::new(VecDeque::new()));
+                    let holder = acquire_uncontended_gate(&gate, &runnable);
+                    let mut wakers: [Waker; 3] = std::array::from_fn(|task| {
+                        Waker::from(Arc::new(QueuedWake {
+                            task,
+                            runnable: Arc::clone(&runnable),
+                        }))
+                    });
+                    let mut waiters: [_; 3] = std::array::from_fn(|_| Some(Box::pin(gate.lock())));
+
+                    for task in order {
+                        assert!(matches!(
+                            waiters[task]
+                                .as_mut()
+                                .unwrap()
+                                .as_mut()
+                                .poll(&mut Context::from_waker(&wakers[task])),
+                            Poll::Pending
+                        ));
+                    }
+                    let repolled = order[0];
+                    wakers[repolled] = Waker::from(Arc::new(QueuedWake {
+                        task: repolled,
+                        runnable: Arc::clone(&runnable),
+                    }));
+                    assert!(matches!(
+                        waiters[repolled]
+                            .as_mut()
+                            .unwrap()
+                            .as_mut()
+                            .poll(&mut Context::from_waker(&wakers[repolled])),
+                        Poll::Pending
+                    ));
+                    assert_eq!(gate.state.lock().unwrap().waiters.len(), 3);
+
+                    if !cancel_after_unlock {
+                        waiters[cancelled].take();
+                    }
+                    drop(holder);
+                    if cancel_after_unlock {
+                        waiters[cancelled].take();
+                    }
+
+                    let mut completed = [false; 3];
+                    // The queue is driven only by real gate wakeups. This
+                    // budget exceeds the two live acquisitions plus any
+                    // stale wakeup queued before a cancellation.
+                    for _ in 0..8 {
+                        let task = { runnable.lock().unwrap().pop_front() };
+                        let Some(task) = task else { break };
+                        if task == cancelled || completed[task] {
+                            continue;
+                        }
+                        if let Poll::Ready(guard) = waiters[task]
+                            .as_mut()
+                            .unwrap()
+                            .as_mut()
+                            .poll(&mut Context::from_waker(&wakers[task]))
+                        {
+                            completed[task] = true;
+                            waiters[task].take();
+                            drop(guard);
+                        }
+                    }
+                    for (task, done) in completed.iter().enumerate() {
+                        if task != cancelled {
+                            assert!(
+                                *done,
+                                "schedule {order:?}, cancel {cancelled}, after unlock {cancel_after_unlock} stranded waiter {task}"
+                            );
+                        }
+                    }
+                }
             }
         }
     }

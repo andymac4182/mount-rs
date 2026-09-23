@@ -227,6 +227,28 @@ async fn different_block_databases_cannot_read_a_shared_metadata_reference() {
             .expect("correct backing still reads"),
         b"shared metadata, private block bytes"
     );
+    Loopback::new(writer_b.clone())
+        .write_file("/from-b", b"second writer, other private block bytes")
+        .await
+        .expect("writer B also acknowledges its own metadata reference");
+    let error = Loopback::new(writer_a.clone())
+        .read_file("/from-b")
+        .await
+        .expect_err("writer A cannot resolve a block in writer B's database");
+    assert!(
+        matches!(
+            error.code,
+            mount_rs_core::ErrorCode::Eio | mount_rs_core::ErrorCode::Enoent
+        ),
+        "the reciprocal backing mismatch must fail closed: {error}"
+    );
+    assert_eq!(
+        Loopback::new(writer_b.clone())
+            .read_file("/from-b")
+            .await
+            .expect("writer B's backing still reads"),
+        b"second writer, other private block bytes"
+    );
     writer_a.shutdown().await.expect("close first writer");
     writer_b.shutdown().await.expect("close second writer");
 }

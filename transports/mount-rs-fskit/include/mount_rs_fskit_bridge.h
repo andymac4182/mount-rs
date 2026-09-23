@@ -6,6 +6,7 @@
 
 #define MOUNT_RS_FSKIT_PROTOCOL_VERSION UINT16_C(1)
 #define MOUNT_RS_FSKIT_MAX_BODY_LENGTH ((size_t)1024 * (size_t)1024)
+#define MOUNT_RS_FSKIT_MAX_FRAME_LENGTH ((size_t)20 + MOUNT_RS_FSKIT_MAX_BODY_LENGTH)
 #define MOUNT_RS_FSKIT_MAX_CONFIG_LENGTH ((size_t)64 * (size_t)1024)
 
 enum mount_rs_fskit_dispatch_status {
@@ -23,8 +24,12 @@ uint16_t mount_rs_fskit_protocol_version(void);
  *
  * The function never allocates for the caller. response_len is required and
  * receives the encoded response length on success, or the required capacity
- * when the response buffer is too small. A nonzero request_len or
- * response_capacity requires the corresponding pointer to be non-null.
+ * when the response buffer is too small. A request longer than
+ * MOUNT_RS_FSKIT_MAX_FRAME_LENGTH returns INVALID_ARGUMENT before reading
+ * request bytes. A nonzero request_len or response_capacity requires the
+ * corresponding pointer to be non-null. The caller must provide accessible
+ * regions of those lengths and a writable, correctly aligned response_len.
+ * Request, response, and response_len regions must not overlap.
  *
  * A successful dispatch includes protocol-level error replies (for example,
  * protocol-only Operation message); malformed input is reported by the
@@ -52,7 +57,9 @@ void *mount_rs_fskit_create_worker(
 /* Compatibility constructor for the deterministic in-memory backend. */
 void *mount_rs_fskit_create_memory_worker(uint8_t read_only);
 
-/* Dispatch through a persistent Rust FsDriver worker and its handle table. */
+/* Dispatch through a live worker. The buffer, response_len, and disjointness
+ * requirements of mount_rs_fskit_dispatch apply here too. The caller must not
+ * destroy the worker while dispatch is in progress. */
 int32_t mount_rs_fskit_worker_dispatch(
     void *worker,
     const uint8_t *request_ptr,

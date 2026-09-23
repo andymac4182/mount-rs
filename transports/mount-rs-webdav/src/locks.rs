@@ -1,15 +1,52 @@
 //! WebDAV write-lock state (RFC 4918 sections 6, 7, and 9.10).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use mount_rs_core::path::is_path_inside;
+use url::Url;
 use uuid::Uuid;
 
 use crate::constants::{
     DEFAULT_LOCK_TIMEOUT_SECONDS, LOCK_TOKEN_PREFIX, MAX_LOCK_TIMEOUT_SECONDS, MAX_LOCKS,
 };
 use crate::protocol::{LockTimeout, XmlNode};
+
+const MAX_INJECTED_TOKEN_BYTES: usize = 1_024;
+
+fn usable_lock_token_uri(token: &str) -> bool {
+    let Some((scheme, value)) = token.split_once(':') else {
+        return false;
+    };
+    let mut scheme_bytes = scheme.bytes();
+    if !scheme_bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic())
+        || !scheme_bytes.all(|byte| byte.is_ascii_alphanumeric() || b"+-.".contains(&byte))
+        || (scheme.eq_ignore_ascii_case("DAV") && value == "no-lock")
+    {
+        return false;
+    }
+
+    let bytes = value.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        let byte = bytes[at];
+        if byte == b'%' {
+            if !bytes.get(at + 1).is_some_and(u8::is_ascii_hexdigit)
+                || !bytes.get(at + 2).is_some_and(u8::is_ascii_hexdigit)
+            {
+                return false;
+            }
+            at += 3;
+        } else if byte.is_ascii_alphanumeric() || b"-._~:/?[]@!$&'()*+,;=".contains(&byte) {
+            at += 1;
+        } else {
+            return false;
+        }
+    }
+    Url::parse(token).is_ok_and(|uri| uri.fragment().is_none())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockDepth {
@@ -52,6 +89,7 @@ pub struct DavLockRequest {
 pub enum DavLockGrant {
     Granted(DavLock),
     Conflict(DavLock),
+    /// Active-lock capacity or an unusable or exhausted configured generator.
     Full,
 }
 
@@ -60,6 +98,13 @@ pub struct DavLockTableOptions {
     pub default_timeout_seconds: u64,
     pub max_timeout_seconds: u64,
     pub max_locks: usize,
+    /// Supplies a lock-token URI when configured. A fresh value is used as
+    /// given; repeats within one table use a UUID fallback. The generator
+    /// must avoid reuse across tables, servers, and process restarts, which
+    /// one table cannot check. Values must be usable ASCII absolute URIs and
+    /// cannot be the reserved `DAV:no-lock` sentinel. Configured tables fail
+    /// closed after [`MAX_LOCKS`] lifetime grants or when a value exceeds
+    /// 1,024 bytes.
     pub new_token: Option<Arc<dyn Fn() -> String + Send + Sync>>,
 }
 
@@ -87,6 +132,7 @@ impl Default for DavLockTableOptions {
 
 pub struct DavLockTable {
     locks: HashMap<String, DavLock>,
+    issued: HashSet<String>,
     order: Vec<String>,
     options: DavLockTableOptions,
 }
@@ -104,6 +150,7 @@ impl DavLockTable {
     pub fn new(options: DavLockTableOptions) -> Self {
         Self {
             locks: HashMap::new(),
+            issued: HashSet::new(),
             order: Vec::new(),
             options,
         }
@@ -177,11 +224,27 @@ impl DavLockTable {
         if self.size(now) >= self.options.max_locks {
             return DavLockGrant::Full;
         }
+        let injected_generator = self.options.new_token.is_some();
+        if injected_generator && self.issued.len() >= MAX_LOCKS {
+            return DavLockGrant::Full;
+        }
         let timeout_seconds = self.granted_timeout(request.timeout);
-        let token = self.options.new_token.as_ref().map_or_else(
+        let mut token = self.options.new_token.as_ref().map_or_else(
             || format!("{LOCK_TOKEN_PREFIX}{}", Uuid::new_v4()),
             |new_token| new_token(),
         );
+        if injected_generator
+            && (token.len() > MAX_INJECTED_TOKEN_BYTES || !usable_lock_token_uri(&token))
+        {
+            return DavLockGrant::Full;
+        }
+        // A configured generator may repeat a token from an expired lock.
+        // Retain its issued values; default UUIDs use random uniqueness.
+        while self.locks.contains_key(&token)
+            || (injected_generator && self.issued.contains(&token))
+        {
+            token = format!("{LOCK_TOKEN_PREFIX}{}", Uuid::new_v4());
+        }
         let lock = DavLock {
             token: token.clone(),
             path: request.path,
@@ -192,11 +255,11 @@ impl DavLockTable {
             timeout_seconds,
             expires_at: now.saturating_add((timeout_seconds as i64).saturating_mul(1000)),
         };
-        let new_token = !self.locks.contains_key(&token);
-        self.locks.insert(token.clone(), lock.clone());
-        if new_token {
-            self.order.push(token);
+        if injected_generator {
+            self.issued.insert(token.clone());
         }
+        self.locks.insert(token.clone(), lock.clone());
+        self.order.push(token);
         DavLockGrant::Granted(lock)
     }
 

@@ -186,6 +186,82 @@ impl LoadedMetadata {
     }
 }
 
+/// A fixed three-directory graph for finite namespace topology checks. Every
+/// entry target exists, names are unique per parent, and nlinks match child
+/// counts, so any rejection comes from the directory graph itself.
+#[cfg(test)]
+fn three_directory_topology(edges: [bool; 9]) -> Namespace {
+    let mut nodes = BTreeMap::new();
+    let names = ["first", "second", "third"];
+    for parent in 0..3 {
+        let inode = parent as u64 + 1;
+        let mut entries = Vec::new();
+        for child in 0..3 {
+            if edges[parent * 3 + child] {
+                let child_inode = child as u64 + 1;
+                entries.push(DirectoryEntry {
+                    name: names[child].to_owned(),
+                    inode: child_inode,
+                });
+            }
+        }
+        let child_count = entries.len() as u64;
+        nodes.insert(
+            inode,
+            NodeMetadata {
+                stats: Stats {
+                    dev: 1,
+                    ino: inode,
+                    mode: S_IFDIR | 0o755,
+                    nlink: 2 + child_count,
+                    uid: 0,
+                    gid: 0,
+                    rdev: 0,
+                    size: 0,
+                    blksize: 4096,
+                    blocks: 0,
+                    atime_ms: 0,
+                    mtime_ms: 0,
+                    ctime_ms: 0,
+                    birthtime_ms: 0,
+                },
+                data: NodeData::Directory { entries },
+            },
+        );
+    }
+    Namespace {
+        format_version: NAMESPACE_FORMAT_VERSION,
+        root: 1,
+        next_inode: 4,
+        default_uid: 0,
+        default_gid: 0,
+        umask: 0o022,
+        default_chunker: ChunkerConfig {
+            algorithm: "fixed-size".to_owned(),
+            version: 1,
+            parameters: BTreeMap::from([("chunk_size".to_owned(), 4096)]),
+        },
+        nodes,
+    }
+}
+
+/// The independent graph oracle: each non-root directory has one parent, the
+/// root has none, and both children are reachable from the root in at most
+/// two edges. With exactly three nodes these conditions describe a rooted tree.
+#[cfg(test)]
+fn is_three_directory_rooted_tree(edges: [bool; 9]) -> bool {
+    let root_parents = edges[0] as u8 + edges[3] as u8 + edges[6] as u8;
+    let second_parents = edges[1] as u8 + edges[4] as u8 + edges[7] as u8;
+    let third_parents = edges[2] as u8 + edges[5] as u8 + edges[8] as u8;
+    let second_reachable = edges[1] || (edges[2] && edges[7]);
+    let third_reachable = edges[2] || (edges[1] && edges[5]);
+    root_parents == 0
+        && second_parents == 1
+        && third_parents == 1
+        && second_reachable
+        && third_reachable
+}
+
 fn validate_format_version(version: u32) -> Result<()> {
     if version > NAMESPACE_FORMAT_VERSION {
         return Err(FsError::new(ErrorCode::Enotsup)
@@ -310,6 +386,50 @@ mod verification {
         {
             assert!(!accepted);
         }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(24)]
+    fn two_extent_validation() {
+        let first_file_offset: u64 = kani::any();
+        let first_block_offset: u64 = kani::any();
+        let first_length: u64 = kani::any();
+        let second_file_offset: u64 = kani::any();
+        let second_block_offset: u64 = kani::any();
+        let second_length: u64 = kani::any();
+        let file_size: u64 = kani::any();
+        let extents = [
+            BlockExtent {
+                file_offset: first_file_offset,
+                block: BlockId("first".to_owned()),
+                block_offset: first_block_offset,
+                length: first_length,
+            },
+            BlockExtent {
+                file_offset: second_file_offset,
+                block: BlockId("second".to_owned()),
+                block_offset: second_block_offset,
+                length: second_length,
+            },
+        ];
+        let accepted = validate_file_extents(&extents, file_size).is_ok();
+        let first_file_end = first_file_offset.checked_add(first_length);
+        let second_file_end = second_file_offset.checked_add(second_length);
+        let expected = first_length > 0
+            && second_length > 0
+            && first_block_offset.checked_add(first_length).is_some()
+            && second_block_offset.checked_add(second_length).is_some()
+            && first_file_end.is_some_and(|end| end <= file_size)
+            && second_file_end.is_some_and(|end| end <= file_size)
+            && first_file_end.is_some_and(|end| second_file_offset >= end);
+
+        kani::cover!(accepted);
+        kani::cover!(accepted && first_file_end == Some(second_file_offset));
+        kani::cover!(accepted && first_file_end.is_some_and(|end| end < second_file_offset));
+        kani::cover!(first_file_end.is_some_and(|end| second_file_offset < end));
+        kani::cover!(first_length == 0 || second_length == 0);
+
+        assert_eq!(accepted, expected);
     }
 }
 
@@ -806,6 +926,20 @@ mod tests {
     }
 
     #[test]
+    fn three_directory_topology_matches_rooted_tree_for_all_edge_sets() {
+        for mask in 0..(1_u16 << 9) {
+            let edges = std::array::from_fn(|bit| (mask & (1 << bit)) != 0);
+            let namespace = three_directory_topology(edges);
+            let accepted = namespace.validate().is_ok();
+            assert_eq!(
+                accepted,
+                is_three_directory_rooted_tree(edges),
+                "three-directory edge mask {mask:#011b}"
+            );
+        }
+    }
+
+    #[test]
     fn validates_directory_nlinks_and_orphan_policy() {
         let mut child = valid_namespace();
         child.nodes.insert(
@@ -848,6 +982,25 @@ mod tests {
         file.stats.blocks = 0;
         file.data = NodeData::File(file_layout(Vec::new()));
         assert!(empty.validate().is_ok());
+
+        for second_offset in [1, 2] {
+            let mut multi_extent = valid_namespace();
+            multi_extent.nodes.get_mut(&2).unwrap().data = NodeData::File(file_layout(vec![
+                BlockExtent {
+                    file_offset: 0,
+                    block: BlockId("first".into()),
+                    block_offset: 0,
+                    length: 1,
+                },
+                BlockExtent {
+                    file_offset: second_offset,
+                    block: BlockId("second".into()),
+                    block_offset: 0,
+                    length: 1,
+                },
+            ]));
+            assert!(multi_extent.validate().is_ok());
+        }
 
         let mut zero_chunker = valid_namespace();
         zero_chunker

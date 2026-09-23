@@ -18,3 +18,6 @@ libc = "0.2"
 mount-rs-memfs = { path = "../../filesystems/mount-rs-memfs" }
 async-trait = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

@@ -540,13 +540,79 @@ pub struct FuseReplyBuffer {
     pub body_offset: usize,
 }
 
+fn reply_body_capacity(message_len: usize, body_offset: usize) -> Option<usize> {
+    if body_offset != FUSE_OUT_HEADER_SIZE {
+        return None;
+    }
+    message_len.checked_sub(FUSE_OUT_HEADER_SIZE)
+}
+
+fn reply_frame_len(message_len: usize, body_offset: usize, used: usize) -> Option<usize> {
+    let capacity = reply_body_capacity(message_len, body_offset)?;
+    if used > capacity {
+        return None;
+    }
+    let len = FUSE_OUT_HEADER_SIZE.checked_add(used)?;
+    (len <= u32::MAX as usize).then_some(len)
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::{FUSE_OUT_HEADER_SIZE, reply_frame_len};
+
+    /// Bound allocation and used lengths to the largest wire length plus 64
+    /// bytes. The public offset spans the full `usize` space. This proves only
+    /// the pure length helper; Vec views and header writes have runtime tests.
+    #[kani::proof]
+    fn reply_frame_len_bounds() {
+        let message_len: usize = kani::any();
+        let body_offset: usize = kani::any();
+        let used: usize = kani::any();
+        let limit = u32::MAX as usize + 64;
+        kani::assume(message_len <= limit && used <= limit);
+
+        let frame_len = reply_frame_len(message_len, body_offset, used);
+        kani::cover!(message_len == 16 && body_offset == 16 && used == 0 && frame_len == Some(16));
+        kani::cover!(message_len == 15 && body_offset == 16 && frame_len.is_none());
+        kani::cover!(message_len == 16 && body_offset == 17 && frame_len.is_none());
+        kani::cover!(message_len == 17 && body_offset == 16 && used == 2 && frame_len.is_none());
+        kani::cover!(
+            message_len == u32::MAX as usize + 17
+                && body_offset == 16
+                && used == u32::MAX as usize
+                && frame_len.is_none()
+        );
+
+        if let Some(len) = frame_len {
+            assert_eq!(body_offset, FUSE_OUT_HEADER_SIZE);
+            assert!(message_len >= FUSE_OUT_HEADER_SIZE);
+            assert!(used <= message_len - FUSE_OUT_HEADER_SIZE);
+            assert_eq!(len, FUSE_OUT_HEADER_SIZE + used);
+            assert!(len <= message_len);
+            assert!(len <= u32::MAX as usize);
+        }
+        if body_offset != FUSE_OUT_HEADER_SIZE
+            || message_len < FUSE_OUT_HEADER_SIZE
+            || used > message_len.saturating_sub(FUSE_OUT_HEADER_SIZE)
+        {
+            assert!(frame_len.is_none());
+        }
+    }
+}
+
 impl FuseReplyBuffer {
     pub fn body(&self) -> &[u8] {
-        &self.message[self.body_offset..]
+        if reply_body_capacity(self.message.len(), self.body_offset).is_none() {
+            return &[];
+        }
+        &self.message[FUSE_OUT_HEADER_SIZE..]
     }
 
     pub fn body_mut(&mut self) -> &mut [u8] {
-        &mut self.message[self.body_offset..]
+        if reply_body_capacity(self.message.len(), self.body_offset).is_none() {
+            return &mut [];
+        }
+        &mut self.message[FUSE_OUT_HEADER_SIZE..]
     }
 }
 
@@ -554,6 +620,11 @@ pub fn alloc_reply(size: usize) -> Result<FuseReplyBuffer, ProtocolError> {
     let length = FUSE_OUT_HEADER_SIZE
         .checked_add(size)
         .ok_or_else(|| ProtocolError::new("reply body size overflows FUSE output length"))?;
+    if length > u32::MAX as usize {
+        return Err(ProtocolError::new(
+            "reply body size exceeds FUSE output length",
+        ));
+    }
     Ok(FuseReplyBuffer {
         message: vec![0; length],
         body_offset: FUSE_OUT_HEADER_SIZE,
@@ -565,18 +636,20 @@ pub fn finish_reply(
     unique: u64,
     bytes_used: Option<usize>,
 ) -> Result<Vec<u8>, ProtocolError> {
-    let used = bytes_used.unwrap_or_else(|| reply.message.len() - reply.body_offset);
-    let capacity = reply.message.len() - reply.body_offset;
+    let capacity = reply_body_capacity(reply.message.len(), reply.body_offset)
+        .ok_or_else(|| ProtocolError::new("invalid FUSE reply buffer layout"))?;
+    let used = bytes_used.unwrap_or(capacity);
     if used > capacity {
         return Err(ProtocolError::new(format!(
             "reply used {used} of a {capacity}-byte body"
         )));
     }
-    let len = FUSE_OUT_HEADER_SIZE + used;
+    let len = reply_frame_len(reply.message.len(), reply.body_offset, used)
+        .ok_or_else(|| ProtocolError::new("reply length exceeds u32"))?;
     write_out_header_into(
         &mut reply.message,
         FuseOutHeader {
-            len: u32::try_from(len).map_err(|_| ProtocolError::new("reply length exceeds u32"))?,
+            len: len as u32,
             error: 0,
             unique,
         },

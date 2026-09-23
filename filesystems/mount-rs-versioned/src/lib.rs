@@ -123,10 +123,12 @@ where
         operation_id: PublicationId,
     ) -> Result<VersionInfo> {
         if let Some(existing) = self.metadata.find_publication(&operation_id).await? {
-            if existing.kind != VersionKind::Snapshot {
+            if existing.kind != VersionKind::Snapshot
+                || existing.block_store_id != self.options.block_store_id
+            {
                 return Err(FsError::new(ErrorCode::Eexist)
                     .with_syscall("snapshot")
-                    .with_message("publication id was reused for another operation"));
+                    .with_message("publication id was reused for another snapshot payload"));
             }
             return Ok(existing);
         }
@@ -136,10 +138,12 @@ where
             .await?;
         let result = async {
             if let Some(existing) = self.metadata.find_publication(&operation_id).await? {
-                if existing.kind != VersionKind::Snapshot {
+                if existing.kind != VersionKind::Snapshot
+                    || existing.block_store_id != self.options.block_store_id
+                {
                     return Err(FsError::new(ErrorCode::Eexist)
                         .with_syscall("snapshot")
-                        .with_message("publication id was reused for another operation"));
+                        .with_message("publication id was reused for another snapshot payload"));
                 }
                 return Ok(existing);
             }
@@ -164,6 +168,22 @@ where
         &self,
         publication: &VersionPublication,
     ) -> Result<Option<VersionInfo>> {
+        // Before NamespacePublication existed, this API committed the same
+        // caller-supplied payload as Snapshot. Reconcile an old row only when
+        // every original payload field matches with that legacy kind.
+        if publication.kind == VersionKind::NamespacePublication
+            && let Some(existing) = self
+                .metadata
+                .find_publication(&publication.operation_id)
+                .await?
+            && existing.kind == VersionKind::Snapshot
+        {
+            let mut legacy = publication.clone();
+            legacy.kind = VersionKind::Snapshot;
+            if legacy.matches_committed(&existing)? {
+                return Ok(Some(existing));
+            }
+        }
         self.metadata.reconcile_publication(publication).await
     }
 
@@ -232,7 +252,7 @@ where
             operation_id,
             namespace,
             block_store_id: self.options.block_store_id.clone(),
-            kind: VersionKind::Snapshot,
+            kind: VersionKind::NamespacePublication,
             restored_from: None,
             forked_from: None,
             durable: self.metadata.durable() && self.blocks.durable(),
@@ -242,11 +262,19 @@ where
 
     /// Publish an explicit provider publication. This is the low-level seam
     /// for integrations that must retain the exact namespace, CAS revision,
-    /// parent, and publication ID across a retry.
+    /// parent, and publication ID across a retry. `Snapshot` is reserved for
+    /// `snapshot_with_publication_id`; caller-supplied cuts use
+    /// `NamespacePublication` so retry identities cannot impersonate a live
+    /// snapshot at this coordinator API.
     pub async fn publish_publication(
         &self,
         publication: VersionPublication,
     ) -> Result<VersionInfo> {
+        if publication.kind == VersionKind::Snapshot {
+            return Err(FsError::new(ErrorCode::Einval)
+                .with_syscall("publish version")
+                .with_message("Snapshot kind is reserved for live snapshot capture"));
+        }
         if publication.block_store_id != self.options.block_store_id {
             return Err(FsError::new(ErrorCode::Exdev)
                 .with_syscall("publish version")
@@ -683,39 +711,54 @@ where
             Some(Ok(renewed)) => {
                 self.invalidated.store(true, Ordering::Release);
                 state.closed = true;
+                state.pin = Some(renewed.clone());
                 pin = Some(renewed);
-                state.pin = None;
                 Err(view_expired_error(syscall))
             }
             Some(Err(error)) => {
                 self.invalidated.store(true, Ordering::Release);
                 state.closed = true;
-                pin = state.pin.take();
+                pin = state.pin.clone();
                 Err(error)
             }
             None => {
                 self.invalidated.store(true, Ordering::Release);
                 state.closed = true;
-                pin = state.pin.take();
+                pin = state.pin.clone();
                 Err(view_expired_error(syscall))
             }
         };
         let previous = self.operations.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0, "operation guard must account for begin");
-        if state.closed && state.handles == 0 && self.operations.load(Ordering::Acquire) == 0 {
-            if pin.is_none() {
-                pin = state.pin.take();
-            } else {
-                state.pin = None;
-            }
+        if state.closed
+            && state.handles == 0
+            && self.operations.load(Ordering::Acquire) == 0
+            && pin.is_none()
+        {
+            pin = state.pin.clone();
         }
         FinishAction { result, pin }
     }
 
-    fn cancel_operation(&self) {
+    fn cancel_operation(self: &Arc<Self>) {
         let previous = self.operations.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0, "operation guard must account for begin");
         self.invalidated.store(true, Ordering::Release);
+        if previous == 1 {
+            self.schedule_close();
+        }
+    }
+
+    fn schedule_close(self: &Arc<Self>) {
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let lifetime = Arc::clone(self);
+            runtime.spawn(async move {
+                // A canceled operation cannot await its own cleanup. Keep the
+                // lifetime alive while the final pin release is attempted.
+                // Explicit close remains available for provider errors.
+                let _ = lifetime.close().await;
+            });
+        }
     }
 
     async fn with_operation<T, F, Fut>(
@@ -762,41 +805,28 @@ where
             if state.handles == 0 {
                 return Ok(());
             }
-            state.handles -= 1;
-            if state.closed && state.handles == 0 && self.operations.load(Ordering::Acquire) == 0 {
-                state.pin.take()
+            let final_pin = if (state.closed || self.invalidated.load(Ordering::Acquire))
+                && state.handles == 1
+                && self.operations.load(Ordering::Acquire) == 0
+            {
+                state.pin.clone()
             } else {
                 None
+            };
+            if final_pin.is_none() {
+                state.handles -= 1;
             }
-        };
-        if let Some(pin) = pin
-            && let Err(error) = self.release_pin(pin).await
-        {
-            // The handle is still logically open when its final pin release
-            // fails; restore the count so the caller's explicit close can
-            // retry the provider operation.
-            let mut state = self.state.lock().await;
-            state.handles += 1;
-            return Err(error);
-        }
-        Ok(())
-    }
-
-    async fn abandon_handle(&self) -> Result<()> {
-        let pin = {
-            let mut state = self.state.lock().await;
-            if state.handles == 0 {
-                return Ok(());
-            }
-            state.handles -= 1;
-            if state.closed && state.handles == 0 && self.operations.load(Ordering::Acquire) == 0 {
-                state.pin.take()
-            } else {
-                None
-            }
+            final_pin
         };
         if let Some(pin) = pin {
-            self.release_pin(pin).await?;
+            // Retain both the exact pin and final handle count until the
+            // provider acknowledges release. Cancellation can then retry.
+            self.release_pin(pin.clone()).await?;
+            let mut state = self.state.lock().await;
+            if state.pin.as_ref() == Some(&pin) {
+                state.pin = None;
+            }
+            state.handles -= 1;
         }
         Ok(())
     }
@@ -806,13 +836,19 @@ where
             let mut state = self.state.lock().await;
             state.closed = true;
             if state.handles == 0 && self.operations.load(Ordering::Acquire) == 0 {
-                state.pin.take()
+                state.pin.clone()
             } else {
                 None
             }
         };
         if let Some(pin) = pin {
-            self.release_pin(pin).await?;
+            // Keep the exact token in local state across the provider await:
+            // cancellation can occur before the provider has removed its pin.
+            self.release_pin(pin.clone()).await?;
+            let mut state = self.state.lock().await;
+            if state.pin.as_ref() == Some(&pin) {
+                state.pin = None;
+            }
         }
         Ok(())
     }
@@ -820,7 +856,6 @@ where
     async fn release_pin(&self, pin: ReadLease) -> Result<()> {
         match self.metadata.close_view_pin(&pin).await {
             Ok(()) => Ok(()),
-            Err(error) if error.is(ErrorCode::Estale) => Ok(()),
             Err(error) => {
                 // A provider error is not proof that the pin was removed.
                 // Keep the exact token so an explicit close can retry. If a
@@ -847,6 +882,7 @@ where
 {
     lifetime: Arc<ViewLifetime<M>>,
     active: bool,
+    needs_cleanup: bool,
 }
 
 impl<M> OperationGuard<M>
@@ -857,6 +893,7 @@ where
         Self {
             lifetime,
             active: true,
+            needs_cleanup: false,
         }
     }
 
@@ -866,8 +903,14 @@ where
         // performs no further await. Disarm before asynchronous pin cleanup so
         // cancellation cannot decrement the same operation twice.
         self.active = false;
+        self.needs_cleanup = action.pin.is_some();
         if let Some(pin) = action.pin {
-            self.lifetime.release_pin(pin).await?;
+            self.lifetime.release_pin(pin.clone()).await?;
+            let mut state = self.lifetime.state.lock().await;
+            if state.pin.as_ref() == Some(&pin) {
+                state.pin = None;
+            }
+            self.needs_cleanup = false;
         }
         action.result
     }
@@ -884,6 +927,8 @@ where
             // count and invalidates the view; an explicit close then releases
             // the provider pin without relying on an async Drop implementation.
             self.lifetime.cancel_operation();
+        } else if self.needs_cleanup {
+            self.lifetime.schedule_close();
         }
     }
 }
@@ -893,7 +938,9 @@ where
 /// Rust cannot await provider cleanup from `Drop`, so dropping this value
 /// without calling [`Self::close`] may retain the pin until its TTL. Explicit
 /// close is retryable after a provider error and must be used when prompt
-/// retention release matters.
+/// retention release matters. A canceled operation attempts deferred cleanup
+/// on the currently running Tokio runtime; if no runtime is available or it
+/// shuts down, the caller must retry explicit close or wait for the pin TTL.
 pub struct VersionedView<M, B>
 where
     M: VersionedMetadataStore + Clone + Send + Sync + 'static,
@@ -1180,14 +1227,11 @@ where
                 return Err(error);
             }
         };
-        if let Err(error) = self.lifetime.acquire_handle().await {
-            let _ = operation.finish("open").await;
-            return Err(error);
-        }
-        if let Err(error) = operation.finish("open").await {
-            let _ = self.lifetime.abandon_handle().await;
-            return Err(error);
-        }
+        // No handle is reserved while the final lease renewal can await.
+        // Cancellation before this point cannot leave an unreturned handle
+        // keeping the view pin alive.
+        operation.finish("open").await?;
+        self.lifetime.acquire_handle().await?;
         Ok(Arc::new(HistoricalFileHandle {
             lifetime: Arc::clone(&self.lifetime),
             namespace: Arc::new(self.record.namespace.clone()),
@@ -1525,4 +1569,56 @@ fn error_with_path(code: ErrorCode, syscall: &str, path: &str) -> FsError {
 
 fn read_only_error(syscall: &str, path: &str) -> FsError {
     error_with_path(ErrorCode::Erofs, syscall, path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
+    use mount_rs_memory::{MemoryBlockStore, MemoryMetadataStore};
+
+    #[tokio::test]
+    async fn cancelled_last_operation_after_view_close_releases_pin() {
+        let metadata = MemoryMetadataStore::new();
+        let blocks = MemoryBlockStore::new();
+        let filesystem = ChunkedFs::open(
+            metadata.clone(),
+            blocks.clone(),
+            ChunkedOptions::fixed("seed", 4096).unwrap(),
+        )
+        .await
+        .unwrap();
+        filesystem.shutdown().await.unwrap();
+        let coordinator = VersionedCoordinator::new(
+            metadata,
+            blocks,
+            VersionedOptions::new("versions", BlockStoreId::new("mem").unwrap()),
+        )
+        .unwrap();
+        let first = coordinator.snapshot().await.unwrap();
+        let _current = coordinator.snapshot().await.unwrap();
+        let view = coordinator.view(&first.id).await.unwrap();
+
+        // Hold an operation without a file handle. A real filesystem method
+        // can be suspended after begin; close returns while it is in flight.
+        let guard = view.lifetime.begin(false, "stat").await.unwrap();
+        view.close().await.unwrap();
+        assert_eq!(
+            coordinator.delete(&first.id).await.unwrap_err().code,
+            ErrorCode::Ebusy
+        );
+        drop(guard);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match coordinator.delete(&first.id).await {
+                    Ok(()) => break,
+                    Err(error) if error.is(ErrorCode::Ebusy) => tokio::task::yield_now().await,
+                    Err(error) => panic!("unexpected delete error: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("cancelled last operation must release the pin");
+    }
 }

@@ -2782,35 +2782,48 @@ async fn write_stream_body(request: StreamWriteRequest<'_>) -> S3Result<u64> {
     let mut position = 0_u64;
     let operation: S3Result<()> = async {
         while let Some(chunk) = next_request_body(&mut body).await {
-            let chunk = chunk.map_err(|_| S3Failure::s3("IncompleteBody"))?;
-            let payloads = if let Some(decoder) = decoder.as_mut() {
-                decoder.feed(&chunk)?
-            } else {
-                if declared_length
-                    .is_some_and(|length| position.saturating_add(chunk.len() as u64) > length)
-                {
-                    return Err(S3Failure::s3("IncompleteBody"));
+            let mut chunk = Some(chunk.map_err(|_| S3Failure::s3("IncompleteBody"))?);
+            let mut consumed = 0;
+            loop {
+                let payloads = if let Some(decoder) = decoder.as_mut() {
+                    let source = chunk.as_ref().expect("source item retained while decoding");
+                    if consumed == source.len() {
+                        break;
+                    }
+                    let (window_bytes, payloads) = decoder.feed(&source[consumed..])?;
+                    consumed += window_bytes;
+                    payloads
+                } else {
+                    let source = chunk.take().expect("raw item consumed once");
+                    if declared_length
+                        .is_some_and(|length| position.saturating_add(source.len() as u64) > length)
+                    {
+                        return Err(S3Failure::s3("IncompleteBody"));
+                    }
+                    vec![source]
+                };
+                for payload in payloads {
+                    if let Some(payload_hash) = payload_hash.as_mut() {
+                        payload_hash.update(&payload);
+                    }
+                    if payload.is_empty() {
+                        continue;
+                    }
+                    enforce_staging_quota(staging_quota, position, payload.len() as u64)?;
+                    if handle.is_none() {
+                        handle =
+                            Some(open_stream_handle(driver, path, exclusive, create_parent).await?);
+                    }
+                    write_stream_chunk(
+                        handle.as_ref().expect("stream handle opened above"),
+                        &mut position,
+                        &payload,
+                    )
+                    .await?;
                 }
-                vec![chunk]
-            };
-            for payload in payloads {
-                if let Some(payload_hash) = payload_hash.as_mut() {
-                    payload_hash.update(&payload);
+                if decoder.is_none() {
+                    break;
                 }
-                if payload.is_empty() {
-                    continue;
-                }
-                enforce_staging_quota(staging_quota, position, payload.len() as u64)?;
-                if handle.is_none() {
-                    handle =
-                        Some(open_stream_handle(driver, path, exclusive, create_parent).await?);
-                }
-                write_stream_chunk(
-                    handle.as_ref().expect("stream handle opened above"),
-                    &mut position,
-                    &payload,
-                )
-                .await?;
             }
         }
         if let Some(decoder) = decoder.as_mut() {
@@ -2878,22 +2891,31 @@ async fn consume_stream_body(
     let mut received = 0_u64;
     while let Some(chunk) = next_request_body(&mut body).await {
         let chunk = chunk.map_err(|_| S3Failure::s3("IncompleteBody"))?;
-        let payloads = if let Some(decoder) = decoder.as_mut() {
-            decoder.feed(&chunk)?
+        if let Some(decoder) = decoder.as_mut() {
+            let mut consumed = 0;
+            while consumed < chunk.len() {
+                let (window_bytes, payloads) = decoder.feed(&chunk[consumed..])?;
+                consumed += window_bytes;
+                for payload in &payloads {
+                    if let Some(payload_hash) = payload_hash.as_mut() {
+                        payload_hash.update(payload);
+                    }
+                }
+                if payloads.iter().any(|payload| !payload.is_empty()) {
+                    return Err(S3Failure::s3("InvalidRequest"));
+                }
+            }
         } else {
             received = received.saturating_add(chunk.len() as u64);
             if received > max_body_bytes as u64 {
                 return Err(S3Failure::s3("EntityTooLarge"));
             }
-            vec![chunk]
-        };
-        for payload in &payloads {
             if let Some(payload_hash) = payload_hash.as_mut() {
-                payload_hash.update(payload);
+                payload_hash.update(&chunk);
             }
-        }
-        if payloads.iter().any(|payload| !payload.is_empty()) {
-            return Err(S3Failure::s3("InvalidRequest"));
+            if !chunk.is_empty() {
+                return Err(S3Failure::s3("InvalidRequest"));
+            }
         }
     }
     if let Some(decoder) = decoder.as_mut() {
@@ -3454,6 +3476,7 @@ struct ChunkSigning<'a> {
 const MAX_SIGNED_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_CHUNK_HEADER_BYTES: usize = 256;
 const MAX_TRAILER_BYTES: usize = 16 * 1024;
+const MAX_STREAMING_FEED_BYTES: usize = 64 * 1024;
 const TRAILER_SIGNATURE_HEADER: &str = "x-amz-trailer-signature";
 
 fn decode_aws_chunked(
@@ -3786,18 +3809,56 @@ impl<'a> StreamingBodyDecoder<'a> {
         }))
     }
 
-    fn feed(&mut self, bytes: &[u8]) -> S3Result<Vec<Vec<u8>>> {
+    fn feed(&mut self, bytes: &[u8]) -> S3Result<(usize, Vec<Vec<u8>>)> {
         if self.state == StreamingDecodeState::Done && !bytes.is_empty() {
             return Err(S3Failure::s3("IncompleteBody"));
         }
-        self.encoded.extend_from_slice(bytes);
+        let consumed = bytes.len().min(MAX_STREAMING_FEED_BYTES);
+        let mut bytes = &bytes[..consumed];
         let mut output = Vec::new();
+        if bytes.is_empty() {
+            self.consume_encoded(&mut output)?;
+        }
+        while !bytes.is_empty() {
+            if self.state == StreamingDecodeState::Done {
+                return Err(S3Failure::s3("IncompleteBody"));
+            }
+            let available = self
+                .pending_encoded_limit()
+                .saturating_sub(self.encoded.len());
+            if available == 0 {
+                return Err(S3Failure::s3("InvalidRequest"));
+            }
+            let take = bytes.len().min(available);
+            self.encoded.extend_from_slice(&bytes[..take]);
+            bytes = &bytes[take..];
+            self.consume_encoded(&mut output)?;
+        }
+        Ok((consumed, output))
+    }
+
+    fn pending_encoded_limit(&self) -> usize {
+        match self.state {
+            StreamingDecodeState::Header => MAX_CHUNK_HEADER_BYTES + 2,
+            StreamingDecodeState::Payload => {
+                self.current_remaining.min(MAX_STREAMING_FEED_BYTES as u64) as usize
+            }
+            StreamingDecodeState::PayloadCr | StreamingDecodeState::PayloadLf => 1,
+            StreamingDecodeState::Trailer => MAX_TRAILER_BYTES
+                .saturating_sub(self.trailer_block.len())
+                .saturating_add(2),
+            StreamingDecodeState::Epilogue => 2,
+            StreamingDecodeState::Done => 0,
+        }
+    }
+
+    fn consume_encoded(&mut self, output: &mut Vec<Vec<u8>>) -> S3Result<()> {
         loop {
             let progressed = match self.state {
                 StreamingDecodeState::Header => self.consume_header()?,
-                StreamingDecodeState::Payload => self.consume_payload(&mut output)?,
+                StreamingDecodeState::Payload => self.consume_payload(output)?,
                 StreamingDecodeState::PayloadCr => self.consume_payload_cr()?,
-                StreamingDecodeState::PayloadLf => self.consume_payload_lf(&mut output)?,
+                StreamingDecodeState::PayloadLf => self.consume_payload_lf(output)?,
                 StreamingDecodeState::Trailer => self.consume_trailer()?,
                 StreamingDecodeState::Epilogue => self.consume_epilogue()?,
                 StreamingDecodeState::Done => {
@@ -3812,7 +3873,7 @@ impl<'a> StreamingBodyDecoder<'a> {
                 break;
             }
         }
-        Ok(output)
+        Ok(())
     }
 
     fn finish(&mut self) -> S3Result<Vec<Vec<u8>>> {
@@ -4289,6 +4350,121 @@ mod tests {
     use super::*;
     use mount_rs_core::{ErrorCode, FileHandle, FsError, Result as FsResult, Stats};
     use mount_rs_memfs::MemoryFs;
+
+    #[test]
+    fn streaming_decoder_limits_buffer_before_rejecting_oversized_header() {
+        let headers = [HeaderEntry::new("content-encoding", "aws-chunked")];
+        let mut decoder = StreamingBodyDecoder::new(&headers, 4, None, None)
+            .expect("valid decoder configuration")
+            .expect("aws-chunked decoder");
+        let frame = vec![b'x'; 1024 * 1024];
+        let error = decoder
+            .feed(&frame)
+            .expect_err("chunk header exceeds limit");
+        assert!(matches!(error, S3Failure::S3(ref error) if error.code == "InvalidRequest"));
+        assert!(
+            decoder.encoded.capacity() <= 1024,
+            "invalid frame allocated {} encoded bytes",
+            decoder.encoded.capacity()
+        );
+    }
+
+    #[test]
+    fn streaming_decoder_limits_buffer_before_rejecting_oversized_payload() {
+        let headers = [HeaderEntry::new("content-encoding", "aws-chunked")];
+        let mut decoder = StreamingBodyDecoder::new(&headers, 4, None, None)
+            .expect("valid decoder configuration")
+            .expect("aws-chunked decoder");
+        let mut frame = b"5\r\n".to_vec();
+        frame.extend(std::iter::repeat_n(b'a', 1024 * 1024));
+        let error = decoder
+            .feed(&frame)
+            .expect_err("decoded body exceeds limit");
+        assert!(matches!(error, S3Failure::S3(ref error) if error.code == "EntityTooLarge"));
+        assert!(
+            decoder.encoded.capacity() <= 1024,
+            "oversized frame allocated {} encoded bytes",
+            decoder.encoded.capacity()
+        );
+    }
+
+    #[test]
+    fn streaming_decoder_accepts_every_partition_of_header_payload_and_trailer() {
+        let headers = [
+            HeaderEntry::new("content-encoding", "aws-chunked"),
+            HeaderEntry::new("x-amz-decoded-content-length", "3"),
+            HeaderEntry::new("x-amz-trailer", "x-amz-checksum-crc32"),
+        ];
+        let frame = b"3\r\nabc\r\n0\r\nx-amz-checksum-crc32:1B2M2Y8=\r\n\r\n";
+        for partition in 1..=frame.len() {
+            let mut decoder = StreamingBodyDecoder::new(&headers, 3, None, None)
+                .expect("valid decoder configuration")
+                .expect("aws-chunked decoder");
+            let mut decoded = Vec::new();
+            for fragment in frame.chunks(partition) {
+                let mut consumed = 0;
+                while consumed < fragment.len() {
+                    let (window_bytes, payloads) =
+                        decoder.feed(&fragment[consumed..]).expect("valid fragment");
+                    consumed += window_bytes;
+                    for payload in payloads {
+                        decoded.extend(payload);
+                    }
+                }
+            }
+            assert!(decoder.finish().expect("terminal chunk").is_empty());
+            assert_eq!(decoded, b"abc", "partition {partition}");
+        }
+    }
+
+    #[test]
+    fn streaming_decoder_keeps_large_accepted_frame_bounded() {
+        let headers = [HeaderEntry::new("content-encoding", "aws-chunked")];
+        let payload = vec![b'a'; 1024 * 1024];
+        let mut frame = format!("{:x}\r\n", payload.len()).into_bytes();
+        frame.extend_from_slice(&payload);
+        frame.extend_from_slice(b"\r\n0\r\n\r\n");
+        let mut decoder = StreamingBodyDecoder::new(&headers, payload.len(), None, None)
+            .expect("valid decoder configuration")
+            .expect("aws-chunked decoder");
+        let mut decoded = Vec::new();
+        let mut consumed = 0;
+        while consumed < frame.len() {
+            let (window_bytes, payloads) = decoder
+                .feed(&frame[consumed..])
+                .expect("large frame window");
+            consumed += window_bytes;
+            for payload in payloads {
+                decoded.extend(payload);
+            }
+        }
+        decoder.finish().expect("terminal chunk");
+        assert_eq!(decoded, payload);
+        assert!(
+            decoder.encoded.capacity() <= MAX_STREAMING_FEED_BYTES * 2,
+            "accepted frame allocated {} encoded bytes",
+            decoder.encoded.capacity()
+        );
+    }
+
+    #[test]
+    fn streaming_decoder_does_not_collect_large_single_item_output() {
+        let headers = [HeaderEntry::new("content-encoding", "aws-chunked")];
+        let payload = vec![b'a'; 1024 * 1024];
+        let mut frame = format!("{:x}\r\n", payload.len()).into_bytes();
+        frame.extend_from_slice(&payload);
+        frame.extend_from_slice(b"\r\n0\r\n\r\n");
+        let mut decoder = StreamingBodyDecoder::new(&headers, payload.len(), None, None)
+            .expect("valid decoder configuration")
+            .expect("aws-chunked decoder");
+        let (consumed, emitted) = decoder.feed(&frame).expect("valid body item");
+        let emitted_bytes = emitted.iter().map(Vec::len).sum::<usize>();
+        assert_eq!(consumed, MAX_STREAMING_FEED_BYTES);
+        assert!(
+            emitted_bytes <= MAX_STREAMING_FEED_BYTES,
+            "one feed call retained {emitted_bytes} decoded bytes"
+        );
+    }
 
     struct ReturnedWriteCount(usize);
 

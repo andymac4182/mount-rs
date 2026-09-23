@@ -23,3 +23,6 @@ tokio = { version = "1", features = ["rt-multi-thread"] }
 # Keep this native bridge independently buildable; it is intentionally not a
 # member of the root mount-rs Cargo workspace.
 [workspace]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

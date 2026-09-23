@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -178,6 +178,18 @@ impl Stream for ReadyBody {
 
     fn poll_next(mut self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Poll::Ready(self.body.take().map(Ok))
+    }
+}
+
+struct FragmentedBody {
+    fragments: VecDeque<Vec<u8>>,
+}
+
+impl Stream for FragmentedBody {
+    type Item = Result<Vec<u8>, String>;
+
+    fn poll_next(mut self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Ready(self.fragments.pop_front().map(Ok))
     }
 }
 
@@ -437,8 +449,9 @@ async fn chunked_lengths_and_trailer_declarations_follow_oracle_refusals() {
 #[tokio::test]
 async fn signed_checksum_trailer_chain_is_verified() {
     let credentials = Credentials::new("AKIAMOUNTX7TRAILER", "test-secret-key");
+    let memory = MemoryFs::empty();
     let session = S3Session::new_with_options(
-        MemoryFs::empty(),
+        memory.clone(),
         S3SessionOptions {
             credentials: Some(credentials.clone()),
             region: Some("us-east-1".to_owned()),
@@ -524,6 +537,22 @@ async fn signed_checksum_trailer_chain_is_verified() {
     let stored = session.handle(upload).await;
     assert_eq!(stored.status, 200);
 
+    for partition in [1, 7, body.len()] {
+        let mut head = S3RequestHead::new("PUT", "/mountx/signed-checksum.txt");
+        head.headers = headers.clone();
+        head.headers
+            .push(HeaderEntry::new("authorization", authorization.clone()));
+        let response = session
+            .handle_request_stream(
+                head,
+                Box::pin(FragmentedBody {
+                    fragments: body.chunks(partition).map(Vec::from).collect(),
+                }),
+            )
+            .await;
+        assert_eq!(response.status, 200, "signed partition {partition}");
+    }
+
     let mut tampered = S3Request::new("PUT", "/mountx/signed-checksum.txt", tampered_body);
     tampered.head.headers = headers.clone();
     tampered
@@ -546,16 +575,34 @@ async fn signed_checksum_trailer_chain_is_verified() {
     } else {
         b'0'
     };
-    let mut tampered_signature =
-        S3Request::new("PUT", "/mountx/signed-checksum.txt", bad_trailer_signature);
-    tampered_signature.head.headers = headers;
+    let mut tampered_signature = S3Request::new(
+        "PUT",
+        "/mountx/signed-checksum.txt",
+        bad_trailer_signature.clone(),
+    );
+    tampered_signature.head.headers = headers.clone();
     tampered_signature
         .head
         .headers
-        .push(HeaderEntry::new("authorization", authorization));
+        .push(HeaderEntry::new("authorization", authorization.clone()));
     let rejected = session.handle(tampered_signature).await;
     assert_eq!(rejected.status, 403);
     assert!(String::from_utf8_lossy(&rejected.body).contains("<Code>SignatureDoesNotMatch</Code>"));
+
+    let mut head = S3RequestHead::new("PUT", "/mountx/signed-checksum.txt");
+    head.headers = headers;
+    head.headers
+        .push(HeaderEntry::new("authorization", authorization));
+    let rejected_stream = session
+        .handle_request_stream(
+            head,
+            Box::pin(FragmentedBody {
+                fragments: bad_trailer_signature.chunks(1).map(Vec::from).collect(),
+            }),
+        )
+        .await;
+    assert_eq!(rejected_stream.status, 403);
+    wait_for_no_root_staging(&memory).await;
 
     let mut get_headers = vec![
         HeaderEntry::new("host", "localhost"),
@@ -587,6 +634,132 @@ async fn signed_checksum_trailer_chain_is_verified() {
         .await;
     assert_eq!(read.status, 200);
     assert_eq!(read.body, payload);
+}
+
+#[tokio::test]
+async fn signed_large_single_item_waits_for_chunk_signature_across_feed_windows() {
+    let credentials = Credentials::new("AKIAMOUNTX7LARGE", "test-secret-key");
+    let signals = ProbeSignals::new();
+    let memory = MemoryFs::empty();
+    let session = S3Session::new_with_options(
+        ProbeFs {
+            inner: memory.clone(),
+            signals: signals.clone(),
+        },
+        S3SessionOptions {
+            credentials: Some(credentials.clone()),
+            region: Some("us-east-1".to_owned()),
+            ..S3SessionOptions::default()
+        },
+    );
+    let payload = vec![b's'; 64 * 1024 + 17];
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_millis() as i64;
+    let amz_date = format_amz_date(now);
+    let scope = CredentialScope {
+        date: amz_date[..8].to_owned(),
+        region: "us-east-1".to_owned(),
+        service: "s3".to_owned(),
+    };
+    let draft_headers = [
+        HeaderEntry::new("host", "localhost"),
+        HeaderEntry::new("x-amz-date", &amz_date),
+        HeaderEntry::new("x-amz-content-sha256", STREAMING_PAYLOAD_TRAILER),
+        HeaderEntry::new("content-encoding", "aws-chunked"),
+        HeaderEntry::new("x-amz-trailer", "x-amz-checksum-crc32"),
+        HeaderEntry::new("x-amz-decoded-content-length", payload.len().to_string()),
+        HeaderEntry::new("content-length", "0"),
+    ];
+    let signed_names = draft_headers
+        .iter()
+        .map(|header| header.name.clone())
+        .collect::<Vec<_>>();
+    let draft_body = signed_chunked_body_with_trailer(
+        &payload,
+        &credentials,
+        &scope,
+        &amz_date,
+        &"0".repeat(64),
+        "x-amz-checksum-crc32",
+        "1B2M2Y8=",
+    );
+    let headers = draft_headers
+        .iter()
+        .map(|header| {
+            if header.name == "content-length" {
+                HeaderEntry::new("content-length", draft_body.len().to_string())
+            } else {
+                header.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    let authorization = sign_request(SignRequest {
+        method: "PUT",
+        path: "/mountx/signed-large-item.bin",
+        query: &[],
+        headers: &headers,
+        signed_headers: &signed_names,
+        credentials: &credentials,
+        region: "us-east-1",
+        timestamp_ms: now,
+        payload_hash: STREAMING_PAYLOAD_TRAILER,
+    });
+    let body = signed_chunked_body_with_trailer(
+        &payload,
+        &credentials,
+        &scope,
+        &amz_date,
+        authorization_signature(&authorization),
+        "x-amz-checksum-crc32",
+        "1B2M2Y8=",
+    );
+    let mut head = S3RequestHead::new("PUT", "/mountx/signed-large-item.bin");
+    head.headers = headers;
+    head.headers
+        .push(HeaderEntry::new("authorization", authorization));
+    let accepted = session
+        .handle_request_stream(
+            head.clone(),
+            Box::pin(ReadyBody {
+                body: Some(body.clone()),
+            }),
+        )
+        .await;
+    assert_eq!(accepted.status, 200);
+    let writes_before = signals.writes.load(Ordering::Relaxed);
+    assert!(writes_before > 0);
+
+    let first_crlf = body
+        .windows(2)
+        .position(|window| window == b"\r\n")
+        .expect("signed chunk header terminator");
+    let mut tampered = body;
+    tampered[first_crlf + 2 + payload.len() - 1] = b'x';
+    let rejected = session
+        .handle_request_stream(
+            head,
+            Box::pin(ReadyBody {
+                body: Some(tampered),
+            }),
+        )
+        .await;
+    assert_eq!(rejected.status, 403);
+    assert_eq!(signals.writes.load(Ordering::Relaxed), writes_before);
+    let handle = memory
+        .open("/signed-large-item.bin", "r", 0)
+        .await
+        .expect("published object retained");
+    let mut stored = vec![0; payload.len()];
+    let count = handle
+        .read(&mut stored, Some(0))
+        .await
+        .expect("read object");
+    handle.close().await.expect("close object");
+    assert_eq!(count, payload.len());
+    assert_eq!(stored, payload);
+    wait_for_no_root_staging(&memory).await;
 }
 
 #[tokio::test]
@@ -844,6 +1017,71 @@ async fn copy_delete_objects_and_multipart_use_driver_state() {
     assert!(after_text.contains(
         "The specified multipart upload does not exist. The upload ID might be invalid, or the multipart upload might have been aborted or completed."
     ));
+}
+
+#[tokio::test]
+async fn list_parts_rejects_marker_that_would_wrap_to_zero() {
+    let driver = MemoryFs::empty();
+    let session = S3Session::new(driver.clone());
+    let initiated = session
+        .handle(request("POST", "/mountx/marker.bin?uploads", [], &[]))
+        .await;
+    assert_eq!(initiated.status, 200);
+    let upload_id = xml_field(&initiated.body, "UploadId");
+    let part = session
+        .handle(request(
+            "PUT",
+            &format!("/mountx/marker.bin?uploadId={upload_id}&partNumber=1"),
+            b"retained part",
+            &[],
+        ))
+        .await;
+    assert_eq!(part.status, 200);
+
+    for invalid_marker in ["4294967296", "18446744073709551615", "18446744073709551616"] {
+        let invalid = session
+            .handle(request(
+                "GET",
+                &format!(
+                    "/mountx/marker.bin?uploadId={upload_id}&part-number-marker={invalid_marker}"
+                ),
+                [],
+                &[],
+            ))
+            .await;
+        assert_eq!(invalid.status, 400, "marker {invalid_marker}");
+        assert!(
+            String::from_utf8_lossy(&invalid.body).contains("<Code>InvalidArgument</Code>"),
+            "marker {invalid_marker}"
+        );
+    }
+
+    let boundary = session
+        .handle(request(
+            "GET",
+            &format!("/mountx/marker.bin?uploadId={upload_id}&part-number-marker=4294967295"),
+            [],
+            &[],
+        ))
+        .await;
+    assert_eq!(boundary.status, 200);
+    assert_eq!(xml_field(&boundary.body, "PartNumberMarker"), "4294967295");
+    let parts = session
+        .handle(request(
+            "GET",
+            &format!("/mountx/marker.bin?uploadId={upload_id}"),
+            [],
+            &[],
+        ))
+        .await;
+    assert_eq!(parts.status, 200);
+    assert!(String::from_utf8_lossy(&parts.body).contains("<PartNumber>1</PartNumber>"));
+    assert!(
+        driver
+            .stat(&format!("/.mountx-multipart/{upload_id}/part-1"))
+            .await
+            .is_ok()
+    );
 }
 
 #[tokio::test]
@@ -2925,6 +3163,168 @@ async fn real_http_fragmented_aws_chunked_upload_decodes_before_terminal_frame()
     assert_eq!(count, payload.len());
     assert_eq!(stored, payload);
     server.close().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn real_http_aws_chunked_upload_handles_body_partitions() {
+    let memory = MemoryFs::empty();
+    let server = S3Server::start(
+        Arc::new(S3Session::new(memory.clone())),
+        S3ServerOptions::default(),
+    )
+    .await
+    .expect("loopback listener");
+    let payload = b"network partitions";
+    let mut encoded = format!("{:x}\r\n", payload.len()).into_bytes();
+    encoded.extend_from_slice(payload);
+    encoded.extend_from_slice(b"\r\n0\r\n\r\n");
+
+    for partition in [1, 7, encoded.len()] {
+        let path = format!("/partition-{partition}.bin");
+        let mut stream = TcpStream::connect(server.address())
+            .await
+            .expect("connect gateway");
+        let request_head = format!(
+            "PUT /mountx{path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: {}\r\nContent-Encoding: aws-chunked\r\nX-Amz-Decoded-Content-Length: {}\r\n\r\n",
+            server.address(),
+            encoded.len(),
+            payload.len()
+        );
+        stream
+            .write_all(request_head.as_bytes())
+            .await
+            .expect("write request head");
+        for fragment in encoded.chunks(partition) {
+            stream
+                .write_all(fragment)
+                .await
+                .expect("write body fragment");
+            tokio::task::yield_now().await;
+        }
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.expect("read response");
+        assert_eq!(
+            parse_wire_response(raw).status,
+            200,
+            "partition {partition}"
+        );
+        let handle = memory.open(&path, "r", 0).await.expect("stored object");
+        let mut stored = vec![0; payload.len()];
+        let count = handle
+            .read(&mut stored, Some(0))
+            .await
+            .expect("read object");
+        handle.close().await.expect("close object");
+        assert_eq!(count, payload.len());
+        assert_eq!(stored, payload);
+    }
+    server.close().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn real_http_aws_chunked_upload_rejects_decoded_limit() {
+    let memory = MemoryFs::empty();
+    let session = S3Session::new_with_options(
+        memory.clone(),
+        S3SessionOptions {
+            max_body_bytes: 5,
+            ..S3SessionOptions::default()
+        },
+    );
+    let server = S3Server::start(Arc::new(session), S3ServerOptions::default())
+        .await
+        .expect("loopback listener");
+    let response = wire_request(
+        &server,
+        "PUT",
+        "/mountx/over-limit.bin",
+        &[
+            ("content-encoding".to_owned(), "aws-chunked".to_owned()),
+            ("x-amz-decoded-content-length".to_owned(), "6".to_owned()),
+        ],
+        b"6\r\nabcdef\r\n0\r\n\r\n",
+    )
+    .await;
+    assert_eq!(response.status, 400);
+    assert!(String::from_utf8_lossy(&response.body).contains("<Code>EntityTooLarge</Code>"));
+    assert!(memory.stat("/over-limit.bin").await.is_err());
+    assert!(
+        memory
+            .readdir("/")
+            .await
+            .expect("root directory")
+            .iter()
+            .all(|entry| !entry.name.starts_with(".mountx-put-"))
+    );
+    server.close().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn single_large_body_item_writes_before_terminal_refusal_and_cleans_staging() {
+    let signals = ProbeSignals::new();
+    let memory = MemoryFs::empty();
+    let session = S3Session::new(ProbeFs {
+        inner: memory.clone(),
+        signals: signals.clone(),
+    });
+    let payload = vec![b'a'; 1024 * 1024];
+    let mut frame = format!("{:x}\r\n", payload.len()).into_bytes();
+    frame.extend_from_slice(&payload);
+    frame.extend_from_slice(b"\r\n0\r\n\r\nx");
+    let response = session
+        .handle_request_stream(
+            S3RequestHead::new("PUT", "/mountx/single-large-item.bin")
+                .with_header("content-length", frame.len().to_string())
+                .with_header("content-encoding", "aws-chunked")
+                .with_header("x-amz-decoded-content-length", payload.len().to_string()),
+            Box::pin(ReadyBody { body: Some(frame) }),
+        )
+        .await;
+    assert_eq!(response.status, 400);
+    assert!(
+        signals.writes.load(Ordering::Relaxed) > 0,
+        "decoded payload waited for the entire body item"
+    );
+    assert!(memory.stat("/single-large-item.bin").await.is_err());
+    wait_for_no_root_staging(&memory).await;
+}
+
+#[tokio::test]
+async fn single_large_body_item_uploads_exact_payload() {
+    let signals = ProbeSignals::new();
+    let memory = MemoryFs::empty();
+    let session = S3Session::new(ProbeFs {
+        inner: memory.clone(),
+        signals: signals.clone(),
+    });
+    let payload = vec![b'a'; 1024 * 1024];
+    let mut frame = format!("{:x}\r\n", payload.len()).into_bytes();
+    frame.extend_from_slice(&payload);
+    frame.extend_from_slice(b"\r\n0\r\n\r\n");
+    let response = session
+        .handle_request_stream(
+            S3RequestHead::new("PUT", "/mountx/single-large-valid.bin")
+                .with_header("content-length", frame.len().to_string())
+                .with_header("content-encoding", "aws-chunked")
+                .with_header("x-amz-decoded-content-length", payload.len().to_string()),
+            Box::pin(ReadyBody { body: Some(frame) }),
+        )
+        .await;
+    assert_eq!(response.status, 200);
+    assert!(signals.writes.load(Ordering::Relaxed) > 0);
+    let handle = memory
+        .open("/single-large-valid.bin", "r", 0)
+        .await
+        .expect("published object");
+    let mut stored = vec![0; payload.len()];
+    let count = handle
+        .read(&mut stored, Some(0))
+        .await
+        .expect("read object");
+    handle.close().await.expect("close object");
+    assert_eq!(count, payload.len());
+    assert_eq!(stored, payload);
+    wait_for_no_root_staging(&memory).await;
 }
 
 #[tokio::test]

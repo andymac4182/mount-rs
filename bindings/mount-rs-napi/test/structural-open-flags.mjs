@@ -1,0 +1,53 @@
+import assert from "node:assert/strict"
+import { constants } from "node:fs"
+import { mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+
+import { createDriver } from "../index.js"
+
+const root = await mkdtemp(join(tmpdir(), "mount-rs-napi-open-flags-"))
+try {
+  await writeFile(join(root, "existing"), "keep these bytes")
+  await writeFile(join(root, "writable"), "truncate these bytes")
+
+  let openCalls = 0
+  const structural = {
+    stat: async () => { throw new Error("stat should not be called") },
+    readdir: async () => { throw new Error("readdir should not be called") },
+    open: (path, flags, mode) => {
+      openCalls++
+      return open(join(root, path.slice(1)), flags, mode)
+    },
+  }
+  const filesystem = createDriver(structural)
+  try {
+    let invalidError
+    try {
+      const handle = await filesystem.open("/existing", constants.O_TRUNC)
+      await handle.close()
+    } catch (error) {
+      invalidError = error
+    }
+    assert.equal(
+      await readFile(join(root, "existing"), "utf8"),
+      "keep these bytes",
+      "a rejected truncate must leave the host file unchanged",
+    )
+    assert.equal(openCalls, 0, "invalid decoded flags must not reach the JS open callback")
+    assert.equal(invalidError?.code, "EINVAL")
+    assert.equal(invalidError.syscall, "open")
+    assert.equal(invalidError.path, "/existing")
+
+    const handle = await filesystem.open("/writable", constants.O_RDWR | constants.O_TRUNC)
+    await handle.close()
+    assert.equal(openCalls, 1, "truncate with write access must reach the JS callback")
+    assert.equal((await readFile(join(root, "writable"))).length, 0)
+  } finally {
+    await filesystem.shutdown()
+  }
+} finally {
+  await rm(root, { recursive: true, force: true })
+}
+
+console.log("mount-rs N-API decoded truncate flags: PASS")
