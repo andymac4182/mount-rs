@@ -124,6 +124,19 @@ def probe_foundationdb_cluster_id_grammar() -> None:
             raise AssertionError(f"accepted invalid FoundationDB cluster ID: {run_id}")
 
 
+def probe_bounded_native_test_timeout() -> None:
+    assert runner.native_test_timeout_seconds(None) == 600
+    for value in ("1", "1200", "1800"):
+        assert runner.native_test_timeout_seconds(value) == int(value)
+    for value in ("0", "1801", "-1", "", "many", "1.5"):
+        try:
+            runner.native_test_timeout_seconds(value)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted invalid native test timeout: {value}")
+
+
 def probe_owned_apfs_detach_and_unrelated_finder_preservation() -> None:
     for fail_detach in (False, True):
         with tempfile.TemporaryDirectory(prefix="mount-rs-native-fdb-rustfs-") as parent_name:
@@ -247,6 +260,7 @@ if __name__ == "__main__":
     probe_symlink_mountpoint_preserves_owned_root_and_foreign_mount()
     probe_exited_leader_with_live_owned_child()
     probe_foundationdb_cluster_id_grammar()
+    probe_bounded_native_test_timeout()
     probe_owned_apfs_detach_and_unrelated_finder_preservation()
     probe_stop_failure_preserves_owned_apfs_image()
     probe_partial_pre_attach_setup_removes_only_its_new_root()
