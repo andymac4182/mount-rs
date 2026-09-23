@@ -8,6 +8,7 @@
 
 #![cfg(target_os = "macos")]
 
+use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
 use std::ffi::{CStr, CString};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -97,6 +98,7 @@ fn mounted_nfs_report_accepts_colored_stdout_without_warnings() {
 
 fn run_journal(journal: &str) {
     let scope = TestScope::new(journal);
+    initialize_backing_databases(&scope.metadata, &scope.blocks);
     configure_local_journal(&scope.metadata, journal);
     configure_local_journal(&scope.blocks, journal);
     let config_a = scope.write_config("a");
@@ -229,6 +231,7 @@ fn run_journal(journal: &str) {
 
 fn run_one_process_two_views() {
     let scope = TestScope::new("ONE-CLI-DELETE");
+    initialize_backing_databases(&scope.metadata, &scope.blocks);
     configure_local_journal(&scope.metadata, "DELETE");
     configure_local_journal(&scope.blocks, "DELETE");
     let config = scope.write_config("a");
@@ -366,6 +369,7 @@ fn run_nfs_backing_diagnostic() {
 
     let metadata_a = scope.backing_a.join("metadata.sqlite");
     let metadata_b = scope.backing_b.join("metadata.sqlite");
+    initialize_backing_databases(&metadata_a, &scope.blocks);
     let configured = try_configure_journal(&metadata_a, "DELETE")
         .expect("candidate NFS metadata SQLite file initializes");
     eprintln!(
@@ -429,6 +433,7 @@ fn run_mixed_nfs_blocks_rejection() {
         .expect("disposable NFS blocks backing view mounts");
 
     let blocks_on_nfs = scope.backing_a.join("blocks.sqlite");
+    initialize_backing_databases(&scope.metadata, &blocks_on_nfs);
     configure_local_journal(&scope.metadata, "DELETE");
     try_configure_journal(&blocks_on_nfs, "DELETE")
         .expect("initialize disposable NFS block SQLite database");
@@ -587,6 +592,13 @@ fn await_absent(path: &Path) -> io::Result<()> {
         }
         thread::sleep(Duration::from_millis(100));
     }
+}
+
+fn initialize_backing_databases(metadata: &Path, blocks: &Path) {
+    // Let the provider create and stamp fresh owned files before Python opens
+    // them; an already existing unstamped metadata file cannot enroll in MRC2.
+    drop(SqliteMetadataStore::open(metadata).expect("create stamped metadata database"));
+    drop(SqliteBlockStore::open(blocks).expect("create block database"));
 }
 
 fn configure_local_journal(path: &Path, journal: &str) {
