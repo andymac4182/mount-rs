@@ -3187,8 +3187,10 @@ impl Nfs3Session {
             } else {
                 self.pre_op(&to_parent).await
             };
-            let same_inode = if self.options.shared_concurrent_view || from == to {
+            let same_inode = if self.options.shared_concurrent_view {
                 true
+            } else if from == to {
+                self.stat_of(&from).await.is_ok()
             } else {
                 match (self.stat_of(&from).await, self.stat_of(&to).await) {
                     (Ok(source), Ok(destination)) => same_backend_inode(&source, &destination),
@@ -3208,7 +3210,12 @@ impl Nfs3Session {
                 })
                 .await?;
             } else {
-                self.driver.rename(&from, &to).await?;
+                // NFSv3 RENAME of two hard links to one inode is a no-op. In
+                // particular, a Windows host rename can remove the source
+                // alias even though the backend inode is unchanged.
+                if !same_inode {
+                    self.driver.rename(&from, &to).await?;
+                }
             }
             if !same_inode && !self.options.shared_concurrent_view {
                 self.handles.remap(&from, &to);

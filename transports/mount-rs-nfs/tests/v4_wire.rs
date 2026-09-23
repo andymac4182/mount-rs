@@ -47,6 +47,91 @@ use tokio::time::timeout;
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+struct RenameSpyHostFs {
+    inner: HostFs,
+    rename_calls: Arc<AtomicU64>,
+}
+
+impl FsDriver for RenameSpyHostFs {
+    fn capabilities(&self) -> mount_rs_core::Capabilities {
+        self.inner.capabilities()
+    }
+
+    fn stat<'a, 'b, 'async_trait>(&'a self, path: &'b str) -> BoxFuture<'async_trait, Result<Stats>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.inner.stat(path).await })
+    }
+
+    fn lstat<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> BoxFuture<'async_trait, Result<Stats>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.inner.lstat(path).await })
+    }
+
+    fn readdir<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> BoxFuture<'async_trait, Result<Vec<DirEntry>>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.inner.readdir(path).await })
+    }
+
+    fn open<'a, 'b, 'c, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        flags: &'c str,
+        mode: u32,
+    ) -> BoxFuture<'async_trait, Result<Arc<dyn FileHandle>>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        'c: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.inner.open(path, flags, mode).await })
+    }
+
+    fn unlink<'a, 'b, 'async_trait>(&'a self, path: &'b str) -> BoxFuture<'async_trait, Result<()>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.inner.unlink(path).await })
+    }
+
+    fn rename<'a, 'b, 'c, 'async_trait>(
+        &'a self,
+        old_path: &'b str,
+        new_path: &'c str,
+    ) -> BoxFuture<'async_trait, Result<()>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        'c: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            self.rename_calls.fetch_add(1, Ordering::AcqRel);
+            self.inner.rename(old_path, new_path).await
+        })
+    }
+}
+
 struct GateStatDriver {
     inner: MemoryFs,
     block_once: Arc<AtomicBool>,
@@ -1635,8 +1720,14 @@ fn nfs_v3_rename_same_inode_preserves_source_handle_after_alias_remove() {
                         host_root.0.join("alias.txt"),
                     )
                     .unwrap();
-                    let server =
-                        NfsServer::new(HostFs::new(&host_root.0), NfsServerOptions::default());
+                    let rename_calls = Arc::new(AtomicU64::new(0));
+                    let server = NfsServer::new(
+                        RenameSpyHostFs {
+                            inner: HostFs::new(&host_root.0),
+                            rename_calls: Arc::clone(&rename_calls),
+                        },
+                        NfsServerOptions::default(),
+                    );
                     let address = server.listen().await.unwrap();
                     let mut stream = TcpStream::connect(address).await.unwrap();
                     let mut mount = rpc_call(
@@ -1733,6 +1824,30 @@ fn nfs_v3_rename_same_inode_preserves_source_handle_after_alias_remove() {
                         b"same inode"
                     );
                     assert!(!host_root.0.join("alias.txt").exists());
+                    assert_eq!(rename_calls.load(Ordering::Acquire), 0);
+                    let mut missing_rename = rpc_call(
+                        &mut stream,
+                        1007,
+                        NFS_PROGRAM,
+                        NFS_V3,
+                        NFSPROC3_RENAME,
+                        encode_xdr(|writer| {
+                            writer.var_opaque(&root);
+                            writer.string("missing.txt");
+                            writer.var_opaque(&root);
+                            writer.string("missing.txt");
+                        }),
+                        None,
+                    )
+                    .await;
+                    assert_eq!(
+                        read_rename_res(&mut missing_rename).unwrap().status,
+                        NFS3ERR_NOENT
+                    );
+                    missing_rename
+                        .end("missing same-name RENAME response")
+                        .unwrap();
+                    assert_eq!(rename_calls.load(Ordering::Acquire), 1);
                     server.close().await.unwrap();
                 });
         })
