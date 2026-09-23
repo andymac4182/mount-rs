@@ -1146,6 +1146,7 @@ dependencies = [
  "object_store",
  "sha2 0.10.9",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -1168,6 +1169,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-postgres",
+ "uuid",
 ]
 
 [[package]]
@@ -1179,6 +1181,8 @@ dependencies = [
  "mount-rs-object-store-blocks",
  "mount-rs-persist",
  "object_store",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -2366,6 +2370,7 @@ version = "1.26.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ef6dac1e96601b4fb3acccccff2139741fcb757cb9a36089bf5be91cfb285ce"
 dependencies = [
+ "getrandom 0.4.3",
  "js-sys",
  "wasm-bindgen",
 ]
