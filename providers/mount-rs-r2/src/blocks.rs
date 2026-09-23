@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -75,6 +75,8 @@ async fn prove_two_signed_clients_on_prefix(
     let first_blocks = ObjectStoreBlockStore::new(first_data.clone(), prefix, true)?;
     let second_blocks = ObjectStoreBlockStore::new(second_data.clone(), prefix, true)?;
     let attempted_create = AtomicBool::new(false);
+    let creates_in_flight = AtomicUsize::new(0);
+    let creates_overlapped = AtomicBool::new(false);
     let result = tokio::time::timeout(Duration::from_secs(60), async {
         // This private, random prefix must start empty. Both clients must send
         // distinct conditional Creates and one must explicitly lose; a service
@@ -99,20 +101,36 @@ async fn prove_two_signed_clients_on_prefix(
         let second_retry_options = create_options.clone();
         let start = Barrier::new(2);
         attempted_create.store(true, Ordering::SeqCst);
+        // A sequential success followed by a conflict cannot test a service's
+        // behavior under simultaneous Creates. Require both request futures
+        // to be active together before examining the winner and loser.
         let (mut first_result, mut second_result) = tokio::join!(
             async {
                 start.wait().await;
-                first_probe
+                if creates_in_flight.fetch_add(1, Ordering::SeqCst) > 0 {
+                    creates_overlapped.store(true, Ordering::SeqCst);
+                }
+                let result = first_probe
                     .put_opts(&marker, candidate_payload(first), create_options)
-                    .await
+                    .await;
+                creates_in_flight.fetch_sub(1, Ordering::SeqCst);
+                result
             },
             async {
                 start.wait().await;
-                second_probe
+                if creates_in_flight.fetch_add(1, Ordering::SeqCst) > 0 {
+                    creates_overlapped.store(true, Ordering::SeqCst);
+                }
+                let result = second_probe
                     .put_opts(&marker, candidate_payload(second), second_options)
-                    .await
+                    .await;
+                creates_in_flight.fetch_sub(1, Ordering::SeqCst);
+                result
             }
         );
+        if !creates_overlapped.load(Ordering::SeqCst) {
+            return Err(unqualified_r2());
+        }
         if first_result.is_ok() && second_result.as_ref().is_err_and(retryable_cleanup_error) {
             second_result = retry_losing_conditional_create(|| {
                 second_probe.put_opts(
@@ -479,19 +497,20 @@ mod qualification_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Debug)]
-    struct NonAtomicCreateStore {
+    struct SimulatedCreateStore {
         inner: Arc<InMemory>,
         marker_create_calls: AtomicUsize,
+        non_atomic: bool,
     }
 
-    impl std::fmt::Display for NonAtomicCreateStore {
+    impl std::fmt::Display for SimulatedCreateStore {
         fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("NonAtomicCreateStore")
+            formatter.write_str("SimulatedCreateStore")
         }
     }
 
     #[async_trait]
-    impl ObjectStore for NonAtomicCreateStore {
+    impl ObjectStore for SimulatedCreateStore {
         async fn put_opts(
             &self,
             location: &ObjectPath,
@@ -502,7 +521,10 @@ mod qualification_tests {
                 && options.mode == PutMode::Create
             {
                 self.marker_create_calls.fetch_add(1, Ordering::SeqCst);
-                return self.inner.put(location, payload).await;
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                if self.non_atomic {
+                    return self.inner.put(location, payload).await;
+                }
             }
             self.inner.put_opts(location, payload, options).await
         }
@@ -605,21 +627,45 @@ mod qualification_tests {
     #[tokio::test]
     async fn two_signed_client_gate_reads_one_winner_and_cleans_only_its_marker() {
         let backing = Arc::new(InMemory::new());
+        let store = Arc::new(SimulatedCreateStore {
+            inner: backing.clone(),
+            marker_create_calls: AtomicUsize::new(0),
+            non_atomic: false,
+        });
         let prefix = "owned-qualification/blocks";
         prove_two_signed_clients_on_prefix(
-            backing.clone(),
-            backing.clone(),
-            backing.clone(),
-            backing.clone(),
+            store.clone(),
+            store.clone(),
+            store.clone(),
+            store.clone(),
             prefix,
         )
         .await
         .unwrap();
+        assert_eq!(store.marker_create_calls.load(Ordering::SeqCst), 2);
         let marker = ObjectPath::from(format!("{prefix}/_mount-rs-backing-id-v2"));
         assert!(matches!(
             backing.get(&marker).await,
             Err(object_store::Error::NotFound { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn qualification_requires_both_create_requests_to_overlap() {
+        let backing = Arc::new(InMemory::new());
+        assert!(
+            prove_two_signed_clients_on_prefix(
+                backing.clone(),
+                backing.clone(),
+                backing.clone(),
+                backing.clone(),
+                "sequential-qualification/blocks",
+            )
+            .await
+            .unwrap_err()
+            .is(ErrorCode::Enotsup),
+            "an immediate first completion must not qualify a sequential probe"
+        );
     }
 
     #[tokio::test]
@@ -653,9 +699,10 @@ mod qualification_tests {
     #[tokio::test]
     async fn qualification_rejects_a_service_that_overwrites_on_create() {
         let inner = Arc::new(InMemory::new());
-        let store = Arc::new(NonAtomicCreateStore {
+        let store = Arc::new(SimulatedCreateStore {
             inner: inner.clone(),
             marker_create_calls: AtomicUsize::new(0),
+            non_atomic: true,
         });
         let prefix = "non-atomic-qualification/blocks";
         assert!(
