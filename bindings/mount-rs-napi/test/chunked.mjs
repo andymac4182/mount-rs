@@ -88,16 +88,25 @@ try {
     blocks: { kind: "sqlite", uri: join(directory, "concurrent-blocks.sqlite") },
     concurrentWrites: true,
   }
-  const writerA = await openDriver({ ...concurrentSqlite, owner: `concurrent-a-${suffix}` })
-  const writerB = await openDriver({ ...concurrentSqlite, owner: `concurrent-b-${suffix}` })
-  try {
-    await writerA.writeFile("/from-a.txt", Buffer.from("writer a"))
-    await writerB.writeFile("/from-b.txt", Buffer.from("writer b"))
-    assert.equal(Buffer.from(await writerA.readFile("/from-b.txt")).toString(), "writer b")
-    assert.equal(Buffer.from(await writerB.readFile("/from-a.txt")).toString(), "writer a")
-  } finally {
-    await writerB.shutdown()
-    await writerA.shutdown()
+  if (process.platform === "win32") {
+    // Windows has no qualified physical-file guard for concurrent SQLite.
+    await assertCode(
+      () => openDriver({ ...concurrentSqlite, owner: `concurrent-unsupported-${suffix}` }),
+      "ENOTSUP",
+    )
+    console.log("mount-rs N-API concurrent SQLite: PASS (Windows ENOTSUP)")
+  } else {
+    const writerA = await openDriver({ ...concurrentSqlite, owner: `concurrent-a-${suffix}` })
+    const writerB = await openDriver({ ...concurrentSqlite, owner: `concurrent-b-${suffix}` })
+    try {
+      await writerA.writeFile("/from-a.txt", Buffer.from("writer a"))
+      await writerB.writeFile("/from-b.txt", Buffer.from("writer b"))
+      assert.equal(Buffer.from(await writerA.readFile("/from-b.txt")).toString(), "writer b")
+      assert.equal(Buffer.from(await writerB.readFile("/from-a.txt")).toString(), "writer a")
+    } finally {
+      await writerB.shutdown()
+      await writerA.shutdown()
+    }
   }
 
   // The provider lease is held until shutdown, so a second writer fails
