@@ -240,8 +240,9 @@ Physical cross-host and production operation still need separate evidence.
 The `native-concurrent-sqlite` macOS CI job runs the local DELETE shared-mount
 cases and both NFS backing rejection cases serially. WAL stays an opt-in
 diagnostic because the bundled SQLite release has the documented WAL reset
-issue. The current local-filesystem provider guard is macOS specific; Linux
-network-backed SQLite files have not been qualified for concurrent mode.
+issue. At that checkpoint the local-filesystem provider guard was macOS
+specific. The later bound-backing checks below add Linux filesystem and
+individual-file mount rejection; network-backed SQLite remains unsupported.
 
 At the first concurrent-writer checkpoint, the mode kept detached file tombstones and staged blocks
 and had no distributed open-handle pin or online collector. The block-row
@@ -407,13 +408,23 @@ with the upgraded binary: it cannot acquire a legacy writer, and its implicit
 implemented. An unstamped `MRC2` file refuses startup. On other
 platforms, including Windows, concurrent SQLite backing returns `ENOTSUP`
 because a copied file could carry the same marker while its contents diverge.
-The Linux guard uses `fstatfs` on the selected file and allows ext-family,
+The GNU Linux guard uses `fstatfs` on an `O_PATH` inspection descriptor and allows ext-family,
 XFS, Btrfs, F2FS and tmpfs; it rejects NFS, overlayfs, CIFS, 9P, FUSE and
 unknown types before concurrent claim. tmpfs passes locality but does not
 survive host reboot. The Linux native NFS acceptance fixture places both
 provider database files on its owned NFS view and asserts `ENOTSUP` with no
 metadata revision or block marker change. The Linux native NFS CI job passed
 that owned fixture on head `2ccf9579` with both markers absent and revision zero.
+Closing a regular descriptor for the same inode releases process POSIX locks,
+including SQLite's locks. `O_PATH` avoids that close path. A new distinct-process
+regression holds `BEGIN IMMEDIATE`, requires another process to receive
+`SQLITE_BUSY` before and after inspection, and permits its write after rollback.
+The revised Linux code awaits runtime CI proof; macOS does not execute this test.
+The combined revised checkout passed SQLite 61 tests, CLI 65 library tests,
+16 CLI integration tests, workspace formatting, and strict all-target Clippy
+for both packages. The remote-only offline migration regression went red
+because it created a view directory before provider connection failed; it now
+skips SQLite placement preparation when neither backing is SQLite.
 
 Concurrent SQLite requires exactly one hard link for each metadata and block
 inode at claim, reopen and publication/authority verification. Different
@@ -424,12 +435,23 @@ appeared usable in a bounded sequential probe but did not establish safety.
 New provider regressions reject aliases before a claim and stop publication
 if a link appears after open. Linux file-only bind mounts can also expose one
 inode at different database paths with link count one and different WAL
-sidecars. The canonical pathname stamp now rejects those aliases; symlinks
-resolving to the same canonical path remain usable. The SQLite provider suite
-passed 60/60, including alternate path marker and symlink regressions. The
-owned Linux file bind regression passed in the same native NFS CI job on
+sidecars. GNU Linux now also checks the selected descriptor's
+`STATX_ATTR_MOUNT_ROOT` attribute, before authority insertion or publication.
+An individually mounted database file returns `ENOTSUP`, even when an active
+canonical WAL hides the authority row from the alias. Directory mounts remain
+usable. The attribute's supported mask is required: concurrent SQLite needs
+GNU Linux with kernel 5.8 or newer; other Linux targets fail closed for this
+opt-in mode. The direct `statx` syscall adds no glibc wrapper version requirement.
+The canonical pathname stamp rejects alternate auxiliary paths; symlinks
+resolving to the same canonical path remain usable. The revised SQLite provider
+suite passed 61/61 on macOS, including alternate path, symlink, hard-link and
+portable mount-attribute regressions. The earlier owned Linux file bind
+regression passed in the native NFS CI job on
 `2ccf9579`. That bounded fixture closes both stores before binding; it does
 not qualify a file-only alias opened while a canonical WAL remains active.
+The extended privileged fixture keeps canonical WALs open and verifies in a
+distinct process that an alias seeing an empty authority table cannot install
+a second authority or change metadata. Its runtime CI result is pending.
 Use the same canonical database paths in every SQLite process.
 Pathless development MRC2 prototypes fail closed before release; see the
 [auxiliary path authority](sqlite-auxiliary-path-authority.md) for the format

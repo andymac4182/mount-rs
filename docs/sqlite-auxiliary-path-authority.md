@@ -34,3 +34,11 @@ publication or authority mutation, old missing markers, symlink aliases,
 non-UTF-8 pathname byte encoding, and hard links. The Linux file bind mount
 regression is an ignored native test requiring a Linux mount namespace with
 `CAP_SYS_ADMIN` and qualified local `/tmp` backing; it does not run on macOS.
+It covers checkpointed files and a distinct process opening aliases while the
+canonical authority remains only in an active WAL. GNU Linux uses an `O_PATH`
+descriptor to preserve SQLite's process locks and requires supported
+`STATX_ATTR_MOUNT_ROOT` inspection (kernel 5.8 or newer). Individually mounted
+database files are refused before concurrent authority claim; directory mounts
+remain usable. Non-GNU Linux concurrent SQLite is unsupported. Provider schema
+initialization can precede this guard, so rejection does not promise zero schema
+side effects.
