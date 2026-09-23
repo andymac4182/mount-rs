@@ -11,6 +11,25 @@ try {
   await writeFile(join(root, "existing"), "keep these bytes")
   await writeFile(join(root, "writable"), "truncate these bytes")
 
+  let validTruncateFlags = constants.O_RDWR | constants.O_TRUNC
+  if (process.platform === "win32") {
+    const controlPath = join(root, "host-control")
+    await writeFile(controlPath, "host truncate control")
+    let control
+    try {
+      control = await open(controlPath, validTruncateFlags)
+    } catch (error) {
+      if (error.code !== "EINVAL") throw error
+      // Some libuv Windows releases reject TRUNCATE_EXISTING on host files:
+      // https://github.com/libuv/libuv/discussions/4291
+      validTruncateFlags |= constants.O_CREAT
+      control = await open(controlPath, validTruncateFlags)
+      console.log("Windows host truncate requires O_CREAT; numeric forwarding remains checked")
+    }
+    await control.close()
+    assert.equal((await readFile(controlPath)).length, 0)
+  }
+
   let openCalls = 0
   const receivedFlags = []
   const structural = {
@@ -41,9 +60,10 @@ try {
     assert.equal(invalidError.syscall, "open")
     assert.equal(invalidError.path, "/existing")
 
-    const handle = await filesystem.open("/writable", constants.O_RDWR | constants.O_TRUNC)
+    const handle = await filesystem.open("/writable", validTruncateFlags)
     await handle.close()
     assert.equal(openCalls, 1, "truncate with write access must reach the JS callback")
+    assert.equal(receivedFlags.at(-1), validTruncateFlags, "valid flags must preserve the host namespace")
     assert.equal((await readFile(join(root, "writable"))).length, 0)
 
     for (const [input, expected] of [
