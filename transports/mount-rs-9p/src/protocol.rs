@@ -1081,6 +1081,26 @@ pub(crate) enum P9VersionScan {
     Incomplete,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum P9FrameSizeStatus {
+    BelowHeader,
+    AboveLimit,
+    Incomplete,
+    Complete,
+}
+
+fn classify_frame_size(size: usize, available: usize, limit: usize) -> P9FrameSizeStatus {
+    if size < P9_HDRSZ {
+        P9FrameSizeStatus::BelowHeader
+    } else if size > limit {
+        P9FrameSizeStatus::AboveLimit
+    } else if size > available {
+        P9FrameSizeStatus::Incomplete
+    } else {
+        P9FrameSizeStatus::Complete
+    }
+}
+
 impl P9FrameAssembler {
     pub fn new(limit: usize) -> Result<Self, P9Error> {
         if limit < P9_HDRSZ {
@@ -1169,19 +1189,23 @@ impl P9FrameAssembler {
                     self.buffer[self.offset + 3],
                 ]) as usize;
                 self.check_size(size, 0)?;
-                if self.pending() < size {
-                    Ok(None)
-                } else {
-                    let frame = self.buffer[self.offset..self.offset + size].to_vec();
-                    self.offset += size;
-                    if self.offset == self.buffer.len() {
-                        self.buffer.clear();
-                        self.offset = 0;
-                        self.scan_offset = 0;
-                    } else {
-                        self.scan_offset = self.scan_offset.max(self.offset);
+                match classify_frame_size(size, self.pending(), self.limit) {
+                    P9FrameSizeStatus::Incomplete => Ok(None),
+                    P9FrameSizeStatus::Complete => {
+                        let frame = self.buffer[self.offset..self.offset + size].to_vec();
+                        self.offset += size;
+                        if self.offset == self.buffer.len() {
+                            self.buffer.clear();
+                            self.offset = 0;
+                            self.scan_offset = 0;
+                        } else {
+                            self.scan_offset = self.scan_offset.max(self.offset);
+                        }
+                        Ok(Some(frame))
                     }
-                    Ok(Some(frame))
+                    P9FrameSizeStatus::BelowHeader | P9FrameSizeStatus::AboveLimit => {
+                        unreachable!("check_size already rejected the frame")
+                    }
                 }
             }
         })();
@@ -1216,7 +1240,8 @@ impl P9FrameAssembler {
                     self.buffer[at + 3],
                 ]) as usize;
                 self.check_size(size, at - self.offset)?;
-                if available < size {
+                if classify_frame_size(size, available, self.limit) == P9FrameSizeStatus::Incomplete
+                {
                     return Ok(P9VersionScan::Incomplete);
                 }
                 let frame = &self.buffer[at..at + size];
@@ -1265,7 +1290,9 @@ impl P9FrameAssembler {
                     u32::from_le_bytes([chunk[at], chunk[at + 1], chunk[at + 2], chunk[at + 3]])
                         as usize;
                 self.check_size(size, at)?;
-                if chunk.len() - at < size {
+                if classify_frame_size(size, chunk.len() - at, self.limit)
+                    == P9FrameSizeStatus::Incomplete
+                {
                     self.buffer.extend_from_slice(&chunk[at..]);
                     return Ok(frames);
                 }
@@ -1290,7 +1317,9 @@ impl P9FrameAssembler {
                 self.buffer[3],
             ]) as usize;
             self.check_size(size, 0)?;
-            if self.buffer.len() < size {
+            if classify_frame_size(size, self.buffer.len(), self.limit)
+                == P9FrameSizeStatus::Incomplete
+            {
                 break;
             }
             frames.push(self.buffer.drain(..size).collect());
@@ -1299,22 +1328,56 @@ impl P9FrameAssembler {
     }
 
     fn check_size(&self, size: usize, offset: usize) -> Result<(), P9Error> {
-        if size < P9_HDRSZ {
-            return Err(P9Error::at(
+        match classify_frame_size(size, usize::MAX, self.limit) {
+            P9FrameSizeStatus::BelowHeader => Err(P9Error::at(
                 format!("frame size {size} is below the {P9_HDRSZ}-byte header"),
                 offset,
-            ));
-        }
-        if size > self.limit {
-            return Err(P9Error::at(
+            )),
+            P9FrameSizeStatus::AboveLimit => Err(P9Error::at(
                 format!(
                     "frame of {size} bytes exceeds the {}-byte limit",
                     self.limit
                 ),
                 offset,
-            ));
+            )),
+            P9FrameSizeStatus::Incomplete | P9FrameSizeStatus::Complete => Ok(()),
         }
-        Ok(())
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Prove the numeric decision shared by frame extraction, version scans,
+    /// and ordinary stream parsing. All u32 wire sizes are considered, while
+    /// the received prefix and negotiated limit are bounded to 12 bytes. The
+    /// proof does not cover allocation, body decoding, or a complete stream.
+    #[kani::proof]
+    #[kani::unwind(4)]
+    fn bounded_frame_size_classification_matches_wire_bounds() {
+        let size: u32 = kani::any();
+        let available: u8 = kani::any();
+        let limit: u8 = kani::any();
+        kani::assume(available <= 12 && limit >= 7 && limit <= 12);
+
+        let size = size as usize;
+        let status = classify_frame_size(size, available as usize, limit as usize);
+        if size < P9_HDRSZ {
+            assert!(status == P9FrameSizeStatus::BelowHeader);
+        } else if size > limit as usize {
+            assert!(status == P9FrameSizeStatus::AboveLimit);
+        } else if size > available as usize {
+            assert!(status == P9FrameSizeStatus::Incomplete);
+        } else {
+            assert!(status == P9FrameSizeStatus::Complete);
+            assert!(size <= available as usize && size <= limit as usize);
+        }
+
+        kani::cover!(status == P9FrameSizeStatus::Complete && size == available as usize);
+        kani::cover!(status == P9FrameSizeStatus::Incomplete && available >= 7);
+        kani::cover!(status == P9FrameSizeStatus::AboveLimit && available >= 7);
+        kani::cover!(status == P9FrameSizeStatus::BelowHeader && available >= 7);
     }
 }
 
@@ -1388,6 +1451,57 @@ mod tests {
         assembler.set_limit(128).unwrap();
         let error = assembler.push_one(&[]).unwrap_err();
         assert!(error.message.contains("128-byte limit"));
+        assert_eq!(error.offset, Some(0));
+        assert!(assembler.failed());
+        assert_eq!(assembler.pending(), 0);
+    }
+
+    #[test]
+    fn negotiated_limit_rechecks_split_next_header_before_receiving_its_body() {
+        let version = encode_message(P9_TVERSION, P9_NOTAG, 64, |writer| {
+            write_tversion(
+                writer,
+                &Tversion {
+                    msize: 64,
+                    version: P9_VERSION_DOTL.to_owned(),
+                },
+            )
+        })
+        .unwrap();
+        let next = encode_message(P9_TAUTH, 7, 128, |writer| {
+            write_tauth(
+                writer,
+                &Tauth {
+                    afid: P9_NOFID,
+                    uname: "x".repeat(64),
+                    aname: String::new(),
+                    n_uname: 0,
+                },
+            )
+        })
+        .unwrap();
+        assert!(next.len() > 64);
+
+        let mut assembler = P9FrameAssembler::new(128).unwrap();
+        let first_chunk = [&version[..], &next[..4]].concat();
+        assert_eq!(assembler.push_one(&first_chunk).unwrap(), Some(version));
+        assert_eq!(assembler.pending(), 4);
+
+        assembler.set_limit(64).unwrap();
+        let error = assembler.push_one(&next[4..P9_HDRSZ]).unwrap_err();
+        assert!(error.message.contains("64-byte limit"));
+        assert_eq!(error.offset, Some(0));
+        assert!(assembler.failed());
+        assert_eq!(assembler.pending(), 0);
+        assert!(assembler.push_one(&next[P9_HDRSZ..]).is_err());
+    }
+
+    #[test]
+    fn maximum_wire_size_is_rejected_from_only_the_header() {
+        let header = [0xff, 0xff, 0xff, 0xff, P9_TCLUNK, 1, 0];
+        let mut assembler = P9FrameAssembler::new(64).unwrap();
+        let error = assembler.push_one(&header).unwrap_err();
+        assert!(error.message.contains("4294967295 bytes"));
         assert_eq!(error.offset, Some(0));
         assert!(assembler.failed());
         assert_eq!(assembler.pending(), 0);

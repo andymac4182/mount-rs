@@ -253,7 +253,7 @@ impl DavLockTable {
             exclusive: request.exclusive,
             owner: request.owner,
             timeout_seconds,
-            expires_at: now.saturating_add((timeout_seconds as i64).saturating_mul(1000)),
+            expires_at: lock_expiration(now, timeout_seconds),
         };
         if injected_generator {
             self.issued.insert(token.clone());
@@ -273,7 +273,7 @@ impl DavLockTable {
         let timeout_seconds = self.granted_timeout(requested);
         let refreshed = DavLock {
             timeout_seconds,
-            expires_at: now.saturating_add((timeout_seconds as i64).saturating_mul(1000)),
+            expires_at: lock_expiration(now, timeout_seconds),
             ..existing
         };
         self.locks.insert(token.to_owned(), refreshed.clone());
@@ -292,7 +292,7 @@ impl DavLockTable {
         if lock.expires_at <= now {
             0
         } else {
-            ((lock.expires_at - now) / 1000) as u64
+            ((i128::from(lock.expires_at) - i128::from(now)) / 1000) as u64
         }
     }
 
@@ -313,6 +313,47 @@ impl DavLockTable {
     fn sweep(&mut self, now: i64) {
         self.locks.retain(|_, lock| lock.expires_at > now);
         self.order.retain(|token| self.locks.contains_key(token));
+    }
+}
+
+fn lock_expiration(now: i64, timeout_seconds: u64) -> i64 {
+    // The public timeout options are unrestricted. Calculate in a wider type
+    // so a large u64 cannot wrap into a negative i64 before saturation.
+    let milliseconds = i128::from(timeout_seconds) * 1000;
+    (i128::from(now) + milliseconds).min(i128::from(i64::MAX)) as i64
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    #[kani::proof]
+    fn timeout_and_remaining_are_wide_before_clamping() {
+        let now: i64 = kani::any();
+        let timeout_seconds: u64 = kani::any();
+        kani::assume((-1_000..=1_000).contains(&now));
+        let expires_at = lock_expiration(now, timeout_seconds);
+        let precise = i128::from(now) + i128::from(timeout_seconds) * 1_000;
+        let expected = i64::try_from(precise).unwrap_or(i64::MAX);
+        assert_eq!(expires_at, expected);
+        assert!(expires_at >= now);
+
+        let lock = DavLock {
+            token: "urn:uuid:bounded-time".to_owned(),
+            path: "/bounded-time".to_owned(),
+            collection: false,
+            depth: LockDepth::Zero,
+            exclusive: true,
+            owner: None,
+            timeout_seconds,
+            expires_at,
+        };
+        let remaining = DavLockTable::remaining(&lock, now);
+        let expected_remaining = ((i128::from(expires_at) - i128::from(now)) / 1_000) as u64;
+        assert_eq!(remaining, expected_remaining);
+        kani::cover!(timeout_seconds == u64::MAX && expires_at == i64::MAX);
+        kani::cover!(timeout_seconds == 0 && expires_at == now);
+        kani::cover!(timeout_seconds == 1 && expires_at == now + 1_000);
     }
 }
 

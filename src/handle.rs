@@ -176,4 +176,62 @@ mod verification {
             assert!(!flags.write);
         }
     }
+
+    #[kani::proof]
+    fn linux_wire_open_bits_preserve_access_and_truncate_guard() {
+        const O_CREAT: u64 = 0o100;
+        const O_EXCL: u64 = 0o200;
+        const O_TRUNC: u64 = 0o1000;
+        const O_APPEND: u64 = 0o2000;
+        const KNOWN: u64 = 3 | O_CREAT | O_EXCL | O_TRUNC | O_APPEND;
+
+        // Transport callers pass arbitrary numeric wire bits. Unknown Linux
+        // flags must not silently grant read/write or bypass truncate policy.
+        let bits: u64 = kani::any();
+        let access = bits & 3;
+        let flags = OpenFlags::from_bits(bits);
+        let without_unknown_bits = OpenFlags::from_bits(bits & KNOWN);
+
+        assert_eq!(flags, without_unknown_bits);
+        assert_eq!(flags.read, access == 0 || access == 2);
+        assert_eq!(flags.write, access == 1 || access == 2);
+        assert_eq!(flags.create, bits & O_CREAT != 0);
+        assert_eq!(flags.exclusive, bits & O_EXCL != 0);
+        assert_eq!(flags.truncate, bits & O_TRUNC != 0);
+        assert_eq!(flags.append, bits & O_APPEND != 0);
+        assert_eq!(
+            flags.has_valid_truncate_access(),
+            bits & O_TRUNC == 0 || access == 1 || access == 2
+        );
+
+        kani::cover!(access == 0 && flags.truncate && !flags.has_valid_truncate_access());
+        kani::cover!(access == 2 && flags.truncate && flags.has_valid_truncate_access());
+        kani::cover!(access == 3 && flags.truncate && !flags.has_valid_truncate_access());
+        kani::cover!(bits & !KNOWN != 0 && flags == without_unknown_bits);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OpenFlags;
+
+    #[test]
+    fn linux_wire_bits_preserve_access_and_truncate_guard() {
+        for (access, read, write) in [
+            (0, true, false),
+            (1, false, true),
+            (2, true, true),
+            (3, false, false),
+        ] {
+            let flags = OpenFlags::from_bits(access | 0o1000);
+            assert_eq!((flags.read, flags.write), (read, write));
+            assert_eq!(flags.has_valid_truncate_access(), write);
+            assert_eq!(OpenFlags::from_bits(access | 0o1000 | (1 << 63)), flags);
+        }
+
+        let flags = OpenFlags::from_bits(0o100 | 0o200 | 0o2000 | 2);
+        assert!(flags.read && flags.write);
+        assert!(flags.create && flags.exclusive && flags.append);
+        assert!(!flags.truncate);
+    }
 }

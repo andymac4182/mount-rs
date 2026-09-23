@@ -1,7 +1,5 @@
 //! Bounded, little-endian 9P wire primitives.
 
-#![allow(unexpected_cfgs)]
-
 use std::fmt;
 
 use crate::constants::{P9_MAX_ITEM, P9_MAX_STRING};

@@ -44,6 +44,14 @@ enum OpaqueFrame {
     Complete { span: usize },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpaqueWireFrame {
+    MissingPrefix,
+    OverLimit { length: usize },
+    Truncated { length: usize, span: usize },
+    Complete { length: usize, span: usize },
+}
+
 fn opaque_frame(length: usize, max: usize, remaining: usize) -> OpaqueFrame {
     if length > max || length > XDR_MAX_ITEM {
         return OpaqueFrame::OverLimit;
@@ -54,6 +62,19 @@ fn opaque_frame(length: usize, max: usize, remaining: usize) -> OpaqueFrame {
         OpaqueFrame::Truncated { span }
     } else {
         OpaqueFrame::Complete { span }
+    }
+}
+
+fn opaque_wire_frame(bytes: &[u8], max: usize) -> OpaqueWireFrame {
+    if bytes.len() < 4 {
+        return OpaqueWireFrame::MissingPrefix;
+    }
+
+    let length = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+    match opaque_frame(length, max, bytes.len() - 4) {
+        OpaqueFrame::OverLimit => OpaqueWireFrame::OverLimit { length },
+        OpaqueFrame::Truncated { span } => OpaqueWireFrame::Truncated { length, span },
+        OpaqueFrame::Complete { span } => OpaqueWireFrame::Complete { length, span },
     }
 }
 
@@ -145,15 +166,27 @@ impl<'a> XdrReader<'a> {
     }
 
     pub fn var_opaque(&mut self, max: usize, what: &str) -> Result<Vec<u8>, XdrError> {
-        let length = self.u32(&format!("{what} length"))? as usize;
-        let span = match opaque_frame(length, max, self.remaining()) {
-            OpaqueFrame::OverLimit => {
+        let frame = opaque_wire_frame(&self.bytes[self.offset..], max);
+        if frame == OpaqueWireFrame::MissingPrefix {
+            return Err(XdrError::new(
+                format!(
+                    "truncated {what} length: need 4 bytes, {} left",
+                    self.remaining()
+                ),
+                self.offset,
+            ));
+        }
+
+        let prefix_offset = self.offset;
+        self.offset += 4;
+        let (length, span) = match frame {
+            OpaqueWireFrame::OverLimit { length } => {
                 return Err(XdrError::new(
                     format!("{what} is {length} bytes, over the {max}-byte limit"),
-                    self.offset.saturating_sub(4),
+                    prefix_offset,
                 ));
             }
-            OpaqueFrame::Truncated { span } => {
+            OpaqueWireFrame::Truncated { span, .. } => {
                 return Err(XdrError::new(
                     format!(
                         "truncated {what}: need {span} bytes, {} left",
@@ -162,7 +195,8 @@ impl<'a> XdrReader<'a> {
                     self.offset,
                 ));
             }
-            OpaqueFrame::Complete { span } => span,
+            OpaqueWireFrame::Complete { length, span } => (length, span),
+            OpaqueWireFrame::MissingPrefix => unreachable!(),
         };
         Ok(self.read_validated_opaque(length, span))
     }
@@ -436,6 +470,60 @@ mod tests {
         );
         assert_eq!(reader.offset(), 4);
     }
+
+    #[test]
+    fn var_opaque_short_wire_reports_exact_offsets_for_all_small_lengths_and_limits() {
+        for length in 0..=4u8 {
+            let bytes = [0, 0, 0, length, 0x11, 0x22, 0x33, 0xa5];
+            for max in 0..=4usize {
+                for wire_size in 0..=bytes.len() {
+                    for start_offset in [0, 4] {
+                        let mut input = vec![0xa5; start_offset];
+                        input.extend_from_slice(&bytes[..wire_size]);
+                        let mut reader = XdrReader::new(&input);
+                        if start_offset == 4 {
+                            reader.u32("preceding field").unwrap();
+                        }
+                        let actual = reader.var_opaque(max, "opaque");
+                        let span = if length == 0 { 0 } else { 4 };
+
+                        if wire_size < 4 {
+                            let error = actual.unwrap_err();
+                            assert_eq!(error.offset, start_offset);
+                            assert_eq!(
+                                error.message,
+                                format!("truncated opaque length: need 4 bytes, {wire_size} left")
+                            );
+                            assert_eq!(reader.offset(), start_offset);
+                        } else if usize::from(length) > max {
+                            let error = actual.unwrap_err();
+                            assert_eq!(error.offset, start_offset);
+                            assert_eq!(
+                                error.message,
+                                format!("opaque is {length} bytes, over the {max}-byte limit")
+                            );
+                            assert_eq!(reader.offset(), start_offset + 4);
+                        } else if wire_size - 4 < span {
+                            let error = actual.unwrap_err();
+                            assert_eq!(error.offset, start_offset + 4);
+                            assert_eq!(
+                                error.message,
+                                format!(
+                                    "truncated opaque: need {span} bytes, {} left",
+                                    wire_size - 4
+                                )
+                            );
+                            assert_eq!(reader.offset(), start_offset + 4);
+                        } else {
+                            assert_eq!(actual.unwrap(), bytes[4..4 + usize::from(length)]);
+                            assert_eq!(reader.offset(), start_offset + 4 + span);
+                            assert_eq!(reader.remaining(), wire_size - (4 + span));
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(kani)]
@@ -495,5 +583,101 @@ mod verification {
         assert_eq!(reader.remaining(), wire_size - (4 + span));
         kani::cover!(length == 4 && wire_size == 8);
         kani::cover!(length == 3 && wire_size == 8 && bytes[7] != 0);
+    }
+
+    /// Proves the production wire decision on every short prefix/limit/frame
+    /// combination. Public-reader tests check the error offsets and extraction
+    /// that this allocation-free decision selects.
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn var_opaque_short_wire_decision() {
+        let length: u8 = kani::any();
+        kani::assume(length <= 4);
+        let max: u8 = kani::any();
+        kani::assume(max <= 4);
+        let wire_size: u8 = kani::any();
+        kani::assume(wire_size <= 8);
+        let bytes = [
+            0u8,
+            0,
+            0,
+            length,
+            kani::any(),
+            kani::any(),
+            kani::any(),
+            kani::any(),
+        ];
+        let wire = &bytes[..usize::from(wire_size)];
+        let result = opaque_wire_frame(wire, usize::from(max));
+
+        if wire_size < 4 {
+            assert_eq!(result, OpaqueWireFrame::MissingPrefix);
+            kani::cover!(wire_size == 3);
+        } else if length > max {
+            assert_eq!(
+                result,
+                OpaqueWireFrame::OverLimit {
+                    length: usize::from(length)
+                }
+            );
+            kani::cover!(length == 4 && max == 3);
+        } else {
+            let span = if length == 0 { 0 } else { 4 };
+            if usize::from(wire_size) - 4 < span {
+                assert_eq!(
+                    result,
+                    OpaqueWireFrame::Truncated {
+                        length: usize::from(length),
+                        span
+                    }
+                );
+                kani::cover!(length == 4 && wire_size == 6);
+                kani::cover!(length == 3 && wire_size == 7);
+            } else {
+                assert_eq!(
+                    result,
+                    OpaqueWireFrame::Complete {
+                        length: usize::from(length),
+                        span
+                    }
+                );
+                kani::cover!(length == 0 && wire_size == 4);
+                kani::cover!(length == 3 && wire_size == 8 && bytes[7] != 0);
+            }
+        }
+    }
+
+    /// Connects every four-byte wire length and every caller limit to the
+    /// production frame decision. Only the tail size is bounded to 0..=4.
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn var_opaque_all_wire_prefixes() {
+        let prefix: [u8; 4] = kani::any();
+        let remaining: u8 = kani::any();
+        kani::assume(remaining <= 4);
+        let max: usize = kani::any();
+        let wire = [prefix[0], prefix[1], prefix[2], prefix[3], 0, 0, 0, 0];
+        let length = (usize::from(prefix[0]) << 24)
+            | (usize::from(prefix[1]) << 16)
+            | (usize::from(prefix[2]) << 8)
+            | usize::from(prefix[3]);
+        let decision = opaque_wire_frame(&wire[..4 + usize::from(remaining)], max);
+
+        if length > max || length > XDR_MAX_ITEM {
+            assert_eq!(decision, OpaqueWireFrame::OverLimit { length });
+            kani::cover!(length == 5 && max == 4);
+            kani::cover!(length == XDR_MAX_ITEM + 1 && max == usize::MAX);
+        } else {
+            let span = ((length + 3) / 4) * 4;
+            if span > usize::from(remaining) {
+                assert_eq!(decision, OpaqueWireFrame::Truncated { length, span });
+                kani::cover!(length == 3 && remaining == 3);
+                kani::cover!(length == XDR_MAX_ITEM && remaining == 4);
+            } else {
+                assert_eq!(decision, OpaqueWireFrame::Complete { length, span });
+                kani::cover!(length == 0 && remaining == 0);
+                kani::cover!(length == 4 && remaining == 4);
+            }
+        }
     }
 }

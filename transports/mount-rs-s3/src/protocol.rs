@@ -1,8 +1,6 @@
 //! S3 request routing, key validation, HTTP metadata, XML codecs, and error
 //! mapping. This module contains no sockets and no filesystem calls.
 
-#![allow(unexpected_cfgs)]
-
 use std::{cmp::Ordering, fmt};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};

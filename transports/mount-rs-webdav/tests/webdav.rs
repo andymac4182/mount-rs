@@ -12,9 +12,10 @@ use mount_rs_core::{
 };
 use mount_rs_memfs::MemoryFs;
 use mount_rs_webdav::protocol::{
-    RangeSpec, collect_body, evaluate_conditionals, href_of, parse_depth, parse_destination,
-    parse_http_date_ms, parse_if, parse_lock_info, parse_lock_token, parse_overwrite, parse_range,
-    parse_target_path, parse_xml, resource_etag, status_of_error, xml_document,
+    LockTimeout, RangeSpec, collect_body, evaluate_conditionals, href_of, parse_depth,
+    parse_destination, parse_http_date_ms, parse_if, parse_lock_info, parse_lock_token,
+    parse_overwrite, parse_range, parse_target_path, parse_xml, resource_etag, status_of_error,
+    xml_document,
 };
 use mount_rs_webdav::{
     ALLOW_HEADER, DAV_COMPLIANCE, DAV_NS, DavFault, DavLockGrant, DavLockRequest, DavLockTable,
@@ -563,6 +564,108 @@ fn bounded_lock_scope_matrix_matches_the_path_hierarchy() {
             .conflict("/a/b", LockDepth::Zero, true, lock.expires_at)
             .is_none()
     );
+}
+
+#[test]
+fn large_lock_timeout_does_not_wrap_expiration_into_the_past() {
+    let mut table = DavLockTable::new(DavLockTableOptions {
+        default_timeout_seconds: u64::MAX,
+        max_timeout_seconds: u64::MAX,
+        new_token: Some(Arc::new(|| "urn:uuid:large-timeout".to_owned())),
+        ..DavLockTableOptions::default()
+    });
+    let DavLockGrant::Granted(lock) = table.create(
+        DavLockRequest {
+            path: "/large-timeout".to_owned(),
+            collection: false,
+            depth: LockDepth::Zero,
+            exclusive: true,
+            owner: None,
+            timeout: None,
+        },
+        0,
+    ) else {
+        panic!("the first lock must be granted");
+    };
+    assert_eq!(lock.expires_at, i64::MAX);
+    assert_eq!(table.size(1), 1);
+    let refreshed = table
+        .refresh(&lock.token, None, 1)
+        .expect("the live lock can refresh");
+    assert_eq!(refreshed.expires_at, i64::MAX);
+    assert_eq!(table.size(1), 1);
+}
+
+#[test]
+fn remaining_lock_time_handles_extreme_millisecond_values() {
+    let lock = mount_rs_webdav::DavLock {
+        token: "urn:uuid:extreme-time".to_owned(),
+        path: "/extreme-time".to_owned(),
+        collection: false,
+        depth: LockDepth::Zero,
+        exclusive: true,
+        owner: None,
+        timeout_seconds: u64::MAX,
+        expires_at: i64::MAX,
+    };
+    assert_eq!(DavLockTable::remaining(&lock, i64::MIN), u64::MAX / 1_000);
+    assert_eq!(DavLockTable::remaining(&lock, i64::MAX), 0);
+}
+
+#[test]
+fn refresh_preserves_one_shared_scope_after_the_other_expires() {
+    let next_token = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&next_token);
+    let mut table = DavLockTable::new(DavLockTableOptions {
+        default_timeout_seconds: 1,
+        max_timeout_seconds: 2,
+        new_token: Some(Arc::new(move || {
+            format!(
+                "urn:uuid:refresh-scope-{}",
+                counter.fetch_add(1, Ordering::SeqCst)
+            )
+        })),
+        ..DavLockTableOptions::default()
+    });
+    let request = |path: &str, depth: LockDepth, exclusive: bool| DavLockRequest {
+        path: path.to_owned(),
+        collection: false,
+        depth,
+        exclusive,
+        owner: None,
+        timeout: None,
+    };
+    let DavLockGrant::Granted(parent) = table.create(request("/a", LockDepth::Infinity, false), 0)
+    else {
+        panic!("shared parent lock must be granted");
+    };
+    let DavLockGrant::Granted(member) = table.create(request("/a/b", LockDepth::Zero, false), 0)
+    else {
+        panic!("shared member lock must be granted");
+    };
+    assert_eq!(table.covering("/a/b", 999).len(), 2);
+    let refreshed = table
+        .refresh(&parent.token, Some(LockTimeout::Infinite), 999)
+        .expect("parent still active");
+    assert_eq!(refreshed.expires_at, 2_999);
+    assert_eq!(table.covering("/a/b", 1_000).len(), 1);
+    assert!(table.find(&member.token, 1_000).is_none());
+    assert_eq!(
+        table
+            .conflict("/a/b", LockDepth::Zero, true, 1_000)
+            .expect("refreshed parent still protects member")
+            .token,
+        parent.token
+    );
+    assert!(
+        table
+            .conflict("/a/b", LockDepth::Zero, true, 2_999)
+            .is_none()
+    );
+    assert!(matches!(
+        table.create(request("/a/b", LockDepth::Zero, true), 2_999),
+        DavLockGrant::Granted(_)
+    ));
 }
 
 #[tokio::test]

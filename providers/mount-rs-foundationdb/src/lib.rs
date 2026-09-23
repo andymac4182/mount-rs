@@ -1705,6 +1705,23 @@ fn plan_writer_acquisition(
     Ok((fence, expires_at_ms))
 }
 
+/// Renew only the exact live persisted token, without changing its fence.
+/// The surrounding FoundationDB transaction owns the record read and write.
+fn plan_writer_renewal(
+    current: &LeaseRecord,
+    requested: &LeaseRecord,
+    now_ms: u64,
+    ttl_ms: u64,
+) -> Result<(u64, u64)> {
+    if !lease_matches(current, requested, now_ms) {
+        return Err(stale());
+    }
+    let expires_at_ms = now_ms
+        .checked_add(ttl_ms)
+        .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+    Ok((requested.fence, expires_at_ms))
+}
+
 #[cfg(kani)]
 mod verification {
     use super::*;
@@ -1744,6 +1761,91 @@ mod verification {
             assert!(!has_current || fence > current_fence);
             assert_eq!(expiry, now_ms.checked_add(ttl_ms).unwrap());
             assert!(expiry > now_ms);
+        }
+    }
+
+    /// The numeric decision called by writer renewal also uses the exact
+    /// lease-token predicate shared with release and fenced publication.
+    /// The FoundationDB transaction, oracle trust, and commit acknowledgement
+    /// remain outside this harness.
+    #[kani::proof]
+    #[kani::unwind(16)]
+    fn writer_renewal_requires_exact_live_fence_and_checked_expiry() {
+        let now_ms: u64 = kani::any();
+        let ttl_ms: u64 = kani::any();
+        let current_fence: u64 = kani::any();
+        let current_expiry: u64 = kani::any();
+        let requested_fence: u64 = kani::any();
+        let requested_expiry: u64 = kani::any();
+        let same_owner: bool = kani::any();
+        // Custom lease oracles may return zero. The TTL validator admits only
+        // positive values; decoded leases and input tokens have positive fields.
+        kani::assume(ttl_ms > 0);
+        kani::assume(current_fence > 0 && current_expiry > 0);
+        kani::assume(requested_fence > 0 && requested_expiry > 0);
+
+        let current = LeaseRecord {
+            owner: "writer".to_owned(),
+            fence: current_fence,
+            expires_at_ms: current_expiry,
+        };
+        let requested = LeaseRecord {
+            owner: if same_owner { "writer" } else { "other" }.to_owned(),
+            fence: requested_fence,
+            expires_at_ms: requested_expiry,
+        };
+        let exact_live = same_owner
+            && current_fence == requested_fence
+            && current_expiry == requested_expiry
+            && current_expiry > now_ms;
+        assert_eq!(lease_matches(&current, &requested, now_ms), exact_live);
+
+        let planned = plan_writer_renewal(&current, &requested, now_ms, ttl_ms);
+        let grantable = exact_live && now_ms.checked_add(ttl_ms).is_some();
+        kani::cover!(grantable);
+        kani::cover!(now_ms == 0 && grantable);
+        kani::cover!(
+            !same_owner
+                && current_fence == requested_fence
+                && current_expiry == requested_expiry
+                && current_expiry > now_ms
+        );
+        kani::cover!(
+            same_owner
+                && current_fence != requested_fence
+                && current_expiry == requested_expiry
+                && current_expiry > now_ms
+        );
+        kani::cover!(
+            same_owner
+                && current_fence == requested_fence
+                && current_expiry != requested_expiry
+                && current_expiry > now_ms
+        );
+        kani::cover!(
+            same_owner
+                && current_fence == requested_fence
+                && current_expiry == requested_expiry
+                && current_expiry == now_ms
+        );
+        kani::cover!(
+            same_owner
+                && current_fence == requested_fence
+                && current_expiry == requested_expiry
+                && current_expiry < now_ms
+        );
+        kani::cover!(exact_live && now_ms.checked_add(ttl_ms).is_none());
+
+        assert_eq!(planned.is_ok(), grantable);
+        match planned {
+            Ok((fence, expiry)) => {
+                assert_eq!(fence, current_fence);
+                assert_eq!(fence, requested_fence);
+                assert_eq!(expiry, now_ms.checked_add(ttl_ms).unwrap());
+                assert!(expiry > now_ms);
+            }
+            Err(error) if !exact_live => assert_eq!(error.code, ErrorCode::Estale),
+            Err(error) => assert_eq!(error.code, ErrorCode::Eoverflow),
         }
     }
 }
@@ -2241,15 +2343,13 @@ impl MetadataStore for FoundationDbMetadataStore {
                         .now_ms_in_transaction(trx)
                         .await
                         .map_err(TxnError::Fs)?;
-                    if !lease_matches(&current, &requested, now_ms) {
-                        return Err(TxnError::Fs(stale()));
-                    }
-                    let expires_at_ms = now_ms
-                        .checked_add(ttl)
-                        .ok_or_else(|| TxnError::Fs(FsError::new(ErrorCode::Eoverflow)))?;
+                    let (fence, expires_at_ms) =
+                        plan_writer_renewal(&current, &requested, now_ms, ttl)
+                            .map_err(TxnError::Fs)?;
                     let renewed = LeaseRecord {
+                        owner: requested.owner.clone(),
+                        fence,
                         expires_at_ms,
-                        ..requested.clone()
                     };
                     let bytes = encode_lease(&renewed).map_err(TxnError::Fs)?;
                     trx.set(&lease_key, &bytes);
@@ -2912,6 +3012,65 @@ mod tests {
         );
         assert_eq!(
             plan_writer_acquisition(None, None, u64::MAX, 1)
+                .unwrap_err()
+                .code,
+            ErrorCode::Eoverflow
+        );
+    }
+
+    #[test]
+    fn writer_renewal_numbers_require_exact_live_token_and_checked_expiry() {
+        let current = LeaseRecord {
+            owner: "writer".to_owned(),
+            fence: 9,
+            expires_at_ms: 1_000,
+        };
+        assert_eq!(
+            plan_writer_renewal(&current, &current, 900, 200).unwrap(),
+            (9, 1_100)
+        );
+        assert_eq!(
+            plan_writer_renewal(&current, &current, 999, 1).unwrap(),
+            (9, 1_000)
+        );
+        assert_eq!(
+            plan_writer_renewal(&current, &current, 0, 200).unwrap(),
+            (9, 200)
+        );
+        let wrong_owner = LeaseRecord {
+            owner: "other".to_owned(),
+            ..current.clone()
+        };
+        let wrong_fence = LeaseRecord {
+            fence: 8,
+            ..current.clone()
+        };
+        let wrong_expiry = LeaseRecord {
+            expires_at_ms: 999,
+            ..current.clone()
+        };
+        for requested in [&wrong_owner, &wrong_fence, &wrong_expiry] {
+            assert_eq!(
+                plan_writer_renewal(&current, requested, 900, 200)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Estale
+            );
+        }
+        for now in [1_000, 1_001] {
+            assert_eq!(
+                plan_writer_renewal(&current, &current, now, 1)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Estale
+            );
+        }
+        let max_expiry = LeaseRecord {
+            expires_at_ms: u64::MAX,
+            ..current
+        };
+        assert_eq!(
+            plan_writer_renewal(&max_expiry, &max_expiry, u64::MAX - 1, 2)
                 .unwrap_err()
                 .code,
             ErrorCode::Eoverflow
