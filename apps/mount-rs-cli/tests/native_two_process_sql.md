@@ -74,7 +74,13 @@ directory for bounded deferred unlink races. If it remains after that wait,
 it reports `owned_cleanup=deferred_until_backing_disposal`; the native test
 then cleanly unmounts and removes the entire disposable backing. The test
 fails if the fixture cannot emit a summary or its exit disagrees with that
-summary. See the standalone
+summary. SQLite failure reports include `sqlite_errorcode` and
+`sqlite_errorname` when Python receives a SQLite error, including a failed
+load worker's error. Set `MOUNT_RS_CLI_NATIVE_SQLITE_INNER_TRACE=1` with the
+matrix flag to capture bounded CLI `--verbose` lines for failed operations
+and `.nfs` rename activity inside the fixture's unique directory. The native
+test prints up to the last 80 matching lines per CLI after clean unmount.
+See the standalone
 [adversarial packet](../../../tests/sqlite_nfs_adversarial.md) for the
 supported single-view profile and its limits.
 

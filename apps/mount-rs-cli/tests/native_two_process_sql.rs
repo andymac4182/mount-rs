@@ -193,6 +193,19 @@ fn run_journal(journal: &str) {
     mount_a
         .clean_stop()
         .expect("A clean SIGINT and native unmount");
+    if journal == "DELETE"
+        && std::env::var("MOUNT_RS_CLI_NATIVE_SQLITE_INNER_MATRIX")
+            .ok()
+            .as_deref()
+            == Some("1")
+        && std::env::var("MOUNT_RS_CLI_NATIVE_SQLITE_INNER_TRACE")
+            .ok()
+            .as_deref()
+            == Some("1")
+    {
+        mount_a.report_inner_trace("A");
+        mount_b.report_inner_trace("B");
+    }
     assert!(!is_mounted_at(&scope.mountpoint_a).expect("inspect A mount entry"));
     assert!(!is_mounted_at(&scope.mountpoint_b).expect("inspect B mount entry"));
     check_backing_integrity(&scope, journal);
@@ -1019,7 +1032,15 @@ impl NativeMount {
         let trace = std::env::var("MOUNT_RS_CLI_SQLITE_NFS_BACKING_TRACE")
             .ok()
             .as_deref()
-            == Some("1");
+            == Some("1")
+            || (std::env::var("MOUNT_RS_CLI_NATIVE_SQLITE_INNER_MATRIX")
+                .ok()
+                .as_deref()
+                == Some("1")
+                && std::env::var("MOUNT_RS_CLI_NATIVE_SQLITE_INNER_TRACE")
+                    .ok()
+                    .as_deref()
+                    == Some("1"));
         command.arg(if trace { "--verbose" } else { "--quiet" });
         if let Some(extra) = extra_mountpoint {
             command.arg("--also-mountpoint").arg(extra);
@@ -1086,6 +1107,25 @@ impl NativeMount {
 
     fn clean_stop(&mut self) -> Result<(), String> {
         self.stop(true)
+    }
+
+    fn report_inner_trace(&self, writer: &str) {
+        const MAX_LINES: usize = 80;
+        let relevant: Vec<_> = self
+            .output
+            .iter()
+            .filter(|line| {
+                line.contains("mount-rs-sqlite-adversarial-")
+                    && (line.contains('→') || line.contains(".nfs."))
+            })
+            .collect();
+        let omitted = relevant.len().saturating_sub(MAX_LINES);
+        for line in relevant.into_iter().skip(omitted) {
+            eprintln!("SQLITE_INNER_NFS_CLI_TRACE writer={writer} {line}");
+        }
+        if omitted > 0 {
+            eprintln!("SQLITE_INNER_NFS_CLI_TRACE writer={writer} omitted_early_lines={omitted}");
+        }
     }
 
     fn stop(&mut self, expect_clean: bool) -> Result<(), String> {
