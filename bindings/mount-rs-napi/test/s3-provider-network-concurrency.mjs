@@ -14,6 +14,18 @@ const objects = Array.from({ length: concurrency }, (_, index) =>
   Buffer.alloc(8 * 1024 + index, index % 256),
 )
 
+async function withRequestStage(label, stage, index, action) {
+  const started = performance.now()
+  try {
+    return await action()
+  } catch (error) {
+    throw new Error(
+      `${label} ${stage} ${index} failed after ${Math.round(performance.now() - started)} ms`,
+      { cause: error },
+    )
+  }
+}
+
 async function runCase({ label, open }) {
   const filesystem = await open()
   let server
@@ -28,25 +40,35 @@ async function runCase({ label, open }) {
 
     const putReplies = await Promise.all(
       objects.map((body, index) =>
-        fetch(`${server.url}/photos/provider-network/${index}.bin`, {
-          method: "PUT",
-          body,
-          signal: AbortSignal.timeout(15_000),
-        }),
+        withRequestStage(label, "concurrent PUT fetch", index, () =>
+          fetch(`${server.url}/photos/provider-network/${index}.bin`, {
+            method: "PUT",
+            body,
+            signal: AbortSignal.timeout(15_000),
+          }),
+        ),
       ),
     )
     for (const [index, reply] of putReplies.entries()) {
       assert.equal(reply.status, 200, `${label} PUT ${index} status ${reply.status}`)
-      await reply.arrayBuffer()
+      await withRequestStage(label, "concurrent PUT response body", index, () =>
+        reply.arrayBuffer(),
+      )
     }
 
     const getReplies = await Promise.all(
       objects.map(async (expected, index) => {
-        const reply = await fetch(`${server.url}/photos/provider-network/${index}.bin`, {
-          signal: AbortSignal.timeout(15_000),
-        })
+        const reply = await withRequestStage(label, "concurrent GET fetch", index, () =>
+          fetch(`${server.url}/photos/provider-network/${index}.bin`, {
+            signal: AbortSignal.timeout(15_000),
+          }),
+        )
         return {
-          body: Buffer.from(await reply.arrayBuffer()),
+          body: Buffer.from(
+            await withRequestStage(label, "concurrent GET response body", index, () =>
+              reply.arrayBuffer(),
+            ),
+          ),
           expected,
           index,
           status: reply.status,
@@ -68,32 +90,42 @@ async function runCase({ label, open }) {
       streamedObject.subarray(3 * 1024, 8 * 1024),
       streamedObject.subarray(8 * 1024),
     ]
-    const streamedPut = await fetch(`${server.url}/photos/provider-network/streamed.bin`, {
-      method: "PUT",
-      body: new ReadableStream({
-        async pull(controller) {
-          const chunk = streamedChunks.shift()
-          if (chunk === undefined) {
-            controller.close()
-            return
-          }
-          await new Promise((resolve) => setImmediate(resolve))
-          controller.enqueue(chunk)
-        },
+    const streamedPut = await withRequestStage(label, "streamed PUT fetch", "streamed.bin", () =>
+      fetch(`${server.url}/photos/provider-network/streamed.bin`, {
+        method: "PUT",
+        body: new ReadableStream({
+          async pull(controller) {
+            const chunk = streamedChunks.shift()
+            if (chunk === undefined) {
+              controller.close()
+              return
+            }
+            await new Promise((resolve) => setImmediate(resolve))
+            controller.enqueue(chunk)
+          },
+        }),
+        duplex: "half",
+        headers: { "content-length": String(streamedObject.length) },
+        signal: AbortSignal.timeout(15_000),
       }),
-      duplex: "half",
-      headers: { "content-length": String(streamedObject.length) },
-      signal: AbortSignal.timeout(15_000),
-    })
+    )
     assert.equal(streamedPut.status, 200, `${label} streamed PUT status`)
-    await streamedPut.arrayBuffer()
+    await withRequestStage(label, "streamed PUT response body", "streamed.bin", () =>
+      streamedPut.arrayBuffer(),
+    )
 
-    const streamedGet = await fetch(`${server.url}/photos/provider-network/streamed.bin`, {
-      signal: AbortSignal.timeout(15_000),
-    })
+    const streamedGet = await withRequestStage(label, "streamed GET fetch", "streamed.bin", () =>
+      fetch(`${server.url}/photos/provider-network/streamed.bin`, {
+        signal: AbortSignal.timeout(15_000),
+      }),
+    )
     assert.equal(streamedGet.status, 200, `${label} streamed GET status`)
     assert.deepEqual(
-      Buffer.from(await streamedGet.arrayBuffer()),
+      Buffer.from(
+        await withRequestStage(label, "streamed GET response body", "streamed.bin", () =>
+          streamedGet.arrayBuffer(),
+        ),
+      ),
       streamedObject,
       `${label} streamed body`,
     )
