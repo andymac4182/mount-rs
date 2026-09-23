@@ -525,8 +525,26 @@ FoundationDB/RustFS fixture: 40/40 native acknowledgements took 27,200 ms,
 followed by `RUSTFS_COMBO_PASS` and `RUSTFS_INTEGRATION_PASS`. The runner
 verified removal of its exact mounts, images, processes, containers and temp
 roots, and closure of all four owned service ports. This pass does not explain
-the earlier failures. An extended 80-write traced load is the next transport
-diagnostic.
+the earlier failures. The extended traced fixture on test-only head
+`e4489179` also passed 80/80 acknowledgements, both live verification passes,
+fresh reopen, owned resource cleanup and the complete service fixture.
+Its 94,537 ms native timer includes the live verification passes; it is not
+a write-only throughput measurement. No pending spans were captured at the
+end of either writer's load window.
+
+| Longest traced phase | Writer A, ms | Writer B, ms |
+| --- | ---: | ---: |
+| Local filesystem gate wait | 19.599 | 22.249 |
+| Metadata load | 83.640 | 18.401 |
+| Backing authority verification | 16.216 | 21.187 |
+| FoundationDB metadata CAS | 510.396 | 484.629 |
+| CREATE ownership claim | 271.992 | 326.332 |
+| NFS dispatch | 761.390 | 753.642 |
+
+These maxima come from different requests and are not additive. They identify
+costs in this passing window, not the cause of the earlier timeout. Tracing
+can affect scheduling through stderr I/O; an untraced reliability qualification
+and an explanation of the intermittent failure remain outstanding.
 
 The same combined source passed locked workspace all-targets tests after
 cleaning the local workspace package artifacts from its isolated target:
