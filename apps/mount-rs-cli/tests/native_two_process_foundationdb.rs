@@ -6,6 +6,7 @@
 
 #![cfg(all(target_os = "macos", target_arch = "aarch64", feature = "foundationdb"))]
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
@@ -248,21 +249,25 @@ fn run_two_process(rustfs_blocks: bool) {
                     .iter()
                     .filter(|line| {
                         line.contains("load-")
+                            || line.contains("MOUNT_RS_REQUEST_TRACE")
+                            || line.contains("panic")
                             || line.contains("error")
                             || line.contains("failed")
                             || line.contains("timeout")
                     })
                     .rev()
-                    .take(80)
+                    .take(120)
                     .cloned()
                     .collect::<Vec<_>>()
             };
             let a_alive = mount_a.is_alive();
             let b_alive = mount_b.is_alive();
             panic!(
-                "RustFS native load failed: A={a_result:?}, B={b_result:?}; A CLI recent={:?}; B CLI recent={:?}; A alive={a_alive}; B alive={b_alive}",
+                "RustFS native load failed: A={a_result:?}, B={b_result:?}; A CLI recent={:?}; B CLI recent={:?}; A pending traces={:?}; B pending traces={:?}; A alive={a_alive}; B alive={b_alive}",
                 recent(&mount_a),
-                recent(&mount_b)
+                recent(&mount_b),
+                pending_request_traces(&mount_a.output),
+                pending_request_traces(&mount_b.output),
             );
         }
         let a_acks = a_result.expect("A load writes");
@@ -784,6 +789,52 @@ struct NativeMount {
     stderr_reader: Option<JoinHandle<()>>,
     output: Vec<String>,
     cleaned: bool,
+}
+
+// A busy client may push a stalled operation out of the recent-line window.
+// Keep its last phase visible without printing the complete native trace.
+fn pending_request_traces(lines: &[String]) -> Vec<String> {
+    let mut pending = BTreeMap::new();
+    for line in lines {
+        if !line.contains("MOUNT_RS_REQUEST_TRACE") {
+            continue;
+        }
+        let value = |key: &str| {
+            line.split_whitespace()
+                .find_map(|token| token.strip_prefix(key))
+        };
+        let (Some(pid), Some(id), Some(stage)) = (value("pid="), value("id="), value("stage="))
+        else {
+            continue;
+        };
+        let (Ok(pid), Ok(id)) = (pid.parse::<u32>(), id.parse::<u64>()) else {
+            continue;
+        };
+        if matches!(stage, "exit" | "dropped") {
+            pending.remove(&(pid, id));
+        } else {
+            pending.insert((pid, id), line);
+        }
+    }
+    pending
+        .values()
+        .take(16)
+        .map(|line| (*line).clone())
+        .collect()
+}
+
+#[test]
+fn pending_request_trace_context_survives_later_completed_work() {
+    let lines = [
+        "MOUNT_RS_REQUEST_TRACE pid=1 id=7 stage=entry",
+        "MOUNT_RS_REQUEST_TRACE pid=1 id=7 stage=backing_verify_start",
+        "MOUNT_RS_REQUEST_TRACE pid=2 id=7 stage=entry",
+        "MOUNT_RS_REQUEST_TRACE pid=2 id=7 stage=exit",
+        "MOUNT_RS_REQUEST_TRACE pid=1 id=8 stage=entry",
+        "MOUNT_RS_REQUEST_TRACE pid=1 id=8 stage=dropped",
+    ]
+    .map(str::to_owned);
+    assert_eq!(pending_request_traces(&lines), vec![lines[1].clone()]);
 }
 
 impl NativeMount {

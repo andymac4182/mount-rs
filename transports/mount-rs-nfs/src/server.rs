@@ -13,13 +13,14 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use mount_rs_core::diagnostics::RequestTrace;
 use mount_rs_core::{FsDriver, Loopback};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex as AsyncMutex, Notify, Semaphore, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
 
-use crate::rpc::{DEFAULT_RECORD_LIMIT, RecordAssembler, frame_record};
+use crate::rpc::{DEFAULT_RECORD_LIMIT, RecordAssembler, decode_call, frame_record};
 use crate::session::{
     Nfs3Session, NfsRequestContext, NfsSessionErrorHook, NfsSessionHooks, NfsSessionOptions,
     route_nfs_call,
@@ -688,6 +689,23 @@ where
             }
         };
         for record in records {
+            let mut trace = RequestTrace::new("nfs", "rpc");
+            let rpc = if trace.is_enabled() {
+                match decode_call(&record) {
+                    Ok((call, _)) => format!(
+                        "xid={} program={} version={} procedure={}",
+                        call.xid, call.program, call.version, call.procedure
+                    ),
+                    Err(_) => "undecodable=true".to_owned(),
+                }
+            } else {
+                String::new()
+            };
+            trace.stage(
+                "received",
+                format_args!("{rpc} peer={peer} bytes={}", record.len()),
+            );
+            trace.stage("permit_wait", format_args!("{rpc}"));
             let permit = tokio::select! {
                 _ = control.shutdown.notified() => {
                     workers.shutdown().await;
@@ -725,10 +743,13 @@ where
             workers.spawn(async move {
                 let _permit = permit;
                 let context = NfsRequestContext { peer: Some(peer) };
+                trace.stage("dispatch", format_args!("{rpc}"));
                 let reply = route_nfs_call(&session, &v4_session, &record, context).await;
                 let Some(reply) = reply else {
+                    trace.finish(format_args!("{rpc} outcome=no_reply"));
                     return;
                 };
+                trace.stage("reply", format_args!("{rpc} bytes={}", reply.len()));
                 let framed = match frame_record(&reply) {
                     Ok(framed) => framed,
                     Err(error) => {
@@ -742,14 +763,29 @@ where
                             ),
                         );
                         stop.notify_one();
+                        trace.finish(format_args!("{rpc} outcome=frame_error"));
                         return;
                     }
                 };
+                trace.stage("socket_lock_wait", format_args!("{rpc}"));
                 let mut writer = writer.lock().await;
+                trace.stage(
+                    "socket_write_start",
+                    format_args!("{rpc} bytes={}", framed.len()),
+                );
                 let result = match writer.write_all(&framed).await {
                     Ok(()) => writer.flush().await,
                     Err(error) => Err(error),
                 };
+                trace.finish(format_args!(
+                    "{rpc} outcome={} os_code={:?}",
+                    if result.is_ok() {
+                        "written"
+                    } else {
+                        "write_error"
+                    },
+                    result.as_ref().err().and_then(io::Error::raw_os_error),
+                ));
                 if let Err(error) = result {
                     if !is_expected_disconnect(&error) {
                         report_once(
