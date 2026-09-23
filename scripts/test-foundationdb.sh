@@ -663,6 +663,14 @@ check_authority_heartbeat
 
 if [ "$run_napi" -eq 1 ]; then
   check_authority_heartbeat
+  # R2 can be a composed Ozone S3 gateway without being a RustFS service.
+  # The Node client runs in its own container, so translate a host-published
+  # loopback endpoint independently of the RustFS restart gate above.
+  node_r2_endpoint=${R2_ENDPOINT:-}
+  case "$node_r2_endpoint" in
+    http://127.0.0.1:*) node_r2_endpoint="http://host.docker.internal${node_r2_endpoint#http://127.0.0.1}" ;;
+    http://localhost:*) node_r2_endpoint="http://host.docker.internal${node_r2_endpoint#http://localhost}" ;;
+  esac
   node_command='node bindings/mount-rs-napi/test/foundationdb.mjs'
   if [ "$run_iops" -eq 1 ]; then
     iops_size_mib=${MOUNT_RS_FOUNDATIONDB_IOPS_SIZE_MIB:-1}
@@ -722,6 +730,7 @@ if [ "$run_napi" -eq 1 ]; then
     if docker run --rm \
       --platform "$docker_platform" \
       --network "$network" \
+      --add-host host.docker.internal:host-gateway \
       --volume "$repo_dir:/workspace:ro" \
       --volume "$client_fdb_volume" \
       --workdir /workspace \
@@ -732,6 +741,10 @@ if [ "$run_napi" -eq 1 ]; then
       --env MOUNT_RS_NAPI_FOUNDATIONDB_SHARED_PROVIDER=1 \
       --env "MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX=$authority_prefix" \
       --env "MOUNT_RS_FOUNDATIONDB_NODE_PREFIX=$test_prefix/napi" \
+      --env "R2_ENDPOINT=$node_r2_endpoint" \
+      --env R2_BUCKET \
+      --env R2_ACCESS_KEY_ID \
+      --env R2_SECRET_ACCESS_KEY \
       "$node_image" sh -c "$node_command"; then
       :
     else
