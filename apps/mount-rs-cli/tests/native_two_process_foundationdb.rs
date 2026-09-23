@@ -66,6 +66,16 @@ fn run_two_process(rustfs_blocks: bool) {
     if rustfs_blocks {
         require_opt_in("MOUNT_RS_CLI_NATIVE_RUSTFS_DISPOSABLE");
     }
+    let load_files_per_writer = if rustfs_blocks {
+        let value = match std::env::var("MOUNT_RS_CLI_NATIVE_FDB_LOAD_FILES_PER_WRITER") {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(error) => panic!("native RustFS load size is invalid: {error}"),
+        };
+        parse_load_files_per_writer(value.as_deref()).expect("bounded native RustFS load size")
+    } else {
+        RUSTFS_LOAD_FILES_PER_WRITER
+    };
     let cluster_file = PathBuf::from(
         std::env::var("MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE")
             .expect("set MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE to the disposable cluster file"),
@@ -225,21 +235,39 @@ fn run_two_process(rustfs_blocks: bool) {
         // updates concurrently. Fresh reopen below checks every acknowledged sync.
         let barrier = Arc::new(Barrier::new(3));
         let started = Instant::now();
+        mount_a.drain_output();
+        mount_b.drain_output();
+        let trace_start_a = mount_a.output.len();
+        let trace_start_b = mount_b.output.len();
         let load_a = spawn_load_writer(
             scope.mountpoint_a.clone(),
             'a',
-            RUSTFS_LOAD_FILES_PER_WRITER,
+            load_files_per_writer,
             Arc::clone(&barrier),
         );
         let load_b = spawn_load_writer(
             scope.mountpoint_b.clone(),
             'b',
-            RUSTFS_LOAD_FILES_PER_WRITER,
+            load_files_per_writer,
             Arc::clone(&barrier),
         );
         barrier.wait();
         let a_result = load_a.join().expect("join RustFS load writer A");
         let b_result = load_b.join().expect("join RustFS load writer B");
+        mount_a.drain_output();
+        mount_b.drain_output();
+        if std::env::var("MOUNT_RS_TRACE_REQUESTS").ok().as_deref() == Some("1") {
+            for (writer, lines) in [
+                ('a', &mount_a.output[trace_start_a..]),
+                ('b', &mount_b.output[trace_start_b..]),
+            ] {
+                println!(
+                    "NATIVE_FDB_RUSTFS_REQUEST_PHASES writer={writer} longest_us={:?} pending={:?}",
+                    longest_request_phases(lines),
+                    pending_request_traces(lines),
+                );
+            }
+        }
         if a_result.is_err() || b_result.is_err() {
             mount_a.drain_output();
             mount_b.drain_output();
@@ -272,9 +300,10 @@ fn run_two_process(rustfs_blocks: bool) {
         }
         let a_acks = a_result.expect("A load writes");
         let b_acks = b_result.expect("B load writes");
-        assert_eq!(a_acks + b_acks, 2 * RUSTFS_LOAD_FILES_PER_WRITER);
+        assert_eq!(a_acks + b_acks, 2 * load_files_per_writer);
         for mountpoint in [&scope.mountpoint_a, &scope.mountpoint_b] {
-            verify_load_files(mountpoint).expect("both live RustFS mounts see every load write");
+            verify_load_files(mountpoint, load_files_per_writer)
+                .expect("both live RustFS mounts see every load write");
         }
         assert!(
             mount_a.is_alive() && mount_b.is_alive(),
@@ -368,7 +397,7 @@ fn run_two_process(rustfs_blocks: bool) {
     await_bytes(&scope.mountpoint_a.join(shared_name), &merged_ranges)
         .expect("fresh process sees both disjoint ranges");
     if rustfs_blocks {
-        verify_load_files(&scope.mountpoint_a)
+        verify_load_files(&scope.mountpoint_a, load_files_per_writer)
             .expect("fresh process preserves every acknowledged RustFS load file");
     }
     await_absent(&scope.mountpoint_a.join("renamed-by-a")).expect("fresh process sees B's removal");
@@ -468,9 +497,9 @@ fn spawn_load_writer(
     })
 }
 
-fn verify_load_files(mountpoint: &Path) -> io::Result<()> {
+fn verify_load_files(mountpoint: &Path, count: usize) -> io::Result<()> {
     for writer in ['a', 'b'] {
-        for index in 0..RUSTFS_LOAD_FILES_PER_WRITER {
+        for index in 0..count {
             await_bytes(
                 &mountpoint.join(load_name(writer, index)),
                 &load_payload(writer, index),
@@ -835,6 +864,126 @@ fn pending_request_trace_context_survives_later_completed_work() {
     ]
     .map(str::to_owned);
     assert_eq!(pending_request_traces(&lines), vec![lines[1].clone()]);
+}
+
+fn parse_load_files_per_writer(value: Option<&str>) -> Result<usize, String> {
+    let Some(value) = value else {
+        return Ok(RUSTFS_LOAD_FILES_PER_WRITER);
+    };
+    let count = value
+        .parse::<usize>()
+        .map_err(|_| "native RustFS load size must be an integer in 1..=200".to_owned())?;
+    if !(1..=200).contains(&count) {
+        return Err("native RustFS load size must be in 1..=200".to_owned());
+    }
+    Ok(count)
+}
+
+fn longest_request_phases(lines: &[String]) -> Vec<(u128, String)> {
+    struct Phase<'a> {
+        elapsed_us: u128,
+        component: &'a str,
+        stage: &'a str,
+        line: &'a String,
+    }
+    let mut previous = BTreeMap::<(u32, u64), Phase<'_>>::new();
+    let mut longest = BTreeMap::<(&str, &str), (u128, &String)>::new();
+    for line in lines {
+        if !line.contains("MOUNT_RS_REQUEST_TRACE") {
+            continue;
+        }
+        let value = |key: &str| {
+            line.split_whitespace()
+                .find_map(|token| token.strip_prefix(key))
+        };
+        let (Some(pid), Some(id), Some(component), Some(stage), Some(elapsed_us)) = (
+            value("pid="),
+            value("id="),
+            value("component="),
+            value("stage="),
+            value("elapsed_us="),
+        ) else {
+            continue;
+        };
+        let (Ok(pid), Ok(id), Ok(elapsed_us)) = (
+            pid.parse::<u32>(),
+            id.parse::<u64>(),
+            elapsed_us.parse::<u128>(),
+        ) else {
+            continue;
+        };
+        if let Some(prior) = previous.remove(&(pid, id))
+            && let Some(duration) = elapsed_us.checked_sub(prior.elapsed_us)
+        {
+            let timing = longest
+                .entry((prior.component, prior.stage))
+                .or_insert((duration, prior.line));
+            if duration > timing.0 {
+                *timing = (duration, prior.line);
+            }
+        }
+        if !matches!(stage, "exit" | "dropped") {
+            previous.insert(
+                (pid, id),
+                Phase {
+                    elapsed_us,
+                    component,
+                    stage,
+                    line,
+                },
+            );
+        }
+    }
+    let mut by_component = BTreeMap::<&str, Vec<(u128, &String)>>::new();
+    for ((component, _), timing) in longest {
+        by_component.entry(component).or_default().push(timing);
+    }
+    let mut summary = Vec::new();
+    for (_, mut timings) in by_component {
+        timings.sort_by_key(|(duration, _)| std::cmp::Reverse(*duration));
+        summary.extend(
+            timings
+                .into_iter()
+                .take(8)
+                .map(|(duration, line)| (duration, line.clone())),
+        );
+    }
+    summary.truncate(32);
+    summary
+}
+
+#[test]
+fn native_rustfs_load_size_retains_default_and_accepts_bounded_stress() {
+    assert_eq!(parse_load_files_per_writer(None).unwrap(), 20);
+    for count in [1, 40, 200] {
+        assert_eq!(
+            parse_load_files_per_writer(Some(&count.to_string())).unwrap(),
+            count
+        );
+    }
+    for invalid in ["0", "201", "-1", "", "forty"] {
+        assert!(
+            parse_load_files_per_writer(Some(invalid)).is_err(),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
+fn native_request_phase_durations_keep_processes_separate() {
+    let lines = [
+        "MOUNT_RS_REQUEST_TRACE pid=1 id=7 component=chunked operation=publish_namespace stage=backing_verify_start elapsed_us=100",
+        "MOUNT_RS_REQUEST_TRACE pid=2 id=7 component=chunked operation=mutate stage=gate_wait elapsed_us=10",
+        "MOUNT_RS_REQUEST_TRACE pid=1 id=7 component=chunked operation=publish_namespace stage=cas_start elapsed_us=5100",
+        "MOUNT_RS_REQUEST_TRACE pid=2 id=7 component=chunked operation=mutate stage=gate_acquired elapsed_us=110",
+        "MOUNT_RS_REQUEST_TRACE pid=1 id=7 component=chunked operation=publish_namespace stage=cas_end elapsed_us=7100",
+        "MOUNT_RS_REQUEST_TRACE pid=2 id=7 component=chunked operation=mutate stage=exit elapsed_us=111",
+        "MOUNT_RS_REQUEST_TRACE pid=1 id=7 component=chunked operation=publish_namespace stage=exit elapsed_us=7101",
+    ].map(str::to_owned);
+    let phases = longest_request_phases(&lines);
+    assert!(phases.contains(&(5000, lines[0].clone())), "{phases:?}");
+    assert!(phases.contains(&(2000, lines[2].clone())), "{phases:?}");
+    assert!(phases.contains(&(100, lines[1].clone())), "{phases:?}");
 }
 
 impl NativeMount {
