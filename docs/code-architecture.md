@@ -75,7 +75,12 @@ see [DEPENDENCIES.md](../DEPENDENCIES.md).
    a requesting client's wall clock. Atomically check the expected revision,
    current fence and lease expiry when publishing. A provider that supports
    concurrent writers must additionally implement `concurrent_mode_state`,
-   `prepare_bound_concurrent_mode` and `publish_bound_if_revision`. The persisted
+   `preflight_new_bound_mode`, `prepare_bound_concurrent_mode` and
+   `publish_bound_if_revision`. The read-only preflight checks eligibility
+   before claiming block authority; the final provider claim rechecks it.
+   Offline MRC1 migration additionally needs `preflight_mrc1_to_bound_mode`
+   and `migrate_mrc1_to_bound_mode`. Wrappers must forward these hooks; their
+   defaults fail with `ENOTSUP`. The persisted
    `MRC2` mode binds every publication to the block provider's stable authority
    ID. Prepare the mode before opening the namespace, fence legacy lease
    operations, and reject conversion while an exclusive writer may exist.

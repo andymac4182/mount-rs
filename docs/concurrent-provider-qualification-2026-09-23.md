@@ -72,8 +72,11 @@ restores the connection's original timeout after the operation; block writes
 retry outside the connection lock with a 16-attempt, 30-second cap. No block
 ID is returned until its INSERT and COMMIT complete. The provider suite
 passed 28/28 and the independent two/four-writer coordinator suite passed
-4/4. Windows verification of this retry head is still required. The test
-also reports the provider stage on any future CI failure.
+4/4. Windows verification was pending at this diagnostic stage. The final
+core PR-event head `688ff38a7823e1615fcfb5ac3389e0200932c33d` later passed
+[Windows Rust CI job 107196626751](https://github.com/andymac4182/mount-rs/actions/runs/35865709669/job/107196626751).
+Windows concurrent SQLite backing still returns `ENOTSUP`. The test also
+reports the provider stage on any future CI failure.
 
 Reproduction of the bounded load uses only test-owned files:
 
@@ -404,8 +407,16 @@ file; a preclaim copy of that file cannot enroll independently. Historical
 unstamped Legacy SQLite metadata can continue in exclusive-writer mode but
 cannot automatically enter `MRC2`. An already `MRC1` SQLite file cannot mount
 with the upgraded binary: it cannot acquire a legacy writer, and its implicit
-`MRC2` migration is refused. Trusted offline re-enrollment has not been
-implemented. An unstamped `MRC2` file refuses startup. On other
+`MRC2` migration is refused. Explicit trusted recovery is available only for a
+completely unstamped, fenced MRC1 SQLite metadata file. It requires the exact
+revision and volume ID and an operator assertion that every writer is stopped
+and the selected file is the sole authoritative metadata copy. The tool cannot
+prove those conditions; a copied database retains its logical volume ID.
+Recovery stamps the current device, inode and canonical pathname while
+preserving the volume ID, revision and namespace. See the
+[operator procedure](concurrent-backing-reenrollment.md). Partially stamped
+MRC1 files and physical pathless MRC2 prototypes remain unsupported by trusted
+recovery; an unstamped `MRC2` file refuses startup. On other
 platforms, including Windows, concurrent SQLite backing returns `ENOTSUP`
 because a copied file could carry the same marker while its contents diverge.
 The GNU Linux guard uses `fstatfs` on an `O_PATH` inspection descriptor and allows ext-family,
@@ -413,13 +424,22 @@ XFS, Btrfs, F2FS and tmpfs; it rejects NFS, overlayfs, CIFS, 9P, FUSE and
 unknown types before concurrent claim. tmpfs passes locality but does not
 survive host reboot. The Linux native NFS acceptance fixture places both
 provider database files on its owned NFS view and asserts `ENOTSUP` with no
-metadata revision or block marker change. The Linux native NFS CI job passed
-that owned fixture on head `2ccf9579` with both markers absent and revision zero.
+metadata revision or block marker change. The final core PR-event head
+`688ff38a7823e1615fcfb5ac3389e0200932c33d` passed the
+[native-nfs Ubuntu CI job 107196627065](https://github.com/andymac4182/mount-rs/actions/runs/35865709669/job/107196627065).
+That workflow used PR merge checkout `3552df110e08d934e96a10ef07366a894e576f7e`
+into main `a47fafbe`. Its owned NFS fixture emitted
+`SQLITE_LINUX_NFS_BACKING_REJECT_PASS metadata=ENOTSUP blocks=ENOTSUP markers=0 revision=0`.
 Closing a regular descriptor for the same inode releases process POSIX locks,
 including SQLite's locks. `O_PATH` avoids that close path. A new distinct-process
 regression holds `BEGIN IMMEDIATE`, requires another process to receive
 `SQLITE_BUSY` before and after inspection, and permits its write after rollback.
-The revised Linux code awaits runtime CI proof; macOS does not execute this test.
+That reserved-lock regression passed on the same final PR-event head in
+[Rust Ubuntu CI job 107196626837](https://github.com/andymac4182/mount-rs/actions/runs/35865709669/job/107196626837).
+Its SQLite suite reported 63 passed, zero failed and three ignored; the outer
+reserved-lock test explicitly invokes its distinct-process probe worker.
+The privileged file-bind fixture runs in the native NFS job. macOS does not
+execute the reserved-lock test.
 The combined revised checkout passed SQLite 61 tests, CLI 65 library tests,
 16 CLI integration tests, workspace formatting, and strict all-target Clippy
 for both packages. The remote-only offline migration regression went red
@@ -445,26 +465,46 @@ opt-in mode. The direct `statx` syscall adds no glibc wrapper version requiremen
 The canonical pathname stamp rejects alternate auxiliary paths; symlinks
 resolving to the same canonical path remain usable. The revised SQLite provider
 suite passed 61/61 on macOS, including alternate path, symlink, hard-link and
-portable mount-attribute regressions. The earlier owned Linux file bind
-regression passed in the native NFS CI job on
-`2ccf9579`. That bounded fixture closes both stores before binding; it does
-not qualify a file-only alias opened while a canonical WAL remains active.
-The extended privileged fixture keeps canonical WALs open and verifies in a
-distinct process that an alias seeing an empty authority table cannot install
-a second authority or change metadata. Its runtime CI result is pending.
+portable mount-attribute regressions. The final core head `688ff38a` passed
+the privileged Linux file-bind fixture in native-nfs Ubuntu CI job
+`107196627065`, workflow `35865709669`. The checkpointed case closes both
+stores before binding. The extended case keeps canonical WALs open and
+verifies in a distinct process that an alias seeing an empty authority table
+cannot install a second authority or change metadata; the canonical providers
+still verify their original MRC2 authority. This qualifies the fixture's owned
+local backing and file-only aliases, without qualifying arbitrary filesystems
+or adversarial path swaps.
 Use the same canonical database paths in every SQLite process.
 Pathless development MRC2 prototypes fail closed before release; see the
 [auxiliary path authority](sqlite-auxiliary-path-authority.md) for the format
 and recovery limits.
 
-The offline migration path currently prepares a block authority before it
-directly reads referenced blocks and attempts the metadata transition. A
-disposable historical unstamped SQLite MRC1 CLI fixture rejected migration
-with metadata still `MRC1`, revision zero and no backing ID, but left one
-authority row in the selected block database. That row alone does not publish
-a namespace. Read-only transition and extent preflight before authority claim
-is tracked as the immediate follow-up; until then a rejected historical
-migration can leave this unused marker.
+The earlier offline migration path prepared a block authority before directly
+reading referenced blocks and attempting the metadata transition. In that
+version, a disposable historical unstamped SQLite MRC1 CLI fixture rejected
+migration with metadata still `MRC1`, revision zero and no backing ID, but left
+one authority row in the selected block database. That row alone did not
+publish a namespace.
+
+The recovery/preflight follow-up checks metadata eligibility, the loaded
+namespace and expected revision, then directly reads every referenced block
+before claiming block authority. Ordinary migration still refuses historical
+unstamped SQLite MRC1 metadata. Failures found during these checks, including
+missing or short blocks, wrong expectations, version state and invalid
+existing metadata stamps, leave the block marker unclaimed. Fresh Legacy
+enrollment also performs read-only metadata preflight
+before claiming block authority. A peer that completes MRC2 enrollment during
+that preflight is accepted only after verifying its existing block marker;
+missing or wrong markers are never recreated.
+
+Preflight is advisory, and each provider rechecks the transition conditions
+during its final conditional update. A concurrent change or failure after a
+successful block claim can still leave an unused marker because separate
+metadata and block providers have no shared transaction. Keep all writers
+stopped through migration or trusted recovery. Both offline CLI handlers
+prepare missing SQLite view directories and recheck their filesystem identity
+before provider open, including absent APFS case and normalization aliases.
+They do not start native mounts; prepared directories can remain after failure.
 
 The bounded local SQLite load completed 8 × 100 independent mount lifecycles
 in both modes: DELETE took 48,047 ms and WAL took 41,993 ms. Each run

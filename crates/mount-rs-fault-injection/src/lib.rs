@@ -20,6 +20,7 @@ use mount_rs_core::storage::{
     BlockId, BlockReconcileReport, BlockStore, ConcurrentBackingId, ConcurrentModeState,
     LoadedMetadata, MetadataStore, Namespace, WriterLease,
 };
+use mount_rs_core::versioning::VolumeId;
 use mount_rs_core::{ErrorCode, FsError, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -848,6 +849,10 @@ where
         self.inner.concurrent_mode_state().await
     }
 
+    async fn preflight_new_bound_mode(&self) -> Result<()> {
+        self.inner.preflight_new_bound_mode().await
+    }
+
     async fn prepare_bound_concurrent_mode(&self, backing: ConcurrentBackingId) -> Result<()> {
         self.inner.prepare_bound_concurrent_mode(backing).await
     }
@@ -929,6 +934,33 @@ where
     ) -> Result<()> {
         self.inner
             .migrate_mrc1_to_bound_mode(backing, expected_revision)
+            .await
+    }
+
+    async fn preflight_mrc1_to_bound_mode(&self, expected_revision: u64) -> Result<()> {
+        self.inner
+            .preflight_mrc1_to_bound_mode(expected_revision)
+            .await
+    }
+
+    async fn preflight_trusted_unstamped_mrc1(
+        &self,
+        expected_revision: u64,
+        expected_volume: VolumeId,
+    ) -> Result<()> {
+        self.inner
+            .preflight_trusted_unstamped_mrc1(expected_revision, expected_volume)
+            .await
+    }
+
+    async fn migrate_trusted_unstamped_mrc1(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+        expected_volume: VolumeId,
+    ) -> Result<()> {
+        self.inner
+            .migrate_trusted_unstamped_mrc1(backing, expected_revision, expected_volume)
             .await
     }
 

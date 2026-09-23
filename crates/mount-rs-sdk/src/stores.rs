@@ -11,6 +11,7 @@ use mount_rs_core::storage::{
     BlockId, BlockReconcileReport, BlockStore, ConcurrentBackingId, ConcurrentModeState,
     LoadedMetadata, MetadataStore, Namespace, WriterLease,
 };
+use mount_rs_core::versioning::VolumeId;
 
 #[derive(Clone)]
 pub(crate) struct ErasedMetadataStore {
@@ -68,6 +69,23 @@ impl MetadataStore for ErasedMetadataStore {
         }
         #[cfg(not(feature = "observability"))]
         self.inner.concurrent_mode_state().await
+    }
+
+    async fn preflight_new_bound_mode(&self) -> Result<()> {
+        #[cfg(feature = "observability")]
+        {
+            return self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "concurrent.preflight_new",
+                    None,
+                    self.inner.preflight_new_bound_mode(),
+                )
+                .await;
+        }
+        #[cfg(not(feature = "observability"))]
+        self.inner.preflight_new_bound_mode().await
     }
 
     async fn prepare_bound_concurrent_mode(&self, backing: ConcurrentBackingId) -> Result<()> {
@@ -208,6 +226,77 @@ impl MetadataStore for ErasedMetadataStore {
         #[cfg(not(feature = "observability"))]
         self.inner
             .migrate_mrc1_to_bound_mode(backing, expected_revision)
+            .await
+    }
+
+    async fn preflight_mrc1_to_bound_mode(&self, expected_revision: u64) -> Result<()> {
+        #[cfg(feature = "observability")]
+        {
+            return self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "concurrent.preflight_mrc1",
+                    None,
+                    self.inner.preflight_mrc1_to_bound_mode(expected_revision),
+                )
+                .await;
+        }
+        #[cfg(not(feature = "observability"))]
+        self.inner
+            .preflight_mrc1_to_bound_mode(expected_revision)
+            .await
+    }
+
+    async fn preflight_trusted_unstamped_mrc1(
+        &self,
+        expected_revision: u64,
+        expected_volume: VolumeId,
+    ) -> Result<()> {
+        #[cfg(feature = "observability")]
+        {
+            return self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "concurrent.preflight_trusted_mrc1",
+                    None,
+                    self.inner
+                        .preflight_trusted_unstamped_mrc1(expected_revision, expected_volume),
+                )
+                .await;
+        }
+        #[cfg(not(feature = "observability"))]
+        self.inner
+            .preflight_trusted_unstamped_mrc1(expected_revision, expected_volume)
+            .await
+    }
+
+    async fn migrate_trusted_unstamped_mrc1(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+        expected_volume: VolumeId,
+    ) -> Result<()> {
+        #[cfg(feature = "observability")]
+        {
+            return self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "concurrent.migrate_trusted_mrc1",
+                    None,
+                    self.inner.migrate_trusted_unstamped_mrc1(
+                        backing,
+                        expected_revision,
+                        expected_volume,
+                    ),
+                )
+                .await;
+        }
+        #[cfg(not(feature = "observability"))]
+        self.inner
+            .migrate_trusted_unstamped_mrc1(backing, expected_revision, expected_volume)
             .await
     }
 
@@ -470,6 +559,42 @@ mod tests {
             Ok(ConcurrentModeState::Mrc2(self.0))
         }
 
+        async fn preflight_new_bound_mode(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn preflight_mrc1_to_bound_mode(&self, expected_revision: u64) -> Result<()> {
+            if expected_revision == 7 {
+                Ok(())
+            } else {
+                Err(FsError::new(ErrorCode::Eagain))
+            }
+        }
+
+        async fn preflight_trusted_unstamped_mrc1(
+            &self,
+            expected_revision: u64,
+            expected_volume: VolumeId,
+        ) -> Result<()> {
+            self.preflight_mrc1_to_bound_mode(expected_revision).await?;
+            if expected_volume.as_str() == "selected-volume" {
+                Ok(())
+            } else {
+                Err(FsError::new(ErrorCode::Estale))
+            }
+        }
+
+        async fn migrate_trusted_unstamped_mrc1(
+            &self,
+            backing: ConcurrentBackingId,
+            expected_revision: u64,
+            expected_volume: VolumeId,
+        ) -> Result<()> {
+            self.preflight_trusted_unstamped_mrc1(expected_revision, expected_volume)
+                .await?;
+            self.prepare_bound_concurrent_mode(backing).await
+        }
+
         async fn prepare_bound_concurrent_mode(&self, backing: ConcurrentBackingId) -> Result<()> {
             if backing == self.0 {
                 Ok(())
@@ -541,6 +666,33 @@ mod tests {
         assert_eq!(
             erased.concurrent_mode_state().await.unwrap(),
             ConcurrentModeState::Mrc2(id)
+        );
+        erased.preflight_new_bound_mode().await.unwrap();
+        erased.preflight_mrc1_to_bound_mode(7).await.unwrap();
+        assert_eq!(
+            erased
+                .preflight_mrc1_to_bound_mode(8)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Eagain
+        );
+        let volume = VolumeId::new("selected-volume").unwrap();
+        erased
+            .preflight_trusted_unstamped_mrc1(7, volume.clone())
+            .await
+            .unwrap();
+        erased
+            .migrate_trusted_unstamped_mrc1(id, 7, volume.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            erased
+                .migrate_trusted_unstamped_mrc1(other, 7, volume)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Estale
         );
         erased.prepare_bound_concurrent_mode(id).await.unwrap();
         assert_eq!(

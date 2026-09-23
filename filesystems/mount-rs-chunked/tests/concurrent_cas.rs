@@ -270,6 +270,20 @@ impl MetadataStore for CasMetadata {
         })
     }
 
+    async fn preflight_new_bound_mode(&self) -> Result<()> {
+        let state = self.lock()?;
+        if !state.concurrent_mode
+            && state.backing_id.is_none()
+            && state.legacy_lease.is_none()
+            && state.revision == 0
+            && state.namespace.is_none()
+        {
+            Ok(())
+        } else {
+            Err(FsError::new(ErrorCode::Ebusy))
+        }
+    }
+
     async fn prepare_bound_concurrent_mode(&self, backing: ConcurrentBackingId) -> Result<()> {
         let mut state = self.lock()?;
         if state.legacy_lease.is_some() || (state.concurrent_mode && state.backing_id.is_none()) {

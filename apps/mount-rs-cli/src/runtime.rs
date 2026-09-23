@@ -10,6 +10,7 @@ use std::task::Poll;
 use std::time::Duration;
 
 use mount_rs_auto::{AutoMount, AutoMountError, AutoMountOptions, AutoTransport};
+use mount_rs_core::versioning::VolumeId;
 use mount_rs_core::{ErrorCode, FsDriver, FsError, Loopback, Result as FsResult};
 use mount_rs_http::{
     DriveConfig as HttpDriveConfig, DriveRegistry, HttpServer, HttpServerError, HttpServerOptions,
@@ -446,6 +447,18 @@ where
             config,
             expected_revision,
         } => migrate_concurrent_backing_command(&config, expected_revision).await,
+        Command::ReenrollSqliteConcurrentBacking {
+            config,
+            expected_revision,
+            expected_volume_id,
+        } => {
+            reenroll_sqlite_concurrent_backing_command(
+                &config,
+                expected_revision,
+                &expected_volume_id,
+            )
+            .await
+        }
         Command::SdkSelfTest { config, reopen } => {
             sdk_self_test_command(config.as_deref(), reopen).await
         }
@@ -499,6 +512,44 @@ async fn migrate_concurrent_backing_command(
     let backing = Filesystem::migrate_concurrent_backing(split, expected_revision).await?;
     println!(
         "migrated MRC1 to MRC2 at revision {expected_revision} with backing ID {}",
+        backing.to_hex()
+    );
+    Ok(())
+}
+
+async fn reenroll_sqlite_concurrent_backing_command(
+    config_path: &Path,
+    expected_revision: u64,
+    expected_volume_id: &str,
+) -> Result<(), CliError> {
+    let raw = CliOptions {
+        config: Some(config_path.to_path_buf()),
+        ..CliOptions::default()
+    };
+    let options = resolve_cli_options(raw)?;
+    if options.driver != DriverChoice::SplitStore
+        || !options
+            .storage
+            .as_ref()
+            .is_some_and(|storage| storage.concurrent_writes)
+    {
+        return Err(CliError::usage(
+            "reenroll-sqlite-concurrent-backing requires a splitstore config with concurrent_writes=true",
+        ));
+    }
+    let mountpoints = requested_mountpoints(&options)?;
+    prepare_mountpoints_before_driver(&options, &mountpoints, true).await?;
+    let (uid, gid) = effective_identity();
+    let split = split_options(&options, uid, gid)?;
+    let expected_volume = VolumeId::new(expected_volume_id.to_owned())?;
+    let backing = Filesystem::reenroll_trusted_unstamped_sqlite_mrc1(
+        split,
+        expected_revision,
+        expected_volume,
+    )
+    .await?;
+    println!(
+        "reenrolled old SQLite MRC1 metadata as MRC2 at revision {expected_revision} with backing ID {}",
         backing.to_hex()
     );
     Ok(())

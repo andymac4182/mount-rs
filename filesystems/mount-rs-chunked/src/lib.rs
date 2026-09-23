@@ -7,7 +7,7 @@
 //! provide copy-on-write views.
 
 mod migration;
-pub use migration::migrate_mrc1_backing;
+pub use migration::{migrate_mrc1_backing, migrate_trusted_unstamped_mrc1_backing};
 
 use async_trait::async_trait;
 use mount_rs_core::chunking::{Chunker, FixedSizeChunker, from_config};
@@ -534,12 +534,27 @@ where
                         .with_syscall("migrate MRC1 backing")
                         .with_message("stop old mounts and run migrate-concurrent-backing"));
                 }
-                ConcurrentModeState::Legacy => {
-                    let id = blocks.prepare_concurrent_backing().await?;
-                    metadata.prepare_bound_concurrent_mode(id).await?;
-                    blocks.verify_concurrent_backing(id).await?;
-                    id
-                }
+                ConcurrentModeState::Legacy => match metadata.preflight_new_bound_mode().await {
+                    Ok(()) => {
+                        let id = blocks.prepare_concurrent_backing().await?;
+                        metadata.prepare_bound_concurrent_mode(id).await?;
+                        blocks.verify_concurrent_backing(id).await?;
+                        id
+                    }
+                    Err(error) => {
+                        // A peer may enroll MRC2 after the Legacy inspection.
+                        // Reuse its authority only through the established
+                        // read-only block verification path.
+                        let ConcurrentModeState::Mrc2(id) =
+                            metadata.concurrent_mode_state().await?
+                        else {
+                            return Err(error);
+                        };
+                        blocks.verify_concurrent_backing(id).await?;
+                        metadata.prepare_bound_concurrent_mode(id).await?;
+                        id
+                    }
+                },
             };
             // Two clients may initialize one fresh volume together. Only one
             // CAS publishes its root; the loser reloads the winner's root.
@@ -4829,11 +4844,19 @@ mod tests {
     /// A test-only shared backing: both coordinators retain the same inner
     /// in-memory block map when this wrapper is cloned.
     #[derive(Clone)]
-    struct SharedTestBlockStore(MemoryBlockStore);
+    struct SharedTestBlockStore {
+        inner: MemoryBlockStore,
+        backing: Arc<Mutex<Option<ConcurrentBackingId>>>,
+        preparations: Arc<AtomicUsize>,
+    }
 
     impl SharedTestBlockStore {
         fn new() -> Self {
-            Self(MemoryBlockStore::new())
+            Self {
+                inner: MemoryBlockStore::new(),
+                backing: Arc::new(Mutex::new(None)),
+                preparations: Arc::new(AtomicUsize::new(0)),
+            }
         }
     }
 
@@ -4844,15 +4867,20 @@ mod tests {
     #[async_trait]
     impl BlockStore for SharedTestBlockStore {
         fn durable(&self) -> bool {
-            self.0.durable()
+            self.inner.durable()
         }
 
         async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
-            Ok(test_concurrent_backing())
+            self.preparations.fetch_add(1, Ordering::SeqCst);
+            Ok(*self
+                .backing
+                .lock()
+                .expect("block authority lock")
+                .get_or_insert(test_concurrent_backing()))
         }
 
         async fn verify_concurrent_backing(&self, expected: ConcurrentBackingId) -> Result<()> {
-            if expected == test_concurrent_backing() {
+            if *self.backing.lock().expect("block authority lock") == Some(expected) {
                 Ok(())
             } else {
                 Err(FsError::new(ErrorCode::Estale))
@@ -4860,19 +4888,19 @@ mod tests {
         }
 
         async fn put(&self, bytes: &[u8]) -> Result<mount_rs_core::storage::BlockId> {
-            self.0.put(bytes).await
+            self.inner.put(bytes).await
         }
 
         async fn get(&self, id: &mount_rs_core::storage::BlockId) -> Result<Vec<u8>> {
-            self.0.get(id).await
+            self.inner.get(id).await
         }
 
         async fn flush(&self) -> Result<()> {
-            self.0.flush().await
+            self.inner.flush().await
         }
 
         async fn delete(&self, id: &mount_rs_core::storage::BlockId) -> Result<()> {
-            self.0.delete(id).await
+            self.inner.delete(id).await
         }
     }
 
@@ -4898,12 +4926,14 @@ mod tests {
     }
 
     type FlushHook = Box<dyn FnOnce() + Send>;
+    type PreflightHook = Box<dyn FnOnce() -> Result<()> + Send>;
 
     #[derive(Clone)]
     struct RevisionRaceMetadata {
         state: Arc<Mutex<LoadedMetadata>>,
         mode: Arc<Mutex<ConcurrentModeState>>,
         on_flush: Arc<Mutex<Option<FlushHook>>>,
+        on_preflight: Arc<Mutex<Option<PreflightHook>>>,
     }
 
     impl RevisionRaceMetadata {
@@ -4915,11 +4945,16 @@ mod tests {
                 })),
                 mode: Arc::new(Mutex::new(ConcurrentModeState::Legacy)),
                 on_flush: Arc::new(Mutex::new(None)),
+                on_preflight: Arc::new(Mutex::new(None)),
             }
         }
 
         fn on_next_flush(&self, callback: impl FnOnce() + Send + 'static) {
             *self.on_flush.lock().expect("flush hook lock") = Some(Box::new(callback));
+        }
+
+        fn on_next_preflight(&self, callback: impl FnOnce() -> Result<()> + Send + 'static) {
+            *self.on_preflight.lock().expect("preflight hook lock") = Some(Box::new(callback));
         }
 
         fn apply_revision(&self, expected_revision: u64, namespace: Namespace) -> Result<u64> {
@@ -4949,6 +4984,22 @@ mod tests {
 
         async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
             Ok(*self.mode.lock().expect("concurrent mode lock"))
+        }
+
+        async fn preflight_new_bound_mode(&self) -> Result<()> {
+            let hook = self
+                .on_preflight
+                .lock()
+                .expect("preflight hook lock")
+                .take();
+            if let Some(hook) = hook {
+                hook()?;
+            }
+            if *self.mode.lock().expect("concurrent mode lock") == ConcurrentModeState::Legacy {
+                Ok(())
+            } else {
+                Err(FsError::new(ErrorCode::Ebusy))
+            }
         }
 
         async fn prepare_bound_concurrent_mode(&self, backing: ConcurrentBackingId) -> Result<()> {
@@ -5005,6 +5056,119 @@ mod tests {
                 hook();
             }
             Ok(())
+        }
+    }
+
+    #[test]
+    fn concurrent_open_recovers_when_peer_enrolls_between_inspection_and_preflight() {
+        let metadata = RevisionRaceMetadata::new();
+        let blocks = SharedTestBlockStore::new();
+        let peer_metadata = metadata.clone();
+        let peer_blocks = blocks.clone();
+        metadata.on_next_preflight(move || {
+            let peer = block_on(ChunkedFs::open(
+                peer_metadata,
+                peer_blocks,
+                ChunkedOptions::fixed("enrolling-peer", 4)?.with_concurrent_writes(true),
+            ))?;
+            block_on(peer.write_file("/retained", b"peer bytes"))?;
+            block_on(peer.shutdown())
+        });
+
+        let fs = block_on(ChunkedFs::open(
+            metadata,
+            blocks.clone(),
+            ChunkedOptions::fixed("racing-open", 4)
+                .expect("chunker")
+                .with_concurrent_writes(true),
+        ))
+        .expect("open must verify the authority enrolled by the peer");
+        let retained = block_on(fs.open("/retained", "r", 0)).expect("open the peer's file");
+        let mut bytes = [0; 10];
+        assert_eq!(block_on(retained.read(&mut bytes, Some(0))).unwrap(), 10);
+        assert_eq!(&bytes, b"peer bytes");
+        block_on(retained.close()).expect("close the peer's file");
+        assert_eq!(
+            blocks.preparations.load(Ordering::SeqCst),
+            1,
+            "only the enrolling peer may prepare a block authority"
+        );
+        block_on(fs.shutdown()).expect("shutdown");
+    }
+
+    fn concurrent_open_racing_enrollment_rejects_unmatched_blocks(
+        selected_backing: Option<ConcurrentBackingId>,
+    ) {
+        let metadata = RevisionRaceMetadata::new();
+        let blocks = SharedTestBlockStore::new();
+        *blocks.backing.lock().expect("block authority lock") = selected_backing;
+        let peer_metadata = metadata.clone();
+        metadata.on_next_preflight(move || {
+            let peer = block_on(ChunkedFs::open(
+                peer_metadata,
+                SharedTestBlockStore::new(),
+                ChunkedOptions::fixed("other-backing-peer", 4)?.with_concurrent_writes(true),
+            ))?;
+            block_on(peer.shutdown())
+        });
+
+        let error = block_on(ChunkedFs::open(
+            metadata,
+            blocks.clone(),
+            ChunkedOptions::fixed("unmatched-racing-open", 4)
+                .expect("chunker")
+                .with_concurrent_writes(true),
+        ))
+        .err()
+        .expect("the selected blocks do not hold the peer's authority");
+        assert_eq!(error.code, ErrorCode::Estale);
+        assert_eq!(
+            blocks.preparations.load(Ordering::SeqCst),
+            0,
+            "an established MRC2 authority must only be verified"
+        );
+        assert_eq!(
+            *blocks.backing.lock().expect("block authority lock"),
+            selected_backing,
+            "rejected startup must preserve the selected block marker"
+        );
+    }
+
+    #[test]
+    fn concurrent_open_racing_enrollment_does_not_claim_missing_block_authority() {
+        concurrent_open_racing_enrollment_rejects_unmatched_blocks(None);
+    }
+
+    #[test]
+    fn concurrent_open_racing_enrollment_rejects_wrong_block_authority() {
+        concurrent_open_racing_enrollment_rejects_unmatched_blocks(Some(
+            ConcurrentBackingId::from_bytes([0xa5; 16]).expect("different backing ID"),
+        ));
+    }
+
+    #[test]
+    fn concurrent_open_preserves_preflight_error_without_established_mrc2() {
+        for mode in [ConcurrentModeState::Legacy, ConcurrentModeState::Mrc1] {
+            let metadata = RevisionRaceMetadata::new();
+            let blocks = SharedTestBlockStore::new();
+            let changed_metadata = metadata.clone();
+            metadata.on_next_preflight(move || {
+                *changed_metadata.mode.lock().expect("concurrent mode lock") = mode;
+                Err(FsError::new(ErrorCode::Eperm).with_syscall("selected preflight refusal"))
+            });
+
+            let error = block_on(ChunkedFs::open(
+                metadata,
+                blocks.clone(),
+                ChunkedOptions::fixed("refused-racing-open", 4)
+                    .expect("chunker")
+                    .with_concurrent_writes(true),
+            ))
+            .err()
+            .expect("Legacy and MRC1 cannot recover a refused preflight");
+            assert_eq!(error.code, ErrorCode::Eperm);
+            assert_eq!(error.syscall.as_deref(), Some("selected preflight refusal"));
+            assert_eq!(blocks.preparations.load(Ordering::SeqCst), 0);
         }
     }
 

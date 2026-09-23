@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use crate::Result;
 use crate::types::{S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK, Stats};
+use crate::versioning::VolumeId;
 
 pub type InodeId = u64;
 
@@ -762,6 +763,11 @@ pub trait MetadataStore: Send + Sync {
     async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
         Err(FsError::new(ErrorCode::Enotsup).with_syscall("inspect concurrent metadata mode"))
     }
+    /// Check an unclaimed Legacy volume for MRC2 enrollment without changing
+    /// metadata. The provider's final conditional claim remains authoritative.
+    async fn preflight_new_bound_mode(&self) -> Result<()> {
+        Err(FsError::new(ErrorCode::Enotsup).with_syscall("preflight new bound metadata"))
+    }
     /// Enter MRC2 only when metadata can bind writes to the supplied backing.
     async fn prepare_bound_concurrent_mode(&self, _backing: ConcurrentBackingId) -> Result<()> {
         Err(FsError::new(ErrorCode::Enotsup).with_syscall("prepare bound concurrent metadata"))
@@ -798,6 +804,35 @@ pub trait MetadataStore: Send + Sync {
         _expected_revision: u64,
     ) -> Result<()> {
         Err(FsError::new(ErrorCode::Enotsup).with_syscall("migrate concurrent metadata mode"))
+    }
+    /// Check a fenced MRC1 volume for offline migration without changing
+    /// metadata. This is advisory; the final revision CAS must recheck it.
+    async fn preflight_mrc1_to_bound_mode(&self, _expected_revision: u64) -> Result<()> {
+        Err(FsError::new(ErrorCode::Enotsup).with_syscall("preflight MRC1 metadata migration"))
+    }
+    /// Explicit operator-authorized recovery for an old SQLite MRC1 file that
+    /// predates physical metadata stamps. Ordinary migration never calls this.
+    /// The caller must assert that every writer is stopped and this is the sole
+    /// authoritative metadata copy; the volume ID cannot prove uniqueness.
+    async fn preflight_trusted_unstamped_mrc1(
+        &self,
+        _expected_revision: u64,
+        _expected_volume: VolumeId,
+    ) -> Result<()> {
+        Err(FsError::new(ErrorCode::Enotsup)
+            .with_syscall("preflight trusted unstamped MRC1 metadata"))
+    }
+    /// Claim the checked physical metadata file and MRC2 mode in one provider
+    /// CAS. The provider must recheck all preflight predicates at commit.
+    /// The caller retains the offline-writer and sole-copy trust obligation.
+    async fn migrate_trusted_unstamped_mrc1(
+        &self,
+        _backing: ConcurrentBackingId,
+        _expected_revision: u64,
+        _expected_volume: VolumeId,
+    ) -> Result<()> {
+        Err(FsError::new(ErrorCode::Enotsup)
+            .with_syscall("migrate trusted unstamped MRC1 metadata"))
     }
     /// Return true only when a successful `publish` already completes the
     /// provider's same durability/acknowledgement barrier as `flush` for the
