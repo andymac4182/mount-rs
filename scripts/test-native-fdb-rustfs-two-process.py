@@ -577,6 +577,12 @@ def main() -> None:
             )
         mode = "FDB_BLOCKS" if blocks_only else "FDB_RUSTFS"
         print(f"NATIVE_{mode}_READY cluster=127.0.0.1:{port}", flush=True)
+        print(
+            f"NATIVE_FDB_RUN_OWNERSHIP native_run_root={run_dir} "
+            f"service_run_root={env.get('RUSTFS_RUN_DIR', 'none')} "
+            f"service_container={env.get('RUSTFS_HARNESS_CONTAINER', 'none')}",
+            flush=True,
+        )
 
         case = (
             "cli_two_process_foundationdb_volume_stays_coherent_and_reopens"

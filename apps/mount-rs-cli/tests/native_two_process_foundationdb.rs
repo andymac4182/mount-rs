@@ -25,6 +25,49 @@ const UNMOUNT_TIMEOUT: Duration = Duration::from_secs(15);
 const RUSTFS_LOAD_FILES_PER_WRITER: usize = 20;
 
 #[test]
+fn feature_cli_follows_current_test_profile_after_target_alias_is_removed() {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after Unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "mount-rs-cli-profile-relocation-{}-{nanos}",
+        std::process::id()
+    ));
+    fs::create_dir(&root).expect("create independent relocation fixture");
+    let cache = root.join("cache");
+    let profile = cache.join("debug");
+    fs::create_dir_all(profile.join("deps")).expect("create cached test profile");
+    let cli_name = format!("mount-rs{}", std::env::consts::EXE_SUFFIX);
+    let expected = b"current feature-on cohort";
+    fs::write(profile.join(&cli_name), expected).expect("write current profile CLI");
+    let old_alias = root.join("old-target");
+    symlink(&cache, &old_alias).expect("create first disposable target alias");
+    let old_compiled_cli = old_alias.join("debug").join(&cli_name);
+    assert!(old_compiled_cli.is_file());
+    fs::remove_file(&old_alias).expect("remove first disposable target alias");
+    assert!(!old_compiled_cli.exists());
+    let new_alias = root.join("new-target");
+    symlink(&cache, &new_alias).expect("reuse cached profile through current target alias");
+    let current_test = new_alias.join("debug/deps/native_two_process_foundationdb-cached");
+    let copied = root.join("run-owned-feature-cli");
+    let result = (|| -> io::Result<Vec<u8>> {
+        fs::copy(feature_cli_in_test_profile(&current_test)?, &copied)?;
+        fs::read(&copied)
+    })();
+    let invalid = feature_cli_in_test_profile(&root.join("unexpected-layout/test"));
+    fs::remove_file(new_alias).expect("remove current disposable target alias");
+    fs::remove_dir_all(root).expect("remove independent host-only relocation fixture");
+    assert_eq!(result.expect("copy current profile CLI"), expected);
+    assert_eq!(
+        invalid
+            .expect_err("unsupported executable layout must fail")
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+}
+
+#[test]
 fn test_scope_preserves_root_for_symlinked_mountpoint() {
     let mut scope = TestScope::new();
     let unrelated = scope.root.with_extension("unrelated-symlink-target");
@@ -682,6 +725,20 @@ fn await_absent(path: &Path) -> io::Result<()> {
     }
 }
 
+fn feature_cli_in_test_profile(test_executable: &Path) -> io::Result<PathBuf> {
+    let profile = test_executable
+        .parent()
+        .filter(|deps| deps.file_name().is_some_and(|name| name == "deps"))
+        .and_then(Path::parent)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "test executable is outside Cargo deps layout",
+            )
+        })?;
+    Ok(profile.join(format!("mount-rs{}", std::env::consts::EXE_SUFFIX)))
+}
+
 struct TestScope {
     root: PathBuf,
     root_identity: (u64, u64),
@@ -717,7 +774,13 @@ impl TestScope {
         // build while this test's children are still mounted. Pin exactly the
         // feature-on executable built for this test through fresh reopen.
         let cli_binary = root.join("mount-rs-feature-on-test-cli");
-        fs::copy(env!("CARGO_BIN_EXE_mount-rs"), &cli_binary)
+        // The current Cargo profile stays usable when a previous run's target
+        // alias is removed and its compiled test is reused through a new alias.
+        let test_executable =
+            std::env::current_exe().expect("locate current Cargo test executable");
+        let feature_cli = feature_cli_in_test_profile(&test_executable)
+            .expect("locate this test's feature-on CLI in its current Cargo profile");
+        fs::copy(feature_cli, &cli_binary)
             .expect("copy this test's feature-on CLI into its run-owned scope");
         fs::set_permissions(&cli_binary, fs::Permissions::from_mode(0o700))
             .expect("make run-owned test CLI executable");
