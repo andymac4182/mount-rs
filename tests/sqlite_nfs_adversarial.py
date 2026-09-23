@@ -12,6 +12,7 @@ are reported without claiming that those topologies are supported.
 """
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -43,6 +44,35 @@ def payload(worker, transaction):
 def clean_db(path):
     for suffix in ("-wal", "-shm", "-journal", ""):
         Path(f"{path}{suffix}").unlink(missing_ok=True)
+
+
+def remove_owned_directory(path):
+    # NFS can briefly recreate/defer an unlink while closed SQLite journal
+    # handles drain. Retry only this fixture's unique directory for 10 seconds.
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            shutil.rmtree(path)
+        except FileNotFoundError:
+            if not path.exists():
+                emit(case="owned_cleanup", status="pass")
+                return True
+        except OSError as error:
+            if error.errno not in (errno.ENOTEMPTY, errno.EBUSY):
+                raise
+        else:
+            if not path.exists():
+                emit(case="owned_cleanup", status="pass")
+                return True
+        if time.monotonic() >= deadline:
+            try:
+                remaining = sorted(os.listdir(path))[:8]
+            except OSError as error:
+                remaining = [f"list error: {error}"]
+            emit(case="owned_cleanup", status="deferred_until_backing_disposal",
+                 remaining=remaining)
+            return False
+        time.sleep(0.05)
 
 
 def journal_capability(root, journal):
@@ -412,7 +442,12 @@ def main():
                 failed = run_suite(owned, second, args.workers, args.transactions, False)
         finally:
             # Remove only the unique directory made by this fixture.
-            shutil.rmtree(owned)
+            cleaned = remove_owned_directory(owned)
+            if not cleaned and args.second_view is None:
+                # A single-view acceptance run requires exact cleanup. The
+                # two-view diagnostic disposes its entire backing after the
+                # native test unmounts both clients.
+                failed = True
     return 1 if failed else 0
 
 

@@ -641,7 +641,7 @@ fn probe_inner_sqlite_lock(scope: &TestScope) -> String {
 fn run_inner_sqlite_matrix(scope: &TestScope) {
     let script =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/sqlite_nfs_adversarial.py");
-    let output = run_python_with_timeout(
+    let result = run_python_report_with_timeout(
         vec![
             script.to_string_lossy().into_owned(),
             "--mount".to_owned(),
@@ -657,7 +657,7 @@ fn run_inner_sqlite_matrix(scope: &TestScope) {
     )
     .expect("run SQLite application journal/load matrix inside two native NFS views");
     let mut summary = None;
-    for line in output.lines() {
+    for line in result.stdout.lines() {
         let report: serde_json::Value =
             serde_json::from_str(line).expect("parse SQLite NFS matrix report");
         if report["case"] == "summary" {
@@ -666,7 +666,29 @@ fn run_inner_sqlite_matrix(scope: &TestScope) {
         eprintln!("SQLITE_INNER_NFS_MATRIX {report}");
     }
     let summary = summary.expect("SQLite NFS matrix emitted a summary");
-    assert_eq!(summary["failed"], 0, "SQLite NFS matrix failed: {summary}");
+    let failed = summary["failed"]
+        .as_u64()
+        .expect("SQLite NFS matrix summary has a failure count");
+    assert_eq!(
+        result.status.success(),
+        failed == 0,
+        "SQLite NFS matrix exit and summary disagree: status={}; summary={summary}; stderr={}",
+        result.status,
+        result.stderr
+    );
+    assert!(
+        result.stderr.trim().is_empty(),
+        "SQLite NFS matrix fixture or cleanup failed: {}",
+        result.stderr
+    );
+    eprintln!(
+        "SQLITE_INNER_NFS_MATRIX_RESULT status={} failed={failed} topology=two-independent-cli-views",
+        if failed == 0 {
+            "no_failure_observed"
+        } else {
+            "unsupported_app_profile_failed"
+        }
+    );
 }
 
 fn probe_sqlite_lock(first: &Path, second: &Path) -> Result<String, String> {
@@ -751,6 +773,26 @@ fn run_python_bounded(args: Vec<String>) -> Result<String, String> {
 }
 
 fn run_python_with_timeout(args: Vec<String>, timeout: Duration) -> Result<String, String> {
+    let result = run_python_report_with_timeout(args, timeout)?;
+    if !result.status.success() {
+        return Err(format!(
+            "Python fixture exited {}; stdout={}; stderr={}",
+            result.status, result.stdout, result.stderr
+        ));
+    }
+    Ok(result.stdout)
+}
+
+struct PythonRun {
+    status: ExitStatus,
+    stdout: String,
+    stderr: String,
+}
+
+fn run_python_report_with_timeout(
+    args: Vec<String>,
+    timeout: Duration,
+) -> Result<PythonRun, String> {
     let mut child = Command::new("python3")
         .args(&args)
         .env("PYTHONDONTWRITEBYTECODE", "1")
@@ -787,12 +829,11 @@ fn run_python_with_timeout(args: Vec<String>, timeout: Duration) -> Result<Strin
         .map_err(|_| "join Python stderr reader".to_owned())?
         .map_err(|error| error.to_string())?;
     let status = status.ok_or_else(|| format!("Python fixture exceeded {timeout:?}"))?;
-    if !status.success() {
-        return Err(format!(
-            "Python fixture exited {status}; stdout={stdout}; stderr={stderr}"
-        ));
-    }
-    Ok(stdout)
+    Ok(PythonRun {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 struct TestScope {
