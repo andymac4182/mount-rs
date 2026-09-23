@@ -75,6 +75,26 @@ fn require_opt_in(name: &str) {
     );
 }
 
+#[test]
+fn mounted_nfs_report_accepts_colored_stdout_without_warnings() {
+    let owned = "/private/tmp/mount-rs-owned/mount-a";
+    assert!(reported_nfs_mount(&format!(
+        "stdout: mounted nfs at {owned} (source: 127.0.0.1:/)"
+    )));
+    assert!(reported_nfs_mount(&format!(
+        "stdout: \u{1b}[32mmounted\u{1b}[0m nfs at {owned} (source: 127.0.0.1:/)"
+    )));
+    assert!(!reported_nfs_mount(&format!(
+        "stderr: mounted nfs at {owned}"
+    )));
+    assert!(!reported_nfs_mount(&format!(
+        "stdout: warning: mounted nfs at {owned}"
+    )));
+    assert!(!reported_nfs_mount(&format!(
+        "stdout: unmounted nfs at {owned}"
+    )));
+}
+
 fn run_journal(journal: &str) {
     let scope = TestScope::new(journal);
     configure_local_journal(&scope.metadata, journal);
@@ -370,14 +390,8 @@ fn run_nfs_backing_diagnostic() {
                 .as_ref()
                 .err()
                 .is_some_and(|error| error.contains(NONLOCAL_REJECTION))
-            && !writer_a
-                .output
-                .iter()
-                .any(|line| line.starts_with("stdout: mounted nfs"))
-            && !writer_b
-                .output
-                .iter()
-                .any(|line| line.starts_with("stdout: mounted nfs")),
+            && !writer_a.output.iter().any(|line| reported_nfs_mount(line))
+            && !writer_b.output.iter().any(|line| reported_nfs_mount(line)),
         "concurrent SQLite NFS backing must report local-filesystem rejection before native mount; A={first_ready:?}, B={second_ready:?}, A output={:?}, B output={:?}",
         writer_a.output,
         writer_b.output
@@ -431,10 +445,7 @@ fn run_mixed_nfs_blocks_rejection() {
             .as_ref()
             .err()
             .is_some_and(|error| error.contains(NONLOCAL_BLOCKS_REJECTION))
-            && !writer
-                .output
-                .iter()
-                .any(|line| line.starts_with("stdout: mounted nfs")),
+            && !writer.output.iter().any(|line| reported_nfs_mount(line)),
         "concurrent SQLite NFS blocks with local metadata must reject before native mount; ready={ready:?}, output={:?}",
         writer.output
     );
@@ -968,7 +979,7 @@ impl NativeMount {
         loop {
             match self.lines.recv_timeout(Duration::from_millis(100)) {
                 Ok(line) => {
-                    reported |= line.contains("mounted nfs");
+                    reported |= reported_nfs_mount(&line);
                     self.output.push(line);
                 }
                 Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {}
@@ -1110,6 +1121,29 @@ fn is_mounted_at(target: &Path) -> Result<bool, String> {
                     || fs::canonicalize(entry_target).is_ok_and(|path| path == canonical_target)
             }),
     )
+}
+
+fn reported_nfs_mount(line: &str) -> bool {
+    if !line.starts_with("stdout: ") {
+        return false;
+    }
+    let mut plain = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(character) = chars.next() {
+        if character != '\u{1b}' {
+            plain.push(character);
+            continue;
+        }
+        if chars.next() != Some('[') {
+            continue;
+        }
+        for final_byte in chars.by_ref() {
+            if ('@'..='~').contains(&final_byte) {
+                break;
+            }
+        }
+    }
+    plain.starts_with("stdout: mounted nfs at ")
 }
 
 fn inspect_owned_mount(target: &Path) -> String {
