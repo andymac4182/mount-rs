@@ -14,6 +14,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
 use mount_rs_core::Loopback;
+#[cfg(target_os = "linux")]
+use mount_rs_core::{
+    ErrorCode,
+    storage::{BlockStore, ConcurrentBackingId, MetadataStore},
+};
 use mount_rs_nfs::{
     NativeNfsMount, NfsMountOptions, NfsPlatform, mount_entry_at, mount_nfs, nfs_client_probe,
     nfs_platform,
@@ -446,6 +451,79 @@ fn sqlite_mount_options() -> NfsMountOptions {
     NfsMountOptions::sqlite_single_host()
 }
 
+#[cfg(target_os = "linux")]
+async fn verify_linux_nfs_backing_rejection(mountpoint: &Path) -> Result<(), String> {
+    // The existing native NFS mount is owned by this acceptance test. Put
+    // provider databases on the actual Linux NFS client filesystem, then
+    // prove both independent MRC2 claims fail before touching their markers.
+    let metadata_path = mountpoint.join("mrc2-metadata-backing-nfs.sqlite");
+    let blocks_path = mountpoint.join("mrc2-block-backing-nfs.sqlite");
+    let result = async {
+        let metadata = SqliteMetadataStore::open(&metadata_path)
+            .map_err(|error| format!("opening NFS metadata backing: {error}"))?;
+        let blocks = SqliteBlockStore::open(&blocks_path)
+            .map_err(|error| format!("opening NFS block backing: {error}"))?;
+        let backing = ConcurrentBackingId::from_bytes([0x5a; 16])
+            .map_err(|error| format!("creating probe backing ID: {error}"))?;
+
+        let metadata_error = match metadata.prepare_bound_concurrent_mode(backing).await {
+            Ok(()) => return Err("NFS metadata file accepted MRC2".into()),
+            Err(error) => error,
+        };
+        let blocks_error = match blocks.prepare_concurrent_backing().await {
+            Ok(_) => return Err("NFS block file accepted MRC2".into()),
+            Err(error) => error,
+        };
+        if metadata_error.code != ErrorCode::Enotsup || blocks_error.code != ErrorCode::Enotsup {
+            return Err(format!(
+                "NFS provider backing rejected with wrong codes: metadata={metadata_error:?}, blocks={blocks_error:?}"
+            ));
+        }
+        let (mode, authority, revision, fence): (Option<String>, Option<String>, i64, i64) =
+            rusqlite::Connection::open(&metadata_path)
+                .map_err(|error| format!("inspecting rejected metadata: {error}"))?
+                .query_row(
+                    "SELECT write_mode, backing_id, revision, fence FROM mount_rs_metadata WHERE id=1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .map_err(|error| format!("reading rejected metadata marker: {error}"))?;
+        let block_markers: i64 = rusqlite::Connection::open(&blocks_path)
+            .map_err(|error| format!("inspecting rejected blocks: {error}"))?
+            .query_row(
+                "SELECT count(*) FROM mount_rs_block_authority",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("reading rejected block marker: {error}"))?;
+        if mode.is_some()
+            || authority.is_some()
+            || revision != 0
+            || fence != 0
+            || block_markers != 0
+        {
+            return Err(format!(
+                "rejected NFS claim changed durable state: mode={mode:?} authority={authority:?} revision={revision} fence={fence} block_markers={block_markers}"
+            ));
+        }
+        println!("SQLITE_LINUX_NFS_BACKING_REJECT_PASS metadata=ENOTSUP blocks=ENOTSUP markers=0 revision=0");
+        Ok(())
+    }
+    .await;
+    let metadata_cleanup = fs::remove_file(&metadata_path);
+    let blocks_cleanup = fs::remove_file(&blocks_path);
+    combine_errors(
+        result.err(),
+        metadata_cleanup
+            .err()
+            .map(|error| format!("remove NFS metadata probe: {error}")),
+        blocks_cleanup
+            .err()
+            .map(|error| format!("remove NFS block probe: {error}")),
+    )
+    .map_or(Ok(()), Err)
+}
+
 async fn verify_fresh_native_sqlite(
     filesystem: &SplitFilesystem,
     platform: NfsPlatform,
@@ -632,6 +710,10 @@ async fn run_native_sqlite_acceptance() -> Result<(), String> {
         None
     };
 
+    #[cfg(target_os = "linux")]
+    let guard_result = verify_linux_nfs_backing_rejection(&mountpoint).await;
+    #[cfg(not(target_os = "linux"))]
+    let guard_result: Result<(), String> = Ok(());
     let fixture_result = run_sqlite_fixture(&mountpoint).await;
     let adversarial_result = if fixture_result.is_ok() && adversarial_requested {
         run_adversarial_fixture(&mountpoint, second_view.as_deref(), false).await
@@ -654,10 +736,16 @@ async fn run_native_sqlite_acceptance() -> Result<(), String> {
     let cleanup_result = cleanup.cleanup().await;
     let shutdown_result = filesystem.shutdown().await;
     if let Some(error) = combine_errors(
-        fixture_result
-            .as_ref()
-            .err()
-            .map(|error| format!("SQLite hosting: {error}")),
+        combine_errors(
+            guard_result
+                .err()
+                .map(|error| format!("Linux NFS provider backing guard: {error}")),
+            fixture_result
+                .as_ref()
+                .err()
+                .map(|error| format!("SQLite hosting: {error}")),
+            None,
+        ),
         combine_errors(
             adversarial_result
                 .err()

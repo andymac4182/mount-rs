@@ -1,9 +1,12 @@
 use mount_rs_cli::color::Color;
 use mount_rs_cli::parse_args;
 use mount_rs_cli::parser::{CliOptions, Command, DriverChoice, TransportChoice, help_text};
+#[cfg(unix)]
+use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
 use std::fs;
 use std::process::Command as ProcessCommand;
 
+#[cfg(unix)]
 #[test]
 fn migrate_concurrent_backing_cli() {
     let scope = tempfile::TempDir::new().expect("create owned migration test root");
@@ -12,26 +15,22 @@ fn migrate_concurrent_backing_cli() {
     let config_path = scope.path().join("shared.json");
     let mountpoint = scope.path().join("view");
 
-    let connection = rusqlite::Connection::open(&metadata).expect("create metadata database");
-    connection
-        .execute_batch(
-            "CREATE TABLE mount_rs_metadata (
-                id INTEGER PRIMARY KEY CHECK(id=1),
-                revision INTEGER NOT NULL CHECK(revision>=0),
-                namespace TEXT,
-                owner TEXT,
-                fence INTEGER NOT NULL CHECK(fence>=0),
-                expires INTEGER NOT NULL,
-                write_mode TEXT,
-                backing_id TEXT
-             );
-             INSERT INTO mount_rs_metadata
-                (id, revision, namespace, owner, fence, expires, write_mode, backing_id)
-             VALUES (1, 0, NULL, NULL, 9223372036854775807, 0, 'MRC1', NULL);",
-        )
-        .expect("create a real offline MRC1 metadata row");
+    // Let the provider exclusively create and stamp each owned file before
+    // seeding the disposable historical MRC1 mode with raw SQLite.
+    drop(SqliteMetadataStore::open(&metadata).expect("create stamped metadata database"));
+    drop(SqliteBlockStore::open(&blocks).expect("create block database"));
+    let connection = rusqlite::Connection::open(&metadata).expect("open metadata database");
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE mount_rs_metadata SET write_mode='MRC1', fence=9223372036854775807
+             WHERE id=1 AND revision=0 AND write_mode IS NULL AND backing_id IS NULL",
+                [],
+            )
+            .expect("create a real offline MRC1 metadata row"),
+        1
+    );
     drop(connection);
-    drop(rusqlite::Connection::open(&blocks).expect("create block database"));
 
     let config = serde_json::json!({
         "version": 1,
@@ -96,6 +95,97 @@ fn migrate_concurrent_backing_cli() {
     assert!(
         !mountpoint.exists(),
         "offline migration must not prepare or start a native mount"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn migrate_concurrent_backing_cli_rejects_historical_unstamped_sqlite_metadata() {
+    let scope = tempfile::TempDir::new().expect("own historical SQLite migration fixture");
+    let metadata = scope.path().join("historical-metadata.sqlite");
+    let blocks = scope.path().join("blocks.sqlite");
+    let config_path = scope.path().join("shared.json");
+    let mountpoint = scope.path().join("view");
+    let connection = rusqlite::Connection::open(&metadata).expect("create old metadata file");
+    connection
+        .execute_batch(
+            "CREATE TABLE mount_rs_metadata (
+                id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL,
+                namespace TEXT, owner TEXT, fence INTEGER NOT NULL, expires INTEGER NOT NULL,
+                write_mode TEXT, backing_id TEXT
+             );
+             INSERT INTO mount_rs_metadata VALUES(1,0,NULL,NULL,9223372036854775807,0,'MRC1',NULL);",
+        )
+        .expect("seed an unstamped historical MRC1 row");
+    drop(connection);
+    let config = serde_json::json!({
+        "version": 1,
+        "mountpoint": mountpoint,
+        "driver": {
+            "kind": "splitstore",
+            "storage": {
+                "concurrent_writes": true,
+                "metadata": {"kind": "sqlite", "path": metadata},
+                "blocks": {"kind": "sqlite", "path": blocks}
+            }
+        }
+    });
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_mount-rs"))
+        .arg("migrate-concurrent-backing")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--expected-revision")
+        .arg("0")
+        .output()
+        .expect("run historical migration probe");
+    assert!(
+        !output.status.success(),
+        "historical unstamped metadata was bound: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "failed migration reported success"
+    );
+    let row: (
+        String,
+        Option<String>,
+        i64,
+        i64,
+        Option<String>,
+        Option<String>,
+    ) = rusqlite::Connection::open(&metadata)
+        .unwrap()
+        .query_row(
+            "SELECT write_mode, backing_id, revision, fence, physical_dev, physical_ino
+                 FROM mount_rs_metadata WHERE id=1",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(row, ("MRC1".to_owned(), None, 0, i64::MAX, None, None));
+    let block_markers: i64 = rusqlite::Connection::open(&blocks)
+        .unwrap()
+        .query_row("SELECT count(*) FROM mount_rs_block_authority", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    println!("HISTORICAL_UNSTAMPED_SQLITE_MIGRATION_BLOCK_MARKERS={block_markers}");
+    assert!(
+        !mountpoint.exists(),
+        "failed migration prepared a mountpoint"
     );
 }
 

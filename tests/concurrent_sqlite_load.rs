@@ -5,6 +5,9 @@
 //! matching the storage boundary between separate CLI processes. Native NFS
 //! tests exercise the kernel and transport boundary separately.
 
+// Concurrent SQLite authority is bound to Unix physical file identities.
+#![cfg(unix)]
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -75,6 +78,11 @@ async fn exercise(writers: usize, lifecycles: usize, journal: &str) {
     let scope = TempDir::new().expect("own disposable SQLite load directory");
     let metadata = scope.path().join("metadata.sqlite");
     let blocks = scope.path().join("blocks.sqlite");
+    // Let the provider create and stamp its owned metadata file before the
+    // journal probe opens it with raw SQLite. An already existing unstamped
+    // database cannot safely enroll in independent concurrent mode.
+    drop(SqliteMetadataStore::open(&metadata).expect("create owned metadata backing"));
+    drop(SqliteBlockStore::open(&blocks).expect("create owned block backing"));
     create_journal(&metadata, journal);
     create_journal(&blocks, journal);
 
