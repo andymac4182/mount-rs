@@ -323,6 +323,7 @@ fn run_two_process(rustfs_blocks: bool) {
                     .filter(|line| {
                         line.contains("load-")
                             || line.contains("MOUNT_RS_REQUEST_TRACE")
+                            || line.contains("MOUNT_RS_FAILURE_TRACE")
                             || line.contains("panic")
                             || line.contains("error")
                             || line.contains("failed")

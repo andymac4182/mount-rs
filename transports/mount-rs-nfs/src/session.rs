@@ -5,7 +5,7 @@
 //! RPC reply. This keeps protocol behavior independently testable and is also
 //! the boundary used by the TCP server.
 
-use mount_rs_core::diagnostics::RequestTrace;
+use mount_rs_core::diagnostics::{RequestTrace, trace_failure};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -2307,30 +2307,34 @@ impl Nfs3Session {
         args.end("WRITE arguments")?;
         let entry = self.handles.decode(&request.file).ok();
         let path = match entry.as_ref() {
-            Some(entry) => self.path_of_entry(entry).await.ok(),
-            None => None,
+            Some(entry) => self.path_of_entry(entry).await,
+            None => Err(FsError::new(ErrorCode::Estale)),
         };
-        let Some(path) = path else {
-            let error = FsError::new(ErrorCode::Estale);
-            self.record_error();
-            write_write_res(
-                writer,
-                &Write3res {
-                    status: Self::status(&error),
-                    wcc: WccData {
-                        before: None,
-                        after: None,
+        let path = match path {
+            Ok(path) => path,
+            Err(error) => {
+                trace_failure("nfs", "write_path", &error);
+                self.record_error();
+                write_write_res(
+                    writer,
+                    &Write3res {
+                        status: Self::status(&error),
+                        wcc: WccData {
+                            before: None,
+                            after: None,
+                        },
+                        count: 0,
+                        committed: FILE_SYNC,
+                        verf: self.write_verifier.to_vec(),
                     },
-                    count: 0,
-                    committed: FILE_SYNC,
-                    verf: self.write_verifier.to_vec(),
-                },
-            );
-            return Ok(());
+                );
+                return Ok(());
+            }
         };
         let offset = match Self::offset(request.offset, "write") {
             Ok(offset) => offset,
             Err(error) => {
+                trace_failure("nfs", "write_offset", &error);
                 self.record_error();
                 write_write_res(
                     writer,
@@ -2384,6 +2388,7 @@ impl Nfs3Session {
                 },
             ),
             Err(error) => {
+                trace_failure("nfs", "write", &error);
                 self.record_error();
                 write_write_res(
                     writer,
@@ -2407,22 +2412,24 @@ impl Nfs3Session {
     ) -> Result<(), DispatchError> {
         let request = read_commit_args(args)?;
         args.end("COMMIT arguments")?;
-        let path = self.path_of(&request.file).await.ok();
-        let Some(path) = path else {
-            let error = FsError::new(ErrorCode::Estale);
-            self.record_error();
-            write_commit_res(
-                writer,
-                &Commit3res {
-                    status: Self::status(&error),
-                    wcc: WccData {
-                        before: None,
-                        after: None,
+        let path = match self.path_of(&request.file).await {
+            Ok(path) => path,
+            Err(error) => {
+                trace_failure("nfs", "commit_path", &error);
+                self.record_error();
+                write_commit_res(
+                    writer,
+                    &Commit3res {
+                        status: Self::status(&error),
+                        wcc: WccData {
+                            before: None,
+                            after: None,
+                        },
+                        verf: self.write_verifier.to_vec(),
                     },
-                    verf: self.write_verifier.to_vec(),
-                },
-            );
-            return Ok(());
+                );
+                return Ok(());
+            }
         };
         let before = self.pre_op(&path).await;
         // Every WRITE is acknowledged FILE_SYNC, so there is no deferred

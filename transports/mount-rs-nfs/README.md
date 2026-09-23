@@ -289,3 +289,13 @@ Rust callers can install `NfsSessionHooks`; the N-API
 `NfsRpcCall` for XDR/dispatch failures, or `undefined` for ordinary NFS status
 failures. Callback-channel operations, native Linux NFSv4.1, hosted lifecycle,
 and crash/durability qualification remain explicit production gates.
+
+Shared NFSv3 WRITE and COMMIT preserve backend path-resolution errors.
+An I/O or permission failure does not invalidate an otherwise live inode
+handle; genuinely stale handles still return `NFS3ERR_STALE`.
+For local investigation, `MOUNT_RS_TRACE_FAILURES=1` independently enables
+up to 16 exceptional WRITE/COMMIT records per process on stderr. Each
+record retains the original filesystem code and backend context, limits
+details to 2,048 UTF-8 bytes, and escapes controls. Output is best effort,
+may include caller paths, and is disabled by default. Request phase tracing
+remains controlled separately by `MOUNT_RS_TRACE_REQUESTS`.

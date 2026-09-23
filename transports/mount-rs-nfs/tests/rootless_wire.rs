@@ -3,25 +3,26 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use mount_rs_core::{
-    Capabilities, DirEntry, FileHandle, FsDriver, GuardedMutation, GuardedMutationResult,
-    GuardedRead, GuardedReadResult, MkdirOptions, OpenFlags, Result, Stats,
+    Capabilities, DirEntry, ErrorCode, FileHandle, FsDriver, FsError, GuardedMutation,
+    GuardedMutationResult, GuardedRead, GuardedReadResult, MkdirOptions, OpenFlags, Result, Stats,
 };
 use mount_rs_memfs::MemoryFs;
 use mount_rs_nfs::constants::{
     CREATE_UNCHECKED, FILE_SYNC, MNT3ERR_NOTSUPP, MOUNT_PROGRAM, MOUNT_V3, MOUNTPROC3_MNT,
     NFS_PROGRAM, NFS_V3, NFS3_OK, NFS3ERR_BAD_COOKIE, NFS3ERR_EXIST, NFS3ERR_INVAL,
-    NFS3ERR_NOTSUPP, NFS3ERR_STALE, NFSPROC3_CREATE, NFSPROC3_GETATTR, NFSPROC3_LOOKUP,
-    NFSPROC3_MKDIR, NFSPROC3_READ, NFSPROC3_READDIR, NFSPROC3_READDIRPLUS, NFSPROC3_READLINK,
-    NFSPROC3_REMOVE, NFSPROC3_RENAME, NFSPROC3_SETATTR, NFSPROC3_WRITE,
+    NFS3ERR_NOTSUPP, NFS3ERR_STALE, NFSPROC3_COMMIT, NFSPROC3_CREATE, NFSPROC3_GETATTR,
+    NFSPROC3_LOOKUP, NFSPROC3_MKDIR, NFSPROC3_READ, NFSPROC3_READDIR, NFSPROC3_READDIRPLUS,
+    NFSPROC3_READLINK, NFSPROC3_REMOVE, NFSPROC3_RENAME, NFSPROC3_SETATTR, NFSPROC3_WRITE,
 };
 use mount_rs_nfs::handles::{FileHandleTable, FileHandleTableOptions};
 use mount_rs_nfs::protocol::{
-    Create3args, DirOpArgs, Mkdir3args, Read3args, Readdir3args, Readdir3res, Readdirplus3args,
-    Rename3args, Sattr3, Setattr3args, WccData, Write3args, read_create_res, read_getattr_res,
-    read_lookup_res, read_mount_res, read_read_res, read_readdir_res, read_readdirplus_res,
-    read_readlink_res, read_rename_res, read_wcc_res, read_write_res, write_create_args,
-    write_dir_op, write_mkdir_args, write_read_args, write_readdir_args, write_readdirplus_args,
-    write_rename_args, write_setattr_args, write_write_args,
+    Commit3args, Create3args, DirOpArgs, Mkdir3args, Read3args, Readdir3args, Readdir3res,
+    Readdirplus3args, Rename3args, Sattr3, Setattr3args, WccData, Write3args, read_commit_res,
+    read_create_res, read_getattr_res, read_lookup_res, read_mount_res, read_read_res,
+    read_readdir_res, read_readdirplus_res, read_readlink_res, read_rename_res, read_wcc_res,
+    read_write_res, write_commit_args, write_create_args, write_dir_op, write_mkdir_args,
+    write_read_args, write_readdir_args, write_readdirplus_args, write_rename_args,
+    write_setattr_args, write_write_args,
 };
 use mount_rs_nfs::rpc::{
     MSG_ACCEPTED, RPC_SUCCESS, RPC_SYSTEM_ERR, decode_reply, encode_call, frame_record,
@@ -3642,4 +3643,159 @@ async fn rootless_tcp_round_trip_uses_real_filesystem_operations() {
     assert_eq!(read.data, b"hello wire!");
 
     server.close().await.unwrap();
+}
+
+#[derive(Clone)]
+struct PathErrorDriver {
+    backing: MemoryFs,
+    fail_path: Arc<AtomicBool>,
+    code: ErrorCode,
+}
+
+#[async_trait]
+impl FsDriver for PathErrorDriver {
+    fn capabilities(&self) -> Capabilities {
+        self.backing.capabilities()
+    }
+
+    fn supports_guarded_reads(&self) -> bool {
+        true
+    }
+
+    fn stable_inode_ids(&self) -> bool {
+        true
+    }
+
+    async fn guarded_read(&self, request: GuardedRead) -> Result<GuardedReadResult> {
+        self.backing.guarded_read(request).await
+    }
+
+    async fn stat(&self, path: &str) -> Result<Stats> {
+        self.lstat(path).await
+    }
+
+    async fn readdir(&self, path: &str) -> Result<Vec<DirEntry>> {
+        self.backing.readdir(path).await
+    }
+
+    async fn open(&self, path: &str, flags: &str, mode: u32) -> Result<Arc<dyn FileHandle>> {
+        self.backing.open(path, flags, mode).await
+    }
+
+    async fn lstat(&self, path: &str) -> Result<Stats> {
+        if path == "/victim" && self.fail_path.load(Ordering::Acquire) {
+            return Err(FsError::new(self.code).with_message("injected backend path error"));
+        }
+        self.backing.lstat(path).await
+    }
+
+    async fn open_flags(
+        &self,
+        path: &str,
+        flags: OpenFlags,
+        mode: u32,
+    ) -> Result<Arc<dyn FileHandle>> {
+        self.backing.open_flags(path, flags, mode).await
+    }
+}
+
+async fn shared_path_error(procedure: u32, code: ErrorCode) {
+    let backing = MemoryFs::empty();
+    let file = backing.open("/victim", "w", 0o644).await.unwrap();
+    file.write(b"original", Some(0)).await.unwrap();
+    file.close().await.unwrap();
+    let fail_path = Arc::new(AtomicBool::new(false));
+    let driver = PathErrorDriver {
+        backing: backing.clone(),
+        fail_path: fail_path.clone(),
+        code,
+    };
+    let session = Nfs3Session::new(
+        driver,
+        NfsSessionOptions {
+            shared_concurrent_view: true,
+            ..Default::default()
+        },
+    );
+    let root = direct_mounted_root(&session).await;
+    let handle = direct_lookup_handle(&session, 2, &root, "victim").await;
+    let args = encode_xdr(|writer| {
+        if procedure == NFSPROC3_WRITE {
+            write_write_args(
+                writer,
+                &Write3args {
+                    file: handle.clone(),
+                    offset: 0,
+                    count: 1,
+                    stable: FILE_SYNC,
+                    data: b"x".to_vec(),
+                },
+            );
+        } else {
+            write_commit_args(
+                writer,
+                &Commit3args {
+                    file: handle.clone(),
+                    offset: 0,
+                    count: 0,
+                },
+            );
+        }
+    });
+    fail_path.store(true, Ordering::Release);
+    let call = encode_call(3, NFS_PROGRAM, NFS_V3, procedure, None, None, &args);
+    let reply = session
+        .handle_call(&call, NfsRequestContext::default())
+        .await
+        .unwrap();
+    let (_, mut body) = decode_reply(&reply).unwrap();
+    let (status, wcc) = if procedure == NFSPROC3_WRITE {
+        let response = read_write_res(&mut body).unwrap();
+        assert_eq!(response.count, 0);
+        (response.status, response.wcc)
+    } else {
+        let response = read_commit_res(&mut body).unwrap();
+        (response.status, response.wcc)
+    };
+    body.end("failed path response").unwrap();
+    assert_eq!(
+        status,
+        mount_rs_nfs::protocol::nfs_status_of(&FsError::new(code))
+    );
+    assert_wcc_attrs(&wcc, false);
+    let mut bytes = [0; 8];
+    let file = backing.open("/victim", "r", 0).await.unwrap();
+    assert_eq!(file.read(&mut bytes, Some(0)).await.unwrap(), 8);
+    file.close().await.unwrap();
+    assert_eq!(&bytes, b"original", "failed resolution must not write");
+
+    // A transient backend failure must not detach the valid inode handle.
+    fail_path.store(false, Ordering::Release);
+    let reply = session
+        .handle_call(&call, NfsRequestContext::default())
+        .await
+        .unwrap();
+    let (_, mut body) = decode_reply(&reply).unwrap();
+    let status = if procedure == NFSPROC3_WRITE {
+        read_write_res(&mut body).unwrap().status
+    } else {
+        read_commit_res(&mut body).unwrap().status
+    };
+    body.end("recovered path response").unwrap();
+    assert_eq!(status, NFS3_OK);
+    assert!(session.destroy().await);
+}
+
+#[tokio::test]
+async fn shared_write_preserves_backend_path_error() {
+    for code in [ErrorCode::Eio, ErrorCode::Efbig, ErrorCode::Eacces] {
+        shared_path_error(NFSPROC3_WRITE, code).await;
+    }
+}
+
+#[tokio::test]
+async fn shared_commit_preserves_backend_path_error() {
+    for code in [ErrorCode::Eio, ErrorCode::Efbig, ErrorCode::Eacces] {
+        shared_path_error(NFSPROC3_COMMIT, code).await;
+    }
 }
