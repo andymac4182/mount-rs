@@ -6,6 +6,79 @@ native NFS behavior, and cross-host claims. The feature uses opt-in
 writer claim. The branch began at fetched `origin/main`
 `8a629287104fcdd6d4c334378eccfcab005817ec`.
 
+## Current bundled SQLite engine
+
+The workspace pins `rusqlite =0.39.0` and `libsqlite3-sys 0.37.0`, bundling
+SQLite 3.51.3 with the upstream
+[WAL-reset fix](https://www.sqlite.org/releaselog/3_51_3.html).
+The SQLite 3.46.0 coordinator, stress, and native measurements below remain
+historical evidence. The upgraded engine passed the local and native gates
+below.
+
+Fresh provider databases default to DELETE journaling, and provider
+connections set `synchronous=FULL`. Existing WAL databases remain WAL when
+opened for `concurrent_writes`; provider configuration has no journal mode
+option and provider open does not reset the mode. Concurrent SQLite backing
+still requires the same canonical local files on one host. NFS/SMB backing
+and cross-host sharing of those SQLite files remain unsupported.
+
+SQLite application databases stored inside shared NFS views remain
+unqualified because the application packet observed a cross-view locking
+defect. This boundary is separate from local SQLite backing and the bundled
+engine fix.
+
+The version regression failed with the expected missing-fix error on 3.46.0
+before the upgrade, then passed with runtime/header version agreement.
+The checkpoint regression runs 64 checkpoint rounds while a provider
+connection holds a reserved writer transaction, interleaving 66 acknowledged
+block writes. It verifies the pinned reader snapshot, WAL reset after release,
+fresh exact block reads, row count and integrity. This ordinary bounded edge
+test does not reproduce SQLite's rare upstream race or impose a hard worker
+join deadline.
+
+Local macOS gates on the upgraded bundle:
+
+| Gate | Result |
+| --- | --- |
+| SQLite provider library | 64 passed, including version and checkpoint regressions |
+| SQLite VFS all targets | 5 library + 16 engine + 16 storage bridge tests passed |
+| CLI all targets | 66 library + 29 integration tests passed; opt-in native/service cases stayed ignored |
+| Core local SQLite integration | 12 concurrent coordinator + 1 backend fault tests passed; 5 opt-in cases stayed ignored |
+| Opt-in local WAL load | 8 × 100 lifecycles; 2,008 acknowledged operations, fresh exact reads and both integrity checks passed in 52,436 ms; 833 block rows and 383,934 namespace bytes |
+| Serial native SQLite packet, WAL enabled | All 4 cases passed in 16.18 s: two CLIs in DELETE and WAL, one CLI with two views, and both NFS backing rejection cases |
+| SQLite provider, VFS and CLI all-target strict Clippy; workspace formatter | Passed |
+| Full offline locked metadata resolution | Workspace plus all 5 excluded packets passed; unrelated package pins and Windows edges retained |
+
+The direct dependencies enable `fallible_uint` to retain the previous checked
+unsigned column conversions. Two VFS test calls now pass `&str` explicitly
+for rusqlite's generic VFS-name argument; the production path already did so.
+
+The fixed-engine native two-CLI 2 × 12 loads took 934 ms in DELETE and 836 ms
+in WAL. Both modes retained exact data after fresh process reopen and passed
+metadata/block integrity checks. NFS blocks were rejected with local metadata
+still at revision zero, without a namespace or concurrent-mode marker. The
+owned root, mounts, ten observed child PIDs and five observed listener ports
+were independently confirmed absent; the pre-existing user mount, PID 66542
+and listener 55309 remained unchanged. This opt-in WAL run supplements the
+default native CI gate, which still runs DELETE. The short inner NFS lock
+probe reported blocked in both modes; it does not qualify SQLite application
+files inside shared NFS views or replace the retained adversarial failures.
+
+Raw upgrade logs are retained under
+`/private/tmp/mount-rs-sqlite-wal-fix-{provider-green,vfs,cli,core-local,clippy,wal-8x100,native}-20260924.log`.
+Native ownership and independent cleanup evidence are in
+`/private/tmp/mount-rs-sqlite-wal-fix-native-20260924.json` and
+`/private/tmp/mount-rs-sqlite-wal-fix-native-cleanup-20260924.json`.
+
+Focused checks:
+
+```sh
+./scripts/cargo-shared test --locked -p mount-rs-sqlite \
+  bundled_sqlite_has_wal_reset_fix -- --nocapture
+./scripts/cargo-shared test --locked -p mount-rs-sqlite \
+  wal_checkpoint_contention_preserves_acknowledged_blocks -- --nocapture
+```
+
 ## SQLite coordinator load
 
 `tests/concurrent_sqlite_load.rs` opens independently connected metadata and
@@ -101,11 +174,12 @@ The final 4 × 12 journal matrix passed again with 124 acknowledged operations
 per mode, 56 DELETE block rows and 54 WAL block rows, exact fresh reads, and
 both backing databases reporting `integrity_check=ok`.
 The bounded 8 × 100 WAL experiment also passed on disposable local files,
-but a successful stress run cannot rule out a rare timing bug. The currently
-bundled SQLite version is 3.46.0; its WAL mode cannot be
-qualified as safe for multi-process checkpoint contention until upgraded to
-a version with the WAL-reset fix. The default provider uses rollback/DELETE
-journaling and FULL synchronization. See [SQLite's WAL note](https://www.sqlite.org/wal.html#the_wal_reset_bug).
+but a successful stress run cannot rule out a rare timing bug. Those runs
+used bundled SQLite 3.46.0, whose WAL mode was unqualified for multi-process
+checkpoint contention because it lacked the WAL-reset fix. The current
+3.51.3 bundle and its verification gates are described
+[above](#current-bundled-sqlite-engine). See
+[SQLite's WAL note](https://www.sqlite.org/wal.html#the_wal_reset_bug).
 
 ## SQLite database files hosted inside NFS
 
@@ -172,9 +246,9 @@ The test-owned native two-CLI macOS SQLite split-store case passed in both
 DELETE and WAL backing modes: bidirectional creates, 4 KiB disjoint same-file
 writes, rename/unlink, 2 × 12 lifecycles (988 and 861 ms), clean SIGINT,
 fresh CLI reopen, exact bytes, and metadata/block `integrity_check=ok`.
-The native positive gate now runs DELETE by default; WAL requires
-`MOUNT_RS_CLI_NATIVE_SQLITE_WAL=1` as a diagnostic because of the bundled
-SQLite 3.46.0 WAL-reset issue.
+The native positive gate runs DELETE by default; WAL requires
+`MOUNT_RS_CLI_NATIVE_SQLITE_WAL=1`. At these checkpoints WAL was diagnostic
+because the bundled SQLite 3.46.0 had the WAL-reset issue.
 After block-hook forwarding, the same local two-CLI case passed again (2 × 12
 loads in 969 and 828 ms for DELETE and WAL), and the one-CLI/two-view local
 DELETE case passed (2 × 12 load in 1,561 ms). All runs checked exact data,
@@ -241,8 +315,8 @@ restart observation, not a RustFS block failure. Both owned Docker runs were
 cleaned by their harnesses.
 Physical cross-host and production operation still need separate evidence.
 The `native-concurrent-sqlite` macOS CI job runs the local DELETE shared-mount
-cases and both NFS backing rejection cases serially. WAL stays an opt-in
-diagnostic because the bundled SQLite release has the documented WAL reset
+cases and both NFS backing rejection cases serially. WAL stays opt-in in this
+fixture; its earlier diagnostic status reflected the SQLite 3.46.0 WAL-reset
 issue. At that checkpoint the local-filesystem provider guard was macOS
 specific. The later bound-backing checks below add Linux filesystem and
 individual-file mount rejection; network-backed SQLite remains unsupported.
@@ -511,8 +585,8 @@ in both modes: DELETE took 48,047 ms and WAL took 41,993 ms. Each run
 acknowledged 2,008 lifecycle operations, reopened exact bytes, and reported
 `PRAGMA integrity_check=ok` on both backing files. Each retained 834 block
 rows and a namespace of about 383,935 bytes. The smaller 4 × 12 DELETE/WAL
-journal matrix passed too. WAL remains a diagnostic because the bundled
-SQLite 3.46 release has the WAL-reset issue described above.
+journal matrix passed too. These measurements used bundled SQLite 3.46.0,
+with WAL diagnostic because of the WAL-reset issue described above.
 
 On this branch, the disposable macOS NFS two-CLI SQLite case passed in DELETE
 and WAL: both independently mounted CLIs saw the other's creates, merged

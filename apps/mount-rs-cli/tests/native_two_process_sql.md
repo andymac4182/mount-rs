@@ -28,9 +28,15 @@ rmdir "$probe_root"
 ```
 
 The two-process case runs local DELETE backing by default. Add
-`MOUNT_RS_CLI_NATIVE_SQLITE_WAL=1` to its command for a separate diagnostic
-WAL run; WAL is not part of the native CI safety gate. Its two CLIs have
-independent NFS listeners and access the same SQLite file paths.
+`MOUNT_RS_CLI_NATIVE_SQLITE_WAL=1` to its command for a separate opt-in WAL
+run; the default native CI safety gate still runs DELETE. The earlier WAL
+measurements below used SQLite 3.46.0 and were diagnostic because that bundle
+had the WAL-reset issue. The current bundled SQLite 3.51.3 includes the
+[upstream fix](https://www.sqlite.org/releaselog/3_51_3.html); the upgraded
+bundle passed this serial four-case packet with WAL enabled, as recorded in the
+[qualification record](../../../docs/concurrent-provider-qualification-2026-09-23.md#current-bundled-sqlite-engine).
+Its two CLIs have independent NFS listeners and access the same SQLite file
+paths.
 It checks bidirectional create visibility, simultaneous disjoint 4 KiB writes
 to one file, rename/unlink, 2 × 12 file create/rename/unlink lifecycles,
 exact data after fresh process reopen, clean unmount, and both backing
@@ -107,12 +113,14 @@ Run either selector below with a fresh test root, `MOUNT_RS_CLI_NATIVE_NFS=1`,
 and its listed opt-in variable. These cases start a disposable memory-backed
 native NFS view to host test-owned SQLite backing files. The metadata selector
 hosts metadata on NFS and keeps blocks local so its rejection remains
-specific to metadata after the block preflight runs first.
+specific to metadata. Read-only metadata preflight checks eligibility before
+block authority preparation. Both negative cases require rejection before
+metadata mode conversion or publication, and before a concurrent CLI mounts.
 
 | Selector | Opt-in variable | Required result |
 | --- | --- | --- |
 | `sqlite_backing_files_on_nfs_are_unsupported` | `MOUNT_RS_CLI_NATIVE_SQLITE_NFS_BACKING=1` | Two independent concurrent SQLite CLIs reject NFS metadata before either mounts; backing integrity stays `ok`. |
-| `sqlite_blocks_on_nfs_with_local_metadata_are_unsupported` | `MOUNT_RS_CLI_NATIVE_SQLITE_NFS_BLOCKS=1` | A concurrent SQLite CLI with local metadata and NFS blocks rejects before mount; the local metadata row stays fresh (`revision=0`, no namespace/owner or `MRC1` marker). |
+| `sqlite_blocks_on_nfs_with_local_metadata_are_unsupported` | `MOUNT_RS_CLI_NATIVE_SQLITE_NFS_BLOCKS=1` | A concurrent SQLite CLI with local metadata and NFS blocks rejects before mount; the local metadata row stays fresh (`revision=0`, no namespace/owner or concurrent-mode marker). |
 
 For example:
 
@@ -130,6 +138,8 @@ rmdir "$probe_root"
 ```
 
 ## Observed macOS runs, 2026-09-23
+
+These measurements predate the bundled SQLite 3.51.3 upgrade.
 
 The disposable two-process acceptance passed for local DELETE and opt-in WAL
 backing: 2 × 12 lifecycle loads took 988 and 861 ms, and backing integrity
@@ -189,8 +199,10 @@ separate-CLI inner SQLite lock attempt was blocked; this is a diagnostic
 observation only.
 
 The local same-host SQLite backing case does not establish sharing those
-files across hosts over NFS/SMB. The currently bundled SQLite is 3.46.0;
-the WAL-reset bug blocks a WAL safety claim until that library is upgraded.
+files across hosts over NFS/SMB. The earlier 3.46.0 bundle's WAL-reset issue
+made its WAL runs diagnostic; the fixed 3.51.3 bundle's passing native packet is
+tracked separately above. SQLite application files inside shared NFS views
+remain unqualified because of the observed cross-view locking defect.
 SQLite's own guidance distinguishes network filesystems and WAL:
 [SQLite over a network](https://www.sqlite.org/useovernet.html),
 [SQLite WAL](https://www.sqlite.org/wal.html).
