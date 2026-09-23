@@ -196,7 +196,9 @@ libraries, a live cluster, and the same shared block backing accessible to
 both processes. The CLI rejects memory and local SQLite blocks with
 FoundationDB metadata: they cannot serve references published by another
 host. Local SQLite blocks are accepted in concurrent mode only alongside
-SQLite metadata when both processes use the same local file paths. A second host
+SQLite metadata when both processes use the same canonical local database
+paths. The [SQLite auxiliary path authority](sqlite-auxiliary-path-authority.md)
+also rejects bind mount aliases of the same inode. A second host
 needs a reachable *shared* FoundationDB cluster and the same client,
 configuration, and block backing. The local macOS test cluster does not verify
 cross-host behavior. A prefix containing a legacy lease or fence key rejects
@@ -283,6 +285,10 @@ protects against a database copied before enrollment. Trusted offline
 re-enrollment is future work. A failed historical MRC1 migration leaves
 metadata at its old revision; the current migration ordering can leave an
 unused block authority marker after that failure.
+
+Pathless `MRC2` prototype markers from development before release also refuse
+startup: the old marker cannot identify the authoritative journal, WAL, or
+shared-memory pathname. The current migration command cannot repair them.
 
 ### Bound concurrent backing
 
