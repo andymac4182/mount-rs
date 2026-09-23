@@ -16,7 +16,7 @@ use std::{
     collections::BTreeSet,
     path::Path,
     sync::{Arc, Mutex, MutexGuard},
-    time::Duration,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 // SQLite supplies the clock inside the same statement as lease validation.
@@ -24,6 +24,34 @@ const NOW: &str = "CAST(unixepoch('subsec') * 1000 AS INTEGER)";
 const NOW_SELECT: &str = "SELECT CAST(unixepoch('subsec') * 1000 AS INTEGER)";
 const CONCURRENT_WRITE_MODE: &str = "MRC1";
 const CONCURRENT_FENCE_SENTINEL: i64 = i64::MAX;
+const MAX_SQLITE_BUSY_RETRIES: usize = 16;
+const SQLITE_BUSY_RETRY_BUDGET: Duration = Duration::from_secs(30);
+const CONCURRENT_PUBLISH_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
+
+fn sqlite_busy_known_noncommit(
+    error: &rusqlite::Error,
+    confirmed_noncommit: bool,
+    syscall: &'static str,
+) -> Option<FsError> {
+    // BEGIN IMMEDIATE cannot have written if it returned SQLITE_BUSY. A busy
+    // COMMIT leaves the transaction active; rusqlite's default Drop rolls it
+    // back. Check autocommit after Drop before allowing the caller to replay.
+    (error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy) && confirmed_noncommit)
+        .then(|| {
+            FsError::new(ErrorCode::Eagain)
+                .with_syscall(syscall)
+                .with_message("SQLite writer contention did not commit")
+        })
+}
+
+async fn sqlite_busy_backoff(attempt: usize) {
+    let window = 250_u64 << attempt.min(6);
+    let tick = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| u64::from(duration.subsec_nanos()));
+    let jitter = (tick ^ (attempt as u64).wrapping_mul(0x9e3779b97f4a7c15)) % window;
+    async_io::Timer::after(Duration::from_micros((window + jitter).min(20_000))).await;
+}
 
 #[cfg(target_os = "macos")]
 fn require_local_concurrent_backing(path: &Path, kind: &'static str) -> Result<()> {
@@ -99,6 +127,29 @@ impl Database {
         self.connection
             .lock()
             .map_err(|_| backend_error("SQLite storage lock poisoned"))
+    }
+
+    fn with_concurrent_publish_timeout<T>(
+        &self,
+        operation: impl FnOnce(&mut Connection) -> Result<T>,
+    ) -> Result<T> {
+        let mut connection = self.lock()?;
+        let original_ms: i64 = connection
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .map_err(backend_error)?;
+        let original_ms = u64::try_from(original_ms)
+            .map_err(|_| backend_error("SQLite busy timeout is negative"))?;
+        connection
+            .busy_timeout(CONCURRENT_PUBLISH_BUSY_TIMEOUT)
+            .map_err(backend_error)?;
+        let result = operation(&mut connection);
+        // Restore under the same mutex even when the CAS fails. If restoration
+        // fails after a commit, fail closed instead of reporting a success
+        // while the connection has an unexpected contention policy.
+        connection
+            .busy_timeout(Duration::from_millis(original_ms))
+            .map_err(backend_error)?;
+        result
     }
 
     fn flush(&self) -> Result<()> {
@@ -573,6 +624,46 @@ impl SqliteBlockStore {
     pub fn in_memory() -> Result<Self> {
         Ok(Self(Database::open(None, BLOCK_SCHEMA)?))
     }
+
+    fn put_once(&self, bytes: &[u8]) -> Result<BlockId> {
+        let mut connection = self.0.lock()?;
+        // Database-generated random identities avoid accidental aliasing when
+        // namespaces use distinct block databases. Collisions fail, never overwrite.
+        let id: String = connection
+            .query_row("SELECT lower(hex(randomblob(32)))", [], |row| row.get(0))
+            .map_err(backend_error)?;
+        let was_autocommit = connection.is_autocommit();
+        let transaction = match connection.transaction_with_behavior(TransactionBehavior::Immediate)
+        {
+            Ok(transaction) => transaction,
+            Err(error) => {
+                return Err(
+                    sqlite_busy_known_noncommit(&error, was_autocommit, "put block")
+                        .unwrap_or_else(|| backend_error(error)),
+                );
+            }
+        };
+        let inserted = transaction
+            .execute(
+                "INSERT INTO mount_rs_blocks(id,bytes) VALUES(?1,?2)",
+                params![id, bytes],
+            )
+            .map_err(backend_error)?;
+        if inserted != 1 {
+            return Err(FsError::new(ErrorCode::Eio)
+                .with_syscall("put block")
+                .with_message("SQLite block insert was not applied"));
+        }
+        if let Err(error) = transaction.commit() {
+            return Err(sqlite_busy_known_noncommit(
+                &error,
+                connection.is_autocommit(),
+                "put block",
+            )
+            .unwrap_or_else(|| backend_error(error)));
+        }
+        Ok(BlockId(id))
+    }
 }
 
 fn ttl_ms(ttl: Duration) -> Result<i64> {
@@ -1025,67 +1116,83 @@ impl MetadataStore for SqliteMetadataStore {
             .checked_add(1)
             .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
         let namespace_json = serde_json::to_string(&namespace).map_err(backend_error)?;
-        let mut connection = self.0.lock()?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(backend_error)?;
-        let (mode, owner, fence, expires, actual_revision): (
-            Option<String>,
-            Option<String>,
-            i64,
-            i64,
-            i64,
-        ) = tx
-            .query_row(
-                "SELECT write_mode, owner, fence, expires, revision
+        self.0.with_concurrent_publish_timeout(|connection| {
+            let was_autocommit = connection.is_autocommit();
+            let tx = match connection.transaction_with_behavior(TransactionBehavior::Immediate) {
+                Ok(tx) => tx,
+                Err(error) => {
+                    return Err(sqlite_busy_known_noncommit(
+                        &error,
+                        was_autocommit,
+                        "publish concurrent SQLite metadata",
+                    )
+                    .unwrap_or_else(|| backend_error(error)));
+                }
+            };
+            let (mode, owner, fence, expires, actual_revision): (
+                Option<String>,
+                Option<String>,
+                i64,
+                i64,
+                i64,
+            ) = tx
+                .query_row(
+                    "SELECT write_mode, owner, fence, expires, revision
                  FROM mount_rs_metadata WHERE id=1",
-                [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
-            )
-            .map_err(backend_error)?;
-        if mode.as_deref() != Some(CONCURRENT_WRITE_MODE)
-            || owner.is_some()
-            || fence != CONCURRENT_FENCE_SENTINEL
-            || expires != 0
-        {
-            return Err(FsError::new(ErrorCode::Ebusy)
-                .with_syscall("publish concurrent SQLite metadata")
-                .with_message("concurrent mode is missing or its legacy fence is invalid"));
-        }
-        if actual_revision != expected {
-            return Err(
-                FsError::new(ErrorCode::Eagain).with_syscall("publish concurrent SQLite metadata")
-            );
-        }
-        let changed = tx
-            .execute(
-                "UPDATE mount_rs_metadata SET revision=?1, namespace=?2
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
+                )
+                .map_err(backend_error)?;
+            if mode.as_deref() != Some(CONCURRENT_WRITE_MODE)
+                || owner.is_some()
+                || fence != CONCURRENT_FENCE_SENTINEL
+                || expires != 0
+            {
+                return Err(FsError::new(ErrorCode::Ebusy)
+                    .with_syscall("publish concurrent SQLite metadata")
+                    .with_message("concurrent mode is missing or its legacy fence is invalid"));
+            }
+            if actual_revision != expected {
+                return Err(FsError::new(ErrorCode::Eagain)
+                    .with_syscall("publish concurrent SQLite metadata"));
+            }
+            let changed = tx
+                .execute(
+                    "UPDATE mount_rs_metadata SET revision=?1, namespace=?2
                  WHERE id=1 AND write_mode=?3 AND owner IS NULL AND fence=?4
                    AND expires=0 AND revision=?5",
-                params![
-                    next,
-                    namespace_json,
-                    CONCURRENT_WRITE_MODE,
-                    CONCURRENT_FENCE_SENTINEL,
-                    expected
-                ],
-            )
-            .map_err(backend_error)?;
-        if changed != 1 {
-            return Err(backend_error(
-                "SQLite concurrent publication CAS returned an unexplained zero-row update",
-            ));
-        }
-        tx.commit().map_err(backend_error)?;
-        Ok(next as u64)
+                    params![
+                        next,
+                        namespace_json,
+                        CONCURRENT_WRITE_MODE,
+                        CONCURRENT_FENCE_SENTINEL,
+                        expected
+                    ],
+                )
+                .map_err(backend_error)?;
+            if changed != 1 {
+                return Err(backend_error(
+                    "SQLite concurrent publication CAS returned an unexplained zero-row update",
+                ));
+            }
+            if let Err(error) = tx.commit() {
+                return Err(sqlite_busy_known_noncommit(
+                    &error,
+                    connection.is_autocommit(),
+                    "publish concurrent SQLite metadata",
+                )
+                .unwrap_or_else(|| backend_error(error)));
+            }
+            Ok(next as u64)
+        })
     }
 
     async fn flush(&self) -> Result<()> {
@@ -1641,28 +1748,26 @@ impl BlockStore for SqliteBlockStore {
     }
 
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
-        let mut connection = self.0.lock()?;
-        // Database-generated random identities avoid accidental aliasing when
-        // namespaces use distinct block databases. Collisions fail, never overwrite.
-        let id: String = connection
-            .query_row("SELECT lower(hex(randomblob(32)))", [], |row| row.get(0))
-            .map_err(backend_error)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(backend_error)?;
-        let inserted = transaction
-            .execute(
-                "INSERT INTO mount_rs_blocks(id,bytes) VALUES(?1,?2)",
-                params![id, bytes],
-            )
-            .map_err(backend_error)?;
-        if inserted != 1 {
-            return Err(FsError::new(ErrorCode::Eio)
-                .with_syscall("put block")
-                .with_message("SQLite block insert was not applied"));
+        let started = Instant::now();
+        for attempt in 0..MAX_SQLITE_BUSY_RETRIES {
+            match self.put_once(bytes) {
+                Ok(id) => return Ok(id),
+                Err(error) if error.code == ErrorCode::Eagain => {
+                    if attempt + 1 == MAX_SQLITE_BUSY_RETRIES
+                        || started.elapsed() >= SQLITE_BUSY_RETRY_BUDGET
+                    {
+                        return Err(error.with_message(
+                            "SQLite block writer remained busy after bounded retries",
+                        ));
+                    }
+                    // Each put_once releases the SQLite connection lock before
+                    // yielding, so another writer can finish its transaction.
+                    sqlite_busy_backoff(attempt).await;
+                }
+                Err(error) => return Err(error),
+            }
         }
-        transaction.commit().map_err(backend_error)?;
-        Ok(BlockId(id))
+        unreachable!("bounded SQLite block retry loop always returns")
     }
 
     async fn get(&self, id: &BlockId) -> Result<Vec<u8>> {
@@ -1704,6 +1809,7 @@ mod tests {
         collections::BTreeMap,
         future::Future,
         task::{Context, Poll, Waker},
+        time::Instant,
     };
 
     fn run<T>(future: impl Future<Output = T>) -> T {
@@ -1736,6 +1842,144 @@ mod tests {
                 },
             )]),
         }
+    }
+
+    #[test]
+    fn concurrent_publish_begin_busy_is_a_known_noncommit() {
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        run(store.prepare_concurrent_mode()).unwrap();
+        store
+            .0
+            .lock()
+            .unwrap()
+            .busy_timeout(Duration::from_millis(40))
+            .unwrap();
+        let holder = Connection::open(&path).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let error = run(store.publish_if_revision(0, namespace())).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Eagain, "{error:?}");
+        assert!(store.0.lock().unwrap().is_autocommit());
+        holder.execute_batch("ROLLBACK").unwrap();
+        let unloaded = run(store.load()).unwrap();
+        assert_eq!(unloaded.revision, 0);
+        assert!(unloaded.namespace.is_none());
+        assert_eq!(run(store.publish_if_revision(0, namespace())).unwrap(), 1);
+
+        drop(holder);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn concurrent_publish_commit_busy_rolls_back_before_retry() {
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        run(store.prepare_concurrent_mode()).unwrap();
+        store
+            .0
+            .lock()
+            .unwrap()
+            .busy_timeout(Duration::from_millis(40))
+            .unwrap();
+        let reader = Connection::open(&path).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        let revision: i64 = reader
+            .query_row(
+                "SELECT revision FROM mount_rs_metadata WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(revision, 0);
+
+        let error = run(store.publish_if_revision(0, namespace())).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Eagain, "{error:?}");
+        assert!(store.0.lock().unwrap().is_autocommit());
+        reader.execute_batch("ROLLBACK").unwrap();
+        let unloaded = run(store.load()).unwrap();
+        assert_eq!(unloaded.revision, 0);
+        assert!(unloaded.namespace.is_none());
+        assert_eq!(run(store.publish_if_revision(0, namespace())).unwrap(), 1);
+
+        drop(reader);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn concurrent_publish_begin_busy_uses_scoped_short_timeout() {
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        run(store.prepare_concurrent_mode()).unwrap();
+        let holder = Connection::open(&path).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let started = Instant::now();
+        let error = run(store.publish_if_revision(0, namespace())).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Eagain, "{error:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "one CAS contention attempt should be shorter than the default 5s"
+        );
+        let timeout: i64 = store
+            .0
+            .lock()
+            .unwrap()
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(timeout, 5000, "scoped CAS timeout must be restored");
+        holder.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(run(store.publish_if_revision(0, namespace())).unwrap(), 1);
+
+        drop(holder);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn concurrent_publish_commit_busy_uses_scoped_short_timeout() {
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        run(store.prepare_concurrent_mode()).unwrap();
+        let reader = Connection::open(&path).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        assert_eq!(
+            reader
+                .query_row(
+                    "SELECT revision FROM mount_rs_metadata WHERE id=1",
+                    [],
+                    |row| { row.get::<_, i64>(0) }
+                )
+                .unwrap(),
+            0
+        );
+
+        let started = Instant::now();
+        let error = run(store.publish_if_revision(0, namespace())).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Eagain, "{error:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "one CAS contention attempt should be shorter than the default 5s"
+        );
+        assert!(store.0.lock().unwrap().is_autocommit());
+        let timeout: i64 = store
+            .0
+            .lock()
+            .unwrap()
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(timeout, 5000, "scoped CAS timeout must be restored");
+        reader.execute_batch("ROLLBACK").unwrap();
+        let unloaded = run(store.load()).unwrap();
+        assert_eq!(unloaded.revision, 0);
+        assert!(unloaded.namespace.is_none());
+        assert_eq!(run(store.publish_if_revision(0, namespace())).unwrap(), 1);
+
+        drop(reader);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -2235,7 +2479,9 @@ mod tests {
             .unwrap();
         assert_eq!(count, 0, "reader must hold a SHARED snapshot before put");
 
-        let result = run(blocks.put(b"commit must precede block acknowledgement"));
+        let result = futures_lite::future::block_on(
+            blocks.put(b"commit must precede block acknowledgement"),
+        );
         let reader_count: i64 = reader
             .query_row("SELECT count(*) FROM mount_rs_blocks", [], |row| row.get(0))
             .unwrap();
@@ -2261,6 +2507,113 @@ mod tests {
             result.is_err(),
             "put acknowledged an uncommitted RETURNING row: {result:?}"
         );
+    }
+
+    #[test]
+    fn block_put_retries_busy_begin_after_writer_releases() {
+        let path = super::super::tests::unique_database_path();
+        let blocks = SqliteBlockStore::open(&path).unwrap();
+        blocks
+            .0
+            .lock()
+            .unwrap()
+            .busy_timeout(Duration::from_millis(40))
+            .unwrap();
+        let holder = Connection::open(&path).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            holder.execute_batch("ROLLBACK").unwrap();
+        });
+
+        let id = futures_lite::future::block_on(blocks.put(b"begin-busy-retry"))
+            .expect("transient writer lock must permit one acknowledged block");
+        release.join().unwrap();
+        let reopened = SqliteBlockStore::open(&path).unwrap();
+        assert_eq!(run(reopened.get(&id)).unwrap(), b"begin-busy-retry");
+        drop(reopened);
+        drop(blocks);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn block_put_retries_busy_commit_after_reader_releases() {
+        let path = super::super::tests::unique_database_path();
+        let blocks = SqliteBlockStore::open(&path).unwrap();
+        blocks
+            .0
+            .lock()
+            .unwrap()
+            .busy_timeout(Duration::from_millis(40))
+            .unwrap();
+        let reader = Connection::open(&path).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        assert_eq!(
+            reader
+                .query_row("SELECT count(*) FROM mount_rs_blocks", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            reader.execute_batch("ROLLBACK").unwrap();
+        });
+
+        let id = futures_lite::future::block_on(blocks.put(b"commit-busy-retry"))
+            .expect("transient reader lock must permit one acknowledged block");
+        release.join().unwrap();
+        let reopened = SqliteBlockStore::open(&path).unwrap();
+        assert_eq!(run(reopened.get(&id)).unwrap(), b"commit-busy-retry");
+        let durable_count: i64 = reopened
+            .0
+            .lock()
+            .unwrap()
+            .query_row("SELECT count(*) FROM mount_rs_blocks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            durable_count, 1,
+            "a rolled-back attempt must not leave a duplicate block"
+        );
+        drop(reopened);
+        drop(blocks);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn block_put_bounds_persistent_writer_lock_without_acknowledgement() {
+        let path = super::super::tests::unique_database_path();
+        let blocks = SqliteBlockStore::open(&path).unwrap();
+        blocks
+            .0
+            .lock()
+            .unwrap()
+            .busy_timeout(Duration::from_millis(40))
+            .unwrap();
+        let holder = Connection::open(&path).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let started = Instant::now();
+        let error = futures_lite::future::block_on(blocks.put(b"never-acknowledged")).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Eagain, "{error:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "short SQLite busy timeout must bound retries"
+        );
+        assert!(blocks.0.lock().unwrap().is_autocommit());
+        holder.execute_batch("ROLLBACK").unwrap();
+        let reopened = SqliteBlockStore::open(&path).unwrap();
+        let count: i64 = reopened
+            .0
+            .lock()
+            .unwrap()
+            .query_row("SELECT count(*) FROM mount_rs_blocks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+        drop(reopened);
+        drop(holder);
+        drop(blocks);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

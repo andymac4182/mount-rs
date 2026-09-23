@@ -659,7 +659,10 @@ version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f78e10609fe0e0b3f4157ffab1876319b5b0db102a2c60dc4626306dc46b44ad"
 dependencies = [
+ "fastrand",
  "futures-core",
+ "futures-io",
+ "parking",
  "pin-project-lite",
 ]
 
@@ -1689,7 +1692,9 @@ dependencies = [
 name = "mount-rs-sqlite"
 version = "0.1.0"
 dependencies = [
+ "async-io",
  "async-trait",
+ "futures-lite",
  "libc",
  "mount-rs-core",
  "mount-rs-memfs",

@@ -27,6 +27,7 @@ both databases.
 | Rebased layout plus async backoff, retry limit 128 | WAL | 8 × 100 | 2,008 acknowledged operations; fresh reopen and integrity OK in one disposable run | 53,570 ms | 834 | about 383,934 |
 | Checked SQLite block and lease commits | DELETE | 8 × 100 | 2,008 acknowledged operations; fresh reopen and integrity OK | 61,671 ms | 834 | 383,933 |
 | Checked SQLite block and lease commits | WAL | 8 × 100 | 2,008 acknowledged operations; fresh reopen and integrity OK, diagnostic mode | 63,871 ms | 834 | 383,936 |
+| Checked commits plus rollback-confirmed BUSY retry | DELETE | 8 × 100 | 2,008 acknowledged operations; fresh reopen and integrity OK | 52,978 ms | 832 | 383,935 |
 
 The short fixed retry budget failed because local SQLite writers can advance
 the revision while another writer repeatedly prepares new immutable blocks.
@@ -58,11 +59,21 @@ not a controlled IOPS comparison.
 
 On diagnostic head `3ed628e2`, the four-writer DELETE coordinator test passed
 on a Windows push runner but one PR runner returned `database is locked` on its
-first write after about 33 seconds. Its five-second SQLite busy timeout can
-still reject a contended operation; this intermittent Windows case is not
-qualified as a reliable multiwriter result. The test now reports the
-provider stage on failure so block insertion and metadata publication can be
-distinguished in the next CI run.
+first write after about 33 seconds. The same test passed on both push and PR
+for head `d57df80a`, so the intermittent contention remains an edge case.
+Disposable DELETE-journal probes then held a competing writer at `BEGIN
+IMMEDIATE` and a SHARED reader across `COMMIT`. The provider originally
+returned `EIO` after its five-second busy timeout in each case; fresh reopen
+confirmed no publication or block write had committed. Four focused
+regressions were red before the retry and green afterward. Only structured
+`SQLITE_BUSY` with a verified inactive transaction is now retryable. A
+concurrent metadata publication temporarily uses a 250 ms busy timeout and
+restores the connection's original timeout after the operation; block writes
+retry outside the connection lock with a 16-attempt, 30-second cap. No block
+ID is returned until its INSERT and COMMIT complete. The provider suite
+passed 28/28 and the independent two/four-writer coordinator suite passed
+4/4. Windows verification of this retry head is still required. The test
+also reports the provider stage on any future CI failure.
 
 Reproduction of the bounded load uses only test-owned files:
 
