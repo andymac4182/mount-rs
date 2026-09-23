@@ -18,7 +18,7 @@
 - A migration never invents a replacement block, omits an unreadable extent, advances the metadata revision, or changes a mode marker after a revision conflict.
 - SQLite concurrent databases remain on a local filesystem on macOS; an NFS/network-backed SQLite database is unsupported. Keep the existing SDK pairing restrictions and signed remote-object preflight.
 - Read-only ID verification on an existing `MRC2` volume must enforce the same backing eligibility as a first claim. In particular, reopening SQLite blocks through an NFS path must still fail the local-backing guard, and object backings must use their signed clients.
-- The provider-created identity is a uniformly random, nonzero 128-bit value; it is independent of the public version-history `BlockStoreId` supplied by applications.
+- The provider-created identity is a nonzero 128-bit identifier generated with UUID v4 randomness for non-SQLite providers (with UUID version and variant bits fixed), or SQLite `randomblob(16)`; SQLite's 16 bytes are random and do not have UUID version/variant bits. It is independent of the public version-history `BlockStoreId` supplied by applications.
 - No production block reconciliation deletes the authority marker. Disposable integration fixtures may delete their own marker only after disposing of their metadata volume and clients.
 - The only independently mergeable preliminary phase is an additive core contract with default `ENOTSUP` methods and no runtime change. Merge the provider implementations, wrappers, driver switch, migration, and acceptance tests as one protocol PR; no partial provider rollout may make a previously supported concurrent pairing fail on `main`.
 

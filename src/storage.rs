@@ -681,6 +681,9 @@ pub trait MetadataStore: Send + Sync {
             .with_message("metadata provider does not support concurrent writers"))
     }
     /// Publish metadata with a compare-and-swap bound to the supplied backing.
+    /// A backing-authority mismatch returns `ESTALE`. `EAGAIN` is reserved for
+    /// a known revision conflict where no commit occurred; ambiguous backend
+    /// errors must remain errors and must not be classified as retryable conflicts.
     async fn publish_bound_if_revision(
         &self,
         _backing: ConcurrentBackingId,
@@ -777,9 +780,14 @@ mod tests {
 
     #[test]
     fn concurrent_backing_id_requires_canonical_nonzero_hex() {
-        let id = ConcurrentBackingId::from_bytes([7; 16]).unwrap();
+        let bytes = [
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xff, 0x10, 0x32, 0x54, 0x76, 0x98,
+            0xba, 0xdc,
+        ];
+        let id = ConcurrentBackingId::from_bytes(bytes).unwrap();
+        assert_eq!(id.to_hex(), "0123456789abcdefff1032547698badc");
         assert_eq!(ConcurrentBackingId::from_hex(&id.to_hex()).unwrap(), id);
-        assert_eq!(id.as_bytes(), [7; 16]);
+        assert_eq!(id.as_bytes(), bytes);
         assert!(ConcurrentBackingId::from_bytes([0; 16]).is_err());
         for bad in [
             "00000000000000000000000000000000",
@@ -787,7 +795,10 @@ mod tests {
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             "gggggggggggggggggggggggggggggggg",
         ] {
-            assert!(ConcurrentBackingId::from_hex(bad).is_err());
+            assert_eq!(
+                ConcurrentBackingId::from_hex(bad).unwrap_err().code,
+                ErrorCode::Einval
+            );
         }
     }
 
