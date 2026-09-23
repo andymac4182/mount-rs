@@ -439,7 +439,7 @@ function configStore(value, role, baseDirectory, resolveValue) {
   }
   if (kind === "rustfs") {
     if (role !== "blocks") {
-      throw new CliConfigError("RustFS is a block-only provider; metadata needs SQLite, PGlite, or FoundationDB revision CAS");
+      throw new CliConfigError("RustFS is a block-only provider; metadata needs SQLite, PGlite, TiDB, or FoundationDB revision CAS");
     }
     return {
       kind: "rustfs",
@@ -507,9 +507,10 @@ function configDriver(driver, baseDirectory, resolveValue) {
         if (!(
           (metadata.kind === "foundationdb" && metadata.leaseAuthority === "revision-cas")
           || metadata.kind === "pglite"
+          || metadata.kind === "tidb"
           || metadata.kind === "sqlite"
         )) {
-          throw new CliConfigError("concurrent_writes requires SQLite, PGlite, or FoundationDB revision-CAS metadata");
+          throw new CliConfigError("concurrent_writes requires SQLite, PGlite, TiDB, or FoundationDB revision-CAS metadata");
         }
         if (blocks.kind === "memory" || (blocks.kind === "sqlite" && metadata.kind !== "sqlite")) {
           throw new CliConfigError("concurrent_writes requires blocks visible to every writer; local SQLite blocks need local SQLite metadata on one host");

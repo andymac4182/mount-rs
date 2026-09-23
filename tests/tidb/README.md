@@ -6,6 +6,43 @@ Run the local gate from the repository root:
 ./scripts/test-tidb.sh
 ```
 
+### Concurrent writable mount checks
+
+The standard harness also runs MRC2 backing enrollment, binary marker
+validation, legacy-writer fencing, revision-CAS conflicts, offline MRC1
+migration and a four-coordinator load. These run serially before and after
+TiDB/TiKV/PD component restarts, with independent connections checking the
+persisted namespace and block sentinel. The owned Docker cluster additionally
+tests global `autocommit=0`; provider sessions must commit independently and
+the test restores the original global setting before reporting its result.
+Direct tests against an external endpoint skip that setting change unless
+`MOUNT_RS_TIDB_GLOBAL_AUTOCOMMIT_TEST=1` explicitly opts in a disposable server.
+
+With a current CLI and Node addon built, macOS can include the native checks:
+
+```sh
+MOUNT_RS_CLI_NATIVE_NFS=1 \
+MOUNT_RS_CLI_NATIVE_TIDB_TWO_PROCESS=1 \
+MOUNT_RS_TIDB_NAPI=1 \
+  ./scripts/test-tidb.sh
+```
+
+The native cases cover one CLI with two writable views and two separate CLIs,
+40 acknowledged load files, same-file disjoint writes, held handles across
+remote rename/replacement/unlink, clean unmount and fresh CLI reopen. Each
+native case creates a unique metadata/block scope; the two-process cases
+verify fresh CLI reopen. The stable provider and Node scopes verify component
+restart. The Node packet checks 41 writes, 80 live reads and 40 surviving files
+through a fresh filesystem object.
+
+For TiDB metadata plus RustFS blocks, use the existing TiDB/RustFS harness
+with both native flags above and `MOUNT_RS_CLI_NATIVE_RUSTFS_DISPOSABLE=1`.
+The RustFS native variant reuses the two-process checks and takes credentials
+from the owned outer harness. Plain TiDB runs explicitly skip that variant.
+Do not enable the global-setting or native disposable flags against a shared
+production server. Native evidence is same-host macOS NFS; distributed
+application locks, cross-host recovery and concurrent GC remain unqualified.
+
 The default `durable` topology starts the official, version-pinned
 `pingcap/pd:v8.5.7`, `pingcap/tikv:v8.5.7`, and `pingcap/tidb:v8.5.7`
 images as three PD nodes, three TiKV nodes, and one TiDB SQL frontend. The
@@ -42,8 +79,8 @@ The test performs these checks in order:
    MySQL-compatible server that does not identify as TiDB fails before the
    provider creates any tables.
 3. Run the ignored `mount-rs-tidb` provider contract with a unique volume key.
-4. In `durable` mode, restart one PD member, the TiDB frontend, and one TiKV
-   container in sequence. The harness waits for PD quorum and the TiKV store
+4. In `durable` mode, restart the TiDB frontend, one TiKV container, and one PD
+   member in sequence. The harness waits for PD quorum and the TiKV store
    count after each relevant phase, then verifies the same metadata revision
    and immutable block remain available.
 
@@ -132,8 +169,9 @@ MOUNT_RS_TIDB_URL='mysql://user:password@127.0.0.1:4000/test' \
   ./scripts/cargo-shared test --locked -p mount-rs-tidb --test ambiguous_commit -- --ignored --nocapture
 ```
 
-That lane uses a plaintext MySQL-wire proxy, lets TiDB finish `COMMIT`, drops
-the response, and verifies an unknown outcome without automatic replay. It is
+That lane uses a plaintext MySQL-wire proxy, lets TiDB commit a publication,
+drops its successful response, and verifies an unknown outcome without
+automatic replay. It is
 commit-outcome evidence only; callers must reconcile state before retrying. It
 runs as part of both TiDB CI harnesses.
 
@@ -156,11 +194,13 @@ The following paths are the audited selection points for consumers:
   The generic workspace job still does not run ignored service tests; the
   dedicated jobs are the service evidence boundary.
 
-The Rust SDK, N-API factory, and Rust/Node CLI now provide runnable mount-free
-TiDB/RustFS consumer rows. Do not turn those rows, a generic native transport
-test, or a macOS/Linux compile into TiDB native-mount acceptance; that remaining
-boundary requires a revision-matched service-backed native test on each claimed
-platform.
+The Rust SDK, N-API factory, and Rust/Node CLI provide runnable mount-free
+TiDB/RustFS consumer rows. The opt-in macOS fixture
+`apps/mount-rs-cli/tests/native_two_process_tidb.rs` separately exercises
+TiDB-backed native NFS mounts, including RustFS blocks. Consult the concurrent
+provider qualification record for the executed revision and packet boundaries;
+generic transport tests and compile gates do not establish native acceptance
+on other platforms.
 
 For a TLS-required production endpoint, compile the selected public consumer
 with its `rustls` feature: `cargo check --locked -p mount-rs-sdk --features

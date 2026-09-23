@@ -649,7 +649,13 @@ run_direct_provider_test() {
   MOUNT_RS_TIDB_URL="$tidb_url" \
   MOUNT_RS_TIDB_TEST_VOLUME_KEY="$volume_key" \
   MOUNT_RS_TIDB_EXPECT_PERSISTED="$persistence_expectation" \
-    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --test tidb -- --ignored --nocapture --test-threads=1
+    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --test tidb -- --ignored --nocapture --test-threads=1 \
+      || return "$?"
+  MOUNT_RS_TIDB_URL="$tidb_url" \
+  MOUNT_RS_TIDB_TEST_VOLUME_KEY="$volume_key" \
+  MOUNT_RS_TIDB_EXPECT_PERSISTED="$persistence_expectation" \
+  MOUNT_RS_TIDB_GLOBAL_AUTOCOMMIT_TEST=1 \
+    sh "$repo_dir/scripts/test-tidb-concurrent-consumers.sh"
 }
 
 run_provider_test() {

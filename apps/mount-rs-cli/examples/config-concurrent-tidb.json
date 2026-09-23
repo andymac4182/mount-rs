@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "mountpoint": "./mnt-tidb-a",
+  "transport": "nfs",
+  "driver": {
+    "kind": "splitstore",
+    "storage": {
+      "concurrent_writes": true,
+      "metadata": {
+        "kind": "tidb",
+        "connection": { "env": "MOUNT_RS_TIDB_URL" },
+        "volume_key": "shared-tidb-metadata",
+        "durable": true
+      },
+      "blocks": {
+        "kind": "tidb",
+        "connection": { "env": "MOUNT_RS_TIDB_URL" },
+        "volume_key": "shared-tidb-blocks",
+        "durable": true
+      },
+      "chunk_size_bytes": 4096
+    }
+  }
+}

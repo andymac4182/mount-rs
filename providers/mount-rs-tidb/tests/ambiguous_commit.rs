@@ -7,15 +7,17 @@
 //! outcome and must not replay the publication automatically.
 
 use mount_rs_core::chunking::{Chunker, FixedSizeChunker};
-use mount_rs_core::storage::{MetadataStore, Namespace, NodeData, NodeMetadata};
-use mount_rs_core::{FsDriver, S_IFDIR};
+use mount_rs_core::storage::{
+    ConcurrentBackingId, ConcurrentModeState, MetadataStore, Namespace, NodeData, NodeMetadata,
+};
+use mount_rs_core::{ErrorCode, FsDriver, S_IFDIR};
 use mount_rs_memfs::MemoryFs;
 use mount_rs_tidb::{TidbMetadataStore, TidbStorageOptions};
 use mysql_async::Pool;
 use mysql_async::prelude::Queryable;
 use std::collections::{BTreeMap, HashSet};
 use std::io::{Error, ErrorKind, Result as IoResult};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::{JoinHandle, JoinSet};
@@ -202,7 +204,11 @@ async fn relay_until_publication_response(client: TcpStream, upstream: TcpStream
                     // the publication. Drop both sockets before forwarding its
                     // acknowledgement so the provider cannot observe whether
                     // the commit succeeded.
-                    let _publication_response = read_packet(&mut upstream_reader).await?;
+                    let publication_response = read_packet(&mut upstream_reader).await?;
+                    if publication_response.payload.first() != Some(&0x00) {
+                        return Err(Error::new(ErrorKind::InvalidData,
+                            "failure injection requires a successful TiDB publication acknowledgement"));
+                    }
                     return Ok(());
                 }
             }
@@ -256,7 +262,63 @@ mod packet_classification_tests {
     }
 }
 
-async fn start_publication_drop_proxy(database_url: &str) -> (String, JoinHandle<IoResult<()>>) {
+struct PublicationProxy {
+    task: JoinHandle<IoResult<()>>,
+}
+
+impl PublicationProxy {
+    async fn finish(mut self) -> IoResult<()> {
+        match tokio::time::timeout(Duration::from_secs(30), &mut self.task).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => Err(Error::other(format!(
+                "publication proxy task failed: {error}"
+            ))),
+            Err(_) => {
+                self.task.abort();
+                let _ = (&mut self.task).await;
+                Err(Error::new(
+                    ErrorKind::TimedOut,
+                    "publication proxy exceeded 30 seconds",
+                ))
+            }
+        }
+    }
+}
+
+impl Drop for PublicationProxy {
+    fn drop(&mut self) {
+        // The owning test may panic or time out before awaiting the proxy.
+        // Cancelling its supervisor also drops its JoinSet of socket relays.
+        self.task.abort();
+    }
+}
+
+#[tokio::test]
+async fn rejected_proxy_injection_and_cancelled_task_are_reported() {
+    let proxy = PublicationProxy {
+        task: tokio::spawn(async {
+            Err(Error::new(
+                ErrorKind::InvalidData,
+                "publication acknowledgement was not OK",
+            ))
+        }),
+    };
+    let error = proxy
+        .finish()
+        .await
+        .expect_err("rejected injection must be propagated");
+    assert_eq!(error.kind(), ErrorKind::InvalidData);
+    assert!(error.to_string().contains("not OK"));
+    let task = tokio::spawn(std::future::pending::<IoResult<()>>());
+    task.abort();
+    let error = PublicationProxy { task }
+        .finish()
+        .await
+        .expect_err("cancelled task must be propagated");
+    assert!(error.to_string().contains("proxy task failed"));
+}
+
+async fn start_publication_drop_proxy(database_url: &str) -> (String, PublicationProxy) {
     let target = Url::parse(database_url).expect("the TiDB URL must be parseable");
     assert_eq!(
         target.scheme(),
@@ -293,16 +355,19 @@ async fn start_publication_drop_proxy(database_url: &str) -> (String, JoinHandle
                     relays.spawn(async move { relay_until_publication_response(client, upstream).await });
                 }
                 relay = relays.join_next(), if !relays.is_empty() => {
-                    if let Some(Ok(Ok(()))) = relay {
-                        relays.abort_all();
-                        while relays.join_next().await.is_some() {}
-                        return Ok(());
-                    }
+                    let result = match relay {
+                        Some(Ok(result)) => result,
+                        Some(Err(error)) => Err(Error::other(format!("publication relay task failed: {error}"))),
+                        None => continue,
+                    };
+                    relays.abort_all();
+                    while relays.join_next().await.is_some() {}
+                    return result;
                 }
             }
         }
     });
-    (proxy_url.to_string(), task)
+    (proxy_url.to_string(), PublicationProxy { task })
 }
 
 async fn delete_metadata_row(url: &str, volume_key: &str) {
@@ -339,20 +404,27 @@ async fn actual_tidb_commit_outcome_is_ambiguous_and_not_replayed() {
         .expect("acquire the TiDB writer before failure injection");
 
     let (proxy_url, proxy_task) = start_publication_drop_proxy(&direct_url).await;
-    let via_proxy = TidbMetadataStore::connect_with_options(&proxy_url, options(&volume_key))
-        .await
-        .expect("connect the TiDB metadata store through the proxy");
-    let error = via_proxy
-        .publish(0, &lease, root_namespace().await)
-        .await
-        .expect_err("a dropped publication response must not be reported as success");
+    let via_proxy = tokio::time::timeout(
+        Duration::from_secs(30),
+        TidbMetadataStore::connect_with_options(&proxy_url, options(&volume_key)),
+    )
+    .await
+    .expect("proxied metadata connection exceeded 30 seconds")
+    .expect("connect the TiDB metadata store through the proxy");
+    let error = tokio::time::timeout(
+        Duration::from_secs(30),
+        via_proxy.publish(0, &lease, root_namespace().await),
+    )
+    .await
+    .expect("publication failure injection exceeded 30 seconds")
+    .expect_err("a dropped publication response must not be reported as success");
     assert!(
         error.to_string().contains("commit outcome is unknown"),
         "ambiguous commit must be distinguishable from a retryable statement conflict: {error}"
     );
     proxy_task
+        .finish()
         .await
-        .expect("the ambiguous-commit proxy task must not panic")
         .expect("the proxy must observe and drop the TiDB COMMIT response");
 
     // Reconcile without replaying the publication. TiDB may have committed or
@@ -379,5 +451,62 @@ async fn actual_tidb_commit_outcome_is_ambiguous_and_not_replayed() {
         .close()
         .await
         .expect("close the direct TiDB metadata pool");
+    delete_metadata_row(&direct_url, &volume_key).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires an actual TiDB service and MOUNT_RS_TIDB_URL"]
+async fn actual_tidb_bound_commit_outcome_is_ambiguous_and_not_replayed() {
+    let direct_url = tidb_url();
+    assert_actual_tidb(&direct_url).await;
+    let volume_key = unique_volume_key();
+    let direct = TidbMetadataStore::connect_with_options(&direct_url, options(&volume_key))
+        .await
+        .expect("direct bound metadata");
+    let backing = ConcurrentBackingId::from_bytes([9; 16]).expect("test backing identity");
+    direct
+        .prepare_bound_concurrent_mode(backing)
+        .await
+        .expect("prepare MRC2 before injection");
+    let (proxy_url, proxy_task) = start_publication_drop_proxy(&direct_url).await;
+    let via_proxy = tokio::time::timeout(
+        Duration::from_secs(30),
+        TidbMetadataStore::connect_with_options(&proxy_url, options(&volume_key)),
+    )
+    .await
+    .expect("proxied bound metadata connection exceeded 30 seconds")
+    .expect("proxied bound metadata");
+    let error = tokio::time::timeout(
+        Duration::from_secs(30),
+        via_proxy.publish_bound_if_revision(backing, 0, root_namespace().await),
+    )
+    .await
+    .expect("bound publication failure injection exceeded 30 seconds")
+    .expect_err("lost bound publication acknowledgement cannot report success");
+    assert!(error.is(ErrorCode::Eio));
+    assert!(!error.is(ErrorCode::Eagain));
+    assert!(error.to_string().contains("commit outcome is unknown"));
+    proxy_task
+        .finish()
+        .await
+        .expect("proxy dropped successful bound publication acknowledgement");
+    let observed = direct
+        .load()
+        .await
+        .expect("direct reconciliation without replay");
+    assert_eq!(
+        observed.revision, 1,
+        "the acknowledged server commit happened exactly once"
+    );
+    assert!(observed.namespace.is_some());
+    assert_eq!(
+        direct
+            .concurrent_mode_state()
+            .await
+            .expect("MRC2 marker survives lost ACK"),
+        ConcurrentModeState::Mrc2(backing)
+    );
+    via_proxy.close().await.expect("close proxy pool");
+    direct.close().await.expect("close direct pool");
     delete_metadata_row(&direct_url, &volume_key).await;
 }

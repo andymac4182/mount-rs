@@ -7,7 +7,17 @@
 //! Metadata selects TiDB's pessimistic transaction mode before each explicit
 //! transaction and uses a `SELECT ... FOR UPDATE` on the volume row. Lease
 //! expiry and fencing are evaluated using TiDB's clock inside the transaction.
-//! Revision publication is a compare-and-swap guarded by the same row lock.
+//! Revision publication uses an atomic conditional statement guarded by the
+//! lease or MRC2 backing identity and the expected revision.
+//! Each newly opened pool session explicitly enables and verifies autocommit,
+//! independent of the server's global default.
+//!
+//! MRC2 enrollment binds a never-used metadata volume to a persistent block
+//! authority and exhausts the legacy lease fence in the same statement. New
+//! enrollment and MRC1 migration have read-only preflight hooks; the final
+//! publication always rechecks their conditions. Concurrent reclamation is
+//! unsupported because distributed handle pins and a capacity policy are
+//! required before immutable blocks can be deleted safely.
 //!
 //! The provider never retries a transaction after `COMMIT` returns an error:
 //! the commit outcome can be ambiguous after a connection failure. Statement
