@@ -53,36 +53,71 @@ const LEASE_TTL_MS: &str = "5000";
 const PYTHON_SQLITE: &str = r#"
 import sqlite3
 import sys
+import time
 
 path, journal, phase, marker = sys.argv[1:5]
+started = time.monotonic()
+def stage(name):
+    print(f"SQLITE_PYTHON_STAGE journal={journal} phase={phase} stage={name} elapsed_ms={int((time.monotonic() - started) * 1000)}", file=sys.stderr, flush=True)
+
 payload = bytes(range(256)) * 4096
 expected = (marker.encode("ascii") + b"\0") * 8192
+stage("connect-start")
 db = sqlite3.connect(path, timeout=2.0)
+stage("connect-pass")
 try:
     db.execute("PRAGMA busy_timeout=2000")
+    stage("journal-start")
     actual = db.execute("PRAGMA journal_mode=" + journal).fetchone()[0].upper()
+    stage("journal-pass")
     assert actual == journal, (journal, actual)
+    stage("synchronous-start")
     db.execute("PRAGMA synchronous=FULL")
     assert db.execute("PRAGMA synchronous").fetchone()[0] == 2
+    stage("synchronous-pass")
 
     if phase == "seed":
+        stage("create-start")
         db.execute("CREATE TABLE records(id INTEGER PRIMARY KEY, payload BLOB NOT NULL)")
+        stage("create-pass")
+        stage("begin-start")
         db.execute("BEGIN IMMEDIATE")
+        stage("begin-pass")
+        stage("insert-start")
         db.execute("INSERT INTO records VALUES(1, ?)", (payload,))
+        stage("insert-pass")
+        stage("commit-start")
         db.commit()
+        stage("commit-pass")
+        stage("select-start")
         assert db.execute("SELECT payload FROM records WHERE id=1").fetchone()[0] == payload
+        stage("select-pass")
     elif phase == "verify":
+        stage("select-start")
         assert db.execute("SELECT payload FROM records WHERE id=1").fetchone()[0] == payload
+        stage("select-pass")
+        stage("begin-start")
         db.execute("BEGIN IMMEDIATE")
+        stage("begin-pass")
+        stage("insert-start")
         db.execute("INSERT INTO records VALUES(2, ?)", (expected,))
+        stage("insert-pass")
+        stage("commit-start")
         db.commit()
+        stage("commit-pass")
+        stage("select-start")
         assert db.execute("SELECT payload FROM records WHERE id=2").fetchone()[0] == expected
+        stage("select-pass")
     else:
         raise AssertionError("unknown phase: " + phase)
 
+    stage("integrity-start")
     assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    stage("integrity-pass")
 finally:
+    stage("close-start")
     db.close()
+    stage("close-pass")
 "#;
 
 #[cfg(target_os = "linux")]
@@ -394,7 +429,7 @@ impl ServiceProcess {
 async fn run_python(path: &Path, journal: &str, phase: &str, marker: &str) {
     let started = Instant::now();
     eprintln!("SQLITE_PYTHON_PHASE_START journal={journal} phase={phase}");
-    let output = tokio::time::timeout(
+    let status = tokio::time::timeout(
         PYTHON_TIMEOUT,
         Command::new("python3")
             .arg("-c")
@@ -404,7 +439,11 @@ async fn run_python(path: &Path, journal: &str, phase: &str, marker: &str) {
             .arg(phase)
             .arg(marker)
             .kill_on_drop(true)
-            .output(),
+            // Stream checkpoints and tracebacks before the deadline. Captured
+            // output disappears when timeout drops the subprocess future.
+            .stderr(Stdio::inherit())
+            .stdout(Stdio::null())
+            .status(),
     )
     .await
     .unwrap_or_else(|_| {
@@ -414,16 +453,13 @@ async fn run_python(path: &Path, journal: &str, phase: &str, marker: &str) {
         )
     })
     .expect("start Python SQLite process");
+    assert!(
+        status.success(),
+        "Python SQLite {phase} failed: status={status}"
+    );
     eprintln!(
         "SQLITE_PYTHON_PHASE_PASS journal={journal} phase={phase} elapsed_ms={}",
         started.elapsed().as_millis()
-    );
-    assert!(
-        output.status.success(),
-        "Python SQLite {phase} failed: status={} stdout={} stderr={}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
     );
 }
 
