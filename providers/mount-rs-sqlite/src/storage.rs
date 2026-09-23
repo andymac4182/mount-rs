@@ -114,24 +114,97 @@ fn linux_qualified_local_fs_type(magic: u32) -> bool {
     [EXT_FAMILY, XFS, BTRFS, F2FS, TMPFS].contains(&magic)
 }
 
+#[cfg(any(all(target_os = "linux", target_env = "gnu"), test))]
+fn require_linux_mount_attributes(
+    attributes: u64,
+    supported: u64,
+    kind: &'static str,
+) -> Result<()> {
+    // Linux UAPI include/uapi/linux/stat.h; available since Linux 5.8.
+    // A clear unsupported attribute is not evidence that this is an ordinary file.
+    // https://man7.org/linux/man-pages/man2/statx.2.html
+    const MOUNT_ROOT: u64 = 0x2000;
+    if supported & MOUNT_ROOT == 0 {
+        return Err(FsError::new(ErrorCode::Enotsup)
+            .with_syscall("inspect concurrent SQLite backing")
+            .with_message("concurrent SQLite requires Linux 5.8 or newer with supported STATX_ATTR_MOUNT_ROOT inspection"));
+    }
+    if attributes & MOUNT_ROOT != 0 {
+        return Err(FsError::new(ErrorCode::Enotsup)
+            .with_syscall("prepare concurrent SQLite volume")
+            .with_message(format!(
+                "concurrent SQLite {kind} require a directory mount; individually mounted database files are unsupported"
+            )));
+    }
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn require_linux_file_mount_status(file: &std::fs::File, kind: &'static str) -> Result<()> {
+    use std::{mem::MaybeUninit, os::fd::AsRawFd};
+
+    // Use the syscall directly so concurrent inspection does not add the
+    // glibc 2.28 statx wrapper as a load-time requirement for legacy users.
+    // The supported attribute mask still requires Linux 5.8 or newer.
+    let mut status = MaybeUninit::<libc::statx>::uninit();
+    if unsafe {
+        libc::syscall(
+            libc::SYS_statx,
+            file.as_raw_fd(),
+            c"".as_ptr(),
+            libc::AT_EMPTY_PATH,
+            libc::STATX_BASIC_STATS,
+            status.as_mut_ptr(),
+        )
+    } != 0
+    {
+        return Err(FsError::new(ErrorCode::Enotsup)
+            .with_syscall("inspect concurrent SQLite backing")
+            .with_message(format!(
+                "cannot inspect SQLite {kind} selected file mount status: {}",
+                std::io::Error::last_os_error()
+            )));
+    }
+    let status = unsafe { status.assume_init() };
+    require_linux_mount_attributes(status.stx_attributes, status.stx_attributes_mask, kind)
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "gnu")))]
+fn require_linux_file_mount_status(_file: &std::fs::File, _kind: &'static str) -> Result<()> {
+    // The locked libc exposes the statx UAPI type on GNU targets. Other Linux
+    // environments keep legacy/exclusive operation and refuse this opt-in.
+    Err(FsError::new(ErrorCode::Enotsup)
+        .with_syscall("inspect concurrent SQLite backing")
+        .with_message("concurrent SQLite requires a qualified GNU Linux target with supported STATX_ATTR_MOUNT_ROOT inspection"))
+}
+
 #[cfg(target_os = "linux")]
 fn require_local_concurrent_backing(
     path: &Path,
     kind: &'static str,
     expected: FileStamp,
 ) -> Result<()> {
-    use std::{mem::MaybeUninit, os::fd::AsRawFd};
+    use std::{mem::MaybeUninit, os::fd::AsRawFd, os::unix::fs::OpenOptionsExt};
 
     // SQLite does not expose its open descriptor. Open the canonical database
     // file ourselves, then require its physical stamp to match the file that
     // this provider selected at open. Never classify only the parent path.
-    let file = std::fs::File::open(path).map_err(|error| {
-        FsError::new(ErrorCode::Eio)
-            .with_syscall("inspect concurrent SQLite backing")
-            .with_message(format!(
-                "cannot open SQLite {kind} file for inspection: {error}"
-            ))
-    })?;
+    // Closing a regular inspection descriptor would release this process's
+    // SQLite POSIX locks for the inode. O_PATH supports fstat/fstatfs without
+    // the regular-descriptor close path's locks_remove_posix side effect.
+    // https://man7.org/linux/man-pages/man2/open.2.html
+    // https://github.com/torvalds/linux/blob/v6.18/fs/open.c#L1451-L1466
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|error| {
+            FsError::new(ErrorCode::Eio)
+                .with_syscall("inspect concurrent SQLite backing")
+                .with_message(format!(
+                    "cannot open SQLite {kind} file for inspection: {error}"
+                ))
+        })?;
     let metadata = file.metadata().map_err(backend_error)?;
     let inspected = FileStamp {
         dev: metadata.dev(),
@@ -162,7 +235,14 @@ fn require_local_concurrent_backing(
                 "concurrent SQLite {kind} require a qualified local filesystem; type 0x{magic:08x} is unsupported"
             )));
     }
-    Ok(())
+    // A file-only bind mount can hide a committed authority in another WAL
+    // namespace. Classify the selected file independently of any SQLite row,
+    // before a concurrent authority INSERT or namespace publication. Provider
+    // schema open is earlier and is not promised to have zero side effects.
+    // statx with AT_EMPTY_PATH classifies this descriptor's mount root directly,
+    // so no pathname decoding or mountinfo/pathname comparison is required.
+    // https://man7.org/linux/man-pages/man2/statx.2.html
+    require_linux_file_mount_status(&file, kind)
 }
 
 #[derive(Clone)]
@@ -739,6 +819,7 @@ fn initialize_block_schema(database: &Database) -> Result<()> {
                     .with_syscall("inspect concurrent SQLite backing")
                     .with_message("SQLite block authority belongs to another physical file"));
             }
+            database.require_concurrent_local_file("blocks")?;
             require_matching_auxiliary_path(database, path.as_deref())?;
         }
         #[cfg(not(unix))]
@@ -3365,7 +3446,7 @@ mod tests {
             ErrorCode::Enotsup
         );
         match SqliteBlockStore::open(&alias_path) {
-            Err(error) => assert_eq!(error.code, ErrorCode::Estale),
+            Err(error) => assert_eq!(error.code, ErrorCode::Enotsup),
             Ok(_) => panic!("hard-linked block authority reopened through another pathname"),
         }
 
@@ -3658,6 +3739,230 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    fn run_linux_sqlite_worker(command: &mut std::process::Command) -> std::process::Output {
+        use std::process::Stdio;
+
+        let mut child = command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                return child.wait_with_output().unwrap();
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let output = child.wait_with_output().unwrap();
+                panic!(
+                    "SQLite worker timed out: {} {}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_inspection_preserves_reserved_sqlite_locks() {
+        struct OwnedFile(PathBuf);
+        impl Drop for OwnedFile {
+            fn drop(&mut self) {
+                for suffix in ["-journal", "-wal", "-shm"] {
+                    let mut sidecar = self.0.as_os_str().to_os_string();
+                    sidecar.push(suffix);
+                    let _ = std::fs::remove_file(PathBuf::from(sidecar));
+                }
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let path = super::super::tests::unique_database_path();
+        let _cleanup = OwnedFile(path.clone());
+        let metadata = SqliteMetadataStore::open(&path).unwrap();
+        let mut connection = metadata.0.lock().unwrap();
+        connection
+            .execute_batch("PRAGMA journal_mode=DELETE; PRAGMA locking_mode=NORMAL;")
+            .unwrap();
+        connection.busy_timeout(Duration::ZERO).unwrap();
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let probe = |expect_busy: bool| {
+            let output = run_linux_sqlite_worker(
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--ignored",
+                        "--exact",
+                        "storage::tests::linux_reserved_lock_probe_worker",
+                        "--nocapture",
+                    ])
+                    .env("MOUNT_RS_SQLITE_RESERVED_LOCK_PROBE", &path)
+                    .env(
+                        "MOUNT_RS_SQLITE_LOCK_EXPECT_BUSY",
+                        if expect_busy { "1" } else { "0" },
+                    ),
+            );
+            assert!(
+                output.status.success(),
+                "reserved lock probe failed: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        probe(true);
+        metadata
+            .0
+            .require_concurrent_local_file("metadata")
+            .unwrap();
+        assert!(
+            !tx.is_autocommit(),
+            "inspection must preserve the SQLite transaction"
+        );
+        probe(true);
+        tx.rollback().unwrap();
+        probe(false);
+        drop(connection);
+        drop(metadata);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "worker invoked by the owned distinct-process SQLite lock fixture"]
+    fn linux_reserved_lock_probe_worker() {
+        let path = std::env::var_os("MOUNT_RS_SQLITE_RESERVED_LOCK_PROBE")
+            .expect("worker requires its owned fixture path");
+        let connection = Connection::open(Path::new(&path)).unwrap();
+        connection.busy_timeout(Duration::ZERO).unwrap();
+        let result = connection.execute(
+            "UPDATE mount_rs_metadata SET revision=revision WHERE id=1",
+            [],
+        );
+        if std::env::var("MOUNT_RS_SQLITE_LOCK_EXPECT_BUSY").unwrap() == "1" {
+            let error =
+                result.expect_err("another process must retain its BEGIN IMMEDIATE reserved lock");
+            assert_eq!(
+                error.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseBusy)
+            );
+        } else {
+            assert_eq!(
+                result.expect("write must succeed after the owner rolls back"),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn linux_mount_root_attributes_fail_closed_without_rejecting_ordinary_files() {
+        assert!(require_linux_mount_attributes(0, 0x2000, "blocks").is_ok());
+        assert!(require_linux_mount_attributes(0x1000, 0x3000, "metadata").is_ok());
+        let mounted = require_linux_mount_attributes(0x2000, 0x2000, "blocks").unwrap_err();
+        assert_eq!(mounted.code, ErrorCode::Enotsup);
+        assert!(mounted.to_string().contains("individually mounted"));
+        for (attributes, supported) in [(0, 0), (0x2000, 0), (0, 0x1000)] {
+            let unsupported =
+                require_linux_mount_attributes(attributes, supported, "blocks").unwrap_err();
+            assert_eq!(unsupported.code, ErrorCode::Enotsup);
+            assert!(unsupported.to_string().contains("Linux 5.8"));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "worker invoked by the owned active-WAL Linux file bind fixture"]
+    fn linux_active_wal_bind_alias_worker() {
+        let block_alias = std::env::var_os("MOUNT_RS_SQLITE_ACTIVE_WAL_BLOCK_ALIAS")
+            .expect("worker requires its owned block alias");
+        let metadata_alias = std::env::var_os("MOUNT_RS_SQLITE_ACTIVE_WAL_METADATA_ALIAS")
+            .expect("worker requires its owned metadata alias");
+        let backing = ConcurrentBackingId::from_hex(
+            &std::env::var("MOUNT_RS_SQLITE_ACTIVE_WAL_BACKING").unwrap(),
+        )
+        .unwrap();
+        let snapshot = std::env::var_os("MOUNT_RS_SQLITE_ACTIVE_WAL_SNAPSHOT")
+            .expect("worker requires its owned snapshot path");
+        // Main-file inspection belongs to this distinct process. Opening and
+        // closing its source must not release the canonical owner's POSIX locks.
+        std::fs::copy(Path::new(&block_alias), Path::new(&snapshot)).unwrap();
+        let checkpointed = Connection::open_with_flags(
+            Path::new(&snapshot),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let checkpointed_count: i64 = checkpointed
+            .query_row("SELECT count(*) FROM mount_rs_block_authority", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            checkpointed_count, 0,
+            "canonical authority must exist only in its active WAL"
+        );
+        drop(checkpointed);
+        let blocks = SqliteBlockStore::open(Path::new(&block_alias)).unwrap();
+        let count = || {
+            blocks
+                .0
+                .lock()
+                .unwrap()
+                .query_row("SELECT count(*) FROM mount_rs_block_authority", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap()
+        };
+        assert_eq!(
+            count(),
+            0,
+            "alias must not see the uncheckpointed canonical authority"
+        );
+        assert_eq!(
+            run(blocks.prepare_concurrent_backing()).unwrap_err().code,
+            ErrorCode::Enotsup
+        );
+        assert_eq!(
+            run(blocks.verify_concurrent_backing(backing))
+                .unwrap_err()
+                .code,
+            ErrorCode::Enotsup
+        );
+        assert_eq!(
+            count(),
+            0,
+            "rejected alias must not install a second authority"
+        );
+        let metadata = SqliteMetadataStore::open(Path::new(&metadata_alias)).unwrap();
+        assert_eq!(
+            run(metadata.concurrent_mode_state()).unwrap(),
+            ConcurrentModeState::Legacy
+        );
+        assert_eq!(
+            run(metadata.prepare_bound_concurrent_mode(backing))
+                .unwrap_err()
+                .code,
+            ErrorCode::Enotsup
+        );
+        let row: (Option<String>, Option<String>, i64, Option<String>) = metadata
+            .0
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT write_mode,backing_id,revision,namespace FROM mount_rs_metadata WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (None, None, 0, None),
+            "rejected metadata alias changed protocol or namespace"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "requires a Linux mount namespace with CAP_SYS_ADMIN and qualified local /tmp backing"]
     fn linux_file_bind_alias_with_one_link_cannot_reuse_bound_authority() {
@@ -3666,6 +3971,11 @@ mod tests {
         struct OwnedFile(PathBuf);
         impl Drop for OwnedFile {
             fn drop(&mut self) {
+                for suffix in ["-journal", "-wal", "-shm"] {
+                    let mut sidecar = self.0.as_os_str().to_os_string();
+                    sidecar.push(suffix);
+                    let _ = std::fs::remove_file(PathBuf::from(sidecar));
+                }
                 let _ = std::fs::remove_file(&self.0);
             }
         }
@@ -3744,15 +4054,71 @@ mod tests {
         assert_eq!(std::fs::metadata(&blocks_alias).unwrap().nlink(), 1);
 
         match SqliteMetadataStore::open(&metadata_alias) {
-            Err(error) => assert_eq!(error.code, ErrorCode::Estale),
+            Err(error) => assert_eq!(error.code, ErrorCode::Enotsup),
             Ok(_) => panic!("bind alias reopened bound metadata authority"),
         }
         match SqliteBlockStore::open(&blocks_alias) {
-            Err(error) => assert_eq!(error.code, ErrorCode::Estale),
+            Err(error) => assert_eq!(error.code, ErrorCode::Enotsup),
             Ok(_) => panic!("bind alias reopened bound block authority"),
         }
         blocks_mount.unmount();
         metadata_mount.unmount();
+
+        // Keep both canonical providers open with their authority only in WAL.
+        // A distinct process is required: SQLite reuses inode bookkeeping and
+        // shared-memory state for connections within a single process.
+        // The first case has checkpointed authority. Use new owned files for
+        // the active-WAL case so the checkpointed block table starts empty.
+        std::fs::remove_file(&metadata_path).unwrap();
+        std::fs::remove_file(&blocks_path).unwrap();
+        let metadata = SqliteMetadataStore::open(&metadata_path).unwrap();
+        let blocks = SqliteBlockStore::open(&blocks_path).unwrap();
+        for database in [&metadata.0, &blocks.0] {
+            let connection = database.lock().unwrap();
+            connection
+                .execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
+                .unwrap();
+            let checkpoint: (i64, i64, i64) = connection
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .unwrap();
+            assert_eq!(checkpoint, (0, 0, 0));
+        }
+        let backing = run(blocks.prepare_concurrent_backing()).unwrap();
+        run(metadata.prepare_bound_concurrent_mode(backing)).unwrap();
+        let snapshot = super::super::tests::unique_database_path();
+        let _snapshot_cleanup = OwnedFile(snapshot.clone());
+        let mut metadata_mount = BindMount::new(&metadata_path, &metadata_alias);
+        let mut blocks_mount = BindMount::new(&blocks_path, &blocks_alias);
+        assert_eq!(std::fs::metadata(&blocks_alias).unwrap().nlink(), 1);
+        let output = run_linux_sqlite_worker(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "storage::tests::linux_active_wal_bind_alias_worker",
+                    "--nocapture",
+                ])
+                .env("MOUNT_RS_SQLITE_ACTIVE_WAL_BLOCK_ALIAS", &blocks_alias)
+                .env("MOUNT_RS_SQLITE_ACTIVE_WAL_METADATA_ALIAS", &metadata_alias)
+                .env("MOUNT_RS_SQLITE_ACTIVE_WAL_SNAPSHOT", &snapshot)
+                .env("MOUNT_RS_SQLITE_ACTIVE_WAL_BACKING", backing.to_hex()),
+        );
+        assert!(
+            output.status.success(),
+            "active WAL alias worker failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        run(blocks.verify_concurrent_backing(backing)).unwrap();
+        assert_eq!(
+            run(metadata.concurrent_mode_state()).unwrap(),
+            ConcurrentModeState::Mrc2(backing)
+        );
+        blocks_mount.unmount();
+        metadata_mount.unmount();
+        drop((metadata, blocks));
     }
 
     #[cfg(unix)]
