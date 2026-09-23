@@ -302,8 +302,16 @@ fn run_two_process(rustfs_blocks: bool) {
         let a_acks = a_result.expect("A load writes");
         let b_acks = b_result.expect("B load writes");
         assert_eq!(a_acks + b_acks, 2 * load_files_per_writer);
-        for mountpoint in [&scope.mountpoint_a, &scope.mountpoint_b] {
-            verify_load_files(mountpoint, load_files_per_writer)
+        println!(
+            "NATIVE_FDB_RUSTFS_WRITES_ACKNOWLEDGED acknowledgements={} elapsed_ms={}",
+            a_acks + b_acks,
+            started.elapsed().as_millis(),
+        );
+        for (view, mountpoint) in [
+            ("live-a", &scope.mountpoint_a),
+            ("live-b", &scope.mountpoint_b),
+        ] {
+            verify_load_files(mountpoint, load_files_per_writer, view)
                 .expect("both live RustFS mounts see every load write");
         }
         assert!(
@@ -398,7 +406,7 @@ fn run_two_process(rustfs_blocks: bool) {
     await_bytes(&scope.mountpoint_a.join(shared_name), &merged_ranges)
         .expect("fresh process sees both disjoint ranges");
     if rustfs_blocks {
-        verify_load_files(&scope.mountpoint_a, load_files_per_writer)
+        verify_load_files(&scope.mountpoint_a, load_files_per_writer, "reopen-a")
             .expect("fresh process preserves every acknowledged RustFS load file");
     }
     await_absent(&scope.mountpoint_a.join("renamed-by-a")).expect("fresh process sees B's removal");
@@ -498,15 +506,36 @@ fn spawn_load_writer(
     })
 }
 
-fn verify_load_files(mountpoint: &Path, count: usize) -> io::Result<()> {
+fn verify_load_files(mountpoint: &Path, count: usize, view: &str) -> io::Result<()> {
+    let started = Instant::now();
+    let total = 2 * count;
+    let mut verified = 0_usize;
+    println!("NATIVE_FDB_RUSTFS_VERIFY_START view={view} verified=0 total={total}");
     for writer in ['a', 'b'] {
         for index in 0..count {
-            await_bytes(
+            if let Err(error) = await_bytes(
                 &mountpoint.join(load_name(writer, index)),
                 &load_payload(writer, index),
-            )?;
+            ) {
+                println!(
+                    "NATIVE_FDB_RUSTFS_VERIFY_FAIL view={view} verified={verified} total={total} writer={writer} index={index} elapsed_ms={} error={error:?}",
+                    started.elapsed().as_millis(),
+                );
+                return Err(error);
+            }
+            verified += 1;
+            if verified.is_multiple_of(25) && verified < total {
+                println!(
+                    "NATIVE_FDB_RUSTFS_VERIFY_PROGRESS view={view} verified={verified} total={total} elapsed_ms={}",
+                    started.elapsed().as_millis(),
+                );
+            }
         }
     }
+    println!(
+        "NATIVE_FDB_RUSTFS_VERIFY_PASS view={view} verified={verified} total={total} elapsed_ms={}",
+        started.elapsed().as_millis(),
+    );
     Ok(())
 }
 
@@ -1250,6 +1279,17 @@ impl NativeMount {
 
 impl Drop for NativeMount {
     fn drop(&mut self) {
+        if thread::panicking()
+            && std::env::var("MOUNT_RS_TRACE_REQUESTS").ok().as_deref() == Some("1")
+        {
+            self.drain_output();
+            let _ = writeln!(
+                io::stdout(),
+                "NATIVE_FDB_REQUEST_PENDING phase=cleanup mountpoint={} pending={:?}",
+                self.mountpoint.display(),
+                pending_request_traces(&self.output),
+            );
+        }
         if let Err(error) = self.stop(false) {
             eprintln!("run-owned CLI child cleanup failed: {error}");
         }
