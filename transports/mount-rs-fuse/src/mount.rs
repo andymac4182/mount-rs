@@ -2195,7 +2195,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn closed_reply_peer_reports_one_owned_write_error() {
-        use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+        use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
         use tokio::io::AsyncWriteExt;
         use tokio::net::UnixStream;
 
@@ -2228,9 +2228,16 @@ mod tests {
         peer.write_all(&test_frame(26, 1, 0, &init))
             .await
             .expect("send init before closing reply peer");
-        drop(peer);
-        // The queued INIT remains readable after the peer closes. Starting
-        // the session now makes the reply write fail deterministically.
+        // Full peer shutdown keeps the queued INIT readable but rejects the
+        // reply write. Dropping the peer here can race a readable EOF against
+        // the write failure and report a Read error instead.
+        let shut_down = unsafe { libc::shutdown(peer.as_raw_fd(), libc::SHUT_RDWR) };
+        assert_eq!(
+            shut_down,
+            0,
+            "shut down reply peer: {}",
+            io::Error::last_os_error()
+        );
         let task = tokio::spawn(run_session(
             FuseSession::new(Arc::new(mount_rs_memfs::MemoryFs::empty())),
             device,
@@ -2239,6 +2246,7 @@ mod tests {
 
         task.await
             .expect("session task should finish after reply peer closes");
+        drop(peer);
         let observed = observed.lock().expect("callback observation lock");
         assert_eq!(observed.len(), 1);
         assert_eq!(observed[0].kind, FuseTransportErrorKind::Write);
