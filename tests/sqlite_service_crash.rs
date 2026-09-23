@@ -37,7 +37,9 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(target_os = "linux")]
 const SERVICE_EXIT_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(target_os = "linux")]
-const PYTHON_TIMEOUT: Duration = Duration::from_secs(30);
+// The real FUSE/SQLite recovery gate is functional, and shared CI runners
+// have measured more than twice the normal latency in earlier native steps.
+const PYTHON_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(target_os = "linux")]
 const UNMOUNT_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(target_os = "linux")]
@@ -390,6 +392,8 @@ impl ServiceProcess {
 
 #[cfg(target_os = "linux")]
 async fn run_python(path: &Path, journal: &str, phase: &str, marker: &str) {
+    let started = Instant::now();
+    eprintln!("SQLITE_PYTHON_PHASE_START journal={journal} phase={phase}");
     let output = tokio::time::timeout(
         PYTHON_TIMEOUT,
         Command::new("python3")
@@ -403,8 +407,17 @@ async fn run_python(path: &Path, journal: &str, phase: &str, marker: &str) {
             .output(),
     )
     .await
-    .expect("Python SQLite deadline")
+    .unwrap_or_else(|_| {
+        panic!(
+            "Python SQLite deadline journal={journal} phase={phase} elapsed_ms={}",
+            started.elapsed().as_millis()
+        )
+    })
     .expect("start Python SQLite process");
+    eprintln!(
+        "SQLITE_PYTHON_PHASE_PASS journal={journal} phase={phase} elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
     assert!(
         output.status.success(),
         "Python SQLite {phase} failed: status={} stdout={} stderr={}",
