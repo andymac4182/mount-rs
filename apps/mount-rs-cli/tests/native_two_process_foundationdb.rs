@@ -261,8 +261,9 @@ fn run_two_process(rustfs_blocks: bool) {
                 ('a', &mount_a.output[trace_start_a..]),
                 ('b', &mount_b.output[trace_start_b..]),
             ] {
+                let (cas_retry_events, max_cas_attempt) = cas_retry_summary(lines);
                 println!(
-                    "NATIVE_FDB_RUSTFS_REQUEST_PHASES writer={writer} longest_us={:?} pending={:?}",
+                    "NATIVE_FDB_RUSTFS_REQUEST_PHASES writer={writer} cas_retry_events={cas_retry_events} max_cas_attempt={max_cas_attempt} longest_us={:?} pending={:?}",
                     longest_request_phases(lines),
                     pending_request_traces(lines),
                 );
@@ -950,6 +951,49 @@ fn longest_request_phases(lines: &[String]) -> Vec<(u128, String)> {
     }
     summary.truncate(32);
     summary
+}
+
+// Count conflicts and retain the deepest observed attempt even when its
+// backoff is shorter than the longest phase retained above.
+fn cas_retry_summary(lines: &[String]) -> (usize, usize) {
+    let mut conflicts = 0;
+    let mut maximum_attempt = 0;
+    for line in lines {
+        if !line.contains("MOUNT_RS_REQUEST_TRACE") {
+            continue;
+        }
+        let value = |key: &str| {
+            line.split_whitespace()
+                .find_map(|token| token.strip_prefix(key))
+        };
+        if value("component=") != Some("chunked") {
+            continue;
+        }
+        let Some(attempt) = value("attempt=").and_then(|value| value.parse::<usize>().ok()) else {
+            continue;
+        };
+        maximum_attempt = maximum_attempt.max(attempt);
+        if value("stage=") == Some("cas_backoff") {
+            conflicts += 1;
+        }
+    }
+    (conflicts, maximum_attempt)
+}
+
+#[test]
+fn native_cas_retry_summary_counts_conflicts_and_maximum_attempt() {
+    let lines = [
+        "MOUNT_RS_REQUEST_TRACE component=chunked stage=cas_backoff attempt=0",
+        "MOUNT_RS_REQUEST_TRACE component=chunked stage=cas_backoff attempt=2",
+        "MOUNT_RS_REQUEST_TRACE component=chunked stage=metadata_load_start attempt=3",
+        "MOUNT_RS_REQUEST_TRACE component=chunked stage=exit attempt=3",
+        "MOUNT_RS_REQUEST_TRACE component=driver stage=await attempt=127",
+        "component=chunked stage=cas_backoff attempt=127",
+        "MOUNT_RS_REQUEST_TRACE component=chunked stage=cas_backoff attempt=invalid",
+    ]
+    .map(str::to_owned);
+    assert_eq!(cas_retry_summary(&lines), (2, 3));
+    assert_eq!(cas_retry_summary(&[]), (0, 0));
 }
 
 #[test]
