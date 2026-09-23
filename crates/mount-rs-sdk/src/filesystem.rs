@@ -4,8 +4,11 @@ use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 
-use mount_rs_chunked::{ChunkedFs, ChunkedOptions, migrate_mrc1_backing};
+use mount_rs_chunked::{
+    ChunkedFs, ChunkedOptions, migrate_mrc1_backing, migrate_trusted_unstamped_mrc1_backing,
+};
 use mount_rs_core::storage::ConcurrentBackingId;
+use mount_rs_core::versioning::VolumeId;
 use mount_rs_core::{ErrorCode, FsDriver, FsError, Result};
 use mount_rs_host::{HostFs, HostFsOptions};
 use mount_rs_memfs::{MemoryFs, MemoryOptions};
@@ -103,6 +106,31 @@ impl Filesystem {
         let opened = open_storage(&options.metadata, &options.blocks).await?;
         let migration =
             migrate_mrc1_backing(&opened.metadata, &opened.blocks, expected_revision).await;
+        complete_migration_after_teardown(migration, opened.close()).await
+    }
+
+    /// Explicit operator-authorized recovery for an old unstamped SQLite MRC1
+    /// metadata file. Only use after all old writers are stopped and the
+    /// selected file is asserted to be the sole active metadata copy.
+    /// These operator assertions cannot be proved by the expected volume ID.
+    pub async fn reenroll_trusted_unstamped_sqlite_mrc1(
+        options: SplitOptions,
+        expected_revision: u64,
+        expected_volume: VolumeId,
+    ) -> Result<ConcurrentBackingId> {
+        if !options.concurrent_writes || !matches!(options.metadata, StoreConfig::Sqlite { .. }) {
+            return Err(FsError::new(ErrorCode::Einval)
+                .with_message("trusted MRC1 reenrollment requires concurrent SQLite metadata"));
+        }
+        validate_concurrent_split_options(&options)?;
+        let opened = open_storage(&options.metadata, &options.blocks).await?;
+        let migration = migrate_trusted_unstamped_mrc1_backing(
+            &opened.metadata,
+            &opened.blocks,
+            expected_revision,
+            expected_volume,
+        )
+        .await;
         complete_migration_after_teardown(migration, opened.close()).await
     }
 

@@ -273,19 +273,25 @@ Replace `0` with the revision read from the backing. The migration checks
 all referenced block extents and the exact revision before changing the
 metadata marker. On success it prints the unchanged revision and the new
 backing authority ID. A missing or short block, a changed revision, or
-historical version state leaves the metadata in MRC1. For SQLite backing,
-the command prepares empty view directories to check physical placement, then migrates
-without starting a native mount. Start the upgraded mounts only after it
-succeeds.
+historical version state leaves the metadata in MRC1. Before opening SQLite
+providers, the CLI rejects mounted views, creates missing mountpoint
+directories, and rechecks backing placement using their filesystem identity.
+Those directories can remain after failure. The command does not start a
+native mount; start the upgraded mounts only after it succeeds.
 
 An unstamped historical Legacy SQLite metadata file can still run in its
 earlier exclusive-writer mode, but automatic MRC2 enrollment is refused. An
 already MRC1 SQLite file cannot mount with the upgraded binary: the exclusive
 writer path does not accept MRC1, and implicit MRC2 migration is refused. This
 protects against a database copied before enrollment. Trusted offline
-re-enrollment is future work. A failed historical MRC1 migration leaves
-metadata at its old revision; the current migration ordering can leave an
-unused block authority marker after that failure.
+reenrollment of an old completely unstamped MRC1 file is available through
+`reenroll-sqlite-concurrent-backing`. It requires the exact revision, volume
+ID, and `--assert-all-writers-stopped-and-sole-metadata-copy`; see the
+[operator recovery procedure](concurrent-backing-reenrollment.md). The tool
+cannot prove those operator assertions. Invalid metadata eligibility and
+missing or short referenced blocks fail before claiming a block authority
+marker. A failure after the block claim can still leave an unused marker
+because metadata and blocks may use separate providers.
 
 Pathless `MRC2` prototype markers from development before release also refuse
 startup: the old marker cannot identify the authoritative journal, WAL, or

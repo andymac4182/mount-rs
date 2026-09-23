@@ -27,6 +27,7 @@ use mount_rs_core::storage::{
     BlockId, BlockReconcileReport, BlockStore, ConcurrentBackingId, ConcurrentModeState,
     LoadedMetadata, MetadataStore, Namespace, WriterLease,
 };
+use mount_rs_core::versioning::VolumeId;
 use mount_rs_core::{
     Capabilities, DirEntry, ErrorCode, FileHandle as CoreFileHandle, FsDriver, FsError,
     GuardedMutation, GuardedMutationResult, GuardedRead, GuardedReadResult, MkdirOptions,
@@ -1476,6 +1477,16 @@ impl MetadataStore for DynMetadataStore {
         self.0.concurrent_mode_state()
     }
 
+    fn preflight_new_bound_mode<'a, 'async_trait>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.preflight_new_bound_mode()
+    }
+
     fn prepare_bound_concurrent_mode<'a, 'async_trait>(
         &'a self,
         backing: ConcurrentBackingId,
@@ -1564,6 +1575,44 @@ impl MetadataStore for DynMetadataStore {
     {
         self.0
             .migrate_mrc1_to_bound_mode(backing, expected_revision)
+    }
+
+    fn preflight_mrc1_to_bound_mode<'a, 'async_trait>(
+        &'a self,
+        expected_revision: u64,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.preflight_mrc1_to_bound_mode(expected_revision)
+    }
+
+    fn preflight_trusted_unstamped_mrc1<'a, 'async_trait>(
+        &'a self,
+        expected_revision: u64,
+        expected_volume: VolumeId,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0
+            .preflight_trusted_unstamped_mrc1(expected_revision, expected_volume)
+    }
+
+    fn migrate_trusted_unstamped_mrc1<'a, 'async_trait>(
+        &'a self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+        expected_volume: VolumeId,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0
+            .migrate_trusted_unstamped_mrc1(backing, expected_revision, expected_volume)
     }
 
     fn flush<'a, 'async_trait>(

@@ -641,6 +641,20 @@ type MetadataMigrationRow = (
     Option<String>,
 );
 
+#[cfg(unix)]
+type TrustedMrc1MigrationRow = (
+    Option<String>,
+    Option<String>,
+    i64,
+    Option<String>,
+    i64,
+    i64,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 const VERSION_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS mount_rs_version_state (
  id INTEGER PRIMARY KEY CHECK(id=1),
@@ -1638,6 +1652,82 @@ impl MetadataStore for SqliteMetadataStore {
         }
     }
 
+    async fn preflight_new_bound_mode(&self) -> Result<()> {
+        if !self.0.durable {
+            return Err(FsError::new(ErrorCode::Enotsup)
+                .with_syscall("preflight new bound SQLite metadata")
+                .with_message("concurrent SQLite metadata requires a file-backed database"));
+        }
+        #[cfg(not(unix))]
+        {
+            Err(incompatible_schema(
+                "MRC2 SQLite metadata requires a Unix file stamp",
+            ))
+        }
+        #[cfg(unix)]
+        {
+            let connection = self.0.lock()?;
+            let (mode, backing, revision, namespace, owner, fence, expires, dev, ino, path):
+                MetadataClaimRow = connection
+                .query_row(
+                    "SELECT write_mode, backing_id, revision, namespace, owner, fence, expires,
+                            physical_dev, physical_ino, physical_path FROM mount_rs_metadata WHERE id=1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                            row.get(7)?,
+                            row.get(8)?,
+                            row.get(9)?,
+                        ))
+                    },
+                )
+                .map_err(backend_error)?;
+            if mode.is_some() || backing.is_some() {
+                return Err(FsError::new(ErrorCode::Ebusy)
+                    .with_syscall("preflight new bound SQLite metadata"));
+            }
+            require_matching_metadata_stamp(
+                &self.0,
+                dev.as_deref(),
+                ino.as_deref(),
+                path.as_deref(),
+            )?;
+            let (head, versions, pins): (Option<String>, i64, i64) = connection
+                .query_row(
+                    "SELECT head_id, (SELECT count(*) FROM mount_rs_versions),
+                        (SELECT count(*) FROM mount_rs_version_pins)
+                 FROM mount_rs_version_state WHERE id=1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(backend_error)?;
+            if revision != 0
+                || namespace.is_some()
+                || owner.is_some()
+                || fence != 0
+                || expires != 0
+                || head.is_some()
+                || versions != 0
+                || pins != 0
+            {
+                return Err(FsError::new(ErrorCode::Ebusy)
+                    .with_syscall("preflight new bound SQLite metadata")
+                    .with_message(
+                        "a populated or fenced Legacy volume needs an offline migration",
+                    ));
+            }
+            self.0.current_file_stamp()?;
+            Ok(())
+        }
+    }
+
     async fn prepare_bound_concurrent_mode(&self, backing: ConcurrentBackingId) -> Result<()> {
         if !self.0.durable {
             return Err(FsError::new(ErrorCode::Enotsup)
@@ -2074,6 +2164,290 @@ impl MetadataStore for SqliteMetadataStore {
                 .map_err(backend_error)?;
             if changed != 1 {
                 return Err(stale());
+            }
+            self.0.current_file_stamp()?;
+            tx.commit().map_err(backend_error)?;
+            self.0.current_file_stamp()?;
+            Ok(())
+        }
+    }
+
+    async fn preflight_mrc1_to_bound_mode(&self, expected_revision: u64) -> Result<()> {
+        if !self.0.durable {
+            return Err(FsError::new(ErrorCode::Enotsup)
+                .with_syscall("preflight MRC1 SQLite metadata")
+                .with_message("concurrent SQLite metadata requires a file-backed database"));
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = expected_revision;
+            Err(incompatible_schema(
+                "MRC2 SQLite metadata requires a Unix file stamp",
+            ))
+        }
+        #[cfg(unix)]
+        {
+            let expected =
+                i64::try_from(expected_revision).map_err(|_| FsError::new(ErrorCode::Eoverflow))?;
+            let connection = self.0.lock()?;
+            let (mode, backing, revision, owner, fence, expires, dev, ino, path):
+                MetadataMigrationRow = connection
+                .query_row(
+                    "SELECT write_mode, backing_id, revision, owner, fence, expires,
+                            physical_dev, physical_ino, physical_path FROM mount_rs_metadata WHERE id=1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                            row.get(7)?,
+                            row.get(8)?,
+                        ))
+                    },
+                )
+                .map_err(backend_error)?;
+            if mode.as_deref() != Some(CONCURRENT_WRITE_MODE)
+                || backing.is_some()
+                || owner.is_some()
+                || fence != CONCURRENT_FENCE_SENTINEL
+                || expires != 0
+            {
+                return Err(
+                    FsError::new(ErrorCode::Ebusy).with_syscall("preflight MRC1 SQLite metadata")
+                );
+            }
+            if revision != expected {
+                return Err(
+                    FsError::new(ErrorCode::Eagain).with_syscall("preflight MRC1 SQLite metadata")
+                );
+            }
+            require_matching_metadata_stamp(
+                &self.0,
+                dev.as_deref(),
+                ino.as_deref(),
+                path.as_deref(),
+            )?;
+            let (head, versions, pins): (Option<String>, i64, i64) = connection
+                .query_row(
+                    "SELECT head_id, (SELECT count(*) FROM mount_rs_versions),
+                        (SELECT count(*) FROM mount_rs_version_pins)
+                 FROM mount_rs_version_state WHERE id=1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(backend_error)?;
+            if head.is_some() || versions != 0 || pins != 0 {
+                return Err(FsError::new(ErrorCode::Ebusy)
+                    .with_syscall("preflight MRC1 SQLite metadata")
+                    .with_message("version state prevents concurrent backing migration"));
+            }
+            self.0.current_file_stamp()?;
+            Ok(())
+        }
+    }
+
+    async fn preflight_trusted_unstamped_mrc1(
+        &self,
+        expected_revision: u64,
+        expected_volume: VolumeId,
+    ) -> Result<()> {
+        if !self.0.durable {
+            return Err(FsError::new(ErrorCode::Enotsup)
+                .with_syscall("preflight trusted SQLite MRC1 reenrollment"));
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (expected_revision, expected_volume);
+            Err(incompatible_schema(
+                "trusted SQLite MRC1 reenrollment requires a Unix file stamp",
+            ))
+        }
+        #[cfg(unix)]
+        {
+            let expected =
+                i64::try_from(expected_revision).map_err(|_| FsError::new(ErrorCode::Eoverflow))?;
+            let connection = self.0.lock()?;
+            let (mode, backing, revision, owner, fence, expires, volume, dev, ino, path):
+                TrustedMrc1MigrationRow = connection
+                .query_row(
+                    "SELECT write_mode, backing_id, revision, owner, fence, expires,
+                            volume_id, physical_dev, physical_ino, physical_path
+                     FROM mount_rs_metadata WHERE id=1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                            row.get(7)?,
+                            row.get(8)?,
+                            row.get(9)?,
+                        ))
+                    },
+                )
+                .map_err(backend_error)?;
+            if mode.as_deref() != Some(CONCURRENT_WRITE_MODE)
+                || backing.is_some()
+                || owner.is_some()
+                || fence != CONCURRENT_FENCE_SENTINEL
+                || expires != 0
+            {
+                return Err(FsError::new(ErrorCode::Ebusy)
+                    .with_syscall("preflight trusted SQLite MRC1 reenrollment"));
+            }
+            if revision != expected {
+                return Err(FsError::new(ErrorCode::Eagain)
+                    .with_syscall("preflight trusted SQLite MRC1 reenrollment"));
+            }
+            if volume != expected_volume.as_str() {
+                return Err(FsError::new(ErrorCode::Estale)
+                    .with_syscall("preflight trusted SQLite MRC1 reenrollment")
+                    .with_message("expected SQLite volume ID selects a different timeline"));
+            }
+            if FileStamp::from_text(dev.as_deref(), ino.as_deref())?.is_some() || path.is_some() {
+                return Err(FsError::new(ErrorCode::Enotsup)
+                    .with_syscall("preflight trusted SQLite MRC1 reenrollment")
+                    .with_message("stamped MRC1 metadata uses ordinary migration"));
+            }
+            self.0.require_concurrent_local_file("metadata")?;
+            self.0.current_auxiliary_path()?;
+            let (head, versions, pins): (Option<String>, i64, i64) = connection
+                .query_row(
+                    "SELECT head_id, (SELECT count(*) FROM mount_rs_versions),
+                        (SELECT count(*) FROM mount_rs_version_pins)
+                 FROM mount_rs_version_state WHERE id=1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(backend_error)?;
+            if head.is_some() || versions != 0 || pins != 0 {
+                return Err(FsError::new(ErrorCode::Ebusy)
+                    .with_syscall("preflight trusted SQLite MRC1 reenrollment")
+                    .with_message("version state prevents trusted reenrollment"));
+            }
+            self.0.current_file_stamp()?;
+            Ok(())
+        }
+    }
+
+    async fn migrate_trusted_unstamped_mrc1(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+        expected_volume: VolumeId,
+    ) -> Result<()> {
+        if !self.0.durable {
+            return Err(FsError::new(ErrorCode::Enotsup)
+                .with_syscall("migrate trusted SQLite MRC1 metadata"));
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (backing, expected_revision, expected_volume);
+            Err(incompatible_schema(
+                "trusted SQLite MRC1 reenrollment requires a Unix file stamp",
+            ))
+        }
+        #[cfg(unix)]
+        {
+            let expected =
+                i64::try_from(expected_revision).map_err(|_| FsError::new(ErrorCode::Eoverflow))?;
+            let mut connection = self.0.lock()?;
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(backend_error)?;
+            let (mode, stored, revision, owner, fence, expires, volume, dev, ino, path):
+                TrustedMrc1MigrationRow = tx
+                .query_row(
+                    "SELECT write_mode, backing_id, revision, owner, fence, expires,
+                            volume_id, physical_dev, physical_ino, physical_path
+                     FROM mount_rs_metadata WHERE id=1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                            row.get(7)?,
+                            row.get(8)?,
+                            row.get(9)?,
+                        ))
+                    },
+                )
+                .map_err(backend_error)?;
+            if mode.as_deref() != Some(CONCURRENT_WRITE_MODE)
+                || stored.is_some()
+                || owner.is_some()
+                || fence != CONCURRENT_FENCE_SENTINEL
+                || expires != 0
+            {
+                return Err(FsError::new(ErrorCode::Ebusy)
+                    .with_syscall("migrate trusted SQLite MRC1 metadata"));
+            }
+            if revision != expected {
+                return Err(FsError::new(ErrorCode::Eagain)
+                    .with_syscall("migrate trusted SQLite MRC1 metadata"));
+            }
+            if volume != expected_volume.as_str() {
+                return Err(FsError::new(ErrorCode::Estale)
+                    .with_syscall("migrate trusted SQLite MRC1 metadata")
+                    .with_message("expected SQLite volume ID selects a different timeline"));
+            }
+            if FileStamp::from_text(dev.as_deref(), ino.as_deref())?.is_some() || path.is_some() {
+                return Err(FsError::new(ErrorCode::Enotsup)
+                    .with_syscall("migrate trusted SQLite MRC1 metadata")
+                    .with_message("stamped MRC1 metadata uses ordinary migration"));
+            }
+            let physical = self.0.require_concurrent_local_file("metadata")?;
+            let physical_path = self.0.current_auxiliary_path()?;
+            let (head, versions, pins): (Option<String>, i64, i64) = tx
+                .query_row(
+                    "SELECT head_id, (SELECT count(*) FROM mount_rs_versions),
+                        (SELECT count(*) FROM mount_rs_version_pins)
+                 FROM mount_rs_version_state WHERE id=1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(backend_error)?;
+            if head.is_some() || versions != 0 || pins != 0 {
+                return Err(FsError::new(ErrorCode::Ebusy)
+                    .with_syscall("migrate trusted SQLite MRC1 metadata")
+                    .with_message("version state prevents trusted reenrollment"));
+            }
+            let changed = tx
+                .execute(
+                    "UPDATE mount_rs_metadata SET write_mode='MRC2', backing_id=?1,
+                        physical_dev=?2, physical_ino=?3, physical_path=?4
+                 WHERE id=1 AND write_mode='MRC1' AND backing_id IS NULL
+                   AND revision=?5 AND volume_id=?6 AND owner IS NULL
+                   AND fence=?7 AND expires=0
+                   AND physical_dev IS NULL AND physical_ino IS NULL AND physical_path IS NULL",
+                    params![
+                        backing.to_hex(),
+                        physical.dev.to_string(),
+                        physical.ino.to_string(),
+                        physical_path,
+                        expected,
+                        expected_volume.as_str(),
+                        CONCURRENT_FENCE_SENTINEL
+                    ],
+                )
+                .map_err(backend_error)?;
+            if changed != 1 {
+                return Err(FsError::new(ErrorCode::Eagain)
+                    .with_syscall("migrate trusted SQLite MRC1 metadata"));
             }
             self.0.current_file_stamp()?;
             tx.commit().map_err(backend_error)?;
@@ -3049,6 +3423,105 @@ mod tests {
         let backing = test_backing_id();
         run(store.prepare_bound_concurrent_mode(backing)).unwrap();
         backing
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_mrc1_claim_rechecks_absent_path_and_preserves_timeline() {
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        let volume: String = store
+            .0
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT volume_id FROM mount_rs_metadata WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let volume = VolumeId::new(volume).unwrap();
+        store
+            .0
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE mount_rs_metadata SET write_mode='MRC1', fence=9223372036854775807,
+                physical_dev=NULL, physical_ino=NULL, physical_path=NULL WHERE id=1",
+                [],
+            )
+            .unwrap();
+        run(store.preflight_trusted_unstamped_mrc1(0, volume.clone())).unwrap();
+        // A stamp appearing after advisory preflight must never be overwritten.
+        store
+            .0
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE mount_rs_metadata SET physical_path='2f6f6c642d70617468' WHERE id=1",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            run(store.preflight_trusted_unstamped_mrc1(0, volume.clone()))
+                .unwrap_err()
+                .code,
+            ErrorCode::Enotsup
+        );
+        assert_eq!(
+            run(store.migrate_trusted_unstamped_mrc1(test_backing_id(), 0, volume.clone()))
+                .unwrap_err()
+                .code,
+            ErrorCode::Enotsup
+        );
+        let row: (String, Option<String>, String) = store
+            .0
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT write_mode, backing_id, physical_path FROM mount_rs_metadata WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("MRC1".into(), None, "2f6f6c642d70617468".into()));
+        store
+            .0
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE mount_rs_metadata SET physical_path=NULL, revision=1 WHERE id=1",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            run(store.migrate_trusted_unstamped_mrc1(test_backing_id(), 0, volume.clone()))
+                .unwrap_err()
+                .code,
+            ErrorCode::Eagain
+        );
+        run(store.migrate_trusted_unstamped_mrc1(test_backing_id(), 1, volume.clone())).unwrap();
+        let row: (String, i64, String) = store
+            .0
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT volume_id, revision, physical_path FROM mount_rs_metadata WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                volume.as_str().into(),
+                1,
+                store.0.current_auxiliary_path().unwrap()
+            )
+        );
+        drop(store);
+        assert!(SqliteMetadataStore::open(&path).is_ok());
+        std::fs::remove_file(path).unwrap();
     }
 
     // The retired MRC1 writer API is deliberately unavailable. Seed only an

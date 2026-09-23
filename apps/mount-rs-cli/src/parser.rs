@@ -187,6 +187,11 @@ pub enum Command {
         config: PathBuf,
         expected_revision: u64,
     },
+    ReenrollSqliteConcurrentBacking {
+        config: PathBuf,
+        expected_revision: u64,
+        expected_volume_id: String,
+    },
     SdkSelfTest {
         config: Option<PathBuf>,
         reopen: bool,
@@ -338,6 +343,78 @@ where
             return Ok(Command::MigrateConcurrentBacking {
                 config,
                 expected_revision,
+            });
+        }
+        if first_argument && raw == "reenroll-sqlite-concurrent-backing" {
+            let mut config_path = None;
+            let mut expected_revision = None;
+            let mut expected_volume_id = None;
+            let mut assertion = false;
+            while let Some(raw) = args.next() {
+                let raw = raw.to_string_lossy().into_owned();
+                if raw == "--help" || raw == "-h" {
+                    return Ok(Command::Help);
+                }
+                let Some(name) = raw.strip_prefix("--") else {
+                    return Err(ParseError::new(
+                        "reenroll-sqlite-concurrent-backing accepts only its required options",
+                    ));
+                };
+                let (name, inline_value) = match name.split_once('=') {
+                    Some((name, value)) => (name, Some(value.to_owned())),
+                    None => (name, None),
+                };
+                match name {
+                    "config" if config_path.is_none() => {
+                        config_path =
+                            Some(PathBuf::from(value("config", inline_value, &mut args)?));
+                    }
+                    "expected-revision" if expected_revision.is_none() => {
+                        let raw = value("expected-revision", inline_value, &mut args)?;
+                        expected_revision = Some(raw.parse::<u64>().map_err(|_| {
+                            ParseError::new(
+                                "--expected-revision must be an unsigned 64-bit integer",
+                            )
+                        })?);
+                    }
+                    "expected-volume-id" if expected_volume_id.is_none() => {
+                        expected_volume_id =
+                            Some(value("expected-volume-id", inline_value, &mut args)?);
+                    }
+                    "assert-all-writers-stopped-and-sole-metadata-copy"
+                        if !assertion && inline_value.is_none() =>
+                    {
+                        assertion = true;
+                    }
+                    _ => {
+                        return Err(ParseError::new(
+                            "reenroll-sqlite-concurrent-backing has an unknown or repeated option",
+                        ));
+                    }
+                }
+            }
+            let config = config_path.ok_or_else(|| {
+                ParseError::new("reenroll-sqlite-concurrent-backing requires --config <path>")
+            })?;
+            let expected_revision = expected_revision.ok_or_else(|| {
+                ParseError::new(
+                    "reenroll-sqlite-concurrent-backing requires --expected-revision <u64>",
+                )
+            })?;
+            let expected_volume_id = expected_volume_id.ok_or_else(|| {
+                ParseError::new(
+                    "reenroll-sqlite-concurrent-backing requires --expected-volume-id <id>",
+                )
+            })?;
+            if !assertion {
+                return Err(ParseError::new(
+                    "reenroll-sqlite-concurrent-backing requires --assert-all-writers-stopped-and-sole-metadata-copy",
+                ));
+            }
+            return Ok(Command::ReenrollSqliteConcurrentBacking {
+                config,
+                expected_revision,
+                expected_volume_id,
             });
         }
         if first_argument && raw == "sdk-self-test" {
@@ -701,7 +778,7 @@ pub fn help_text(color: Color) -> String {
     );
     let output = output.replace(
         "       mount-rs sdk-self-test [--config <path>] [--reopen]",
-        "       mount-rs sdk-self-test [--config <path>] [--reopen]\n       mount-rs migrate-concurrent-backing --config <path> --expected-revision <u64>",
+        "       mount-rs sdk-self-test [--config <path>] [--reopen]\n       mount-rs migrate-concurrent-backing --config <path> --expected-revision <u64>\n       mount-rs reenroll-sqlite-concurrent-backing --config <path> --expected-revision <u64> --expected-volume-id <id> --assert-all-writers-stopped-and-sole-metadata-copy",
     );
     let output = output.replace(
         "      --sqlite-single-host",
@@ -886,6 +963,48 @@ mod tests {
                 parse_args(invalid.iter().copied()).is_err(),
                 "accepted {invalid:?}"
             );
+        }
+    }
+
+    #[test]
+    fn reenrollment_requires_the_operator_assertion_and_expected_timeline() {
+        let valid = [
+            "mount-rs",
+            "reenroll-sqlite-concurrent-backing",
+            "--config",
+            "shared.json",
+            "--expected-revision",
+            "7",
+            "--expected-volume-id",
+            "selected-volume",
+            "--assert-all-writers-stopped-and-sole-metadata-copy",
+        ];
+        assert_eq!(
+            parse(&valid),
+            Command::ReenrollSqliteConcurrentBacking {
+                config: PathBuf::from("shared.json"),
+                expected_revision: 7,
+                expected_volume_id: "selected-volume".into(),
+            }
+        );
+        for (start, count) in [(2, 2), (4, 2), (6, 2), (8, 1)] {
+            let mut incomplete = valid.to_vec();
+            incomplete.drain(start..start + count);
+            assert!(
+                parse_args(incomplete).is_err(),
+                "accepted missing option at {start}"
+            );
+        }
+        for extra in [
+            "--mountpoint=/tmp/view",
+            "--config=other.json",
+            "--expected-revision=8",
+            "--expected-volume-id=other-volume",
+            "--assert-all-writers-stopped-and-sole-metadata-copy=false",
+        ] {
+            let mut invalid = valid.to_vec();
+            invalid.push(extra);
+            assert!(parse_args(invalid).is_err(), "accepted {extra}");
         }
     }
 

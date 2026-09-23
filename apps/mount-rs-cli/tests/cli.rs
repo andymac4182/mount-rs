@@ -2,6 +2,10 @@ use mount_rs_cli::color::Color;
 use mount_rs_cli::parse_args;
 use mount_rs_cli::parser::{CliOptions, Command, DriverChoice, TransportChoice, help_text};
 #[cfg(unix)]
+use mount_rs_core::Loopback;
+#[cfg(unix)]
+use mount_rs_sdk::{Filesystem, SplitOptions, StoreConfig};
+#[cfg(unix)]
 use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
 use std::fs;
 use std::process::Command as ProcessCommand;
@@ -387,7 +391,10 @@ fn migrate_concurrent_backing_cli_rejects_historical_unstamped_sqlite_metadata()
             row.get(0)
         })
         .unwrap();
-    println!("HISTORICAL_UNSTAMPED_SQLITE_MIGRATION_BLOCK_MARKERS={block_markers}");
+    assert_eq!(
+        block_markers, 0,
+        "rejected MRC1 migration claimed a block marker"
+    );
     assert!(
         mountpoint.is_dir(),
         "path checks prepare the view before storage opens"
@@ -396,6 +403,606 @@ fn migrate_concurrent_backing_cli_rejects_historical_unstamped_sqlite_metadata()
         fs::read_dir(&mountpoint).unwrap().next().is_none(),
         "failed migration leaves an empty prepared view"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_trusted_reenrollment_of_raw_mrc1_sqlite_preserves_volume_and_rejects_copy() {
+    let scope = tempfile::TempDir::new().expect("own historical SQLite recovery fixture");
+    let mountpoint = scope.path().join("view");
+    let metadata = scope.path().join("historical-metadata.sqlite");
+    let copied_metadata = scope.path().join("copied-metadata.sqlite");
+    let blocks = scope.path().join("blocks.sqlite");
+    let config_path = scope.path().join("shared.json");
+    let connection = rusqlite::Connection::open(&metadata).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE mount_rs_metadata (
+            id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL,
+            namespace TEXT, owner TEXT, fence INTEGER NOT NULL, expires INTEGER NOT NULL,
+            write_mode TEXT, backing_id TEXT
+         );
+         INSERT INTO mount_rs_metadata VALUES(1,0,NULL,NULL,9223372036854775807,0,'MRC1',NULL);",
+        )
+        .unwrap();
+    drop(connection);
+    drop(SqliteMetadataStore::open(&metadata).expect("upgrade old schema without trusting stamp"));
+    let volume_id: String = rusqlite::Connection::open(&metadata)
+        .unwrap()
+        .query_row(
+            "SELECT volume_id FROM mount_rs_metadata WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    fs::copy(&metadata, &copied_metadata).unwrap();
+    let config = serde_json::json!({
+        "version": 1,
+        "mountpoint": mountpoint,
+        "driver": {"kind": "splitstore", "storage": {
+            "concurrent_writes": true,
+            "metadata": {"kind": "sqlite", "path": metadata},
+            "blocks": {"kind": "sqlite", "path": blocks}
+        }}
+    });
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    for (supplied_volume, supplied_revision) in [
+        (format!("{volume_id}-wrong"), "0"),
+        (volume_id.clone(), "1"),
+    ] {
+        let rejected = ProcessCommand::new(env!("CARGO_BIN_EXE_mount-rs"))
+            .arg("reenroll-sqlite-concurrent-backing")
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--expected-revision")
+            .arg(supplied_revision)
+            .arg("--expected-volume-id")
+            .arg(&supplied_volume)
+            .arg("--assert-all-writers-stopped-and-sole-metadata-copy")
+            .output()
+            .unwrap();
+        assert!(
+            !rejected.status.success(),
+            "wrong volume or revision recovered old metadata: stdout={} stderr={}",
+            String::from_utf8_lossy(&rejected.stdout),
+            String::from_utf8_lossy(&rejected.stderr)
+        );
+        let claimed: i64 = rusqlite::Connection::open(&blocks)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM mount_rs_block_authority WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(claimed, 0, "wrong expectation claimed block authority");
+    }
+    let missing_assertion = ProcessCommand::new(env!("CARGO_BIN_EXE_mount-rs"))
+        .arg("reenroll-sqlite-concurrent-backing")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--expected-revision")
+        .arg("0")
+        .arg("--expected-volume-id")
+        .arg(&volume_id)
+        .output()
+        .unwrap();
+    assert_eq!(missing_assertion.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&missing_assertion.stderr)
+            .contains("--assert-all-writers-stopped-and-sole-metadata-copy")
+    );
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_mount-rs"))
+        .arg("reenroll-sqlite-concurrent-backing")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--expected-revision")
+        .arg("0")
+        .arg("--expected-volume-id")
+        .arg(&volume_id)
+        .arg("--assert-all-writers-stopped-and-sole-metadata-copy")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "trusted old MRC1 recovery failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(mountpoint.is_dir());
+    assert_eq!(fs::read_dir(&mountpoint).unwrap().count(), 0);
+    let row: (String, String, String, String, String) = rusqlite::Connection::open(&metadata)
+        .unwrap()
+        .query_row(
+            "SELECT write_mode, volume_id, physical_dev, physical_ino, physical_path
+             FROM mount_rs_metadata WHERE id=1",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(row.0, "MRC2");
+    assert_eq!(row.1, volume_id);
+    assert!(!row.2.is_empty() && !row.3.is_empty() && !row.4.is_empty());
+    assert!(SqliteMetadataStore::open(&metadata).is_ok());
+    assert!(
+        SqliteMetadataStore::open(&copied_metadata).is_ok(),
+        "unstamped sibling remains a Legacy/MRC1 file requiring explicit trust"
+    );
+    let after_conversion_copy = scope.path().join("claimed-copy.sqlite");
+    fs::copy(&metadata, &after_conversion_copy).unwrap();
+    assert!(
+        SqliteMetadataStore::open(&after_conversion_copy).is_err(),
+        "claimed MRC2 metadata copy must fail its physical file stamp"
+    );
+}
+
+#[cfg(unix)]
+fn offline_transition_rejects_metadata_inside_configured_mountpoint(trusted_unstamped: bool) {
+    let scope = tempfile::TempDir::new().unwrap();
+    let view = scope.path().join("view");
+    fs::create_dir(&view).unwrap();
+    let metadata = view.join("metadata.sqlite");
+    let blocks = scope.path().join("blocks.sqlite");
+    let config_path = scope.path().join("shared.json");
+    if trusted_unstamped {
+        let connection = rusqlite::Connection::open(&metadata).unwrap();
+        connection.execute_batch(
+            "CREATE TABLE mount_rs_metadata (
+                id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL,
+                namespace TEXT, owner TEXT, fence INTEGER NOT NULL, expires INTEGER NOT NULL,
+                write_mode TEXT, backing_id TEXT
+             );
+             INSERT INTO mount_rs_metadata VALUES(1,0,NULL,NULL,9223372036854775807,0,'MRC1',NULL);"
+        ).unwrap();
+        drop(connection);
+        drop(SqliteMetadataStore::open(&metadata).unwrap());
+    } else {
+        drop(SqliteMetadataStore::open(&metadata).unwrap());
+        assert_eq!(
+            rusqlite::Connection::open(&metadata)
+                .unwrap()
+                .execute(
+                    "UPDATE mount_rs_metadata SET write_mode='MRC1', fence=9223372036854775807
+             WHERE id=1",
+                    [],
+                )
+                .unwrap(),
+            1
+        );
+    }
+    let volume_id: String = rusqlite::Connection::open(&metadata)
+        .unwrap()
+        .query_row(
+            "SELECT volume_id FROM mount_rs_metadata WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let config = serde_json::json!({
+        "version": 1,
+        "mountpoint": view,
+        "driver": {"kind": "splitstore", "storage": {
+            "concurrent_writes": true,
+            "metadata": {"kind": "sqlite", "path": metadata},
+            "blocks": {"kind": "sqlite", "path": blocks}
+        }}
+    });
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let mut command = ProcessCommand::new(env!("CARGO_BIN_EXE_mount-rs"));
+    command
+        .arg(if trusted_unstamped {
+            "reenroll-sqlite-concurrent-backing"
+        } else {
+            "migrate-concurrent-backing"
+        })
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--expected-revision")
+        .arg("0");
+    if trusted_unstamped {
+        command
+            .arg("--expected-volume-id")
+            .arg(&volume_id)
+            .arg("--assert-all-writers-stopped-and-sole-metadata-copy");
+    }
+    let output = command.output().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "offline transition enrolled backing inside mountpoint: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("outside every mountpoint"));
+    let (mode, backing): (String, Option<String>) = rusqlite::Connection::open(&metadata)
+        .unwrap()
+        .query_row(
+            "SELECT write_mode, backing_id FROM mount_rs_metadata WHERE id=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((mode.as_str(), backing), ("MRC1", None));
+    assert!(
+        !blocks.exists(),
+        "rejected command opened the block backing"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn trusted_reenrollment_rejects_unstamped_sqlite_metadata_under_mountpoint_before_claim() {
+    offline_transition_rejects_metadata_inside_configured_mountpoint(true);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn trusted_reenrollment_rejects_absent_apfs_mountpoint_aliases_before_provider_open() {
+    for (view_name, backing_parent) in [
+        ("mnt", "MNT"),
+        ("caf\u{e9}", "cafe\u{301}"),
+        ("\u{df}", "ss"),
+    ] {
+        let scope = tempfile::TempDir::new().unwrap();
+        let probe = scope.path().join(view_name);
+        fs::create_dir(&probe).unwrap();
+        assert!(
+            scope.path().join(backing_parent).exists(),
+            "this regression needs APFS-equivalent names: {view_name}, {backing_parent}"
+        );
+        fs::remove_dir(&probe).unwrap();
+        let metadata = scope.path().join("metadata.sqlite");
+        let blocks = scope.path().join(backing_parent).join("blocks.sqlite");
+        let mountpoint = scope.path().join(view_name);
+        let config_path = scope.path().join("shared.json");
+        let connection = rusqlite::Connection::open(&metadata).unwrap();
+        connection.execute_batch(
+            "CREATE TABLE mount_rs_metadata (
+                id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL,
+                namespace TEXT, owner TEXT, fence INTEGER NOT NULL, expires INTEGER NOT NULL,
+                write_mode TEXT, backing_id TEXT
+             );
+             INSERT INTO mount_rs_metadata VALUES(1,0,NULL,NULL,9223372036854775807,0,'MRC1',NULL);"
+        ).unwrap();
+        drop(connection);
+        drop(SqliteMetadataStore::open(&metadata).unwrap());
+        let volume_id: String = rusqlite::Connection::open(&metadata)
+            .unwrap()
+            .query_row(
+                "SELECT volume_id FROM mount_rs_metadata WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let config = serde_json::json!({
+            "version": 1,
+            "mountpoint": mountpoint,
+            "driver": {"kind": "splitstore", "storage": {
+                "concurrent_writes": true,
+                "metadata": {"kind": "sqlite", "path": metadata},
+                "blocks": {"kind": "sqlite", "path": blocks}
+            }}
+        });
+        fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+        assert!(!mountpoint.exists());
+        assert!(!blocks.exists());
+        let output = ProcessCommand::new(env!("CARGO_BIN_EXE_mount-rs"))
+            .arg("reenroll-sqlite-concurrent-backing")
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--expected-revision")
+            .arg("0")
+            .arg("--expected-volume-id")
+            .arg(&volume_id)
+            .arg("--assert-all-writers-stopped-and-sole-metadata-copy")
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "trusted reenrollment enrolled APFS alias: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("outside every mountpoint"));
+        assert!(mountpoint.is_dir());
+        assert_eq!(fs::read_dir(&mountpoint).unwrap().count(), 0);
+        assert!(!blocks.exists(), "path rejection opened the block provider");
+        let row: (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = rusqlite::Connection::open(&metadata)
+            .unwrap()
+            .query_row(
+                "SELECT write_mode, backing_id, physical_dev, physical_ino, physical_path
+                 FROM mount_rs_metadata WHERE id=1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(row, ("MRC1".into(), None, None, None, None));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn sdk_self_test_rejects_historical_unstamped_legacy_metadata_without_claiming_blocks() {
+    let scope = tempfile::TempDir::new().expect("own historical SQLite enrollment fixture");
+    let metadata = scope.path().join("historical-metadata.sqlite");
+    let blocks = scope.path().join("blocks.sqlite");
+    let config_path = scope.path().join("shared.json");
+    let connection = rusqlite::Connection::open(&metadata).expect("create old metadata file");
+    connection
+        .execute_batch(
+            "CREATE TABLE mount_rs_metadata (
+                id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL,
+                namespace TEXT, owner TEXT, fence INTEGER NOT NULL, expires INTEGER NOT NULL,
+                write_mode TEXT, backing_id TEXT
+             );
+             INSERT INTO mount_rs_metadata VALUES(1,0,NULL,NULL,0,0,NULL,NULL);",
+        )
+        .expect("seed an unstamped historical Legacy row");
+    drop(connection);
+    let config = serde_json::json!({
+        "version": 1,
+        "driver": {
+            "kind": "splitstore",
+            "storage": {
+                "concurrent_writes": true,
+                "metadata": {"kind": "sqlite", "path": metadata},
+                "blocks": {"kind": "sqlite", "path": blocks}
+            }
+        }
+    });
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_mount-rs"))
+        .arg("sdk-self-test")
+        .arg("--config")
+        .arg(&config_path)
+        .output()
+        .expect("run historical concurrent enrollment probe");
+    assert!(
+        !output.status.success(),
+        "historical unstamped metadata was enrolled: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let claimed: i64 = rusqlite::Connection::open(&blocks)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM mount_rs_block_authority WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        claimed, 0,
+        "rejected Legacy enrollment claimed a block marker"
+    );
+}
+
+#[cfg(unix)]
+async fn migrate_mrc1_after_checking_referenced_blocks(
+    block_sql: Option<&str>,
+    trusted_unstamped: bool,
+) {
+    let scope = tempfile::TempDir::new().expect("own SQLite migration block fixture");
+    let mountpoint = scope.path().join("view");
+    let metadata = scope.path().join("metadata.sqlite");
+    let blocks = scope.path().join("blocks.sqlite");
+    let config_path = scope.path().join("shared.json");
+    let mut initial = SplitOptions::memory("migration-block-fixture", 4096);
+    initial.metadata = StoreConfig::Sqlite {
+        path: metadata.clone(),
+    };
+    initial.blocks = StoreConfig::Sqlite {
+        path: blocks.clone(),
+    };
+    let filesystem = Filesystem::split(initial.clone()).await.unwrap();
+    let view = Loopback::from_arc(filesystem.driver());
+    view.write_file("/retained.bin", b"migration referenced bytes")
+        .await
+        .unwrap();
+    view.syncfs().await.unwrap();
+    filesystem.shutdown().await.unwrap();
+    let connection = rusqlite::Connection::open(&metadata).unwrap();
+    let revision: i64 = connection
+        .query_row(
+            "SELECT revision FROM mount_rs_metadata WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(revision > 0);
+    let volume_id: String = connection
+        .query_row(
+            "SELECT volume_id FROM mount_rs_metadata WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let namespace: String = connection
+        .query_row(
+            "SELECT namespace FROM mount_rs_metadata WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let stamps = if trusted_unstamped {
+        ", physical_dev=NULL, physical_ino=NULL, physical_path=NULL"
+    } else {
+        ""
+    };
+    assert_eq!(
+        connection
+            .execute(
+                &format!(
+                    "UPDATE mount_rs_metadata SET write_mode='MRC1', owner=NULL,
+                    fence=9223372036854775807, expires=0{stamps} WHERE id=1"
+                ),
+                [],
+            )
+            .unwrap(),
+        1
+    );
+    drop(connection);
+    let connection = rusqlite::Connection::open(&blocks).unwrap();
+    let referenced_blocks: i64 = connection
+        .query_row("SELECT count(*) FROM mount_rs_blocks", [], |row| row.get(0))
+        .unwrap();
+    assert!(
+        referenced_blocks > 0,
+        "self-test must persist referenced file blocks"
+    );
+    if let Some(block_sql) = block_sql {
+        connection.execute(block_sql, []).unwrap();
+    }
+    drop(connection);
+
+    let migrating = serde_json::json!({
+        "version": 1,
+        "mountpoint": mountpoint,
+        "driver": {
+            "kind": "splitstore",
+            "storage": {
+                "concurrent_writes": true,
+                "metadata": {"kind": "sqlite", "path": metadata},
+                "blocks": {"kind": "sqlite", "path": blocks}
+            }
+        }
+    });
+    fs::write(&config_path, serde_json::to_vec(&migrating).unwrap()).unwrap();
+    let mut command = ProcessCommand::new(env!("CARGO_BIN_EXE_mount-rs"));
+    command
+        .arg(if trusted_unstamped {
+            "reenroll-sqlite-concurrent-backing"
+        } else {
+            "migrate-concurrent-backing"
+        })
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--expected-revision")
+        .arg(revision.to_string());
+    if trusted_unstamped {
+        command
+            .arg("--expected-volume-id")
+            .arg(&volume_id)
+            .arg("--assert-all-writers-stopped-and-sole-metadata-copy");
+    }
+    let output = command.output().expect("verify migration block scan");
+    if block_sql.is_none() {
+        assert!(
+            output.status.success(),
+            "trusted populated reenrollment failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let row: (String, i64, String, String) = rusqlite::Connection::open(&metadata).unwrap()
+            .query_row("SELECT write_mode, revision, volume_id, namespace FROM mount_rs_metadata WHERE id=1", [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap();
+        assert_eq!(row, ("MRC2".into(), revision, volume_id, namespace));
+        initial.concurrent_writes = true;
+        let reopened = Filesystem::split(initial).await.unwrap();
+        assert_eq!(
+            Loopback::from_arc(reopened.driver())
+                .read_file("/retained.bin")
+                .await
+                .unwrap(),
+            b"migration referenced bytes"
+        );
+        reopened.shutdown().await.unwrap();
+        return;
+    }
+    assert!(
+        !output.status.success(),
+        "invalid block was migrated: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let claimed: i64 = rusqlite::Connection::open(&blocks)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM mount_rs_block_authority WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(claimed, 0, "invalid migration block claimed authority");
+    if trusted_unstamped {
+        let row: (String, Option<String>, Option<String>, Option<String>) =
+            rusqlite::Connection::open(&metadata)
+                .unwrap()
+                .query_row(
+                    "SELECT write_mode, physical_dev, physical_ino, physical_path
+                     FROM mount_rs_metadata WHERE id=1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .unwrap();
+        assert_eq!(
+            row,
+            ("MRC1".to_owned(), None, None, None),
+            "failed trusted block scan stamped metadata"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn missing_mrc1_block_fails_before_claiming_backing() {
+    migrate_mrc1_after_checking_referenced_blocks(Some("DELETE FROM mount_rs_blocks"), false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn short_mrc1_block_fails_before_claiming_backing() {
+    migrate_mrc1_after_checking_referenced_blocks(
+        Some("UPDATE mount_rs_blocks SET bytes=x'00'"),
+        false,
+    )
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn trusted_unstamped_mrc1_missing_block_fails_before_stamp_or_marker() {
+    migrate_mrc1_after_checking_referenced_blocks(Some("DELETE FROM mount_rs_blocks"), true).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn trusted_unstamped_mrc1_short_block_fails_before_stamp_or_marker() {
+    migrate_mrc1_after_checking_referenced_blocks(
+        Some("UPDATE mount_rs_blocks SET bytes=x'00'"),
+        true,
+    )
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn trusted_unstamped_mrc1_preserves_populated_namespace_and_reopens_exact_bytes() {
+    migrate_mrc1_after_checking_referenced_blocks(None, true).await;
 }
 
 #[test]

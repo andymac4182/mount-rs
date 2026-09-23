@@ -790,6 +790,32 @@ impl MetadataStore for PgliteMetadataStore {
         }
     }
 
+    async fn preflight_new_bound_mode(&self) -> Result<()> {
+        let client = self.0.lock_client().await?;
+        let row = client
+            .as_ref()
+            .ok_or_else(connection_closed)?
+            .query_typed_opt(
+                "SELECT write_mode IS NULL AND backing_id IS NULL AND revision=0
+                        AND namespace IS NULL AND owner IS NULL AND fence=0 AND expires=0
+                        AND EXISTS (SELECT 1 FROM mount_rs_version_state
+                                    WHERE volume_key=$1 AND head_id IS NULL
+                                      AND next_sequence=1 AND next_read_fence=0)
+                        AND NOT EXISTS (SELECT 1 FROM mount_rs_versions WHERE volume_key=$1)
+                        AND NOT EXISTS (SELECT 1 FROM mount_rs_version_pins WHERE volume_key=$1)
+                 FROM mount_rs_metadata WHERE volume_key=$1",
+                &[(&self.0.volume_key, Type::TEXT)],
+            )
+            .await
+            .map_err(postgres_error)?
+            .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
+        if row.get::<_, bool>(0) {
+            Ok(())
+        } else {
+            Err(FsError::new(ErrorCode::Ebusy).with_syscall("preflight new bound PGlite metadata"))
+        }
+    }
+
     async fn prepare_bound_concurrent_mode(&self, backing: ConcurrentBackingId) -> Result<()> {
         let client = self.0.lock_client().await?;
         let backing_text = backing.to_hex();
@@ -1149,6 +1175,44 @@ impl MetadataStore for PgliteMetadataStore {
             );
         }
         Err(FsError::new(ErrorCode::Ebusy).with_syscall("migrate concurrent PGlite mode"))
+    }
+
+    async fn preflight_mrc1_to_bound_mode(&self, expected_revision: u64) -> Result<()> {
+        let expected =
+            i64::try_from(expected_revision).map_err(|_| FsError::new(ErrorCode::Eoverflow))?;
+        let client = self.0.lock_client().await?;
+        let row = client
+            .as_ref()
+            .ok_or_else(connection_closed)?
+            .query_typed_opt(
+                "SELECT revision,
+                        write_mode=$2 AND backing_id IS NULL AND owner IS NULL
+                        AND fence=$3 AND expires=0
+                        AND EXISTS (SELECT 1 FROM mount_rs_version_state
+                                    WHERE volume_key=$1 AND head_id IS NULL
+                                      AND next_sequence=1 AND next_read_fence=0)
+                        AND NOT EXISTS (SELECT 1 FROM mount_rs_versions WHERE volume_key=$1)
+                        AND NOT EXISTS (SELECT 1 FROM mount_rs_version_pins WHERE volume_key=$1)
+                 FROM mount_rs_metadata WHERE volume_key=$1",
+                &[
+                    (&self.0.volume_key, Type::TEXT),
+                    (&CONCURRENT_WRITE_MODE, Type::TEXT),
+                    (&CONCURRENT_FENCE_SENTINEL, Type::INT8),
+                ],
+            )
+            .await
+            .map_err(postgres_error)?
+            .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
+        if row.get::<_, i64>(0) != expected {
+            return Err(
+                FsError::new(ErrorCode::Eagain).with_syscall("preflight MRC1 PGlite metadata")
+            );
+        }
+        if row.get::<_, bool>(1) {
+            Ok(())
+        } else {
+            Err(FsError::new(ErrorCode::Ebusy).with_syscall("preflight MRC1 PGlite metadata"))
+        }
     }
 
     async fn flush(&self) -> Result<()> {
@@ -3745,6 +3809,8 @@ mod tests {
                 PgliteBlockStore::connect_with_key(&connection_string, "simultaneous-open")
                     .await
                     .unwrap();
+            first.preflight_new_bound_mode().await.unwrap();
+            second.preflight_new_bound_mode().await.unwrap();
             let backing = blocks.prepare_concurrent_backing().await.unwrap();
             let conversion = tokio::spawn({
                 let first = first.clone();
@@ -4239,6 +4305,14 @@ mod tests {
                 metadata.concurrent_mode_state().await.unwrap(),
                 ConcurrentModeState::Mrc1
             );
+            assert!(
+                metadata
+                    .preflight_mrc1_to_bound_mode(1)
+                    .await
+                    .unwrap_err()
+                    .is(ErrorCode::Eagain)
+            );
+            metadata.preflight_mrc1_to_bound_mode(0).await.unwrap();
             let id = blocks.prepare_concurrent_backing().await.unwrap();
             assert!(
                 metadata

@@ -2350,6 +2350,44 @@ impl MetadataStore for FoundationDbMetadataStore {
             .await
     }
 
+    async fn preflight_new_bound_mode(&self) -> Result<()> {
+        let inner = Arc::clone(&self.0);
+        let keyspace = Keyspace::new(&inner.prefix);
+        let mode_key = keyspace.write_mode();
+        let backing_key = keyspace.metadata_backing();
+        let lease_key = keyspace.lease();
+        let fence_key = keyspace.fence();
+        let limits = inner.limits;
+        inner
+            .transact_idempotent((), move |trx, _| {
+                let mode_key = mode_key.clone();
+                let backing_key = backing_key.clone();
+                let lease_key = lease_key.clone();
+                let fence_key = fence_key.clone();
+                Box::pin(async move {
+                    configure_transaction(trx, limits)?;
+                    let (mode, backing, lease, fence) = futures_util::future::try_join4(
+                        get_owned(trx, &mode_key),
+                        get_owned(trx, &backing_key),
+                        get_owned(trx, &lease_key),
+                        get_owned(trx, &fence_key),
+                    )
+                    .await?;
+                    if decode_concurrent_mode_state(mode, backing)? != ConcurrentModeState::Legacy
+                        || lease.is_some()
+                        || fence.is_some()
+                    {
+                        return Err(TxnError::Fs(
+                            FsError::new(ErrorCode::Ebusy)
+                                .with_syscall("preflight new bound FoundationDB metadata"),
+                        ));
+                    }
+                    Ok(())
+                })
+            })
+            .await
+    }
+
     async fn prepare_bound_concurrent_mode(&self, backing: ConcurrentBackingId) -> Result<()> {
         let inner = Arc::clone(&self.0);
         let keyspace = Keyspace::new(&inner.prefix);
@@ -2850,6 +2888,56 @@ impl MetadataStore for FoundationDbMetadataStore {
                     // namespace chunks, revision, and fence unchanged.
                     trx.set(&mode_key, BOUND_CONCURRENT_WRITE_MODE);
                     trx.set(&backing_key, &backing.as_bytes());
+                    Ok(())
+                })
+            })
+            .await
+    }
+
+    async fn preflight_mrc1_to_bound_mode(&self, expected_revision: u64) -> Result<()> {
+        let inner = Arc::clone(&self.0);
+        let keyspace = Keyspace::new(&inner.prefix);
+        let mode_key = keyspace.write_mode();
+        let backing_key = keyspace.metadata_backing();
+        let lease_key = keyspace.lease();
+        let fence_key = keyspace.fence();
+        let manifest_key = keyspace.manifest();
+        let limits = inner.limits;
+        inner
+            .transact_idempotent((), move |trx, _| {
+                let mode_key = mode_key.clone();
+                let backing_key = backing_key.clone();
+                let lease_key = lease_key.clone();
+                let fence_key = fence_key.clone();
+                let manifest_key = manifest_key.clone();
+                Box::pin(async move {
+                    configure_transaction(trx, limits)?;
+                    let (mode, backing, lease, fence, manifest) = futures_util::future::try_join5(
+                        get_owned(trx, &mode_key),
+                        get_owned(trx, &backing_key),
+                        get_owned(trx, &lease_key),
+                        get_owned(trx, &fence_key),
+                        get_owned(trx, &manifest_key),
+                    )
+                    .await?;
+                    if decode_concurrent_mode_state(mode, backing)? != ConcurrentModeState::Mrc1
+                        || lease.is_some()
+                        || fence.as_deref() != Some(CONCURRENT_FENCE_SENTINEL)
+                    {
+                        return Err(TxnError::Fs(
+                            FsError::new(ErrorCode::Ebusy)
+                                .with_syscall("preflight MRC1 FoundationDB metadata"),
+                        ));
+                    }
+                    let manifest = manifest
+                        .map(|raw| decode_manifest(&raw).map_err(TxnError::Fs))
+                        .transpose()?;
+                    if manifest.map_or(0, |value| value.revision) != expected_revision {
+                        return Err(TxnError::Fs(
+                            FsError::new(ErrorCode::Eagain)
+                                .with_syscall("preflight MRC1 FoundationDB metadata"),
+                        ));
+                    }
                     Ok(())
                 })
             })
