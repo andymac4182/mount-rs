@@ -14,6 +14,7 @@ import { createHash } from "node:crypto"
 import { createRequire } from "node:module"
 import { fileURLToPath } from "node:url"
 import { dirname, resolve } from "node:path"
+import { realpathSync } from "node:fs"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { execFileSync, spawnSync } from "node:child_process"
 import { computeStats } from "../storage/stats.mjs"
@@ -380,12 +381,18 @@ function sharedCargoTargetDir() {
   if (process.env.CARGO_TARGET_DIR) return process.env.CARGO_TARGET_DIR
   if (process.env.MOUNT_RS_CARGO_TARGET_DIR) return process.env.MOUNT_RS_CARGO_TARGET_DIR
   const userHome = process.env.HOME
-  if (!userHome) return undefined
+  if (!userHome) throw new Error("HOME must be set for the default Cargo target")
   const cacheRoot =
     process.platform === "darwin"
       ? resolve(userHome, "Library", "Caches")
       : process.env.XDG_CACHE_HOME || resolve(userHome, ".cache")
-  return resolve(cacheRoot, "mount-rs", "cargo-target")
+  const checkoutRoot = realpathSync(repoRoot)
+  const checkoutKey = execFileSync("git", ["hash-object", "--stdin"], {
+    cwd: checkoutRoot,
+    input: `${checkoutRoot}\n`,
+    encoding: "utf8",
+  }).trim()
+  return resolve(cacheRoot, "mount-rs", "cargo-target", checkoutKey)
 }
 
 function runRust(config, rustTimeoutMs) {

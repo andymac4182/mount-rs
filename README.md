@@ -112,20 +112,24 @@ provider/consumer integration matrix before native transport tests are run.
 
 ## Development
 
-Use the repository wrapper for normal Cargo commands so all mount-rs
-worktrees share one per-user target directory instead of rebuilding into
-separate `target/` trees:
+Use the repository wrapper for normal Cargo commands. Each checkout or
+worktree gets its own target directory under the per-user cache:
 
 ```sh
 ./scripts/cargo-shared test --workspace --all-targets --locked
 ./scripts/cargo-shared clippy --workspace --all-targets --locked -- -D warnings
 ```
 
-The default is `~/Library/Caches/mount-rs/cargo-target` on macOS and
-`$XDG_CACHE_HOME/mount-rs/cargo-target` (or `~/.cache/mount-rs/cargo-target`)
-elsewhere. Set `MOUNT_RS_CARGO_TARGET_DIR` to choose a different shared
-location. An explicit `CARGO_TARGET_DIR` still wins for gates that need an
-isolated target.
+The default is `~/Library/Caches/mount-rs/cargo-target/<checkout-hash>` on
+macOS and `$XDG_CACHE_HOME/mount-rs/cargo-target/<checkout-hash>` (or
+`~/.cache/mount-rs/cargo-target/<checkout-hash>`) elsewhere. The hash comes
+from the canonical checkout root, so symlink aliases reuse the same target.
+The dispatch benchmark uses this layout too.
+
+An explicit `CARGO_TARGET_DIR` wins; `MOUNT_RS_CARGO_TARGET_DIR` supplies the
+target when `CARGO_TARGET_DIR` is unset or empty. Give each worktree its own
+override too: sharing an override can select a binary built by another
+branch. The wrapper leaves the old shared cache in place.
 
 ```sh
 ./scripts/cargo-shared fmt --all -- --check
