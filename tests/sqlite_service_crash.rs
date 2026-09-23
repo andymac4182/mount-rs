@@ -37,9 +37,11 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(target_os = "linux")]
 const SERVICE_EXIT_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(target_os = "linux")]
-// The real FUSE/SQLite recovery gate is functional, and shared CI runners
-// have measured more than twice the normal latency in earlier native steps.
-const PYTHON_TIMEOUT: Duration = Duration::from_secs(60);
+// A loaded CI runner measured DELETE seeds at 21-25 s versus under 2 s on
+// its passing same-SHA PR peer. WAL seeds take about 7 s on that peer, so
+// keep a bounded deadline that covers this observed >10x native I/O swing.
+// Live stage checkpoints identify the SQLite call if this bound is exceeded.
+const PYTHON_TIMEOUT: Duration = Duration::from_secs(120);
 #[cfg(target_os = "linux")]
 const UNMOUNT_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(target_os = "linux")]

@@ -699,7 +699,7 @@ jobs:
 
   native-fuse:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
@@ -745,7 +745,7 @@ jobs:
       - name: Verify SQLite mount-service restart and SIGKILL recovery
         env:
           MOUNT_RS_RUN_NATIVE_FUSE: '1'
-        run: timeout 240s cargo test --locked -p mount-rs-core --test sqlite_service_crash -- --ignored --nocapture
+        run: timeout 480s cargo test --locked -p mount-rs-core --test sqlite_service_crash -- --ignored --nocapture
       - name: Verify real SQLite recovery from split backend failures
         env:
           MOUNT_RS_RUN_NATIVE_FUSE: '1'

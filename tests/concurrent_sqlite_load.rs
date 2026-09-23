@@ -73,7 +73,9 @@ async fn exercise(writers: usize, lifecycles: usize, journal: &str) {
                 let payload = format!("writer={writer};lifecycle={lifecycle};").into_bytes();
                 view.write_file(&original, &payload)
                     .await
-                    .unwrap_or_else(|error| panic!("write {original}: {error}"));
+                    // Debug retains the provider stage (`block-put` versus
+                    // `metadata-publish`) hidden by FsError's display text.
+                    .unwrap_or_else(|error| panic!("write {original}: {error:?}"));
                 view.rename(&original, &renamed)
                     .await
                     .unwrap_or_else(|error| panic!("rename {original}: {error}"));
