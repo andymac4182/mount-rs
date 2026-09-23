@@ -8,8 +8,10 @@
 
 #![cfg(target_os = "macos")]
 
+use std::ffi::{CStr, CString};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -975,9 +977,10 @@ impl NativeMount {
                 return Ok(());
             }
             if !self.is_alive() || Instant::now() >= deadline {
+                let mount_diagnostic = inspect_owned_mount(&self.mountpoint);
                 let _ = self.stop(false);
                 return Err(format!(
-                    "CLI did not mount {} within {READY_TIMEOUT:?}; output={:?}",
+                    "CLI did not mount {} within {READY_TIMEOUT:?}; mount_diagnostic={mount_diagnostic}; output={:?}",
                     self.mountpoint.display(),
                     self.output
                 ));
@@ -1107,4 +1110,46 @@ fn is_mounted_at(target: &Path) -> Result<bool, String> {
                     || fs::canonicalize(entry_target).is_ok_and(|path| path == canonical_target)
             }),
     )
+}
+
+fn inspect_owned_mount(target: &Path) -> String {
+    let canonical = fs::canonicalize(target)
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|error| format!("canonicalize failed: {error}"));
+    let statfs = CString::new(target.as_os_str().as_bytes())
+        .map_err(|error| error.to_string())
+        .and_then(|path| {
+            let mut info = std::mem::MaybeUninit::<libc::statfs>::uninit();
+            // SAFETY: the path is NUL-terminated and info is writable storage for statfs.
+            let status = unsafe { libc::statfs(path.as_ptr(), info.as_mut_ptr()) };
+            if status != 0 {
+                return Err(io::Error::last_os_error().to_string());
+            }
+            // SAFETY: statfs succeeded and initialized the full result.
+            let info = unsafe { info.assume_init() };
+            // SAFETY: macOS statfs string fields are NUL-terminated arrays.
+            let fs_type = unsafe { CStr::from_ptr(info.f_fstypename.as_ptr()) }.to_string_lossy();
+            // SAFETY: macOS statfs string fields are NUL-terminated arrays.
+            let mounted_on = unsafe { CStr::from_ptr(info.f_mntonname.as_ptr()) }.to_string_lossy();
+            // SAFETY: macOS statfs string fields are NUL-terminated arrays.
+            let mounted_from =
+                unsafe { CStr::from_ptr(info.f_mntfromname.as_ptr()) }.to_string_lossy();
+            Ok(format!(
+                "type={fs_type:?} on={mounted_on:?} from={mounted_from:?}"
+            ))
+        });
+    let mount_table = Command::new("mount").output().map(|output| {
+        let table = String::from_utf8_lossy(&output.stdout);
+        let matching_lines = table
+            .lines()
+            .filter(|line| line.contains("nfs") || line.contains(&target.display().to_string()))
+            .collect::<Vec<_>>();
+        let parsed = mount_rs_nfs::parse_mount_table(mount_rs_nfs::NfsPlatform::Macos, &table);
+        format!(
+            "exit={} parsed={} matching_raw={matching_lines:?}",
+            output.status,
+            parsed.len()
+        )
+    });
+    format!("target={target:?} canonical={canonical} statfs={statfs:?} mount_table={mount_table:?}")
 }

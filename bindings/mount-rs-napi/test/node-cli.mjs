@@ -360,7 +360,7 @@ if (process.platform === "darwin") {
   }
 }
 
-if (process.platform !== "darwin") {
+if (process.platform === "linux" || process.platform === "win32") {
   const nonMacCaseRoot = await fs.mkdtemp(join(temporaryRoot, "mount-rs-node-cli-nonmac-case-"));
   try {
     const configPath = join(nonMacCaseRoot, "config.json");
@@ -378,7 +378,12 @@ if (process.platform !== "darwin") {
     const layout = await runCli([
       "--config", configPath, "--mountpoint", join(nonMacCaseRoot, "mnt"), "--check",
     ]);
-    assert.equal(layout.code, 0, output(layout));
+    if (process.platform === "win32") {
+      assert.equal(layout.code, 1, output(layout));
+      assert.match(layout.stderr, /outside the native mountpoint/i, output(layout));
+    } else {
+      assert.equal(layout.code, 0, output(layout));
+    }
   } finally {
     await fs.rm(nonMacCaseRoot, { recursive: true, force: true });
   }
