@@ -898,6 +898,9 @@ run_combo_command() {
     return 0
   else
     combo_status=$?
+    if [ "${MOUNT_RS_RUSTFS_COMBO_TRACE:-0}" = "1" ]; then
+      bounded_docker_command "logs" docker logs --tail 80 "$container_name" >&2 || true
+    fi
     # On an abnormal runner exit, leave combo_pid_file available to the EXIT
     # cleanup. The runner removes it only after it has verified the process
     # group is gone; otherwise cleanup must finish that verification before
