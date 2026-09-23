@@ -225,8 +225,12 @@ fn validate_file_layout(layout: &FileLayout, file_size: u64) -> Result<()> {
     // An empty list represents an empty or entirely sparse/zero-filled file.
     // Every stored extent, however, must be a nonempty bounded range.
     from_config(&layout.chunker)?;
+    validate_file_extents(&layout.extents, file_size)
+}
+
+fn validate_file_extents(extents: &[BlockExtent], file_size: u64) -> Result<()> {
     let mut previous_end = None;
-    for extent in &layout.extents {
+    for extent in extents {
         if extent.length == 0 {
             return Err(invalid_namespace("file extents must be nonempty"));
         }
@@ -252,6 +256,61 @@ fn validate_file_layout(layout: &FileLayout, file_size: u64) -> Result<()> {
         previous_end = Some(file_end);
     }
     Ok(())
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    #[kani::proof]
+    #[kani::unwind(16)]
+    fn single_extent_validation() {
+        let file_offset: u64 = kani::any();
+        let block_offset: u64 = kani::any();
+        let length: u64 = kani::any();
+        let file_size: u64 = kani::any();
+        let extent = BlockExtent {
+            file_offset,
+            block: BlockId("block".to_owned()),
+            block_offset,
+            length,
+        };
+        let accepted = validate_file_extents(&[extent], file_size).is_ok();
+
+        kani::cover!(accepted);
+        kani::cover!(length == 0);
+        kani::cover!(length > 0 && file_offset.checked_add(length).is_none());
+        kani::cover!(
+            length > 0
+                && file_offset
+                    .checked_add(length)
+                    .is_some_and(|end| end <= file_size)
+                && block_offset.checked_add(length).is_none()
+        );
+        kani::cover!(
+            length > 0
+                && file_offset
+                    .checked_add(length)
+                    .is_some_and(|end| end > file_size)
+                && block_offset.checked_add(length).is_some()
+        );
+
+        if accepted {
+            assert!(length > 0);
+            let file_end = file_offset.checked_add(length).unwrap();
+            assert!(file_end <= file_size);
+            assert!(block_offset.checked_add(length).is_some());
+        }
+        if length == 0
+            || file_offset.checked_add(length).is_none()
+            || block_offset.checked_add(length).is_none()
+            || file_offset
+                .checked_add(length)
+                .is_some_and(|end| end > file_size)
+        {
+            assert!(!accepted);
+        }
+    }
 }
 
 fn validate_entry_name(name: &str) -> Result<()> {

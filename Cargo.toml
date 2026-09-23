@@ -50,6 +50,9 @@ repository = "https://github.com/andymac4182/mount-rs"
 readme = "README.md"
 keywords = ["filesystem", "mount", "driver", "storage"]
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 [dependencies]
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
