@@ -2135,9 +2135,9 @@ impl SqliteBlockStore {
         }
         #[cfg(not(unix))]
         {
-            return Err(FsError::new(ErrorCode::Enotsup)
+            Err(FsError::new(ErrorCode::Enotsup)
                 .with_syscall("prepare concurrent SQLite blocks")
-                .with_message("this platform cannot bind a SQLite block ID to a physical file"));
+                .with_message("this platform cannot bind a SQLite block ID to a physical file"))
         }
         #[cfg(unix)]
         {

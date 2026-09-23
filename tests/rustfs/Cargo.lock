@@ -1158,6 +1158,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-postgres",
+ "uuid",
 ]
 
 [[package]]
@@ -1169,6 +1170,8 @@ dependencies = [
  "mount-rs-object-store-blocks",
  "mount-rs-persist",
  "object_store",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
