@@ -243,20 +243,20 @@ diagnostic because the bundled SQLite release has the documented WAL reset
 issue. The current local-filesystem provider guard is macOS specific; Linux
 network-backed SQLite files have not been qualified for concurrent mode.
 
-The current concurrent mode keeps detached file tombstones and staged blocks
-and has no distributed open-handle pin or online collector. The block-row
+At the first concurrent-writer checkpoint, the mode kept detached file tombstones and staged blocks
+and had no distributed open-handle pin or online collector. The block-row
 growth measured above is a capacity limit even when acknowledged data is
 correct. Every writable CLI must select the same block database or remote
-bucket/prefix; the metadata marker currently does not bind a block-backing
+bucket/prefix; its `MRC1` metadata marker did not bind a block-backing
 identity. An explicit mismatch test shared metadata but gave writers different
 SQLite block files: one writer published a file, the other received an error
 on read, and the correct backing still read exact bytes. A second writer could
 also acknowledge a new file into its different block store, leaving one
 metadata namespace with chunks split across the two backings. A later missing
 backing would make that acknowledged file inaccessible. Matching the block
-backing in every writer's configuration is therefore a required volume
-invariant; a future authority marker should bind a stable backing identity
-before publication. Cross-host physical
+backing in every writer's configuration was therefore a required volume
+invariant. The `MRC2` work below binds a stable backing identity before
+publication. Cross-host physical
 mounts, power-loss recovery, and sustained
 multi-endpoint RustFS visibility are separate qualification gates.
 
@@ -358,7 +358,7 @@ this as cleanup failure and the runner preserves any uncertain mounted root
 for diagnosis. Normal success, injected setup failures, and scoped TERM
 cleanup passed; hard-KILL image reaping was not qualified.
 
-## Final workspace gates
+## First checkpoint workspace gates
 
 After the path-guard and exact cleanup fixes,
 `./scripts/cargo-shared fmt --all -- --check` and strict
@@ -370,3 +370,60 @@ described above. Node addon build, typecheck, CLI/chunked suites, Python script
 AST, changed shell syntax, CI workflow YAML parse, and `git diff --check` also
 passed. The full Cargo suite ran with macOS test-owned socket permissions so
 its 9P tests could bind Unix sockets.
+
+## Bound backing protocol qualification
+
+The next coordinated protocol branch starts at fetched `origin/main`
+`fbf85562` and changes the concurrent metadata mode to `MRC2`. Metadata stores
+persist a 16-byte backing ID and check it in the same transaction as each
+revision CAS. Block stores persist their own stable authority and verify it
+read-only at mount open and again after the block flush, before each metadata
+CAS. An existing `MRC1` volume returns `EBUSY` with the offline migration command
+before it creates a block marker. Migration reads every referenced block
+directly, checks its digest and length, and rechecks metadata revision before
+changing the mode without changing namespace bytes.
+
+The inverse SQLite mismatch regression now rejects a second physical block
+database against one bound metadata file with `ESTALE` before a write or marker
+claim. Deleting the marker makes reopen fail without recreating it or advancing
+metadata; changing it after open stops the next publication with `ESTALE` and
+no metadata revision advance. Migration rejects missing, short and different
+blocks, retained unlinked-node block damage, stale revisions, and version
+history. A revision change during the direct block scan returns `EAGAIN` while
+the volume stays `MRC1`.
+
+The bounded local SQLite load completed 8 × 100 independent mount lifecycles
+in both modes: DELETE took 48,047 ms and WAL took 41,993 ms. Each run
+acknowledged 2,008 lifecycle operations, reopened exact bytes, and reported
+`PRAGMA integrity_check=ok` on both backing files. Each retained 834 block
+rows and a namespace of about 383,935 bytes. The smaller 4 × 12 DELETE/WAL
+journal matrix passed too. WAL remains a diagnostic because the bundled
+SQLite 3.46 release has the WAL-reset issue described above.
+
+On this branch, the disposable macOS NFS two-CLI SQLite case passed in DELETE
+and WAL: both independently mounted CLIs saw the other's creates, merged
+disjoint same-file ranges, renamed and unlinked files, and a fresh CLI reopened
+the result. Its 2 × 12 loads took 778 and 634 ms, and both backing databases
+passed integrity checks after clean unmount. One CLI serving two writable
+views passed its 2 × 12 load in 1,068 ms. The two-view inner SQLite application
+lock probe returned `blocked` in these runs; it does not qualify SQLite
+application databases across independent NFS views. Concurrent SQLite
+provider files placed on NFS still fail before a volume is created, including
+the mixed local-metadata/NFS-block path. The first sandboxed native attempt
+could not load `mount_nfs` and returned status 5; the same owned cases passed
+with host mount permissions, with no test mount left behind.
+
+Real PGlite socket-server authority and MRC1 migration tests passed 2/2.
+Its disposable macOS two-CLI NFS case passed 160 acknowledged calls in a
+3,721 ms load, cross-view writes, and fresh reopen against one PGlite engine.
+The owned real FoundationDB provider gate passed on both single-node and
+durable three-node clusters: five authority, migration and contract tests plus
+the terminal native network shutdown test each time. The durable readiness
+probe received an ambiguous transaction acknowledgement and confirmed its
+value by readback before accepting the cluster as ready. A separate native
+macOS two-CLI test with FoundationDB serving both metadata and blocks passed
+bidirectional visibility, concurrent writes and fresh reopen; its runner
+verified exact NFS mount and sparse-image cleanup. These are one-host and
+disposable-service results. Physical cross-host mounts, power-loss recovery,
+online reclamation, distributed open-handle pins and sustained production
+performance remain separate qualifications.

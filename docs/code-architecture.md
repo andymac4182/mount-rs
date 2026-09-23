@@ -74,10 +74,14 @@ see [DEPENDENCIES.md](../DEPENDENCIES.md).
    mode, use provider time or a qualified shared lease-time authority, never
    a requesting client's wall clock. Atomically check the expected revision,
    current fence and lease expiry when publishing. A provider that supports
-   concurrent writers must additionally implement `prepare_concurrent_mode`
-   and `publish_if_revision`. Persist the mode before opening the namespace,
-   fence legacy lease operations, and reject conversion while an exclusive
-   writer may exist. A revision conflict must be a known non-commit (`EAGAIN`);
+   concurrent writers must additionally implement `concurrent_mode_state`,
+   `prepare_bound_concurrent_mode` and `publish_bound_if_revision`. The persisted
+   `MRC2` mode binds every publication to the block provider's stable authority
+   ID. Prepare the mode before opening the namespace, fence legacy lease
+   operations, and reject conversion while an exclusive writer may exist.
+   An existing `MRC1` volume requires explicit offline migration that verifies
+   every referenced block before the metadata mode changes. A revision
+   conflict must be a known non-commit (`EAGAIN`);
    an uncertain publication error must remain ambiguous and fail closed.
    SQLite performs the mode transition and revision CAS in immediate
    transactions on one local database file; PGlite uses atomic statements
@@ -88,18 +92,24 @@ see [DEPENDENCIES.md](../DEPENDENCIES.md).
    Namespace records contain attributes and block references, not file bytes.
 3. For blocks, store immutable bytes under stable identities, reject an
    identity reused for different bytes, and make `flush` cover completed puts.
-   Every block backing used with concurrent writers must explicitly implement
-   `BlockStore::prepare_concurrent_mode`; the default rejects participation.
-   `ChunkedFs` calls it before converting metadata to the persisted concurrent
-   marker. A rejected block path must leave metadata in its original writer
-   mode. Forward this hook through every type-erased,
-   telemetry or fault-injection block adapter; the SDK `ErasedBlockStore` and
-   N-API `DynBlockStore` are part of that call path.
+   Every block backing used with concurrent writers must implement
+   `prepare_concurrent_backing` and read-only `verify_concurrent_backing`; the
+   defaults reject participation. `ChunkedFs` reads the metadata mode first.
+   An established `MRC2` volume verifies the existing block marker without
+   creating one. A fresh volume claims the block ID, binds metadata to it,
+   and verifies it before root publication. It verifies again after the block
+   flush and before every metadata CAS. A rejected block path must leave
+   metadata in its original writer mode. Forward these calls and the direct
+   `get_for_migration` read through every type-erased, telemetry, fault and
+   N-API block adapter.
    An arbitrary injected object-store client cannot establish sharedness;
    its adapter stays in the default rejecting path even if a caller declares
    durability. Named remote provider crates construct signed clients from
    validated configs and probe create/read access under their block prefix
-   before the metadata mode changes.
+   before the metadata mode changes. The reserved immutable object marker is
+   `<prefix>/_mount-rs-backing-id-v2`; it is separate from content blocks and
+   is excluded from reconciliation. Arbitrary S3-compatible endpoints need
+   their own conditional-Create and read-back qualification.
    Concurrent writers must use the same block backing so a reference
    published by one writer can be read by the others. Memory blocks are
    rejected. Local SQLite blocks are allowed only with local SQLite metadata
@@ -180,13 +190,16 @@ mapping and shutdown coverage.
   loads and validates metadata, and initializes an empty namespace through
   fenced publication. Ownership loss stops that instance. The optional
   experimental concurrent mode opens without a long writer lease on SQLite,
-  PGlite or FoundationDB metadata. It first persists a write-mode marker and
-  legacy fence sentinel, then initializes a fresh namespace with revision
-  CAS. Existing exclusive-writer state needs an offline migration. Memory
+  PGlite or FoundationDB metadata. It first checks the persisted writer mode
+  and block authority. Fresh volumes enter bound `MRC2` and initialize a
+  namespace through an ID-bound revision CAS. `MRC2` reopens verify the block
+  marker without recreating it. `MRC1` volumes require the explicit
+  `migrate-concurrent-backing` command while old mounts are stopped. Existing
+  exclusive-writer state needs an offline migration. Memory
   metadata and the legacy SQLite/PGlite snapshot facades remain single-writer.
 - Writes complete new immutable blocks and the block barrier before publishing
   their references. Exclusive mode checks both revision and writer fence;
-  concurrent mode checks the expected revision in the provider's atomic
+  concurrent mode checks both backing ID and expected revision in the provider's atomic
   publication (SQLite transaction, PGlite update, or FoundationDB transaction
   containing metadata chunks and manifest). The latter
   reloads the authoritative namespace before operations and can rebuild an

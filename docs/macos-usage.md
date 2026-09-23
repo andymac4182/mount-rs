@@ -271,6 +271,33 @@ historical version state leaves the metadata in MRC1. The command does not
 prepare a mountpoint or start a native mount; start the upgraded mounts only
 after it succeeds.
 
+### Bound concurrent backing
+
+Fresh concurrent split-store volumes persist `MRC2` and one stable block
+authority ID. Every mount must use the same metadata volume and physical block
+backing. An established mount checks the existing marker without creating a
+replacement, and verifies it again before each metadata revision CAS. A wrong
+or missing marker fails `ESTALE` before another namespace revision can be
+acknowledged.
+
+| Backing | Persisted authority |
+| --- | --- |
+| Local SQLite | `mount_rs_metadata.backing_id` in the metadata file and `mount_rs_block_authority.backing_id` in the blocks file; concurrent SQLite requires both files on local storage outside every mountpoint. |
+| PGlite | `mount_rs_metadata.backing_id` and `mount_rs_block_authority.backing_id`, each keyed by the configured volume key in one reachable PGlite server. |
+| FoundationDB | `meta/write-mode` and `meta/backing-id` in the metadata keyspace; `block-authority` in the selected block keyspace. |
+| Signed object blocks, including RustFS | The immutable `<prefix>/_mount-rs-backing-id-v2` object contains `MRC2` and the 16-byte ID. It is not a content block and must remain intact. |
+
+The RustFS signed-client race and restart fixture qualifies its disposable
+service. Cloudflare R2, AWS S3 and arbitrary S3-compatible endpoints need
+their own live independent-client conditional-Create and read-back gate before
+a concurrent mount can claim them. PGlite and FoundationDB metadata cannot
+commit a remote object marker in the same transaction, so the mounted driver
+does the direct marker checks at open and before publication. These checks do
+not provide distributed open-handle pins or online block collection. Plan
+capacity for retained detached files and staged blocks, and keep old clients
+stopped during `MRC1` migration because the command cannot detect their live
+writer state across hosts.
+
 ## Choose a storage backend
 
 The CLI selects built-in filesystems with `--driver`. Structured JSON
