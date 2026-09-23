@@ -100,6 +100,68 @@ fn migrate_concurrent_backing_cli() {
 
 #[cfg(unix)]
 #[test]
+fn offline_migration_rejects_stamped_sqlite_metadata_under_mountpoint_before_claim() {
+    let scope = tempfile::TempDir::new().unwrap();
+    let view = scope.path().join("view");
+    fs::create_dir(&view).unwrap();
+    let metadata = view.join("metadata.sqlite");
+    let blocks = scope.path().join("blocks.sqlite");
+    let config_path = scope.path().join("shared.json");
+    drop(SqliteMetadataStore::open(&metadata).unwrap());
+    assert_eq!(
+        rusqlite::Connection::open(&metadata)
+            .unwrap()
+            .execute(
+                "UPDATE mount_rs_metadata SET write_mode='MRC1', fence=9223372036854775807
+                 WHERE id=1",
+                [],
+            )
+            .unwrap(),
+        1
+    );
+    let config = serde_json::json!({
+        "version": 1,
+        "mountpoint": view,
+        "driver": {"kind": "splitstore", "storage": {
+            "concurrent_writes": true,
+            "metadata": {"kind": "sqlite", "path": metadata},
+            "blocks": {"kind": "sqlite", "path": blocks}
+        }}
+    });
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_mount-rs"))
+        .arg("migrate-concurrent-backing")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--expected-revision")
+        .arg("0")
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "offline migration enrolled backing inside mountpoint: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("outside every mountpoint"));
+    let (mode, backing): (String, Option<String>) = rusqlite::Connection::open(&metadata)
+        .unwrap()
+        .query_row(
+            "SELECT write_mode, backing_id FROM mount_rs_metadata WHERE id=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((mode.as_str(), backing), ("MRC1", None));
+    assert!(
+        !blocks.exists(),
+        "rejected command opened the block backing"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn migrate_concurrent_backing_cli_rejects_historical_unstamped_sqlite_metadata() {
     let scope = tempfile::TempDir::new().expect("own historical SQLite migration fixture");
     let metadata = scope.path().join("historical-metadata.sqlite");

@@ -489,6 +489,7 @@ async fn migrate_concurrent_backing_command(
             "migrate-concurrent-backing requires a splitstore config with concurrent_writes=true",
         ));
     }
+    requested_mountpoints(&options)?;
     let (uid, gid) = effective_identity();
     let split = split_options(&options, uid, gid)?;
     let backing = Filesystem::migrate_concurrent_backing(split, expected_revision).await?;
