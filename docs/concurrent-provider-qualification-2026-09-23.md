@@ -399,9 +399,11 @@ SQLite block and metadata files use separate Unix physical dev/inode stamps to
 reject a copied backing with the same persisted authority or volume ID. The
 metadata stamp is seeded only when the provider exclusively creates a new
 file; a preclaim copy of that file cannot enroll independently. Historical
-unstamped Legacy/MRC1 SQLite metadata stays readable in its prior single-writer
-mode but cannot automatically enter `MRC2`; an unstamped `MRC2` file refuses
-startup. Trusted offline re-enrollment has not been implemented. On other
+unstamped Legacy SQLite metadata can continue in exclusive-writer mode but
+cannot automatically enter `MRC2`. An already `MRC1` SQLite file cannot mount
+with the upgraded binary: it cannot acquire a legacy writer, and its implicit
+`MRC2` migration is refused. Trusted offline re-enrollment has not been
+implemented. An unstamped `MRC2` file refuses startup. On other
 platforms, including Windows, concurrent SQLite backing returns `ENOTSUP`
 because a copied file could carry the same marker while its contents diverge.
 The Linux guard uses `fstatfs` on the selected file and allows ext-family,
@@ -410,6 +412,18 @@ unknown types before concurrent claim. tmpfs passes locality but does not
 survive host reboot. The Linux native NFS acceptance fixture places both
 provider database files on its owned NFS view and asserts `ENOTSUP` with no
 metadata revision or block marker change; its live Linux CI run is pending.
+
+Concurrent SQLite requires exactly one hard link for each metadata and block
+inode at claim, reopen and publication/authority verification. Different
+hard-link names share dev/inode but select different SQLite WAL sidecars. A
+disposable APFS WAL repro acknowledged an A write, then B hit
+`SQLITE_IOERR_SHORT_READ` through the alias; DELETE, TRUNCATE and PERSIST
+appeared usable in a bounded sequential probe but did not establish safety.
+New provider regressions reject aliases before a claim and stop publication
+if a link appears after open. Linux file-only bind mounts can also expose one
+inode at different database paths with link count one and different WAL
+sidecars; that alias configuration remains unqualified. Use the same
+canonical database paths in every SQLite process.
 
 The offline migration path currently prepares a block authority before it
 directly reads referenced blocks and attempts the metadata transition. A

@@ -90,6 +90,10 @@ user-owned mountpoints. The example enables `concurrent_writes` on a fresh
 backing. Save the adjusted JSON as `/absolute/path/to/shared.json`, then run
 these commands in separate Terminal windows:
 
+Use the same canonical metadata and block filenames in every process.
+Concurrent SQLite refuses hard-link aliases of either database because
+different names create different WAL sidecars even for one inode.
+
 ```sh
 ./scripts/cargo-shared run --locked -p mount-rs-cli -- \
   mount --config /absolute/path/to/shared.json \
@@ -271,13 +275,14 @@ historical version state leaves the metadata in MRC1. The command does not
 prepare a mountpoint or start a native mount; start the upgraded mounts only
 after it succeeds.
 
-SQLite metadata files created before physical dev/inode stamping can still be
-opened in their earlier single-writer mode, but automatic MRC2 enrollment of
-an unstamped historical Legacy or MRC1 file is refused. This protects against
-a database copied before enrollment. Trusted offline re-enrollment of these
-files is future work. A failed historical MRC1 migration leaves metadata at
-its old revision; the current migration ordering can leave an unused block
-authority marker after that failure.
+An unstamped historical Legacy SQLite metadata file can still run in its
+earlier exclusive-writer mode, but automatic MRC2 enrollment is refused. An
+already MRC1 SQLite file cannot mount with the upgraded binary: the exclusive
+writer path does not accept MRC1, and implicit MRC2 migration is refused. This
+protects against a database copied before enrollment. Trusted offline
+re-enrollment is future work. A failed historical MRC1 migration leaves
+metadata at its old revision; the current migration ordering can leave an
+unused block authority marker after that failure.
 
 ### Bound concurrent backing
 
