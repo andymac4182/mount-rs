@@ -469,7 +469,8 @@ fn initialize_telemetry() {
 }
 
 /// Perform the offline protocol migration using the SDK's storage path. This
-/// command never constructs a filesystem driver or starts a native transport.
+/// command prepares view directories for physical path checks, without
+/// constructing a filesystem driver or starting a native transport.
 async fn migrate_concurrent_backing_command(
     config_path: &Path,
     expected_revision: u64,
@@ -489,7 +490,8 @@ async fn migrate_concurrent_backing_command(
             "migrate-concurrent-backing requires a splitstore config with concurrent_writes=true",
         ));
     }
-    requested_mountpoints(&options)?;
+    let mountpoints = requested_mountpoints(&options)?;
+    prepare_mountpoints_before_driver(&options, &mountpoints, true).await?;
     let (uid, gid) = effective_identity();
     let split = split_options(&options, uid, gid)?;
     let backing = Filesystem::migrate_concurrent_backing(split, expected_revision).await?;
