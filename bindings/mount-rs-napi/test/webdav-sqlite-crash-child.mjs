@@ -33,7 +33,9 @@ try {
   }
 
   process.stdout.write("READY\n")
-  await new Promise(() => {})
+  // Keep a refed Node handle until the parent forces the crash. The Rust
+  // listener alone does not prevent an unsettled-top-level-await exit.
+  await new Promise(() => setInterval(() => {}, 60_000))
 } finally {
   await server.close().catch(() => {})
   await filesystem.shutdown().catch(() => {})

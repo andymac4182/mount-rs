@@ -3,6 +3,7 @@ import { once } from "node:events"
 import { spawn } from "node:child_process"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
+import { setTimeout as sleep } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
 import { join } from "node:path"
 
@@ -52,6 +53,8 @@ try {
   })
   const exited = once(child, "exit")
   await waitForReady(child)
+  await sleep(100)
+  assert.equal(child.exitCode, null, "the WebDAV SQLite child must remain live until forced termination")
   assert.equal(child.kill("SIGKILL"), true, "the WebDAV SQLite child must be killable")
   const [code, signal] = await exited
   assert.ok(

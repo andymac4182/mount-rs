@@ -15,6 +15,11 @@ done
 : "${R2_BUCKET:?R2_BUCKET must be supplied by the RustFS harness}"
 : "${R2_ACCESS_KEY_ID:?R2_ACCESS_KEY_ID must be supplied by the RustFS harness}"
 : "${R2_SECRET_ACCESS_KEY:?R2_SECRET_ACCESS_KEY must be supplied by the RustFS harness}"
+: "${RUSTFS_ENDPOINT:?RUSTFS_ENDPOINT must be supplied by the RustFS harness}"
+: "${RUSTFS_BUCKET:?RUSTFS_BUCKET must be supplied by the RustFS harness}"
+: "${RUSTFS_REGION:?RUSTFS_REGION must be supplied by the RustFS harness}"
+: "${RUSTFS_ACCESS_KEY_ID:?RUSTFS_ACCESS_KEY_ID must be supplied by the RustFS harness}"
+: "${RUSTFS_SECRET_ACCESS_KEY:?RUSTFS_SECRET_ACCESS_KEY must be supplied by the RustFS harness}"
 
 base_run_id=${MOUNT_RS_TIDB_CONSUMER_RUN_ID:-tidb-rustfs-$(date +%s)-$$}
 case "${MOUNT_RS_TIDB_EXPECT_PERSISTED:-0}" in

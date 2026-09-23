@@ -21,8 +21,10 @@ def connect(path):
     return db
 
 
-def child(path, mode):
+def child(path, mode, journal):
     db = connect(path)
+    actual = db.execute("PRAGMA journal_mode=" + journal).fetchone()[0]
+    assert actual.upper() == journal, (journal, actual)
     db.execute("PRAGMA cache_size=8")
     db.execute("BEGIN IMMEDIATE")
     db.execute("UPDATE items SET payload=? WHERE id=1", (b"uncommitted",))
@@ -61,7 +63,7 @@ def run_case(directory, journal):
         # some SQLite versions read the schema while setting synchronous.
         contender = connect(path) if mode == "uncommitted" else None
         process = subprocess.Popen(
-            [sys.executable, __file__, "--child", str(path), mode],
+            [sys.executable, __file__, "--child", str(path), mode, journal],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         try:
@@ -92,6 +94,7 @@ def run_case(directory, journal):
                 process.communicate(timeout=10)
 
         reopened = connect(path)
+        reopen_journal = reopened.execute("PRAGMA journal_mode").fetchone()[0].upper()
         integrity(reopened)
         count = reopened.execute("SELECT count(*) FROM items").fetchone()[0]
         payload = reopened.execute("SELECT payload FROM items WHERE id=1").fetchone()[0]
@@ -105,6 +108,7 @@ def run_case(directory, journal):
         reopened.close()
 
     print(json.dumps({"sqlite": sqlite3.sqlite_version, "journal": journal,
+                      "reopen_journal": reopen_journal,
                       "synchronous": "FULL", "process_lock_and_recovery": "pass",
                       "mount_service_crash_tested": False}), flush=True)
 
@@ -117,7 +121,7 @@ def run(directory):
 
 if __name__ == "__main__":
     if sys.argv[1] == "--child":
-        child(sys.argv[2], sys.argv[3])
+        child(sys.argv[2], sys.argv[3], sys.argv[4])
     elif sys.argv[1] == "--self-test":
         with tempfile.TemporaryDirectory(prefix="mount-rs-sqlite-control-") as root:
             run(Path(root))

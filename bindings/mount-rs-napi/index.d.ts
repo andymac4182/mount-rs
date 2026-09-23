@@ -1295,7 +1295,10 @@ export interface JsChunkedOptions {
   chunkSize: number
   owner?: string
   ttlMs?: number
-  /** Enable persisted multiwriter revision CAS for FoundationDB metadata. */
+  /**
+   * Enable persisted multiwriter revision CAS for FoundationDB, PGlite, or
+   * local SQLite metadata. SQLite metadata and blocks are same-host only.
+   */
   concurrentWrites?: boolean
   /** Defaults to the current process uid, matching the memory driver. */
   uid?: number
@@ -1312,8 +1315,8 @@ export interface JsChunkedOptions {
  */
 export interface JsChunkedStoreOptions {
   /**
-   * Supported values are memory, sqlite, pglite, tidb, foundationdb, and r2
-   * (blocks only). FoundationDB requires the native feature and an
+   * Supported values are memory, sqlite, pglite, tidb, foundationdb, r2,
+   * and rustfs (object stores are blocks only). FoundationDB requires the native feature and an
    * explicit persisted-single-authority, shared-provider, or revision-cas authority.
    */
   kind: string
@@ -1326,6 +1329,8 @@ export interface JsChunkedStoreOptions {
   authorityPrefix?: string
   endpoint?: string
   bucket?: string
+  /** RustFS only: signing region for the S3-compatible endpoint. */
+  region?: string
   accessKeyId?: string
   secretAccessKey?: string
 }

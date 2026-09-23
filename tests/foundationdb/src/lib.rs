@@ -2,7 +2,7 @@
 //!
 //! The harness supplies a disposable FoundationDB server and a disposable
 //! RustFS S3 endpoint. This test deliberately uses the production providers:
-//! FoundationDB owns the fenced namespace and `R2BlockStore` owns immutable
+//! FoundationDB owns the fenced namespace and `RustFsBlockStore` owns immutable
 //! blocks in RustFS. No in-memory or fake provider is accepted by this gate.
 
 #![cfg(test)]
@@ -16,7 +16,7 @@ use mount_rs_foundationdb::{
     FoundationDbLeaseAuthority, FoundationDbLimits, FoundationDbSharedLeaseOracle,
     FoundationDbStorage, FoundationDbStorageOptions, LeaseOracle,
 };
-use mount_rs_r2::{R2BlockStore, R2Config};
+use mount_rs_rustfs::{RustFsBlockStore, RustFsConfig};
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
 use std::collections::BTreeSet;
@@ -137,18 +137,19 @@ impl LeaseOracle for DeterministicLeaseOracle {
 
 #[derive(Clone)]
 struct TrackedRustFsBlocks {
-    inner: R2BlockStore,
+    inner: RustFsBlockStore,
     created: Arc<Mutex<BTreeSet<BlockId>>>,
 }
 
 impl TrackedRustFsBlocks {
     fn new(
-        config: &R2Config,
+        config: &RustFsConfig,
         prefix: impl Into<String>,
         created: Arc<Mutex<BTreeSet<BlockId>>>,
     ) -> Self {
         Self {
-            inner: R2BlockStore::from_config(config, prefix).expect("RustFS block store config"),
+            inner: RustFsBlockStore::from_config(config, prefix, true)
+                .expect("RustFS block store config"),
             created,
         }
     }
@@ -207,8 +208,15 @@ fn configured_authority_prefix(combo_prefix: &str) -> String {
         .unwrap_or_else(|| format!("{combo_prefix}/lease-authority"))
 }
 
-fn local_rustfs_config() -> R2Config {
-    let config = R2Config::from_env().expect("RustFS R2-compatible environment is required");
+fn local_rustfs_config() -> RustFsConfig {
+    let config = RustFsConfig {
+        endpoint: required_env("RUSTFS_ENDPOINT"),
+        bucket: required_env("RUSTFS_BUCKET"),
+        access_key_id: required_env("RUSTFS_ACCESS_KEY_ID"),
+        secret_access_key: required_env("RUSTFS_SECRET_ACCESS_KEY"),
+        region: required_env("RUSTFS_REGION"),
+    };
+    config.validate().expect("RustFS configuration");
     assert!(
         config.endpoint.starts_with("http://127.0.0.1:")
             || config.endpoint.starts_with("http://localhost:")
@@ -260,7 +268,7 @@ fn open_shared_storage(
 
 async fn composition_round_trip(
     cluster_file: &str,
-    config: &R2Config,
+    config: &RustFsConfig,
     volume_prefix: &str,
     block_prefix: &str,
     authority_prefix: &str,
@@ -281,15 +289,15 @@ async fn composition_round_trip(
     assert!(filesystem.capabilities().durable_writes);
 
     let loopback = Loopback::new(filesystem.clone());
-    let file = metrics.measure(loopback.open("/binary", "w+", 0o640)).await?;
+    let file = metrics
+        .measure(loopback.open("/binary", "w+", 0o640))
+        .await?;
     let initial = patterned_bytes(4096 * 3 + 113);
     let mut expected = initial.clone();
     metrics.measure(file.write(&initial, Some(0))).await?;
 
     let patch = patterned_bytes(257);
-    metrics
-        .measure(file.write(&patch, Some(4096 + 37)))
-        .await?;
+    metrics.measure(file.write(&patch, Some(4096 + 37))).await?;
     expected[4096 + 37..4096 + 37 + patch.len()].copy_from_slice(&patch);
 
     metrics.measure(file.truncate(4096 + 19)).await?;
@@ -305,21 +313,21 @@ async fn composition_round_trip(
     metrics.measure(file.sync()).await?;
 
     let mut actual = vec![0; expected.len() + 41];
-    let read = metrics
-        .measure(file.read(&mut actual, Some(0)))
-        .await?;
+    let read = metrics.measure(file.read(&mut actual, Some(0))).await?;
     assert_eq!(read, expected.len());
     assert_eq!(&actual[..read], expected);
     let loaded = metrics.measure(filesystem.metadata_store().load()).await?;
-    assert!(loaded
-        .namespace
-        .expect("published namespace")
-        .nodes
-        .values()
-        .any(|node| matches!(
-            &node.data,
-            mount_rs_core::storage::NodeData::File(layout) if layout.extents.len() > 1
-        )));
+    assert!(
+        loaded
+            .namespace
+            .expect("published namespace")
+            .nodes
+            .values()
+            .any(|node| matches!(
+                &node.data,
+                mount_rs_core::storage::NodeData::File(layout) if layout.extents.len() > 1
+            ))
+    );
 
     metrics.measure(file.close()).await?;
     let bounded_file = metrics
@@ -342,7 +350,7 @@ async fn composition_round_trip(
 
 async fn verify_reopen(
     cluster_file: &str,
-    config: &R2Config,
+    config: &RustFsConfig,
     volume_prefix: &str,
     block_prefix: &str,
     authority_prefix: &str,
@@ -460,7 +468,7 @@ async fn verify_cas_and_fencing(
 
 async fn verify_chunked_lease_fencing(
     cluster_file: &str,
-    config: &R2Config,
+    config: &RustFsConfig,
     volume_prefix: &str,
     block_prefix: &str,
     created: Arc<Mutex<BTreeSet<BlockId>>>,
@@ -529,7 +537,7 @@ async fn verify_chunked_lease_fencing(
 }
 
 async fn verify_exact_rustfs_cleanup(
-    config: &R2Config,
+    config: &RustFsConfig,
     combo_prefix: &str,
     block_prefix: &str,
     blocks: &TrackedRustFsBlocks,

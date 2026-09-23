@@ -60,6 +60,7 @@ fn aws_s3_split_options(
         chunk_size_bytes,
         owner: owner.to_owned(),
         lease_ttl: Duration::from_secs(30),
+        concurrent_writes: false,
         uid: 0,
         gid: 0,
         umask: 0,

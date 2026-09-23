@@ -206,6 +206,23 @@ impl BlockStore for ErasedBlockStore {
         self.inner.durable()
     }
 
+    async fn prepare_concurrent_mode(&self) -> Result<()> {
+        #[cfg(feature = "observability")]
+        {
+            return self
+                .telemetry
+                .observe_fs(
+                    "provider.blocks",
+                    "concurrent.prepare",
+                    None,
+                    self.inner.prepare_concurrent_mode(),
+                )
+                .await;
+        }
+        #[cfg(not(feature = "observability"))]
+        self.inner.prepare_concurrent_mode().await
+    }
+
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
         #[cfg(feature = "observability")]
         {
@@ -280,5 +297,26 @@ impl BlockStore for ErasedBlockStore {
         }
         #[cfg(not(feature = "observability"))]
         self.inner.reconcile(live, grace).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mount_rs_core::ErrorCode;
+    use mount_rs_sqlite::SqliteBlockStore;
+
+    #[tokio::test]
+    async fn erased_blocks_forward_concurrent_preflight_failure() {
+        let inner = Arc::new(SqliteBlockStore::open(":memory:").unwrap()) as Arc<dyn BlockStore>;
+        #[cfg(feature = "observability")]
+        let erased = ErasedBlockStore::new(inner, Telemetry::disabled());
+        #[cfg(not(feature = "observability"))]
+        let erased = ErasedBlockStore::new(inner);
+        let error = erased
+            .prepare_concurrent_mode()
+            .await
+            .expect_err("volatile SQLite block preflight must reach the provider");
+        assert_eq!(error.code, ErrorCode::Enotsup);
     }
 }

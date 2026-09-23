@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use mount_rs_9p::{P9Mount, P9MountOptions, mount_9p, p9_client_probe, parse_mount_table};
 use mount_rs_memfs::MemoryFs;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::task::spawn_blocking;
 use tokio::time::timeout;
@@ -146,8 +147,9 @@ async fn external_umount(path: &Path) -> io::Result<()> {
     let mut child = Command::new("umount")
         .arg(path)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()?;
+    let mut stderr = child.stderr.take().expect("pipe external umount stderr");
     let status = match timeout(COMMAND_TIMEOUT, child.wait()).await {
         Ok(status) => status?,
         Err(_) => {
@@ -162,8 +164,26 @@ async fn external_umount(path: &Path) -> io::Result<()> {
     if status.success() {
         Ok(())
     } else {
+        let mut diagnostic = Vec::new();
+        let stderr_state = match timeout(COMMAND_TIMEOUT, stderr.read_to_end(&mut diagnostic)).await
+        {
+            Ok(Ok(_)) => "complete".to_owned(),
+            Ok(Err(error)) => format!("read-error: {error}"),
+            Err(_) => "deadline".to_owned(),
+        };
+        let mount_present = fs::read_to_string("/proc/self/mounts")
+            .map(|table| {
+                let target = path.to_string_lossy();
+                parse_mount_table(&table)
+                    .iter()
+                    .any(|entry| entry.target == target)
+            })
+            .map(|present| present.to_string())
+            .unwrap_or_else(|error| format!("unknown: {error}"));
         Err(io::Error::other(format!(
-            "external umount exited with {status}"
+            "external umount exited with {status}; target={}; mount_present={mount_present}; stderr_state={stderr_state}; stderr={}",
+            path.display(),
+            String::from_utf8_lossy(&diagnostic).trim()
         )))
     }
 }
@@ -366,7 +386,9 @@ async fn native_linux_external_umount_finishes_server_lifecycle() {
         }
         (io_result, external_result, close_result) => {
             panic!(
-                "native 9P external teardown failed; refusing recursive cleanup: I/O={io_result:?}, umount={external_result:?}, close={close_result:?}"
+                "native 9P external teardown failed; refusing recursive cleanup: I/O={io_result:?}, umount={external_result:?}, close={close_result:?}, active={}, connections={:?}",
+                mount.active(),
+                mount.server.connection_count()
             );
         }
     }

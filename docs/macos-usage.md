@@ -79,6 +79,61 @@ For shared mounts, `--transport auto` selects NFS when available; an explicit
 FUSE or 9P selection fails. The `--sqlite-single-host` profile uses local
 SQLite locking and cannot be combined with shared NFS views.
 
+### Two CLIs using one local SQLite backing
+
+On one Mac, two independent CLIs can use the same file-backed SQLite
+metadata and block databases. Start with the
+[concurrent SQLite/SQLite example](../apps/mount-rs-cli/examples/config-sqlite-concurrent.json):
+set both database paths to absolute paths on local storage **outside** either
+mount, use the same paths in both processes, and choose two distinct, empty,
+user-owned mountpoints. The example enables `concurrent_writes` on a fresh
+backing. Save the adjusted JSON as `/absolute/path/to/shared.json`, then run
+these commands in separate Terminal windows:
+
+```sh
+./scripts/cargo-shared run --locked -p mount-rs-cli -- \
+  mount --config /absolute/path/to/shared.json \
+  --mountpoint /absolute/path/to/view-a
+./scripts/cargo-shared run --locked -p mount-rs-cli -- \
+  mount --config /absolute/path/to/shared.json \
+  --mountpoint /absolute/path/to/view-b
+```
+
+Use `--also-mountpoint` with one CLI if both views can share one
+process. This mode requires all writers to run on the same host; do not place
+the provider databases on NFS or SMB. It does not use the single-mount
+`sqlite_single_host` NFS profile. The CLI checks both SQLite paths against
+the primary mountpoint and every `--also-mountpoint` before opening the driver.
+
+The local native two-CLI test has passed with SQLite DELETE and WAL backing
+smoke checks. WAL is not yet qualified: the bundled SQLite 3.46 is affected
+by SQLite's rare [WAL-reset bug](https://www.sqlite.org/wal.html#the_wal_reset_bug),
+which is fixed in 3.51.3 and selected backports. Use DELETE backing for now.
+An SQLite *application database inside* two NFS mount views is a different
+case: the [adversarial macOS probe](../tests/sqlite_nfs_adversarial.md)
+observed a second view acquire `BEGIN IMMEDIATE` while the first held an
+uncommitted update. That contender rolled back without writing. A WAL request
+through the NFS view fell back to DELETE. These shared NFS views do not
+provide safe SQLite application-file locking; SQLite also documents the
+[network filesystem locking risk](https://www.sqlite.org/useovernet.html).
+
+### Two CLIs using one PGlite server
+
+Start one PostgreSQL-wire PGlite server and connect both CLIs to it using
+the same `PGLITE_DATABASE_URL`, volume key, and block backing. The server can
+listen on a Unix socket or TCP; the local native two-CLI test used TCP
+loopback `127.0.0.1` to one engine. If both metadata and blocks use PGlite,
+two CLIs open four provider connections, so configure `maxConnections` to at
+least 4. The native test also checks that insufficient connection slots fail
+closed. PGlite metadata may instead use a shared RustFS block store, as in
+the [PGlite/RustFS concurrent example](../apps/mount-rs-cli/examples/config-pglite-rustfs-concurrent.json).
+Set a fresh volume key, a durable `PGLITE_DATA_DIR` if persistence is needed,
+the same provider settings in both CLIs, and different mountpoints. Local
+two-CLI behavior has been exercised; a listener reached from another host
+and physical cross-host mounts have not been verified.
+
+### Two CLIs using FoundationDB
+
 The following **experimental** two-process FoundationDB recipe passed the
 final guarded-source macOS native two-CLI acceptance 1/1 on 2026-09-23. A
 distributed handle-pin and capacity protocol is still pending. For
@@ -134,8 +189,10 @@ FoundationDB revision CAS coordinates their metadata publications.
 
 This cross-process recipe requires matching macOS FoundationDB client
 libraries, a live cluster, and the same shared block backing accessible to
-both processes. The CLI rejects `memory` and `sqlite` blocks in concurrent
-mode: they cannot serve references published by another mount. A second host
+both processes. The CLI rejects memory and local SQLite blocks with
+FoundationDB metadata: they cannot serve references published by another
+host. Local SQLite blocks are accepted in concurrent mode only alongside
+SQLite metadata when both processes use the same local file paths. A second host
 needs a reachable *shared* FoundationDB cluster and the same client,
 configuration, and block backing. The local macOS test cluster does not verify
 cross-host behavior. A prefix containing a legacy lease or fence key rejects
@@ -196,9 +253,9 @@ direction.
 | Storage path | Direct check on macOS | Native Finder path |
 | --- | --- | --- |
 | In-memory `MemoryFs` | `./scripts/cargo-shared run --locked -p mount-rs-cli -- sdk-self-test` | Run the memory NFS command above. |
-| SQLite `SqliteFs` or SQLite/SQLite split store | Use a file-backed config with `sdk-self-test --config PATH --reopen`. | Use the single-host NFS config below. |
-| PGlite metadata and blocks | `./scripts/test-pglite.sh` starts an isolated PostgreSQL-wire server and runs the provider checks. | `MOUNT_RS_PGLITE_TEST_SCOPE=native-nfs ./scripts/test-pglite.sh` runs a disposable native mount test; use a running PGlite socket server and a split-store config for an interactive mount. |
-| RustFS S3-compatible blocks | `./scripts/test-rustfs.sh` starts a disposable RustFS service in Docker and tests the `r2` block provider. | Keep a reachable RustFS service running; pair `storage.blocks.kind: "r2"` with a metadata provider and mount that config over NFS. |
+| SQLite `SqliteFs` or SQLite/SQLite split store | Use a file-backed config with `sdk-self-test --config PATH --reopen`. | Use the single-host NFS config below, or the local concurrent SQLite/SQLite recipe above. |
+| PGlite metadata and blocks | `./scripts/test-pglite.sh` starts an isolated PostgreSQL-wire server and runs the provider checks. | `MOUNT_RS_PGLITE_TEST_SCOPE=native-nfs ./scripts/test-pglite.sh` runs a disposable native mount test; use one running PGlite server and a split-store config for an interactive mount. |
+| RustFS S3-compatible blocks | `./scripts/test-rustfs.sh` starts a disposable RustFS service in Docker and tests the named `rustfs` block provider. | Keep a reachable RustFS service running; pair `storage.blocks.kind: "rustfs"` with PGlite or FoundationDB metadata for cross-host backing and mount that config over NFS. |
 | FoundationDB metadata with RustFS blocks | `./scripts/test-foundationdb.sh` tests a disposable cluster with a Linux client in Docker; the composed lane is in [the FoundationDB test guide](../tests/foundationdb/README.md). | Supply a compatible macOS FoundationDB client and readable cluster file, a live cluster, and RustFS credentials; build the CLI with `--features foundationdb` and mount the composed config over NFS. |
 
 These direct checks have different lifecycles. `sdk-self-test` exercises the
@@ -252,7 +309,7 @@ PGlite needs the `pglite-socket` server in another process. Install its pinned
 fixture dependencies with
 `pnpm --dir tests/pglite install --frozen-lockfile`, then follow the
 [socket-server instructions](../tests/pglite/README.md). Set
-`PGLITE_DATABASE_URL` to the socket-directory URL and use a structured
+`PGLITE_DATABASE_URL` to the server's Unix socket or TCP URL and use a structured
 split-store config with `kind: "pglite"` in both provider roles. The CLI's
 [native PGlite test](../apps/mount-rs-cli/tests/native_lifecycle.rs) constructs
 that shape and checks write, read, shutdown, and reopen over NFS. A persistent
@@ -260,14 +317,20 @@ that shape and checks write, read, shutdown, and reopen over NFS. A persistent
 restart; setting `durable: true` in a config is the caller's assertion about
 the server, not an automatic durability check.
 
-RustFS speaks the S3-compatible API used by the `r2` block provider. The
+RustFS has its own `mount-rs-rustfs` crate and `rustfs` block-provider kind.
+It supplies immutable blocks over signed, path-style S3-compatible requests;
+it does not supply metadata revision CAS. The
 [RustFS harness](../tests/rustfs/README.md) owns a temporary service and
 bucket, then removes them on normal exit. For an interactive mount, keep a
 service available at the configured `endpoint`, initialize its `bucket`,
-set `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` in the CLI environment,
-and give the filesystem its own `prefix`. Start from the
-[PGlite/R2 config](../apps/mount-rs-cli/examples/config-pglite-r2.json) or
-replace its metadata role with SQLite. Set `mountpoint` to an absolute,
+set `RUSTFS_ACCESS_KEY_ID` and `RUSTFS_SECRET_ACCESS_KEY` in the CLI
+environment, supply the endpoint's `region`, and give the filesystem its
+own `prefix`. The endpoint URL has no path, apart from an optional trailing
+slash. Omitting `durable` defaults to false; `durable: true` asserts that the
+operator's RustFS service will retain completed writes. The disposable
+single-node harness does not establish power-loss durability. Start from the
+[PGlite/RustFS concurrent config](../apps/mount-rs-cli/examples/config-pglite-rustfs-concurrent.json)
+or the FoundationDB/RustFS template below. Set `mountpoint` to an absolute,
 user-owned empty directory and `transport` to `nfs`. Run
 `validate-config --config PATH` to check the schema, then
 `mount --config PATH` to open the providers and mount the view.
@@ -275,7 +338,11 @@ Configuration validation does not contact RustFS.
 
 The [FoundationDB/RustFS config
 template](../apps/mount-rs-cli/examples/config-foundationdb-rustfs.json)
-selects FoundationDB metadata and RustFS-compatible blocks. On macOS it
+selects exclusive-writer FoundationDB metadata and the named RustFS blocks.
+The separate [concurrent FoundationDB/RustFS
+template](../apps/mount-rs-cli/examples/config-foundationdb-rustfs-concurrent.json)
+selects revision-CAS metadata and `concurrent_writes` for a fresh volume.
+On macOS either
 requires FoundationDB 7.4's matching `libfdb_c.dylib`, a cluster file
 reachable by the host process, a live cluster, and a live RustFS endpoint.
 Set the template's `cluster_file`, `endpoint`, `bucket`,
@@ -345,3 +412,13 @@ unmount. All three tests used the same pinned CLI dependency source, and no
 test NFS mount remained afterward. These checks use separate processes on one
 macOS host; they do not establish cross-host behavior or the distributed
 handle-pin/capacity protocol.
+
+The newer native CLI cases passed for one CLI serving two writable views and
+for two independent writable CLIs on the same local SQLite backing. SQLite's
+two-CLI case exercised DELETE and WAL backing, bounded load, disjoint writes,
+rename/unlink and reopen; WAL remains unqualified with bundled SQLite 3.46
+until the [WAL-reset bug](https://www.sqlite.org/wal.html#the_wal_reset_bug)
+is fixed. The PGlite native suite passed its one-CLI/two-view and two-CLI
+cases against one TCP-loopback PGlite engine, plus the insufficient-connection
+fail-closed case. These are local mount checks. They do not verify a
+cross-host PGlite listener or physical cross-host mounts.

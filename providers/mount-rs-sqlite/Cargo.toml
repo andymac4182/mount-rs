@@ -7,11 +7,16 @@ description = "SQLite integration for mount-rs"
 license = "Apache-2.0"
 
 [dependencies]
+async-io = "2.6"
 async-trait = "0.1"
 mount-rs-core = { path = "../.." }
 mount-rs-persist = { path = "../../filesystems/mount-rs-persist" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde_json = "1"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
+futures-lite = "2"
 mount-rs-memfs = { path = "../../filesystems/mount-rs-memfs" }

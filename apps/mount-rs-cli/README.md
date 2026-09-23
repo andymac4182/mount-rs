@@ -98,19 +98,25 @@ does not open SQLite or PGlite, resolve credential values, construct an R2
 client, or make a network request. Provider construction starts only after
 the mount command has resolved the config.
 
-Two CLI processes cannot use the ordinary FoundationDB exclusive-writer
-volume concurrently. For a fresh FoundationDB volume, the experimental opt-in
-`driver.storage.concurrent_writes: true` mode uses FoundationDB metadata
-with `lease_authority: "revision-cas"` and the same shared blocks available to
-both processes. Each CLI receives its own `--mountpoint`; all provider keys and
-cluster settings must match. Existing exclusive volumes with a legacy lease
-or fence key return `EBUSY` in this mode and require offline migration. On
-macOS, a second host needs a reachable shared cluster and the same block
-backing; cross-host behavior has not been verified here. The CLI rejects
-`memory` and `sqlite` block providers for concurrent mode because their
-independent local bytes cannot satisfy another writer's published references.
-The final local native two-process acceptance passed 1/1 against the guarded
-source; cross-host acceptance remains outstanding.
+Two CLI processes cannot use an ordinary exclusive-writer volume
+concurrently. The experimental opt-in `driver.storage.concurrent_writes: true`
+mode uses revision-CAS metadata and blocks available to every process. Each
+CLI receives its own mountpoint and uses identical provider keys and paths.
+The current metadata marker does not bind a block-backing identity. If two
+writers use different SQLite block files or RustFS bucket/prefix settings,
+both can acknowledge files into one namespace while each sees missing chunks
+from the other's backing. Keep the shared block configuration identical for
+every writer and stop a misconfigured writer before publication.
+SQLite metadata and block databases support only processes on the same host
+using the same local disk files; do not place those files on NFS or SMB.
+PGlite needs one reachable socket server shared by every CLI or host.
+FoundationDB requires `lease_authority: "revision-cas"`; the SQLite and
+PGlite metadata configurations need no FoundationDB lease setting. RustFS
+supplies shared immutable blocks when paired with one of those metadata
+providers; it has no metadata revision authority of its own. Local SQLite
+blocks are accepted only with local SQLite metadata, and memory blocks are
+rejected. Existing exclusive volumes with a legacy writer lease or fence
+require offline migration. Cross-host physical acceptance is still pending.
 Stop and upgrade older writers
 before activation because they do not recognize the concurrent-mode marker.
 If a shared cluster still serves older writers,
@@ -205,11 +211,10 @@ without mutating the database; use a matching pair for read-only access.
 This policy only addresses the virtual filesystem root; SQLite journal/WAL and
 transaction safety still require the native hosting acceptance tests below.
 
-Structured storage has independent metadata and blocks providers. Each
+Structured storage has independent metadata and block providers. Each
 provider is strict and supports memory, sqlite, pglite, tidb, and
-FoundationDB; r2 is supported for blocks only because the current integration
-exposes no R2 metadata store. PGlite and TiDB connection URLs plus R2
-credentials are environment references such as
+FoundationDB; R2, RustFS, and AWS S3 are block-only. PGlite and TiDB
+connection URLs plus R2 and RustFS credentials are environment references such as
 {"env":"R2_SECRET_ACCESS_KEY"}, never plaintext values. FoundationDB uses a
 resolved cluster_file path and requires the explicit `lease_authority` setting.
 Use `"persisted-single-authority"` only for an owned single-authority/test
@@ -225,15 +230,22 @@ without the feature. See
 examples/config-pglite-r2.json for the block-only R2 shape,
 examples/config-tidb-rustfs.json for the TiDB metadata/RustFS block shape, and
 examples/config-foundationdb-rustfs.json for FoundationDB metadata with
-RustFS-compatible blocks.
+RustFS blocks. For opt-in concurrent mode, see
+examples/config-sqlite-concurrent.json,
+examples/config-pglite-rustfs-concurrent.json, and
+examples/config-foundationdb-rustfs-concurrent.json.
 
-TiDB metadata can be composed with RustFS or another S3-compatible endpoint
-through the `r2` block provider. The TiDB `connection` and `volume_key` are
+TiDB metadata can be composed with RustFS through the `rustfs` block provider.
+The TiDB `connection` and `volume_key` are
 passed to the provider, and `durable` remains an explicit caller assertion;
 the URL alone does not prove replicated TiKV durability. The opt-in provider
 matrix uses this shape for configuration, shutdown/reopen, partial-write,
 truncate, and owned-prefix cleanup checks when live TiDB and RustFS
 credentials are available.
+RustFS endpoint URLs must contain only the HTTP(S) authority and may have one
+trailing slash; provider paths and buckets go in their separate fields.
+Omitting RustFS `durable` defaults to false. Set it to true only when the
+configured RustFS service is expected to retain completed block writes.
 
 Explicit command-line flags override only the config fields they name.
 Unspecified flags retain config values. Relative config paths are resolved

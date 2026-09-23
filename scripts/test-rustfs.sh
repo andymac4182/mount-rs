@@ -654,6 +654,7 @@ refresh_endpoint() {
       rustfs_port="$candidate_port"
       rustfs_endpoint="http://127.0.0.1:$rustfs_port"
       export R2_ENDPOINT="$rustfs_endpoint"
+      export RUSTFS_ENDPOINT="$rustfs_endpoint"
       return 0
     fi
     previous_port="$candidate_port"
@@ -789,6 +790,11 @@ bootstrap_bucket() {
 
 bootstrap_bucket
 echo "RUSTFS_READY endpoint=$rustfs_endpoint image=$rustfs_image"
+
+"$repo_dir/scripts/cargo-shared" test \
+  --manifest-path "$repo_dir/tests/rustfs/Cargo.toml" \
+  --locked \
+  -- "real_rustfs_signed_concurrent_preflight_fails_closed_before_mode_conversion" --exact --test-threads=1 --nocapture
 
 "$repo_dir/scripts/cargo-shared" test \
   --manifest-path "$repo_dir/tests/rustfs/Cargo.toml" \

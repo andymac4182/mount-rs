@@ -18,8 +18,8 @@ use mount_rs_core::{
 pub use mount_rs_core::{LoadedSnapshot, StateStore, snapshot_conflict};
 use mount_rs_memfs::MemoryFs;
 
-/// A small runtime-neutral async mutex used to serialize snapshot creation and
-/// backend writes.
+/// A runtime-neutral FIFO async mutex used to serialize snapshot creation and
+/// backend writes. A canceled waiter releases its queued turn to the next one.
 ///
 /// `PersistedFs` clones share the same `MemoryFs`. If a backend write is
 /// delayed, taking a snapshot before the write has completed lets a newer
@@ -34,17 +34,18 @@ struct SaveGate {
 
 struct SaveGateState {
     held: bool,
+    next_waiter_id: u64,
     waiters: VecDeque<SaveGateWaiter>,
 }
 
 struct SaveGateWaiter {
-    registration: Arc<()>,
+    id: u64,
     waker: Waker,
 }
 
 struct SaveGateFuture {
     state: Arc<Mutex<SaveGateState>>,
-    registration: Option<Arc<()>>,
+    queued_id: Option<u64>,
 }
 
 struct SaveGateGuard {
@@ -56,6 +57,7 @@ impl SaveGate {
         Self {
             state: Arc::new(Mutex::new(SaveGateState {
                 held: false,
+                next_waiter_id: 0,
                 waiters: VecDeque::new(),
             })),
         }
@@ -64,25 +66,9 @@ impl SaveGate {
     async fn lock(&self) -> SaveGateGuard {
         SaveGateFuture {
             state: Arc::clone(&self.state),
-            registration: None,
+            queued_id: None,
         }
         .await
-    }
-}
-
-impl SaveGateState {
-    // Keeping the selected waiter in the queue lets its cancellation hand an
-    // unlocked gate to another live waiter.
-    fn remove_waiter(&mut self, registration: &Arc<()>) -> bool {
-        let Some(index) = self
-            .waiters
-            .iter()
-            .position(|waiter| Arc::ptr_eq(&waiter.registration, registration))
-        else {
-            return false;
-        };
-        self.waiters.remove(index);
-        true
     }
 }
 
@@ -90,37 +76,43 @@ impl Future for SaveGateFuture {
     type Output = SaveGateGuard;
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        let future = self.get_mut();
-        let mut state = future
+        let this = self.get_mut();
+        let mut state = this
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !state.held {
-            state.held = true;
-            if let Some(registration) = future.registration.take() {
-                state.remove_waiter(&registration);
+        // Keep the front waiter queued until it polls; a new caller cannot
+        // take the free gate ahead of a waiter that has already been woken.
+        let owns_next_turn = !state.held
+            && match this.queued_id {
+                Some(id) => state.waiters.front().is_some_and(|waiter| waiter.id == id),
+                None => state.waiters.is_empty(),
+            };
+        if owns_next_turn {
+            if this.queued_id.take().is_some() {
+                state.waiters.pop_front();
             }
+            state.held = true;
             return Poll::Ready(SaveGateGuard {
-                state: Arc::clone(&future.state),
+                state: Arc::clone(&this.state),
             });
         }
 
-        // Re-polling one future updates its registration, including after a
-        // wakeup if another future acquired the gate first.
-        let registration = future.registration.get_or_insert_with(|| Arc::new(()));
-        if let Some(waiter) = state
-            .waiters
-            .iter_mut()
-            .find(|waiter| Arc::ptr_eq(&waiter.registration, registration))
-        {
-            if !waiter.waker.will_wake(context.waker()) {
-                waiter.waker = context.waker().clone();
-            }
+        if let Some(id) = this.queued_id {
+            let waiter = state
+                .waiters
+                .iter_mut()
+                .find(|waiter| waiter.id == id)
+                .expect("polled save-gate waiter is still queued");
+            waiter.waker = context.waker().clone();
         } else {
+            let id = state.next_waiter_id;
+            state.next_waiter_id = id.checked_add(1).expect("save-gate waiter IDs exhausted");
             state.waiters.push_back(SaveGateWaiter {
-                registration: Arc::clone(registration),
+                id,
                 waker: context.waker().clone(),
             });
+            this.queued_id = Some(id);
         }
         Poll::Pending
     }
@@ -128,7 +120,7 @@ impl Future for SaveGateFuture {
 
 impl Drop for SaveGateFuture {
     fn drop(&mut self) {
-        let Some(registration) = self.registration.take() else {
+        let Some(id) = self.queued_id.take() else {
             return;
         };
         let next = {
@@ -136,11 +128,15 @@ impl Drop for SaveGateFuture {
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if state.remove_waiter(&registration) && !state.held {
-                state.waiters.front().map(|waiter| waiter.waker.clone())
-            } else {
-                None
-            }
+            let position = state
+                .waiters
+                .iter()
+                .position(|waiter| waiter.id == id)
+                .expect("dropped save-gate waiter is still queued");
+            state.waiters.remove(position);
+            (position == 0 && !state.held)
+                .then(|| state.waiters.front().map(|waiter| waiter.waker.clone()))
+                .flatten()
         };
         if let Some(waker) = next {
             waker.wake();
@@ -156,11 +152,7 @@ impl Drop for SaveGateGuard {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             state.held = false;
-            state.waiters.pop_front().map(|waiter| {
-                let waker = waiter.waker.clone();
-                state.waiters.push_back(waiter);
-                waker
-            })
+            state.waiters.front().map(|waiter| waiter.waker.clone())
         };
         if let Some(waker) = waiter {
             waker.wake();
@@ -515,6 +507,7 @@ mod tests {
     fn repeated_save_gate_unlocks_wake_distinct_waiters() {
         const FIRST: usize = 0;
         const SECOND: usize = 1;
+        const NEWCOMER: usize = 2;
 
         let gate = SaveGate::new();
         let runnable = Arc::new(Mutex::new(VecDeque::new()));
@@ -525,6 +518,10 @@ mod tests {
         }));
         let second_waker = Waker::from(Arc::new(QueuedWake {
             task: SECOND,
+            runnable: Arc::clone(&runnable),
+        }));
+        let newcomer_waker = Waker::from(Arc::new(QueuedWake {
+            task: NEWCOMER,
             runnable: Arc::clone(&runnable),
         }));
         let mut first = Box::pin(gate.lock());
@@ -541,14 +538,37 @@ mod tests {
         ));
 
         drop(holder);
-        // A new caller can acquire the free gate before the first scheduled
-        // waiter is polled. Its release must notify the other waiter too.
-        let newcomer = acquire_uncontended_gate(&gate, &runnable);
-        drop(newcomer);
-
-        let scheduled = runnable.lock().unwrap().clone();
-        assert!(scheduled.contains(&SECOND));
-        assert!(scheduled.contains(&FIRST), "the first waiter stayed asleep");
+        // A later caller joins behind the queued waiters, and each completed
+        // handoff schedules the next distinct waiter.
+        let mut newcomer = Box::pin(gate.lock());
+        assert!(matches!(
+            newcomer
+                .as_mut()
+                .poll(&mut Context::from_waker(&newcomer_waker)),
+            Poll::Pending
+        ));
+        assert_eq!(runnable.lock().unwrap().pop_front(), Some(FIRST));
+        let first_guard = match first.as_mut().poll(&mut Context::from_waker(&first_waker)) {
+            Poll::Ready(guard) => guard,
+            Poll::Pending => panic!("the first waiter stayed asleep"),
+        };
+        drop(first_guard);
+        assert_eq!(runnable.lock().unwrap().pop_front(), Some(SECOND));
+        let second_guard = match second
+            .as_mut()
+            .poll(&mut Context::from_waker(&second_waker))
+        {
+            Poll::Ready(guard) => guard,
+            Poll::Pending => panic!("the second waiter stayed asleep"),
+        };
+        drop(second_guard);
+        assert_eq!(runnable.lock().unwrap().pop_front(), Some(NEWCOMER));
+        assert!(matches!(
+            newcomer
+                .as_mut()
+                .poll(&mut Context::from_waker(&newcomer_waker)),
+            Poll::Ready(_)
+        ));
     }
 
     #[test]
@@ -644,6 +664,172 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[derive(Default)]
+    struct CountingWake(AtomicUsize);
+
+    impl Wake for CountingWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn poll_gate<F: Future<Output = SaveGateGuard>>(
+        future: Pin<&mut F>,
+        counter: &Arc<CountingWake>,
+    ) -> Poll<SaveGateGuard> {
+        let waker = Waker::from(Arc::clone(counter));
+        future.poll(&mut Context::from_waker(&waker))
+    }
+
+    fn expect_gate_ready(poll: Poll<SaveGateGuard>, message: &str) -> SaveGateGuard {
+        match poll {
+            Poll::Ready(guard) => guard,
+            Poll::Pending => panic!("{message}"),
+        }
+    }
+
+    #[test]
+    fn save_gate_serves_queued_waiters_in_arrival_order() {
+        let gate = SaveGate::new();
+        let owner = block_on(gate.lock());
+        let first_wake = Arc::new(CountingWake::default());
+        let second_wake = Arc::new(CountingWake::default());
+        let mut first = Box::pin(gate.lock());
+        let mut second = Box::pin(gate.lock());
+        assert!(poll_gate(first.as_mut(), &first_wake).is_pending());
+        assert!(poll_gate(second.as_mut(), &second_wake).is_pending());
+
+        drop(owner);
+        assert_eq!(first_wake.0.load(Ordering::SeqCst), 1);
+        assert_eq!(second_wake.0.load(Ordering::SeqCst), 0);
+        let first_guard = expect_gate_ready(
+            poll_gate(first.as_mut(), &first_wake),
+            "first queued waiter must acquire after release",
+        );
+        drop(first_guard);
+        assert_eq!(second_wake.0.load(Ordering::SeqCst), 1);
+        let second_guard = expect_gate_ready(
+            poll_gate(second.as_mut(), &second_wake),
+            "second queued waiter must acquire after first release",
+        );
+        drop(second_guard);
+    }
+
+    #[test]
+    fn save_gate_cancellation_wakes_the_next_live_waiter() {
+        let gate = SaveGate::new();
+        let owner = block_on(gate.lock());
+        let live_wake = Arc::new(CountingWake::default());
+        let canceled_wake = Arc::new(CountingWake::default());
+        let mut live = Box::pin(gate.lock());
+        let mut canceled = Box::pin(gate.lock());
+        assert!(poll_gate(live.as_mut(), &live_wake).is_pending());
+        assert!(poll_gate(canceled.as_mut(), &canceled_wake).is_pending());
+
+        drop(canceled);
+        drop(owner);
+        assert_eq!(live_wake.0.load(Ordering::SeqCst), 1);
+        let live_guard = expect_gate_ready(
+            poll_gate(live.as_mut(), &live_wake),
+            "canceled waiter must not strand a live waiter",
+        );
+        drop(live_guard);
+    }
+
+    #[test]
+    fn save_gate_front_cancellation_while_held_wakes_the_next_waiter_on_release() {
+        let gate = SaveGate::new();
+        let owner = block_on(gate.lock());
+        let first_wake = Arc::new(CountingWake::default());
+        let second_wake = Arc::new(CountingWake::default());
+        let mut first = Box::pin(gate.lock());
+        let mut second = Box::pin(gate.lock());
+        assert!(poll_gate(first.as_mut(), &first_wake).is_pending());
+        assert!(poll_gate(second.as_mut(), &second_wake).is_pending());
+
+        drop(first);
+        assert_eq!(second_wake.0.load(Ordering::SeqCst), 0);
+        drop(owner);
+        assert_eq!(first_wake.0.load(Ordering::SeqCst), 0);
+        assert_eq!(second_wake.0.load(Ordering::SeqCst), 1);
+        drop(expect_gate_ready(
+            poll_gate(second.as_mut(), &second_wake),
+            "next waiter must acquire after the canceled front waiter",
+        ));
+    }
+
+    #[test]
+    fn save_gate_canceled_handoff_passes_to_the_next_waiter() {
+        let gate = SaveGate::new();
+        let owner = block_on(gate.lock());
+        let first_wake = Arc::new(CountingWake::default());
+        let second_wake = Arc::new(CountingWake::default());
+        let mut first = Box::pin(gate.lock());
+        let mut second = Box::pin(gate.lock());
+        assert!(poll_gate(first.as_mut(), &first_wake).is_pending());
+        assert!(poll_gate(second.as_mut(), &second_wake).is_pending());
+
+        drop(owner);
+        assert_eq!(first_wake.0.load(Ordering::SeqCst), 1);
+        drop(first);
+        assert_eq!(second_wake.0.load(Ordering::SeqCst), 1);
+        drop(expect_gate_ready(
+            poll_gate(second.as_mut(), &second_wake),
+            "canceled handoff must pass to the next queued waiter",
+        ));
+    }
+
+    #[test]
+    fn save_gate_late_arrival_cannot_pass_a_woken_waiter() {
+        let gate = SaveGate::new();
+        let owner = block_on(gate.lock());
+        let queued_wake = Arc::new(CountingWake::default());
+        let late_wake = Arc::new(CountingWake::default());
+        let mut queued = Box::pin(gate.lock());
+        assert!(poll_gate(queued.as_mut(), &queued_wake).is_pending());
+        drop(owner);
+
+        let mut late = Box::pin(gate.lock());
+        assert!(
+            poll_gate(late.as_mut(), &late_wake).is_pending(),
+            "a late waiter must not pass an already queued waiter"
+        );
+        let queued_guard = expect_gate_ready(
+            poll_gate(queued.as_mut(), &queued_wake),
+            "queued waiter must own the handoff",
+        );
+        drop(queued_guard);
+        assert_eq!(late_wake.0.load(Ordering::SeqCst), 1);
+        drop(expect_gate_ready(
+            poll_gate(late.as_mut(), &late_wake),
+            "late waiter must acquire after queued release",
+        ));
+    }
+
+    #[test]
+    fn save_gate_repoll_replaces_the_waiters_waker() {
+        let gate = SaveGate::new();
+        let owner = block_on(gate.lock());
+        let old_wake = Arc::new(CountingWake::default());
+        let current_wake = Arc::new(CountingWake::default());
+        let mut waiter = Box::pin(gate.lock());
+        assert!(poll_gate(waiter.as_mut(), &old_wake).is_pending());
+        assert!(poll_gate(waiter.as_mut(), &current_wake).is_pending());
+
+        drop(owner);
+        assert_eq!(old_wake.0.load(Ordering::SeqCst), 0);
+        assert_eq!(current_wake.0.load(Ordering::SeqCst), 1);
+        drop(expect_gate_ready(
+            poll_gate(waiter.as_mut(), &current_wake),
+            "repolled waiter must acquire on its current waker",
+        ));
+        assert_eq!(old_wake.0.load(Ordering::SeqCst), 0);
     }
 
     #[derive(Clone)]

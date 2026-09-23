@@ -11,15 +11,16 @@
         "lease_authority": "persisted-single-authority"
       },
       "blocks": {
-        "kind": "r2",
+        "kind": "rustfs",
         "endpoint": "http://127.0.0.1:9878",
         "bucket": "mount-rs-rustfs",
+        "region": "us-east-1",
         "prefix": "mount-rs/foundationdb-rustfs",
         "access_key_id": {
-          "env": "R2_ACCESS_KEY_ID"
+          "env": "RUSTFS_ACCESS_KEY_ID"
         },
         "secret_access_key": {
-          "env": "R2_SECRET_ACCESS_KEY"
+          "env": "RUSTFS_SECRET_ACCESS_KEY"
         },
         "durable": true
       },

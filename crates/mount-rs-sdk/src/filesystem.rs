@@ -68,25 +68,49 @@ impl Filesystem {
                 .with_message("chunk_size_bytes must be greater than zero"));
         }
         if options.concurrent_writes {
-            if !matches!(
-                &options.metadata,
+            match &options.metadata {
                 StoreConfig::FoundationDb {
                     lease_authority: FoundationDbLeaseAuthority::RevisionCas,
                     ..
                 }
-            ) {
-                return Err(FsError::new(ErrorCode::Einval).with_message(
-                    "concurrent_writes requires FoundationDB revision-CAS metadata",
-                ));
+                | StoreConfig::Pglite { .. } => {}
+                StoreConfig::Sqlite { path } if sqlite_durable_path(path) => {}
+                StoreConfig::Sqlite { .. } => {
+                    return Err(FsError::new(ErrorCode::Einval).with_message(
+                        "concurrent_writes SQLite metadata requires a durable local database path",
+                    ));
+                }
+                _ => {
+                    return Err(FsError::new(ErrorCode::Einval).with_message(
+                        "concurrent_writes requires SQLite, PGlite, or FoundationDB revision-CAS metadata",
+                    ));
+                }
             }
-            if matches!(
-                &options.blocks,
-                StoreConfig::Memory | StoreConfig::Sqlite { .. }
-            ) {
-                return Err(FsError::new(ErrorCode::Einval).with_message(
-                    "concurrent_writes requires a shared block store; memory and local SQLite blocks cannot serve independent mounts",
-                ));
+            match &options.blocks {
+                StoreConfig::Memory => {
+                    return Err(FsError::new(ErrorCode::Einval).with_message(
+                        "concurrent_writes requires a shared block provider; memory blocks are unavailable to independent mounts",
+                    ));
+                }
+                StoreConfig::Sqlite { path }
+                    if !matches!(&options.metadata, StoreConfig::Sqlite { .. })
+                        || !sqlite_durable_path(path) =>
+                {
+                    return Err(FsError::new(ErrorCode::Einval).with_message(
+                        "concurrent_writes requires a shared block provider; local SQLite blocks require local SQLite metadata on the same host and a durable block database path",
+                    ));
+                }
+                _ => {}
             }
+        } else if matches!(
+            &options.metadata,
+            StoreConfig::FoundationDb {
+                lease_authority: FoundationDbLeaseAuthority::RevisionCas,
+                ..
+            }
+        ) {
+            return Err(FsError::new(ErrorCode::Einval)
+                .with_message("FoundationDB revision-CAS metadata requires concurrent_writes"));
         }
         let chunk_options = ChunkedOptions::fixed(options.owner, options.chunk_size_bytes)?
             .with_lease_ttl(options.lease_ttl)
@@ -161,6 +185,11 @@ impl Filesystem {
             }
         }
     }
+}
+
+fn sqlite_durable_path(path: &Path) -> bool {
+    let value = path.to_string_lossy();
+    !value.is_empty() && value != ":memory:" && !value.starts_with("file:")
 }
 
 impl Clone for Filesystem {

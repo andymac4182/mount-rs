@@ -333,6 +333,23 @@ fn sdk_store_config(provider: &StorageProvider) -> Result<StoreConfig, CliError>
             secret_access_key: resolve_storage_env(secret_access_key)?,
             durable: *durable,
         }),
+        StorageProvider::RustFs {
+            endpoint,
+            bucket,
+            region,
+            prefix,
+            access_key_id,
+            secret_access_key,
+            durable,
+        } => Ok(StoreConfig::RustFs {
+            endpoint: endpoint.clone(),
+            bucket: bucket.clone(),
+            region: region.clone(),
+            prefix: prefix.clone(),
+            access_key_id: resolve_storage_env(access_key_id)?,
+            secret_access_key: resolve_storage_env(secret_access_key)?,
+            durable: *durable,
+        }),
         StorageProvider::AwsS3 {
             bucket,
             region,
@@ -696,6 +713,7 @@ async fn shutdown_runtimes(runtimes: &[DriverRuntime]) -> FsResult<()> {
 
 async fn mount_command(options: CliOptions) -> Result<(), CliError> {
     let mountpoints = requested_mountpoints(&options)?;
+    let preopen_sqlite_path_guard = concurrent_sqlite_backing_requested(&options);
     let shared_view = shared_view_requested(&options);
     let auto_transport = if options.transport == TransportChoice::Auto {
         let probe = mount_rs_auto::probe_transports();
@@ -712,6 +730,9 @@ async fn mount_command(options: CliOptions) -> Result<(), CliError> {
         ));
     }
     let (uid, gid) = effective_identity();
+    if preopen_sqlite_path_guard {
+        prepare_mountpoints_before_driver(&options, &mountpoints, true).await?;
+    }
     let runtime = DriverRuntime::open(&options, uid, gid).await?;
     #[cfg(feature = "observability")]
     let telemetry = runtime.telemetry();
@@ -742,27 +763,9 @@ async fn mount_command(options: CliOptions) -> Result<(), CliError> {
             !options.quiet,
         ),
     );
-    for mountpoint in &mountpoints {
-        unmount_stale(mountpoint, current_uid(), color).await;
-        if let Err(error) = std::fs::create_dir_all(mountpoint) {
-            let _ = runtime.shutdown().await;
-            return Err(io_error(error));
-        }
-    }
-    // Lexical checks catch ordinary repeats before any directory is touched.
-    // Canonical paths also catch aliases through an existing symlink.
-    let canonical_mountpoints = mountpoints
-        .iter()
-        .map(std::fs::canonicalize)
-        .collect::<std::io::Result<Vec<_>>>();
-    let canonical_mountpoints = match canonical_mountpoints {
-        Ok(paths) => paths,
-        Err(error) => {
-            let _ = runtime.shutdown().await;
-            return Err(io_error(error));
-        }
-    };
-    if let Err(error) = check_distinct_mountpoints(&canonical_mountpoints) {
+    if !preopen_sqlite_path_guard
+        && let Err(error) = prepare_mountpoints_before_driver(&options, &mountpoints, false).await
+    {
         let _ = runtime.shutdown().await;
         return Err(error);
     }
@@ -868,6 +871,82 @@ async fn mount_command(options: CliOptions) -> Result<(), CliError> {
         }
     }
     Ok(())
+}
+
+async fn prepare_mountpoints_before_driver(
+    options: &CliOptions,
+    mountpoints: &[PathBuf],
+    preopen: bool,
+) -> Result<(), CliError> {
+    let color = Color::from_env();
+    if preopen {
+        for mountpoint in mountpoints {
+            if mountpoint_is_mounted(mountpoint).await? {
+                return Err(CliError::runtime(format!(
+                    "EBUSY: concurrent SQLite mountpoint is already mounted: {}",
+                    mountpoint.display()
+                )));
+            }
+        }
+    }
+    for mountpoint in mountpoints {
+        if !preopen {
+            unmount_stale(mountpoint, current_uid(), color).await;
+        }
+        std::fs::create_dir_all(mountpoint).map_err(io_error)?;
+    }
+    // Existing directories resolve case and normalization aliases on macOS.
+    // This second check must run before a fresh metadata provider can install
+    // its concurrent-mode marker or create a backing database inside a view.
+    let canonical_mountpoints = mountpoints
+        .iter()
+        .map(std::fs::canonicalize)
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(io_error)?;
+    check_distinct_mountpoints(&canonical_mountpoints)?;
+    validate_concurrent_sqlite_backing_paths(options, mountpoints)
+}
+
+async fn mountpoint_is_mounted(target: &Path) -> Result<bool, CliError> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let platform = if cfg!(target_os = "macos") {
+            mount_rs_nfs::NfsPlatform::Macos
+        } else {
+            mount_rs_nfs::NfsPlatform::Linux
+        };
+        let first = mount_rs_nfs::mount_entry_at(target, platform)
+            .await
+            .map_err(|error| {
+                CliError::runtime(format!(
+                    "cannot inspect mountpoint before SQLite open: {error}"
+                ))
+            })?;
+        if first.is_some() {
+            return Ok(true);
+        }
+        let Ok(canonical) = std::fs::canonicalize(target) else {
+            return Ok(false);
+        };
+        if canonical == target {
+            return Ok(false);
+        }
+        mount_rs_nfs::mount_entry_at(&canonical, platform)
+            .await
+            .map(|entry| entry.is_some())
+            .map_err(|error| {
+                CliError::runtime(format!(
+                    "cannot inspect mountpoint before SQLite open: {error}"
+                ))
+            })
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = target;
+        Err(CliError::runtime(
+            "cannot verify mounted paths before concurrent SQLite open on this platform",
+        ))
+    }
 }
 
 fn sqlite_single_host_nfs_options(options: &CliOptions) -> Option<mount_rs_nfs::NfsMountOptions> {
@@ -1181,13 +1260,52 @@ fn requested_mountpoints(options: &CliOptions) -> Result<Vec<PathBuf>, CliError>
             .collect::<Result<Vec<_>, _>>()?;
         check_distinct_mountpoints(&candidates)?;
     }
+    validate_concurrent_sqlite_backing_paths(options, &paths)?;
     Ok(paths)
+}
+
+fn validate_concurrent_sqlite_backing_paths(
+    options: &CliOptions,
+    mountpoints: &[PathBuf],
+) -> Result<(), CliError> {
+    let Some(storage) = options
+        .storage
+        .as_ref()
+        .filter(|storage| storage.concurrent_writes)
+    else {
+        return Ok(());
+    };
+    for (role, provider) in [("metadata", &storage.metadata), ("blocks", &storage.blocks)] {
+        let StorageProvider::Sqlite { path } = provider else {
+            continue;
+        };
+        let backing = canonical_mountpoint_candidate(&expand_path(path))?;
+        for mountpoint in mountpoints {
+            let candidate = canonical_mountpoint_candidate(mountpoint)?;
+            if path_is_or_below(&backing, &candidate) {
+                return Err(CliError::usage(format!(
+                    "concurrent SQLite backing {role} path must be outside every mountpoint: {} is under {}",
+                    backing.display(),
+                    candidate.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn concurrent_sqlite_backing_requested(options: &CliOptions) -> bool {
+    options.storage.as_ref().is_some_and(|storage| {
+        storage.concurrent_writes
+            && (matches!(storage.metadata, StorageProvider::Sqlite { .. })
+                || matches!(storage.blocks, StorageProvider::Sqlite { .. }))
+    })
 }
 
 fn check_distinct_mountpoints(paths: &[PathBuf]) -> Result<(), CliError> {
     for (index, path) in paths.iter().enumerate() {
         for other in paths.iter().skip(index + 1) {
-            if path.starts_with(other) || other.starts_with(path) {
+            if path_is_or_below(path, other) || path_is_or_below(other, path) {
                 return Err(CliError::usage(format!(
                     "mountpoints must be distinct and not nested: {} and {}",
                     path.display(),
@@ -1199,22 +1317,104 @@ fn check_distinct_mountpoints(paths: &[PathBuf]) -> Result<(), CliError> {
     Ok(())
 }
 
+fn path_is_or_below(path: &Path, parent: &Path) -> bool {
+    if path.starts_with(parent) {
+        return true;
+    }
+    // An existing ancestor can be the same directory through case folding,
+    // Unicode normalization, or a symlink even if its path spelling differs.
+    #[cfg(target_os = "macos")]
+    if macos_has_mountpoint_inode_in_ancestors(path, parent) {
+        return true;
+    }
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn macos_has_mountpoint_inode_in_ancestors(path: &Path, parent: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(mountpoint) = std::fs::metadata(parent) else {
+        return false;
+    };
+    path.ancestors().any(|ancestor| {
+        std::fs::metadata(ancestor).is_ok_and(|metadata| {
+            metadata.dev() == mountpoint.dev() && metadata.ino() == mountpoint.ino()
+        })
+    })
+}
+
 fn canonical_mountpoint_candidate(path: &Path) -> Result<PathBuf, CliError> {
+    let mut symlink_hops = 0;
+    canonical_candidate_with_dangling_links(path, &mut symlink_hops)
+}
+
+fn canonical_candidate_with_dangling_links(
+    path: &Path,
+    symlink_hops: &mut usize,
+) -> Result<PathBuf, CliError> {
+    const MAX_SYMLINK_HOPS: usize = 40;
+
     let mut ancestor = path;
     let mut missing = Vec::new();
     loop {
         match std::fs::canonicalize(ancestor) {
             Ok(mut canonical) => {
                 for name in missing.iter().rev() {
-                    canonical.push(name);
+                    if name == ".." {
+                        canonical.pop();
+                    } else if name != "." {
+                        canonical.push(name);
+                    }
                 }
                 return Ok(canonical);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let name = ancestor.file_name().ok_or_else(|| {
+                match std::fs::symlink_metadata(ancestor) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        *symlink_hops += 1;
+                        if *symlink_hops > MAX_SYMLINK_HOPS {
+                            return Err(CliError::usage(format!(
+                                "too many symlinks in path: {}",
+                                path.display()
+                            )));
+                        }
+                        let link = std::fs::read_link(ancestor).map_err(io_error)?;
+                        let mut target = if link.is_absolute() {
+                            link
+                        } else {
+                            ancestor
+                                .parent()
+                                .ok_or_else(|| {
+                                    CliError::usage(format!(
+                                        "invalid symlink path: {}",
+                                        ancestor.display()
+                                    ))
+                                })?
+                                .join(link)
+                        };
+                        for name in missing.iter().rev() {
+                            target.push(name);
+                        }
+                        return canonical_candidate_with_dangling_links(&target, symlink_hops);
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(io_error(error)),
+                }
+                let component = ancestor.components().next_back().ok_or_else(|| {
                     CliError::usage(format!("invalid mountpoint: {}", path.display()))
                 })?;
-                missing.push(name.to_os_string());
+                if matches!(
+                    component,
+                    std::path::Component::RootDir | std::path::Component::Prefix(_)
+                ) {
+                    return Err(CliError::usage(format!(
+                        "invalid mountpoint: {}",
+                        path.display()
+                    )));
+                }
+                missing.push(component.as_os_str().to_os_string());
                 ancestor = ancestor.parent().ok_or_else(|| {
                     CliError::usage(format!("invalid mountpoint: {}", path.display()))
                 })?;
@@ -1357,6 +1557,368 @@ mod tests {
             PathBuf::from("/tmp/mount-rs-view/child"),
         ];
         assert!(check_distinct_mountpoints(&nested).is_err());
+    }
+
+    #[test]
+    fn concurrent_sqlite_backing_must_be_outside_every_mountpoint() {
+        let scope = std::env::temp_dir().join(format!(
+            "mount-rs-cli-concurrent-sqlite-paths-{}",
+            std::process::id()
+        ));
+        let primary = scope.join("view-a");
+        let secondary = scope.join("view-b");
+        let metadata = scope.join("metadata.sqlite");
+        let blocks = scope.join("blocks.sqlite");
+        let mut options = CliOptions {
+            mountpoint: Some(primary.clone()),
+            also_mountpoints: vec![secondary.clone()],
+            transport: TransportChoice::Nfs,
+            driver: DriverChoice::SplitStore,
+            storage: Some(Box::new(SplitStorageConfig {
+                metadata: StorageProvider::Sqlite {
+                    path: primary.join("metadata.sqlite"),
+                },
+                blocks: StorageProvider::Sqlite {
+                    path: blocks.clone(),
+                },
+                chunk_size_bytes: 4096,
+                lease_ttl_ms: None,
+                concurrent_writes: true,
+                owner: None,
+            })),
+            ..CliOptions::default()
+        };
+        let error = requested_mountpoints(&options)
+            .expect_err("metadata inside the primary mount must fail before driver open");
+        assert!(error.to_string().contains("SQLite backing"), "{error}");
+
+        options.storage.as_mut().unwrap().metadata = StorageProvider::Sqlite {
+            path: metadata.clone(),
+        };
+        options.storage.as_mut().unwrap().blocks = StorageProvider::Sqlite {
+            path: secondary.join("blocks.sqlite"),
+        };
+        let error = requested_mountpoints(&options)
+            .expect_err("blocks inside an additional mount must fail before driver open");
+        assert!(error.to_string().contains("SQLite backing"), "{error}");
+
+        options.storage.as_mut().unwrap().blocks = StorageProvider::Sqlite { path: blocks };
+        assert!(requested_mountpoints(&options).is_ok());
+        options.storage.as_mut().unwrap().concurrent_writes = false;
+        options.storage.as_mut().unwrap().metadata = StorageProvider::Sqlite {
+            path: primary.join("legacy.sqlite"),
+        };
+        assert!(
+            requested_mountpoints(&options).is_ok(),
+            "existing single-writer layouts remain unchanged"
+        );
+    }
+
+    #[test]
+    fn concurrent_sqlite_backing_guard_resolves_dotdot_below_missing_paths() {
+        let scope = std::env::temp_dir().join(format!(
+            "mount-rs-cli-concurrent-sqlite-dotdot-{}",
+            std::process::id()
+        ));
+        let view = scope.join("view");
+        let mut options = CliOptions {
+            mountpoint: Some(view.clone()),
+            transport: TransportChoice::Nfs,
+            driver: DriverChoice::SplitStore,
+            storage: Some(Box::new(SplitStorageConfig {
+                metadata: StorageProvider::Sqlite {
+                    path: scope.join("missing/../view/metadata.sqlite"),
+                },
+                blocks: StorageProvider::Sqlite {
+                    path: scope.join("blocks.sqlite"),
+                },
+                chunk_size_bytes: 4096,
+                lease_ttl_ms: None,
+                concurrent_writes: true,
+                owner: None,
+            })),
+            ..CliOptions::default()
+        };
+        let error = requested_mountpoints(&options)
+            .expect_err("dotdot must not hide backing under a missing mountpoint");
+        assert!(error.to_string().contains("SQLite backing"), "{error}");
+
+        options.storage.as_mut().unwrap().metadata = StorageProvider::Sqlite {
+            path: scope.join("view/../metadata.sqlite"),
+        };
+        assert!(
+            requested_mountpoints(&options).is_ok(),
+            "dotdot resolving outside the mountpoint must remain valid"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_sqlite_guard_resolves_dangling_backing_symlink_into_absent_view() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after Unix epoch")
+            .as_nanos();
+        let scope = std::env::temp_dir().join(format!(
+            "mount-rs-cli-dangling-backing-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&scope).expect("create private test scope");
+        let view = scope.join("view");
+        let metadata_link = scope.join("metadata-link.sqlite");
+        std::os::unix::fs::symlink("view/metadata.sqlite", &metadata_link)
+            .expect("create dangling relative backing link");
+        let blocks = scope.join("blocks.sqlite");
+        let mut options = CliOptions {
+            mountpoint: Some(view.clone()),
+            transport: TransportChoice::Nfs,
+            driver: DriverChoice::SplitStore,
+            storage: Some(Box::new(SplitStorageConfig {
+                metadata: StorageProvider::Sqlite {
+                    path: metadata_link.clone(),
+                },
+                blocks: StorageProvider::Sqlite {
+                    path: blocks.clone(),
+                },
+                chunk_size_bytes: 4096,
+                lease_ttl_ms: None,
+                concurrent_writes: true,
+                owner: None,
+            })),
+            ..CliOptions::default()
+        };
+        let error = requested_mountpoints(&options).expect_err(
+            "dangling backing link into the absent view must fail before provider open",
+        );
+        assert!(error.to_string().contains("SQLite backing"), "{error}");
+        assert!(!view.exists());
+        assert!(!view.join("metadata.sqlite").exists());
+        assert!(!blocks.exists());
+
+        let directory_link = scope.join("directory-link");
+        std::os::unix::fs::symlink("view/missing-directory", &directory_link)
+            .expect("create dangling intermediate link");
+        options.storage.as_mut().unwrap().metadata = StorageProvider::Sqlite {
+            path: directory_link.join("nested/metadata.sqlite"),
+        };
+        let error = requested_mountpoints(&options)
+            .expect_err("dangling intermediate link into the view must also fail");
+        assert!(error.to_string().contains("SQLite backing"), "{error}");
+
+        std::fs::remove_file(&directory_link).expect("remove intermediate link");
+        std::fs::remove_file(&metadata_link).expect("remove backing link");
+        std::os::unix::fs::symlink("outside/metadata.sqlite", &metadata_link)
+            .expect("create dangling backing link outside the view");
+        options.storage.as_mut().unwrap().metadata = StorageProvider::Sqlite {
+            path: metadata_link.clone(),
+        };
+        assert!(
+            requested_mountpoints(&options).is_ok(),
+            "a dangling link to an unrelated outside sibling must remain valid"
+        );
+        std::fs::remove_file(&metadata_link).expect("remove outside backing link");
+
+        let cycle_a = scope.join("cycle-a");
+        let cycle_b = scope.join("cycle-b");
+        std::os::unix::fs::symlink("cycle-b", &cycle_a).expect("create cycle A");
+        std::os::unix::fs::symlink("cycle-a", &cycle_b).expect("create cycle B");
+        options.storage.as_mut().unwrap().metadata = StorageProvider::Sqlite {
+            path: cycle_a.clone(),
+        };
+        assert!(
+            requested_mountpoints(&options).is_err(),
+            "a cyclic backing symlink must fail before provider open"
+        );
+        std::fs::remove_file(&cycle_a).expect("remove cycle A");
+        std::fs::remove_file(&cycle_b).expect("remove cycle B");
+        std::fs::remove_dir(&scope).expect("remove empty private test scope");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn concurrent_sqlite_backing_guard_rejects_uncreated_apfs_aliases() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after Unix epoch")
+            .as_nanos();
+        let scope = std::env::temp_dir().join(format!(
+            "mount-rs-cli-uncreated-apfs-aliases-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&scope).expect("create private test scope");
+        let probe = scope.join("case-probe");
+        std::fs::create_dir(&probe).expect("create sensitivity probe");
+        assert!(
+            scope.join("CASE-PROBE").exists(),
+            "this regression needs a case-insensitive macOS test volume"
+        );
+        std::fs::remove_dir(&probe).expect("remove sensitivity probe");
+        let composed_probe = scope.join("caf\u{e9}-probe");
+        std::fs::create_dir(&composed_probe).expect("create normalization probe");
+        assert!(
+            scope.join("cafe\u{301}-probe").exists(),
+            "this regression needs an APFS-style normalization-equivalent volume"
+        );
+        std::fs::remove_dir(&composed_probe).expect("remove normalization probe");
+        let case_fold_probe = scope.join("\u{df}-probe");
+        std::fs::create_dir(&case_fold_probe).expect("create Unicode case-fold probe");
+        assert!(
+            scope.join("ss-probe").exists(),
+            "this regression needs a macOS volume where sharp-s aliases ss"
+        );
+        std::fs::remove_dir(&case_fold_probe).expect("remove Unicode case-fold probe");
+
+        let mountpoint = scope.join("mnt");
+        let metadata = scope.join("MNT/metadata.sqlite");
+        let blocks = scope.join("blocks.sqlite");
+        let mut options = CliOptions {
+            mountpoint: Some(mountpoint.clone()),
+            transport: TransportChoice::Nfs,
+            driver: DriverChoice::SplitStore,
+            storage: Some(Box::new(SplitStorageConfig {
+                metadata: StorageProvider::Sqlite {
+                    path: metadata.clone(),
+                },
+                blocks: StorageProvider::Sqlite {
+                    path: blocks.clone(),
+                },
+                chunk_size_bytes: 4096,
+                lease_ttl_ms: None,
+                concurrent_writes: true,
+                owner: None,
+            })),
+            ..CliOptions::default()
+        };
+        assert!(!mountpoint.exists(), "mountpoint must start absent");
+        assert!(!metadata.exists(), "backing must start absent");
+        let paths = requested_mountpoints(&options)
+            .expect("an absent spelling needs actual volume identity before rejection");
+        let error = prepare_mountpoints_before_driver(&options, &paths, true)
+            .await
+            .expect_err("case-equivalent absent backing must be rejected before provider open");
+        assert!(error.to_string().contains("SQLite backing"), "{error}");
+        assert_eq!(error.exit_code(), 2);
+        assert!(
+            mountpoint.exists(),
+            "the volume identity was checked after materialization"
+        );
+        assert!(!metadata.exists(), "path guard must not create metadata");
+        assert!(!blocks.exists(), "path guard must not create blocks");
+        std::fs::remove_dir(&mountpoint).expect("remove empty materialized view");
+
+        let composed_mountpoint = scope.join("caf\u{e9}");
+        let decomposed_backing = scope.join("cafe\u{301}/metadata.sqlite");
+        options.mountpoint = Some(composed_mountpoint.clone());
+        options.storage.as_mut().unwrap().metadata = StorageProvider::Sqlite {
+            path: decomposed_backing.clone(),
+        };
+        let paths = requested_mountpoints(&options)
+            .expect("an absent spelling needs actual volume identity before rejection");
+        let error = prepare_mountpoints_before_driver(&options, &paths, true)
+            .await
+            .expect_err(
+                "normalization-equivalent absent backing must be rejected before provider open",
+            );
+        assert!(error.to_string().contains("SQLite backing"), "{error}");
+        assert!(composed_mountpoint.exists());
+        assert!(!decomposed_backing.exists());
+        assert!(!blocks.exists());
+        std::fs::remove_dir(&composed_mountpoint).expect("remove empty materialized view");
+
+        let sharp_s_mountpoint = scope.join("\u{df}");
+        let ss_backing = scope.join("ss/metadata.sqlite");
+        options.mountpoint = Some(sharp_s_mountpoint.clone());
+        options.storage.as_mut().unwrap().metadata = StorageProvider::Sqlite {
+            path: ss_backing.clone(),
+        };
+        let paths = requested_mountpoints(&options)
+            .expect("Unicode case-fold alias is checked against the actual volume before open");
+        let error = prepare_mountpoints_before_driver(&options, &paths, true)
+            .await
+            .expect_err("sharp-s and ss missing components must be rejected as APFS aliases");
+        assert!(error.to_string().contains("SQLite backing"), "{error}");
+        assert_eq!(error.exit_code(), 2, "failure must precede provider open");
+        assert!(
+            sharp_s_mountpoint.exists(),
+            "the alias was resolved by the actual volume"
+        );
+        assert!(!ss_backing.exists());
+        assert!(
+            !blocks.exists(),
+            "the provider must not create either backing database"
+        );
+        std::fs::remove_dir(&sharp_s_mountpoint).expect("remove empty materialized view");
+
+        options.mountpoint = Some(mountpoint.clone());
+        options.storage.as_mut().unwrap().metadata = StorageProvider::Sqlite {
+            path: scope.join("MNT2/metadata.sqlite"),
+        };
+        assert!(
+            requested_mountpoints(&options).is_ok(),
+            "segment containment must preserve an unrelated ASCII sibling"
+        );
+        let unicode_view = scope.join("\u{3b1}");
+        options.mountpoint = Some(unicode_view.clone());
+        options.storage.as_mut().unwrap().metadata = StorageProvider::Sqlite {
+            path: scope.join("\u{3b2}/metadata.sqlite"),
+        };
+        let paths = requested_mountpoints(&options)
+            .expect("unrelated Unicode siblings should not be treated as APFS aliases");
+        prepare_mountpoints_before_driver(&options, &paths, true)
+            .await
+            .expect("volume-aware recheck keeps unrelated Unicode backing outside the view");
+        assert!(
+            unicode_view.exists(),
+            "volume-aware recheck materializes only the requested view"
+        );
+        assert!(
+            !scope.join("\u{3b2}").exists(),
+            "unrelated Unicode siblings should not be treated as APFS aliases"
+        );
+        std::fs::remove_dir(&unicode_view).expect("remove empty Unicode view");
+        options.mountpoint = Some(mountpoint.clone());
+        options.also_mountpoints = vec![scope.join("MNT")];
+        let paths = requested_mountpoints(&options)
+            .expect("absent case variant views need actual volume identity before rejection");
+        let error = prepare_mountpoints_before_driver(&options, &paths, true)
+            .await
+            .expect_err("uncreated case-equivalent view paths must be distinct before open");
+        assert!(
+            error.to_string().contains("distinct and not nested"),
+            "{error}"
+        );
+        assert!(mountpoint.exists());
+        assert!(
+            scope.join("MNT").exists(),
+            "APFS resolves both spellings to one view"
+        );
+        std::fs::remove_dir(&mountpoint).expect("remove aliased empty view");
+
+        std::fs::remove_dir(&scope).expect("remove empty private test scope");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn concurrent_sqlite_preopen_guard_rejects_an_existing_mount_without_detaching_it() {
+        let root = PathBuf::from("/");
+        assert!(
+            mountpoint_is_mounted(&root)
+                .await
+                .expect("read the host mount table"),
+            "the test needs the root filesystem's mount entry"
+        );
+        let options = CliOptions::default();
+        let error = prepare_mountpoints_before_driver(&options, std::slice::from_ref(&root), true)
+            .await
+            .expect_err("a mounted path must fail before stale unmount or provider open");
+        assert!(error.to_string().starts_with("EBUSY:"), "{error}");
+        assert_eq!(error.exit_code(), 1);
+        assert!(
+            mountpoint_is_mounted(&root)
+                .await
+                .expect("read the mount table after rejection"),
+            "pre-open path validation must leave an existing mount attached"
+        );
     }
 
     #[cfg(unix)]
