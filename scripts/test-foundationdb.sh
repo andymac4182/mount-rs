@@ -64,7 +64,7 @@ if [ "$soak_rounds" -gt 100 ]; then
   echo "MOUNT_RS_FOUNDATIONDB_SOAK_ROUNDS must not exceed 100" >&2
   exit 2
 fi
-if [ "$soak_rounds" -gt 0 ] && [ -z "${R2_ENDPOINT:-}" ]; then
+if [ "$soak_rounds" -gt 0 ] && [ -z "${RUSTFS_ENDPOINT:-}" ]; then
   echo "MOUNT_RS_FOUNDATIONDB_SOAK_ROUNDS requires the composed RustFS lane" >&2
   exit 2
 fi
@@ -387,7 +387,7 @@ fi
 export MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE="$run_dir/fdb.cluster"
 echo "FOUNDATIONDB_READY platform=$docker_platform server=$server cluster=$run_dir/fdb.cluster"
 
-if [ -n "${R2_ENDPOINT:-}" ]; then
+if [ -n "${RUSTFS_ENDPOINT:-}" ]; then
   if [ "$external_mode" -eq 1 ]; then
     echo "FoundationDB + RustFS service-restart gate requires an owned FoundationDB server; refusing external mode" >&2
     exit 2
@@ -406,11 +406,11 @@ if [ -n "${R2_ENDPOINT:-}" ]; then
     rustfs_endpoint="http://$rustfs_network_alias:9000"
     echo "FOUNDATIONDB_RUSTFS_NETWORK_READY alias=$rustfs_network_alias container=$RUSTFS_HARNESS_CONTAINER"
   else
-    case "$R2_ENDPOINT" in
-      http://127.0.0.1:*) rustfs_endpoint="http://host.docker.internal${R2_ENDPOINT#http://127.0.0.1}" ;;
-      http://localhost:*) rustfs_endpoint="http://host.docker.internal${R2_ENDPOINT#http://localhost}" ;;
-      http://host.docker.internal:*) rustfs_endpoint="$R2_ENDPOINT" ;;
-      *) echo "Refusing non-local RustFS endpoint in composed gate: $R2_ENDPOINT" >&2; exit 2 ;;
+    case "$RUSTFS_ENDPOINT" in
+      http://127.0.0.1:*) rustfs_endpoint="http://host.docker.internal${RUSTFS_ENDPOINT#http://127.0.0.1}" ;;
+      http://localhost:*) rustfs_endpoint="http://host.docker.internal${RUSTFS_ENDPOINT#http://localhost}" ;;
+      http://host.docker.internal:*) rustfs_endpoint="$RUSTFS_ENDPOINT" ;;
+      *) echo "Refusing non-local RustFS endpoint in composed gate: $RUSTFS_ENDPOINT" >&2; exit 2 ;;
     esac
   fi
   test_manifest=tests/foundationdb/Cargo.toml
@@ -419,9 +419,10 @@ if [ -n "${R2_ENDPOINT:-}" ]; then
   # owned FoundationDB container is restarted below.
   test_command="set -e; cargo check --locked -p mount-rs-sdk -p mount-rs-cli -p mount-rs-napi --features mount-rs-sdk/foundationdb,mount-rs-cli/foundationdb,mount-rs-napi/foundationdb && cargo test --manifest-path tests/foundationdb/Cargo.toml --locked --lib foundationdb_rustfs_chunked_composition -- --exact --nocapture && cargo test --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb -- --nocapture"
   test_prefix=${RUSTFS_COMBO_PREFIX:?RUSTFS_COMBO_PREFIX must be set for the composed gate}
-  : "${R2_BUCKET:?R2_BUCKET must be set for the composed gate}"
-  : "${R2_ACCESS_KEY_ID:?R2_ACCESS_KEY_ID must be set for the composed gate}"
-  : "${R2_SECRET_ACCESS_KEY:?R2_SECRET_ACCESS_KEY must be set for the composed gate}"
+  : "${RUSTFS_BUCKET:?RUSTFS_BUCKET must be set for the composed gate}"
+  : "${RUSTFS_ACCESS_KEY_ID:?RUSTFS_ACCESS_KEY_ID must be set for the composed gate}"
+  : "${RUSTFS_SECRET_ACCESS_KEY:?RUSTFS_SECRET_ACCESS_KEY must be set for the composed gate}"
+  : "${RUSTFS_REGION:?RUSTFS_REGION must be set for the composed gate}"
 else
   rustfs_endpoint=""
   test_manifest=providers/mount-rs-foundationdb/Cargo.toml
@@ -600,6 +601,11 @@ if [ -n "$rustfs_endpoint" ]; then
     --env R2_BUCKET \
     --env R2_ACCESS_KEY_ID \
     --env R2_SECRET_ACCESS_KEY \
+    --env "RUSTFS_ENDPOINT=$rustfs_endpoint" \
+    --env RUSTFS_BUCKET \
+    --env RUSTFS_ACCESS_KEY_ID \
+    --env RUSTFS_SECRET_ACCESS_KEY \
+    --env RUSTFS_REGION \
     --env "RUSTFS_COMBO_PREFIX=$test_prefix" \
     --env "MOUNT_RS_FOUNDATIONDB_TEST_PREFIX=$test_prefix" \
     --env "MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX=$authority_prefix" \
@@ -702,6 +708,11 @@ if [ "$run_napi" -eq 1 ]; then
       --env R2_BUCKET \
       --env R2_ACCESS_KEY_ID \
       --env R2_SECRET_ACCESS_KEY \
+      --env "RUSTFS_ENDPOINT=$rustfs_endpoint" \
+      --env RUSTFS_BUCKET \
+      --env RUSTFS_ACCESS_KEY_ID \
+      --env RUSTFS_SECRET_ACCESS_KEY \
+      --env RUSTFS_REGION \
       "$node_image" sh -c "$node_command"; then
       :
     else
@@ -782,6 +793,34 @@ if [ -n "$rustfs_endpoint" ]; then
   echo "FOUNDATIONDB_SERVICE_RESTART_READY topology=$topology server=$restart_server"
   check_authority_heartbeat
 
+  # The server-local fdbcli probe above can succeed while a separate client's
+  # copied cluster descriptor is stale or its network transaction path is not
+  # ready. Assert the exact descriptor and a transaction from another isolated
+  # container before treating restart as a consumer-ready event.
+  docker cp "$server:/var/fdb/fdb.cluster" "$run_dir/fdb.cluster.after-restart"
+  if ! cmp -s "$run_dir/fdb.cluster" "$run_dir/fdb.cluster.after-restart"; then
+    echo "FoundationDB cluster descriptor changed across restart; copied client descriptor is stale" >&2
+    exit 1
+  fi
+  client_probe_log="$run_dir/restart-client-probe.log"
+  probe_key_written=1
+  if ! docker run --rm --platform "$docker_platform" --network "$network" \
+    --volume "$run_dir:/fdb:ro" --entrypoint /usr/bin/fdbcli "$fdb_image" \
+    -C /fdb/fdb.cluster --exec "writemode on; set $probe_key $probe_value" \
+    >"$client_probe_log" 2>&1 || ! grep -Fq 'Committed' "$client_probe_log"; then
+    cat "$client_probe_log" >&2
+    echo "FoundationDB restarted server passed local probe but separate client transaction failed" >&2
+    exit 1
+  fi
+  if ! docker exec "$server" fdbcli --exec "writemode on; clear $probe_key" >"$client_probe_log" 2>&1 \
+    || ! grep -Fq 'Committed' "$client_probe_log"; then
+    cat "$client_probe_log" >&2
+    echo "FoundationDB could not clear this run's restart transaction probe" >&2
+    exit 1
+  fi
+  probe_key_written=0
+  echo "FOUNDATIONDB_RESTART_CLIENT_TRANSACTION_READY topology=$topology"
+
   restart_test_command="cargo test --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb publish_foundationdb_authority_for_consumers -- --exact --nocapture && cargo test --manifest-path tests/foundationdb/Cargo.toml --locked --lib foundationdb_rustfs_chunked_restart_reopen -- --exact --nocapture"
   docker run --rm \
     --platform "$docker_platform" \
@@ -799,6 +838,11 @@ if [ -n "$rustfs_endpoint" ]; then
     --env R2_BUCKET \
     --env R2_ACCESS_KEY_ID \
     --env R2_SECRET_ACCESS_KEY \
+    --env "RUSTFS_ENDPOINT=$rustfs_endpoint" \
+    --env RUSTFS_BUCKET \
+    --env RUSTFS_ACCESS_KEY_ID \
+    --env RUSTFS_SECRET_ACCESS_KEY \
+    --env RUSTFS_REGION \
     --env "RUSTFS_COMBO_PREFIX=$test_prefix" \
     --env "MOUNT_RS_FOUNDATIONDB_TEST_PREFIX=$test_prefix" \
     --env "MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX=$authority_prefix" \

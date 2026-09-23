@@ -12,7 +12,7 @@ async-trait = "0.1"
 mount-rs-chunked = { path = "../../filesystems/mount-rs-chunked" }
 mount-rs-core = { path = "../.." }
 mount-rs-pglite = { path = "../../providers/mount-rs-pglite" }
-mount-rs-r2 = { path = "../../providers/mount-rs-r2" }
+mount-rs-rustfs = { path = "../../providers/mount-rs-rustfs" }
 mount-rs-sdk = { path = "../../crates/mount-rs-sdk" }
 mount-rs-sqlite = { path = "../../providers/mount-rs-sqlite" }
 object_store = { version = "0.12", default-features = false, features = ["aws"] }

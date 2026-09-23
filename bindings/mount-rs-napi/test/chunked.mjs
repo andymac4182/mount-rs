@@ -83,6 +83,23 @@ try {
     await reopened.shutdown()
   }
 
+  const concurrentSqlite = {
+    metadata: { kind: "sqlite", uri: join(directory, "concurrent-metadata.sqlite") },
+    blocks: { kind: "sqlite", uri: join(directory, "concurrent-blocks.sqlite") },
+    concurrentWrites: true,
+  }
+  const writerA = await openDriver({ ...concurrentSqlite, owner: `concurrent-a-${suffix}` })
+  const writerB = await openDriver({ ...concurrentSqlite, owner: `concurrent-b-${suffix}` })
+  try {
+    await writerA.writeFile("/from-a.txt", Buffer.from("writer a"))
+    await writerB.writeFile("/from-b.txt", Buffer.from("writer b"))
+    assert.equal(Buffer.from(await writerA.readFile("/from-b.txt")).toString(), "writer b")
+    assert.equal(Buffer.from(await writerB.readFile("/from-a.txt")).toString(), "writer a")
+  } finally {
+    await writerB.shutdown()
+    await writerA.shutdown()
+  }
+
   // The provider lease is held until shutdown, so a second writer fails
   // immediately. Once the first writer releases it, a replacement succeeds.
   const leaseOptions = {
@@ -137,6 +154,49 @@ try {
       "EINVAL",
     )
   }
+  await assertCode(
+    () => createChunkedDriver({
+      metadata: { kind: "sqlite", uri: ":memory:" },
+      blocks: { kind: "sqlite", uri: join(directory, "concurrent-blocks.sqlite") },
+      chunkSize: 4096,
+      concurrentWrites: true,
+    }),
+    "EINVAL",
+  )
+  await assertCode(
+    () => createChunkedDriver({
+      metadata: { kind: "sqlite", uri: join(directory, "concurrent-meta.sqlite") },
+      blocks: { kind: "memory" },
+      chunkSize: 4096,
+      concurrentWrites: true,
+    }),
+    "EINVAL",
+  )
+  await assertCode(
+    () => createChunkedDriver({
+      metadata: { kind: "pglite", uri: "postgres://127.0.0.1:1/missing", key: "metadata" },
+      blocks: { kind: "sqlite", uri: join(directory, "concurrent-blocks.sqlite") },
+      chunkSize: 4096,
+      concurrentWrites: true,
+    }),
+    "EINVAL",
+  )
+  await assertCode(
+    () => createChunkedDriver({
+      metadata: { kind: "rustfs" },
+      blocks: { kind: "memory" },
+      chunkSize: 4096,
+    }),
+    "EINVAL",
+  )
+  await assertCode(
+    () => createChunkedDriver({
+      metadata: { kind: "memory" },
+      blocks: { kind: "rustfs", endpoint: "http://127.0.0.1:9878", bucket: "test", key: "test", accessKeyId: "key", secretAccessKey: "secret" },
+      chunkSize: 4096,
+    }),
+    "EINVAL",
+  )
   await assertCode(
     () =>
       createChunkedDriver({
@@ -211,6 +271,33 @@ try {
       },
       "pglite",
     )
+
+    const concurrentPglite = {
+      metadata: {
+        kind: "pglite",
+        uri: process.env.PGLITE_DATABASE_URL,
+        key: `napi-concurrent-meta-${suffix}`,
+        durable: false,
+      },
+      blocks: {
+        kind: "pglite",
+        uri: process.env.PGLITE_DATABASE_URL,
+        key: `napi-concurrent-blocks-${suffix}`,
+        durable: false,
+      },
+      concurrentWrites: true,
+    }
+    const pgliteA = await openDriver({ ...concurrentPglite, owner: `pglite-a-${suffix}` })
+    const pgliteB = await openDriver({ ...concurrentPglite, owner: `pglite-b-${suffix}` })
+    try {
+      await pgliteA.writeFile("/from-a.txt", Buffer.from("pglite a"))
+      await pgliteB.writeFile("/from-b.txt", Buffer.from("pglite b"))
+      assert.equal(Buffer.from(await pgliteA.readFile("/from-b.txt")).toString(), "pglite b")
+      assert.equal(Buffer.from(await pgliteB.readFile("/from-a.txt")).toString(), "pglite a")
+    } finally {
+      await pgliteB.shutdown()
+      await pgliteA.shutdown()
+    }
 
     // Keep every JS Filesystem alive after shutdown. The explicit close must
     // release both PostgreSQL-wire clients; relying on native object drop or

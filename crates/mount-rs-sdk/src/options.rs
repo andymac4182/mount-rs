@@ -40,6 +40,16 @@ pub enum StoreConfig {
         secret_access_key: String,
         durable: bool,
     },
+    /// RustFS S3-compatible immutable blocks; metadata stays independent.
+    RustFs {
+        endpoint: String,
+        bucket: String,
+        region: String,
+        prefix: String,
+        access_key_id: String,
+        secret_access_key: String,
+        durable: bool,
+    },
     /// AWS S3 block storage using the standard AWS workload credential chain.
     /// The provider is block-only; metadata remains an independent store.
     AwsS3 {
@@ -105,6 +115,23 @@ impl fmt::Debug for StoreConfig {
                 .field("secret_access_key", &"<redacted>")
                 .field("durable", durable)
                 .finish(),
+            Self::RustFs {
+                endpoint,
+                bucket,
+                region,
+                prefix,
+                durable,
+                ..
+            } => formatter
+                .debug_struct("RustFs")
+                .field("endpoint", &rustfs_debug_endpoint_authority(endpoint))
+                .field("bucket", bucket)
+                .field("region", region)
+                .field("prefix", prefix)
+                .field("access_key_id", &"<redacted>")
+                .field("secret_access_key", &"<redacted>")
+                .field("durable", durable)
+                .finish(),
             Self::AwsS3 {
                 bucket,
                 region,
@@ -119,6 +146,67 @@ impl fmt::Debug for StoreConfig {
                 .finish(),
         }
     }
+}
+
+fn rustfs_debug_endpoint_authority(endpoint: &str) -> String {
+    let Some((scheme, remainder)) = endpoint.split_once("://") else {
+        return "<redacted>".to_owned();
+    };
+    let authority = remainder.split('/').next().unwrap_or_default();
+    if !matches!(scheme, "http" | "https")
+        || endpoint.contains('?')
+        || endpoint.contains('#')
+        || !rustfs_valid_debug_authority(authority)
+    {
+        return "<redacted>".to_owned();
+    }
+    format!("{scheme}://{authority}")
+}
+
+fn rustfs_valid_debug_authority(authority: &str) -> bool {
+    if authority.is_empty()
+        || !authority.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b':' | b'[' | b']')
+        })
+    {
+        return false;
+    }
+    let port = if let Some(bracketed) = authority.strip_prefix('[') {
+        let Some((host, suffix)) = bracketed.split_once(']') else {
+            return false;
+        };
+        if host.parse::<std::net::Ipv6Addr>().is_err() {
+            return false;
+        }
+        if suffix.is_empty() {
+            None
+        } else {
+            let Some(port) = suffix.strip_prefix(':') else {
+                return false;
+            };
+            Some(port)
+        }
+    } else {
+        if authority.contains(['[', ']']) {
+            return false;
+        }
+        let (host, port) = authority
+            .split_once(':')
+            .map_or((authority, None), |(host, port)| (host, Some(port)));
+        if host.is_empty()
+            || !host
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+        {
+            return false;
+        }
+        port
+    };
+    port.is_none_or(|port| {
+        !port.is_empty()
+            && port.bytes().all(|byte| byte.is_ascii_digit())
+            && port.parse::<u16>().is_ok_and(|value| value > 0)
+    })
 }
 
 /// Lease authority choices exposed by consumer configuration.

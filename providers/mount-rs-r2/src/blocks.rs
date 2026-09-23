@@ -11,7 +11,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use mount_rs_core::Result;
 use mount_rs_core::storage::{BlockId, BlockReconcileReport, BlockStore};
-use mount_rs_object_store_blocks::ObjectStoreBlockStore;
+use mount_rs_object_store_blocks::{ObjectStoreBlockStore, probe_configured_concurrent_prefix};
 use object_store::ObjectStore;
 
 pub use mount_rs_object_store_blocks::{
@@ -21,7 +21,7 @@ pub use mount_rs_object_store_blocks::{
 
 /// Immutable blocks in one R2 or S3-compatible object-store prefix.
 #[derive(Clone)]
-pub struct R2BlockStore(ObjectStoreBlockStore);
+pub struct R2BlockStore(ObjectStoreBlockStore, Option<Arc<dyn ObjectStore>>);
 
 impl R2BlockStore {
     /// Wrap an existing client with an explicitly declared durability level.
@@ -30,12 +30,27 @@ impl R2BlockStore {
         prefix: impl Into<String>,
         durable: bool,
     ) -> Result<Self> {
-        Ok(Self(ObjectStoreBlockStore::new(store, prefix, durable)?))
+        Ok(Self(
+            ObjectStoreBlockStore::new(store, prefix, durable)?,
+            None,
+        ))
     }
 
     /// Build durable blocks using this provider's S3-compatible R2 client.
     pub fn from_config(config: &crate::R2Config, prefix: impl Into<String>) -> Result<Self> {
-        Self::new(config.build_store()?, prefix, true)
+        Self::from_config_with_durable(config, prefix, true)
+    }
+
+    /// Build blocks with a validated signed client and caller-declared
+    /// durability. Concurrent startup probes the configured service.
+    pub fn from_config_with_durable(
+        config: &crate::R2Config,
+        prefix: impl Into<String>,
+        durable: bool,
+    ) -> Result<Self> {
+        let mut blocks = Self::new(config.build_store()?, prefix, durable)?;
+        blocks.1 = Some(config.build_probe_store()?);
+        Ok(blocks)
     }
 
     pub fn prefix(&self) -> &str {
@@ -51,6 +66,13 @@ impl R2BlockStore {
 impl BlockStore for R2BlockStore {
     fn durable(&self) -> bool {
         self.0.durable()
+    }
+
+    async fn prepare_concurrent_mode(&self) -> Result<()> {
+        match &self.1 {
+            Some(probe) => probe_configured_concurrent_prefix(probe.as_ref(), self.prefix()).await,
+            None => self.0.prepare_concurrent_mode().await,
+        }
     }
 
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {

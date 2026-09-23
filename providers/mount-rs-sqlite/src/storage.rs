@@ -22,6 +22,47 @@ use std::{
 // SQLite supplies the clock inside the same statement as lease validation.
 const NOW: &str = "CAST(unixepoch('subsec') * 1000 AS INTEGER)";
 const NOW_SELECT: &str = "SELECT CAST(unixepoch('subsec') * 1000 AS INTEGER)";
+const CONCURRENT_WRITE_MODE: &str = "MRC1";
+const CONCURRENT_FENCE_SENTINEL: i64 = i64::MAX;
+
+#[cfg(target_os = "macos")]
+fn require_local_concurrent_backing(path: &Path, kind: &'static str) -> Result<()> {
+    use std::{ffi::CString, mem::MaybeUninit, os::unix::ffi::OsStrExt};
+
+    let path = path.canonicalize().map_err(|error| {
+        FsError::new(ErrorCode::Eio)
+            .with_syscall("inspect concurrent SQLite backing")
+            .with_message(format!("cannot resolve SQLite {kind} file: {error}"))
+    })?;
+    let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        FsError::new(ErrorCode::Einval)
+            .with_syscall("inspect concurrent SQLite backing")
+            .with_message(format!("SQLite {kind} path contains a NUL byte"))
+    })?;
+    let mut filesystem = MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::statfs(path.as_ptr(), filesystem.as_mut_ptr()) } != 0 {
+        return Err(FsError::new(ErrorCode::Eio)
+            .with_syscall("inspect concurrent SQLite backing")
+            .with_message(format!(
+                "cannot inspect SQLite {kind} filesystem: {}",
+                std::io::Error::last_os_error()
+            )));
+    }
+    let filesystem = unsafe { filesystem.assume_init() };
+    if filesystem.f_flags & (libc::MNT_LOCAL as u32) == 0 {
+        let verb = if kind == "blocks" {
+            "require"
+        } else {
+            "requires"
+        };
+        return Err(FsError::new(ErrorCode::Enotsup)
+            .with_syscall("prepare concurrent SQLite volume")
+            .with_message(format!(
+                "concurrent SQLite {kind} {verb} a local filesystem; NFS/network-backed databases are unsupported",
+            )));
+    }
+    Ok(())
+}
 
 #[derive(Clone)]
 struct Database {
@@ -161,6 +202,7 @@ fn initialize_version_schema(database: &Database) -> Result<()> {
     )?;
     require_primary_key(&tx, "mount_rs_metadata", "id")?;
     let has_volume_id = metadata_columns.contains("volume_id");
+    let has_write_mode = metadata_columns.contains("write_mode");
     if schema_is_current && !has_volume_id {
         return Err(incompatible_schema(
             "current versioning schema is missing metadata.volume_id",
@@ -172,6 +214,30 @@ fn initialize_version_schema(database: &Database) -> Result<()> {
             [],
         )
         .map_err(backend_error)?;
+    }
+    if !has_write_mode {
+        tx.execute(
+            "ALTER TABLE mount_rs_metadata ADD COLUMN write_mode TEXT",
+            [],
+        )
+        .map_err(backend_error)?;
+    }
+    let (mode, owner, fence, expires): (Option<String>, Option<String>, i64, i64) = tx
+        .query_row(
+            "SELECT write_mode, owner, fence, expires FROM mount_rs_metadata WHERE id=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(backend_error)?;
+    match mode.as_deref() {
+        None if fence != CONCURRENT_FENCE_SENTINEL => {}
+        Some(CONCURRENT_WRITE_MODE)
+            if owner.is_none() && fence == CONCURRENT_FENCE_SENTINEL && expires == 0 => {}
+        _ => {
+            return Err(incompatible_schema(
+                "concurrent write mode marker and legacy fence disagree",
+            ));
+        }
     }
     tx.execute(
         "UPDATE mount_rs_metadata
@@ -671,6 +737,106 @@ impl MetadataStore for SqliteMetadataStore {
         })
     }
 
+    async fn prepare_concurrent_mode(&self) -> Result<()> {
+        if !self.0.durable {
+            return Err(FsError::new(ErrorCode::Enotsup)
+                .with_syscall("prepare concurrent SQLite volume")
+                .with_message(
+                    "independent concurrent writers require a file-backed SQLite database",
+                ));
+        }
+        let mut connection = self.0.lock()?;
+        #[cfg(target_os = "macos")]
+        {
+            let path = connection
+                .path()
+                .filter(|path| !path.is_empty())
+                .ok_or_else(|| {
+                    FsError::new(ErrorCode::Eio)
+                        .with_syscall("inspect concurrent SQLite backing")
+                        .with_message("SQLite metadata file path is unavailable")
+                })?;
+            require_local_concurrent_backing(Path::new(path), "metadata")?;
+        }
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(backend_error)?;
+        let (mode, revision, namespace, owner, fence, expires): (
+            Option<String>,
+            i64,
+            Option<String>,
+            Option<String>,
+            i64,
+            i64,
+        ) = tx
+            .query_row(
+                "SELECT write_mode, revision, namespace, owner, fence, expires
+                 FROM mount_rs_metadata WHERE id=1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .map_err(backend_error)?;
+        if mode.as_deref() == Some(CONCURRENT_WRITE_MODE) {
+            if owner.is_none() && fence == CONCURRENT_FENCE_SENTINEL && expires == 0 {
+                return Ok(());
+            }
+            return Err(backend_error(
+                "SQLite concurrent mode marker and fence sentinel disagree",
+            ));
+        }
+        if mode.is_some() {
+            return Err(incompatible_schema(
+                "unsupported SQLite concurrent write mode",
+            ));
+        }
+        let (head, versions, pins): (Option<String>, i64, i64) = tx
+            .query_row(
+                "SELECT head_id,
+                  (SELECT count(*) FROM mount_rs_versions),
+                  (SELECT count(*) FROM mount_rs_version_pins)
+                 FROM mount_rs_version_state WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(backend_error)?;
+        if revision != 0
+            || namespace.is_some()
+            || owner.is_some()
+            || fence != 0
+            || expires != 0
+            || head.is_some()
+            || versions != 0
+            || pins != 0
+        {
+            return Err(FsError::new(ErrorCode::Ebusy)
+                .with_syscall("prepare concurrent SQLite volume")
+                .with_message("a fenced legacy volume needs an offline migration"));
+        }
+        let changed = tx
+            .execute(
+                "UPDATE mount_rs_metadata SET write_mode=?1, fence=?2
+             WHERE id=1 AND write_mode IS NULL AND revision=0 AND namespace IS NULL
+               AND owner IS NULL AND fence=0 AND expires=0",
+                params![CONCURRENT_WRITE_MODE, CONCURRENT_FENCE_SENTINEL],
+            )
+            .map_err(backend_error)?;
+        if changed != 1 {
+            return Err(backend_error(
+                "SQLite concurrent mode update returned an unexplained zero-row result",
+            ));
+        }
+        tx.commit().map_err(backend_error)
+    }
+
     async fn acquire_writer(&self, owner: &str, ttl: Duration) -> Result<WriterLease> {
         if owner.is_empty() {
             return Err(FsError::new(ErrorCode::Einval));
@@ -678,7 +844,7 @@ impl MetadataStore for SqliteMetadataStore {
         let ttl = ttl_ms(ttl)?;
         let sql = format!(
             "UPDATE mount_rs_metadata SET owner=?1, fence=fence+1, expires={NOW}+?2
-            WHERE id=1 AND (owner IS NULL OR expires<={NOW})
+            WHERE id=1 AND write_mode IS NULL AND (owner IS NULL OR expires<={NOW})
               AND fence<9223372036854775807 AND ?2<=9223372036854775807-{NOW}
             RETURNING fence, expires"
         );
@@ -693,6 +859,20 @@ impl MetadataStore for SqliteMetadataStore {
             })
             .optional()
             .map_err(backend_error)?;
+        if result.is_none() {
+            let mode: Option<String> = connection
+                .query_row(
+                    "SELECT write_mode FROM mount_rs_metadata WHERE id=1",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(backend_error)?;
+            if mode.is_some() {
+                return Err(FsError::new(ErrorCode::Ebusy)
+                    .with_syscall("acquire writer")
+                    .with_message("SQLite volume is in concurrent write mode"));
+            }
+        }
         result.ok_or_else(|| FsError::new(ErrorCode::Eagain).with_syscall("acquire writer"))
     }
 
@@ -702,7 +882,7 @@ impl MetadataStore for SqliteMetadataStore {
         let connection = self.0.lock()?;
         let sql = format!(
             "UPDATE mount_rs_metadata SET expires={NOW}+?4
-            WHERE id=1 AND owner=?1 AND fence=?2 AND expires=?3 AND expires>{NOW}
+            WHERE id=1 AND write_mode IS NULL AND owner=?1 AND fence=?2 AND expires=?3 AND expires>{NOW}
               AND ?4<=9223372036854775807-{NOW} RETURNING expires"
         );
         let expiry = connection
@@ -725,7 +905,7 @@ impl MetadataStore for SqliteMetadataStore {
             .execute(
                 &format!(
                     "UPDATE mount_rs_metadata SET owner=NULL, expires=0
-            WHERE id=1 AND owner=?1 AND fence=?2 AND expires=?3 AND expires>{NOW}"
+            WHERE id=1 AND write_mode IS NULL AND owner=?1 AND fence=?2 AND expires=?3 AND expires>{NOW}"
                 ),
                 params![lease.owner, fence, expires],
             )
@@ -760,7 +940,7 @@ impl MetadataStore for SqliteMetadataStore {
             .execute(
                 &format!(
                     "UPDATE mount_rs_metadata SET revision=?1, namespace=?2
-                     WHERE id=1 AND revision=?3 AND owner=?4 AND fence=?5
+                     WHERE id=1 AND write_mode IS NULL AND revision=?3 AND owner=?4 AND fence=?5
                        AND expires=?6 AND expires>{NOW}"
                 ),
                 params![next, namespace, expected, lease.owner, fence, expires],
@@ -776,7 +956,7 @@ impl MetadataStore for SqliteMetadataStore {
             let (valid, actual_revision): (bool, i64) = tx
                 .query_row(
                     &format!(
-                        "SELECT owner=?1 AND fence=?2 AND expires=?3 AND expires>{NOW}, revision
+                        "SELECT write_mode IS NULL AND owner=?1 AND fence=?2 AND expires=?3 AND expires>{NOW}, revision
                          FROM mount_rs_metadata WHERE id=1"
                     ),
                     params![lease.owner, fence, expires],
@@ -793,6 +973,81 @@ impl MetadataStore for SqliteMetadataStore {
             // unexplained zero-row CAS fails closed.
             return Err(stale());
         }
+        Ok(next as u64)
+    }
+
+    async fn publish_if_revision(
+        &self,
+        expected_revision: u64,
+        namespace: Namespace,
+    ) -> Result<u64> {
+        namespace.validate()?;
+        let expected =
+            i64::try_from(expected_revision).map_err(|_| FsError::new(ErrorCode::Eoverflow))?;
+        let next = expected
+            .checked_add(1)
+            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        let namespace_json = serde_json::to_string(&namespace).map_err(backend_error)?;
+        let mut connection = self.0.lock()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(backend_error)?;
+        let (mode, owner, fence, expires, actual_revision): (
+            Option<String>,
+            Option<String>,
+            i64,
+            i64,
+            i64,
+        ) = tx
+            .query_row(
+                "SELECT write_mode, owner, fence, expires, revision
+                 FROM mount_rs_metadata WHERE id=1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .map_err(backend_error)?;
+        if mode.as_deref() != Some(CONCURRENT_WRITE_MODE)
+            || owner.is_some()
+            || fence != CONCURRENT_FENCE_SENTINEL
+            || expires != 0
+        {
+            return Err(FsError::new(ErrorCode::Ebusy)
+                .with_syscall("publish concurrent SQLite metadata")
+                .with_message("concurrent mode is missing or its legacy fence is invalid"));
+        }
+        if actual_revision != expected {
+            return Err(
+                FsError::new(ErrorCode::Eagain).with_syscall("publish concurrent SQLite metadata")
+            );
+        }
+        let changed = tx
+            .execute(
+                "UPDATE mount_rs_metadata SET revision=?1, namespace=?2
+                 WHERE id=1 AND write_mode=?3 AND owner IS NULL AND fence=?4
+                   AND expires=0 AND revision=?5",
+                params![
+                    next,
+                    namespace_json,
+                    CONCURRENT_WRITE_MODE,
+                    CONCURRENT_FENCE_SENTINEL,
+                    expected
+                ],
+            )
+            .map_err(backend_error)?;
+        if changed != 1 {
+            return Err(backend_error(
+                "SQLite concurrent publication CAS returned an unexplained zero-row update",
+            ));
+        }
+        tx.commit().map_err(backend_error)?;
         Ok(next as u64)
     }
 
@@ -955,7 +1210,7 @@ impl VersionedMetadataStore for SqliteMetadataStore {
         let valid: bool = tx
             .query_row(
                 &format!(
-                    "SELECT owner=?1 AND fence=?2 AND expires=?3 AND expires>{NOW}
+                    "SELECT write_mode IS NULL AND owner=?1 AND fence=?2 AND expires=?3 AND expires>{NOW}
                      FROM mount_rs_metadata WHERE id=1"
                 ),
                 params![lease.owner, fence, expires],
@@ -1049,7 +1304,7 @@ impl VersionedMetadataStore for SqliteMetadataStore {
         let changed = tx
             .execute(
                 "UPDATE mount_rs_metadata SET revision=?1, namespace=?2
-                 WHERE id=1 AND revision=?3",
+                 WHERE id=1 AND write_mode IS NULL AND revision=?3",
                 params![revision, namespace_json, expected_revision],
             )
             .map_err(backend_error)?;
@@ -1267,7 +1522,7 @@ impl VersionedMetadataStore for SqliteMetadataStore {
         let valid: bool = tx
             .query_row(
                 &format!(
-                    "SELECT owner=?1 AND fence=?2 AND expires=?3 AND expires>{NOW}
+                    "SELECT write_mode IS NULL AND owner=?1 AND fence=?2 AND expires=?3 AND expires>{NOW}
                      FROM mount_rs_metadata WHERE id=1"
                 ),
                 params![lease.owner, fence, expires],
@@ -1322,6 +1577,30 @@ impl VersionedMetadataStore for SqliteMetadataStore {
 impl BlockStore for SqliteBlockStore {
     fn durable(&self) -> bool {
         self.0.durable
+    }
+
+    async fn prepare_concurrent_mode(&self) -> Result<()> {
+        if !self.0.durable {
+            return Err(FsError::new(ErrorCode::Enotsup)
+                .with_syscall("prepare concurrent SQLite blocks")
+                .with_message(
+                    "independent concurrent writers require a file-backed SQLite block database",
+                ));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let connection = self.0.lock()?;
+            let path = connection
+                .path()
+                .filter(|path| !path.is_empty())
+                .ok_or_else(|| {
+                    FsError::new(ErrorCode::Eio)
+                        .with_syscall("inspect concurrent SQLite backing")
+                        .with_message("SQLite blocks file path is unavailable")
+                })?;
+            require_local_concurrent_backing(Path::new(path), "blocks")?;
+        }
+        Ok(())
     }
 
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
@@ -1474,6 +1753,317 @@ mod tests {
         assert!(third.fence > second.fence);
         run(store.flush()).unwrap();
         assert_eq!(run(store.load()).unwrap().revision, 3);
+    }
+
+    #[test]
+    fn separate_connections_share_persisted_concurrent_mode_and_cas() {
+        let path = super::super::tests::unique_database_path();
+        let first = SqliteMetadataStore::open(&path).unwrap();
+        let second = SqliteMetadataStore::open(&path).unwrap();
+
+        run(first.prepare_concurrent_mode()).unwrap();
+        run(second.prepare_concurrent_mode()).unwrap();
+        assert!(
+            run(second.acquire_writer("legacy", Duration::from_secs(60)))
+                .unwrap_err()
+                .is(ErrorCode::Ebusy)
+        );
+
+        assert_eq!(run(first.publish_if_revision(0, namespace())).unwrap(), 1);
+        assert!(
+            run(second.publish_if_revision(0, namespace()))
+                .unwrap_err()
+                .is(ErrorCode::Eagain)
+        );
+        assert_eq!(run(second.load()).unwrap().revision, 1);
+        assert_eq!(run(second.publish_if_revision(1, namespace())).unwrap(), 2);
+        drop(first);
+        drop(second);
+
+        let reopened = SqliteMetadataStore::open(&path).unwrap();
+        assert_eq!(run(reopened.load()).unwrap().revision, 2);
+        run(reopened.prepare_concurrent_mode()).unwrap();
+        let connection = reopened.0.lock().unwrap();
+        let (mode, fence): (Option<String>, i64) = connection
+            .query_row(
+                "SELECT write_mode, fence FROM mount_rs_metadata WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(mode.as_deref(), Some("MRC1"));
+        assert_eq!(fence, i64::MAX);
+        assert_eq!(
+            connection
+                .execute(
+                    "UPDATE mount_rs_metadata SET owner='old', fence=fence+1
+                     WHERE id=1 AND owner IS NULL AND fence<9223372036854775807",
+                    [],
+                )
+                .unwrap(),
+            0,
+            "the old acquisition query must stay fenced"
+        );
+        drop(connection);
+        drop(reopened);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn concurrent_mode_rejects_non_durable_and_historically_fenced_volumes() {
+        let memory = SqliteMetadataStore::in_memory().unwrap();
+        assert!(
+            run(memory.prepare_concurrent_mode())
+                .unwrap_err()
+                .is(ErrorCode::Enotsup)
+        );
+
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        let lease = run(store.acquire_writer("old", Duration::from_secs(60))).unwrap();
+        run(store.release_writer(&lease)).unwrap();
+        assert!(
+            run(store.prepare_concurrent_mode())
+                .unwrap_err()
+                .is(ErrorCode::Ebusy)
+        );
+        let (mode, fence): (Option<String>, i64) = store
+            .0
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT write_mode, fence FROM mount_rs_metadata WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(mode.is_none());
+        assert_eq!(fence, lease.fence as i64);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn concurrent_publication_fails_closed_on_corrupt_fence_and_sqlite_io_error() {
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        run(store.prepare_concurrent_mode()).unwrap();
+
+        store
+            .0
+            .lock()
+            .unwrap()
+            .execute("UPDATE mount_rs_metadata SET fence=0 WHERE id=1", [])
+            .unwrap();
+        assert!(
+            run(store.publish_if_revision(0, namespace()))
+                .unwrap_err()
+                .is(ErrorCode::Ebusy)
+        );
+        assert_eq!(run(store.load()).unwrap().revision, 0);
+        store
+            .0
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE mount_rs_metadata SET fence=9223372036854775807 WHERE id=1",
+                [],
+            )
+            .unwrap();
+        store
+            .0
+            .lock()
+            .unwrap()
+            .execute_batch("PRAGMA query_only=ON")
+            .unwrap();
+        let error = run(store.publish_if_revision(0, namespace())).unwrap_err();
+        assert!(!error.is(ErrorCode::Eagain));
+        assert_eq!(run(store.load()).unwrap().revision, 0);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn legacy_version_mutations_reject_a_concurrent_mode_marker() {
+        let store = SqliteMetadataStore::in_memory().unwrap();
+        let lease = run(store.acquire_writer("old", Duration::from_secs(60))).unwrap();
+        let first = run(store.publish_version(
+            &lease,
+            VersionPublication {
+                expected_revision: 0,
+                expected_parent: None,
+                operation_id: PublicationId::new("first-old-version").unwrap(),
+                namespace: namespace(),
+                block_store_id: mount_rs_core::versioning::BlockStoreId::new("blocks").unwrap(),
+                kind: VersionKind::Snapshot,
+                restored_from: None,
+                forked_from: None,
+                durable: false,
+            },
+        ))
+        .unwrap();
+        let second = run(store.publish_version(
+            &lease,
+            VersionPublication {
+                expected_revision: 1,
+                expected_parent: Some(first.id.clone()),
+                operation_id: PublicationId::new("second-old-version").unwrap(),
+                namespace: namespace(),
+                block_store_id: mount_rs_core::versioning::BlockStoreId::new("blocks").unwrap(),
+                kind: VersionKind::Snapshot,
+                restored_from: None,
+                forked_from: None,
+                durable: false,
+            },
+        ))
+        .unwrap();
+        store
+            .0
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE mount_rs_metadata SET write_mode='MRC1' WHERE id=1",
+                [],
+            )
+            .unwrap();
+
+        assert!(
+            run(store.delete_version(&lease, &first.id))
+                .unwrap_err()
+                .is(ErrorCode::Estale)
+        );
+        assert!(
+            run(store.publish_version(
+                &lease,
+                VersionPublication {
+                    expected_revision: 2,
+                    expected_parent: Some(second.id),
+                    operation_id: PublicationId::new("third-old-version").unwrap(),
+                    namespace: namespace(),
+                    block_store_id: mount_rs_core::versioning::BlockStoreId::new("blocks").unwrap(),
+                    kind: VersionKind::Snapshot,
+                    restored_from: None,
+                    forked_from: None,
+                    durable: false,
+                },
+            ))
+            .unwrap_err()
+            .is(ErrorCode::Estale)
+        );
+        assert_eq!(run(store.load()).unwrap().revision, 2);
+    }
+
+    #[test]
+    fn legacy_acquire_and_mode_conversion_race_without_dual_authority() {
+        use std::sync::{Arc, Barrier};
+
+        for journal in ["DELETE", "WAL"] {
+            for _ in 0..8 {
+                let path = super::super::tests::unique_database_path();
+                let old = SqliteMetadataStore::open(&path).unwrap();
+                old.0
+                    .lock()
+                    .unwrap()
+                    .execute_batch(&format!("PRAGMA journal_mode={journal};"))
+                    .unwrap();
+                let concurrent = SqliteMetadataStore::open(&path).unwrap();
+                let start = Arc::new(Barrier::new(3));
+                let old_start = Arc::clone(&start);
+                let concurrent_start = Arc::clone(&start);
+                let old_task = std::thread::spawn(move || {
+                    old_start.wait();
+                    run(old.acquire_writer("old", Duration::from_secs(60)))
+                });
+                let concurrent_task = std::thread::spawn(move || {
+                    concurrent_start.wait();
+                    run(concurrent.prepare_concurrent_mode())
+                });
+                start.wait();
+                let old_result = old_task.join().unwrap();
+                let concurrent_result = concurrent_task.join().unwrap();
+                let reopened = SqliteMetadataStore::open(&path).unwrap();
+                match (old_result, concurrent_result) {
+                    (Ok(lease), Err(error)) if error.is(ErrorCode::Ebusy) => {
+                        assert_eq!(
+                            run(reopened.acquire_writer("new", Duration::from_secs(60)))
+                                .unwrap_err()
+                                .code,
+                            ErrorCode::Eagain
+                        );
+                        run(reopened.release_writer(&lease)).unwrap();
+                        assert!(
+                            run(reopened.prepare_concurrent_mode())
+                                .unwrap_err()
+                                .is(ErrorCode::Ebusy)
+                        );
+                    }
+                    (Err(error), Ok(())) if error.is(ErrorCode::Ebusy) => {
+                        assert_eq!(
+                            run(reopened.publish_if_revision(0, namespace())).unwrap(),
+                            1
+                        );
+                    }
+                    (old_result, concurrent_result) => panic!(
+                        "journal {journal}: both modes must not win or both fail: {old_result:?}, {concurrent_result:?}"
+                    ),
+                }
+                drop(reopened);
+                std::fs::remove_file(&path).unwrap();
+                for sidecar in ["-wal", "-shm"] {
+                    let _ = std::fs::remove_file(format!("{}{sidecar}", path.display()));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ignored_mode_update_must_not_report_concurrent_authority() {
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        store
+            .0
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER suppress_concurrent_mode
+                 BEFORE UPDATE OF write_mode ON mount_rs_metadata
+                 BEGIN SELECT RAISE(IGNORE); END;",
+            )
+            .unwrap();
+        let error = run(store.prepare_concurrent_mode()).unwrap_err();
+        assert!(!error.is(ErrorCode::Eagain));
+        let (mode, fence): (Option<String>, i64) = store
+            .0
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT write_mode, fence FROM mount_rs_metadata WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(mode.is_none());
+        assert_eq!(fence, 0);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn concurrent_sqlite_blocks_require_shared_file_backing() {
+        let memory = SqliteBlockStore::in_memory().unwrap();
+        let error = run(memory.prepare_concurrent_mode()).unwrap_err();
+        assert!(error.is(ErrorCode::Enotsup));
+        assert!(
+            error
+                .to_string()
+                .contains("file-backed SQLite block database")
+        );
+
+        let path = super::super::tests::unique_database_path();
+        let file = SqliteBlockStore::open(&path).unwrap();
+        run(file.prepare_concurrent_mode()).unwrap();
+        drop(file);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

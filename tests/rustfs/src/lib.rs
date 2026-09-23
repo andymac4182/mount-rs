@@ -16,7 +16,7 @@ use mount_rs_core::ErrorCode;
 use mount_rs_core::storage::{BlockId, BlockStore, MetadataStore};
 use mount_rs_core::{Loopback, MkdirOptions};
 use mount_rs_pglite::PgliteMetadataStore;
-use mount_rs_r2::{R2BlockStore, R2Config};
+use mount_rs_rustfs::{RustFsBlockStore, RustFsConfig};
 use mount_rs_sdk::{Filesystem, FilesystemKind, SplitOptions, StoreConfig};
 use mount_rs_sqlite::SqliteMetadataStore;
 use object_store::path::Path as ObjectPath;
@@ -24,8 +24,18 @@ use object_store::{GetOptions, ObjectStore, PutMode, PutOptions, PutPayload, Upd
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(60);
 
-fn local_config() -> R2Config {
-    let config = R2Config::from_env().expect("RustFS R2-compatible test environment is required");
+fn local_config() -> RustFsConfig {
+    let required = |name: &str| {
+        std::env::var(name).unwrap_or_else(|_| panic!("{name} is required by the RustFS harness"))
+    };
+    let config = RustFsConfig {
+        endpoint: required("RUSTFS_ENDPOINT"),
+        bucket: required("RUSTFS_BUCKET"),
+        access_key_id: required("RUSTFS_ACCESS_KEY_ID"),
+        secret_access_key: required("RUSTFS_SECRET_ACCESS_KEY"),
+        region: required("RUSTFS_REGION"),
+    };
+    config.validate().expect("valid RustFS test configuration");
     assert!(
         config.endpoint.starts_with("http://127.0.0.1:")
             || config.endpoint.starts_with("http://localhost:"),
@@ -58,15 +68,15 @@ fn block_id(value: &str) -> BlockId {
 }
 
 #[derive(Clone)]
-struct TrackedR2Blocks {
-    inner: R2BlockStore,
+struct TrackedRustFsBlocks {
+    inner: RustFsBlockStore,
     created: Arc<Mutex<BTreeSet<String>>>,
 }
 
-impl TrackedR2Blocks {
-    fn new(config: &R2Config, prefix: String, created: Arc<Mutex<BTreeSet<String>>>) -> Self {
+impl TrackedRustFsBlocks {
+    fn new(config: &RustFsConfig, prefix: String, created: Arc<Mutex<BTreeSet<String>>>) -> Self {
         Self {
-            inner: R2BlockStore::from_config(config, prefix).unwrap(),
+            inner: RustFsBlockStore::from_config(config, prefix, true).unwrap(),
             created,
         }
     }
@@ -86,7 +96,7 @@ impl TrackedR2Blocks {
 }
 
 #[async_trait]
-impl BlockStore for TrackedR2Blocks {
+impl BlockStore for TrackedRustFsBlocks {
     fn durable(&self) -> bool {
         self.inner.durable()
     }
@@ -184,12 +194,114 @@ async fn assert_timeout<T>(future: impl std::future::Future<Output = T>) -> T {
         .expect("RustFS request/test exceeded its bounded timeout")
 }
 
+async fn assert_rustfs_preflight_rejects_before_sqlite_conversion(
+    config: &RustFsConfig,
+    case: &str,
+) {
+    let run_dir = std::env::var_os("RUSTFS_RUN_DIR")
+        .map(PathBuf::from)
+        .expect("RUSTFS_RUN_DIR must be set");
+    let metadata_path = run_dir.join(format!("preflight-{case}.sqlite"));
+    let prefix = format!("{}/preflight-{case}", test_prefix());
+    let metadata = SqliteMetadataStore::open(&metadata_path).unwrap();
+    let blocks = RustFsBlockStore::from_config(config, prefix, true).unwrap();
+    let result = ChunkedFs::open(
+        metadata,
+        blocks,
+        ChunkedOptions::fixed(format!("preflight-{case}"), 4096)
+            .unwrap()
+            .with_concurrent_writes(true),
+    )
+    .await;
+    let error = match result {
+        Ok(filesystem) => {
+            filesystem.shutdown().await.unwrap();
+            panic!("{case} RustFS backing unexpectedly converted concurrent SQLite metadata");
+        }
+        Err(error) => error,
+    };
+    assert!(
+        !error.is(ErrorCode::Enotsup),
+        "{case} must fail from the signed RustFS write/read rather than a generic opt-in guard: {error}"
+    );
+
+    let reopened = SqliteMetadataStore::open(&metadata_path).unwrap();
+    let state = reopened.load().await.unwrap();
+    assert_eq!(state.revision, 0, "{case} must not publish metadata");
+    assert!(
+        state.namespace.is_none(),
+        "{case} must leave namespace empty"
+    );
+    let legacy = reopened
+        .acquire_writer(&format!("preflight-legacy-{case}"), Duration::from_secs(30))
+        .await
+        .expect("failed preflight must leave legacy single-writer mode available");
+    reopened.release_writer(&legacy).await.unwrap();
+}
+
+#[tokio::test]
+async fn real_rustfs_signed_concurrent_preflight_fails_closed_before_mode_conversion() {
+    assert_timeout(async {
+        let valid = local_config();
+        let prefix = format!("{}/preflight-valid", test_prefix());
+        let first = RustFsBlockStore::from_config(&valid, prefix.clone(), true).unwrap();
+        let second = RustFsBlockStore::from_config(&valid, prefix.clone(), true).unwrap();
+        first.prepare_concurrent_mode().await.unwrap();
+        second.prepare_concurrent_mode().await.unwrap();
+        valid
+            .build_store()
+            .unwrap()
+            .head(&object_path(&prefix, "_mount-rs-concurrent-probe-v1"))
+            .await
+            .expect("signed preflight must leave a reusable, remotely visible probe");
+
+        let mut wrong_credentials = valid.clone();
+        wrong_credentials.secret_access_key.push_str("-wrong");
+        assert_rustfs_preflight_rejects_before_sqlite_conversion(
+            &wrong_credentials,
+            "wrong-credentials",
+        )
+        .await;
+
+        let mut missing_bucket = valid.clone();
+        missing_bucket.bucket = "mount-rs-missing-rustfs-bucket".to_owned();
+        assert_rustfs_preflight_rejects_before_sqlite_conversion(&missing_bucket, "missing-bucket")
+            .await;
+
+        let colliding_prefix = format!("{}/preflight-collision", test_prefix());
+        let colliding_path = object_path(&colliding_prefix, "_mount-rs-concurrent-probe-v1");
+        let service = valid.build_store().unwrap();
+        service
+            .put(
+                &colliding_path,
+                PutPayload::from(b"foreign probe must remain".to_vec()),
+            )
+            .await
+            .unwrap();
+        assert_rustfs_preflight_rejects_before_sqlite_conversion(&valid, "collision").await;
+        assert_eq!(
+            service
+                .get(&colliding_path)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap()
+                .as_ref(),
+            b"foreign probe must remain",
+            "failed preflight must not replace an existing object"
+        );
+        println!("RUSTFS_SIGNED_CONCURRENT_PREFLIGHT_PASS");
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn real_rustfs_block_contract() {
     assert_timeout(async {
         let config = local_config();
         let prefix = test_prefix();
-        let blocks = R2BlockStore::from_config(&config, prefix.clone()).unwrap();
+        let blocks = RustFsBlockStore::from_config(&config, prefix.clone(), true).unwrap();
         let object_store = config.build_store().unwrap();
 
         let payload = (0_u32..32_768)
@@ -352,7 +464,7 @@ async fn real_rustfs_reopen_after_service_restart() {
         let mut lines = lines.lines();
         let id = block_id(lines.next().expect("restart fixture block ID"));
         let expected = decode_hex(lines.next().expect("restart fixture payload"));
-        let blocks = R2BlockStore::from_config(&config, prefix.clone()).unwrap();
+        let blocks = RustFsBlockStore::from_config(&config, prefix.clone(), true).unwrap();
         assert_eq!(blocks.get(&id).await.unwrap(), expected);
         blocks.delete(&id).await.unwrap();
         std::fs::remove_file(&fixture).unwrap();
@@ -370,14 +482,14 @@ async fn real_rustfs_sqlite_metadata_round_trip() {
         let config = local_config();
         let prefix = split_prefix("sqlite-metadata");
         let created = Arc::new(Mutex::new(BTreeSet::new()));
-        let first_blocks = TrackedR2Blocks::new(&config, prefix.clone(), Arc::clone(&created));
+        let first_blocks = TrackedRustFsBlocks::new(&config, prefix.clone(), Arc::clone(&created));
         let expected = write_split_file(
             SqliteMetadataStore::open(sqlite_metadata_file()).unwrap(),
             first_blocks,
             "rustfs-split-sqlite-first",
         )
         .await;
-        let reopened_blocks = TrackedR2Blocks::new(&config, prefix, created.clone());
+        let reopened_blocks = TrackedRustFsBlocks::new(&config, prefix, created.clone());
         let actual = read_split_file(
             SqliteMetadataStore::open(sqlite_metadata_file()).unwrap(),
             reopened_blocks.clone(),
@@ -399,9 +511,10 @@ async fn real_rustfs_sdk_sqlite_metadata_round_trip() {
         options.metadata = StoreConfig::Sqlite {
             path: sdk_metadata_file(),
         };
-        options.blocks = StoreConfig::R2 {
+        options.blocks = StoreConfig::RustFs {
             endpoint: config.endpoint,
             bucket: config.bucket,
+            region: config.region,
             prefix: format!("{}/sdk-sqlite-blocks", test_prefix()),
             access_key_id: config.access_key_id,
             secret_access_key: config.secret_access_key,
@@ -439,7 +552,7 @@ async fn real_rustfs_pglite_metadata_round_trip() {
         let config = local_config();
         let prefix = split_prefix("pglite-metadata");
         let created = Arc::new(Mutex::new(BTreeSet::new()));
-        let blocks = TrackedR2Blocks::new(&config, prefix.clone(), Arc::clone(&created));
+        let blocks = TrackedRustFsBlocks::new(&config, prefix.clone(), Arc::clone(&created));
         let key = format!("{}/pglite-metadata", test_prefix());
         let first_metadata = PgliteMetadataStore::connect_with_key(&pglite_url(), key.clone())
             .await
@@ -455,7 +568,7 @@ async fn real_rustfs_pglite_metadata_round_trip() {
         let reopened_metadata = PgliteMetadataStore::connect_with_key(&pglite_url(), key)
             .await
             .unwrap();
-        let reopened_blocks = TrackedR2Blocks::new(&config, prefix, created.clone());
+        let reopened_blocks = TrackedRustFsBlocks::new(&config, prefix, created.clone());
         let actual = read_split_file(
             reopened_metadata.clone(),
             reopened_blocks.clone(),
@@ -479,7 +592,7 @@ async fn real_rustfs_block_benchmark() {
         let config = local_config();
         let prefix = format!("{}/benchmark", test_prefix());
         let created = Arc::new(Mutex::new(BTreeSet::new()));
-        let blocks = TrackedR2Blocks::new(&config, prefix, Arc::clone(&created));
+        let blocks = TrackedRustFsBlocks::new(&config, prefix, Arc::clone(&created));
         let payload = (0..BLOCK_BYTES)
             .map(|index| (index as u8).wrapping_mul(31))
             .collect::<Vec<_>>();

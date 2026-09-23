@@ -54,6 +54,25 @@ Build the local addon with
 `MOUNT_RS_NAPI_FEATURES=foundationdb pnpm --dir bindings/mount-rs-napi build:debug`
 before running that config.
 
+For two independent writable CLIs, set `driver.storage.concurrent_writes: true`.
+The example selects the NFS shared-view profile and accepts SQLite, PGlite,
+or FoundationDB `revision-cas` metadata. SQLite metadata and blocks require
+the same local disk paths on one host. Place both SQLite database files outside
+the native mountpoint; the CLI rejects concurrent SQLite backing paths inside
+the mountpoint before it opens a driver, including symlink aliases and paths
+with missing components. On case-insensitive macOS filesystems, `mnt` and `MNT`
+refer to one directory. Before opening a driver, the CLI creates the native
+mountpoint and compares its filesystem identity with each existing SQLite
+backing ancestor, including symlink targets. Under `--check`, it removes any
+empty mountpoint directories it created for this probe. PGlite clients require
+one reachable socket server.
+RustFS is a separately named block-only provider; its JSON
+configuration uses `kind: "rustfs"`, an endpoint, bucket, signing region,
+prefix, and environment references for both credentials. Pair RustFS with
+PGlite or FoundationDB metadata for hosts sharing one volume. RustFS
+`durable` defaults to `false`; set it to `true` only when the service's
+durability is assured.
+
 Run the bounded self-test on a host with a usable native transport:
 
 ```sh

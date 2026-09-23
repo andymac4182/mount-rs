@@ -46,15 +46,34 @@ mod tests {
             volume_key: "volume".to_owned(),
             durable: true,
         };
+        let mut rustfs = StoreConfig::RustFs {
+            endpoint: "http://127.0.0.1:9878/tenant-secret".to_owned(),
+            bucket: "bucket".to_owned(),
+            region: "us-east-1".to_owned(),
+            prefix: "volume".to_owned(),
+            access_key_id: "rustfs-access-key".to_owned(),
+            secret_access_key: "rustfs-secret-value".to_owned(),
+            durable: true,
+        };
 
         let r2_debug = format!("{r2:?}");
         let pglite_debug = format!("{pglite:?}");
+        let rustfs_debug = format!("{rustfs:?}");
 
         assert!(r2_debug.contains("<redacted>"));
         assert!(!r2_debug.contains("access-key"));
         assert!(!r2_debug.contains("secret-value"));
         assert!(pglite_debug.contains("<redacted>"));
         assert!(!pglite_debug.contains("password"));
+        assert!(rustfs_debug.contains("<redacted>"));
+        assert!(rustfs_debug.contains("http://127.0.0.1:9878"));
+        assert!(!rustfs_debug.contains("tenant-secret"));
+        assert!(!rustfs_debug.contains("rustfs-access-key"));
+        assert!(!rustfs_debug.contains("rustfs-secret-value"));
+        if let StoreConfig::RustFs { endpoint, .. } = &mut rustfs {
+            *endpoint = "https://example.invalid:tenant-secret".to_owned();
+        }
+        assert!(!format!("{rustfs:?}").contains("tenant-secret"));
     }
 
     #[tokio::test]
@@ -107,6 +126,53 @@ mod tests {
                 .expect("local blocks must fail before provider open");
             assert_eq!(error.code, ErrorCode::Einval);
             assert!(error.to_string().contains("shared block"));
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_concurrent_sdk_rejects_volatile_and_cross_provider_local_blocks() {
+        let sqlite = StoreConfig::Sqlite {
+            path: "/nonexistent/mount-rs-concurrent-metadata.sqlite".into(),
+        };
+        for (metadata, blocks) in [
+            (sqlite.clone(), StoreConfig::Memory),
+            (
+                StoreConfig::Sqlite {
+                    path: ":memory:".into(),
+                },
+                StoreConfig::Sqlite {
+                    path: "/nonexistent/mount-rs-concurrent-blocks.sqlite".into(),
+                },
+            ),
+            (
+                sqlite.clone(),
+                StoreConfig::Sqlite {
+                    path: ":memory:".into(),
+                },
+            ),
+            (
+                StoreConfig::Pglite {
+                    connection: "postgres://127.0.0.1:1/missing".to_owned(),
+                    volume_key: "metadata".to_owned(),
+                    durable: true,
+                },
+                StoreConfig::Sqlite {
+                    path: "/nonexistent/mount-rs-concurrent-blocks.sqlite".into(),
+                },
+            ),
+        ] {
+            let error = Filesystem::split(
+                SplitOptions {
+                    metadata,
+                    blocks,
+                    ..SplitOptions::memory("sqlite-concurrent-check", 4096)
+                }
+                .with_concurrent_writes(true),
+            )
+            .await
+            .err()
+            .expect("unsupported pairing must fail before provider open");
+            assert_eq!(error.code, ErrorCode::Einval);
         }
     }
 

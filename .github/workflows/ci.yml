@@ -629,6 +629,25 @@ jobs:
             MOUNT_RS_RUN_NATIVE_NFS_SQLITE=1 python3 -c 'import subprocess,sys; subprocess.run([sys.argv[1], "--ignored", "--nocapture"], check=True, timeout=300)' "$sqlite_test"
           fi
 
+  native-concurrent-sqlite:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+      - name: Verify local SQLite shared mounts and reject NFS hosted backing
+        env:
+          MOUNT_RS_CLI_NATIVE_NFS: '1'
+          MOUNT_RS_CLI_NATIVE_SQLITE_TWO_PROCESS: '1'
+          MOUNT_RS_CLI_NATIVE_SQLITE_ONE_PROCESS: '1'
+          MOUNT_RS_CLI_NATIVE_SQLITE_NFS_BACKING: '1'
+          MOUNT_RS_CLI_NATIVE_SQLITE_NFS_BLOCKS: '1'
+        run: |
+          owned_tmp=$(mktemp -d "$RUNNER_TEMP/mount-rs-concurrent-sqlite-XXXXXXXX")
+          trap 'rmdir "$owned_tmp"' EXIT
+          TMPDIR="$owned_tmp" python3 -c 'import os,subprocess; subprocess.run(["cargo", "test", "--locked", "-p", "mount-rs-cli", "--test", "native_two_process_sql", "--", "--ignored", "--test-threads=1", "--nocapture"], env=os.environ, check=True, timeout=540)'
+
   native-9p:
     runs-on: ubuntu-latest
     timeout-minutes: 10

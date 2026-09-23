@@ -2,7 +2,7 @@
 
 This standalone test crate is the real split-provider acceptance lane. It
 opens `ChunkedFs` with `mount-rs-foundationdb` as the fenced metadata store and
-`mount-rs-r2::R2BlockStore` against the RustFS S3 endpoint as the immutable
+`mount-rs-rustfs::RustFsBlockStore` against the RustFS S3 endpoint as the immutable
 block store. The test performs multi-chunk binary writes, partial overwrites,
 truncate/extend operations, fresh provider reopen, metadata revision CAS, and
 stale-fence rejection. The real composition path publishes a protected shared
@@ -18,8 +18,9 @@ cargo test --manifest-path tests/foundationdb/Cargo.toml \
   --lib foundationdb_rustfs_chunked_composition -- --exact --nocapture
 ```
 
-It requires `MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE`, `R2_ENDPOINT`, `R2_BUCKET`,
-`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `RUSTFS_COMBO_PREFIX`. The
+It requires `MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE`, `RUSTFS_ENDPOINT`,
+`RUSTFS_BUCKET`, `RUSTFS_ACCESS_KEY_ID`, `RUSTFS_SECRET_ACCESS_KEY`,
+`RUSTFS_REGION`, and `RUSTFS_COMBO_PREFIX`. The
 repository `scripts/test-foundationdb.sh` supplies the FDB server/client in a
 disposable container. When invoked by `scripts/test-rustfs.sh`, it attaches the
 RustFS container to the FoundationDB client network as `mount-rs-rustfs` and

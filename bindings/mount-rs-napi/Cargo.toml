@@ -33,6 +33,7 @@ mount-rs-observability = { path = "../../crates/mount-rs-observability", optiona
 mount-rs-pglite = { path = "../../providers/mount-rs-pglite" }
 mount-rs-pglite-fs = { path = "../../filesystems/mount-rs-pglite-fs" }
 mount-rs-r2 = { path = "../../providers/mount-rs-r2" }
+mount-rs-rustfs = { path = "../../providers/mount-rs-rustfs" }
 mount-rs-r2-fs = { path = "../../filesystems/mount-rs-r2-fs" }
 mount-rs-sqlite = { path = "../../providers/mount-rs-sqlite" }
 mount-rs-sqlite-fs = { path = "../../filesystems/mount-rs-sqlite-fs" }

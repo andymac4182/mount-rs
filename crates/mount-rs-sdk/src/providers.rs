@@ -31,6 +31,7 @@ use mount_rs_foundationdb::{
 use mount_rs_memory::{MemoryBlockStore, MemoryMetadataStore};
 use mount_rs_pglite::{PgliteBlockStore, PgliteMetadataStore, PgliteStorageOptions};
 use mount_rs_r2::{R2BlockStore, R2Config};
+use mount_rs_rustfs::{RustFsBlockStore, RustFsConfig};
 use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
 use mount_rs_tidb::{TidbBlockStore, TidbMetadataStore, TidbStorageOptions};
 
@@ -233,9 +234,11 @@ async fn open_metadata(
                 ))
             }
         }
-        StoreConfig::R2 { .. } | StoreConfig::AwsS3 { .. } => Err(backend_error(
-            "metadata providers 'r2' and 'aws-s3' are unsupported; object-store providers are block-only",
-        )),
+        StoreConfig::R2 { .. } | StoreConfig::RustFs { .. } | StoreConfig::AwsS3 { .. } => {
+            Err(backend_error(
+                "object-store metadata is unsupported; R2, RustFS, and AWS S3 are block-only",
+            ))
+        }
     }
 }
 
@@ -330,7 +333,26 @@ async fn open_blocks(
                 secret_access_key: secret_access_key.clone(),
                 state_key: prefix.clone(),
             };
-            let store = R2BlockStore::new(config.build_store()?, prefix.clone(), *durable)?;
+            let store = R2BlockStore::from_config_with_durable(&config, prefix.clone(), *durable)?;
+            Ok((Arc::new(store), Vec::new()))
+        }
+        StoreConfig::RustFs {
+            endpoint,
+            bucket,
+            region,
+            prefix,
+            access_key_id,
+            secret_access_key,
+            durable,
+        } => {
+            let config = RustFsConfig {
+                endpoint: endpoint.clone(),
+                bucket: bucket.clone(),
+                region: region.clone(),
+                access_key_id: access_key_id.clone(),
+                secret_access_key: secret_access_key.clone(),
+            };
+            let store = RustFsBlockStore::from_config(&config, prefix.clone(), *durable)?;
             Ok((Arc::new(store), Vec::new()))
         }
         StoreConfig::AwsS3 {
@@ -343,7 +365,8 @@ async fn open_blocks(
                 bucket: bucket.clone(),
                 region: region.clone(),
             };
-            let store = AwsS3BlockStore::new(config.build_store()?, prefix.clone(), *durable)?;
+            let store =
+                AwsS3BlockStore::from_config_with_durable(&config, prefix.clone(), *durable)?;
             Ok((Arc::new(store), Vec::new()))
         }
     }

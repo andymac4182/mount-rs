@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
 use mount_rs_core::chunking::ChunkerConfig;
 use mount_rs_core::storage::{
     BlockId, BlockStore, LoadedMetadata, MetadataStore, Namespace, WriterLease,
@@ -9,6 +10,7 @@ use mount_rs_fault_injection::{
     FaultOccurrence, FaultOperation, FaultOutcome, FaultPhase, FaultPlan, FaultRule, PlanError,
     is_commit_unknown,
 };
+use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -195,6 +197,36 @@ async fn no_fault_is_transparent_for_metadata_and_blocks() {
     blocks.delete(&id).await.unwrap();
     assert_eq!(blocks.injector().trace().events.len(), 0);
     assert_eq!(blocks_inner.counts(), (1, 1, 1, 1));
+}
+
+#[tokio::test]
+async fn fault_wrapped_blocks_reject_unsupported_concurrent_backing_before_conversion() {
+    let temp_dir = tempfile::tempdir().expect("create local SQLite metadata directory");
+    let metadata = SqliteMetadataStore::open(temp_dir.path().join("metadata.sqlite"))
+        .expect("open file-backed metadata");
+    let blocks = SqliteBlockStore::in_memory().expect("open volatile block store");
+    let wrapped = FaultBlockStore::new(blocks, FaultInjector::disabled(13));
+    let options = ChunkedOptions::fixed("fault-wrapped-unsupported-blocks", 4096)
+        .expect("valid fixed-size chunker")
+        .with_concurrent_writes(true);
+
+    let error = ChunkedFs::open(metadata.clone(), wrapped, options)
+        .await
+        .err()
+        .expect("volatile blocks must reject concurrent mode");
+    assert_eq!(error.code, ErrorCode::Enotsup);
+    assert_eq!(
+        error.syscall.as_deref(),
+        Some("prepare concurrent SQLite blocks")
+    );
+
+    // The block check runs before the metadata provider persists its MRC1
+    // conversion, so the legacy lease path must still work.
+    let lease = metadata
+        .acquire_writer("legacy-after-rejected-open", Duration::from_secs(60))
+        .await
+        .expect("metadata was not converted");
+    metadata.release_writer(&lease).await.unwrap();
 }
 
 #[test]

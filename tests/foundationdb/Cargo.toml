@@ -13,6 +13,6 @@ foundationdb = { version = "0.11.0", default-features = false, features = ["embe
 mount-rs-chunked = { path = "../../filesystems/mount-rs-chunked" }
 mount-rs-core = { path = "../.." }
 mount-rs-foundationdb = { path = "../../providers/mount-rs-foundationdb", features = ["foundationdb"] }
-mount-rs-r2 = { path = "../../providers/mount-rs-r2" }
+mount-rs-rustfs = { path = "../../providers/mount-rs-rustfs" }
 object_store = { version = "0.12", default-features = false, features = ["aws"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

@@ -1222,6 +1222,17 @@ where
         self.inner.durable()
     }
 
+    async fn prepare_concurrent_mode(&self) -> Result<()> {
+        self.telemetry
+            .observe_fs(
+                "provider.blocks",
+                "concurrent.prepare",
+                None,
+                self.inner.prepare_concurrent_mode(),
+            )
+            .await
+    }
+
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
         let count = bytes.len() as u64;
         let result = self
@@ -1587,10 +1598,48 @@ pub use http_propagation::{HeaderExtractor, HeaderInjector, extract_headers, inj
 mod tests {
     use super::*;
     use mount_rs_core::{
-        ErrorCode, FsDriver, GuardedMutation, GuardedMutationResult, GuardedRead,
+        ErrorCode, FsDriver, FsError, GuardedMutation, GuardedMutationResult, GuardedRead,
         GuardedReadResult, GuardedSetattr, ObservedEntry, OpenFlags, PathGuard, PathIdentity,
     };
     use mount_rs_memfs::{MemoryFs, MemoryOptions};
+
+    struct RejectingConcurrentBlocks;
+
+    #[async_trait]
+    impl BlockStore for RejectingConcurrentBlocks {
+        fn durable(&self) -> bool {
+            true
+        }
+
+        async fn prepare_concurrent_mode(&self) -> Result<()> {
+            Err(FsError::new(ErrorCode::Enotsup).with_syscall("prepare rejecting blocks"))
+        }
+
+        async fn put(&self, _bytes: &[u8]) -> Result<BlockId> {
+            unreachable!("preflight must reject before block I/O")
+        }
+
+        async fn get(&self, _id: &BlockId) -> Result<Vec<u8>> {
+            unreachable!("preflight must reject before block I/O")
+        }
+
+        async fn flush(&self) -> Result<()> {
+            unreachable!("preflight must reject before block I/O")
+        }
+
+        async fn delete(&self, _id: &BlockId) -> Result<()> {
+            unreachable!("preflight must reject before block I/O")
+        }
+    }
+
+    #[tokio::test]
+    async fn instrumented_blocks_forward_concurrent_preflight_and_observe_rejection() {
+        let telemetry = Telemetry::new(TelemetryConfig::enabled("block-preflight-test"));
+        let blocks = InstrumentedBlockStore::new(RejectingConcurrentBlocks, telemetry.clone());
+        let error = blocks.prepare_concurrent_mode().await.unwrap_err();
+        assert!(error.is(ErrorCode::Enotsup));
+        assert_eq!(telemetry.snapshot().errors, 1);
+    }
 
     #[test]
     fn disabled_telemetry_has_zero_snapshot_and_redacts_path_shape() {

@@ -8,7 +8,7 @@ commit protocol and its acceptance limits, see [ARCHITECTURE.md](../ARCHITECTURE
 | Location | Responsibility |
 | --- | --- |
 | `src/` (`mount-rs-core`) | `FsDriver`/`FileHandle`, paths, errors, types, `Loopback`, and the metadata, block, chunker and versioning contracts. Core has no runtime dependency on a concrete provider, filesystem, or transport. |
-| `providers/` | One crate per backend: memory, SQLite, PGlite, TiDB, FoundationDB, Cloudflare R2 and AWS S3. The shared object-store block adapter has its own crate. |
+| `providers/` | One crate per backend: memory, SQLite, PGlite, TiDB, FoundationDB, Cloudflare R2, RustFS and AWS S3. The shared object-store block adapter has its own crate. |
 | `filesystems/` | One crate per `FsDriver` implementation or composition: memfs, chunked, host, KV, persisted snapshots, versioned views, and SQLite/PGlite/R2 snapshot facades. |
 | `transports/` | One crate per protocol or native bridge: FUSE, 9P, NFS, WebDAV, incoming S3 gateway, HTTP, auto-mount and the macOS FSKit bridge. |
 | `bindings/` | Node N-API, JavaScript virtual-filesystem adapters and the SQLite VFS bridge. |
@@ -41,6 +41,10 @@ several concrete providers and transports directly; the FSKit bridge also
 constructs some concrete filesystems for its native host. A provider exposed in
 those frontends needs explicit selection and shutdown mapping as well as SDK
 construction.
+`mount-rs-rustfs` provides signed, path-style immutable blocks through the
+shared `mount-rs-object-store-blocks` adapter. It has no `MetadataStore`;
+concurrent mounts on different hosts pair it with FoundationDB or PGlite
+revision-CAS metadata.
 SQLite, PGlite and R2 providers retain their older `*Fs` factories for
 existing callers. New filesystem consumers should import the matching
 `mount-rs-*-fs` crate under `filesystems/`; those facades join a provider store
@@ -75,12 +79,35 @@ see [DEPENDENCIES.md](../DEPENDENCIES.md).
    fence legacy lease operations, and reject conversion while an exclusive
    writer may exist. A revision conflict must be a known non-commit (`EAGAIN`);
    an uncertain publication error must remain ambiguous and fail closed.
+   SQLite performs the mode transition and revision CAS in immediate
+   transactions on one local database file; PGlite uses atomic statements
+   through one PostgreSQL-wire server that may use TCP or a Unix socket;
+   FoundationDB publishes its metadata chunks and
+   manifest in a transaction. A PGlite/PGlite split store opens metadata and
+   block connections in each CLI, so two CLIs need at least four server slots.
    Namespace records contain attributes and block references, not file bytes.
 3. For blocks, store immutable bytes under stable identities, reject an
    identity reused for different bytes, and make `flush` cover completed puts.
-   Concurrent writers must use the same shared block backing so a reference
-   published by one writer can be read by the others; `memory` and local
-   `sqlite` block stores are rejected for FoundationDB concurrent mode.
+   Every block backing used with concurrent writers must explicitly implement
+   `BlockStore::prepare_concurrent_mode`; the default rejects participation.
+   `ChunkedFs` calls it before converting metadata to the persisted concurrent
+   marker. A rejected block path must leave metadata in its original writer
+   mode. Forward this hook through every type-erased,
+   telemetry or fault-injection block adapter; the SDK `ErasedBlockStore` and
+   N-API `DynBlockStore` are part of that call path.
+   An arbitrary injected object-store client cannot establish sharedness;
+   its adapter stays in the default rejecting path even if a caller declares
+   durability. Named remote provider crates construct signed clients from
+   validated configs and probe create/read access under their block prefix
+   before the metadata mode changes.
+   Concurrent writers must use the same block backing so a reference
+   published by one writer can be read by the others. Memory blocks are
+   rejected. Local SQLite blocks are allowed only with local SQLite metadata
+   when every process uses the same file paths on one host; those database
+   files must stay outside every mountpoint and off NFS/SMB. PGlite,
+   FoundationDB, R2, RustFS and AWS S3
+   can provide blocks reachable by independent hosts. RustFS is block-only;
+   pair it with PGlite or FoundationDB metadata for cross-host mounts.
    Deletion/reconciliation needs authoritative roots and an explicit grace
    period; it is not part of ordinary unlink or shutdown.
 4. Make `durable()` reflect the actual configured store. Wire selectable
@@ -130,6 +157,12 @@ commit before the reply.
 Automatic transport selection must choose NFS for a shared view; routing it
 through FUSE or 9P would skip this shared NFS identity and cache profile.
 NFSv4 requests fail closed in this profile.
+The backing SQLite provider files must remain on local disk. An application
+SQLite database stored *inside* two shared NFS views is a separate locking
+problem: the [macOS adversarial packet](../tests/sqlite_nfs_adversarial.md)
+observed a competing `BEGIN IMMEDIATE` lock bypass between views and a WAL
+request falling back to DELETE. The one-host `sqlite_single_host()` NFS
+profile is for one mount and cannot be combined with shared views.
 
 ### Frontend
 
@@ -146,14 +179,16 @@ mapping and shutdown coverage.
 - By default, `ChunkedFs::open` acquires a provider-enforced writer lease,
   loads and validates metadata, and initializes an empty namespace through
   fenced publication. Ownership loss stops that instance. The optional
-  experimental FoundationDB concurrent mode opens without a long writer lease.
-  It first persists a write-mode marker and legacy fence sentinel, then
-  initializes a fresh namespace with revision CAS. A prefix containing legacy
-  lease or fence keys needs an offline migration before concurrent mode.
+  experimental concurrent mode opens without a long writer lease on SQLite,
+  PGlite or FoundationDB metadata. It first persists a write-mode marker and
+  legacy fence sentinel, then initializes a fresh namespace with revision
+  CAS. Existing exclusive-writer state needs an offline migration. Memory
+  metadata and the legacy SQLite/PGlite snapshot facades remain single-writer.
 - Writes complete new immutable blocks and the block barrier before publishing
   their references. Exclusive mode checks both revision and writer fence;
-  concurrent mode publishes metadata chunks and the manifest in one
-  FoundationDB transaction conditional on the expected revision. The latter
+  concurrent mode checks the expected revision in the provider's atomic
+  publication (SQLite transaction, PGlite update, or FoundationDB transaction
+  containing metadata chunks and manifest). The latter
   reloads the authoritative namespace before operations and can rebuild an
   operation after a known `EAGAIN` conflict, within a bounded retry count.
   Ambiguous publication or barrier failures fail closed; they cannot be
@@ -168,10 +203,14 @@ mapping and shutdown coverage.
   detached file tombstones for remote open handles. Detached tombstones and
   immutable blocks staged for failed or conflicted publications currently have
   no built-in retention cap, so storage can grow without bound. The mode is
-  pending a distributed handle-pin and capacity protocol. The final guarded
-  macOS native acceptance passed once each for two independent writable
-  FoundationDB CLIs, one CLI with two FoundationDB mounts, and one CLI with
-  two memory mounts. Cross-host acceptance remains outstanding.
+  pending a distributed handle-pin and capacity protocol. Local macOS native
+  cases have passed for two writable SQLite, PGlite and FoundationDB CLIs,
+  and one CLI with two writable SQLite, PGlite, FoundationDB or memory mounts.
+  PGlite's two-CLI case used TCP loopback to one engine. SQLite's DELETE and
+  WAL backing smoke checks passed, but WAL is unqualified with the bundled
+  SQLite 3.46 until its rare
+  [WAL-reset bug](https://www.sqlite.org/wal.html#the_wal_reset_bug) is fixed.
+  Cross-host physical acceptance remains outstanding.
 - Shared NFS views require a driver that atomically guards handle identity
   during both namespace reads and mutations. A directory handle must identify
   its original parent while looking up or listing entries under one snapshot.
@@ -195,9 +234,10 @@ mapping and shutdown coverage.
 
 ## Provider crate versus S3-compatible service
 
-`mount-rs-r2` and `mount-rs-aws-s3` are **outgoing** object-store providers.
-They select Cloudflare R2 and AWS S3 clients respectively over a shared
-immutable object-block adapter. `mount-rs-s3` is the opposite direction: an
+`mount-rs-r2`, `mount-rs-rustfs` and `mount-rs-aws-s3` are **outgoing**
+object-store block providers. They select Cloudflare R2, RustFS and AWS S3
+clients respectively over a shared immutable object-block adapter.
+`mount-rs-s3` is the opposite direction: an
 **incoming** path-style HTTP gateway exposing one or more `FsDriver` values as
 S3-compatible buckets. None of these crates by itself is an
 operated, qualified S3-compatible service. Gateway rootless tests exercise

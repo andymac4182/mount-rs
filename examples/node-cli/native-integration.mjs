@@ -184,12 +184,13 @@ function tidbRustfsConfig(transport) {
   const prefix = `mount-rs-provider-matrix/${runId}/native-tidb-rustfs`;
   const volumeKey = `mount-rs-provider-matrix/${runId}/native-tidb-rustfs-metadata`;
   requiredEnv("MOUNT_RS_TIDB_URL");
-  const endpoint = requiredEnv("R2_ENDPOINT");
-  const bucket = requiredEnv("R2_BUCKET");
-  requiredEnv("R2_ACCESS_KEY_ID");
-  requiredEnv("R2_SECRET_ACCESS_KEY");
+  const endpoint = requiredEnv("RUSTFS_ENDPOINT");
+  const bucket = requiredEnv("RUSTFS_BUCKET");
+  const region = requiredEnv("RUSTFS_REGION");
+  requiredEnv("RUSTFS_ACCESS_KEY_ID");
+  requiredEnv("RUSTFS_SECRET_ACCESS_KEY");
   if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+(?:\/|$)/.test(endpoint)) {
-    throw new Error("the TiDB/RustFS native gate requires a loopback R2_ENDPOINT");
+    throw new Error("the TiDB/RustFS native gate requires a loopback RUSTFS_ENDPOINT");
   }
   return {
     prefix,
@@ -208,12 +209,13 @@ function tidbRustfsConfig(transport) {
             durable: true,
           },
           blocks: {
-            kind: "r2",
+            kind: "rustfs",
             endpoint,
             bucket,
+            region,
             prefix,
-            access_key_id: { env: "R2_ACCESS_KEY_ID" },
-            secret_access_key: { env: "R2_SECRET_ACCESS_KEY" },
+            access_key_id: { env: "RUSTFS_ACCESS_KEY_ID" },
+            secret_access_key: { env: "RUSTFS_SECRET_ACCESS_KEY" },
             durable: true,
           },
           chunk_size_bytes: 7,
@@ -248,9 +250,10 @@ async function verifyTidbRustfsFiles(configPath, expectedFiles) {
       durable: storage.metadata.durable,
     },
     blocks: {
-      kind: "r2",
+      kind: "rustfs",
       endpoint: storage.blocks.endpoint,
       bucket: storage.blocks.bucket,
+      region: storage.blocks.region,
       key: storage.blocks.prefix,
       accessKeyId: resolveCredential(storage.blocks.access_key_id, "blocks.access_key_id"),
       secretAccessKey: resolveCredential(

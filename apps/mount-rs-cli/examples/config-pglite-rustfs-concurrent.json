@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "mountpoint": "./mnt",
+  "transport": "nfs",
+  "driver": {
+    "kind": "splitstore",
+    "storage": {
+      "concurrent_writes": true,
+      "metadata": {
+        "kind": "pglite",
+        "connection": {
+          "env": "PGLITE_DATABASE_URL"
+        },
+        "volume_key": "mount-rs/pglite-rustfs-concurrent",
+        "durable": true
+      },
+      "blocks": {
+        "kind": "rustfs",
+        "endpoint": "http://127.0.0.1:9878",
+        "bucket": "mount-rs-rustfs",
+        "region": "us-east-1",
+        "prefix": "mount-rs/pglite-rustfs-concurrent",
+        "access_key_id": {
+          "env": "RUSTFS_ACCESS_KEY_ID"
+        },
+        "secret_access_key": {
+          "env": "RUSTFS_SECRET_ACCESS_KEY"
+        },
+        "durable": true
+      },
+      "chunk_size_bytes": 65536
+    }
+  }
+}

@@ -10,10 +10,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use mount_rs_core::storage::{BlockId, BlockReconcileReport, BlockStore};
-use mount_rs_core::{FsError, Result, backend_error};
-use mount_rs_object_store_blocks::{ObjectStoreBlockStore, ObjectStoreBlockStoreStats};
+use mount_rs_core::{FsError, Result};
+use mount_rs_object_store_blocks::{
+    ObjectStoreBlockStore, ObjectStoreBlockStoreStats, probe_configured_concurrent_prefix,
+};
 use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey, S3ConditionalPut};
-use object_store::client::ClientConfigKey;
+use object_store::client::{ClientConfigKey, ClientOptions};
 use object_store::{ObjectStore, RetryConfig};
 
 /// Maximum number of internal object-store retry attempts for AWS S3.
@@ -46,15 +48,39 @@ impl AwsS3Config {
 
     /// Build a signed AWS S3 client from the configured environment.
     pub fn build_store(&self) -> Result<Arc<dyn ObjectStore>> {
+        self.build_store_with_probe_limits(false)
+    }
+
+    fn build_probe_store(&self) -> Result<Arc<dyn ObjectStore>> {
+        self.build_store_with_probe_limits(true)
+    }
+
+    fn build_store_with_probe_limits(&self, probe: bool) -> Result<Arc<dyn ObjectStore>> {
         self.validate()?;
-        let builder = AmazonS3Builder::from_env()
+        let mut builder = AmazonS3Builder::from_env()
             .with_bucket_name(&self.bucket)
             .with_region(&self.region)
             .with_virtual_hosted_style_request(true)
-            .with_retry(self.retry_config())
             .with_conditional_put(S3ConditionalPut::ETagMatch);
+        if probe {
+            builder = builder
+                .with_client_options(
+                    ClientOptions::new()
+                        .with_timeout(Duration::from_secs(8))
+                        .with_connect_timeout(Duration::from_secs(3)),
+                )
+                .with_retry(RetryConfig {
+                    max_retries: 1,
+                    retry_timeout: Duration::from_secs(12),
+                    ..RetryConfig::default()
+                });
+        } else {
+            builder = builder.with_retry(self.retry_config());
+        }
         validate_aws_builder(&builder)?;
-        Ok(Arc::new(builder.build().map_err(backend_error)?))
+        Ok(Arc::new(builder.build().map_err(|_| {
+            FsError::backend("AWS S3 signed object-store client could not be built")
+        })?))
     }
 }
 
@@ -64,7 +90,7 @@ impl AwsS3Config {
 /// creation, and scoped reconciliation. This wrapper owns the AWS client
 /// construction and keeps it independent of the R2 provider.
 #[derive(Clone)]
-pub struct AwsS3BlockStore(ObjectStoreBlockStore);
+pub struct AwsS3BlockStore(ObjectStoreBlockStore, Option<Arc<dyn ObjectStore>>);
 
 impl AwsS3BlockStore {
     /// Wrap an existing client with an explicitly declared durability level.
@@ -73,12 +99,26 @@ impl AwsS3BlockStore {
         prefix: impl Into<String>,
         durable: bool,
     ) -> Result<Self> {
-        Ok(Self(ObjectStoreBlockStore::new(store, prefix, durable)?))
+        Ok(Self(
+            ObjectStoreBlockStore::new(store, prefix, durable)?,
+            None,
+        ))
     }
 
     /// Build durable blocks using this provider's signed AWS S3 client.
     pub fn from_config(config: &AwsS3Config, prefix: impl Into<String>) -> Result<Self> {
-        Self::new(config.build_store()?, prefix, true)
+        Self::from_config_with_durable(config, prefix, true)
+    }
+
+    /// Build blocks with a validated signed client and explicit durability.
+    pub fn from_config_with_durable(
+        config: &AwsS3Config,
+        prefix: impl Into<String>,
+        durable: bool,
+    ) -> Result<Self> {
+        let mut blocks = Self::new(config.build_store()?, prefix, durable)?;
+        blocks.1 = Some(config.build_probe_store()?);
+        Ok(blocks)
     }
 
     pub fn prefix(&self) -> &str {
@@ -94,6 +134,13 @@ impl AwsS3BlockStore {
 impl BlockStore for AwsS3BlockStore {
     fn durable(&self) -> bool {
         self.0.durable()
+    }
+
+    async fn prepare_concurrent_mode(&self) -> Result<()> {
+        match &self.1 {
+            Some(probe) => probe_configured_concurrent_prefix(probe.as_ref(), self.prefix()).await,
+            None => self.0.prepare_concurrent_mode().await,
+        }
     }
 
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
