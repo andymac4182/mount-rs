@@ -6,6 +6,22 @@ native NFS behavior, and cross-host claims. The feature uses opt-in
 writer claim. The branch began at fetched `origin/main`
 `8a629287104fcdd6d4c334378eccfcab005817ec`.
 
+## Current scope at a glance
+
+| Storage / workload | Current evidence and limits |
+| --- | --- |
+| Memory | Sharing is within one filesystem instance in one process. Independent memory-backed CLIs do not share state. |
+| SQLite provider backing | Same host and the same canonical local metadata/block files. Bundled SQLite 3.51.3 passed native DELETE and WAL two-CLI checks, one CLI with two views, fresh reopen and integrity checks. Concurrent Windows SQLite backing returns `ENOTSUP`. |
+| PGlite provider backing | Clients share one persisted engine through its socket server; two split-store CLIs need four socket slots. Native bidirectional/disjoint writes and fresh engine/CLI reopen passed. Three slots rejected the second CLI before mount while the first remained readable. |
+| FoundationDB metadata + RustFS blocks | Two independent macOS loopback CLIs passed one current 400-write packet: 400 acknowledged writes, 400 checks through each live view and 400 after fresh CLI reopen. Earlier OOM, sync errors and per-OPEN timeouts remain retained and unexplained where stated below. |
+| Concurrent online reclamation | Disabled / `ENOTSUP`; distributed handle pins and a capacity policy are still needed. Retained immutable conflict blocks and tombstones can grow. |
+| Application SQLite inside shared NFS views | Unqualified: a retained cross-view locking probe allowed the contender to acquire `BEGIN IMMEDIATE`. Local SQLite provider backing is a separate qualified scope. |
+| Cross-host and recovery | These native packets use one host. Physical cross-host mounts, power-loss recovery and production operation need separate evidence. |
+| Runtime and performance | Current macOS CLI/addon measurements use debug builds and Node 24.18. The latest packet enabled bounded failure-only diagnostics, with request tracing and profiling off. Sustained production performance and the configured IOPS floor are not qualified by these samples. |
+
+The detailed history below retains each original failure and its source,
+runtime, measurement and cleanup boundary.
+
 ## Current bundled SQLite engine
 
 The workspace pins `rusqlite =0.39.0` and `libsqlite3-sys 0.37.0`, bundling
@@ -998,9 +1014,105 @@ port cleanup. Its raw log is
 JSON proof. This single macOS pass does not explain the retained Windows CI
 15-second S3 timeout.
 
-The current 400-write native qualification remains incomplete. The 8 GiB
-helper correction and cached-artifact correction address observed harness
-defects; neither explains the third attempt's sync errors or the original
+These three attempts did not complete the 400-write native qualification.
+The 8 GiB helper correction and cached-artifact correction address observed
+harness defects; neither explains the third attempt's sync errors or the original
 per-OPEN timeouts. The earlier traced 400-write acknowledgment followed by
 a verification deadline, and the complete untraced 40-write pass, remain
 separate evidence boundaries.
+
+## Completed 400-write packet with bounded NFS failure diagnostics
+
+Merged source `44aa06f4f3bed86c46bab68799de24413614235a` preserves backend
+path-resolution errors in NFSv3 WRITE and COMMIT. The prior `.ok()` paths
+could turn an original `EIO`, `EFBIG` or `EACCES` into `ESTALE`. Two shared
+wire regressions were red before that correction and green afterward,
+checking unchanged file contents on resolution failure and recovery through
+the same valid handle. Genuinely stale handles retain their stale status.
+This is a proven error-mapping defect; it does not identify what caused the
+earlier native sync errors.
+
+That source passed one complete genuine native FoundationDB 7.4.7 plus
+RustFS packet on macOS. Both independent writers used 200 files, with the
+same 8 GiB server cap, 1 GiB APFS data image, five-second FoundationDB
+transaction setting and 1,200 / 1,500-second native/combo budgets. No capacity
+or deadline was increased for this attempt. Request tracing and CLI verbose
+output were explicitly off, no profiling was performed, and
+`MOUNT_RS_TRACE_FAILURES=1` enabled only bounded exceptional records.
+
+| Completed stage | Count | Elapsed, ms |
+| --- | ---: | ---: |
+| Writes acknowledged | 400 | 132,143 |
+| Live view A file checks | 400 / 400 | 11,563 |
+| Live view B file checks | 400 / 400 | 11,878 |
+| Fresh CLI reopen file checks | 400 / 400 | 13,623 |
+
+The writes-plus-live-checks timer was 155,585 ms; the entire native test took
+173.59 seconds. The complete signed provider, SDK, addon, SQLite VFS and
+service fault/restart/reopen packet ended with both `RUSTFS_COMBO_PASS` and
+`RUSTFS_INTEGRATION_PASS`. Checkpoints retained every 25 verified files.
+These debug diagnostic times are not production-release throughput.
+
+The successful fixture buffers owned CLI stderr and does not print those
+buffers on normal completion. The raw log contains zero request/failure
+trace markers, but exceptional-record availability is therefore unknown;
+zero raw failure markers do not establish zero internal failures. CAS retry
+counts, RPC retransmission counts and internal phase metrics are unavailable.
+The approved failure-only disk watcher did not trigger, so no `statvfs` or
+disk-capacity measurement was retained. The unchanged 1 GiB image passed
+this packet; that result does not establish or dismiss capacity pressure in
+the original failed attempts, and does not justify a capacity change.
+
+Existing FoundationDB trace evidence retained the 8,589,934,592-byte process
+cap, a greatest periodic RSS sample of 679,329,792 bytes and a final sampled
+RSS of 240,418,816 bytes. The bounded scan read 3,161,172 bytes without
+truncation or parsing errors. These sampled resident values are distinct
+from virtual memory and allocator-pool totals, and do not establish a
+continuous peak.
+
+Before the packet, the isolated checkout's complete tree was confirmed
+identical to reviewed/gated source `7bf72807`. Core/NFS all-target tests,
+four bounded-diagnostic checks, six pure native-fixture checks, strict
+feature-enabled core/NFS/CLI Clippy and formatting passed; a disabled-env
+check produced no failure marker. The affected core/NFS/CLI/NAPI packages
+were cleaned in both host and arm64 target layouts. All nine full offline
+locked standalone dependency graphs passed again. Fresh feature CLI and
+default addon builds took 5.15 and 16.09 seconds, and the native test cohort
+build took 3.30 seconds; its six pure checks passed with two native cases
+ignored. The selected addon loaded 254 exports and the required APIs under
+Node 24.18.0.
+
+The fixture's actual copied CLI was 54,624,360 bytes with SHA-256
+`8c46753a676741e4b3782e9b9ae237cb5226cadd4611f1031a979116cb018db1`.
+The addon was 94,809,624 bytes with SHA-256
+`6285d489ab77f62c2bbaa07d5a27a3fd53920e7f6f5672e3f837dd8ee5003ee8`.
+The immutable raw log is
+`/private/tmp/mount-rs-native-failures400-44aa06f4f3bed86c46bab68799de24413614235a-20260923.log`
+(19,589 bytes, 298 lines; SHA-256
+`f1c0462ea18852ff3487a9654841ce492cc6079c0c1687c3473316f5fb1926b5`).
+Result, artifact, ownership, memory and independent cleanup JSON proofs use
+the prefix `/private/tmp/mount-rs-native-failures400-44aa06f4-`.
+
+Independent cleanup confirmed the exact native and service roots,
+containers, mounts, images and matching processes absent. Observed ports
+54318, 54319, 54485, 54631 and 54648 were closed, including the restarted
+RustFS endpoint. The exact PGlite helper command and owned diagnostic watcher
+were absent. Both borrowed dependency links were verified and removed,
+preserving their original directories. The user's existing PID 66542,
+NFS mount and listener 55309 remained unchanged.
+
+Separately, the unchanged PR #20 Windows Node isolated rerun
+`107254968301` completed successfully, including its 32-request S3 network
+fixture and the concurrent-SQLite `ENOTSUP` assertion. Its immutable log is
+`/private/tmp/mount-rs-pr20-windows-node-isolated-rerun-107254968301.log`
+(77,008 bytes; SHA-256
+`7fd9ecd0a1ee167fa535dff24ac9e3959de58e4dcb3982ccca4ebd756df96eac`).
+The original 15-second Windows timeout remains recorded; the rerun does
+not establish its cause. PR #23 fault workflow `35884548013` passed on
+Ubuntu, macOS and Windows. This fault-workflow result is separate from the
+primary Rust/native CI status and the retained IOPS-floor failures.
+
+This completes one bounded current-source 400-write native packet with
+live and fresh-reopen exact bytes. It does not turn the earlier OOM,
+`EIO`/`ESTALE`, per-OPEN timeouts or capped verification into passing runs,
+and it does not establish an RCA or sustained reliability guarantee.
