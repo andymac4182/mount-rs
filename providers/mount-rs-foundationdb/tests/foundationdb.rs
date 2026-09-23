@@ -383,12 +383,23 @@ async fn exercise_real_cluster(cluster_file: &str) -> Result<()> {
         serde_json::to_vec(loaded.namespace.as_ref().expect("published namespace")).unwrap(),
         serde_json::to_vec(&namespace).unwrap()
     );
+    assert!(metadata.load_if_changed(1).await?.is_none());
 
     let large_namespace = multi_chunk_namespace();
     let large_payload = serde_json::to_vec(&large_namespace).unwrap();
     assert!(large_payload.len() > DEFAULT_METADATA_CHUNK_BYTES);
     let large_revision = metadata.publish(1, &lease, large_namespace.clone()).await?;
     assert_eq!(large_revision, 2);
+    let refreshed_large = metadata
+        .load_if_changed(1)
+        .await?
+        .expect("changed revision must return its full multi-shard namespace");
+    assert_eq!(refreshed_large.revision, large_revision);
+    assert_eq!(
+        serde_json::to_vec(&refreshed_large.namespace.expect("changed namespace")).unwrap(),
+        large_payload
+    );
+    assert!(metadata.load_if_changed(large_revision).await?.is_none());
     let loaded_large = metadata.load().await?;
     assert_eq!(loaded_large.revision, large_revision);
     assert_eq!(

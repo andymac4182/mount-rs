@@ -1467,6 +1467,17 @@ impl MetadataStore for DynMetadataStore {
         self.0.load()
     }
 
+    fn load_if_changed<'a, 'async_trait>(
+        &'a self,
+        known_revision: u64,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<Option<LoadedMetadata>>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.load_if_changed(known_revision)
+    }
+
     fn concurrent_mode_state<'a, 'async_trait>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = CoreResult<ConcurrentModeState>> + Send + 'async_trait>>
@@ -4215,6 +4226,121 @@ mod tests {
                 Poll::Pending => std::thread::yield_now(),
             }
         }
+    }
+
+    struct ConditionalMetadata;
+
+    impl MetadataStore for ConditionalMetadata {
+        fn durable(&self) -> bool {
+            true
+        }
+
+        fn load<'a, 'async_trait>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<LoadedMetadata>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            Self: 'async_trait,
+        {
+            unreachable!("conditional loads must reach the provider override")
+        }
+
+        fn load_if_changed<'a, 'async_trait>(
+            &'a self,
+            known_revision: u64,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<Option<LoadedMetadata>>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                match known_revision {
+                    7 => Ok(None),
+                    0 => Ok(Some(LoadedMetadata {
+                        revision: 0,
+                        namespace: None,
+                    })),
+                    _ => Err(FsError::new(ErrorCode::Eio)),
+                }
+            })
+        }
+
+        fn acquire_writer<'a, 'b, 'async_trait>(
+            &'a self,
+            _owner: &'b str,
+            _ttl: Duration,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<WriterLease>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            Self: 'async_trait,
+        {
+            unreachable!()
+        }
+
+        fn renew_writer<'a, 'b, 'async_trait>(
+            &'a self,
+            _lease: &'b WriterLease,
+            _ttl: Duration,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<WriterLease>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            Self: 'async_trait,
+        {
+            unreachable!()
+        }
+
+        fn release_writer<'a, 'b, 'async_trait>(
+            &'a self,
+            _lease: &'b WriterLease,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            Self: 'async_trait,
+        {
+            unreachable!()
+        }
+
+        fn publish<'a, 'b, 'async_trait>(
+            &'a self,
+            _expected_revision: u64,
+            _lease: &'b WriterLease,
+            _namespace: Namespace,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<u64>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            Self: 'async_trait,
+        {
+            unreachable!()
+        }
+
+        fn flush<'a, 'async_trait>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            Self: 'async_trait,
+        {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn dynamic_metadata_forwards_conditional_load_and_provider_errors() {
+        let inner = Arc::new(ConditionalMetadata) as Arc<dyn MetadataStore>;
+        let metadata = DynMetadataStore(inner);
+
+        assert!(block_on(metadata.load_if_changed(7)).unwrap().is_none());
+        let loaded = block_on(metadata.load_if_changed(0)).unwrap().unwrap();
+        assert_eq!(loaded.revision, 0);
+        assert!(loaded.namespace.is_none());
+        assert_eq!(
+            block_on(metadata.load_if_changed(8)).unwrap_err().code,
+            ErrorCode::Eio
+        );
     }
 
     #[test]

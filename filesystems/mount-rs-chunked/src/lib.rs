@@ -875,7 +875,7 @@ where
     /// local operations may finish between the remote load and state lock;
     /// never replace a newer locally acknowledged revision with an older one.
     async fn refresh_concurrent_namespace(&self) -> Result<()> {
-        {
+        let known_revision = {
             let state = self.lock_state()?;
             if let Some(error) = &state.failure {
                 return Err(error.clone());
@@ -883,21 +883,28 @@ where
             if state.closed {
                 return Err(FsError::new(ErrorCode::Ebadf).with_message("filesystem is closed"));
             }
-        }
+            state.revision
+        };
         let loaded = self
             .inner
             .metadata
-            .load()
+            .load_if_changed(known_revision)
             .await
             .map_err(|error| self.fail_closed(with_context(error, "metadata-load", None)))?;
-        loaded
-            .validate()
-            .map_err(|error| self.fail_closed(with_context(error, "metadata-validate", None)))?;
-        let namespace = loaded.namespace.ok_or_else(|| {
-            self.fail_closed(FsError::backend(
-                "concurrent metadata revision has no published namespace",
-            ))
-        })?;
+        let changed = match loaded {
+            Some(loaded) => {
+                loaded.validate().map_err(|error| {
+                    self.fail_closed(with_context(error, "metadata-validate", None))
+                })?;
+                let namespace = loaded.namespace.ok_or_else(|| {
+                    self.fail_closed(FsError::backend(
+                        "concurrent metadata revision has no published namespace",
+                    ))
+                })?;
+                Some((namespace, loaded.revision))
+            }
+            None => None,
+        };
         let mut state = self.lock_state()?;
         if let Some(error) = &state.failure {
             return Err(error.clone());
@@ -905,13 +912,15 @@ where
         if state.closed {
             return Err(FsError::new(ErrorCode::Ebadf).with_message("filesystem is closed"));
         }
-        if loaded.revision > state.revision {
+        if let Some((namespace, revision)) = changed
+            && revision > state.revision
+        {
             // Remote rmdir can remove a directory inode entirely. A local
             // handle already opened on that inode must retain its metadata
             // until close, even though path lookup sees the new namespace.
             retain_open_detached(&mut state, &namespace);
             state.namespace = namespace;
-            state.revision = loaded.revision;
+            state.revision = revision;
             state.pending_atime.clear();
         }
         Ok(())
@@ -4934,6 +4943,7 @@ mod tests {
         mode: Arc<Mutex<ConcurrentModeState>>,
         on_flush: Arc<Mutex<Option<FlushHook>>>,
         on_preflight: Arc<Mutex<Option<PreflightHook>>>,
+        loads: Arc<AtomicUsize>,
     }
 
     impl RevisionRaceMetadata {
@@ -4946,6 +4956,7 @@ mod tests {
                 mode: Arc::new(Mutex::new(ConcurrentModeState::Legacy)),
                 on_flush: Arc::new(Mutex::new(None)),
                 on_preflight: Arc::new(Mutex::new(None)),
+                loads: Arc::new(AtomicUsize::new(0)),
             }
         }
 
@@ -4979,6 +4990,7 @@ mod tests {
         }
 
         async fn load(&self) -> Result<LoadedMetadata> {
+            self.loads.fetch_add(1, Ordering::SeqCst);
             Ok(self.state.lock().expect("revision state lock").clone())
         }
 
@@ -5057,6 +5069,284 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    #[derive(Clone)]
+    struct ConditionalRevisionMetadata {
+        inner: RevisionRaceMetadata,
+        conditional_loads: Arc<AtomicUsize>,
+        after_load: Arc<Mutex<Option<FlushHook>>>,
+    }
+
+    impl ConditionalRevisionMetadata {
+        fn new() -> Self {
+            Self {
+                inner: RevisionRaceMetadata::new(),
+                conditional_loads: Arc::new(AtomicUsize::new(0)),
+                after_load: Arc::new(Mutex::new(None)),
+            }
+        }
+
+        fn after_next_load(&self, callback: impl FnOnce() + Send + 'static) {
+            *self.after_load.lock().expect("conditional load hook") = Some(Box::new(callback));
+        }
+    }
+
+    #[async_trait]
+    impl MetadataStore for ConditionalRevisionMetadata {
+        fn durable(&self) -> bool {
+            false
+        }
+
+        async fn load(&self) -> Result<LoadedMetadata> {
+            self.inner.load().await
+        }
+
+        async fn load_if_changed(&self, known_revision: u64) -> Result<Option<LoadedMetadata>> {
+            self.conditional_loads.fetch_add(1, Ordering::SeqCst);
+            let loaded = {
+                let state = self.inner.state.lock().expect("revision state lock");
+                if known_revision != 0 && state.revision == known_revision {
+                    None
+                } else {
+                    self.inner.loads.fetch_add(1, Ordering::SeqCst);
+                    Some(state.clone())
+                }
+            };
+            let hook = self
+                .after_load
+                .lock()
+                .expect("conditional load hook")
+                .take();
+            if let Some(hook) = hook {
+                hook();
+            }
+            Ok(loaded)
+        }
+
+        async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
+            self.inner.concurrent_mode_state().await
+        }
+
+        async fn preflight_new_bound_mode(&self) -> Result<()> {
+            self.inner.preflight_new_bound_mode().await
+        }
+
+        async fn prepare_bound_concurrent_mode(&self, backing: ConcurrentBackingId) -> Result<()> {
+            self.inner.prepare_bound_concurrent_mode(backing).await
+        }
+
+        async fn acquire_writer(&self, owner: &str, ttl: Duration) -> Result<WriterLease> {
+            self.inner.acquire_writer(owner, ttl).await
+        }
+
+        async fn renew_writer(&self, lease: &WriterLease, ttl: Duration) -> Result<WriterLease> {
+            self.inner.renew_writer(lease, ttl).await
+        }
+
+        async fn release_writer(&self, lease: &WriterLease) -> Result<()> {
+            self.inner.release_writer(lease).await
+        }
+
+        async fn publish(
+            &self,
+            expected_revision: u64,
+            lease: &WriterLease,
+            namespace: Namespace,
+        ) -> Result<u64> {
+            self.inner
+                .publish(expected_revision, lease, namespace)
+                .await
+        }
+
+        async fn publish_bound_if_revision(
+            &self,
+            backing: ConcurrentBackingId,
+            expected_revision: u64,
+            namespace: Namespace,
+        ) -> Result<u64> {
+            self.inner
+                .publish_bound_if_revision(backing, expected_revision, namespace)
+                .await
+        }
+
+        async fn flush(&self) -> Result<()> {
+            self.inner.flush().await
+        }
+    }
+
+    fn conditional_filesystem(
+        metadata: &ConditionalRevisionMetadata,
+    ) -> ChunkedFs<ConditionalRevisionMetadata, SharedTestBlockStore> {
+        block_on(ChunkedFs::open(
+            metadata.clone(),
+            SharedTestBlockStore::new(),
+            ChunkedOptions::fixed("conditional", 4)
+                .expect("chunker")
+                .with_concurrent_writes(true),
+        ))
+        .expect("open concurrent filesystem")
+    }
+
+    #[test]
+    fn concurrent_refresh_skips_unchanged_namespace_payload() {
+        let metadata = ConditionalRevisionMetadata::new();
+        let fs = conditional_filesystem(&metadata);
+        assert_eq!(
+            metadata.inner.loads.load(Ordering::SeqCst),
+            1,
+            "open fully loads"
+        );
+        for _ in 0..3 {
+            block_on(fs.refresh_concurrent_namespace()).expect("unchanged refresh");
+        }
+        assert_eq!(metadata.conditional_loads.load(Ordering::SeqCst), 3);
+        assert_eq!(metadata.inner.loads.load(Ordering::SeqCst), 1);
+        block_on(fs.shutdown()).expect("shutdown");
+    }
+
+    #[test]
+    fn concurrent_refresh_reloads_changed_namespace() {
+        let metadata = ConditionalRevisionMetadata::new();
+        let fs = conditional_filesystem(&metadata);
+        let (mut namespace, revision) = fs.snapshot().expect("snapshot");
+        namespace.default_uid = 77;
+        let next = metadata
+            .inner
+            .apply_revision(revision, namespace)
+            .expect("remote commit");
+        block_on(fs.refresh_concurrent_namespace()).expect("changed refresh");
+        let (namespace, revision) = fs.snapshot().expect("refreshed snapshot");
+        assert_eq!(revision, next);
+        assert_eq!(namespace.default_uid, 77);
+        assert_eq!(metadata.inner.loads.load(Ordering::SeqCst), 2);
+        block_on(fs.refresh_concurrent_namespace()).expect("now unchanged");
+        assert_eq!(metadata.inner.loads.load(Ordering::SeqCst), 2);
+        block_on(fs.shutdown()).expect("shutdown");
+    }
+
+    #[test]
+    fn concurrent_refresh_validates_changed_namespace_and_retains_failure() {
+        let metadata = ConditionalRevisionMetadata::new();
+        let fs = conditional_filesystem(&metadata);
+        {
+            let mut state = metadata.inner.state.lock().expect("revision state");
+            state.revision += 1;
+            state.namespace.as_mut().expect("namespace").root = 0;
+        }
+        let error = block_on(fs.refresh_concurrent_namespace()).expect_err("invalid changed data");
+        assert_eq!(error.code, ErrorCode::Einval);
+        let calls = metadata.conditional_loads.load(Ordering::SeqCst);
+        let repeated = block_on(fs.refresh_concurrent_namespace()).expect_err("failure retained");
+        assert_eq!(repeated.code, error.code);
+        assert_eq!(metadata.conditional_loads.load(Ordering::SeqCst), calls);
+    }
+
+    #[test]
+    fn concurrent_refresh_retains_failure_after_either_conditional_response() {
+        for changed in [false, true] {
+            let metadata = ConditionalRevisionMetadata::new();
+            let fs = conditional_filesystem(&metadata);
+            if changed {
+                let (namespace, revision) = fs.snapshot().expect("snapshot");
+                metadata
+                    .inner
+                    .apply_revision(revision, namespace)
+                    .expect("remote commit");
+            }
+            let failing = fs.clone();
+            metadata.after_next_load(move || {
+                failing
+                    .fail_closed(FsError::new(ErrorCode::Eio).with_message("failure during load"));
+            });
+            let error =
+                block_on(fs.refresh_concurrent_namespace()).expect_err("failure after await");
+            assert_eq!(error.code, ErrorCode::Eio);
+            assert!(error.to_string().contains("failure during load"));
+            assert_eq!(fs.lock_state().expect("state").revision, 1);
+        }
+    }
+
+    #[test]
+    fn concurrent_refresh_checks_closed_after_either_conditional_response() {
+        for changed in [false, true] {
+            let metadata = ConditionalRevisionMetadata::new();
+            let fs = conditional_filesystem(&metadata);
+            if changed {
+                let (namespace, revision) = fs.snapshot().expect("snapshot");
+                metadata
+                    .inner
+                    .apply_revision(revision, namespace)
+                    .expect("remote commit");
+            }
+            let closing = fs.clone();
+            metadata.after_next_load(move || closing.lock_state().expect("state").closed = true);
+            let error =
+                block_on(fs.refresh_concurrent_namespace()).expect_err("closed after await");
+            assert_eq!(error.code, ErrorCode::Ebadf);
+            assert_eq!(fs.lock_state().expect("state").revision, 1);
+        }
+    }
+
+    #[test]
+    fn concurrent_refresh_does_not_regress_publication_during_conditional_load() {
+        for changed in [false, true] {
+            let metadata = ConditionalRevisionMetadata::new();
+            let fs = conditional_filesystem(&metadata);
+            if changed {
+                let (mut namespace, revision) = fs.snapshot().expect("snapshot");
+                namespace.default_uid = 11;
+                metadata
+                    .inner
+                    .apply_revision(revision, namespace)
+                    .expect("remote commit");
+            }
+            let publishing = fs.clone();
+            let remote = metadata.inner.clone();
+            metadata.after_next_load(move || {
+                let latest = remote.state.lock().expect("revision state").clone();
+                let mut namespace = latest.namespace.expect("namespace");
+                namespace.default_gid = 12;
+                block_on(publishing.publish_namespace(latest.revision, namespace, true))
+                    .expect("local publication acknowledges during load");
+            });
+            block_on(fs.refresh_concurrent_namespace()).expect("racing refresh");
+            let (namespace, revision) = fs.snapshot().expect("snapshot");
+            assert_eq!(revision, if changed { 3 } else { 2 });
+            assert_eq!(namespace.default_gid, 12);
+            assert_eq!(namespace.default_uid, if changed { 11 } else { 0 });
+            block_on(fs.shutdown()).expect("shutdown");
+        }
+    }
+
+    #[test]
+    fn metadata_conditional_load_default_fully_loads_unchanged_custom_provider() {
+        let metadata = RevisionRaceMetadata::new();
+        let fs = block_on(ChunkedFs::open(
+            metadata.clone(),
+            SharedTestBlockStore::new(),
+            ChunkedOptions::fixed("fallback", 4)
+                .expect("chunker")
+                .with_concurrent_writes(true),
+        ))
+        .expect("open");
+        let revision = fs.snapshot().expect("snapshot").1;
+        let loaded = block_on(metadata.load_if_changed(revision))
+            .expect("fallback load")
+            .expect("the conservative default never omits payload");
+        assert_eq!(loaded.revision, revision);
+        assert_eq!(metadata.loads.load(Ordering::SeqCst), 2);
+        metadata
+            .state
+            .lock()
+            .expect("revision state")
+            .namespace
+            .as_mut()
+            .expect("namespace")
+            .root = 0;
+        let error = block_on(fs.refresh_concurrent_namespace())
+            .expect_err("fallback validates same-revision data");
+        assert_eq!(error.code, ErrorCode::Einval);
     }
 
     #[test]
