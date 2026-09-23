@@ -271,6 +271,14 @@ historical version state leaves the metadata in MRC1. The command does not
 prepare a mountpoint or start a native mount; start the upgraded mounts only
 after it succeeds.
 
+SQLite metadata files created before physical dev/inode stamping can still be
+opened in their earlier single-writer mode, but automatic MRC2 enrollment of
+an unstamped historical Legacy or MRC1 file is refused. This protects against
+a database copied before enrollment. Trusted offline re-enrollment of these
+files is future work. A failed historical MRC1 migration leaves metadata at
+its old revision; the current migration ordering can leave an unused block
+authority marker after that failure.
+
 ### Bound concurrent backing
 
 Fresh concurrent split-store volumes persist `MRC2` and one stable block
@@ -282,7 +290,7 @@ acknowledged.
 
 | Backing | Persisted authority |
 | --- | --- |
-| Local SQLite | `mount_rs_metadata.backing_id` in the metadata file and `mount_rs_block_authority.backing_id` in the blocks file; concurrent SQLite requires both files on local storage outside every mountpoint. |
+| Local SQLite | `mount_rs_metadata.backing_id` and physical dev/inode stamp in the metadata file; `mount_rs_block_authority.backing_id` and physical dev/inode stamp in the blocks file. Both files must be on local storage outside every mountpoint. |
 | PGlite | `mount_rs_metadata.backing_id` and `mount_rs_block_authority.backing_id`, each keyed by the configured volume key in one reachable PGlite server. |
 | FoundationDB | `meta/write-mode` and `meta/backing-id` in the metadata keyspace; `block-authority` in the selected block keyspace. |
 | Signed object blocks, including RustFS | The immutable `<prefix>/_mount-rs-backing-id-v2` object contains `MRC2` and the 16-byte ID. It is not a content block and must remain intact. |

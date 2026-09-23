@@ -373,8 +373,7 @@ its 9P tests could bind Unix sockets.
 
 ## Bound backing protocol qualification
 
-The next coordinated protocol branch starts at fetched `origin/main`
-`fbf85562` and changes the concurrent metadata mode to `MRC2`. Metadata stores
+The coordinated protocol branch changes the concurrent metadata mode to `MRC2`. Metadata stores
 persist a 16-byte backing ID and check it in the same transaction as each
 revision CAS. Block stores persist their own stable authority and verify it
 read-only at mount open and again after the block flush, before each metadata
@@ -396,12 +395,30 @@ block damage, stale revisions, and version
 history. A revision change during the direct block scan returns `EAGAIN` while
 the volume stays `MRC1`.
 
-The SQLite block ID uses a Unix physical file stamp to reject a copied block
-database. On other platforms, including Windows, concurrent SQLite blocks
-return `ENOTSUP` because a copied file could carry the same marker while its
-contents diverge. This path needs a qualified physical-file identity check
-before it can be enabled there. The Linux local-filesystem guard remains
-unqualified for NFS-backed provider files.
+SQLite block and metadata files use separate Unix physical dev/inode stamps to
+reject a copied backing with the same persisted authority or volume ID. The
+metadata stamp is seeded only when the provider exclusively creates a new
+file; a preclaim copy of that file cannot enroll independently. Historical
+unstamped Legacy/MRC1 SQLite metadata stays readable in its prior single-writer
+mode but cannot automatically enter `MRC2`; an unstamped `MRC2` file refuses
+startup. Trusted offline re-enrollment has not been implemented. On other
+platforms, including Windows, concurrent SQLite backing returns `ENOTSUP`
+because a copied file could carry the same marker while its contents diverge.
+The Linux guard uses `fstatfs` on the selected file and allows ext-family,
+XFS, Btrfs, F2FS and tmpfs; it rejects NFS, overlayfs, CIFS, 9P, FUSE and
+unknown types before concurrent claim. tmpfs passes locality but does not
+survive host reboot. The Linux native NFS acceptance fixture places both
+provider database files on its owned NFS view and asserts `ENOTSUP` with no
+metadata revision or block marker change; its live Linux CI run is pending.
+
+The offline migration path currently prepares a block authority before it
+directly reads referenced blocks and attempts the metadata transition. A
+disposable historical unstamped SQLite MRC1 CLI fixture rejected migration
+with metadata still `MRC1`, revision zero and no backing ID, but left one
+authority row in the selected block database. That row alone does not publish
+a namespace. Read-only transition and extent preflight before authority claim
+is tracked as the immediate follow-up; until then a rejected historical
+migration can leave this unused marker.
 
 The bounded local SQLite load completed 8 × 100 independent mount lifecycles
 in both modes: DELETE took 48,047 ms and WAL took 41,993 ms. Each run
@@ -452,3 +469,26 @@ verified exact NFS mount and sparse-image cleanup. These are one-host and
 disposable-service results. Physical cross-host mounts, power-loss recovery,
 online reclamation, distributed open-handle pins and sustained production
 performance remain separate qualifications.
+
+## Rebased integrity and service checkpoint
+
+Ordinary FoundationDB block reads now verify the full SHA-256 content ID, as
+the migration read already did. A direct same-length key overwrite is rejected
+with `EIO` in the real durable three-node provider test (five live provider
+tests passed, one ignored, followed by the native shutdown test). Ordinary
+PGlite reads likewise verify their existing legacy MD5-derived content ID;
+the isolated Node-backed same-length BYTEA tamper test failed before the
+change and passed with `EIO` afterward. MD5 checks ordinary accidental
+replacement, not adversarial collision resistance. SQLite's older random
+block IDs do not provide a comparable read digest.
+
+The first PR #13-rebased full RustFS fixture passed signed authority,
+provider, SDK and VFS stages, then one native two-CLI load write returned macOS NFS code 60
+(`ETIMEDOUT`) after 34,280 ms on the shared soft mount. Its exact stalled
+backend request was not retained in that first run. A repeat with bounded
+failure-only CLI and operation diagnostics passed 40/40 native acknowledgements
+in 12,672 ms, and the complete signed provider, SDK, N-API, SQLite VFS,
+service restart and reopen fixture ended with `RUSTFS_INTEGRATION_PASS`.
+This is an intermittent soft-NFS timeout observation, not a measured
+production reliability rate. The final branch with the newer SQLite stamp
+and ordinary block-read checks still needs its own full fixture run.
