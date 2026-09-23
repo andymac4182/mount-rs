@@ -16,6 +16,55 @@ use crate::types::{S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG,
 
 pub type InodeId = u64;
 
+/// Stable identity for the physical immutable-block authority shared by
+/// concurrent clients of a split store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ConcurrentBackingId([u8; 16]);
+
+impl ConcurrentBackingId {
+    pub fn from_bytes(bytes: [u8; 16]) -> Result<Self> {
+        if bytes == [0; 16] {
+            return Err(FsError::new(ErrorCode::Einval));
+        }
+        Ok(Self(bytes))
+    }
+
+    pub fn as_bytes(self) -> [u8; 16] {
+        self.0
+    }
+
+    pub fn to_hex(self) -> String {
+        let mut text = String::with_capacity(32);
+        for byte in self.0 {
+            std::fmt::Write::write_fmt(&mut text, format_args!("{byte:02x}"))
+                .expect("writing into a String cannot fail");
+        }
+        text
+    }
+
+    pub fn from_hex(text: &str) -> Result<Self> {
+        fn nibble(byte: u8) -> Option<u8> {
+            match byte {
+                b'0'..=b'9' => Some(byte - b'0'),
+                b'a'..=b'f' => Some(byte - b'a' + 10),
+                _ => None,
+            }
+        }
+
+        let raw = text.as_bytes();
+        if raw.len() != 32 {
+            return Err(FsError::new(ErrorCode::Einval));
+        }
+        let mut bytes = [0; 16];
+        for index in 0..16 {
+            let hi = nibble(raw[2 * index]).ok_or_else(|| FsError::new(ErrorCode::Einval))?;
+            let lo = nibble(raw[2 * index + 1]).ok_or_else(|| FsError::new(ErrorCode::Einval))?;
+            bytes[index] = (hi << 4) | lo;
+        }
+        Self::from_bytes(bytes)
+    }
+}
+
 /// Opaque identity in the selected block store, never a virtual filesystem path.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BlockId(pub String);
@@ -551,6 +600,14 @@ pub struct LoadedMetadata {
     pub namespace: Option<Namespace>,
 }
 
+/// Persisted concurrent mode and, for MRC2, its physical backing authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConcurrentModeState {
+    Legacy,
+    Mrc1,
+    Mrc2(ConcurrentBackingId),
+}
+
 /// Result of an explicit block-store reconciliation pass.
 ///
 /// Reconciliation is deliberately separate from filesystem shutdown. A
@@ -590,6 +647,14 @@ pub trait MetadataStore: Send + Sync {
             .with_syscall("prepare concurrent metadata")
             .with_message("metadata provider does not support concurrent writers"))
     }
+    /// Inspect the persisted writer mode and bound block authority.
+    async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
+        Err(FsError::new(ErrorCode::Enotsup).with_syscall("inspect concurrent metadata mode"))
+    }
+    /// Enter MRC2 only when metadata can bind writes to the supplied backing.
+    async fn prepare_bound_concurrent_mode(&self, _backing: ConcurrentBackingId) -> Result<()> {
+        Err(FsError::new(ErrorCode::Enotsup).with_syscall("prepare bound concurrent metadata"))
+    }
     async fn acquire_writer(&self, owner: &str, ttl: Duration) -> Result<WriterLease>;
     async fn renew_writer(&self, lease: &WriterLease, ttl: Duration) -> Result<WriterLease>;
     async fn release_writer(&self, lease: &WriterLease) -> Result<()>;
@@ -615,6 +680,27 @@ pub trait MetadataStore: Send + Sync {
             .with_syscall("publish concurrent metadata")
             .with_message("metadata provider does not support concurrent writers"))
     }
+    /// Publish metadata with a compare-and-swap bound to the supplied backing.
+    /// A backing-authority mismatch returns `ESTALE`. `EAGAIN` is reserved for
+    /// a known revision conflict where no commit occurred; ambiguous backend
+    /// errors must remain errors and must not be classified as retryable conflicts.
+    async fn publish_bound_if_revision(
+        &self,
+        _backing: ConcurrentBackingId,
+        _expected_revision: u64,
+        _namespace: Namespace,
+    ) -> Result<u64> {
+        Err(FsError::new(ErrorCode::Enotsup).with_syscall("publish bound concurrent metadata"))
+    }
+    /// Migrate an MRC1 volume to MRC2 only after its referenced blocks are
+    /// verified against the supplied authority and its revision is unchanged.
+    async fn migrate_mrc1_to_bound_mode(
+        &self,
+        _backing: ConcurrentBackingId,
+        _expected_revision: u64,
+    ) -> Result<()> {
+        Err(FsError::new(ErrorCode::Enotsup).with_syscall("migrate concurrent metadata mode"))
+    }
     /// Return true only when a successful `publish` already completes the
     /// provider's same durability/acknowledgement barrier as `flush` for the
     /// published metadata. The default is conservative for custom providers.
@@ -639,6 +725,18 @@ pub trait BlockStore: Send + Sync {
         Err(FsError::new(ErrorCode::Enotsup)
             .with_syscall("prepare concurrent blocks")
             .with_message("block provider has not declared a shared concurrent backing"))
+    }
+    /// Establish and return the stable identity of this shared block authority.
+    async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
+        Err(FsError::new(ErrorCode::Enotsup).with_syscall("prepare concurrent backing"))
+    }
+    /// Verify that the block authority still has the expected stable identity.
+    async fn verify_concurrent_backing(&self, _expected: ConcurrentBackingId) -> Result<()> {
+        Err(FsError::new(ErrorCode::Enotsup).with_syscall("verify concurrent backing"))
+    }
+    /// Read migration data without trusting a provider's potentially stale cache.
+    async fn get_for_migration(&self, _id: &BlockId) -> Result<Vec<u8>> {
+        Err(FsError::new(ErrorCode::Enotsup).with_syscall("read block for migration"))
     }
     /// Store immutable bytes; an existing identity may only name identical
     /// bytes. No caller can overwrite data referenced by an older layout.
@@ -677,6 +775,30 @@ mod tests {
             algorithm: "fixed-size".to_owned(),
             version: 1,
             parameters: BTreeMap::from([("chunk_size".to_owned(), size)]),
+        }
+    }
+
+    #[test]
+    fn concurrent_backing_id_requires_canonical_nonzero_hex() {
+        let bytes = [
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xff, 0x10, 0x32, 0x54, 0x76, 0x98,
+            0xba, 0xdc,
+        ];
+        let id = ConcurrentBackingId::from_bytes(bytes).unwrap();
+        assert_eq!(id.to_hex(), "0123456789abcdefff1032547698badc");
+        assert_eq!(ConcurrentBackingId::from_hex(&id.to_hex()).unwrap(), id);
+        assert_eq!(id.as_bytes(), bytes);
+        assert!(ConcurrentBackingId::from_bytes([0; 16]).is_err());
+        for bad in [
+            "00000000000000000000000000000000",
+            "AB",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "gggggggggggggggggggggggggggggggg",
+        ] {
+            assert_eq!(
+                ConcurrentBackingId::from_hex(bad).unwrap_err().code,
+                ErrorCode::Einval
+            );
         }
     }
 
