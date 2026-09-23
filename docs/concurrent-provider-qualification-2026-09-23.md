@@ -424,6 +424,20 @@ the mixed local-metadata/NFS-block path. The first sandboxed native attempt
 could not load `mount_nfs` and returned status 5; the same owned cases passed
 with host mount permissions, with no test mount left behind.
 
+A later full SQLite application matrix through two separate CLI mounts
+reproduced the shared-view NFS limit three times. DELETE, TRUNCATE, and
+PERSIST recovered neither the killed uncommitted writer's lock nor a clean
+reopen (`database is locked`); one DELETE load worker failed at commit with
+a disk I/O error, and WAL selected DELETE. This is the CLI's `soft,nolocks`
+shared-view profile, not the separate `locallocks,hard` single-view SQLite
+profile that passed its rollback modes and 100-row load. The mount-rs two-CLI
+file lifecycle load, cross-view visibility, fresh reopen, and both local
+backing databases' integrity checks passed around the failing application
+packet. Three macOS `.nfs.*` deferred unlink names stayed visible for ten
+seconds and were removed with the entire disposable backing after unmount.
+The application packet is diagnostic and does not qualify SQLite files inside
+two independent NFS mountpoints.
+
 Real PGlite socket-server authority and MRC1 migration tests passed 2/2.
 Its disposable macOS two-CLI NFS case passed 160 acknowledged calls in a
 3,721 ms load, cross-view writes, and fresh reopen against one PGlite engine.
