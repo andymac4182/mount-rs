@@ -358,7 +358,7 @@ async function testEvidencePacket() {
       "OZONE_CHUNKED_BOUNDED_READDIR_PASS provider_owner=ozone-sqlite-seed entries=2",
       "OZONE_CHUNKED_BOUNDED_READDIR_PASS provider_owner=ozone-pglite-seed entries=2",
       "test actual_binary_runs_live_ozone_split_provider_self_test ... ok",
-      "SUMMARY node-sdk pass=7 skip=1 fail=0",
+      "SUMMARY node-sdk pass=8 skip=1 fail=0",
       "OZONE_NODE_CLI_PASS prefix=mount-rs-ozone/cli",
       "OZONE_CLI_REMOTE_HTTP_PASS mode=rust prefix=mount-rs-ozone/cli-http",
       "OZONE_COMPOSITION_PGLITE_READY endpoint=127.0.0.1:1",
@@ -403,6 +403,16 @@ async function testEvidencePacket() {
     artifacts: ["ozone-compositions", "ozone-tidb", "ozone-foundationdb"],
     policyMarkers: 11,
   })
+  assert.throws(
+    () => validateEvidencePacket({
+      ...packet,
+      compositionsLog: packet.compositionsLog.replace(
+        "SUMMARY node-sdk pass=8 skip=1 fail=0",
+        "SUMMARY node-sdk pass=7 skip=1 fail=0",
+      ),
+    }),
+    /ozone-compositions-log-missing-marker=SUMMARY node-sdk pass=8 skip=1 fail=0/,
+  )
   assert.throws(
     () => validateEvidencePacket({ ...packet, tidbLog: packet.tidbLog.replace("TIDB_ACCEPTANCE ", "") }),
     /tidb-log-missing-marker=TIDB_ACCEPTANCE/,

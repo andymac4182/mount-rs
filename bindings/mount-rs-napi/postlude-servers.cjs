@@ -1,5 +1,7 @@
 "use strict"
 
+const { structuredError } = require("./postlude.cjs")
+
 // The native methods deliberately keep their small Promise<void> N-API ABI.
 // This shared facade supplies the upstream server contract at the JavaScript
 // boundary: one cached listen promise, one in-flight close promise that can be
@@ -158,7 +160,7 @@ function installStructuralFactories(binding) {
         return server
       } catch (error) {
         void release().catch(() => {})
-        throw error
+        throw structuredError(error)
       }
     }
   }
@@ -174,7 +176,7 @@ function installStructuralFactories(binding) {
       return mounted
     } catch (error) {
       await release()
-      throw error
+      throw structuredError(error)
     }
   }
   const unmountAll = binding.unmountAll

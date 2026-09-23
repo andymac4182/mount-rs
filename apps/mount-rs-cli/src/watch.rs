@@ -10,7 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use mount_rs_core::{
-    Capabilities, DirEntry, FileHandle, FsDriver, MkdirOptions, OpenFlags, Result, Stats, StatsFs,
+    Capabilities, DirEntry, FileHandle, FsDriver, GuardedMutation, GuardedMutationResult,
+    GuardedRead, GuardedReadResult, MkdirOptions, OpenFlags, Result, Stats, StatsFs,
 };
 
 use crate::color::{CYAN, Color, DIM, GREEN, RED, YELLOW};
@@ -225,6 +226,76 @@ impl FileHandle for WatchedHandle {
 impl FsDriver for WatchedDriver {
     fn capabilities(&self) -> Capabilities {
         self.inner.capabilities()
+    }
+
+    fn supports_guarded_mutations(&self) -> bool {
+        self.inner.supports_guarded_mutations()
+    }
+
+    fn supports_guarded_reads(&self) -> bool {
+        self.inner.supports_guarded_reads()
+    }
+
+    fn stable_inode_ids(&self) -> bool {
+        self.inner.stable_inode_ids()
+    }
+
+    async fn guarded_read(&self, request: GuardedRead) -> Result<GuardedReadResult> {
+        let (operation, subject) = match &request {
+            GuardedRead::Stat { target } => ("stat", target.path.clone()),
+            GuardedRead::Lookup { parent, name } => (
+                "lookup",
+                format!("{}/{}", parent.path.trim_end_matches('/'), name),
+            ),
+            GuardedRead::Readdir { directory, .. } => ("readdir", directory.path.clone()),
+            GuardedRead::Readlink { target } => ("readlink", target.path.clone()),
+        };
+        self.watched(
+            operation,
+            subject,
+            String::new(),
+            self.inner.guarded_read(request),
+        )
+        .await
+    }
+
+    async fn guarded_mutation(&self, request: GuardedMutation) -> Result<GuardedMutationResult> {
+        let child_path =
+            |parent: &str, name: &str| format!("{}/{}", parent.trim_end_matches('/'), name);
+        let (operation, subject) = match &request {
+            GuardedMutation::Setattr { target, .. } => ("setattr", target.path.clone()),
+            GuardedMutation::Open { parent, name, .. } => ("open", child_path(&parent.path, name)),
+            GuardedMutation::Mkdir { parent, name, .. } => {
+                ("mkdir", child_path(&parent.path, name))
+            }
+            GuardedMutation::Symlink { parent, name, .. } => {
+                ("symlink", child_path(&parent.path, name))
+            }
+            GuardedMutation::Mknod { parent, name, .. } => {
+                ("mknod", child_path(&parent.path, name))
+            }
+            GuardedMutation::Unlink { parent, name, .. } => {
+                ("unlink", child_path(&parent.path, name))
+            }
+            GuardedMutation::Rmdir { parent, name, .. } => {
+                ("rmdir", child_path(&parent.path, name))
+            }
+            GuardedMutation::Rename {
+                from_parent,
+                from_name,
+                ..
+            } => ("rename", child_path(&from_parent.path, from_name)),
+            GuardedMutation::Link {
+                to_parent, to_name, ..
+            } => ("link", child_path(&to_parent.path, to_name)),
+        };
+        self.watched(
+            operation,
+            subject,
+            String::new(),
+            self.inner.guarded_mutation(request),
+        )
+        .await
     }
 
     async fn syncfs(&self) -> Result<()> {

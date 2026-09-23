@@ -13,7 +13,10 @@ import {
   Nfs4Session,
   NfsSession,
   S3Session,
+  createDriver,
   createNfsServer,
+  createNodeFsDriver,
+  mount,
   createP9Server,
   createS3Server,
   createWebdavServer,
@@ -23,12 +26,16 @@ import * as nfs from "../nfs.cjs";
 import p9 from "../p9.cjs";
 
 let memoryFilesystem = () => Filesystem.memory();
+let oracleMemoryDriver;
+if (process.env.MOUNTX_SOURCE) {
+  const { createMemoryDriver } = await import(pathToFileURL(`${process.env.MOUNTX_SOURCE}/src/drivers/memory.ts`).href);
+  oracleMemoryDriver = createMemoryDriver;
+}
 if (process.env.MOUNT_RS_STRUCTURAL_SERVERS === "1") {
   assert.ok(process.env.MOUNTX_SOURCE, "structural server tests require the oracle");
-  const { createMemoryDriver } = await import(pathToFileURL(`${process.env.MOUNTX_SOURCE}/src/drivers/memory.ts`).href);
   const { createLoopback } = await import(pathToFileURL(`${process.env.MOUNTX_SOURCE}/src/harness.ts`).href);
   memoryFilesystem = () => {
-    const driver = createMemoryDriver();
+    const driver = oracleMemoryDriver();
     const loopback = createLoopback(driver);
     return { ...driver, writeFile: loopback.writeFile.bind(loopback), readFile: loopback.readFile.bind(loopback) };
   };
@@ -279,6 +286,61 @@ function nfsV4NullCall(xid) {
   call.writeUInt32BE(100_003, 12);
   call.writeUInt32BE(4, 16);
   return call;
+}
+
+function nfsV3Call(xid, program, procedure, writeArgs) {
+  return nfs.encodeCall({
+    xid,
+    program,
+    version: 3,
+    procedure,
+    cred: nfs.AUTH_NULL,
+    verf: nfs.AUTH_NULL,
+    args: nfs.encodeXdr(writeArgs),
+  });
+}
+
+async function nfsV3Results(session, call, label) {
+  const response = await session.handleCall(call);
+  assert.ok(response, `${label} reply`);
+  const decoded = nfs.decodeReply(response);
+  assert.equal(decoded.reply.acceptStat, nfs.RPC_SUCCESS, `${label} RPC status`);
+  return decoded.results;
+}
+
+async function nfsMountedRoot(session, xid) {
+  const results = await nfsV3Results(
+    session,
+    nfsV3Call(xid, 100_005, 1, (writer) => writer.string("/")),
+    "MOUNT root",
+  );
+  assert.equal(results.u32(), 0, "MOUNT root status");
+  const root = Buffer.from(results.varOpaque());
+  results.array((reader) => reader.u32());
+  results.end("MOUNT root reply");
+  return root;
+}
+
+async function nfsLookupFile(session, xid, root, name) {
+  const results = await nfsV3Results(
+    session,
+    nfsV3Call(xid, 100_003, 3, (writer) => {
+      writer.varOpaque(root);
+      writer.string(name);
+    }),
+    `LOOKUP ${name}`,
+  );
+  assert.equal(results.u32(), 0, `LOOKUP ${name} status`);
+  return Buffer.from(results.varOpaque());
+}
+
+async function nfsGetattrStatus(session, xid, handle) {
+  const results = await nfsV3Results(
+    session,
+    nfsV3Call(xid, 100_003, 1, (writer) => writer.varOpaque(handle)),
+    "GETATTR retained file",
+  );
+  return results.u32();
 }
 
 function nfsV4Compound(tag, operations) {
@@ -744,6 +806,223 @@ async function exerciseNfsSessionDestroy() {
     assert.equal(server.session.v4.destroyed, true);
   } finally {
     await server.close();
+  }
+}
+
+async function exerciseNfsV4DestroyKeepsV3FileHandle() {
+  const source = memoryFilesystem();
+  const seeded = await source.open("/retained-v4.txt", "w");
+  try {
+    const bytes = Buffer.from("retained v3 data");
+    await seeded.write(bytes, 0, bytes.length, 0);
+  } finally {
+    await seeded.close();
+  }
+  const filesystem = source instanceof Filesystem ? source : createDriver(source);
+  const server = createNfsServer(filesystem);
+  try {
+    const root = await nfsMountedRoot(server.session.v3, 70);
+    const file = await nfsLookupFile(server.session.v3, 71, root, "retained-v4.txt");
+    assert.equal(await nfsGetattrStatus(server.session.v3, 72, file), 0);
+    assert.ok(server.session.v3.handles.length > 1, "v3 retains the file handle");
+
+    await server.session.v4.destroy();
+    assert.equal(server.session.v4.destroyed, true);
+    assert.equal(server.session.v3.destroyed, false);
+    for (const [xid, call] of [
+      [74, nfsV4NullCall(74)],
+      [75, nfsV4Call(75, "post-destroy", [])],
+    ]) {
+      const refused = await server.session.v4.handleCall(call);
+      assert.ok(refused, "decoded v4 call receives a post-destroy RPC reply");
+      const { reply } = nfs.decodeReply(refused);
+      assert.equal(reply.xid, xid, "post-destroy reply preserves the call XID");
+      assert.equal(reply.acceptStat, nfs.RPC_SYSTEM_ERR);
+    }
+    assert.equal(
+      await nfsGetattrStatus(server.session.v3, 73, file),
+      0,
+      "v4 destroy must not retire the live v3 file handle",
+    );
+    await server.session.v3.destroy();
+    assert.equal(server.session.v3.destroyed, true);
+  } finally {
+    try {
+      await server.close();
+    } finally {
+      await filesystem.shutdown();
+    }
+  }
+}
+
+async function nfsCloseRetryFixture(path) {
+  assert.ok(oracleMemoryDriver, "close retry requires the pinned memory oracle");
+  const backing = oracleMemoryDriver();
+  const seeded = await backing.open(path, "w");
+  try {
+    const bytes = Buffer.from("retained close retry");
+    await seeded.write(bytes, 0, bytes.length, 0);
+  } finally {
+    await seeded.close();
+  }
+  let closeAttempts = 0;
+  const driver = {
+    ...backing,
+    async open(openPath, flags, mode) {
+      const handle = await backing.open(openPath, flags, mode);
+      if (openPath !== path) return handle;
+      return {
+        ...handle,
+        async close() {
+          closeAttempts++;
+          if (closeAttempts === 1) {
+            throw Object.assign(new Error("temporary retained close failure"), {
+              code: "EIO",
+              syscall: "close",
+            });
+          }
+          return handle.close();
+        },
+      };
+    },
+  };
+  const filesystem = createDriver(driver);
+  const server = createNfsServer(filesystem);
+  try {
+    const root = await nfsMountedRoot(server.session.v3, 80);
+    const file = await nfsLookupFile(
+      server.session.v3,
+      81,
+      root,
+      path.slice(1),
+    );
+    assert.ok(server.session.v3.handles.length > 1, "LOOKUP must retain a file handle");
+    return { server, filesystem, file, closeAttempts: () => closeAttempts };
+  } catch (error) {
+    try {
+      await server.close();
+    } finally {
+      await filesystem.shutdown();
+    }
+    throw error;
+  }
+}
+
+async function cleanupNfsCloseRetry({ server, filesystem }) {
+  try {
+    await server.close();
+  } finally {
+    await filesystem.shutdown();
+  }
+}
+
+async function exerciseNfsV3DestroyRetriesFailedClose() {
+  const fixture = await nfsCloseRetryFixture("/retry-v3-destroy.txt");
+  const { server, closeAttempts } = fixture;
+  try {
+    await assert.rejects(
+      () => server.session.v3.destroy(),
+      (error) => /retained file handles|retry destroy/i.test(error.message),
+    );
+    assert.equal(closeAttempts(), 1, "first destroy tried one backend close");
+    assert.ok(server.session.v3.handles.length > 1, "failed close preserves file pin");
+    await server.session.v3.destroy();
+    assert.equal(closeAttempts(), 2, "retry closed the same backend handle");
+    assert.equal(server.session.v3.handles.length, 1, "retry released file pin");
+  } finally {
+    await cleanupNfsCloseRetry(fixture);
+  }
+}
+
+async function exerciseNfsServerCloseRetriesFailedClose() {
+  const fixture = await nfsCloseRetryFixture("/retry-server-close.txt");
+  const { server, closeAttempts } = fixture;
+  try {
+    await server.listen();
+    await assert.rejects(
+      () => server.close(),
+      (error) => /retained file handles|retry server\.close/i.test(error.message),
+    );
+    assert.equal(closeAttempts(), 1, "first server close tried one backend close");
+    assert.ok(server.session.v3.handles.length > 1, "failed close preserves file pin");
+    assert.equal(server.session.v4.destroyed, false, "v4 still shares the pinned table");
+    await server.close();
+    assert.equal(closeAttempts(), 2, "server close retry closed backend handle");
+    assert.equal(server.session.v3.handles.length, 1, "retry released file pin");
+    assert.equal(server.session.v4.destroyed, true);
+  } finally {
+    await cleanupNfsCloseRetry(fixture);
+  }
+}
+
+async function exerciseNfsSharedView() {
+  const ordinary = createNfsServer(memoryFilesystem());
+  const guardedFilesystem = Filesystem.memory();
+  const shared = createNfsServer(guardedFilesystem, { sharedView: true });
+  const unguarded = createNodeFsDriver(tmpdir());
+  try {
+    assert.equal(ordinary.session.options.sharedView, false);
+    assert.equal(shared.session.options.sharedView, true);
+    assert.equal(shared.session.options.useDriverIno, true);
+    assert.equal(shared.session.v3.options.sharedView, true);
+    assert.equal(shared.session.v4.options.sharedView, true);
+    assert.throws(
+      () => createNfsServer(memoryFilesystem(), {
+        sharedView: true,
+        useDriverIno: false,
+      }),
+      (error) => error?.code === "EINVAL",
+    );
+    const mountCall = nfsNullCall(47);
+    mountCall.writeUInt32BE(1, 20);
+    const mountedRoot = await shared.session.handleCall(Buffer.concat([
+      mountCall,
+      Buffer.from([0, 0, 0, 1, 47, 0, 0, 0]),
+    ]));
+    assert.equal(mountedRoot.readUInt32BE(24), 0, "shared MOUNT root status");
+    const handleLength = mountedRoot.readUInt32BE(28);
+    const rootHandle = mountedRoot.subarray(28, 32 + ((handleLength + 3) & ~3));
+    const getattr = nfsNullCall(48);
+    getattr.writeUInt32BE(100_003, 12);
+    getattr.writeUInt32BE(1, 20);
+    const rootAttrs = await shared.session.handleCall(Buffer.concat([getattr, rootHandle]));
+    assert.equal(rootAttrs.readUInt32BE(24), 0, "guarded GETATTR root status");
+    assert.equal(rootAttrs.readUInt32BE(28), 2, "guarded root is a directory");
+    const refusedV4 = await shared.session.handleCall(nfsV4NullCall(46));
+    assert.equal(refusedV4.readUInt32BE(20), nfs.RPC_PROG_MISMATCH);
+    assert.equal(refusedV4.readUInt32BE(24), 3);
+    assert.equal(refusedV4.readUInt32BE(28), 3);
+    assert.throws(
+      () => createNfsServer(unguarded, { sharedView: true }),
+      (error) => error?.code === "ENOTSUP",
+    );
+    await assert.rejects(
+      mount(unguarded, join(tmpdir(), "unused-nfs-shared-view"), {
+        transport: "nfs",
+        nfsSharedView: true,
+      }),
+      (error) => error?.code === "ENOTSUP",
+    );
+    await assert.rejects(
+      mount(unguarded, join(tmpdir(), "unused-fuse-shared-view"), {
+        transport: "fuse",
+        nfsSharedView: true,
+      }),
+      (error) => error?.code === "EINVAL",
+    );
+    await assert.rejects(
+      mount(unguarded, join(tmpdir(), "unused-local-lock-shared-view"), {
+        transport: "nfs",
+        nfsSharedView: true,
+        nfsSqliteSingleHost: true,
+      }),
+      (error) => error?.code === "EINVAL",
+    );
+  } finally {
+    await shared.close();
+    await ordinary.close();
+    await guardedFilesystem.shutdown();
+    await unguarded.shutdown();
   }
 }
 
@@ -1512,7 +1791,7 @@ async function exerciseP9RemoteAdmission() {
   try {
     await within(server.listen(), "9P remote admission listen");
     socket = net.createConnection({
-      host: external.address,
+      host: process.platform === "darwin" ? "127.0.0.1" : external.address,
       localAddress: external.address,
       port: server.port,
     });
@@ -1555,7 +1834,7 @@ async function exerciseP9RemoteAdmissionOptIn() {
   try {
     await within(server.listen(), "9P remote admission opt-in listen");
     connection = await connectP9Session(server, 8_192, {
-      host: external.address,
+      host: process.platform === "darwin" ? "127.0.0.1" : external.address,
       localAddress: external.address,
     });
     assert.equal(server.connections, 1);
@@ -2780,9 +3059,25 @@ const requestedServerPhase = process.env.MOUNT_RS_SERVER_PHASE
 
 await within(
   (async () => {
+    if (requestedServerPhase === "nfs-v4-pin") {
+      await runPhase("NFS v4 destroy keeps v3 file pin", exerciseNfsV4DestroyKeepsV3FileHandle);
+      return;
+    }
+    if (requestedServerPhase === "nfs-close-retry") {
+      assert.ok(oracleMemoryDriver, "NFS close retry phase requires the pinned memory oracle");
+      await runPhase("NFS v3 destroy close retry", exerciseNfsV3DestroyRetriesFailedClose);
+      await runPhase("NFS server close retry", exerciseNfsServerCloseRetriesFailedClose);
+      return;
+    }
     if (requestedServerPhase === "nfs") {
       await runPhase("NFS exercise", exerciseNfs);
       await runPhase("NFS session destroy", exerciseNfsSessionDestroy);
+      await runPhase("NFS v4 destroy keeps v3 file pin", exerciseNfsV4DestroyKeepsV3FileHandle);
+      if (oracleMemoryDriver) {
+        await runPhase("NFS v3 destroy close retry", exerciseNfsV3DestroyRetriesFailedClose);
+        await runPhase("NFS server close retry", exerciseNfsServerCloseRetriesFailedClose);
+      }
+      await runPhase("NFS shared view", exerciseNfsSharedView);
       return;
     }
     if (requestedServerPhase === "p9") {
@@ -2815,6 +3110,12 @@ await within(
     }
     await runPhase("NFS exercise", exerciseNfs);
     await runPhase("NFS session destroy", exerciseNfsSessionDestroy);
+    await runPhase("NFS v4 destroy keeps v3 file pin", exerciseNfsV4DestroyKeepsV3FileHandle);
+    if (oracleMemoryDriver) {
+      await runPhase("NFS v3 destroy close retry", exerciseNfsV3DestroyRetriesFailedClose);
+      await runPhase("NFS server close retry", exerciseNfsServerCloseRetriesFailedClose);
+    }
+    await runPhase("NFS shared view", exerciseNfsSharedView);
     await runPhase("9P exercise", exerciseP9);
     await runPhase("9P TCP concurrency", exerciseP9TcpConcurrency);
     await runPhase("9P shared lock table", exerciseP9LockTableNetwork);

@@ -377,6 +377,7 @@ fn open_foundationdb_storage(
             )?;
             options.with_production_lease_oracle(oracle)
         }
+        FoundationDbLeaseAuthority::RevisionCas => options.without_lease_oracle(),
     };
     FoundationDbStorage::connect(cluster_file, options)
 }

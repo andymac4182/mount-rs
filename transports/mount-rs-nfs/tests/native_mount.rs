@@ -12,14 +12,20 @@
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::Read;
+#[cfg(target_os = "macos")]
+use std::io::{BufRead, BufReader};
 #[cfg(target_os = "linux")]
 use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
+#[cfg(target_os = "macos")]
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mount_rs_memfs::{MemoryFs, MemoryOptions};
 use mount_rs_nfs::{NativeNfsMount, NfsMountOptions, NfsVersion, mount_nfs, nfs_client_probe};
+#[cfg(target_os = "macos")]
+use mount_rs_nfs::{NfsPlatform, mount_entry_at};
 
 const MOUNT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 // The expanded Linux v4.1 case deliberately exercises many kernel RPCs, but
@@ -60,6 +66,17 @@ struct NativeChecks {
 struct NativeMountGuard {
     mount: Option<NativeNfsMount>,
     mountpoint: PathBuf,
+}
+
+#[cfg(target_os = "macos")]
+struct NativeCwdHolder(Child);
+
+#[cfg(target_os = "macos")]
+impl Drop for NativeCwdHolder {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 impl NativeMountGuard {
@@ -204,6 +221,10 @@ fn exercise_namespace(mountpoint: &std::path::Path) -> std::io::Result<NativeChe
 }
 
 fn create_empty_mountpoint() -> std::io::Result<PathBuf> {
+    // macOS reports /private/var/folders in mount(8), while std::env::temp_dir
+    // commonly returns its /var/folders symlink. Use the real path for exact
+    // mount-table assertions and native helper calls.
+    let temp_root = fs::canonicalize(std::env::temp_dir())?;
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock")
@@ -212,7 +233,7 @@ fn create_empty_mountpoint() -> std::io::Result<PathBuf> {
         // Two native tests run in parallel in CI. The clock alone can return
         // the same nanosecond in both threads, so claim each path atomically.
         let sequence = NEXT_MOUNTPOINT_ID.fetch_add(1, Ordering::Relaxed);
-        let mountpoint = std::env::temp_dir().join(format!(
+        let mountpoint = temp_root.join(format!(
             "mount-rs-nfs-native-{}-{timestamp}-{sequence}",
             std::process::id()
         ));
@@ -457,6 +478,142 @@ fn parallel_native_cases_claim_distinct_empty_mountpoints() {
 async fn native_loopback_mount_round_trip() {
     let checks = run_native_case(NfsVersion::V3, "MOUNT_RS_NFS_NATIVE_TEST").await;
     assert_namespace_checks(&checks);
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires an opted-in macOS NFS client and native mount privileges"]
+async fn native_busy_cwd_force_unmounts_exact_path() {
+    assert_eq!(
+        std::env::var("MOUNT_RS_NFS_NATIVE_BUSY_TEST")
+            .ok()
+            .as_deref(),
+        Some("1"),
+        "set MOUNT_RS_NFS_NATIVE_BUSY_TEST=1 to run this real native NFS mount harness"
+    );
+    let probe = nfs_client_probe();
+    assert!(probe.usable, "native NFS prerequisites: {:?}", probe.reason);
+
+    let mountpoint = create_empty_mountpoint().expect("create busy-test mountpoint");
+    let driver = MemoryFs::new(MemoryOptions {
+        root_mode: 0o777,
+        ..MemoryOptions::default()
+    });
+    let mount = tokio::time::timeout(
+        MOUNT_TIMEOUT,
+        mount_nfs(driver, &mountpoint, NfsMountOptions::default()),
+    )
+    .await
+    .expect("busy-test mount deadline")
+    .expect("mount busy-test NFS view");
+    let mut guard = NativeMountGuard::new(mount.clone(), mountpoint.clone());
+
+    let mut holder = None;
+    let outcome: Result<(), String> = async {
+        let child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("cd \"$1\" || exit 1; printf 'ready\\n'; exec sleep 60")
+            .arg("mount-rs-nfs-cwd-holder")
+            .arg(&mountpoint)
+            .stdout(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("spawn cwd holder: {error}"))?;
+        holder = Some(NativeCwdHolder(child));
+        let stdout = holder
+            .as_mut()
+            .and_then(|holder| holder.0.stdout.take())
+            .ok_or_else(|| "cwd holder readiness pipe missing".to_owned())?;
+        let ready = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            tokio::task::spawn_blocking(move || {
+                let mut line = String::new();
+                BufReader::new(stdout).read_line(&mut line).map(|_| line)
+            }),
+        )
+        .await
+        .map_err(|_| "cwd holder readiness timed out".to_owned())?
+        .map_err(|error| format!("cwd holder readiness task: {error}"))?
+        .map_err(|error| format!("read cwd holder readiness: {error}"))?;
+        if ready != "ready\n" {
+            return Err(format!("cwd holder did not enter the mount: {ready:?}"));
+        }
+
+        // A child cwd alone does not pin a macOS NFS mount consistently.
+        // Keep both a directory descriptor and an open file in this process
+        // while the plain helper and the library attempt teardown.
+        let _held_directory = fs::File::open(&mountpoint)
+            .map_err(|error| format!("open mounted directory: {error}"))?;
+        let held_path = mountpoint.join("busy-holder.txt");
+        fs::write(&held_path, b"busy native NFS mount\n")
+            .map_err(|error| format!("create held file: {error}"))?;
+        let _held_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&held_path)
+            .map_err(|error| format!("open held file: {error}"))?;
+        let listed = tokio::time::timeout(
+            CLEANUP_TIMEOUT,
+            mount_entry_at(&mountpoint, NfsPlatform::Macos),
+        )
+        .await
+        .map_err(|_| "initial mount-table read timed out".to_owned())?
+        .map_err(|error| format!("initial mount-table read: {error}"))?;
+        if listed.is_none() {
+            return Err("busy-test NFS mount was not listed before umount".to_owned());
+        }
+
+        let plain = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            tokio::process::Command::new("/sbin/umount")
+                .arg(&mountpoint)
+                .env("LC_ALL", "C")
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .map_err(|_| "plain macOS umount timed out".to_owned())?
+        .map_err(|error| format!("plain macOS umount: {error}"))?;
+        let stderr = String::from_utf8_lossy(&plain.stderr);
+        if plain.status.success() || !stderr.to_ascii_lowercase().contains("resource busy") {
+            return Err(format!("plain umount did not reproduce Resource busy: {stderr}"));
+        }
+        let before = tokio::time::timeout(
+            CLEANUP_TIMEOUT,
+            mount_entry_at(&mountpoint, NfsPlatform::Macos),
+        )
+        .await
+        .map_err(|_| "precondition mount-table read timed out".to_owned())?
+        .map_err(|error| format!("precondition mount-table read: {error}"))?;
+        if before.is_none() {
+            return Err(format!(
+                "plain umount detached the test mount despite busy error: status={:?}, stderr={stderr}",
+                plain.status
+            ));
+        }
+
+        tokio::time::timeout(CLEANUP_TIMEOUT, mount.unmount())
+            .await
+            .map_err(|_| "busy-test unmount timed out".to_owned())?
+            .map_err(|error| format!("busy-test force fallback: {error}"))?;
+        let entry = tokio::time::timeout(
+            CLEANUP_TIMEOUT,
+            mount_entry_at(&mountpoint, NfsPlatform::Macos),
+        )
+        .await
+        .map_err(|_| "post-unmount mount-table read timed out".to_owned())?
+        .map_err(|error| format!("post-unmount mount-table read: {error}"))?;
+        if entry.is_some() {
+            return Err("busy-test NFS mount remained listed".to_owned());
+        }
+        Ok(())
+    }
+    .await;
+    drop(holder);
+    let cleanup = guard.cleanup().await;
+    assert!(
+        outcome.is_ok() && cleanup.is_ok(),
+        "busy-test outcome: {outcome:?}; cleanup: {cleanup:?}"
+    );
 }
 
 #[cfg(target_os = "linux")]

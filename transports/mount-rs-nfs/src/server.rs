@@ -183,6 +183,9 @@ impl NfsConnection {
     }
 }
 
+/// TCP server with backend file handles that require asynchronous teardown.
+/// Call [`Self::close`] before dropping a server while its driver is shared
+/// with another live mount. Dropping only aborts transport tasks.
 pub struct NfsServer {
     session: Nfs3Session,
     v4_session: Nfs4Session,
@@ -240,12 +243,16 @@ impl NfsServer {
 
     pub fn from_session_with_hooks(
         session: Nfs3Session,
-        options: NfsServerOptions,
+        mut options: NfsServerOptions,
         hooks: NfsServerHooks,
     ) -> Self {
         let session = session.with_hooks(NfsSessionHooks {
             on_error: hooks.on_error.clone(),
         });
+        // The supplied v3 session is already constructed. Its protocol
+        // options are authoritative for the shared router and v4 session,
+        // including the shared-view v4 refusal.
+        options.session = session.options.clone();
         let shared = session.shared_state();
         let v4_session = Nfs4Session::from_loopback_shared_with_hooks(
             session.driver.clone(),
@@ -461,9 +468,17 @@ impl NfsServer {
                 let _ = task.await;
             }
         }
-        self.session.destroy().await;
-        self.v4_session.destroy().await;
+        let v3_closed = self.session.destroy().await;
         debug_assert_eq!(self.connections(), 0);
+        if !v3_closed {
+            return Err(io::Error::other(
+                "NFSv3 backend file handles remain open; retry server.close()",
+            ));
+        }
+        // Both sessions share one FileHandleTable. V3 clears it only after
+        // every retained descriptor has closed and released its pin; the
+        // server-derived V4 session only tears down its own state.
+        self.v4_session.destroy().await;
         Ok(())
     }
 }

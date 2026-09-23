@@ -13,7 +13,11 @@ pub mod storage;
 pub mod types;
 pub mod versioning;
 
-pub use driver::{FileHandle, FsDriver, Loopback, collect_bounded_dir_entries};
+pub use driver::{
+    FileHandle, FsDriver, GuardedDirectoryEntry, GuardedMutation, GuardedMutationResult,
+    GuardedRead, GuardedReadResult, GuardedSetattr, Loopback, ObservedEntry, PathGuard,
+    PathIdentity, collect_bounded_dir_entries,
+};
 pub use error::{ErrorCode, FsError, Result, backend_error};
 pub use handle::OpenFlags;
 pub use snapshot::{LoadedSnapshot, StateStore, snapshot_conflict};

@@ -37,8 +37,8 @@ embed the native client library or a cluster. The runtime must be able to load
 the matching `libfdb_c` and read a cluster file. Caller-owned handles must boot
 the FoundationDB network once and keep the returned `NetworkAutoStop` guard
 alive until every database handle has been dropped. Consumer-facing code can
-use `FoundationDbStorage::connect`, which owns the process-scoped network
-guard:
+use `FoundationDbStorage::connect`, which shares one process-scoped network
+guard across sequential opens:
 
 ```rust,no_run
 let storage = mount_rs_foundationdb::FoundationDbStorage::connect(
@@ -46,6 +46,14 @@ let storage = mount_rs_foundationdb::FoundationDbStorage::connect(
     mount_rs_foundationdb::FoundationDbStorageOptions::new("my-volume"),
 )?;
 ```
+
+At process shutdown, drop all providers, database handles, in-flight work, and
+application runtimes, then call `shutdown_client_network()` before exiting.
+The call stops and joins the native FoundationDB network thread. It returns
+`EBUSY` while a managed provider handle remains alive; the application can
+finish draining it and retry. This is a terminal process operation: subsequent
+managed `connect` calls fail because FoundationDB cannot restart its client
+network in the same process.
 
 The constructor intentionally does not select a lease clock. Block operations
 and metadata reads are available, but lease acquisition/publication returns

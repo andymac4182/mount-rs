@@ -9,6 +9,7 @@ import {
   __napiBindingTarget,
   basename,
   createChunkedDriver,
+  shutdownFoundationdbClientNetwork,
   createMemoryDriver as createRootMemoryDriver,
   createNodeFsDriver,
   dirname,
@@ -175,6 +176,8 @@ import {
 
 // node:fs/promises and minimal structural drivers satisfy the public boundary.
 import * as nodeFs from "node:fs/promises"
+const terminalFoundationdbStop: () => void = shutdownFoundationdbClientNetwork
+void terminalFoundationdbStop
 function checkStructuralFactories(driver: FsDriver): void {
   createDriver(driver)
   createNfsServer(driver)
@@ -197,6 +200,7 @@ void checkStructuralFactories
 
 const autoMountOptions: JsAutoMountOptions = {
   transport: "fuse",
+  nfsSharedView: true,
   onTransportError: (error, peer) => {
     void error
     void peer
@@ -375,6 +379,7 @@ async function checkFactories(): Promise<void> {
     gid: 20,
     umask: 0o22,
     rootMode: 0o755,
+    concurrentWrites: false,
   }
   const chunkedFilesystem: Filesystem = await createChunkedDriver(chunkedOptions)
   const nativeFilesystem: Filesystem = createNodeFsDriver("/tmp", {
@@ -399,6 +404,13 @@ async function checkFactories(): Promise<void> {
     blocks: { kind: "memory" },
     // @ts-expect-error chunkSize is a number in the chunked-driver options.
     chunkSize: "4096",
+  })
+  createChunkedDriver({
+    metadata: { kind: "memory" },
+    blocks: { kind: "memory" },
+    chunkSize: 4096,
+    // @ts-expect-error concurrentWrites is a boolean in the chunked-driver options.
+    concurrentWrites: "true",
   })
 }
 
@@ -494,6 +506,7 @@ function checkServerAndKvSubpaths(): void {
     host: "127.0.0.1",
     port: 0,
     allowRemote: false,
+    sharedView: true,
     verifier: new Uint8Array(8),
     nfs4: nfs4Options,
   }
@@ -630,6 +643,8 @@ function checkServerAndKvSubpaths(): void {
   const nfsV3Driver: Filesystem = nfsV3Session.driver
   const nfsV4Driver: Filesystem = nfsV4Session.driver
   const nfsOptionsView: NfsSessionOptionsView = nfsSession.options
+  const nfsSharedView: boolean = nfsOptionsView.sharedView
+  void nfsSharedView
   const nfsV4OptionsView: NfsSessionOptionsView = nfsV4Session.options
   const nfsV4StateOptionsView: Nfs4StateOptionsView = nfsOptionsView.nfs4
   const nfsWriteVerifier: Uint8Array = nfsSession.writeVerifier

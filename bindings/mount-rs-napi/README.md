@@ -61,6 +61,17 @@ is unavailable and includes the probe's prerequisite reason in the failure.
 If mount or teardown fails, the mountpoint is printed and is not recursively
 removed, so an active host mount is never hidden by cleanup.
 
+For a live shared NFSv3 view, pass `{ transport: "nfs", nfsSharedView: true }`
+to `mount(filesystem, mountpoint, options)`. With `transport: "auto"`, the shared
+view setting selects NFS. Explicit FUSE or 9P requests and the local-only
+`nfsSqliteSingleHost` lock profile are rejected. This enables guarded server reads
+and mutations and disables the native client's metadata and name caches (`noac`
+and `nonegnamecache` on macOS; `noac` and `lookupcache=none` on Linux). The
+backend must support identity-guarded reads and mutations; unsupported drivers fail
+before the mount starts. A direct `createNfsServer(filesystem, { sharedView:
+true })` selects the same server policy. Callers mounting that server through
+an external NFS client must configure those client cache options themselves.
+
 ## FoundationDB chunked provider
 
 The chunked Node factory accepts a foundationdb provider when the N-API crate
@@ -68,16 +79,45 @@ is built with its opt-in native feature:
 
     cargo check -p mount-rs-napi --features foundationdb
 
-Use uri for the cluster-file path and key for the volume prefix. The owned
-single-authority/test mode uses `leaseAuthority: "persisted-single-authority"`.
-For independent production writers, use
-`leaseAuthority: "shared-provider"` with an `authorityPrefix` naming the
-protected provider-time record. Each worker must have read-only access to that
-record; only the authority service may publish provider time. The N-API option
-does not create that credential boundary, so deployments must enforce it
-outside the addon and must republish authority time after authority restart.
+Build the local Node addon with that feature using the package script:
+
+    MOUNT_RS_NAPI_FEATURES=foundationdb pnpm --dir bindings/mount-rs-napi build:debug
+
+On macOS, supply a compatible native FoundationDB client library through
+`FDB_CLIENT_LIB_PATH` for linking and `DYLD_LIBRARY_PATH` if its runtime path
+is not already in the dynamic loader search path.
+
+Use `uri` for the cluster-file path and `key` for the volume prefix. Two
+independent clients that write the same volume use FoundationDB metadata with
+`leaseAuthority: "revision-cas"`, `concurrentWrites: true`, and a shared durable
+block provider such as FoundationDB or R2. Both clients must use the same
+metadata volume key and block store. For example:
+
+    await createChunkedDriver({
+      metadata: { kind: "foundationdb", uri: clusterFile, key: "files", leaseAuthority: "revision-cas", durable: true },
+      blocks: { kind: "foundationdb", uri: clusterFile, key: "file-blocks", leaseAuthority: "revision-cas", durable: true },
+      chunkSize: 4096,
+      concurrentWrites: true,
+    })
+
+The volume records its writer mode; keep all clients on the same mode.
+Concurrent mode is experimental: block reconciliation is disabled, and
+deleted file tombstones and superseded blocks remain stored until a safe
+distributed reclamation protocol is available. Size long-lived volumes with
+that retained data in mind.
+Exclusive-writer volumes use `leaseAuthority: "persisted-single-authority"` in
+an owned test cluster, or `leaseAuthority: "shared-provider"` with a protected
+`authorityPrefix` in a deployed cluster. In shared-provider mode, each worker
+needs read-only access to the provider-time record and only the authority
+service may publish it. The addon does not create that credential boundary.
 The provider retains the process-scoped FoundationDB client network until its
 filesystem handles are dropped.
+At the Node application's terminal process boundary, after all FoundationDB
+filesystems have completed `shutdown()`, call the synchronous
+`shutdownFoundationdbClientNetwork()` export. It stops and joins the native
+client network; `EBUSY` means a provider handle is still live and the stop can
+be retried after closing it. A feature-off addon exposes the same function and
+returns `ENOTSUP`.
 
 The live Node gate is intentionally opt-in:
 
@@ -87,7 +127,8 @@ The live Node gate is intentionally opt-in:
 
 If R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY_ID, and R2_SECRET_ACCESS_KEY are
 present, the gate composes FoundationDB metadata with R2-compatible blocks;
-otherwise it exercises the FoundationDB metadata path with in-memory blocks.
+otherwise it exercises durable FoundationDB metadata and block stores, including
+readback after reopening a new filesystem instance.
 The native feature build requires the host FoundationDB client library for
 linking, and a live cluster is required for the runtime gate. The repository
 CI lane builds that artifact from the pinned FoundationDB client image and
@@ -151,7 +192,7 @@ For a TLS-required TiDB endpoint, build the addon with the `rustls` feature so
 the TiDB client TLS implementation is included:
 
 ```sh
-CARGOFLAGS="--locked --features rustls" pnpm --dir bindings/mount-rs-napi build
+MOUNT_RS_NAPI_FEATURES=rustls pnpm --dir bindings/mount-rs-napi build
 ```
 
 This is a build capability, not live TLS/provider acceptance. The deployment

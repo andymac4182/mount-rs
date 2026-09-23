@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use mount_rs_core::{ErrorCode, FsError, Stats};
+use mount_rs_core::{ErrorCode, FsDriver, FsError, GuardedDirectoryEntry, Stats};
 
 use crate::constants::{NFS3_COOKIEVERFSIZE, NFS3_FHSIZE};
 
@@ -38,6 +38,7 @@ struct Entry {
 #[derive(Debug)]
 struct HandleState {
     verifier: [u8; 8],
+    stable_inode_ids: bool,
     next_id: u64,
     by_id: HashMap<u64, Entry>,
     by_path: HashMap<String, u64>,
@@ -85,6 +86,7 @@ impl FileHandleTable {
         Self {
             state: Arc::new(Mutex::new(HandleState {
                 verifier,
+                stable_inode_ids: false,
                 next_id: ROOT_HANDLE_ID + 1,
                 by_id,
                 by_path: HashMap::from([(String::from("/"), ROOT_HANDLE_ID)]),
@@ -102,6 +104,15 @@ impl FileHandleTable {
 
     pub fn size(&self) -> usize {
         self.state.lock().expect("handle table lock").by_id.len()
+    }
+
+    /// Trust backend inode keys across remote rename and name replacement.
+    /// Enable this only when the driver guarantees IDs cannot be reused.
+    pub(crate) fn trust_stable_inode_ids(&self) {
+        self.state
+            .lock()
+            .expect("handle table lock")
+            .stable_inode_ids = true;
     }
 
     /// Return one stable snapshot of every live handle, ordered by handle id.
@@ -183,6 +194,87 @@ impl FileHandleTable {
         Ok(path)
     }
 
+    /// Resolve a shared backing object's handle through an alias that still
+    /// names its original inode. A different server may rename or unlink a
+    /// remembered path without updating this server's local handle table.
+    pub(crate) async fn live_path_of(
+        &self,
+        entry: &HandleEntry,
+        driver: &dyn FsDriver,
+        preserve_orphan_key: bool,
+    ) -> mount_rs_core::Result<String> {
+        if entry.id == ROOT_HANDLE_ID {
+            return self.path_of(entry);
+        }
+        let aliases = {
+            let state = self.state.lock().expect("handle table lock");
+            let current = state
+                .by_id
+                .get(&entry.id)
+                .ok_or_else(|| stale("unknown file handle"))?;
+            current
+                .paths
+                .iter()
+                .filter(|path| state.by_path.get(*path) == Some(&entry.id))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        for path in aliases {
+            let observed = match driver.lstat(&path).await {
+                // Match NFS's existing stat_of fallback for drivers without
+                // lstat. Such drivers cannot distinguish symlink identity.
+                Err(error) if error.code == ErrorCode::Enosys => driver.stat(&path).await,
+                result => result,
+            };
+            let live = match observed {
+                Ok(stats) => {
+                    if let Some(key) = entry.key.as_deref() {
+                        stats.ino > 0 && key == format!("{}:{}", stats.dev, stats.ino)
+                    } else {
+                        stats.ino == 0 || stats.ino == entry.fileid
+                    }
+                }
+                Err(error) if matches!(error.code, ErrorCode::Enoent | ErrorCode::Estale) => false,
+                Err(error) => return Err(error),
+            };
+            if live {
+                // A concurrent local request may have rebound this path to a
+                // different handle while the backend stat was in flight.
+                if self.at(&path).is_some_and(|bound| bound.id == entry.id) {
+                    return Ok(path);
+                }
+            } else {
+                self.discard_stale_alias(entry.id, &path, preserve_orphan_key);
+            }
+        }
+        Err(stale("file handle has no live name"))
+    }
+
+    fn discard_stale_alias(&self, id: u64, path: &str, preserve_orphan_key: bool) {
+        let mut state = self.state.lock().expect("handle table lock");
+        if state.by_path.get(path) != Some(&id) {
+            return;
+        }
+        detach_preserve_locked(&mut state, id, path);
+        let orphan_key = state
+            .by_id
+            .get(&id)
+            .filter(|entry| entry.paths.is_empty())
+            .and_then(|entry| entry.key.clone());
+        // A retained file descriptor pins an inode; a backend with stable
+        // inode IDs also cannot reuse this key after unlink. In either case,
+        // a remote rename can later bind its new name to the original opaque
+        // handle. Other backends drop the key to prevent inode reuse from
+        // reviving an orphaned handle.
+        if let Some(key) = orphan_key
+            && !preserve_orphan_key
+            && state.by_key.get(&key) == Some(&id)
+        {
+            state.by_key.remove(&key);
+        }
+        touch_locked(&mut state, id);
+    }
+
     pub fn entry(&self, id: u64) -> Option<HandleEntry> {
         let state = self.state.lock().expect("handle table lock");
         state.by_id.get(&id).map(|entry| HandleEntry {
@@ -207,6 +299,17 @@ impl FileHandleTable {
     }
 
     pub fn bind(&self, path: &str, stats: &Stats) -> HandleEntry {
+        self.bind_inner(path, stats, false)
+    }
+
+    /// Bind and provisionally pin the entry under one table lock. A parallel
+    /// rebind cannot retire a newly issued regular-file handle before the
+    /// caller starts opening its retained backend descriptor.
+    pub(crate) fn bind_pinned(&self, path: &str, stats: &Stats) -> HandleEntry {
+        self.bind_inner(path, stats, true)
+    }
+
+    fn bind_inner(&self, path: &str, stats: &Stats, pin: bool) -> HandleEntry {
         let key = if self.use_driver_ino && stats.ino > 0 {
             Some(format!("{}:{}", stats.dev, stats.ino))
         } else {
@@ -241,7 +344,10 @@ impl FileHandleTable {
                 id
             });
         if let Some(previous) = previous.filter(|old| *old != id) {
-            detach_locked(&mut state, previous, path);
+            // A retained descriptor still owns the old inode even after
+            // another mount reuses this name. Keep its opaque handle alive
+            // without leaving the new name or inode key bound to it.
+            detach_replaced_locked(&mut state, previous, path);
         }
         let bound_key = if let Some(entry) = state.by_id.get_mut(&id) {
             if entry.key.is_none() {
@@ -249,6 +355,9 @@ impl FileHandleTable {
             }
             entry.fileid = if stats.ino > 0 { stats.ino } else { id };
             entry.paths.insert(path.to_owned());
+            if pin {
+                entry.pins = entry.pins.saturating_add(1);
+            }
             entry.key.clone()
         } else {
             None
@@ -262,15 +371,24 @@ impl FileHandleTable {
         entry_locked(&state, id, path)
     }
 
-    /// Hold an entry against LRU eviction while NFSv4 state refers to it.
+    /// Hold an entry against LRU eviction while backend state refers to it.
     ///
-    /// Pins are bookkeeping only: a removed path is still dropped immediately
-    /// and a missing entry makes this a no-op, which keeps teardown and error
-    /// paths safe to balance.
+    /// A retained descriptor can keep a displaced inode's opaque handle
+    /// pathless until the descriptor closes. A missing entry makes this a
+    /// no-op, which keeps teardown and error paths safe to balance.
     pub fn pin(&self, id: u64) {
+        let _ = self.try_pin(id);
+    }
+
+    /// Atomically pin a live entry, so callers retaining a descriptor do not
+    /// insert one for an ID that has already been retired by a concurrent bind.
+    pub(crate) fn try_pin(&self, id: u64) -> bool {
         let mut state = self.state.lock().expect("handle table lock");
         if let Some(entry) = state.by_id.get_mut(&id) {
             entry.pins = entry.pins.saturating_add(1);
+            true
+        } else {
+            false
         }
     }
 
@@ -478,7 +596,12 @@ fn detach_replaced_locked(state: &mut HandleState, id: u64, path: &str) {
     if !entry.paths.is_empty() || id == ROOT_HANDLE_ID {
         return;
     }
-    if entry.pins == 0 {
+    if state.stable_inode_ids {
+        // Another server can rename this inode to an unknown alias before
+        // placing a new inode at its old name. Its stable key lets a later
+        // lookup reconnect the original opaque handle to the moved name.
+        touch_locked(state, id);
+    } else if entry.pins == 0 {
         drop_entry_locked(state, id);
     } else if let Some(key) = entry.key.clone()
         && state.by_key.get(&key) == Some(&id)
@@ -593,6 +716,30 @@ pub fn cookie_verifier(names: &[String]) -> Vec<u8> {
             hash ^= u64::from(*byte);
             hash = hash.wrapping_mul(0x1000_0000_01b3);
         }
+    }
+    hash.to_be_bytes().to_vec()
+}
+
+/// Shared directory pages must invalidate cookies when an inode changes under
+/// an unchanged name. The backend supplies these attributes from one guarded
+/// namespace snapshot, so no independent path lookups enter this hash.
+pub fn guarded_cookie_verifier(directory: &Stats, entries: &[GuardedDirectoryEntry]) -> Vec<u8> {
+    const PRIME: u64 = 0x1000_0000_01b3;
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    let mut feed = |bytes: &[u8]| {
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(PRIME);
+        }
+    };
+    feed(&directory.dev.to_be_bytes());
+    feed(&directory.ino.to_be_bytes());
+    feed(&directory.ctime_ms.to_be_bytes());
+    for entry in entries {
+        feed(&(entry.name.len() as u64).to_be_bytes());
+        feed(entry.name.as_bytes());
+        feed(&entry.stats.dev.to_be_bytes());
+        feed(&entry.stats.ino.to_be_bytes());
     }
     hash.to_be_bytes().to_vec()
 }
@@ -777,6 +924,79 @@ mod tests {
             table.decode(&held_handle).unwrap_err().code,
             ErrorCode::Estale
         );
+    }
+
+    #[test]
+    fn bind_replacing_a_pinned_name_keeps_the_old_handle_pathless() {
+        let table = FileHandleTable::default();
+        let old = table.bind("/file", &stats(12));
+        let held_handle = table.encode(&old);
+        table.pin(old.id);
+
+        let replacement = table.bind("/file", &stats(13));
+
+        assert_ne!(replacement.id, old.id);
+        assert_eq!(table.at("/file").unwrap().id, replacement.id);
+        assert_eq!(table.decode(&held_handle).unwrap().id, old.id);
+        assert_eq!(
+            table.resolve(&held_handle).unwrap_err().code,
+            ErrorCode::Estale
+        );
+        // An orphaned file must not adopt a later name through its old key.
+        assert_ne!(table.bind("/other", &stats(12)).id, old.id);
+
+        table.unpin(old.id);
+        assert_eq!(
+            table.decode(&held_handle).unwrap_err().code,
+            ErrorCode::Estale
+        );
+    }
+
+    #[test]
+    fn bind_pinned_closes_the_gap_before_a_descriptor_can_be_retained() {
+        let table = FileHandleTable::default();
+        let old = table.bind_pinned("/file", &stats(12));
+        let held_handle = table.encode(&old);
+
+        let replacement = table.bind("/file", &stats(13));
+
+        assert_ne!(replacement.id, old.id);
+        assert_eq!(table.decode(&held_handle).unwrap().id, old.id);
+        table.unpin(old.id);
+        assert_eq!(
+            table.decode(&held_handle).unwrap_err().code,
+            ErrorCode::Estale
+        );
+    }
+
+    #[test]
+    fn stable_inode_keys_reconnect_a_remote_move_after_name_replacement() {
+        let table = FileHandleTable::default();
+        table.trust_stable_inode_ids();
+        let old = table.bind_pinned("/file", &stats(12));
+        let held_handle = table.encode(&old);
+
+        let replacement = table.bind("/file", &stats(13));
+        let moved = table.bind("/moved", &stats(12));
+
+        assert_ne!(replacement.id, old.id);
+        assert_eq!(moved.id, old.id);
+        assert_eq!(table.resolve(&held_handle).unwrap(), "/moved");
+        table.unpin(old.id);
+        assert_eq!(table.decode(&held_handle).unwrap().id, old.id);
+    }
+
+    #[test]
+    fn stable_inode_keys_reconnect_unpinned_directory_handles_too() {
+        let table = FileHandleTable::default();
+        table.trust_stable_inode_ids();
+        let old = table.bind("/dir", &stats(12));
+
+        table.bind("/dir", &stats(13));
+        let moved = table.bind("/new-dir", &stats(12));
+
+        assert_eq!(moved.id, old.id);
+        assert_eq!(table.resolve(&table.encode(&old)).unwrap(), "/new-dir");
     }
 
     #[test]

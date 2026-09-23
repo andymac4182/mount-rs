@@ -399,7 +399,10 @@ export declare class Nfs3Session {
    */
   get handles(): Array<NfsHandleEntry>
   get destroyed(): boolean
-  /** Destroy the NFSv3/MOUNT session and release its process-local state. */
+  /**
+   * Destroy the NFSv3/MOUNT session and close retained handles. An
+   * incomplete backend close rejects so the caller can retry destroy.
+   */
   destroy(): Promise<void>
 }
 
@@ -495,7 +498,10 @@ export declare class NfsSession {
    */
   get handles(): Array<NfsHandleEntry>
   get destroyed(): boolean
-  /** Destroy both versioned sessions and release their shared server state. */
+  /**
+   * Destroy both versioned sessions and release their shared server state.
+   * An incomplete v3 backend close rejects so the caller can retry destroy.
+   */
   destroy(): Promise<void>
 }
 
@@ -1240,6 +1246,14 @@ export interface JsAutoMountOptions {
    * NFS. This does not enable WAL or distributed SQLite locking.
    */
   nfsSqliteSingleHost?: boolean
+  /**
+   * Select NFS for an automatic mount, use the NFSv3 shared-view server
+   * policy, and disable the native client's metadata/name caches so another
+   * mount's committed paths are visible. Explicit FUSE/9P and the local
+   * SQLite lock profile are incompatible. Shared writes require a backend
+   * with guarded reads and mutations.
+   */
+  nfsSharedView?: boolean
 }
 
 export interface JsAutoProbe {
@@ -1281,6 +1295,8 @@ export interface JsChunkedOptions {
   chunkSize: number
   owner?: string
   ttlMs?: number
+  /** Enable persisted multiwriter revision CAS for FoundationDB metadata. */
+  concurrentWrites?: boolean
   /** Defaults to the current process uid, matching the memory driver. */
   uid?: number
   /** Defaults to the current process gid, matching the memory driver. */
@@ -1298,13 +1314,13 @@ export interface JsChunkedStoreOptions {
   /**
    * Supported values are memory, sqlite, pglite, tidb, foundationdb, and r2
    * (blocks only). FoundationDB requires the native feature and an
-   * explicit persisted-single-authority or shared-provider authority.
+   * explicit persisted-single-authority, shared-provider, or revision-cas authority.
    */
   kind: string
   uri?: string
   key?: string
   durable?: boolean
-  /** FoundationDB only: persisted-single-authority or shared-provider. */
+  /** FoundationDB only: persisted-single-authority, shared-provider, or revision-cas. */
   leaseAuthority?: string
   /** FoundationDB shared-provider only: the authority record key prefix. */
   authorityPrefix?: string
@@ -2440,6 +2456,11 @@ export interface NfsServerOptions {
   maxRecord?: number
   maxInFlight?: number
   useDriverIno?: boolean
+  /**
+   * NFSv3 shared-view policy for identity-guarded writes. The external
+   * kernel client must also disable metadata and name caches.
+   */
+  sharedView?: boolean
   verifier?: Uint8Array
   maxHandles?: number
   rtmax?: number
@@ -2459,6 +2480,7 @@ export interface NfsServerOptions {
  */
 export interface NfsSessionOptionsView {
   useDriverIno: boolean
+  sharedView: boolean
   verifier?: Uint8Array | null
   maxHandles?: number
   rtmax: number
@@ -2708,6 +2730,14 @@ export interface S3SessionStats {
   responseBytes: number
   errorClasses: Record<string, number>
 }
+
+/**
+ * Stop and join the process-wide FoundationDB client network at the Node
+ * application's terminal boundary, after every FoundationDB filesystem has
+ * completed `shutdown()`. A live provider handle returns `EBUSY`; this is
+ * synchronous and cannot be used as a per-filesystem cleanup operation.
+ */
+export declare function shutdownFoundationdbClientNetwork(): void
 
 export declare function splitPath(path: string): Array<string>
 

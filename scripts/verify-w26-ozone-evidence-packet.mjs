@@ -23,7 +23,7 @@ const PACKET_SPECS = Object.freeze([
       "OZONE_CHUNKED_BOUNDED_READDIR_PASS provider_owner=ozone-sqlite-seed ",
       "OZONE_CHUNKED_BOUNDED_READDIR_PASS provider_owner=ozone-pglite-seed ",
       "test actual_binary_runs_live_ozone_split_provider_self_test ... ok",
-      "SUMMARY node-sdk pass=7 skip=1 fail=0",
+      "SUMMARY node-sdk pass=8 skip=1 fail=0",
       "OZONE_NODE_CLI_PASS ",
       "OZONE_CLI_REMOTE_HTTP_PASS ",
       "OZONE_COMPOSITION_PGLITE_READY ",

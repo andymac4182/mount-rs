@@ -102,6 +102,7 @@ pub struct SplitStorageConfig {
     pub blocks: StorageProvider,
     pub chunk_size_bytes: usize,
     pub lease_ttl_ms: Option<u64>,
+    pub concurrent_writes: bool,
     pub owner: Option<String>,
 }
 
@@ -524,6 +525,7 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
             "blocks",
             "chunk_size_bytes",
             "lease_ttl_ms",
+            "concurrent_writes",
             "owner",
         ],
         "config.driver.storage",
@@ -553,6 +555,51 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
         .get("lease_ttl_ms")
         .map(|value| positive_u64(value, "config.driver.storage.lease_ttl_ms"))
         .transpose()?;
+    let concurrent_writes = object
+        .get("concurrent_writes")
+        .map(|value| required_value_bool(value, "config.driver.storage.concurrent_writes"))
+        .transpose()?
+        .unwrap_or(false);
+    if concurrent_writes {
+        if lease_ttl_ms.is_some() {
+            return Err(ConfigError::at(
+                "config.driver.storage.lease_ttl_ms",
+                "is unused with concurrent_writes; omit the writer lease TTL",
+            ));
+        }
+        if !matches!(
+            metadata,
+            StorageProvider::FoundationDb {
+                lease_authority: mount_rs_sdk::FoundationDbLeaseAuthority::RevisionCas,
+                ..
+            }
+        ) {
+            return Err(ConfigError::at(
+                "config.driver.storage.metadata.lease_authority",
+                "concurrent_writes requires FoundationDB metadata with lease_authority 'revision-cas'",
+            ));
+        }
+        if matches!(
+            &blocks,
+            StorageProvider::Memory | StorageProvider::Sqlite { .. }
+        ) {
+            return Err(ConfigError::at(
+                "config.driver.storage.blocks",
+                "concurrent_writes requires a shared block provider; memory and local SQLite blocks cannot serve independent mounts",
+            ));
+        }
+    } else if matches!(
+        metadata,
+        StorageProvider::FoundationDb {
+            lease_authority: mount_rs_sdk::FoundationDbLeaseAuthority::RevisionCas,
+            ..
+        }
+    ) {
+        return Err(ConfigError::at(
+            "config.driver.storage.concurrent_writes",
+            "must be true with FoundationDB lease_authority 'revision-cas'",
+        ));
+    }
     let owner = object
         .get("owner")
         .map(|value| required_value_string(value, "config.driver.storage.owner"))
@@ -565,6 +612,7 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
         blocks,
         chunk_size_bytes,
         lease_ttl_ms,
+        concurrent_writes,
         owner,
     })
 }
@@ -657,10 +705,19 @@ fn parse_provider(
                 "shared-provider" => mount_rs_sdk::FoundationDbLeaseAuthority::SharedProvider {
                     authority_prefix: required_nonempty_string(object, "authority_prefix", path)?,
                 },
+                "revision-cas" => {
+                    if object.get("authority_prefix").is_some() {
+                        return Err(ConfigError::at(
+                            &format!("{path}.authority_prefix"),
+                            "is only valid with lease_authority 'shared-provider'",
+                        ));
+                    }
+                    mount_rs_sdk::FoundationDbLeaseAuthority::RevisionCas
+                }
                 _ => {
                     return Err(ConfigError::at(
                         &format!("{path}.lease_authority"),
-                        "expected 'persisted-single-authority' or 'shared-provider'",
+                        "expected 'persisted-single-authority', 'shared-provider', or 'revision-cas'",
                     ));
                 }
             };
@@ -808,6 +865,9 @@ fn has_native_fields(spec: &ConfigSpec) -> bool {
 
 fn apply_explicit_overrides(resolved: &mut CliOptions, raw: &CliOptions) {
     let overrides = &raw.overrides;
+    // Extra mountpoints exist only on the CLI; a config describes one primary
+    // view and the storage backing shared by every view in this process.
+    resolved.also_mountpoints = raw.also_mountpoints.clone();
     if overrides.mountpoint {
         resolved.mountpoint = raw.mountpoint.clone();
     }
@@ -926,6 +986,17 @@ pub(crate) fn validate_resolved_options(options: &CliOptions) -> Result<(), Conf
             "--sqlite-single-host is only valid with --transport nfs or auto",
         ));
     }
+    if options.sqlite_single_host
+        && (!options.also_mountpoints.is_empty()
+            || options
+                .storage
+                .as_ref()
+                .is_some_and(|storage| storage.concurrent_writes))
+    {
+        return Err(ConfigError::new(
+            "--sqlite-single-host cannot be combined with shared NFS mounts",
+        ));
+    }
     Ok(())
 }
 
@@ -933,6 +1004,7 @@ impl ConfigSpec {
     pub(crate) fn to_options(&self) -> CliOptions {
         CliOptions {
             mountpoint: self.mountpoint.clone(),
+            also_mountpoints: Vec::new(),
             transport: self.transport.unwrap_or(TransportChoice::Auto),
             quiet: self.quiet.unwrap_or(false),
             verbose: self.verbose.unwrap_or(false),
@@ -1877,6 +1949,48 @@ mod tests {
         let spec = parse_config_str(SPLIT_MEMORY, Path::new("/tmp")).unwrap();
         assert_eq!(spec.storage.as_ref().unwrap().chunk_size_bytes, 4096);
         assert!(validate_resolved_options(&spec.to_options()).is_ok());
+    }
+
+    #[test]
+    fn local_sqlite_nfs_lock_profile_cannot_be_used_for_shared_views() {
+        let options = CliOptions {
+            sqlite_single_host: true,
+            also_mountpoints: vec![PathBuf::from("/tmp/second-view")],
+            ..CliOptions::default()
+        };
+        let error = validate_resolved_options(&options)
+            .expect_err("the local SQLite profile is incompatible with shared views");
+        assert!(error.message().contains("shared NFS mounts"));
+    }
+
+    #[test]
+    fn concurrent_fdb_config_rejects_blocks_local_to_one_process_or_host() {
+        for blocks in [
+            serde_json::json!({"kind": "memory"}),
+            serde_json::json!({"kind": "sqlite", "path": "local-blocks.sqlite"}),
+        ] {
+            let config = serde_json::json!({
+                "version": 1,
+                "driver": {
+                    "kind": "splitstore",
+                    "storage": {
+                        "concurrent_writes": true,
+                        "metadata": {
+                            "kind": "foundationdb",
+                            "cluster_file": "/nonexistent/fdb.cluster",
+                            "volume_key": "shared-test",
+                            "durable": true,
+                            "lease_authority": "revision-cas"
+                        },
+                        "blocks": blocks
+                    }
+                }
+            });
+            let error = parse_config_str(&config.to_string(), Path::new("/tmp"))
+                .expect_err("process-local blocks must fail static validation");
+            assert!(error.message().contains("config.driver.storage.blocks"));
+            assert!(error.message().contains("shared block"));
+        }
     }
 
     #[test]

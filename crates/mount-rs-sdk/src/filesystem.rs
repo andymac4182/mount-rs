@@ -9,7 +9,7 @@ use mount_rs_host::{HostFs, HostFsOptions};
 use mount_rs_memfs::{MemoryFs, MemoryOptions};
 use mount_rs_sqlite_fs::{SqliteFs, open_sqlite};
 
-use crate::options::SplitOptions;
+use crate::options::{FoundationDbLeaseAuthority, SplitOptions, StoreConfig};
 use crate::providers::{StorageResources, open_storage};
 use crate::stores::{ErasedBlockStore, ErasedMetadataStore};
 #[cfg(feature = "observability")]
@@ -67,8 +67,30 @@ impl Filesystem {
             return Err(FsError::new(ErrorCode::Einval)
                 .with_message("chunk_size_bytes must be greater than zero"));
         }
+        if options.concurrent_writes {
+            if !matches!(
+                &options.metadata,
+                StoreConfig::FoundationDb {
+                    lease_authority: FoundationDbLeaseAuthority::RevisionCas,
+                    ..
+                }
+            ) {
+                return Err(FsError::new(ErrorCode::Einval).with_message(
+                    "concurrent_writes requires FoundationDB revision-CAS metadata",
+                ));
+            }
+            if matches!(
+                &options.blocks,
+                StoreConfig::Memory | StoreConfig::Sqlite { .. }
+            ) {
+                return Err(FsError::new(ErrorCode::Einval).with_message(
+                    "concurrent_writes requires a shared block store; memory and local SQLite blocks cannot serve independent mounts",
+                ));
+            }
+        }
         let chunk_options = ChunkedOptions::fixed(options.owner, options.chunk_size_bytes)?
             .with_lease_ttl(options.lease_ttl)
+            .with_concurrent_writes(options.concurrent_writes)
             .with_identity(options.uid, options.gid, options.umask);
         let opened = open_storage(&options.metadata, &options.blocks).await?;
         let resources = opened.resources.clone();

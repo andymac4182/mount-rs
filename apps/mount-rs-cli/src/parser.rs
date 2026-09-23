@@ -81,6 +81,9 @@ impl DriverChoice {
 #[derive(Debug, Clone)]
 pub struct CliOptions {
     pub mountpoint: Option<PathBuf>,
+    /// Additional mountpoints served by the same opened filesystem in this
+    /// CLI process. Each gets its own native NFS client/server lifecycle.
+    pub also_mountpoints: Vec<PathBuf>,
     pub transport: TransportChoice,
     pub quiet: bool,
     pub verbose: bool,
@@ -128,6 +131,7 @@ pub struct CliOverrides {
 impl PartialEq for CliOptions {
     fn eq(&self, other: &Self) -> bool {
         self.mountpoint == other.mountpoint
+            && self.also_mountpoints == other.also_mountpoints
             && self.transport == other.transport
             && self.quiet == other.quiet
             && self.verbose == other.verbose
@@ -152,6 +156,7 @@ impl Default for CliOptions {
     fn default() -> Self {
         Self {
             mountpoint: None,
+            also_mountpoints: Vec::new(),
             transport: TransportChoice::Auto,
             quiet: false,
             verbose: false,
@@ -408,6 +413,13 @@ where
                     values.mountpoint = Some(PathBuf::from(value(name, inline_value, &mut args)?));
                     values.overrides.mountpoint = true;
                 }
+                "also-mountpoint" => {
+                    values.also_mountpoints.push(PathBuf::from(value(
+                        name,
+                        inline_value,
+                        &mut args,
+                    )?));
+                }
                 "config" => {
                     if values.config.is_some() {
                         return Err(ParseError::new(
@@ -601,7 +613,7 @@ pub fn help_text(color: Color) -> String {
     let b = |text: &str| color.bold(text).to_string();
     let d = |text: &str| color.dim(text).to_string();
     let output = format!(
-        "\n{} {}\n\n{}  mount-rs [mountpoint] [options]\n       mount-rs mount [mountpoint] [options]\n       mount-rs serve-http --config <path>\n       mount-rs sdk-self-test [--config <path>] [--reopen]\n\n{}\n  -m, --mountpoint {}  where to mount {}\n  -t, --transport {}   auto | fuse | 9p | nfs {}\n      --sqlite-single-host  use the single-host SQLite NFS profile (nfs or auto)\n  -q, --quiet              do not log filesystem requests\n  -v, --verbose            log metadata polls too {}\n  -r, --read-only          mount read-only\n      --empty              start without the memory README\n      --allow-other        let other users see the FUSE mount\n      --driver {}    memory | host | sqlite | splitstore {}\n      --root {}      host driver root {}\n      --database {}  SQLite state/metadata database\n      --blocks {}    splitstore block database\n      --probe              print transport availability without mounting\n  -h, --help               this\n  -V, --version            print the version\n\n{}\n{}\n",
+        "\n{} {}\n\n{}  mount-rs [mountpoint] [options]\n       mount-rs mount [mountpoint] [options]\n       mount-rs serve-http --config <path>\n       mount-rs sdk-self-test [--config <path>] [--reopen]\n\n{}\n  -m, --mountpoint {}  where to mount {}\n      --also-mountpoint <path>  add another NFS view of this filesystem (repeatable)\n  -t, --transport {}   auto | fuse | 9p | nfs {}\n      --sqlite-single-host  use the single-host SQLite NFS profile (nfs or auto)\n  -q, --quiet              do not log filesystem requests\n  -v, --verbose            log metadata polls too {}\n  -r, --read-only          mount read-only\n      --empty              start without the memory README\n      --allow-other        let other users see the FUSE mount\n      --driver {}    memory | host | sqlite | splitstore {}\n      --root {}      host driver root {}\n      --database {}  SQLite state/metadata database\n      --blocks {}    splitstore block database\n      --probe              print transport availability without mounting\n  -h, --help               this\n  -V, --version            print the version\n\n{}\n{}\n",
         b("mount-rs"),
         d("— mount a selected filesystem driver and watch kernel requests"),
         b("Usage:"),
@@ -675,6 +687,27 @@ mod tests {
                 blocks: Some(PathBuf::from("blocks.db")),
                 ..CliOptions::default()
             })
+        );
+    }
+
+    #[test]
+    fn extra_mountpoints_are_repeatable_without_replacing_the_primary() {
+        let command = parse(&[
+            "mount-rs",
+            "mount",
+            "/tmp/first",
+            "--transport=nfs",
+            "--also-mountpoint",
+            "/tmp/second",
+            "--also-mountpoint=/tmp/third",
+        ]);
+        let Command::Mount(options) = command else {
+            panic!("expected mount command");
+        };
+        assert_eq!(options.mountpoint, Some(PathBuf::from("/tmp/first")));
+        assert_eq!(
+            options.also_mountpoints,
+            vec![PathBuf::from("/tmp/second"), PathBuf::from("/tmp/third")]
         );
     }
 

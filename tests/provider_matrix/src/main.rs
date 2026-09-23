@@ -207,6 +207,7 @@ async fn open_sdk_split(
         chunk_size_bytes: CHUNK_SIZE,
         owner,
         lease_ttl: Duration::from_secs(30),
+        concurrent_writes: false,
         uid: 0,
         gid: 0,
         umask: 0,

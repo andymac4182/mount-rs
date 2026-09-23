@@ -199,6 +199,27 @@ module.exports = function install(binding) {
     })
   }
 
+  // FoundationDB's native client network belongs to the Node process, not
+  // one Filesystem. Keep this terminal operation synchronous and preserve the
+  // same structured EBUSY/ENOTSUP errors as the async provider factories.
+  const nativeShutdownFoundationdbClientNetwork = binding.shutdownFoundationdbClientNetwork
+  if (typeof nativeShutdownFoundationdbClientNetwork === "function" && !nativeShutdownFoundationdbClientNetwork.__mountRsWrapped) {
+    function shutdownFoundationdbClientNetwork(...args) {
+      try {
+        return nativeShutdownFoundationdbClientNetwork(...args)
+      } catch (error) {
+        throw structuredError(error)
+      }
+    }
+    Object.defineProperty(shutdownFoundationdbClientNetwork, "__mountRsWrapped", { value: true })
+    Object.defineProperty(binding, "shutdownFoundationdbClientNetwork", {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: shutdownFoundationdbClientNetwork,
+    })
+  }
+
   for (const name of ["mount", "unmountAll"]) {
     const nativeFunction = binding[name]
     if (typeof nativeFunction !== "function" || nativeFunction.__mountRsWrapped) continue
@@ -298,3 +319,5 @@ module.exports = function install(binding) {
   binding.Filesystem = FilesystemFacade
   return binding
 }
+
+module.exports.structuredError = structuredError

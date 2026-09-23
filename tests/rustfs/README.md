@@ -42,6 +42,8 @@ same test-owned data directory, waits for readiness again, and runs the fresh
 client reopen assertion. The contract covers immutable publication, stale
 conditional reads/writes, full and range reads, missing-object errors,
 concurrent puts, exact-ID cleanup, and persistence across service restart.
+It also opens and reopens the public Rust SDK split-store factory with SQLite
+metadata and RustFS blocks.
 
 The RustFS container is single-node/single-disk test storage. It is not a
 durability or power-loss claim, and it does not replace live Cloudflare R2

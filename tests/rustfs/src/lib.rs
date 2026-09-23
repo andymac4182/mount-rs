@@ -17,6 +17,7 @@ use mount_rs_core::storage::{BlockId, BlockStore, MetadataStore};
 use mount_rs_core::{Loopback, MkdirOptions};
 use mount_rs_pglite::PgliteMetadataStore;
 use mount_rs_r2::{R2BlockStore, R2Config};
+use mount_rs_sdk::{Filesystem, FilesystemKind, SplitOptions, StoreConfig};
 use mount_rs_sqlite::SqliteMetadataStore;
 use object_store::path::Path as ObjectPath;
 use object_store::{GetOptions, ObjectStore, PutMode, PutOptions, PutPayload, UpdateVersion};
@@ -117,6 +118,13 @@ fn sqlite_metadata_file() -> PathBuf {
     std::env::var_os("RUSTFS_SQLITE_METADATA_FILE")
         .map(PathBuf::from)
         .expect("RUSTFS_SQLITE_METADATA_FILE must be set")
+}
+
+fn sdk_metadata_file() -> PathBuf {
+    std::env::var_os("RUSTFS_RUN_DIR")
+        .map(PathBuf::from)
+        .expect("RUSTFS_RUN_DIR must be set")
+        .join("sdk-sqlite-metadata.db")
 }
 
 fn pglite_url() -> String {
@@ -379,6 +387,48 @@ async fn real_rustfs_sqlite_metadata_round_trip() {
         assert_eq!(actual, expected);
         reopened_blocks.delete_created().await;
         println!("RUSTFS_SPLIT_SQLITE_METADATA_PASS");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn real_rustfs_sdk_sqlite_metadata_round_trip() {
+    assert_timeout(async {
+        let config = local_config();
+        let mut options = SplitOptions::memory("rustfs-sdk-first", 7);
+        options.metadata = StoreConfig::Sqlite {
+            path: sdk_metadata_file(),
+        };
+        options.blocks = StoreConfig::R2 {
+            endpoint: config.endpoint,
+            bucket: config.bucket,
+            prefix: format!("{}/sdk-sqlite-blocks", test_prefix()),
+            access_key_id: config.access_key_id,
+            secret_access_key: config.secret_access_key,
+            durable: true,
+        };
+
+        let first = Filesystem::split(options.clone()).await.unwrap();
+        assert_eq!(first.kind(), FilesystemKind::SplitStore);
+        let first_view = Loopback::from_arc(first.driver());
+        first_view
+            .write_file("/sdk-rustfs.txt", b"public Rust SDK over real RustFS")
+            .await
+            .unwrap();
+        drop(first_view);
+        first.shutdown().await.unwrap();
+        drop(first);
+
+        options.owner = "rustfs-sdk-reopen".to_owned();
+        let reopened = Filesystem::split(options).await.unwrap();
+        let reopened_view = Loopback::from_arc(reopened.driver());
+        assert_eq!(
+            reopened_view.read_file("/sdk-rustfs.txt").await.unwrap(),
+            b"public Rust SDK over real RustFS"
+        );
+        drop(reopened_view);
+        reopened.shutdown().await.unwrap();
+        println!("RUSTFS_SDK_SQLITE_METADATA_PASS");
     })
     .await;
 }

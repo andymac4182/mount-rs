@@ -9,7 +9,10 @@ use mount_rs_nfs::rpc::{
     RPC_AUTH_ERROR, RPC_MISMATCH, RPC_PROG_MISMATCH, RPC_PROG_UNAVAIL, RPC_SUCCESS, auth_sys,
     decode_reply, encode_call, frame_record,
 };
-use mount_rs_nfs::{NFS_V4, NfsServer, NfsServerOptions};
+use mount_rs_nfs::v4::NFSPROC4_COMPOUND;
+use mount_rs_nfs::{
+    NFS_V4, Nfs3Session, NfsRequestContext, NfsServer, NfsServerOptions, NfsSessionOptions,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -105,6 +108,82 @@ async fn shared_router_advertises_both_nfs_versions_and_keeps_mount_separate() {
     assert_eq!(stats.replies, 9);
     assert_eq!(stats.dropped, 0);
     server.close().await.expect("close NFS router");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shared_view_refuses_nfs4_before_null_or_compound_dispatch() {
+    let mut options = NfsServerOptions::default();
+    options.session.shared_concurrent_view = true;
+    options.session.omit_wcc_attributes = true;
+    let server = NfsServer::new(MemoryFs::empty(), options);
+    let address = server
+        .listen()
+        .await
+        .expect("listen shared-view NFS router");
+    let mut stream = TcpStream::connect(address)
+        .await
+        .expect("connect shared-view NFS router");
+
+    for (xid, version, procedure, status, low, high) in [
+        (1, NFS_V3, NFSPROC3_NULL, RPC_SUCCESS, None, None),
+        (
+            2,
+            NFS_V4,
+            NFSPROC3_NULL,
+            RPC_PROG_MISMATCH,
+            Some(3),
+            Some(3),
+        ),
+        (
+            3,
+            NFS_V4,
+            NFSPROC4_COMPOUND,
+            RPC_PROG_MISMATCH,
+            Some(3),
+            Some(3),
+        ),
+        (4, 2, NFSPROC3_NULL, RPC_PROG_MISMATCH, Some(3), Some(3)),
+        (5, 5, NFSPROC3_NULL, RPC_PROG_MISMATCH, Some(3), Some(3)),
+    ] {
+        let record = exchange(
+            &mut stream,
+            &encode_call(xid, NFS_PROGRAM, version, procedure, None, None, &[]),
+        )
+        .await;
+        let (reply, body) = decode_reply(&record).expect("decode shared-view RPC reply");
+        assert_eq!(reply.xid, xid);
+        assert_eq!(reply.reply_stat, MSG_ACCEPTED);
+        assert_eq!(reply.accept_stat, Some(status));
+        assert_eq!((reply.low, reply.high), (low, high));
+        body.end("shared-view RPC reply").expect("no reply body");
+    }
+
+    server.close().await.expect("close shared-view NFS router");
+}
+
+#[tokio::test]
+async fn from_session_uses_actual_shared_v3_options_for_direct_v4() {
+    let session_options = NfsSessionOptions {
+        shared_concurrent_view: true,
+        ..NfsSessionOptions::default()
+    };
+    let session = Nfs3Session::new(MemoryFs::empty(), session_options);
+    let server = NfsServer::from_session(session, NfsServerOptions::default());
+
+    let call = encode_call(41, NFS_PROGRAM, NFS_V4, NFSPROC3_NULL, None, None, &[]);
+    let record = server
+        .v4_session()
+        .handle_call(&call, NfsRequestContext::default())
+        .await
+        .expect("direct V4 reply");
+    let (reply, body) = decode_reply(&record).expect("decode direct V4 reply");
+    assert_eq!(reply.xid, 41);
+    assert_eq!(reply.reply_stat, MSG_ACCEPTED);
+    assert_eq!(reply.accept_stat, Some(RPC_PROG_MISMATCH));
+    assert_eq!((reply.low, reply.high), (Some(3), Some(3)));
+    body.end("direct V4 refusal").expect("no reply body");
+
+    server.close().await.expect("close shared server");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

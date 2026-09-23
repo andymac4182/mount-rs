@@ -77,6 +77,8 @@ async function exerciseSeeded(filesystem) {
 }
 
 const failures = [];
+let passes = 0;
+let skips = 0;
 
 async function runCase(label, factory, cleanup = async () => {}) {
   let filesystem;
@@ -102,6 +104,7 @@ async function runCase(label, factory, cleanup = async () => {}) {
     failures.push(label);
     console.log("FAIL node-sdk case=" + label + " reason=" + errorCode(failure));
   } else {
+    passes += 1;
     console.log("PASS node-sdk case=" + label);
   }
 }
@@ -156,6 +159,7 @@ async function runReopenCase(
     failures.push(label);
     console.log("FAIL node-sdk case=" + label + " reason=" + errorCode(failure));
   } else {
+    passes += 1;
     console.log("PASS node-sdk case=" + label);
   }
 }
@@ -315,6 +319,7 @@ if (pgliteUrl) {
     () => createChunkedDriver(pgliteOptions("provider-matrix-node-pglite-reopened")),
   );
 } else {
+  skips += 1;
   console.log("SKIP node-sdk case=chunked-pglite/pglite gate=PGLITE_DATABASE_URL");
 }
 
@@ -352,6 +357,7 @@ if (pgliteR2Ready) {
     "/provider-matrix/seeded",
   );
 } else {
+  skips += 1;
   const gate = [
     pgliteUrl ? undefined : "PGLITE_DATABASE_URL",
     ...missingR2,
@@ -400,6 +406,7 @@ if (tidbRustfsReady) {
     "/provider-matrix/seeded",
   );
 } else {
+  skips += 1;
   const gate = [
     tidbUrl ? undefined : "MOUNT_RS_TIDB_URL",
     ...rustfs.missing,
@@ -426,16 +433,14 @@ if (missingR2.length === 0) {
     () => cleanupR2Snapshot(stateKey),
   );
 } else {
+  skips += 1;
   console.log("SKIP node-sdk case=r2-factory gate=" + missingR2.join("|"));
 }
 
 console.log(
   "SUMMARY node-sdk pass=" +
-    (4 + (pgliteUrl ? 1 : 0) + (missingR2.length === 0 ? 1 : 0) +
-      (pgliteR2Ready ? 1 : 0) + (tidbRustfsReady ? 1 : 0) - failures.length) +
-    " skip=" +
-    ((pgliteUrl ? 0 : 1) + (missingR2.length === 0 ? 0 : 1) +
-      (pgliteR2Ready ? 0 : 1) + (tidbRustfsReady ? 0 : 1)) +
+    passes +
+    " skip=" + skips +
     " fail=" +
     failures.length,
 );

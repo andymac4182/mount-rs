@@ -40,3 +40,8 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 name = "foundationdb"
 path = "tests/foundationdb.rs"
 required-features = ["foundationdb"]
+
+[[test]]
+name = "network_shutdown"
+path = "tests/network_shutdown.rs"
+required-features = ["foundationdb"]

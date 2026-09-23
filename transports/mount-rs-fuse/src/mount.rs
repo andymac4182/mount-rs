@@ -2221,12 +2221,6 @@ mod tests {
                 })),
             },
         ));
-        let task = tokio::spawn(run_session(
-            FuseSession::new(Arc::new(mount_rs_memfs::MemoryFs::empty())),
-            device,
-            Arc::clone(&state),
-        ));
-
         let init: Vec<u8> = [7_u32, 41, 65536, u32::MAX, u32::MAX]
             .into_iter()
             .flat_map(u32::to_le_bytes)
@@ -2235,6 +2229,13 @@ mod tests {
             .await
             .expect("send init before closing reply peer");
         drop(peer);
+        // The queued INIT remains readable after the peer closes. Starting
+        // the session now makes the reply write fail deterministically.
+        let task = tokio::spawn(run_session(
+            FuseSession::new(Arc::new(mount_rs_memfs::MemoryFs::empty())),
+            device,
+            Arc::clone(&state),
+        ));
 
         task.await
             .expect("session task should finish after reply peer closes");
@@ -2250,17 +2251,34 @@ mod tests {
     async fn invalid_device_read_reports_one_owned_read_error() {
         use std::os::fd::{FromRawFd, OwnedFd};
 
-        // An eventfd is readable immediately, but its eight-byte counter
-        // cannot satisfy the FUSE device's larger frame read. That produces a
-        // deterministic EINVAL instead of relying on a write-only pipe whose
-        // read readiness is platform/kernel dependent and can wait forever.
-        let fd = unsafe { libc::eventfd(1, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
-        assert!(fd >= 0, "eventfd should be available on Linux");
-        // SAFETY: eventfd returned one owned descriptor transferred exactly
-        // once into OwnedFd.
-        let device_fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        // A ready eventfd makes the epoll descriptor readable, but read(2)
+        // on that descriptor fails with EINVAL. An eventfd alone returns an
+        // eight-byte counter, which is a malformed FUSE frame instead.
+        let event_fd = unsafe { libc::eventfd(1, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+        assert!(event_fd >= 0, "eventfd should be available on Linux");
+        // SAFETY: eventfd returned one owned descriptor.
+        let event_fd = unsafe { OwnedFd::from_raw_fd(event_fd) };
+        let epoll_fd = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
+        assert!(epoll_fd >= 0, "epoll should be available on Linux");
+        // SAFETY: epoll_create1 returned one owned descriptor.
+        let epoll_fd = unsafe { OwnedFd::from_raw_fd(epoll_fd) };
+        let mut event = libc::epoll_event {
+            events: libc::EPOLLIN as u32,
+            u64: 0,
+        };
+        use std::os::fd::AsRawFd;
+        let registered = unsafe {
+            libc::epoll_ctl(
+                epoll_fd.as_raw_fd(),
+                libc::EPOLL_CTL_ADD,
+                event_fd.as_raw_fd(),
+                &mut event,
+            )
+        };
+        assert_eq!(registered, 0, "register ready eventfd with epoll");
+        let device_fd = epoll_fd;
         let device = FuseDevice::from_owned_fd(device_fd, DEFAULT_MAX_FRAME)
-            .expect("eventfd should satisfy the descriptor boundary");
+            .expect("epoll should satisfy the descriptor boundary");
 
         let observed = Arc::new(Mutex::new(Vec::new()));
         let observed_callback = Arc::clone(&observed);
@@ -3022,6 +3040,16 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    struct ActiveReadGuard<'a>(&'a std::sync::atomic::AtomicUsize);
+
+    #[cfg(target_os = "linux")]
+    impl Drop for ActiveReadGuard<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
     #[async_trait]
     impl mount_rs_core::FileHandle for ReadBarrierHandle {
         fn fd(&self) -> Option<u64> {
@@ -3033,11 +3061,11 @@ mod tests {
             buffer: &mut [u8],
             position: Option<u64>,
         ) -> mount_rs_core::Result<usize> {
-            self.entered.notify_one();
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            let _active_guard = ActiveReadGuard(self.active.as_ref());
             self.max_active.fetch_max(active, Ordering::SeqCst);
+            self.entered.notify_one();
             self.barrier.wait().await;
-            self.active.fetch_sub(1, Ordering::SeqCst);
             self.inner.read(buffer, position).await
         }
 
@@ -3126,6 +3154,27 @@ mod tests {
             .await
             .expect("read FUSE reply body");
         reply
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn read_test_reply_or_eof(peer: &mut tokio::net::UnixStream) -> Option<Vec<u8>> {
+        use tokio::io::AsyncReadExt;
+
+        let mut reply = vec![0; crate::OUT_HEADER_SIZE];
+        if peer.read(&mut reply[..1]).await.expect("read reply or EOF") == 0 {
+            return None;
+        }
+        peer.read_exact(&mut reply[1..])
+            .await
+            .expect("read complete FUSE reply header");
+        let length = u32::from_le_bytes(reply[..4].try_into().unwrap()) as usize;
+        assert!(length >= crate::OUT_HEADER_SIZE);
+        assert!(length <= DEFAULT_MAX_FRAME);
+        reply.resize(length, 0);
+        peer.read_exact(&mut reply[crate::OUT_HEADER_SIZE..])
+            .await
+            .expect("read complete FUSE reply body");
+        Some(reply)
     }
 
     #[cfg(target_os = "linux")]
@@ -3418,7 +3467,7 @@ mod tests {
         ));
         let entered = Arc::clone(&driver.entered);
         let task = tokio::spawn(run_session(
-            FuseSession::new(driver),
+            FuseSession::new(driver.clone()),
             device,
             Arc::clone(&state),
         ));
@@ -3452,15 +3501,29 @@ mod tests {
         peer.write_all(&test_frame(crate::constants::FUSE_DESTROY, 5, 0, &[]))
             .await
             .expect("send destroy");
-        let read_reply = tokio::time::timeout(Duration::from_secs(1), read_test_reply(&mut peer))
-            .await
-            .expect("destroy should terminate the blocked read");
-        assert_eq!(i32::from_le_bytes(read_reply[4..8].try_into().unwrap()), -5);
-        assert_eq!(u64::from_le_bytes(read_reply[8..16].try_into().unwrap()), 4);
         tokio::time::timeout(Duration::from_secs(1), task)
             .await
             .expect("FUSE_DESTROY should close the session")
             .expect("destroyed session task should finish");
+        // A stop-aware worker may reply EIO before the destroy branch aborts
+        // it. If abort wins, the peer instead reaches clean EOF without a
+        // reply. A partial reply is still a framing failure.
+        let read_reply =
+            tokio::time::timeout(Duration::from_secs(1), read_test_reply_or_eof(&mut peer))
+                .await
+                .expect("destroyed session should close the reply peer");
+        if let Some(read_reply) = read_reply {
+            assert_eq!(i32::from_le_bytes(read_reply[4..8].try_into().unwrap()), -5);
+            assert_eq!(u64::from_le_bytes(read_reply[8..16].try_into().unwrap()), 4);
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), read_test_reply_or_eof(&mut peer))
+                .await
+                .expect("DESTROY must not produce a reply")
+                .is_none()
+        );
+        assert_eq!(driver.max_active.load(Ordering::SeqCst), 1);
+        assert_eq!(driver.active.load(Ordering::SeqCst), 0);
         assert!(state.closed.load(Ordering::Acquire));
         assert!(
             observed

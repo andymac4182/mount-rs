@@ -77,6 +77,19 @@ assert.match(ozoneCheck.stdout, /driver=splitstore/);
 assert.match(ozoneCheck.stdout, /no SDK loaded; no mount attempted/);
 assert.doesNotMatch(output(ozoneCheck), /^mounted\s+/im);
 
+const foundationdbConfig = resolve(
+  repositoryRoot,
+  "apps/mount-rs-cli/examples/config-foundationdb-rustfs.json",
+);
+const foundationdbCheck = await runCli(
+  ["--config", foundationdbConfig, "--mountpoint", join(temporaryRoot, "mount-rs-node-cli-fdb-check"), "--check"],
+  { MOUNT_RS_NAPI_PACKAGE: "@mount-rs/this-package-must-not-be-loaded-for-check" },
+);
+assert.equal(foundationdbCheck.code, 0, output(foundationdbCheck));
+assert.match(foundationdbCheck.stdout, /driver=splitstore/);
+assert.match(foundationdbCheck.stdout, /no SDK loaded; no mount attempted/);
+assert.doesNotMatch(output(foundationdbCheck), /^mounted\s+/im);
+
 const sdkSelfTest = await runCli([
   "--driver", "memory", "--sdk-self-test",
 ]);
@@ -133,6 +146,46 @@ try {
   const invalidTtl = await runCli(["--config", invalidTtlConfig, "--check"]);
   assert.equal(invalidTtl.code, 1, output(invalidTtl));
   assert.match(invalidTtl.stderr, /lease_ttl_ms must be a positive integer/);
+
+  if (process.env.MOUNT_RS_NAPI_FOUNDATIONDB === "1") {
+    const clusterFile = process.env.MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE;
+    assert.ok(clusterFile, "MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE is required for the Node CLI FoundationDB gate");
+    const prefix = `mount-rs-napi/node-cli/${process.pid}-${Date.now()}`;
+    const foundationdbRuntimeConfig = join(durableRoot, "foundationdb.json");
+    const store = (volume) => ({
+      kind: "foundationdb",
+      cluster_file: clusterFile,
+      volume_key: `${prefix}/${volume}`,
+      durable: true,
+      lease_authority: "persisted-single-authority",
+    });
+    await fs.writeFile(
+      foundationdbRuntimeConfig,
+      `${JSON.stringify({
+        version: 1,
+        driver: {
+          kind: "splitstore",
+          storage: {
+            metadata: store("metadata"),
+            blocks: store("blocks"),
+            chunk_size_bytes: 4096,
+            owner: `node-cli-foundationdb-${process.pid}`,
+          },
+        },
+      }, null, 2)}\n`,
+      { mode: 0o600 },
+    );
+    const foundationdbRuntime = await runCli([
+      "--config", foundationdbRuntimeConfig, "--sdk-self-test", "--reopen",
+    ]);
+    assert.equal(foundationdbRuntime.code, 0, output(foundationdbRuntime));
+    assert.equal(foundationdbRuntime.signal, null, output(foundationdbRuntime));
+    assert.match(
+      foundationdbRuntime.stdout,
+      /sdk self-test passed: Node SDK wrote, shut down, reopened, and read/,
+    );
+    console.log("native FoundationDB Node CLI SDK self-test: PASS");
+  }
 } finally {
   await fs.rm(durableRoot, { recursive: true, force: true });
 }

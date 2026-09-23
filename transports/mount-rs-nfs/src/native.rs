@@ -703,13 +703,20 @@ impl NativeNfsMount {
         let timeout = self.inner.options.unmount_timeout;
         let deadline = deadline(timeout);
 
-        match self.graceful_unmount(deadline).await? {
-            UnmountOutcome::Done => {
+        let result = match self.graceful_unmount(deadline).await {
+            Ok(UnmountOutcome::Done) => {
                 self.inner.mounted.store(false, Ordering::Release);
                 self.finish().await
             }
-            UnmountOutcome::TimedOut => self.force_unmount(timeout).await,
+            Ok(UnmountOutcome::TimedOut) => self.force_unmount(timeout).await,
+            Err(error) => Err(error),
+        };
+        if result.is_err() && self.inner.mounted.load(Ordering::Acquire) {
+            // The kernel still has the mount (or its absence could not be
+            // confirmed). Keep the server responsive for a later retry.
+            self.inner.stopping.store(false, Ordering::Release);
         }
+        result
     }
 
     async fn graceful_unmount(
@@ -724,14 +731,24 @@ impl NativeNfsMount {
         if result.timed_out {
             return Ok(UnmountOutcome::TimedOut);
         }
-        if result.status == Some(0) || !self.mount_is_present(deadline).await {
+        // A successful helper exit is not proof that the kernel detached the
+        // exact mount. Keep the server until mount-table readback confirms it.
+        if !self.mount_is_present(deadline).await {
             return Ok(UnmountOutcome::Done);
         }
-        Err(NfsMountError::Unmount(format!(
-            "could not unmount {}: {}",
-            self.inner.mountpoint.display(),
-            format_command_failure("umount", &args, &result),
-        )))
+        // A busy mount, or a helper that reported success without detaching
+        // the exact entry, still needs the bounded force ladder. Other helper
+        // failures remain retryable with the server running.
+        if result.status == Some(0) || result.stderr.to_ascii_lowercase().contains("resource busy")
+        {
+            Ok(UnmountOutcome::TimedOut)
+        } else {
+            Err(NfsMountError::Unmount(format!(
+                "could not unmount {}: {}",
+                self.inner.mountpoint.display(),
+                format_command_failure("umount", &args, &result),
+            )))
+        }
     }
 
     async fn force_unmount(&self, timeout: Option<Duration>) -> Result<(), NfsMountError> {
@@ -762,20 +779,22 @@ impl NativeNfsMount {
             }
         }
         let still_present = self.mount_is_present(deadline).await;
-        self.inner.mounted.store(!still_present, Ordering::Release);
-        let close_result = self.finish().await;
-        if consent_denied {
-            return Err(NfsMountError::Unmount(consent_advice(
-                &self.inner.mountpoint,
-            )));
-        }
         if still_present {
+            // Do not close the only server for a kernel mount that may still
+            // be issuing requests. An unreadable table is treated as live.
+            self.inner.mounted.store(true, Ordering::Release);
+            if consent_denied {
+                return Err(NfsMountError::Unmount(consent_advice(
+                    &self.inner.mountpoint,
+                )));
+            }
             return Err(NfsMountError::Unmount(format!(
-                "unmounting {} exceeded its deadline; the server was stopped but the mount is still listed",
+                "unmounting {} exceeded its deadline; the mount remains or could not be checked, and the server is still running",
                 self.inner.mountpoint.display()
             )));
         }
-        close_result
+        self.inner.mounted.store(false, Ordering::Release);
+        self.finish().await
     }
 
     async fn mount_is_present(&self, timeout: Option<Instant>) -> bool {
@@ -789,14 +808,16 @@ impl NativeNfsMount {
 
     async fn finish(&self) -> Result<(), NfsMountError> {
         self.inner.mounted.store(false, Ordering::Release);
-        if self.inner.finished.swap(true, Ordering::AcqRel) {
+        if self.inner.finished.load(Ordering::Acquire) {
             return Ok(());
         }
         self.inner
             .server
             .close()
             .await
-            .map_err(NfsMountError::Server)
+            .map_err(NfsMountError::Server)?;
+        self.inner.finished.store(true, Ordering::Release);
+        Ok(())
     }
 }
 

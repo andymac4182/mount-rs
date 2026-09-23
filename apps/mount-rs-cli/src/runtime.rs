@@ -73,6 +73,7 @@ impl std::error::Error for CliError {}
 /// sufficient for a caller that may receive SIGINT during mount startup.
 struct CtrlCHandler {
     signal: Pin<Box<dyn Future<Output = std::io::Result<()>> + Send>>,
+    pending_signal: bool,
 }
 
 impl CtrlCHandler {
@@ -85,11 +86,29 @@ impl CtrlCHandler {
                 "received SIGINT before native mount startup completed",
             ));
         }
-        Ok(Self { signal })
+        Ok(Self {
+            signal,
+            pending_signal: false,
+        })
     }
 
     async fn wait(&mut self) -> Result<(), CliError> {
+        if self.pending_signal {
+            self.pending_signal = false;
+            return Ok(());
+        }
         self.signal.as_mut().await.map_err(io_error)
+    }
+
+    async fn rearm(&mut self) -> Result<(), CliError> {
+        let mut signal: Pin<Box<dyn Future<Output = std::io::Result<()>> + Send>> =
+            Box::pin(tokio::signal::ctrl_c());
+        // Poll once before reporting that another Ctrl-C can be received.
+        // A signal during registration remains ready for the next wait.
+        let received = poll_signal_registration(signal.as_mut()).await?;
+        self.signal = signal;
+        self.pending_signal = received;
+        Ok(())
     }
 }
 
@@ -230,6 +249,7 @@ fn split_options(options: &CliOptions, uid: u32, gid: u32) -> Result<SplitOption
                 .lease_ttl_ms
                 .map(Duration::from_millis)
                 .unwrap_or_else(|| Duration::from_secs(30)),
+            concurrent_writes: storage.concurrent_writes,
             uid,
             gid,
             umask: 0,
@@ -258,6 +278,7 @@ fn split_options(options: &CliOptions, uid: u32, gid: u32) -> Result<SplitOption
         chunk_size_bytes: DEFAULT_CHUNK_SIZE_BYTES,
         owner: unique_default_owner(),
         lease_ttl: Duration::from_secs(30),
+        concurrent_writes: false,
         uid,
         gid,
         umask: 0,
@@ -674,25 +695,42 @@ async fn shutdown_runtimes(runtimes: &[DriverRuntime]) -> FsResult<()> {
 }
 
 async fn mount_command(options: CliOptions) -> Result<(), CliError> {
-    if options.transport == TransportChoice::Auto {
+    let mountpoints = requested_mountpoints(&options)?;
+    let shared_view = shared_view_requested(&options);
+    let auto_transport = if options.transport == TransportChoice::Auto {
         let probe = mount_rs_auto::probe_transports();
-        if probe.chosen.is_none() {
-            return Err(CliError::runtime(
-                probe
-                    .reason
-                    .unwrap_or_else(|| "no native transport is usable".to_owned()),
-            ));
-        }
+        Some(select_auto_transport(&options, &probe)?)
+    } else {
+        None
+    };
+    if shared_view
+        && options.transport != TransportChoice::Nfs
+        && auto_transport != Some(mount_rs_auto::Transport::Nfs)
+    {
+        return Err(CliError::usage(
+            "shared mounts require NFS; use --transport nfs",
+        ));
     }
-    let mountpoint = resolve_mountpoint(options.mountpoint.as_deref())?;
     let (uid, gid) = effective_identity();
     let runtime = DriverRuntime::open(&options, uid, gid).await?;
     #[cfg(feature = "observability")]
     let telemetry = runtime.telemetry();
 
     let bare_driver = runtime.driver();
-    if !options.empty && runtime.is_memory() {
-        seed_readme(Arc::clone(&bare_driver)).await?;
+    if shared_view
+        && (!bare_driver.supports_guarded_mutations() || !bare_driver.supports_guarded_reads())
+    {
+        let _ = runtime.shutdown().await;
+        return Err(CliError::usage(
+            "shared NFS views require a filesystem with atomic handle identity guards for reads and writes; use --driver memory or --driver splitstore",
+        ));
+    }
+    if !options.empty
+        && runtime.is_memory()
+        && let Err(error) = seed_readme(Arc::clone(&bare_driver)).await
+    {
+        let _ = runtime.shutdown().await;
+        return Err(error);
     }
 
     let color = Color::from_env();
@@ -704,14 +742,38 @@ async fn mount_command(options: CliOptions) -> Result<(), CliError> {
             !options.quiet,
         ),
     );
-    // Match mountx: stale cleanup is scoped to the one mountpoint this start
-    // command resolved, and runs immediately before creating that directory.
-    unmount_stale(&mountpoint, current_uid(), color).await;
-    std::fs::create_dir_all(&mountpoint).map_err(io_error)?;
+    for mountpoint in &mountpoints {
+        unmount_stale(mountpoint, current_uid(), color).await;
+        if let Err(error) = std::fs::create_dir_all(mountpoint) {
+            let _ = runtime.shutdown().await;
+            return Err(io_error(error));
+        }
+    }
+    // Lexical checks catch ordinary repeats before any directory is touched.
+    // Canonical paths also catch aliases through an existing symlink.
+    let canonical_mountpoints = mountpoints
+        .iter()
+        .map(std::fs::canonicalize)
+        .collect::<std::io::Result<Vec<_>>>();
+    let canonical_mountpoints = match canonical_mountpoints {
+        Ok(paths) => paths,
+        Err(error) => {
+            let _ = runtime.shutdown().await;
+            return Err(io_error(error));
+        }
+    };
+    if let Err(error) = check_distinct_mountpoints(&canonical_mountpoints) {
+        let _ = runtime.shutdown().await;
+        return Err(error);
+    }
     let mount_options = AutoMountOptions {
-        transport: options.transport.into(),
+        transport: if options.transport == TransportChoice::Auto && shared_view {
+            AutoTransport::Nfs
+        } else {
+            options.transport.into()
+        },
         read_only: Some(options.read_only),
-        nfs: sqlite_single_host_nfs_options(&options),
+        nfs: shared_view_nfs_options(&options),
         fuse: Some(mount_rs_auto::MountOptions {
             allow_other: options.allow_other || uid == 0,
             ..mount_rs_auto::MountOptions::default()
@@ -727,37 +789,43 @@ async fn mount_command(options: CliOptions) -> Result<(), CliError> {
         }
     };
 
-    let mount_future = mount_rs_auto::mount(watched, &mountpoint, mount_options);
-    #[cfg(feature = "observability")]
-    let mount_result = {
-        let mount_path = mountpoint.to_string_lossy().into_owned();
-        telemetry
-            .observe_result("mount", "mount", Some(&mount_path), mount_future, |_| {
-                Some("mount_error")
-            })
-            .await
-    };
-    #[cfg(not(feature = "observability"))]
-    let mount_result = mount_future.await;
-    let mounted = match mount_result {
-        Ok(mounted) => mounted,
-        Err(error) => {
-            let _ = runtime.shutdown().await;
-            return Err(auto_error(error));
-        }
-    };
-
-    println!(
-        "{} {} at {} (source: {})",
-        color.green("mounted"),
-        transport_name(mounted.transport()),
-        mounted.mountpoint().display(),
-        mounted.source().unwrap_or("transport-managed")
-    );
-    println!(
-        "From another terminal: ls -l {}",
-        mounted.mountpoint().display()
-    );
+    let mut mounted = Vec::with_capacity(mountpoints.len());
+    for mountpoint in &mountpoints {
+        let mount_future = mount_rs_auto::mount(watched.clone(), mountpoint, mount_options.clone());
+        #[cfg(feature = "observability")]
+        let mount_result = {
+            let mount_path = mountpoint.to_string_lossy().into_owned();
+            telemetry
+                .observe_result("mount", "mount", Some(&mount_path), mount_future, |_| {
+                    Some("mount_error")
+                })
+                .await
+        };
+        #[cfg(not(feature = "observability"))]
+        let mount_result = mount_future.await;
+        let mount = match mount_result {
+            Ok(mount) => mount,
+            Err(error) => {
+                for previous in mounted.iter().rev() {
+                    retry_unmount(previous, &mut ctrl_c).await;
+                }
+                let _ = runtime.shutdown().await;
+                return Err(auto_error(error));
+            }
+        };
+        println!(
+            "{} {} at {} (source: {})",
+            color.green("mounted"),
+            transport_name(mount.transport()),
+            mount.mountpoint().display(),
+            mount.source().unwrap_or("transport-managed")
+        );
+        println!(
+            "From another terminal: ls -l {}",
+            mount.mountpoint().display()
+        );
+        mounted.push(mount);
+    }
     if !options.read_only {
         println!(
             "Press Ctrl-C to unmount; requests are {}.",
@@ -770,24 +838,34 @@ async fn mount_command(options: CliOptions) -> Result<(), CliError> {
     } else {
         println!("Press Ctrl-C to unmount; the mounted view is read-only.");
     }
-    if let Some(command) = stale_command_line(
-        mounted.mountpoint(),
-        transport_name(mounted.transport()),
-        current_uid(),
-    ) {
-        println!(
-            "If this process exits without unmounting, clear it with {}.",
-            color.bold(command)
-        );
+    for mount in &mounted {
+        if let Some(command) = stale_command_line(
+            mount.mountpoint(),
+            transport_name(mount.transport()),
+            current_uid(),
+        ) {
+            println!(
+                "If this process exits without unmounting, clear it with {}.",
+                color.bold(command)
+            );
+        }
     }
 
-    let lifecycle = wait_for_shutdown(&mounted, &mut ctrl_c).await;
-    let shutdown = runtime.shutdown().await.map_err(CliError::from);
-    lifecycle?;
-    shutdown?;
-    println!("{}", color.yellow("unmounted"));
-    if let Some(stats) = session_stats(&mounted) {
-        println!("  {}", color.dim(stats));
+    if mounted.len() == 1 {
+        wait_for_shutdown(&mounted[0], &mut ctrl_c).await;
+    } else {
+        wait_for_multiple_nfs_shutdown(&mounted, &mut ctrl_c).await;
+    }
+    runtime.shutdown().await.map_err(CliError::from)?;
+    for mount in &mounted {
+        println!(
+            "{} at {}",
+            color.yellow("unmounted"),
+            mount.mountpoint().display()
+        );
+        if let Some(stats) = session_stats(mount) {
+            println!("  {}", color.dim(stats));
+        }
     }
     Ok(())
 }
@@ -803,6 +881,65 @@ fn sqlite_single_host_nfs_options(options: &CliOptions) -> Option<mount_rs_nfs::
     // shared-field merge.
     nfs.read_only = options.read_only;
     Some(nfs)
+}
+
+fn shared_view_nfs_options(options: &CliOptions) -> Option<mount_rs_nfs::NfsMountOptions> {
+    let mut nfs = sqlite_single_host_nfs_options(options);
+    if !shared_view_requested(options) {
+        return nfs;
+    }
+
+    let nfs_options = nfs.get_or_insert_with(mount_rs_nfs::NfsMountOptions::default);
+    // A complete NFS override must explicitly carry the shared read-only
+    // option. Disable client metadata/name caching so another mount's
+    // committed namespace becomes visible on the next lookup.
+    nfs_options.read_only = options.read_only;
+    // Another server can commit between our mutation and its reply. WCC after
+    // attributes could then describe a revision whose data this client has
+    // never read, so omit the optional WCC fields in shared views.
+    nfs_options.server_options.session.shared_concurrent_view = true;
+    nfs_options.server_options.session.use_driver_ino = true;
+    nfs_options.server_options.session.omit_wcc_attributes = true;
+    #[cfg(target_os = "macos")]
+    nfs_options
+        .mount_options
+        .extend(["noac".to_owned(), "nonegnamecache".to_owned()]);
+    #[cfg(target_os = "linux")]
+    nfs_options
+        .mount_options
+        .extend(["noac".to_owned(), "lookupcache=none".to_owned()]);
+    nfs
+}
+
+fn shared_view_requested(options: &CliOptions) -> bool {
+    !options.also_mountpoints.is_empty()
+        || options
+            .storage
+            .as_ref()
+            .is_some_and(|storage| storage.concurrent_writes)
+}
+
+fn select_auto_transport(
+    options: &CliOptions,
+    probe: &mount_rs_auto::AutoProbe,
+) -> Result<mount_rs_auto::Transport, CliError> {
+    if shared_view_requested(options) {
+        if probe.nfs.usable {
+            return Ok(mount_rs_auto::Transport::Nfs);
+        }
+        return Err(CliError::runtime(format!(
+            "shared mounts require a usable NFS client: {}",
+            probe.nfs.reason.as_deref().unwrap_or("NFS is unavailable")
+        )));
+    }
+    probe.chosen.ok_or_else(|| {
+        CliError::runtime(
+            probe
+                .reason
+                .clone()
+                .unwrap_or_else(|| "no native transport is usable".to_owned()),
+        )
+    })
 }
 
 fn session_stats(mounted: &AutoMount) -> Option<String> {
@@ -847,40 +984,100 @@ async fn seed_readme(driver: Arc<dyn FsDriver>) -> Result<(), CliError> {
     result.and(close).map_err(CliError::from)
 }
 
-async fn wait_for_shutdown(mounted: &AutoMount, ctrl_c: &mut CtrlCHandler) -> Result<(), CliError> {
+async fn wait_for_shutdown(mounted: &AutoMount, ctrl_c: &mut CtrlCHandler) {
     match mounted {
         AutoMount::Fuse { mount, .. } => {
             tokio::select! {
-                result = wait_fuse_closed(mount.as_ref()) => result,
+                result = wait_fuse_closed(mount.as_ref()) => {
+                    if let Err(error) = result {
+                        eprintln!("mount-rs: FUSE close listener failed: {error}");
+                    }
+                },
                 signal = ctrl_c.wait() => {
-                    signal?;
-                    mounted.unmount().await.map_err(auto_error)
+                    if let Err(error) = signal {
+                        eprintln!("mount-rs: SIGINT listener failed: {error}");
+                    }
                 }
             }
         }
         AutoMount::P9 { mount, .. } => {
             tokio::select! {
-                () = mount.wait_closed() => Ok(()),
+                () = mount.wait_closed() => {},
                 signal = ctrl_c.wait() => {
-                    signal?;
-                    mounted.unmount().await.map_err(auto_error)
+                    if let Err(error) = signal {
+                        eprintln!("mount-rs: SIGINT listener failed: {error}");
+                    }
                 }
             }
         }
         AutoMount::Nfs { .. } => loop {
-            tokio::select! {
+            let shutdown_requested = tokio::select! {
                 signal = ctrl_c.wait() => {
-                    signal?;
-                    mounted.unmount().await.map_err(auto_error)?;
-                    return Ok(())
-                }
-                () = tokio::time::sleep(Duration::from_millis(250)) => {
-                    if !mounted.active() {
-                        return Ok(())
+                    if let Err(error) = signal {
+                        eprintln!("mount-rs: SIGINT listener failed: {error}");
                     }
+                    true
                 }
+                () = tokio::time::sleep(Duration::from_millis(250)) => !mounted.active(),
+            };
+            if shutdown_requested {
+                break;
             }
         },
+    }
+
+    // A transport close or SIGINT is a request to detach the mount. Keep its
+    // provider and server alive until the transport confirms unmount, even if
+    // the signal listener or a host unmount helper fails.
+    retry_unmount(mounted, ctrl_c).await;
+}
+
+async fn wait_for_multiple_nfs_shutdown(mounted: &[AutoMount], ctrl_c: &mut CtrlCHandler) {
+    loop {
+        let shutdown_requested = tokio::select! {
+            signal = ctrl_c.wait() => {
+                if let Err(error) = signal {
+                    eprintln!("mount-rs: SIGINT listener failed: {error}");
+                }
+                true
+            }
+            () = tokio::time::sleep(Duration::from_millis(250)) => {
+                mounted.iter().all(|mount| !mount.active())
+            },
+        };
+        if shutdown_requested {
+            break;
+        }
+    }
+
+    // A single CLI owns one driver and its FoundationDB client. Detach every
+    // native mount before shutting that shared driver down.
+    for mount in mounted.iter().rev() {
+        retry_unmount(mount, ctrl_c).await;
+    }
+}
+
+async fn retry_unmount(mounted: &AutoMount, ctrl_c: &mut CtrlCHandler) {
+    let mut signal_available = true;
+    loop {
+        match mounted.unmount().await {
+            Ok(()) => return,
+            Err(error) => {
+                eprintln!("mount-rs: unmount failed: {error}; press Ctrl-C to retry");
+            }
+        }
+
+        if signal_available {
+            if let Err(error) = ctrl_c.rearm().await {
+                eprintln!("mount-rs: SIGINT listener failed: {error}; retrying unmount on a timer");
+                signal_available = false;
+            } else if let Err(error) = ctrl_c.wait().await {
+                eprintln!("mount-rs: SIGINT listener failed: {error}; retrying unmount on a timer");
+                signal_available = false;
+            }
+        } else {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
     }
 }
 
@@ -957,6 +1154,74 @@ fn resolve_mountpoint(requested: Option<&Path>) -> Result<PathBuf, CliError> {
         .or_else(|| std::env::var_os("MOUNTX_MOUNTPOINT").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("~/mountx"));
     Ok(expand_path(&path))
+}
+
+fn requested_mountpoints(options: &CliOptions) -> Result<Vec<PathBuf>, CliError> {
+    let mut paths = vec![resolve_mountpoint(options.mountpoint.as_deref())?];
+    for additional in &options.also_mountpoints {
+        paths.push(resolve_mountpoint(Some(additional))?);
+    }
+    if paths.len() > 1 {
+        // A parent component can resolve through an earlier symlink, so
+        // lexical `..` cleanup would silently change the target directory.
+        // Keep ordinary single mounts' OS path semantics; require simple
+        // paths for a multi-mount command before it touches any directory.
+        if let Some(path) = paths.iter().find(|path| {
+            path.components()
+                .any(|component| component == std::path::Component::ParentDir)
+        }) {
+            return Err(CliError::usage(format!(
+                "multiple mountpoints cannot contain '..': {}",
+                path.display()
+            )));
+        }
+        let candidates = paths
+            .iter()
+            .map(|path| canonical_mountpoint_candidate(path))
+            .collect::<Result<Vec<_>, _>>()?;
+        check_distinct_mountpoints(&candidates)?;
+    }
+    Ok(paths)
+}
+
+fn check_distinct_mountpoints(paths: &[PathBuf]) -> Result<(), CliError> {
+    for (index, path) in paths.iter().enumerate() {
+        for other in paths.iter().skip(index + 1) {
+            if path.starts_with(other) || other.starts_with(path) {
+                return Err(CliError::usage(format!(
+                    "mountpoints must be distinct and not nested: {} and {}",
+                    path.display(),
+                    other.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn canonical_mountpoint_candidate(path: &Path) -> Result<PathBuf, CliError> {
+    let mut ancestor = path;
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::canonicalize(ancestor) {
+            Ok(mut canonical) => {
+                for name in missing.iter().rev() {
+                    canonical.push(name);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let name = ancestor.file_name().ok_or_else(|| {
+                    CliError::usage(format!("invalid mountpoint: {}", path.display()))
+                })?;
+                missing.push(name.to_os_string());
+                ancestor = ancestor.parent().ok_or_else(|| {
+                    CliError::usage(format!("invalid mountpoint: {}", path.display()))
+                })?;
+            }
+            Err(error) => return Err(io_error(error)),
+        }
+    }
 }
 
 fn expand_path(path: &Path) -> PathBuf {
@@ -1077,6 +1342,57 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_or_nested_mountpoints_are_rejected_before_mounting() {
+        let options = CliOptions {
+            mountpoint: Some(PathBuf::from("/tmp/mount-rs-view")),
+            also_mountpoints: vec![PathBuf::from("/tmp/mount-rs-view/../mount-rs-view")],
+            ..CliOptions::default()
+        };
+        let error = requested_mountpoints(&options).expect_err("duplicate path must fail");
+        assert_eq!(error.exit_code(), 2);
+        assert!(error.to_string().contains("cannot contain '..'"));
+
+        let nested = [
+            PathBuf::from("/tmp/mount-rs-view"),
+            PathBuf::from("/tmp/mount-rs-view/child"),
+        ];
+        assert!(check_distinct_mountpoints(&nested).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_nested_mountpoint_is_rejected_before_directory_creation() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "mount-rs-cli-path-check-{}-{nonce}",
+            std::process::id()
+        ));
+        let primary = root.join("primary");
+        let alias = root.join("alias");
+        std::fs::create_dir_all(&primary).expect("create test primary path");
+        std::os::unix::fs::symlink(&primary, &alias).expect("create test alias");
+        let nested = primary.join("child");
+        let options = CliOptions {
+            mountpoint: Some(primary),
+            also_mountpoints: vec![alias.join("child")],
+            ..CliOptions::default()
+        };
+        let outcome = requested_mountpoints(&options);
+        let created_nested = nested.exists();
+        std::fs::remove_file(&alias).expect("remove test alias");
+        std::fs::remove_dir_all(&root).expect("remove test scope");
+        let error = outcome.expect_err("symlinked child must be rejected");
+        assert!(error.to_string().contains("distinct and not nested"));
+        assert!(
+            !created_nested,
+            "path validation created a nested directory"
+        );
+    }
+
+    #[test]
     fn structured_storage_propagates_explicit_lease_ttl() {
         let options = CliOptions {
             driver: DriverChoice::SplitStore,
@@ -1085,6 +1401,7 @@ mod tests {
                 blocks: StorageProvider::Memory,
                 chunk_size_bytes: 4096,
                 lease_ttl_ms: Some(120_000),
+                concurrent_writes: false,
                 owner: Some("runtime-ttl-test-owner".to_owned()),
             })),
             ..CliOptions::default()
@@ -1132,12 +1449,102 @@ mod tests {
         let nfs = sqlite_single_host_nfs_options(&options).expect("profile override");
         assert!(nfs.hard);
         assert!(nfs.read_only);
+        assert!(!nfs.server_options.session.shared_concurrent_view);
+        assert!(!nfs.server_options.session.omit_wcc_attributes);
         assert_eq!(nfs.version, mount_rs_nfs::NfsVersion::V3);
         let rendered =
             mount_rs_nfs::nfs_mount_options(2049, &nfs, mount_rs_nfs::NfsPlatform::Linux)
                 .expect("profile renders");
         assert!(rendered.contains("local_lock=all"));
         assert!(rendered.contains("hard"));
+    }
+
+    #[test]
+    fn shared_nfs_views_disable_client_metadata_and_name_caches() {
+        let options = CliOptions {
+            read_only: true,
+            also_mountpoints: vec![PathBuf::from("/tmp/second-view")],
+            ..CliOptions::default()
+        };
+        let nfs = shared_view_nfs_options(&options).expect("NFS shared-view override");
+        assert!(nfs.read_only);
+        assert!(nfs.server_options.session.shared_concurrent_view);
+        assert!(nfs.server_options.session.use_driver_ino);
+        assert!(nfs.server_options.session.omit_wcc_attributes);
+        #[cfg(target_os = "macos")]
+        {
+            let rendered =
+                mount_rs_nfs::nfs_mount_options(2049, &nfs, mount_rs_nfs::NfsPlatform::Macos)
+                    .expect("macOS NFS options");
+            assert!(rendered.contains(",noac,"), "{rendered}");
+            assert!(
+                rendered.contains(",nonegnamecache,") || rendered.ends_with(",nonegnamecache"),
+                "{rendered}"
+            );
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let rendered =
+                mount_rs_nfs::nfs_mount_options(2049, &nfs, mount_rs_nfs::NfsPlatform::Linux)
+                    .expect("Linux NFS options");
+            assert!(rendered.contains(",noac,"), "{rendered}");
+            assert!(rendered.ends_with(",lookupcache=none"), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn shared_auto_transport_selects_nfs_even_when_fuse_is_preferred() {
+        let mut probe = mount_rs_auto::probe_transports_for("linux");
+        probe.chosen = Some(mount_rs_auto::Transport::Fuse);
+        probe.nfs.usable = true;
+        probe.nfs.reason = None;
+        let options = CliOptions {
+            transport: TransportChoice::Auto,
+            also_mountpoints: vec![PathBuf::from("/tmp/second-view")],
+            ..CliOptions::default()
+        };
+        assert_eq!(
+            select_auto_transport(&options, &probe).unwrap(),
+            mount_rs_auto::Transport::Nfs
+        );
+
+        probe.nfs.usable = false;
+        probe.nfs.reason = Some("no NFS client".to_owned());
+        let error = select_auto_transport(&options, &probe)
+            .expect_err("shared auto mode must fail when NFS is unavailable");
+        assert!(error.to_string().contains("no NFS client"));
+    }
+
+    #[tokio::test]
+    async fn shared_nfs_rejects_host_before_creating_mountpoints() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "mount-rs-cli-shared-host-check-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("create host root");
+        let first = root.join("view-a");
+        let second = root.join("view-b");
+        let options = CliOptions {
+            driver: DriverChoice::Host,
+            root: Some(root.clone()),
+            transport: TransportChoice::Nfs,
+            mountpoint: Some(first.clone()),
+            also_mountpoints: vec![second.clone()],
+            ..CliOptions::default()
+        };
+
+        let error = mount_command(options)
+            .await
+            .expect_err("host driver has no atomic handle identity guards");
+        assert_eq!(error.exit_code(), 2);
+        assert!(error.to_string().contains("atomic handle identity guards"));
+        assert!(!first.exists());
+        assert!(!second.exists());
+        std::fs::remove_dir_all(&root).expect("remove host root");
     }
 
     #[test]
@@ -1181,6 +1588,7 @@ mod tests {
                 blocks: StorageProvider::Memory,
                 chunk_size_bytes: 4096,
                 lease_ttl_ms: Some(120_000),
+                concurrent_writes: false,
                 owner: Some("runtime-test-owner".to_owned()),
             })),
             ..CliOptions::default()
@@ -1214,6 +1622,7 @@ mod tests {
                 },
                 chunk_size_bytes: 4096,
                 lease_ttl_ms: None,
+                concurrent_writes: false,
                 owner: None,
             })),
             ..CliOptions::default()

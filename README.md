@@ -17,11 +17,13 @@ For crate responsibilities and extension points, see the
 [storage and durability guide](ARCHITECTURE.md) records publication ordering
 and safety boundaries; the [documentation index](docs/README.md) links to
 acceptance and operations records.
+For a native NFS mount and its exact Finder path on macOS, see the
+[macOS usage guide](docs/macos-usage.md).
 
 ## Backends
 
 - `ChunkedFs` — composes independently selected metadata and immutable block
-  providers with persisted fixed-size chunking, fenced writers and ordered
+  providers with persisted fixed-size chunking, coordinated writers and ordered
   durability barriers. Memory, SQLite and PGlite implement both provider roles;
   R2 and AWS S3 provide block storage. Each provider and filesystem has its own
   crate under `providers/` or `filesystems/`.

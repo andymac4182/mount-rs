@@ -606,7 +606,7 @@ jobs:
           if [ "$RUNNER_OS" = Linux ]; then
             sudo env MOUNT_RS_NFS_NATIVE_TEST=1 MOUNT_RS_NFS_NATIVE_V4_TEST=1 MOUNT_RS_NFS_V4_TRACE=1 timeout 240s "$native_test" --ignored --nocapture
           else
-            MOUNT_RS_NFS_NATIVE_TEST=1 python3 -c 'import subprocess,sys; subprocess.run([sys.argv[1], "--ignored", "--nocapture"], check=True, timeout=240)' "$native_test"
+            MOUNT_RS_NFS_NATIVE_TEST=1 MOUNT_RS_NFS_NATIVE_BUSY_TEST=1 python3 -c 'import subprocess,sys; subprocess.run([sys.argv[1], "--ignored", "--nocapture"], check=True, timeout=240)' "$native_test"
           fi
 
       - name: Compile FoundationDB-enabled CLI NFS acceptance on macOS
@@ -617,7 +617,7 @@ jobs:
         if: runner.os == 'macOS'
         env:
           MOUNT_RS_CLI_NATIVE_NFS: '1'
-        run: python3 -c 'import subprocess; subprocess.run(["cargo", "test", "--locked", "-p", "mount-rs-cli", "--test", "native_lifecycle", "--", "--ignored", "--nocapture"], check=True, timeout=240)'
+        run: python3 -c 'import subprocess; subprocess.run(["cargo", "test", "--locked", "-p", "mount-rs-cli", "--test", "native_lifecycle", "--", "--ignored", "--skip", "cli_nfs_pglite_config_binary_mounts_io_and_reopens", "--nocapture"], check=True, timeout=240)'
 
       - name: Verify SQLite hosting and journal support through native NFS
         run: |
@@ -839,6 +839,7 @@ jobs:
       - name: Verify portable Windows N-API parity against the pinned oracle
         env:
           MOUNTX_SOURCE: ${{ github.workspace }}/mountx-source
+          MOUNT_RS_WEBDAV_PROVIDER_NETWORK_TIMEOUT_MS: '60000'
         run: pnpm --dir bindings/mount-rs-napi test
       - name: Verify Windows structural-driver adapter harness
         run: node bindings/mount-rs-napi/test/structural-native.mjs

@@ -1,7 +1,11 @@
 import { spawnSync } from "node:child_process"
 
-const args = ["exec", "napi", "build", "--platform", ...process.argv.slice(2)]
 const env = { ...process.env }
+const requestedFeatures = env.MOUNT_RS_NAPI_FEATURES?.trim()
+const args = [
+  "exec", "napi", "build", "--platform", ...process.argv.slice(2),
+  ...(requestedFeatures ? ["--features", requestedFeatures] : []),
+]
 
 if (process.platform === "darwin") {
   // Rust 1.95's LLVM 22 Mach-O post-link layout can leave the __LINKEDIT
@@ -23,14 +27,12 @@ if (process.platform === "darwin") {
   }
 }
 
-const pnpm = process.env.npm_execpath
+const npmExecPath = process.env.npm_execpath
+const isJavaScriptCli = /\.(?:cjs|js|mjs)$/iu.test(npmExecPath ?? "")
+const pnpm = isJavaScriptCli
   ? process.execPath
-  : process.platform === "win32"
-    ? "pnpm.cmd"
-    : "pnpm"
-const pnpmArgs = process.env.npm_execpath
-  ? [process.env.npm_execpath, ...args]
-  : args
+  : npmExecPath ?? (process.platform === "win32" ? "pnpm.cmd" : "pnpm")
+const pnpmArgs = isJavaScriptCli ? [npmExecPath, ...args] : args
 const result = spawnSync(pnpm, pnpmArgs, { env, stdio: "inherit" })
 
 if (result.error) throw result.error

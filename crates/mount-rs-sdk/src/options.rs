@@ -130,7 +130,12 @@ impl fmt::Debug for StoreConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FoundationDbLeaseAuthority {
     PersistedSingleAuthority,
-    SharedProvider { authority_prefix: String },
+    SharedProvider {
+        authority_prefix: String,
+    },
+    /// Concurrent-volume manifest revision CAS needs no lease-time oracle.
+    /// Only choose this with `SplitOptions::concurrent_writes`.
+    RevisionCas,
 }
 
 /// Options for a filesystem with independent metadata and block providers.
@@ -141,6 +146,9 @@ pub struct SplitOptions {
     pub chunk_size_bytes: usize,
     pub owner: String,
     pub lease_ttl: Duration,
+    /// Persisted, opt-in concurrent metadata mode; the provider must support
+    /// revision CAS and fence legacy lease clients on the same volume.
+    pub concurrent_writes: bool,
     pub uid: u32,
     pub gid: u32,
     pub umask: u32,
@@ -155,6 +163,7 @@ impl SplitOptions {
             chunk_size_bytes,
             owner: owner.into(),
             lease_ttl: Duration::from_secs(30),
+            concurrent_writes: false,
             uid: 0,
             gid: 0,
             umask: 0,
@@ -168,6 +177,11 @@ impl SplitOptions {
     /// operation duration without making stale-writer recovery unbounded.
     pub fn with_lease_ttl(mut self, lease_ttl: Duration) -> Self {
         self.lease_ttl = lease_ttl;
+        self
+    }
+
+    pub fn with_concurrent_writes(mut self, concurrent_writes: bool) -> Self {
+        self.concurrent_writes = concurrent_writes;
         self
     }
 

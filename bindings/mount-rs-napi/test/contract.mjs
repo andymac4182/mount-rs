@@ -34,6 +34,11 @@ export async function exercise(fs) {
   const written = await handle.write(Buffer.from("ab"), 0, 2, 1);
   assert.equal(written.bytesWritten, 2);
   await handle.close();
+  await handle.close();
+  await assert.rejects(
+    () => handle.read(Buffer.alloc(1)),
+    (error) => error.code === "EBADF" && error.syscall === "read",
+  );
   assert.equal(text(await fs.readFile("/tree/data")), "0ab3456789");
 
   const cursor = await fs.open("/tree/data", "r");

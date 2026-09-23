@@ -429,9 +429,14 @@ else
   if [ "$external_mode" -eq 1 ]; then
     test_prefix=${MOUNT_RS_FOUNDATIONDB_TEST_PREFIX:-mount-rs/foundationdb-external/$run_id}
   else
-    test_prefix=""
+    test_prefix="mount-rs/foundationdb/$run_id"
   fi
 fi
+
+# The terminal network test runs in its own process after the ordinary
+# provider contract, so stopping the one-shot native client cannot affect
+# subsequent authority or application tests.
+test_command="${test_command} && cargo test --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test network_shutdown terminal_shutdown_drains_the_native_network_and_rejects_new_connections -- --exact --nocapture"
 
 if [ "$run_native_cli" -eq 1 ] && [ -z "$rustfs_endpoint" ]; then
   echo "MOUNT_RS_FOUNDATIONDB_NATIVE_CLI requires the composed RustFS lane" >&2

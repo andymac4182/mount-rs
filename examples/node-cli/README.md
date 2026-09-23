@@ -45,6 +45,15 @@ deployment's observed provider latency without delaying stale-writer recovery.
 Use `--check` to validate a config without loading native code or resolving
 credentials.
 
+For FoundationDB, the same config shape uses `cluster_file`, `volume_key`, and
+an explicit `lease_authority` in a metadata or block store. The example calls
+the SDK's synchronous `shutdownFoundationdbClientNetwork()` once at its
+terminal boundary after shutting down every configured filesystem; a native
+addon built without the `foundationdb` feature returns `ENOTSUP`.
+Build the local addon with
+`MOUNT_RS_NAPI_FEATURES=foundationdb pnpm --dir bindings/mount-rs-napi build:debug`
+before running that config.
+
 Run the bounded self-test on a host with a usable native transport:
 
 ```sh

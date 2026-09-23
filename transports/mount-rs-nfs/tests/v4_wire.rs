@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use mount_rs_core::{DirEntry, FileHandle, FsDriver, Result, Stats};
+use mount_rs_core::{DirEntry, ErrorCode, FileHandle, FsDriver, FsError, Result, Stats};
 use mount_rs_host::HostFs;
 use mount_rs_memfs::MemoryFs;
 use mount_rs_nfs::constants::{
@@ -46,6 +46,98 @@ use tokio::sync::Notify;
 use tokio::time::timeout;
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+struct RenameSpyHostFs {
+    inner: HostFs,
+    rename_calls: Arc<AtomicU64>,
+    lstat_enabled: Arc<AtomicBool>,
+}
+
+impl FsDriver for RenameSpyHostFs {
+    fn capabilities(&self) -> mount_rs_core::Capabilities {
+        self.inner.capabilities()
+    }
+
+    fn stat<'a, 'b, 'async_trait>(&'a self, path: &'b str) -> BoxFuture<'async_trait, Result<Stats>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.inner.stat(path).await })
+    }
+
+    fn lstat<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> BoxFuture<'async_trait, Result<Stats>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            if self.lstat_enabled.load(Ordering::Acquire) {
+                self.inner.lstat(path).await
+            } else {
+                Err(FsError::new(ErrorCode::Enosys))
+            }
+        })
+    }
+
+    fn readdir<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> BoxFuture<'async_trait, Result<Vec<DirEntry>>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.inner.readdir(path).await })
+    }
+
+    fn open<'a, 'b, 'c, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        flags: &'c str,
+        mode: u32,
+    ) -> BoxFuture<'async_trait, Result<Arc<dyn FileHandle>>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        'c: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.inner.open(path, flags, mode).await })
+    }
+
+    fn unlink<'a, 'b, 'async_trait>(&'a self, path: &'b str) -> BoxFuture<'async_trait, Result<()>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.inner.unlink(path).await })
+    }
+
+    fn rename<'a, 'b, 'c, 'async_trait>(
+        &'a self,
+        old_path: &'b str,
+        new_path: &'c str,
+    ) -> BoxFuture<'async_trait, Result<()>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        'c: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            self.rename_calls.fetch_add(1, Ordering::AcqRel);
+            self.inner.rename(old_path, new_path).await
+        })
+    }
+}
 
 struct GateStatDriver {
     inner: MemoryFs,
@@ -1595,6 +1687,8 @@ fn nfs_v3_rename_same_inode_preserves_source_handle_after_alias_remove() {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(self.0.join("source.txt"));
             let _ = std::fs::remove_file(self.0.join("alias.txt"));
+            let _ = std::fs::remove_file(self.0.join("source-link"));
+            let _ = std::fs::remove_file(self.0.join("alias-link"));
             let _ = std::fs::remove_dir(&self.0);
         }
     }
@@ -1635,8 +1729,16 @@ fn nfs_v3_rename_same_inode_preserves_source_handle_after_alias_remove() {
                         host_root.0.join("alias.txt"),
                     )
                     .unwrap();
-                    let server =
-                        NfsServer::new(HostFs::new(&host_root.0), NfsServerOptions::default());
+                    let rename_calls = Arc::new(AtomicU64::new(0));
+                    let lstat_enabled = Arc::new(AtomicBool::new(true));
+                    let server = NfsServer::new(
+                        RenameSpyHostFs {
+                            inner: HostFs::new(&host_root.0),
+                            rename_calls: Arc::clone(&rename_calls),
+                            lstat_enabled: Arc::clone(&lstat_enabled),
+                        },
+                        NfsServerOptions::default(),
+                    );
                     let address = server.listen().await.unwrap();
                     let mut stream = TcpStream::connect(address).await.unwrap();
                     let mut mount = rpc_call(
@@ -1733,6 +1835,72 @@ fn nfs_v3_rename_same_inode_preserves_source_handle_after_alias_remove() {
                         b"same inode"
                     );
                     assert!(!host_root.0.join("alias.txt").exists());
+                    assert_eq!(rename_calls.load(Ordering::Acquire), 0);
+                    let mut missing_rename = rpc_call(
+                        &mut stream,
+                        1007,
+                        NFS_PROGRAM,
+                        NFS_V3,
+                        NFSPROC3_RENAME,
+                        encode_xdr(|writer| {
+                            writer.var_opaque(&root);
+                            writer.string("missing.txt");
+                            writer.var_opaque(&root);
+                            writer.string("missing.txt");
+                        }),
+                        None,
+                    )
+                    .await;
+                    assert_eq!(
+                        read_rename_res(&mut missing_rename).unwrap().status,
+                        NFS3ERR_NOENT
+                    );
+                    missing_rename
+                        .end("missing same-name RENAME response")
+                        .unwrap();
+                    assert_eq!(rename_calls.load(Ordering::Acquire), 1);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::{MetadataExt, symlink};
+
+                        symlink("source.txt", host_root.0.join("source-link")).unwrap();
+                        symlink("source.txt", host_root.0.join("alias-link")).unwrap();
+                        assert_eq!(
+                            std::fs::metadata(host_root.0.join("source-link"))
+                                .unwrap()
+                                .ino(),
+                            std::fs::metadata(host_root.0.join("alias-link"))
+                                .unwrap()
+                                .ino()
+                        );
+                        lstat_enabled.store(false, Ordering::Release);
+                        let mut symlink_rename = rpc_call(
+                            &mut stream,
+                            1008,
+                            NFS_PROGRAM,
+                            NFS_V3,
+                            NFSPROC3_RENAME,
+                            encode_xdr(|writer| {
+                                writer.var_opaque(&root);
+                                writer.string("source-link");
+                                writer.var_opaque(&root);
+                                writer.string("alias-link");
+                            }),
+                            None,
+                        )
+                        .await;
+                        assert_eq!(
+                            read_rename_res(&mut symlink_rename).unwrap().status,
+                            NFS3_OK
+                        );
+                        symlink_rename.end("symlink RENAME response").unwrap();
+                        assert_eq!(rename_calls.load(Ordering::Acquire), 2);
+                        assert!(!host_root.0.join("source-link").exists());
+                        assert_eq!(
+                            std::fs::read_link(host_root.0.join("alias-link")).unwrap(),
+                            PathBuf::from("source.txt")
+                        );
+                    }
                     server.close().await.unwrap();
                 });
         })
