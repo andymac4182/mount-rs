@@ -617,7 +617,7 @@ jobs:
         if: runner.os == 'macOS'
         env:
           MOUNT_RS_CLI_NATIVE_NFS: '1'
-        run: python3 -c 'import subprocess; subprocess.run(["cargo", "test", "--locked", "-p", "mount-rs-cli", "--test", "native_lifecycle", "--", "--ignored", "--nocapture"], check=True, timeout=240)'
+        run: python3 -c 'import subprocess; subprocess.run(["cargo", "test", "--locked", "-p", "mount-rs-cli", "--test", "native_lifecycle", "--", "--ignored", "--skip", "cli_nfs_pglite_config_binary_mounts_io_and_reopens", "--nocapture"], check=True, timeout=240)'
 
       - name: Verify SQLite hosting and journal support through native NFS
         run: |

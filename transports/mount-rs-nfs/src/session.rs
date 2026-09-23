@@ -3192,7 +3192,9 @@ impl Nfs3Session {
             } else if from == to {
                 self.stat_of(&from).await.is_ok()
             } else {
-                match (self.stat_of(&from).await, self.stat_of(&to).await) {
+                // A stat fallback follows symlinks. Only direct lstat identities
+                // can establish that distinct directory entries are hard links.
+                match (self.driver.lstat(&from).await, self.driver.lstat(&to).await) {
                     (Ok(source), Ok(destination)) => same_backend_inode(&source, &destination),
                     _ => false,
                 }

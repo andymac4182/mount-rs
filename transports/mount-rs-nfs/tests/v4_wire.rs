@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use mount_rs_core::{DirEntry, FileHandle, FsDriver, Result, Stats};
+use mount_rs_core::{DirEntry, ErrorCode, FileHandle, FsDriver, FsError, Result, Stats};
 use mount_rs_host::HostFs;
 use mount_rs_memfs::MemoryFs;
 use mount_rs_nfs::constants::{
@@ -50,6 +50,7 @@ type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 struct RenameSpyHostFs {
     inner: HostFs,
     rename_calls: Arc<AtomicU64>,
+    lstat_enabled: Arc<AtomicBool>,
 }
 
 impl FsDriver for RenameSpyHostFs {
@@ -75,7 +76,13 @@ impl FsDriver for RenameSpyHostFs {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        Box::pin(async move { self.inner.lstat(path).await })
+        Box::pin(async move {
+            if self.lstat_enabled.load(Ordering::Acquire) {
+                self.inner.lstat(path).await
+            } else {
+                Err(FsError::new(ErrorCode::Enosys))
+            }
+        })
     }
 
     fn readdir<'a, 'b, 'async_trait>(
@@ -1680,6 +1687,8 @@ fn nfs_v3_rename_same_inode_preserves_source_handle_after_alias_remove() {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(self.0.join("source.txt"));
             let _ = std::fs::remove_file(self.0.join("alias.txt"));
+            let _ = std::fs::remove_file(self.0.join("source-link"));
+            let _ = std::fs::remove_file(self.0.join("alias-link"));
             let _ = std::fs::remove_dir(&self.0);
         }
     }
@@ -1721,10 +1730,12 @@ fn nfs_v3_rename_same_inode_preserves_source_handle_after_alias_remove() {
                     )
                     .unwrap();
                     let rename_calls = Arc::new(AtomicU64::new(0));
+                    let lstat_enabled = Arc::new(AtomicBool::new(true));
                     let server = NfsServer::new(
                         RenameSpyHostFs {
                             inner: HostFs::new(&host_root.0),
                             rename_calls: Arc::clone(&rename_calls),
+                            lstat_enabled: Arc::clone(&lstat_enabled),
                         },
                         NfsServerOptions::default(),
                     );
@@ -1848,6 +1859,48 @@ fn nfs_v3_rename_same_inode_preserves_source_handle_after_alias_remove() {
                         .end("missing same-name RENAME response")
                         .unwrap();
                     assert_eq!(rename_calls.load(Ordering::Acquire), 1);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::{MetadataExt, symlink};
+
+                        symlink("source.txt", host_root.0.join("source-link")).unwrap();
+                        symlink("source.txt", host_root.0.join("alias-link")).unwrap();
+                        assert_eq!(
+                            std::fs::metadata(host_root.0.join("source-link"))
+                                .unwrap()
+                                .ino(),
+                            std::fs::metadata(host_root.0.join("alias-link"))
+                                .unwrap()
+                                .ino()
+                        );
+                        lstat_enabled.store(false, Ordering::Release);
+                        let mut symlink_rename = rpc_call(
+                            &mut stream,
+                            1008,
+                            NFS_PROGRAM,
+                            NFS_V3,
+                            NFSPROC3_RENAME,
+                            encode_xdr(|writer| {
+                                writer.var_opaque(&root);
+                                writer.string("source-link");
+                                writer.var_opaque(&root);
+                                writer.string("alias-link");
+                            }),
+                            None,
+                        )
+                        .await;
+                        assert_eq!(
+                            read_rename_res(&mut symlink_rename).unwrap().status,
+                            NFS3_OK
+                        );
+                        symlink_rename.end("symlink RENAME response").unwrap();
+                        assert_eq!(rename_calls.load(Ordering::Acquire), 2);
+                        assert!(!host_root.0.join("source-link").exists());
+                        assert_eq!(
+                            std::fs::read_link(host_root.0.join("alias-link")).unwrap(),
+                            PathBuf::from("source.txt")
+                        );
+                    }
                     server.close().await.unwrap();
                 });
         })
