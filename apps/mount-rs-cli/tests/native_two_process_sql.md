@@ -55,6 +55,35 @@ result is diagnostic only; the test checks the rolled-back value and
 `integrity_check`, and prints `SQLITE_INNER_NFS_LOCK=blocked` or
 `lock_bypassed`. A blocked attempt does not certify general NFS locking.
 
+Set `MOUNT_RS_CLI_NATIVE_SQLITE_INNER_MATRIX=1` for a separate, bounded
+adversarial run inside those **two independent CLI mounts**. It replaces the
+short inner lock probe in the DELETE backing case with SQLite application
+DELETE, TRUNCATE, PERSIST, and WAL capability and process kill/reopen checks,
+plus two workers × eight transactions in DELETE and available WAL. The
+fixture checks exact committed payloads and `integrity_check`, then records
+two-view create/delete visibility and conflicting locks. SQLite may select
+DELETE when WAL is requested through NFS; that fallback is reported as
+unsupported. A two-view lock bypass is a diagnostic failure of that SQLite
+application topology, and the contender rolls back without writing. Each
+JSON report is printed as `SQLITE_INNER_NFS_MATRIX`. The application matrix
+reports its failure count and exit status while the provider acceptance
+continues to exact reopen and backing integrity checks. This two-CLI
+application topology is unsupported; journal/recovery/load failures are
+recorded as such. The Python fixture retries removal of its unique NFS
+directory for bounded deferred unlink races. If it remains after that wait,
+it reports `owned_cleanup=deferred_until_backing_disposal`; the native test
+then cleanly unmounts and removes the entire disposable backing. The test
+fails if the fixture cannot emit a summary or its exit disagrees with that
+summary. SQLite failure reports include `sqlite_errorcode` and
+`sqlite_errorname` when Python receives a SQLite error, including a failed
+load worker's error. Set `MOUNT_RS_CLI_NATIVE_SQLITE_INNER_TRACE=1` with the
+matrix flag to capture bounded CLI `--verbose` lines for failed operations
+and `.nfs` rename activity inside the fixture's unique directory. The native
+test prints up to the last 80 matching lines per CLI after clean unmount.
+See the standalone
+[adversarial packet](../../../tests/sqlite_nfs_adversarial.md) for the
+supported single-view profile and its limits.
+
 ## Backing path boundary
 
 For concurrent SQLite backing, the CLI rejects metadata or block database
@@ -108,6 +137,22 @@ was `ok` after clean stop and again after reopen. The inner SQLite
 application lock attempt was `blocked` in both runs. The one-CLI/two-view
 local DELETE case passed its 2 × 12 load in 1,376 ms, with exact data,
 integrity, and fresh reopen.
+
+The full inner SQLite packet was run three times against two independent
+DELETE-backed CLI mounts. Each mount-rs file lifecycle load finished before
+the application packet (the final 2 × 12 load took 859 ms). The SQLite
+application packet consistently failed four cases: DELETE, TRUNCATE, and
+PERSIST each reported `database is locked` after killing an uncommitted
+writer, and one DELETE load worker reported a disk I/O error at commit. WAL
+selected DELETE and was reported unsupported. The second view observed a
+synced create/delete and a competing `BEGIN IMMEDIATE` was blocked in this
+run, but those observations do not certify two-view locks. After a ten-second
+owned cleanup retry, three `.nfs.*` deferred names remained; the native test
+then cleanly unmounted, reopened, verified both backing databases had
+`integrity_check=ok`, and disposed of the test-owned backing and mounts.
+These are SQLite application failures in the shared-view `soft,nolocks` NFS
+profile, not failures of the local SQLite storage provider's acknowledged
+file operations.
 
 Before the local-filesystem guard, the NFS metadata+blocks negative setup
 allowed both CLIs to mount. Simultaneous first filesystem writes gave

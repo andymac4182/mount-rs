@@ -90,6 +90,10 @@ user-owned mountpoints. The example enables `concurrent_writes` on a fresh
 backing. Save the adjusted JSON as `/absolute/path/to/shared.json`, then run
 these commands in separate Terminal windows:
 
+Use the same canonical metadata and block filenames in every process.
+Concurrent SQLite refuses hard-link aliases of either database because
+different names create different WAL sidecars even for one inode.
+
 ```sh
 ./scripts/cargo-shared run --locked -p mount-rs-cli -- \
   mount --config /absolute/path/to/shared.json \
@@ -192,7 +196,9 @@ libraries, a live cluster, and the same shared block backing accessible to
 both processes. The CLI rejects memory and local SQLite blocks with
 FoundationDB metadata: they cannot serve references published by another
 host. Local SQLite blocks are accepted in concurrent mode only alongside
-SQLite metadata when both processes use the same local file paths. A second host
+SQLite metadata when both processes use the same canonical local database
+paths. The [SQLite auxiliary path authority](sqlite-auxiliary-path-authority.md)
+also rejects bind mount aliases of the same inode. A second host
 needs a reachable *shared* FoundationDB cluster and the same client,
 configuration, and block backing. The local macOS test cluster does not verify
 cross-host behavior. A prefix containing a legacy lease or fence key rejects
@@ -241,6 +247,76 @@ the current revision and namespace. The `revision-cas` transaction controls
 conflicting writes, even when a notification is delayed or missed. Watches
 are a planned signal optimization; mount-rs does not use them yet, and a
 watch cannot directly invalidate the macOS NFS client's cache.
+
+### Migrate an MRC1 concurrent backing
+
+An existing MRC1 metadata volume needs an explicit offline migration before
+the bound MRC2 client can open it. Stop every old mount-rs process using the
+volume, including processes on other hosts. Keep those mounts stopped while
+migration runs and until every client uses the upgraded binary. The command
+cannot detect live writers across hosts.
+
+Use the exact config for the metadata and block backing, with
+`driver.kind: "splitstore"` and `storage.concurrent_writes: true`. Read the
+current metadata revision with provider administration tools and supply that
+value explicitly. For a local SQLite metadata file, one way to read it is:
+
+```sh
+sqlite3 /absolute/path/to/metadata.sqlite \
+  'SELECT revision FROM mount_rs_metadata WHERE id=1;'
+./scripts/cargo-shared run --locked -p mount-rs-cli -- \
+  migrate-concurrent-backing --config /absolute/path/to/shared.json \
+  --expected-revision 0
+```
+
+Replace `0` with the revision read from the backing. The migration checks
+all referenced block extents and the exact revision before changing the
+metadata marker. On success it prints the unchanged revision and the new
+backing authority ID. A missing or short block, a changed revision, or
+historical version state leaves the metadata in MRC1. For SQLite backing,
+the command prepares empty view directories to check physical placement, then migrates
+without starting a native mount. Start the upgraded mounts only after it
+succeeds.
+
+An unstamped historical Legacy SQLite metadata file can still run in its
+earlier exclusive-writer mode, but automatic MRC2 enrollment is refused. An
+already MRC1 SQLite file cannot mount with the upgraded binary: the exclusive
+writer path does not accept MRC1, and implicit MRC2 migration is refused. This
+protects against a database copied before enrollment. Trusted offline
+re-enrollment is future work. A failed historical MRC1 migration leaves
+metadata at its old revision; the current migration ordering can leave an
+unused block authority marker after that failure.
+
+Pathless `MRC2` prototype markers from development before release also refuse
+startup: the old marker cannot identify the authoritative journal, WAL, or
+shared-memory pathname. The current migration command cannot repair them.
+
+### Bound concurrent backing
+
+Fresh concurrent split-store volumes persist `MRC2` and one stable block
+authority ID. Every mount must use the same metadata volume and physical block
+backing. An established mount checks the existing marker without creating a
+replacement, and verifies it again before each metadata revision CAS. A wrong
+or missing marker fails `ESTALE` before another namespace revision can be
+acknowledged.
+
+| Backing | Persisted authority |
+| --- | --- |
+| Local SQLite | `mount_rs_metadata.backing_id` and physical dev/inode stamp in the metadata file; `mount_rs_block_authority.backing_id` and physical dev/inode stamp in the blocks file. Both files must be on local storage outside every mountpoint. |
+| PGlite | `mount_rs_metadata.backing_id` and `mount_rs_block_authority.backing_id`, each keyed by the configured volume key in one reachable PGlite server. |
+| FoundationDB | `meta/write-mode` and `meta/backing-id` in the metadata keyspace; `block-authority` in the selected block keyspace. |
+| Signed object blocks, including RustFS | The immutable `<prefix>/_mount-rs-backing-id-v2` object contains `MRC2` and the 16-byte ID. It is not a content block and must remain intact. |
+
+The RustFS signed-client race and restart fixture qualifies its disposable
+service. Cloudflare R2, AWS S3 and arbitrary S3-compatible endpoints need
+their own live independent-client conditional-Create and read-back gate before
+a concurrent mount can claim them. PGlite and FoundationDB metadata cannot
+commit a remote object marker in the same transaction, so the mounted driver
+does the direct marker checks at open and before publication. These checks do
+not provide distributed open-handle pins or online block collection. Plan
+capacity for retained detached files and staged blocks, and keep old clients
+stopped during `MRC1` migration because the command cannot detect their live
+writer state across hosts.
 
 ## Choose a storage backend
 

@@ -8,7 +8,8 @@ use async_trait::async_trait;
 use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
 use mount_rs_core::chunking::{Chunker, ChunkerConfig, FixedSizeChunker};
 use mount_rs_core::storage::{
-    BlockId, BlockStore, LoadedMetadata, MetadataStore, Namespace, NodeData, WriterLease,
+    BlockId, BlockStore, ConcurrentBackingId, ConcurrentModeState, LoadedMetadata, MetadataStore,
+    Namespace, NodeData, WriterLease,
 };
 use mount_rs_core::types::now_ms;
 use mount_rs_core::{
@@ -19,7 +20,7 @@ use mount_rs_core::{
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::{Duration, Instant};
@@ -45,6 +46,7 @@ struct CasState {
     namespace: Option<Namespace>,
     published: Vec<Namespace>,
     concurrent_mode: bool,
+    backing_id: Option<ConcurrentBackingId>,
     legacy_lease: Option<WriterLease>,
     last_fence: u64,
     swap_entries_on_next_cas: Option<(String, String)>,
@@ -120,121 +122,17 @@ impl CasMetadata {
             .lock()
             .map_err(|_| FsError::backend("CAS metadata test state lock poisoned"))
     }
-}
 
-#[async_trait]
-impl MetadataStore for CasMetadata {
-    fn durable(&self) -> bool {
-        false
+    fn bound_backing(&self) -> ConcurrentBackingId {
+        self.lock()
+            .expect("bound metadata state")
+            .backing_id
+            .expect("metadata is bound to one fake block map")
     }
 
-    async fn load(&self) -> Result<LoadedMetadata> {
-        if self.fail_load.load(Ordering::SeqCst) {
-            return Err(FsError::new(ErrorCode::Eio).with_message("test metadata load unavailable"));
-        }
-        let state = self.lock()?;
-        Ok(LoadedMetadata {
-            revision: state.revision,
-            namespace: state.namespace.clone(),
-        })
-    }
-
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
-        let mut state = self.lock()?;
-        if state.legacy_lease.is_some() {
-            return Err(
-                FsError::new(ErrorCode::Ebusy).with_message("legacy writer still owns the volume")
-            );
-        }
-        state.concurrent_mode = true;
-        Ok(())
-    }
-
-    async fn acquire_writer(&self, owner: &str, ttl: Duration) -> Result<WriterLease> {
-        if owner.is_empty() || ttl.is_zero() {
-            return Err(FsError::new(ErrorCode::Einval));
-        }
-        let mut state = self.lock()?;
-        if state.concurrent_mode {
-            return Err(FsError::new(ErrorCode::Enotsup)
-                .with_message("legacy writer lease disabled by concurrent mode"));
-        }
-        if state.legacy_lease.is_some() {
-            return Err(FsError::new(ErrorCode::Eagain));
-        }
-        state.last_fence = state
-            .last_fence
-            .checked_add(1)
-            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-        let lease = WriterLease {
-            owner: owner.to_owned(),
-            fence: state.last_fence,
-            expires_at_ms: u64::MAX,
-        };
-        state.legacy_lease = Some(lease.clone());
-        Ok(lease)
-    }
-
-    async fn renew_writer(&self, lease: &WriterLease, _ttl: Duration) -> Result<WriterLease> {
-        if self.fail_one_renew.swap(false, Ordering::SeqCst) {
-            return Err(
-                FsError::new(ErrorCode::Eio).with_message("test transient lease renewal error")
-            );
-        }
-        let state = self.lock()?;
-        if state.concurrent_mode || state.legacy_lease.as_ref() != Some(lease) {
-            return Err(FsError::new(ErrorCode::Estale));
-        }
-        Ok(lease.clone())
-    }
-
-    async fn release_writer(&self, lease: &WriterLease) -> Result<()> {
-        if self
-            .suspend_release_before_apply
-            .swap(false, Ordering::SeqCst)
-        {
-            self.release_entered.store(true, Ordering::SeqCst);
-            std::future::pending::<()>().await;
-        }
-        let mut state = self.lock()?;
-        if state.concurrent_mode || state.legacy_lease.as_ref() != Some(lease) {
-            return Err(FsError::new(ErrorCode::Estale));
-        }
-        state.legacy_lease = None;
-        Ok(())
-    }
-
-    async fn publish(
+    async fn publish_cas_internal(
         &self,
-        expected_revision: u64,
-        lease: &WriterLease,
-        namespace: Namespace,
-    ) -> Result<u64> {
-        namespace.validate()?;
-        let revision = {
-            let mut state = self.lock()?;
-            if state.concurrent_mode || state.legacy_lease.as_ref() != Some(lease) {
-                return Err(FsError::new(ErrorCode::Estale));
-            }
-            if state.revision != expected_revision {
-                return Err(FsError::new(ErrorCode::Eagain));
-            }
-            state.revision = state
-                .revision
-                .checked_add(1)
-                .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-            state.published.push(namespace.clone());
-            state.namespace = Some(namespace);
-            state.revision
-        };
-        if self.pending_after_apply.swap(false, Ordering::SeqCst) {
-            self.after_apply_resume.notified().await;
-        }
-        Ok(revision)
-    }
-
-    async fn publish_if_revision(
-        &self,
+        backing: ConcurrentBackingId,
         expected_revision: u64,
         namespace: Namespace,
     ) -> Result<u64> {
@@ -243,6 +141,9 @@ impl MetadataStore for CasMetadata {
             let mut state = self.lock()?;
             if !state.concurrent_mode {
                 return Err(FsError::new(ErrorCode::Enotsup));
+            }
+            if state.backing_id != Some(backing) {
+                return Err(FsError::new(ErrorCode::Estale));
             }
             if let Some((first, second)) = state.swap_entries_on_next_cas.take() {
                 // Simulate another coordinator winning the CAS immediately after
@@ -341,16 +242,174 @@ impl MetadataStore for CasMetadata {
         }
         Ok(revision)
     }
+}
+
+#[async_trait]
+impl MetadataStore for CasMetadata {
+    fn durable(&self) -> bool {
+        false
+    }
+
+    async fn load(&self) -> Result<LoadedMetadata> {
+        if self.fail_load.load(Ordering::SeqCst) {
+            return Err(FsError::new(ErrorCode::Eio).with_message("test metadata load unavailable"));
+        }
+        let state = self.lock()?;
+        Ok(LoadedMetadata {
+            revision: state.revision,
+            namespace: state.namespace.clone(),
+        })
+    }
+
+    async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
+        let state = self.lock()?;
+        Ok(match (state.concurrent_mode, state.backing_id) {
+            (_, Some(id)) => ConcurrentModeState::Mrc2(id),
+            (true, None) => ConcurrentModeState::Mrc1,
+            (false, None) => ConcurrentModeState::Legacy,
+        })
+    }
+
+    async fn prepare_bound_concurrent_mode(&self, backing: ConcurrentBackingId) -> Result<()> {
+        let mut state = self.lock()?;
+        if state.legacy_lease.is_some() || (state.concurrent_mode && state.backing_id.is_none()) {
+            return Err(FsError::new(ErrorCode::Ebusy));
+        }
+        if let Some(current) = state.backing_id {
+            return if current == backing {
+                Ok(())
+            } else {
+                Err(FsError::new(ErrorCode::Estale))
+            };
+        }
+        state.concurrent_mode = true;
+        state.backing_id = Some(backing);
+        Ok(())
+    }
+
+    async fn acquire_writer(&self, owner: &str, ttl: Duration) -> Result<WriterLease> {
+        if owner.is_empty() || ttl.is_zero() {
+            return Err(FsError::new(ErrorCode::Einval));
+        }
+        let mut state = self.lock()?;
+        if state.concurrent_mode {
+            return Err(FsError::new(ErrorCode::Enotsup)
+                .with_message("legacy writer lease disabled by concurrent mode"));
+        }
+        if state.legacy_lease.is_some() {
+            return Err(FsError::new(ErrorCode::Eagain));
+        }
+        state.last_fence = state
+            .last_fence
+            .checked_add(1)
+            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        let lease = WriterLease {
+            owner: owner.to_owned(),
+            fence: state.last_fence,
+            expires_at_ms: u64::MAX,
+        };
+        state.legacy_lease = Some(lease.clone());
+        Ok(lease)
+    }
+
+    async fn renew_writer(&self, lease: &WriterLease, _ttl: Duration) -> Result<WriterLease> {
+        if self.fail_one_renew.swap(false, Ordering::SeqCst) {
+            return Err(
+                FsError::new(ErrorCode::Eio).with_message("test transient lease renewal error")
+            );
+        }
+        let state = self.lock()?;
+        if state.concurrent_mode || state.legacy_lease.as_ref() != Some(lease) {
+            return Err(FsError::new(ErrorCode::Estale));
+        }
+        Ok(lease.clone())
+    }
+
+    async fn release_writer(&self, lease: &WriterLease) -> Result<()> {
+        if self
+            .suspend_release_before_apply
+            .swap(false, Ordering::SeqCst)
+        {
+            self.release_entered.store(true, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+        }
+        let mut state = self.lock()?;
+        if state.concurrent_mode || state.legacy_lease.as_ref() != Some(lease) {
+            return Err(FsError::new(ErrorCode::Estale));
+        }
+        state.legacy_lease = None;
+        Ok(())
+    }
+
+    async fn publish(
+        &self,
+        expected_revision: u64,
+        lease: &WriterLease,
+        namespace: Namespace,
+    ) -> Result<u64> {
+        namespace.validate()?;
+        let revision = {
+            let mut state = self.lock()?;
+            if state.concurrent_mode || state.legacy_lease.as_ref() != Some(lease) {
+                return Err(FsError::new(ErrorCode::Estale));
+            }
+            if state.revision != expected_revision {
+                return Err(FsError::new(ErrorCode::Eagain));
+            }
+            state.revision = state
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+            state.published.push(namespace.clone());
+            state.namespace = Some(namespace);
+            state.revision
+        };
+        if self.pending_after_apply.swap(false, Ordering::SeqCst) {
+            self.after_apply_resume.notified().await;
+        }
+        Ok(revision)
+    }
+
+    async fn publish_bound_if_revision(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+        namespace: Namespace,
+    ) -> Result<u64> {
+        self.publish_cas_internal(backing, expected_revision, namespace)
+            .await
+    }
 
     async fn flush(&self) -> Result<()> {
         Ok(())
     }
 }
 
-#[derive(Clone, Default)]
-struct SharedBlocks(Arc<Mutex<BTreeMap<BlockId, Vec<u8>>>>);
+#[derive(Clone)]
+struct SharedBlocks(Arc<Mutex<BTreeMap<BlockId, Vec<u8>>>>, ConcurrentBackingId);
+
+static NEXT_FAKE_BACKING: AtomicU64 = AtomicU64::new(1);
+
+impl Default for SharedBlocks {
+    fn default() -> Self {
+        let mut bytes = [0xd1; 16];
+        bytes[8..].copy_from_slice(
+            &NEXT_FAKE_BACKING
+                .fetch_add(1, Ordering::SeqCst)
+                .to_be_bytes(),
+        );
+        Self(
+            Arc::new(Mutex::new(BTreeMap::new())),
+            ConcurrentBackingId::from_bytes(bytes).expect("unique nonzero fake backing ID"),
+        )
+    }
+}
 
 impl SharedBlocks {
+    fn backing_id(&self) -> ConcurrentBackingId {
+        self.1
+    }
+
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, BTreeMap<BlockId, Vec<u8>>>> {
         self.0
             .lock()
@@ -364,9 +423,16 @@ impl BlockStore for SharedBlocks {
         false
     }
 
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
-        // Every coordinator in this test shares the same Arc-backed block map.
-        Ok(())
+    async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
+        Ok(self.backing_id())
+    }
+
+    async fn verify_concurrent_backing(&self, expected: ConcurrentBackingId) -> Result<()> {
+        if expected == self.backing_id() {
+            Ok(())
+        } else {
+            Err(FsError::new(ErrorCode::Estale))
+        }
     }
 
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
@@ -416,7 +482,7 @@ impl BlockStore for RejectingConcurrentBlocks {
         self.0.durable()
     }
 
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
+    async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
         Err(FsError::new(ErrorCode::Enotsup).with_message("block backing cannot share writes"))
     }
 
@@ -453,8 +519,12 @@ impl BlockStore for RevisionAdvancingBlocks {
         false
     }
 
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
-        self.blocks.prepare_concurrent_mode().await
+    async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
+        self.blocks.prepare_concurrent_backing().await
+    }
+
+    async fn verify_concurrent_backing(&self, expected: ConcurrentBackingId) -> Result<()> {
+        self.blocks.verify_concurrent_backing(expected).await
     }
 
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
@@ -473,7 +543,7 @@ impl BlockStore for RevisionAdvancingBlocks {
             namespace.default_chunker = chunker;
         }
         self.metadata
-            .publish_if_revision(loaded.revision, namespace)
+            .publish_bound_if_revision(self.blocks.backing_id(), loaded.revision, namespace)
             .await?;
         Ok(id)
     }
@@ -592,6 +662,45 @@ fn rejected_shared_block_backing_does_not_convert_metadata() {
     assert_eq!(loaded.revision, 0);
     assert!(loaded.namespace.is_none());
     assert!(!metadata.lock().unwrap().concurrent_mode);
+}
+
+#[test]
+fn distinct_fake_block_maps_cannot_open_one_bound_metadata_volume() {
+    let metadata = CasMetadata::default();
+    let first = block_on(ChunkedFs::open(
+        metadata.clone(),
+        SharedBlocks::default(),
+        ChunkedOptions::fixed("first-map", 4096)
+            .unwrap()
+            .with_concurrent_writes(true),
+    ))
+    .expect("first map binds metadata");
+    let error = block_on(ChunkedFs::open(
+        metadata.clone(),
+        SharedBlocks::default(),
+        ChunkedOptions::fixed("second-map", 4096)
+            .unwrap()
+            .with_concurrent_writes(true),
+    ))
+    .err()
+    .expect("different fake block map must not share one authority ID");
+    assert_eq!(error.code, ErrorCode::Estale);
+    block_on(first.shutdown()).unwrap();
+}
+
+#[test]
+fn wrong_backing_fake_cas_cannot_publish_an_mrc2_namespace() {
+    let (metadata, first, _) = open_two();
+    let loaded = block_on(metadata.load()).expect("load bound namespace");
+    let namespace = loaded.namespace.expect("published root");
+    let mut wrong_bytes = metadata.bound_backing().as_bytes();
+    wrong_bytes[0] ^= 0x80;
+    let wrong = ConcurrentBackingId::from_bytes(wrong_bytes).expect("other backing ID");
+    let error = block_on(metadata.publish_bound_if_revision(wrong, loaded.revision, namespace))
+        .expect_err("wrong backing CAS must not publish MRC2");
+    assert_eq!(error.code, ErrorCode::Estale);
+    assert_eq!(block_on(metadata.load()).unwrap().revision, loaded.revision);
+    block_on(first.shutdown()).unwrap();
 }
 
 #[test]
@@ -844,8 +953,12 @@ fn concurrent_metadata_mutations_keep_ctime_after_a_newer_revision() {
         .expect("root node")
         .stats
         .ctime_ms = future;
-    block_on(metadata.publish_if_revision(loaded.revision, namespace))
-        .expect("publish a newer remote timestamp");
+    block_on(metadata.publish_bound_if_revision(
+        metadata.bound_backing(),
+        loaded.revision,
+        namespace,
+    ))
+    .expect("publish a newer remote timestamp");
 
     let mut prior = future;
     block_on(second.chmod("/shared", 0o600)).expect("chmod shared");

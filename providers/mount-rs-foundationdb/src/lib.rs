@@ -21,7 +21,8 @@ use foundationdb::options::TransactionOption;
 use foundationdb::{Database, FdbError, TransactOption, Transaction};
 use mount_rs_core::chunking::{ChunkerConfig, from_config};
 use mount_rs_core::storage::{
-    BlockId, BlockStore, LoadedMetadata, MetadataStore, Namespace, NodeData, WriterLease,
+    BlockId, BlockStore, ConcurrentBackingId, ConcurrentModeState, LoadedMetadata, MetadataStore,
+    Namespace, NodeData, WriterLease,
 };
 use mount_rs_core::{ErrorCode, FsError, Result, backend_error};
 use sha2::{Digest, Sha256};
@@ -35,6 +36,7 @@ use std::sync::{
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::Level;
+use uuid::Uuid;
 
 /// FoundationDB's hard key limit.
 pub const FOUNDATIONDB_MAX_KEY_BYTES: usize = 10_000;
@@ -72,13 +74,16 @@ const METADATA_CHUNK_SUFFIX: &[u8] = b"meta/chunk/";
 const METADATA_LEASE_SUFFIX: &[u8] = b"meta/lease";
 const METADATA_FENCE_SUFFIX: &[u8] = b"meta/fence";
 const METADATA_WRITE_MODE_SUFFIX: &[u8] = b"meta/write-mode";
+const METADATA_BACKING_SUFFIX: &[u8] = b"meta/backing-id";
 const CONCURRENT_WRITE_MODE: &[u8; 4] = b"MRC1";
+const BOUND_CONCURRENT_WRITE_MODE: &[u8; 4] = b"MRC2";
 // The old fenced provider decodes this key as a 12-byte MRF1 record. A
 // different magic makes old clients fail before they can acquire a lease.
 const CONCURRENT_FENCE_SENTINEL: &[u8; FENCE_BYTES] = b"MRCF\0\0\0\0\0\0\0\0";
 const LEASE_ORACLE_SUFFIX: &[u8] = b"meta/lease-oracle";
 const FLUSH_SUFFIX: &[u8] = b"flush";
 const BLOCK_SUFFIX: &[u8] = b"block/";
+const BLOCK_AUTHORITY_SUFFIX: &[u8] = b"block-authority";
 const BLOCK_ID_TEXT_BYTES: usize = 7 + 64; // "sha256:" plus the hex digest.
 const ORACLE_MAGIC: &[u8; 4] = b"MRO1";
 const ORACLE_BYTES: usize = 4 + 8;
@@ -1636,6 +1641,38 @@ fn stale() -> FsError {
     FsError::new(ErrorCode::Estale).with_syscall("FoundationDB metadata lease")
 }
 
+fn stale_backing() -> FsError {
+    FsError::new(ErrorCode::Estale).with_syscall("FoundationDB concurrent backing authority")
+}
+
+fn parse_backing_bytes(raw: &[u8]) -> Option<ConcurrentBackingId> {
+    let bytes: [u8; 16] = raw.try_into().ok()?;
+    ConcurrentBackingId::from_bytes(bytes).ok()
+}
+
+fn decode_concurrent_mode_state(
+    raw_mode: Option<Vec<u8>>,
+    raw_backing: Option<Vec<u8>>,
+) -> TxnResult<ConcurrentModeState> {
+    match (raw_mode.as_deref(), raw_backing.as_deref()) {
+        (None, None) => Ok(ConcurrentModeState::Legacy),
+        (Some(mode), None) if mode == CONCURRENT_WRITE_MODE => Ok(ConcurrentModeState::Mrc1),
+        (Some(mode), Some(id)) if mode == BOUND_CONCURRENT_WRITE_MODE => parse_backing_bytes(id)
+            .map(ConcurrentModeState::Mrc2)
+            .ok_or_else(|| {
+                TxnError::Fs(backend_error(
+                    "FoundationDB concurrent metadata backing ID is invalid",
+                ))
+            }),
+        _ => Err(TxnError::Fs(backend_error(
+            "FoundationDB metadata write mode and backing ID disagree",
+        ))),
+    }
+}
+
+// The removed MRC1 publisher's exact mode decoder remains as a regression
+// oracle for old-client rejection after migration.
+#[cfg(test)]
 fn decode_concurrent_write_mode(raw: Option<Vec<u8>>) -> TxnResult<bool> {
     match raw {
         None => Ok(false),
@@ -1647,24 +1684,17 @@ fn decode_concurrent_write_mode(raw: Option<Vec<u8>>) -> TxnResult<bool> {
 }
 
 fn require_legacy_write_mode(raw: Option<Vec<u8>>) -> TxnResult<()> {
-    if decode_concurrent_write_mode(raw)? {
-        Err(TxnError::Fs(
-            FsError::enotsup("FoundationDB fenced metadata writer")
-                .with_message("this volume uses concurrent revision publication"),
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-fn require_concurrent_write_mode(raw: Option<Vec<u8>>) -> TxnResult<()> {
-    if decode_concurrent_write_mode(raw)? {
-        Ok(())
-    } else {
-        Err(TxnError::Fs(
-            FsError::enotsup("FoundationDB concurrent metadata publication")
-                .with_message("prepare the volume for concurrent writers first"),
-        ))
+    match raw.as_deref() {
+        None => Ok(()),
+        Some(mode) if mode == CONCURRENT_WRITE_MODE || mode == BOUND_CONCURRENT_WRITE_MODE => {
+            Err(TxnError::Fs(
+                FsError::enotsup("FoundationDB fenced metadata writer")
+                    .with_message("this volume uses concurrent revision publication"),
+            ))
+        }
+        Some(_) => Err(TxnError::Fs(backend_error(
+            "FoundationDB metadata write mode marker is invalid",
+        ))),
     }
 }
 
@@ -1951,6 +1981,10 @@ impl Keyspace {
         self.key(METADATA_WRITE_MODE_SUFFIX)
     }
 
+    fn metadata_backing(&self) -> Vec<u8> {
+        self.key(METADATA_BACKING_SUFFIX)
+    }
+
     fn lease_oracle(&self) -> Vec<u8> {
         self.key(LEASE_ORACLE_SUFFIX)
     }
@@ -1963,6 +1997,10 @@ impl Keyspace {
         let mut key = self.key(BLOCK_SUFFIX);
         key.extend_from_slice(id.0.as_bytes());
         key
+    }
+
+    fn block_authority(&self) -> Vec<u8> {
+        self.key(BLOCK_AUTHORITY_SUFFIX)
     }
 }
 
@@ -2053,6 +2091,7 @@ fn metadata_publication_affected_bytes(
     let lease_key = keyspace.lease();
     let fence_key = keyspace.fence();
     let write_mode_key = keyspace.write_mode();
+    let metadata_backing_key = keyspace.metadata_backing();
     let manifest_key = keyspace.manifest();
     let chunk_prefix = keyspace.chunks();
     let chunk_end = range_end(&chunk_prefix)?;
@@ -2070,6 +2109,10 @@ fn metadata_publication_affected_bytes(
     add_affected_bytes(
         &mut affected,
         key_conflict_range_bytes(write_mode_key.len())?,
+    )?;
+    add_affected_bytes(
+        &mut affected,
+        key_conflict_range_bytes(metadata_backing_key.len())?,
     )?;
     add_affected_bytes(&mut affected, key_conflict_range_bytes(manifest_key.len())?)?;
     // clear_range(chunk_prefix, chunk_end) contributes both its mutation
@@ -2268,53 +2311,110 @@ impl MetadataStore for FoundationDbMetadataStore {
             .await
     }
 
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
+    async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
         let inner = Arc::clone(&self.0);
         let keyspace = Keyspace::new(&inner.prefix);
         let mode_key = keyspace.write_mode();
+        let backing_key = keyspace.metadata_backing();
+        let lease_key = keyspace.lease();
+        let fence_key = keyspace.fence();
+        let limits = inner.limits;
+        inner
+            .transact_idempotent((), move |trx, _| {
+                let mode_key = mode_key.clone();
+                let backing_key = backing_key.clone();
+                let lease_key = lease_key.clone();
+                let fence_key = fence_key.clone();
+                Box::pin(async move {
+                    configure_transaction(trx, limits)?;
+                    let (raw_mode, raw_backing, raw_lease, raw_fence) =
+                        futures_util::future::try_join4(
+                            get_owned(trx, &mode_key),
+                            get_owned(trx, &backing_key),
+                            get_owned(trx, &lease_key),
+                            get_owned(trx, &fence_key),
+                        )
+                        .await?;
+                    let mode = decode_concurrent_mode_state(raw_mode, raw_backing)?;
+                    if mode != ConcurrentModeState::Legacy
+                        && (raw_lease.is_some()
+                            || raw_fence.as_deref() != Some(CONCURRENT_FENCE_SENTINEL))
+                    {
+                        return Err(TxnError::Fs(backend_error(
+                            "FoundationDB concurrent mode and legacy fence disagree",
+                        )));
+                    }
+                    Ok(mode)
+                })
+            })
+            .await
+    }
+
+    async fn prepare_bound_concurrent_mode(&self, backing: ConcurrentBackingId) -> Result<()> {
+        let inner = Arc::clone(&self.0);
+        let keyspace = Keyspace::new(&inner.prefix);
+        let mode_key = keyspace.write_mode();
+        let backing_key = keyspace.metadata_backing();
         let lease_key = keyspace.lease();
         let fence_key = keyspace.fence();
         let limits = inner.limits;
         inner
             .transact_metadata((), move |trx, _| {
                 let mode_key = mode_key.clone();
+                let backing_key = backing_key.clone();
                 let lease_key = lease_key.clone();
                 let fence_key = fence_key.clone();
                 Box::pin(async move {
                     configure_transaction(trx, limits)?;
-                    // Read the marker and both legacy authority records in
-                    // one transaction. A racing legacy acquire reads this
-                    // marker and writes the fence, so only one mode can win.
-                    let (raw_mode, raw_lease, raw_fence) = futures_util::future::try_join3(
-                        get_owned(trx, &mode_key),
-                        get_owned(trx, &lease_key),
-                        get_owned(trx, &fence_key),
-                    )
-                    .await?;
-                    let prepared = decode_concurrent_write_mode(raw_mode)?;
-                    let has_sentinel = raw_fence.as_deref() == Some(CONCURRENT_FENCE_SENTINEL);
-                    if prepared {
-                        if raw_lease.is_none() && has_sentinel {
-                            return Ok(());
+                    // Mode, backing, lease, and fence share one read version.
+                    // A racing legacy lease claimant reads this mode/fence pair
+                    // and conflicts with the fresh MRC2 claim.
+                    let (raw_mode, raw_backing, raw_lease, raw_fence) =
+                        futures_util::future::try_join4(
+                            get_owned(trx, &mode_key),
+                            get_owned(trx, &backing_key),
+                            get_owned(trx, &lease_key),
+                            get_owned(trx, &fence_key),
+                        )
+                        .await?;
+                    match decode_concurrent_mode_state(raw_mode, raw_backing)? {
+                        ConcurrentModeState::Mrc2(current) if current != backing => {
+                            Err(TxnError::Fs(stale_backing()))
                         }
-                        return Err(TxnError::Fs(backend_error(
-                            "FoundationDB concurrent mode marker and fence sentinel disagree",
-                        )));
-                    }
-                    if raw_lease.is_some() || raw_fence.is_some() {
-                        return Err(TxnError::Fs(
+                        ConcurrentModeState::Mrc2(_) => {
+                            if raw_lease.is_none()
+                                && raw_fence.as_deref() == Some(CONCURRENT_FENCE_SENTINEL)
+                            {
+                                Ok(())
+                            } else {
+                                Err(TxnError::Fs(backend_error(
+                                    "FoundationDB bound mode and legacy fence disagree",
+                                )))
+                            }
+                        }
+                        ConcurrentModeState::Mrc1 => Err(TxnError::Fs(
                             FsError::new(ErrorCode::Ebusy)
-                                .with_syscall("prepare concurrent FoundationDB volume")
-                                .with_message("a fenced legacy volume needs an offline migration"),
-                        ));
+                                .with_syscall("prepare bound concurrent FoundationDB volume")
+                                .with_message("MRC1 needs offline migrate-concurrent-backing"),
+                        )),
+                        ConcurrentModeState::Legacy => {
+                            if raw_lease.is_some() || raw_fence.is_some() {
+                                return Err(TxnError::Fs(
+                                    FsError::new(ErrorCode::Ebusy)
+                                        .with_syscall(
+                                            "prepare bound concurrent FoundationDB volume",
+                                        )
+                                        .with_message(
+                                            "a fenced legacy volume needs an offline migration",
+                                        ),
+                                ));
+                            }
+                            trx.set(&mode_key, BOUND_CONCURRENT_WRITE_MODE);
+                            trx.set(&backing_key, &backing.as_bytes());
+                            trx.set(&fence_key, CONCURRENT_FENCE_SENTINEL);
+                            Ok(())
+                        }
                     }
-                    // The pair is committed atomically. Old lease acquisition
-                    // reads this fence key before its own write, so a race
-                    // conflicts and an old client that starts later rejects
-                    // the deliberately invalid fence record.
-                    trx.set(&mode_key, CONCURRENT_WRITE_MODE);
-                    trx.set(&fence_key, CONCURRENT_FENCE_SENTINEL);
-                    Ok(())
                 })
             })
             .await
@@ -2567,8 +2667,9 @@ impl MetadataStore for FoundationDbMetadataStore {
             .await
     }
 
-    async fn publish_if_revision(
+    async fn publish_bound_if_revision(
         &self,
+        backing: ConcurrentBackingId,
         expected_revision: u64,
         namespace: Namespace,
     ) -> Result<u64> {
@@ -2601,6 +2702,7 @@ impl MetadataStore for FoundationDbMetadataStore {
         });
         let keyspace = Keyspace::new(&inner.prefix);
         let mode_key = keyspace.write_mode();
+        let backing_key = keyspace.metadata_backing();
         let lease_key = keyspace.lease();
         let fence_key = keyspace.fence();
         let manifest_key = keyspace.manifest();
@@ -2610,6 +2712,7 @@ impl MetadataStore for FoundationDbMetadataStore {
         inner
             .transact_metadata((), move |trx, _| {
                 let mode_key = mode_key.clone();
+                let backing_key = backing_key.clone();
                 let lease_key = lease_key.clone();
                 let fence_key = fence_key.clone();
                 let manifest_key = manifest_key.clone();
@@ -2619,24 +2722,43 @@ impl MetadataStore for FoundationDbMetadataStore {
                 let manifest = manifest.clone();
                 Box::pin(async move {
                     configure_transaction(trx, limits)?;
-                    // All guards and the manifest CAS use one FDB read
-                    // version. Reading the manifest adds a conflict range;
-                    // only one concurrent revision writer can commit.
-                    let (raw_mode, raw_lease, raw_fence, raw_manifest) =
-                        futures_util::future::try_join4(
+                    // The authority, legacy fence, and manifest CAS all use
+                    // one transaction read version. Compare backing before
+                    // revision so a wrong client cannot retry an EAGAIN.
+                    let (raw_mode, raw_backing, raw_lease, raw_fence, raw_manifest) =
+                        futures_util::future::try_join5(
                             get_owned(trx, &mode_key),
+                            get_owned(trx, &backing_key),
                             get_owned(trx, &lease_key),
                             get_owned(trx, &fence_key),
                             get_owned(trx, &manifest_key),
                         )
                         .await?;
-                    require_concurrent_write_mode(raw_mode)?;
+                    match decode_concurrent_mode_state(raw_mode, raw_backing)? {
+                        ConcurrentModeState::Mrc2(current) if current != backing => {
+                            return Err(TxnError::Fs(stale_backing()));
+                        }
+                        ConcurrentModeState::Mrc2(_) => {}
+                        ConcurrentModeState::Mrc1 => {
+                            return Err(TxnError::Fs(
+                                FsError::new(ErrorCode::Ebusy)
+                                    .with_syscall("publish bound FoundationDB metadata")
+                                    .with_message("MRC1 needs offline migrate-concurrent-backing"),
+                            ));
+                        }
+                        ConcurrentModeState::Legacy => {
+                            return Err(TxnError::Fs(
+                                FsError::enotsup("publish bound FoundationDB metadata")
+                                    .with_message("prepare the volume for bound writers first"),
+                            ));
+                        }
+                    }
                     if raw_lease.is_some()
                         || raw_fence.as_deref() != Some(CONCURRENT_FENCE_SENTINEL)
                     {
                         return Err(TxnError::Fs(
                             FsError::new(ErrorCode::Ebusy)
-                                .with_syscall("publish concurrent FoundationDB metadata")
+                                .with_syscall("publish bound FoundationDB metadata")
                                 .with_message("the concurrent fence sentinel is missing or a legacy writer has claimed this volume"),
                         ));
                     }
@@ -2647,7 +2769,7 @@ impl MetadataStore for FoundationDbMetadataStore {
                     if current_revision != expected_revision {
                         return Err(TxnError::Fs(
                             FsError::new(ErrorCode::Eagain)
-                                .with_syscall("publish concurrent FoundationDB metadata"),
+                                .with_syscall("publish bound FoundationDB metadata"),
                         ));
                     }
                     if let Some(clear_start) =
@@ -2668,6 +2790,72 @@ impl MetadataStore for FoundationDbMetadataStore {
             .await
     }
 
+    async fn migrate_mrc1_to_bound_mode(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        let inner = Arc::clone(&self.0);
+        let keyspace = Keyspace::new(&inner.prefix);
+        let mode_key = keyspace.write_mode();
+        let backing_key = keyspace.metadata_backing();
+        let lease_key = keyspace.lease();
+        let fence_key = keyspace.fence();
+        let manifest_key = keyspace.manifest();
+        let limits = inner.limits;
+        inner
+            .transact_metadata((), move |trx, _| {
+                let mode_key = mode_key.clone();
+                let backing_key = backing_key.clone();
+                let lease_key = lease_key.clone();
+                let fence_key = fence_key.clone();
+                let manifest_key = manifest_key.clone();
+                Box::pin(async move {
+                    configure_transaction(trx, limits)?;
+                    let (raw_mode, raw_backing, raw_lease, raw_fence, raw_manifest) =
+                        futures_util::future::try_join5(
+                            get_owned(trx, &mode_key),
+                            get_owned(trx, &backing_key),
+                            get_owned(trx, &lease_key),
+                            get_owned(trx, &fence_key),
+                            get_owned(trx, &manifest_key),
+                        )
+                        .await?;
+                    if decode_concurrent_mode_state(raw_mode, raw_backing)?
+                        != ConcurrentModeState::Mrc1
+                    {
+                        return Err(TxnError::Fs(
+                            FsError::new(ErrorCode::Ebusy)
+                                .with_syscall("migrate MRC1 FoundationDB metadata")
+                                .with_message("only a fenced MRC1 volume can be migrated"),
+                        ));
+                    }
+                    if raw_lease.is_some()
+                        || raw_fence.as_deref() != Some(CONCURRENT_FENCE_SENTINEL)
+                    {
+                        return Err(TxnError::Fs(backend_error(
+                            "FoundationDB MRC1 mode and legacy fence disagree",
+                        )));
+                    }
+                    let current_manifest = raw_manifest
+                        .map(|bytes| decode_manifest(&bytes).map_err(TxnError::Fs))
+                        .transpose()?;
+                    if current_manifest.map_or(0, |value| value.revision) != expected_revision {
+                        return Err(TxnError::Fs(
+                            FsError::new(ErrorCode::Eagain)
+                                .with_syscall("migrate MRC1 FoundationDB metadata"),
+                        ));
+                    }
+                    // The mode and backing are one commit. Keep the manifest,
+                    // namespace chunks, revision, and fence unchanged.
+                    trx.set(&mode_key, BOUND_CONCURRENT_WRITE_MODE);
+                    trx.set(&backing_key, &backing.as_bytes());
+                    Ok(())
+                })
+            })
+            .await
+    }
+
     async fn flush(&self) -> Result<()> {
         flush_inner(&self.0).await
     }
@@ -2681,19 +2869,10 @@ impl FoundationDbBlockStore {
     pub fn new(storage: &FoundationDbStorage) -> Self {
         storage.blocks()
     }
-}
 
-#[async_trait]
-impl BlockStore for FoundationDbBlockStore {
-    fn durable(&self) -> bool {
-        self.0.durable
-    }
-
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
-        // Database::from_path only creates a client handle. Probe a key in
-        // this exact block keyspace before metadata irreversibly enters CAS
-        // mode, so an unavailable second block cluster fails closed at open.
-        // This transaction has no mutation and cannot create a test object.
+    async fn probe_concurrent_keyspace(&self) -> Result<()> {
+        // Opening Database::from_path creates only a client handle. Probe
+        // this exact keyspace without mutation before claiming its marker.
         let inner = Arc::clone(&self.0);
         let key = Keyspace::new(&inner.prefix).block(&block_id(
             b"mount-rs FoundationDB concurrent block preflight",
@@ -2725,7 +2904,111 @@ impl BlockStore for FoundationDbBlockStore {
             )
             .await
             .map_err(TxnError::into_fs)
-            .map_err(|error| error.with_syscall("prepare concurrent FoundationDB blocks"))
+            .map_err(|error| error.with_syscall("probe concurrent FoundationDB blocks"))
+    }
+}
+
+#[async_trait]
+impl BlockStore for FoundationDbBlockStore {
+    fn durable(&self) -> bool {
+        self.0.durable
+    }
+
+    async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
+        // A Database handle is not proof that its coordinator is reachable.
+        // Preserve the bounded, read-only keyspace probe before creating an
+        // authority marker.
+        self.probe_concurrent_keyspace().await?;
+        let candidate = ConcurrentBackingId::from_bytes(*Uuid::new_v4().as_bytes())?;
+        let inner = Arc::clone(&self.0);
+        let key = Keyspace::new(&inner.prefix).block_authority();
+        let limits = inner.limits;
+        inner
+            .transact_idempotent((), move |trx, _| {
+                let key = key.clone();
+                Box::pin(async move {
+                    configure_transaction(trx, limits)?;
+                    if let Some(raw) = get_owned(trx, &key).await? {
+                        // The normal read adds a conflict range. Concurrent
+                        // creators cannot both commit distinct IDs; a loser
+                        // retries by reading the winner from this same key.
+                        parse_backing_bytes(&raw).ok_or_else(|| TxnError::Fs(stale_backing()))
+                    } else {
+                        trx.set(&key, &candidate.as_bytes());
+                        Ok(candidate)
+                    }
+                })
+            })
+            .await
+    }
+
+    async fn verify_concurrent_backing(&self, expected: ConcurrentBackingId) -> Result<()> {
+        let inner = Arc::clone(&self.0);
+        let key = Keyspace::new(&inner.prefix).block_authority();
+        let limits = FoundationDbLimits {
+            transaction_timeout: inner
+                .limits
+                .transaction_timeout
+                .min(CONCURRENT_BLOCK_PREFLIGHT_TIMEOUT),
+            transaction_retry_limit: inner
+                .limits
+                .transaction_retry_limit
+                .min(CONCURRENT_BLOCK_PREFLIGHT_RETRY_LIMIT),
+            ..inner.limits
+        };
+        inner
+            .db
+            .transact_boxed(
+                (),
+                move |trx, _| {
+                    let key = key.clone();
+                    Box::pin(async move {
+                        configure_transaction(trx, limits)?;
+                        let raw = get_owned(trx, &key).await?;
+                        let actual = raw
+                            .as_deref()
+                            .and_then(parse_backing_bytes)
+                            .ok_or_else(|| TxnError::Fs(stale_backing()))?;
+                        if actual != expected {
+                            return Err(TxnError::Fs(stale_backing()));
+                        }
+                        Ok(())
+                    })
+                },
+                transaction_options(limits, TransactionPolicy::Idempotent),
+            )
+            .await
+            .map_err(TxnError::into_fs)
+    }
+
+    async fn get_for_migration(&self, id: &BlockId) -> Result<Vec<u8>> {
+        validate_block_id(id)?;
+        let inner = Arc::clone(&self.0);
+        let key = Keyspace::new(&inner.prefix).block(id);
+        let requested = id.clone();
+        let limits = inner.limits;
+        inner
+            .transact_idempotent((), move |trx, _| {
+                let key = key.clone();
+                let requested = requested.clone();
+                Box::pin(async move {
+                    configure_transaction(trx, limits)?;
+                    let bytes = get_owned(trx, &key).await?.ok_or_else(|| {
+                        TxnError::Fs(
+                            FsError::new(ErrorCode::Enoent)
+                                .with_syscall("read FoundationDB block for migration"),
+                        )
+                    })?;
+                    if block_id(&bytes) != requested {
+                        return Err(TxnError::Fs(
+                            FsError::new(ErrorCode::Eio)
+                                .with_syscall("verify FoundationDB migration block digest"),
+                        ));
+                    }
+                    Ok(bytes)
+                })
+            })
+            .await
     }
 
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
@@ -2764,15 +3047,24 @@ impl BlockStore for FoundationDbBlockStore {
         validate_block_id(id)?;
         let inner = Arc::clone(&self.0);
         let key = Keyspace::new(&inner.prefix).block(id);
+        let requested = id.clone();
         let limits = inner.limits;
         inner
             .transact_idempotent((), move |trx, _| {
                 let key = key.clone();
+                let requested = requested.clone();
                 Box::pin(async move {
                     configure_transaction(trx, limits)?;
-                    get_owned(trx, &key).await?.ok_or_else(|| {
+                    let bytes = get_owned(trx, &key).await?.ok_or_else(|| {
                         TxnError::Fs(FsError::new(ErrorCode::Enoent).with_syscall("get block"))
-                    })
+                    })?;
+                    if block_id(&bytes) != requested {
+                        return Err(TxnError::Fs(
+                            FsError::new(ErrorCode::Eio)
+                                .with_syscall("verify FoundationDB block digest"),
+                        ));
+                    }
+                    Ok(bytes)
                 })
             })
             .await
@@ -2803,6 +3095,7 @@ impl BlockStore for FoundationDbBlockStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mount_rs_core::storage::{ConcurrentBackingId, ConcurrentModeState};
     use std::io::{self, Write};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
@@ -3147,6 +3440,49 @@ mod tests {
         // uses before it can write a lease or advance the fence.
         assert!(decode_last_fence(CONCURRENT_FENCE_SENTINEL).is_err());
         assert!(decode_concurrent_write_mode(Some(CONCURRENT_WRITE_MODE.to_vec())).unwrap());
+    }
+
+    #[test]
+    fn concurrent_backing_mrc2_fences_legacy_writers() {
+        let error = require_legacy_write_mode(Some(b"MRC2".to_vec()))
+            .expect_err("MRC2 must fence the legacy publisher")
+            .into_fs();
+        assert_eq!(error.code, ErrorCode::Enotsup);
+        assert!(decode_concurrent_write_mode(Some(b"MRC2".to_vec())).is_err());
+    }
+
+    #[test]
+    fn concurrent_backing_mode_and_id_pairs_require_one_valid_authority() {
+        let backing = ConcurrentBackingId::from_bytes([7; 16]).unwrap();
+        assert_eq!(
+            decode_concurrent_mode_state(None, None).unwrap(),
+            ConcurrentModeState::Legacy
+        );
+        assert_eq!(
+            decode_concurrent_mode_state(Some(CONCURRENT_WRITE_MODE.to_vec()), None).unwrap(),
+            ConcurrentModeState::Mrc1
+        );
+        assert_eq!(
+            decode_concurrent_mode_state(Some(b"MRC2".to_vec()), Some(backing.as_bytes().to_vec()))
+                .unwrap(),
+            ConcurrentModeState::Mrc2(backing)
+        );
+        for (mode, id) in [
+            (None, Some(backing.as_bytes().to_vec())),
+            (
+                Some(CONCURRENT_WRITE_MODE.to_vec()),
+                Some(backing.as_bytes().to_vec()),
+            ),
+            (Some(b"MRC2".to_vec()), None),
+            (Some(b"MRC2".to_vec()), Some(vec![0; 16])),
+            (Some(b"MRC2".to_vec()), Some(vec![7; 15])),
+            (Some(b"BAD!".to_vec()), Some(backing.as_bytes().to_vec())),
+        ] {
+            assert!(
+                decode_concurrent_mode_state(mode, id).is_err(),
+                "malformed concurrent mode and ID pair must fail closed"
+            );
+        }
     }
 
     #[test]

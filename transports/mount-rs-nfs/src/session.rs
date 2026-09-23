@@ -5,6 +5,7 @@
 //! RPC reply. This keeps protocol behavior independently testable and is also
 //! the boundary used by the TCP server.
 
+use mount_rs_core::diagnostics::RequestTrace;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -2572,6 +2573,7 @@ impl Nfs3Session {
     ) -> Result<(), DispatchError> {
         let request = read_create_args(args)?;
         args.end("CREATE arguments")?;
+        let mut trace = RequestTrace::new("nfs", "create");
         let mut directory = None;
         let mut before = None;
         let mut created_identity = None;
@@ -2588,6 +2590,7 @@ impl Nfs3Session {
             };
             Self::check_name(&request.where_.name)?;
             let path = Self::join_path(&dir, &request.where_.name);
+            trace.stage("open_child_start", format_args!("path={path}"));
             directory = Some(dir.clone());
             let parent = self.stat_of(&dir).await.ok();
             before = parent.as_ref().map(wcc_attr_of);
@@ -2617,6 +2620,7 @@ impl Nfs3Session {
                 .await
             {
                 Ok((handle, identity)) => {
+                    trace.stage("open_child_end", format_args!("path={path} outcome=ok"));
                     created_identity = identity;
                     if request.mode == CREATE_EXCLUSIVE {
                         let verifier = request
@@ -2628,7 +2632,9 @@ impl Nfs3Session {
                             .expect("NFS exclusive-create lock")
                             .set(path.clone(), verifier, created_identity);
                     }
+                    trace.stage("create_handle_close_start", format_args!("path={path}"));
                     handle.close().await?;
+                    trace.stage("create_handle_close_end", format_args!("path={path}"));
                     true
                 }
                 Err(error) if error.code == ErrorCode::Eexist => false,
@@ -2641,8 +2647,10 @@ impl Nfs3Session {
                         path: path.clone(),
                         identity,
                     };
+                    trace.stage("claim_owner_start", format_args!("path={path}"));
                     self.claim_created_owner(&target, credentials, parent.as_ref(), false, mode)
                         .await?;
+                    trace.stage("claim_owner_end", format_args!("path={path}"));
                     if request.mode != CREATE_EXCLUSIVE
                         && let Some(attributes) = request.attributes.as_ref()
                     {
@@ -2730,6 +2738,7 @@ impl Nfs3Session {
         .await;
         match result {
             Ok(path) => {
+                trace.stage("created_response_start", format_args!("path={path}"));
                 self.created_response(
                     writer,
                     directory.as_deref().unwrap_or("/"),
@@ -2738,8 +2747,10 @@ impl Nfs3Session {
                     created_identity,
                 )
                 .await;
+                trace.finish(format_args!("path={path} outcome=response_ready"));
             }
             Err(error) => {
+                trace.finish(format_args!("outcome={}", error.code.as_str()));
                 self.record_error();
                 write_create_res(
                     writer,

@@ -6,14 +6,15 @@ This crate implements immutable byte blocks over any
 the chosen backend is durable; the adapter does not infer that from the client
 type.
 
-The generic injected adapter rejects `prepare_concurrent_mode` because an
+The generic injected adapter rejects `prepare_concurrent_backing` because an
 arbitrary client and durability declaration cannot prove that two mounts use
-the same service. Configured R2, AWS S3, and RustFS providers use the shared
-`probe_configured_concurrent_prefix` before their metadata stores enable
-concurrent publication. It conditionally creates and directly reads one stable
-`_mount-rs-concurrent-probe-v1` object under the block prefix. That object is
-ignored by block reconciliation and stays in the prefix until an operator
-explicitly removes it.
+the same service. Configured signed providers probe Create/read access, then
+claim an immutable `_mount-rs-backing-id-v2` object under the block prefix.
+It holds the `MRC2` header and the 16-byte backing authority ID. Established
+mounts verify this marker directly without recreating it; block reconciliation
+ignores it. RustFS uses a signed client. R2 requires an explicit live
+independent-client conditional-Create/conflict/read-back qualification for its
+configured endpoint and bucket before it can claim a concurrent backing.
 
 The adapter validates its prefix and block IDs, uses conditional creation for
 content-addressed blocks, tracks bounded diagnostics, and reconciles only

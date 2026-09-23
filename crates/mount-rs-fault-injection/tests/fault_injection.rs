@@ -2,7 +2,8 @@ use async_trait::async_trait;
 use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
 use mount_rs_core::chunking::ChunkerConfig;
 use mount_rs_core::storage::{
-    BlockId, BlockStore, LoadedMetadata, MetadataStore, Namespace, WriterLease,
+    BlockId, BlockStore, ConcurrentBackingId, ConcurrentModeState, LoadedMetadata, MetadataStore,
+    Namespace, WriterLease,
 };
 use mount_rs_core::{ErrorCode, FsError, Result};
 use mount_rs_fault_injection::{
@@ -52,6 +53,45 @@ impl MetadataStore for FakeMetadata {
             revision,
             namespace: None,
         })
+    }
+
+    async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
+        Ok(ConcurrentModeState::Mrc2(authority()))
+    }
+
+    async fn prepare_bound_concurrent_mode(&self, backing: ConcurrentBackingId) -> Result<()> {
+        if backing == authority() {
+            Ok(())
+        } else {
+            Err(FsError::new(ErrorCode::Estale))
+        }
+    }
+
+    async fn publish_bound_if_revision(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+        _namespace: Namespace,
+    ) -> Result<u64> {
+        if backing != authority() {
+            return Err(FsError::new(ErrorCode::Estale));
+        }
+        let mut state = self.state.lock().unwrap();
+        state.publish_calls += 1;
+        state.revision = expected_revision + 1;
+        Ok(state.revision)
+    }
+
+    async fn migrate_mrc1_to_bound_mode(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        if backing == authority() && expected_revision == 7 {
+            Ok(())
+        } else {
+            Err(FsError::new(ErrorCode::Estale))
+        }
     }
 
     async fn acquire_writer(&self, owner: &str, ttl: Duration) -> Result<WriterLease> {
@@ -123,6 +163,23 @@ impl BlockStore for FakeBlocks {
         true
     }
 
+    async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
+        Ok(authority())
+    }
+
+    async fn verify_concurrent_backing(&self, expected: ConcurrentBackingId) -> Result<()> {
+        if expected == authority() {
+            Ok(())
+        } else {
+            Err(FsError::new(ErrorCode::Estale))
+        }
+    }
+
+    async fn get_for_migration(&self, _id: &BlockId) -> Result<Vec<u8>> {
+        self.state.lock().unwrap().gets += 1;
+        Ok(vec![4, 5, 6])
+    }
+
     async fn put(&self, _bytes: &[u8]) -> Result<BlockId> {
         self.state.lock().unwrap().puts += 1;
         Ok(BlockId("fake-block".to_owned()))
@@ -159,6 +216,77 @@ fn namespace() -> Namespace {
         },
         nodes: BTreeMap::new(),
     }
+}
+
+fn authority() -> ConcurrentBackingId {
+    ConcurrentBackingId::from_bytes([0xb1; 16]).unwrap()
+}
+
+#[tokio::test]
+async fn bound_authority_forwards_and_publish_fault_prevents_inner_commit() {
+    let inner = FakeMetadata::new();
+    let rule = FaultRule::new(
+        FaultBoundary::Metadata,
+        FaultOperation::Publish,
+        FaultPhase::Before,
+        FaultOccurrence::Once,
+        FaultAction::Error(ErrorCode::Eio),
+    );
+    let injector = FaultInjector::new(FaultPlan::new(71, 1, vec![rule]).unwrap()).unwrap();
+    let metadata = FaultMetadataStore::new(inner.clone(), injector);
+    assert_eq!(
+        metadata.concurrent_mode_state().await.unwrap(),
+        ConcurrentModeState::Mrc2(authority())
+    );
+    metadata
+        .prepare_bound_concurrent_mode(authority())
+        .await
+        .unwrap();
+    metadata
+        .migrate_mrc1_to_bound_mode(authority(), 7)
+        .await
+        .unwrap();
+    code(
+        metadata
+            .publish_bound_if_revision(authority(), 0, namespace())
+            .await,
+        ErrorCode::Eio,
+    );
+    assert_eq!(inner.publish_calls(), 0);
+
+    let inner_blocks = FakeBlocks::new();
+    let blocks = FaultBlockStore::new(inner_blocks.clone(), FaultInjector::disabled(72));
+    assert_eq!(
+        blocks.prepare_concurrent_backing().await.unwrap(),
+        authority()
+    );
+    blocks.verify_concurrent_backing(authority()).await.unwrap();
+    assert_eq!(
+        blocks
+            .get_for_migration(&BlockId("migration".into()))
+            .await
+            .unwrap(),
+        vec![4, 5, 6]
+    );
+    assert_eq!(inner_blocks.counts().1, 1);
+
+    let read_rule = FaultRule::new(
+        FaultBoundary::Blocks,
+        FaultOperation::Get,
+        FaultPhase::Before,
+        FaultOccurrence::Once,
+        FaultAction::Error(ErrorCode::Eio),
+    );
+    let read_fault = FaultInjector::new(FaultPlan::new(73, 1, vec![read_rule]).unwrap()).unwrap();
+    let unread = FakeBlocks::new();
+    let faulted_blocks = FaultBlockStore::new(unread.clone(), read_fault);
+    code(
+        faulted_blocks
+            .get_for_migration(&BlockId("migration".into()))
+            .await,
+        ErrorCode::Eio,
+    );
+    assert_eq!(unread.counts().1, 0);
 }
 
 fn code(result: Result<impl Sized>, expected: ErrorCode) {

@@ -1,9 +1,11 @@
 //! Filesystem facade and its shutdown lifecycle.
 
+use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 
-use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
+use mount_rs_chunked::{ChunkedFs, ChunkedOptions, migrate_mrc1_backing};
+use mount_rs_core::storage::ConcurrentBackingId;
 use mount_rs_core::{ErrorCode, FsDriver, FsError, Result};
 use mount_rs_host::{HostFs, HostFsOptions};
 use mount_rs_memfs::{MemoryFs, MemoryOptions};
@@ -67,51 +69,7 @@ impl Filesystem {
             return Err(FsError::new(ErrorCode::Einval)
                 .with_message("chunk_size_bytes must be greater than zero"));
         }
-        if options.concurrent_writes {
-            match &options.metadata {
-                StoreConfig::FoundationDb {
-                    lease_authority: FoundationDbLeaseAuthority::RevisionCas,
-                    ..
-                }
-                | StoreConfig::Pglite { .. } => {}
-                StoreConfig::Sqlite { path } if sqlite_durable_path(path) => {}
-                StoreConfig::Sqlite { .. } => {
-                    return Err(FsError::new(ErrorCode::Einval).with_message(
-                        "concurrent_writes SQLite metadata requires a durable local database path",
-                    ));
-                }
-                _ => {
-                    return Err(FsError::new(ErrorCode::Einval).with_message(
-                        "concurrent_writes requires SQLite, PGlite, or FoundationDB revision-CAS metadata",
-                    ));
-                }
-            }
-            match &options.blocks {
-                StoreConfig::Memory => {
-                    return Err(FsError::new(ErrorCode::Einval).with_message(
-                        "concurrent_writes requires a shared block provider; memory blocks are unavailable to independent mounts",
-                    ));
-                }
-                StoreConfig::Sqlite { path }
-                    if !matches!(&options.metadata, StoreConfig::Sqlite { .. })
-                        || !sqlite_durable_path(path) =>
-                {
-                    return Err(FsError::new(ErrorCode::Einval).with_message(
-                        "concurrent_writes requires a shared block provider; local SQLite blocks require local SQLite metadata on the same host and a durable block database path",
-                    ));
-                }
-                _ => {}
-            }
-        } else if matches!(
-            &options.metadata,
-            StoreConfig::FoundationDb {
-                lease_authority: FoundationDbLeaseAuthority::RevisionCas,
-                ..
-            }
-        ) {
-            return Err(FsError::new(ErrorCode::Einval)
-                .with_message("FoundationDB revision-CAS metadata requires concurrent_writes"));
-        }
+        validate_concurrent_split_options(&options)?;
         let chunk_options = ChunkedOptions::fixed(options.owner, options.chunk_size_bytes)?
             .with_lease_ttl(options.lease_ttl)
             .with_concurrent_writes(options.concurrent_writes)
@@ -127,6 +85,25 @@ impl Filesystem {
                 Err(error)
             }
         }
+    }
+
+    /// Bind an offline MRC1 volume to its verified shared block backing.
+    /// Call this only after all older mounts of the volume have stopped.
+    /// Provider teardown is attempted after migration; teardown errors do not
+    /// replace an acknowledged backing ID or the original migration error.
+    pub async fn migrate_concurrent_backing(
+        options: SplitOptions,
+        expected_revision: u64,
+    ) -> Result<ConcurrentBackingId> {
+        if !options.concurrent_writes {
+            return Err(FsError::new(ErrorCode::Einval)
+                .with_message("migrate-concurrent-backing requires concurrent_writes"));
+        }
+        validate_concurrent_split_options(&options)?;
+        let opened = open_storage(&options.metadata, &options.blocks).await?;
+        let migration =
+            migrate_mrc1_backing(&opened.metadata, &opened.blocks, expected_revision).await;
+        complete_migration_after_teardown(migration, opened.close()).await
     }
 
     /// Return the shared driver contract used by transports and loopback
@@ -192,6 +169,65 @@ fn sqlite_durable_path(path: &Path) -> bool {
     !value.is_empty() && value != ":memory:" && !value.starts_with("file:")
 }
 
+async fn complete_migration_after_teardown(
+    migration: Result<ConcurrentBackingId>,
+    teardown: impl Future<Output = Result<()>>,
+) -> Result<ConcurrentBackingId> {
+    // A committed MRC2 CAS cannot be reversed by a later close error. Keep
+    // provider teardown best effort and preserve the migration outcome.
+    let _ = teardown.await;
+    migration
+}
+
+fn validate_concurrent_split_options(options: &SplitOptions) -> Result<()> {
+    if options.concurrent_writes {
+        match &options.metadata {
+            StoreConfig::FoundationDb {
+                lease_authority: FoundationDbLeaseAuthority::RevisionCas,
+                ..
+            }
+            | StoreConfig::Pglite { .. } => {}
+            StoreConfig::Sqlite { path } if sqlite_durable_path(path) => {}
+            StoreConfig::Sqlite { .. } => {
+                return Err(FsError::new(ErrorCode::Einval).with_message(
+                    "concurrent_writes SQLite metadata requires a durable local database path",
+                ));
+            }
+            _ => {
+                return Err(FsError::new(ErrorCode::Einval).with_message(
+                    "concurrent_writes requires SQLite, PGlite, or FoundationDB revision-CAS metadata",
+                ));
+            }
+        }
+        match &options.blocks {
+            StoreConfig::Memory => {
+                return Err(FsError::new(ErrorCode::Einval).with_message(
+                    "concurrent_writes requires a shared block provider; memory blocks are unavailable to independent mounts",
+                ));
+            }
+            StoreConfig::Sqlite { path }
+                if !matches!(&options.metadata, StoreConfig::Sqlite { .. })
+                    || !sqlite_durable_path(path) =>
+            {
+                return Err(FsError::new(ErrorCode::Einval).with_message(
+                    "concurrent_writes requires a shared block provider; local SQLite blocks require local SQLite metadata on the same host and a durable block database path",
+                ));
+            }
+            _ => {}
+        }
+    } else if matches!(
+        &options.metadata,
+        StoreConfig::FoundationDb {
+            lease_authority: FoundationDbLeaseAuthority::RevisionCas,
+            ..
+        }
+    ) {
+        return Err(FsError::new(ErrorCode::Einval)
+            .with_message("FoundationDB revision-CAS metadata requires concurrent_writes"));
+    }
+    Ok(())
+}
+
 impl Clone for Filesystem {
     fn clone(&self) -> Self {
         let inner = match &self.inner {
@@ -203,5 +239,75 @@ impl Clone for Filesystem {
             }
         };
         Self { inner }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn migrate_requires_concurrent_writes_before_opening_backing() {
+        let options = SplitOptions::memory("sdk-migration-disabled", 4096);
+        let error = Filesystem::migrate_concurrent_backing(options, 0)
+            .await
+            .expect_err("migration requires the concurrent writer mode");
+        assert_eq!(error.code, ErrorCode::Einval);
+        assert!(error.to_string().contains("concurrent_writes"));
+    }
+
+    #[tokio::test]
+    async fn migrate_reuses_split_pairing_rules_before_opening_provider() {
+        let options = SplitOptions {
+            metadata: StoreConfig::FoundationDb {
+                cluster_file: "/nonexistent/sdk-migration-fdb.cluster".into(),
+                volume_key: "sdk-migration-pairing".to_owned(),
+                durable: true,
+                lease_authority: FoundationDbLeaseAuthority::RevisionCas,
+            },
+            blocks: StoreConfig::Memory,
+            ..SplitOptions::memory("sdk-migration-pairing", 4096)
+        }
+        .with_concurrent_writes(true);
+        let error = Filesystem::migrate_concurrent_backing(options, 0)
+            .await
+            .expect_err("local blocks must fail before FoundationDB opens");
+        assert_eq!(error.code, ErrorCode::Einval);
+        assert!(error.to_string().contains("shared block"));
+    }
+
+    #[tokio::test]
+    async fn acknowledged_migration_keeps_backing_id_after_teardown_error() {
+        let backing = ConcurrentBackingId::from_bytes([0x42; 16]).unwrap();
+        let close_attempted = AtomicBool::new(false);
+        let teardown = async {
+            close_attempted.store(true, Ordering::SeqCst);
+            Err::<(), FsError>(FsError::new(ErrorCode::Eio).with_syscall("provider close"))
+        };
+
+        let returned = complete_migration_after_teardown(Ok(backing), teardown)
+            .await
+            .expect("an acknowledged migration remains successful after teardown fails");
+        assert!(close_attempted.load(Ordering::SeqCst));
+        assert_eq!(returned, backing);
+    }
+
+    #[tokio::test]
+    async fn failed_migration_still_attempts_teardown_and_keeps_primary_error() {
+        let close_attempted = AtomicBool::new(false);
+        let teardown = async {
+            close_attempted.store(true, Ordering::SeqCst);
+            Err::<(), FsError>(FsError::new(ErrorCode::Eio).with_syscall("provider close"))
+        };
+
+        let error = complete_migration_after_teardown(
+            Err(FsError::new(ErrorCode::Eagain).with_syscall("migrate MRC1 backing")),
+            teardown,
+        )
+        .await
+        .expect_err("migration failure remains primary after teardown fails");
+        assert!(close_attempted.load(Ordering::SeqCst));
+        assert_eq!(error.code, ErrorCode::Eagain);
     }
 }

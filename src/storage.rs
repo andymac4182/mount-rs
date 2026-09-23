@@ -758,14 +758,6 @@ pub trait MetadataStore: Send + Sync {
     /// False for volatile stores; never advertise durable commits for memfs.
     fn durable(&self) -> bool;
     async fn load(&self) -> Result<LoadedMetadata>;
-    /// Enter an opt-in, persistent concurrent-writer mode before opening the
-    /// namespace. A provider must fence every legacy lease operation after
-    /// this succeeds, and reject conversion while a legacy writer may exist.
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
-        Err(FsError::new(ErrorCode::Enotsup)
-            .with_syscall("prepare concurrent metadata")
-            .with_message("metadata provider does not support concurrent writers"))
-    }
     /// Inspect the persisted writer mode and bound block authority.
     async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
         Err(FsError::new(ErrorCode::Enotsup).with_syscall("inspect concurrent metadata mode"))
@@ -786,19 +778,6 @@ pub trait MetadataStore: Send + Sync {
         lease: &WriterLease,
         namespace: Namespace,
     ) -> Result<u64>;
-    /// Atomically publish a namespace only if its persisted manifest still
-    /// has `expected_revision`. EAGAIN means no commit and permits a caller
-    /// to reload and reconstruct its original operation. An ambiguous I/O
-    /// error must never be retried as though it were a known conflict.
-    async fn publish_if_revision(
-        &self,
-        _expected_revision: u64,
-        _namespace: Namespace,
-    ) -> Result<u64> {
-        Err(FsError::new(ErrorCode::Enotsup)
-            .with_syscall("publish concurrent metadata")
-            .with_message("metadata provider does not support concurrent writers"))
-    }
     /// Publish metadata with a compare-and-swap bound to the supplied backing.
     /// A backing-authority mismatch returns `ESTALE`. `EAGAIN` is reserved for
     /// a known revision conflict where no commit occurred; ambiguous backend
@@ -836,15 +815,6 @@ pub trait MetadataStore: Send + Sync {
 #[async_trait]
 pub trait BlockStore: Send + Sync {
     fn durable(&self) -> bool;
-    /// Validate that this backing can participate in the provider's shared
-    /// concurrent mode before metadata is irreversibly converted to CAS.
-    /// Providers must opt in after proving that independently opened clients
-    /// see the same immutable block identities and bytes.
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
-        Err(FsError::new(ErrorCode::Enotsup)
-            .with_syscall("prepare concurrent blocks")
-            .with_message("block provider has not declared a shared concurrent backing"))
-    }
     /// Establish and return the stable identity of this shared block authority.
     async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
         Err(FsError::new(ErrorCode::Enotsup).with_syscall("prepare concurrent backing"))

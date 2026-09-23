@@ -13,8 +13,8 @@ use async_trait::async_trait;
 use mount_rs_core::driver::{FileHandle, FsDriver};
 use mount_rs_core::error::Result;
 use mount_rs_core::storage::{
-    BlockId, BlockReconcileReport, BlockStore, LoadedMetadata, MetadataStore, Namespace,
-    WriterLease,
+    BlockId, BlockReconcileReport, BlockStore, ConcurrentBackingId, ConcurrentModeState,
+    LoadedMetadata, MetadataStore, Namespace, WriterLease,
 };
 use mount_rs_core::types::{Capabilities, DirEntry, MkdirOptions, Stats, StatsFs};
 use std::collections::BTreeSet;
@@ -1107,13 +1107,24 @@ where
             .await
     }
 
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
+    async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
         self.telemetry
             .observe_fs(
                 "provider.metadata",
-                "concurrent.prepare",
+                "concurrent.mode",
                 None,
-                self.inner.prepare_concurrent_mode(),
+                self.inner.concurrent_mode_state(),
+            )
+            .await
+    }
+
+    async fn prepare_bound_concurrent_mode(&self, backing: ConcurrentBackingId) -> Result<()> {
+        self.telemetry
+            .observe_fs(
+                "provider.metadata",
+                "concurrent.prepare_bound",
+                None,
+                self.inner.prepare_bound_concurrent_mode(backing),
             )
             .await
     }
@@ -1167,17 +1178,35 @@ where
             .await
     }
 
-    async fn publish_if_revision(
+    async fn publish_bound_if_revision(
         &self,
+        backing: ConcurrentBackingId,
         expected_revision: u64,
         namespace: Namespace,
     ) -> Result<u64> {
         self.telemetry
             .observe_fs(
                 "provider.metadata",
-                "concurrent.publish",
+                "concurrent.publish_bound",
                 None,
-                self.inner.publish_if_revision(expected_revision, namespace),
+                self.inner
+                    .publish_bound_if_revision(backing, expected_revision, namespace),
+            )
+            .await
+    }
+
+    async fn migrate_mrc1_to_bound_mode(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        self.telemetry
+            .observe_fs(
+                "provider.metadata",
+                "concurrent.migrate",
+                None,
+                self.inner
+                    .migrate_mrc1_to_bound_mode(backing, expected_revision),
             )
             .await
     }
@@ -1222,13 +1251,35 @@ where
         self.inner.durable()
     }
 
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
+    async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
         self.telemetry
             .observe_fs(
                 "provider.blocks",
-                "concurrent.prepare",
+                "concurrent.prepare_backing",
                 None,
-                self.inner.prepare_concurrent_mode(),
+                self.inner.prepare_concurrent_backing(),
+            )
+            .await
+    }
+
+    async fn verify_concurrent_backing(&self, expected: ConcurrentBackingId) -> Result<()> {
+        self.telemetry
+            .observe_fs(
+                "provider.blocks",
+                "concurrent.verify_backing",
+                None,
+                self.inner.verify_concurrent_backing(expected),
+            )
+            .await
+    }
+
+    async fn get_for_migration(&self, id: &BlockId) -> Result<Vec<u8>> {
+        self.telemetry
+            .observe_fs(
+                "provider.blocks",
+                "concurrent.migration_read",
+                None,
+                self.inner.get_for_migration(id),
             )
             .await
     }
@@ -1597,6 +1648,7 @@ pub use http_propagation::{HeaderExtractor, HeaderInjector, extract_headers, inj
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mount_rs_core::storage::ConcurrentBackingId;
     use mount_rs_core::{
         ErrorCode, FsDriver, FsError, GuardedMutation, GuardedMutationResult, GuardedRead,
         GuardedReadResult, GuardedSetattr, ObservedEntry, OpenFlags, PathGuard, PathIdentity,
@@ -1611,7 +1663,7 @@ mod tests {
             true
         }
 
-        async fn prepare_concurrent_mode(&self) -> Result<()> {
+        async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
             Err(FsError::new(ErrorCode::Enotsup).with_syscall("prepare rejecting blocks"))
         }
 
@@ -1633,11 +1685,75 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn instrumented_blocks_forward_concurrent_preflight_and_observe_rejection() {
+    async fn instrumented_blocks_forward_concurrent_backing_rejection_and_observe_it() {
         let telemetry = Telemetry::new(TelemetryConfig::enabled("block-preflight-test"));
         let blocks = InstrumentedBlockStore::new(RejectingConcurrentBlocks, telemetry.clone());
-        let error = blocks.prepare_concurrent_mode().await.unwrap_err();
+        let error = blocks.prepare_concurrent_backing().await.unwrap_err();
         assert!(error.is(ErrorCode::Enotsup));
+        assert_eq!(telemetry.snapshot().errors, 1);
+    }
+
+    struct IdentityBackedBlocks(ConcurrentBackingId);
+
+    #[async_trait]
+    impl BlockStore for IdentityBackedBlocks {
+        fn durable(&self) -> bool {
+            true
+        }
+
+        async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
+            Ok(self.0)
+        }
+
+        async fn verify_concurrent_backing(&self, expected: ConcurrentBackingId) -> Result<()> {
+            if expected == self.0 {
+                Ok(())
+            } else {
+                Err(FsError::new(ErrorCode::Estale))
+            }
+        }
+
+        async fn get_for_migration(&self, id: &BlockId) -> Result<Vec<u8>> {
+            Ok(id.0.as_bytes().to_vec())
+        }
+
+        async fn put(&self, _bytes: &[u8]) -> Result<BlockId> {
+            unreachable!()
+        }
+        async fn get(&self, _id: &BlockId) -> Result<Vec<u8>> {
+            unreachable!()
+        }
+        async fn flush(&self) -> Result<()> {
+            unreachable!()
+        }
+        async fn delete(&self, _id: &BlockId) -> Result<()> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn instrumented_blocks_forward_backing_identity_and_direct_read() {
+        let id = ConcurrentBackingId::from_bytes([0xa1; 16]).unwrap();
+        let telemetry = Telemetry::new(TelemetryConfig::enabled("backing-id-test"));
+        let blocks = InstrumentedBlockStore::new(IdentityBackedBlocks(id), telemetry.clone());
+        assert_eq!(blocks.prepare_concurrent_backing().await.unwrap(), id);
+        blocks.verify_concurrent_backing(id).await.unwrap();
+        let other = ConcurrentBackingId::from_bytes([0xa2; 16]).unwrap();
+        assert_eq!(
+            blocks
+                .verify_concurrent_backing(other)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Estale
+        );
+        assert_eq!(
+            blocks
+                .get_for_migration(&BlockId("direct".into()))
+                .await
+                .unwrap(),
+            b"direct"
+        );
         assert_eq!(telemetry.snapshot().errors, 1);
     }
 

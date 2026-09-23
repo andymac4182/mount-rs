@@ -8,6 +8,7 @@
 
 #![cfg(target_os = "macos")]
 
+use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
 use std::ffi::{CStr, CString};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -97,6 +98,7 @@ fn mounted_nfs_report_accepts_colored_stdout_without_warnings() {
 
 fn run_journal(journal: &str) {
     let scope = TestScope::new(journal);
+    initialize_backing_databases(&scope.metadata, &scope.blocks);
     configure_local_journal(&scope.metadata, journal);
     configure_local_journal(&scope.blocks, journal);
     let config_a = scope.write_config("a");
@@ -173,10 +175,19 @@ fn run_journal(journal: &str) {
         load_started.elapsed().as_millis()
     );
 
-    let inner_lock_status = probe_inner_sqlite_lock(&scope);
-    eprintln!(
-        "SQLITE_INNER_NFS_LOCK journal={journal} status={inner_lock_status} clients=2 servers=2"
-    );
+    if journal == "DELETE"
+        && std::env::var("MOUNT_RS_CLI_NATIVE_SQLITE_INNER_MATRIX")
+            .ok()
+            .as_deref()
+            == Some("1")
+    {
+        run_inner_sqlite_matrix(&scope);
+    } else {
+        let inner_lock_status = probe_inner_sqlite_lock(&scope);
+        eprintln!(
+            "SQLITE_INNER_NFS_LOCK journal={journal} status={inner_lock_status} clients=2 servers=2"
+        );
+    }
 
     mount_b
         .clean_stop()
@@ -184,6 +195,19 @@ fn run_journal(journal: &str) {
     mount_a
         .clean_stop()
         .expect("A clean SIGINT and native unmount");
+    if journal == "DELETE"
+        && std::env::var("MOUNT_RS_CLI_NATIVE_SQLITE_INNER_MATRIX")
+            .ok()
+            .as_deref()
+            == Some("1")
+        && std::env::var("MOUNT_RS_CLI_NATIVE_SQLITE_INNER_TRACE")
+            .ok()
+            .as_deref()
+            == Some("1")
+    {
+        mount_a.report_inner_trace("A");
+        mount_b.report_inner_trace("B");
+    }
     assert!(!is_mounted_at(&scope.mountpoint_a).expect("inspect A mount entry"));
     assert!(!is_mounted_at(&scope.mountpoint_b).expect("inspect B mount entry"));
     check_backing_integrity(&scope, journal);
@@ -207,6 +231,7 @@ fn run_journal(journal: &str) {
 
 fn run_one_process_two_views() {
     let scope = TestScope::new("ONE-CLI-DELETE");
+    initialize_backing_databases(&scope.metadata, &scope.blocks);
     configure_local_journal(&scope.metadata, "DELETE");
     configure_local_journal(&scope.blocks, "DELETE");
     let config = scope.write_config("a");
@@ -344,6 +369,7 @@ fn run_nfs_backing_diagnostic() {
 
     let metadata_a = scope.backing_a.join("metadata.sqlite");
     let metadata_b = scope.backing_b.join("metadata.sqlite");
+    initialize_backing_databases(&metadata_a, &scope.blocks);
     let configured = try_configure_journal(&metadata_a, "DELETE")
         .expect("candidate NFS metadata SQLite file initializes");
     eprintln!(
@@ -407,6 +433,7 @@ fn run_mixed_nfs_blocks_rejection() {
         .expect("disposable NFS blocks backing view mounts");
 
     let blocks_on_nfs = scope.backing_a.join("blocks.sqlite");
+    initialize_backing_databases(&scope.metadata, &blocks_on_nfs);
     configure_local_journal(&scope.metadata, "DELETE");
     try_configure_journal(&blocks_on_nfs, "DELETE")
         .expect("initialize disposable NFS block SQLite database");
@@ -567,6 +594,13 @@ fn await_absent(path: &Path) -> io::Result<()> {
     }
 }
 
+fn initialize_backing_databases(metadata: &Path, blocks: &Path) {
+    // Let the provider create and stamp fresh owned files before Python opens
+    // them; an already existing unstamped metadata file cannot enroll in MRC2.
+    drop(SqliteMetadataStore::open(metadata).expect("create stamped metadata database"));
+    drop(SqliteBlockStore::open(blocks).expect("create block database"));
+}
+
 fn configure_local_journal(path: &Path, journal: &str) {
     try_configure_journal(path, journal).expect("configure owned SQLite backing journal");
 }
@@ -627,6 +661,59 @@ for name, path in (("metadata", sys.argv[1]), ("blocks", sys.argv[2])):
 fn probe_inner_sqlite_lock(scope: &TestScope) -> String {
     probe_sqlite_lock(&scope.mountpoint_a, &scope.mountpoint_b)
         .expect("probe SQLite application lock inside both NFS views")
+}
+
+fn run_inner_sqlite_matrix(scope: &TestScope) {
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/sqlite_nfs_adversarial.py");
+    let result = run_python_report_with_timeout(
+        vec![
+            script.to_string_lossy().into_owned(),
+            "--mount".to_owned(),
+            scope.mountpoint_a.to_string_lossy().into_owned(),
+            "--second-view".to_owned(),
+            scope.mountpoint_b.to_string_lossy().into_owned(),
+            "--workers".to_owned(),
+            "2".to_owned(),
+            "--transactions".to_owned(),
+            "8".to_owned(),
+        ],
+        Duration::from_secs(420),
+    )
+    .expect("run SQLite application journal/load matrix inside two native NFS views");
+    let mut summary = None;
+    for line in result.stdout.lines() {
+        let report: serde_json::Value =
+            serde_json::from_str(line).expect("parse SQLite NFS matrix report");
+        if report["case"] == "summary" {
+            summary = Some(report.clone());
+        }
+        eprintln!("SQLITE_INNER_NFS_MATRIX {report}");
+    }
+    let summary = summary.expect("SQLite NFS matrix emitted a summary");
+    let failed = summary["failed"]
+        .as_u64()
+        .expect("SQLite NFS matrix summary has a failure count");
+    assert_eq!(
+        result.status.success(),
+        failed == 0,
+        "SQLite NFS matrix exit and summary disagree: status={}; summary={summary}; stderr={}",
+        result.status,
+        result.stderr
+    );
+    assert!(
+        result.stderr.trim().is_empty(),
+        "SQLite NFS matrix fixture or cleanup failed: {}",
+        result.stderr
+    );
+    eprintln!(
+        "SQLITE_INNER_NFS_MATRIX_RESULT status={} failed={failed} topology=two-independent-cli-views",
+        if failed == 0 {
+            "no_failure_observed"
+        } else {
+            "unsupported_app_profile_failed"
+        }
+    );
 }
 
 fn probe_sqlite_lock(first: &Path, second: &Path) -> Result<String, String> {
@@ -707,6 +794,30 @@ finally:
 }
 
 fn run_python_bounded(args: Vec<String>) -> Result<String, String> {
+    run_python_with_timeout(args, PYTHON_TIMEOUT)
+}
+
+fn run_python_with_timeout(args: Vec<String>, timeout: Duration) -> Result<String, String> {
+    let result = run_python_report_with_timeout(args, timeout)?;
+    if !result.status.success() {
+        return Err(format!(
+            "Python fixture exited {}; stdout={}; stderr={}",
+            result.status, result.stdout, result.stderr
+        ));
+    }
+    Ok(result.stdout)
+}
+
+struct PythonRun {
+    status: ExitStatus,
+    stdout: String,
+    stderr: String,
+}
+
+fn run_python_report_with_timeout(
+    args: Vec<String>,
+    timeout: Duration,
+) -> Result<PythonRun, String> {
     let mut child = Command::new("python3")
         .args(&args)
         .env("PYTHONDONTWRITEBYTECODE", "1")
@@ -729,7 +840,7 @@ fn run_python_bounded(args: Vec<String>) -> Result<String, String> {
             .read_to_string(&mut text)
             .map(|_| text)
     });
-    let status = wait_child_bounded(&mut child, PYTHON_TIMEOUT);
+    let status = wait_child_bounded(&mut child, timeout);
     if status.is_none() {
         let _ = child.kill();
         let _ = child.wait();
@@ -742,13 +853,12 @@ fn run_python_bounded(args: Vec<String>) -> Result<String, String> {
         .join()
         .map_err(|_| "join Python stderr reader".to_owned())?
         .map_err(|error| error.to_string())?;
-    let status = status.ok_or_else(|| format!("Python fixture exceeded {PYTHON_TIMEOUT:?}"))?;
-    if !status.success() {
-        return Err(format!(
-            "Python fixture exited {status}; stdout={stdout}; stderr={stderr}"
-        ));
-    }
-    Ok(stdout)
+    let status = status.ok_or_else(|| format!("Python fixture exceeded {timeout:?}"))?;
+    Ok(PythonRun {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 struct TestScope {
@@ -934,7 +1044,15 @@ impl NativeMount {
         let trace = std::env::var("MOUNT_RS_CLI_SQLITE_NFS_BACKING_TRACE")
             .ok()
             .as_deref()
-            == Some("1");
+            == Some("1")
+            || (std::env::var("MOUNT_RS_CLI_NATIVE_SQLITE_INNER_MATRIX")
+                .ok()
+                .as_deref()
+                == Some("1")
+                && std::env::var("MOUNT_RS_CLI_NATIVE_SQLITE_INNER_TRACE")
+                    .ok()
+                    .as_deref()
+                    == Some("1"));
         command.arg(if trace { "--verbose" } else { "--quiet" });
         if let Some(extra) = extra_mountpoint {
             command.arg("--also-mountpoint").arg(extra);
@@ -1001,6 +1119,25 @@ impl NativeMount {
 
     fn clean_stop(&mut self) -> Result<(), String> {
         self.stop(true)
+    }
+
+    fn report_inner_trace(&self, writer: &str) {
+        const MAX_LINES: usize = 80;
+        let relevant: Vec<_> = self
+            .output
+            .iter()
+            .filter(|line| {
+                line.contains("mount-rs-sqlite-adversarial-")
+                    && (line.contains('→') || line.contains(".nfs."))
+            })
+            .collect();
+        let omitted = relevant.len().saturating_sub(MAX_LINES);
+        for line in relevant.into_iter().skip(omitted) {
+            eprintln!("SQLITE_INNER_NFS_CLI_TRACE writer={writer} {line}");
+        }
+        if omitted > 0 {
+            eprintln!("SQLITE_INNER_NFS_CLI_TRACE writer={writer} omitted_early_lines={omitted}");
+        }
     }
 
     fn stop(&mut self, expect_clean: bool) -> Result<(), String> {

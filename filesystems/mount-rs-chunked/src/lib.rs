@@ -6,8 +6,12 @@
 //! The implementation is intentionally not a snapshot adapter and does not
 //! provide copy-on-write views.
 
+mod migration;
+pub use migration::migrate_mrc1_backing;
+
 use async_trait::async_trait;
 use mount_rs_core::chunking::{Chunker, FixedSizeChunker, from_config};
+use mount_rs_core::diagnostics::RequestTrace;
 use mount_rs_core::driver::{
     FileHandle, FsDriver, GuardedDirectoryEntry, GuardedMutation, GuardedMutationResult,
     GuardedRead, GuardedReadResult, GuardedSetattr, ObservedEntry, PathGuard, PathIdentity,
@@ -16,8 +20,9 @@ use mount_rs_core::error::{ErrorCode, FsError, Result};
 use mount_rs_core::handle::OpenFlags;
 use mount_rs_core::path::{is_path_inside, normalize_path, split_path};
 use mount_rs_core::storage::{
-    BlockExtent, BlockReconcileReport, BlockStore, FileLayout, InodeId, MetadataStore,
-    NAMESPACE_FORMAT_VERSION, Namespace, NodeData, NodeMetadata, WriterLease,
+    BlockExtent, BlockReconcileReport, BlockStore, ConcurrentBackingId, ConcurrentModeState,
+    FileLayout, InodeId, MetadataStore, NAMESPACE_FORMAT_VERSION, Namespace, NodeData,
+    NodeMetadata, WriterLease,
 };
 use mount_rs_core::types::{
     Capabilities, DirEntry, FileType, MkdirOptions, S_IFDIR, S_IFMT, S_IFREG, Stats, StatsFs,
@@ -467,6 +472,7 @@ where
 {
     metadata: Arc<M>,
     blocks: Arc<B>,
+    concurrent_backing: Option<ConcurrentBackingId>,
     options: ChunkedOptions,
     gate: AsyncGate,
     lifecycle: tokio::sync::RwLock<()>,
@@ -514,8 +520,27 @@ where
         let metadata = Arc::new(metadata);
         let blocks = Arc::new(blocks);
         if options.concurrent_writes {
-            blocks.prepare_concurrent_mode().await?;
-            metadata.prepare_concurrent_mode().await?;
+            // Inspect metadata before claiming a block authority. Established
+            // MRC2 volumes must verify their persisted block marker read-only;
+            // recreating a missing marker could bind an unrelated backing.
+            let backing = match metadata.concurrent_mode_state().await? {
+                ConcurrentModeState::Mrc2(id) => {
+                    blocks.verify_concurrent_backing(id).await?;
+                    metadata.prepare_bound_concurrent_mode(id).await?;
+                    id
+                }
+                ConcurrentModeState::Mrc1 => {
+                    return Err(FsError::new(ErrorCode::Ebusy)
+                        .with_syscall("migrate MRC1 backing")
+                        .with_message("stop old mounts and run migrate-concurrent-backing"));
+                }
+                ConcurrentModeState::Legacy => {
+                    let id = blocks.prepare_concurrent_backing().await?;
+                    metadata.prepare_bound_concurrent_mode(id).await?;
+                    blocks.verify_concurrent_backing(id).await?;
+                    id
+                }
+            };
             // Two clients may initialize one fresh volume together. Only one
             // CAS publishes its root; the loser reloads the winner's root.
             for attempt in 0..MAX_CONCURRENT_CAS_RETRIES {
@@ -527,7 +552,11 @@ where
                         let namespace = initial_namespace(&options)?;
                         namespace.validate()?;
                         blocks.flush().await?;
-                        match metadata.publish_if_revision(0, namespace.clone()).await {
+                        blocks.verify_concurrent_backing(backing).await?;
+                        match metadata
+                            .publish_bound_if_revision(backing, 0, namespace.clone())
+                            .await
+                        {
                             Ok(revision) => {
                                 if !metadata.publish_includes_flush_barrier() {
                                     metadata.flush().await?;
@@ -551,6 +580,7 @@ where
                     inner: Arc::new(ChunkedInner {
                         metadata,
                         blocks,
+                        concurrent_backing: Some(backing),
                         options,
                         gate: AsyncGate::new(),
                         lifecycle: tokio::sync::RwLock::new(()),
@@ -622,6 +652,7 @@ where
             inner: Arc::new(ChunkedInner {
                 metadata,
                 blocks,
+                concurrent_backing: None,
                 options,
                 gate: AsyncGate::new(),
                 lifecycle: tokio::sync::RwLock::new(()),
@@ -1029,21 +1060,73 @@ where
         namespace: Namespace,
         blocks_flushed: bool,
     ) -> Result<u64> {
+        let mut trace = RequestTrace::new("chunked", "publish_namespace");
+        trace.stage(
+            "publication",
+            format_args!(
+                "expected_revision={expected_revision} concurrent={} blocks_flushed={blocks_flushed}",
+                self.inner.options.concurrent_writes
+            ),
+        );
         if !blocks_flushed {
-            self.inner
-                .blocks
-                .flush()
-                .await
-                .map_err(|error| with_context(error, "block-flush", None))?;
+            trace.stage("block_flush_start", format_args!(""));
+            let result = self.inner.blocks.flush().await;
+            trace.stage(
+                "block_flush_end",
+                format_args!(
+                    "outcome={}",
+                    result
+                        .as_ref()
+                        .map_or_else(|error| error.code.as_str(), |_| "ok")
+                ),
+            );
+            result.map_err(|error| with_context(error, "block-flush", None))?;
         }
         if self.inner.options.concurrent_writes {
+            let backing = self.inner.concurrent_backing.ok_or_else(|| {
+                self.fail_closed(
+                    FsError::new(ErrorCode::Eio)
+                        .with_syscall("publish bound concurrent metadata")
+                        .with_message("concurrent backing ID is missing from runtime state"),
+                )
+            })?;
+            trace.stage(
+                "backing_verify_start",
+                format_args!("expected_revision={expected_revision}"),
+            );
+            let result = self.inner.blocks.verify_concurrent_backing(backing).await;
+            trace.stage(
+                "backing_verify_end",
+                format_args!(
+                    "expected_revision={expected_revision} outcome={}",
+                    result
+                        .as_ref()
+                        .map_or_else(|error| error.code.as_str(), |_| "ok")
+                ),
+            );
+            result
+                .map_err(|error| self.fail_closed(with_context(error, "backing-verify", None)))?;
             let mut publication = PublicationGuard::new(&self.inner.state);
-            let revision = match self
+            trace.stage(
+                "cas_start",
+                format_args!("expected_revision={expected_revision}"),
+            );
+            let result = self
                 .inner
                 .metadata
-                .publish_if_revision(expected_revision, namespace.clone())
-                .await
-            {
+                .publish_bound_if_revision(backing, expected_revision, namespace.clone())
+                .await;
+            trace.stage(
+                "cas_end",
+                format_args!(
+                    "expected_revision={expected_revision} outcome={} revision={:?}",
+                    result
+                        .as_ref()
+                        .map_or_else(|error| error.code.as_str(), |_| "ok"),
+                    result.as_ref().ok()
+                ),
+            );
+            let revision = match result {
                 Ok(revision) => revision,
                 Err(error) if error.code == ErrorCode::Eagain => {
                     // This is a known non-commit. The caller may reload and
@@ -1079,6 +1162,8 @@ where
                 state.pending_atime.clear();
             }
             publication.disarm();
+            drop(state);
+            trace.finish(format_args!("revision={revision}"));
             return Ok(revision);
         }
         let lease = self.renew_lease().await?;
@@ -1104,6 +1189,8 @@ where
         state.revision = revision;
         state.pending_atime.clear();
         publication.disarm();
+        drop(state);
+        trace.finish(format_args!("revision={revision}"));
         Ok(revision)
     }
 
@@ -1397,26 +1484,57 @@ where
     where
         F: FnMut(&mut Namespace) -> Result<R>,
     {
+        let mut trace = RequestTrace::new("chunked", "mutate");
+        trace.stage("gate_wait", format_args!(""));
         let _gate = self.inner.gate.lock().await;
+        trace.stage("gate_acquired", format_args!(""));
         let attempts = if self.inner.options.concurrent_writes {
             MAX_CONCURRENT_CAS_RETRIES
         } else {
             1
         };
         for attempt in 0..attempts {
-            self.ensure_operation_lease().await?;
+            trace.stage("metadata_load_start", format_args!("attempt={attempt}"));
+            let loaded = self.ensure_operation_lease().await;
+            trace.stage(
+                "metadata_load_end",
+                format_args!(
+                    "attempt={attempt} outcome={}",
+                    loaded
+                        .as_ref()
+                        .map_or_else(|error| error.code.as_str(), |_| "ok")
+                ),
+            );
+            loaded?;
             let (mut namespace, revision) = self.snapshot()?;
             let result = operation(&mut namespace)?;
+            trace.stage(
+                "publish_start",
+                format_args!("attempt={attempt} expected_revision={revision}"),
+            );
             match self.publish_namespace(revision, namespace, false).await {
-                Ok(_) => return Ok(result),
+                Ok(next_revision) => {
+                    trace.finish(format_args!("attempt={attempt} revision={next_revision}"));
+                    return Ok(result);
+                }
                 Err(error)
                     if self.inner.options.concurrent_writes
                         && error.code == ErrorCode::Eagain
                         && attempt + 1 < attempts =>
                 {
+                    trace.stage(
+                        "cas_backoff",
+                        format_args!("attempt={attempt} expected_revision={revision}"),
+                    );
                     concurrent_cas_backoff(attempt, &self.inner.options.owner).await;
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    trace.finish(format_args!(
+                        "attempt={attempt} error={}",
+                        error.code.as_str()
+                    ));
+                    return Err(error);
+                }
             }
         }
         Err(FsError::new(ErrorCode::Eagain)
@@ -2265,6 +2383,14 @@ where
         mode: u32,
         guard: Option<(&PathGuard, &str, ObservedEntry)>,
     ) -> Result<(Arc<dyn FileHandle>, PathIdentity)> {
+        let mut trace = RequestTrace::new("chunked", "open");
+        trace.stage(
+            "flags",
+            format_args!(
+                "path={path:?} create={} exclusive={} truncate={}",
+                flags.create, flags.exclusive, flags.truncate
+            ),
+        );
         if !flags.read && !flags.write {
             return Err(error_with_path(ErrorCode::Einval, "open", path));
         }
@@ -2272,15 +2398,32 @@ where
             return Err(error_with_path(ErrorCode::Einval, "open", path));
         }
         let normalized = normalize_path(path);
+        trace.stage("gate_wait", format_args!("path={normalized:?}"));
         let _gate = self.inner.gate.lock().await;
+        trace.stage("gate_acquired", format_args!("path={normalized:?}"));
         let attempts = if self.inner.options.concurrent_writes {
             MAX_CONCURRENT_CAS_RETRIES
         } else {
             1
         };
         for attempt in 0..attempts {
-            self.ensure_operation_lease().await?;
+            trace.stage("metadata_load_start", format_args!("attempt={attempt}"));
+            let loaded = self.ensure_operation_lease().await;
+            trace.stage(
+                "metadata_load_end",
+                format_args!(
+                    "attempt={attempt} outcome={}",
+                    loaded
+                        .as_ref()
+                        .map_or_else(|error| error.code.as_str(), |_| "ok")
+                ),
+            );
+            loaded?;
             let (mut namespace, revision) = self.snapshot()?;
+            trace.stage(
+                "snapshot",
+                format_args!("attempt={attempt} expected_revision={revision}"),
+            );
             let entry = walk(
                 &namespace,
                 &normalized,
@@ -2383,20 +2526,40 @@ where
 
             let changed = entry.node.is_none() || flags.truncate;
             if changed {
+                trace.stage(
+                    "publish_start",
+                    format_args!("attempt={attempt} expected_revision={revision}"),
+                );
                 match self.publish_namespace(revision, namespace, false).await {
-                    Ok(_) => {}
+                    Ok(next_revision) => {
+                        trace.stage(
+                            "publish_end",
+                            format_args!("attempt={attempt} revision={next_revision}"),
+                        );
+                    }
                     Err(error)
                         if self.inner.options.concurrent_writes
                             && error.code == ErrorCode::Eagain
                             && attempt + 1 < attempts =>
                     {
+                        trace.stage(
+                            "cas_backoff",
+                            format_args!("attempt={attempt} expected_revision={revision}"),
+                        );
                         concurrent_cas_backoff(attempt, &self.inner.options.owner).await;
                         continue;
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => {
+                        trace.finish(format_args!(
+                            "attempt={attempt} error={}",
+                            error.code.as_str()
+                        ));
+                        return Err(error);
+                    }
                 }
             }
             let fd = self.allocate_fd(inode)?;
+            trace.finish(format_args!("attempt={attempt} inode={inode} fd={fd}"));
             return Ok((
                 Arc::new(ChunkedHandle {
                     filesystem: self.clone(),
@@ -4674,14 +4837,26 @@ mod tests {
         }
     }
 
+    fn test_concurrent_backing() -> ConcurrentBackingId {
+        ConcurrentBackingId::from_bytes([0xc1; 16]).expect("fixed nonzero backing ID")
+    }
+
     #[async_trait]
     impl BlockStore for SharedTestBlockStore {
         fn durable(&self) -> bool {
             self.0.durable()
         }
 
-        async fn prepare_concurrent_mode(&self) -> Result<()> {
-            Ok(())
+        async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
+            Ok(test_concurrent_backing())
+        }
+
+        async fn verify_concurrent_backing(&self, expected: ConcurrentBackingId) -> Result<()> {
+            if expected == test_concurrent_backing() {
+                Ok(())
+            } else {
+                Err(FsError::new(ErrorCode::Estale))
+            }
         }
 
         async fn put(&self, bytes: &[u8]) -> Result<mount_rs_core::storage::BlockId> {
@@ -4727,6 +4902,7 @@ mod tests {
     #[derive(Clone)]
     struct RevisionRaceMetadata {
         state: Arc<Mutex<LoadedMetadata>>,
+        mode: Arc<Mutex<ConcurrentModeState>>,
         on_flush: Arc<Mutex<Option<FlushHook>>>,
     }
 
@@ -4737,12 +4913,27 @@ mod tests {
                     revision: 0,
                     namespace: None,
                 })),
+                mode: Arc::new(Mutex::new(ConcurrentModeState::Legacy)),
                 on_flush: Arc::new(Mutex::new(None)),
             }
         }
 
         fn on_next_flush(&self, callback: impl FnOnce() + Send + 'static) {
             *self.on_flush.lock().expect("flush hook lock") = Some(Box::new(callback));
+        }
+
+        fn apply_revision(&self, expected_revision: u64, namespace: Namespace) -> Result<u64> {
+            namespace.validate()?;
+            let mut state = self.state.lock().expect("revision state lock");
+            if state.revision != expected_revision {
+                return Err(FsError::new(ErrorCode::Eagain));
+            }
+            state.revision = state
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+            state.namespace = Some(namespace);
+            Ok(state.revision)
         }
     }
 
@@ -4756,8 +4947,21 @@ mod tests {
             Ok(self.state.lock().expect("revision state lock").clone())
         }
 
-        async fn prepare_concurrent_mode(&self) -> Result<()> {
-            Ok(())
+        async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
+            Ok(*self.mode.lock().expect("concurrent mode lock"))
+        }
+
+        async fn prepare_bound_concurrent_mode(&self, backing: ConcurrentBackingId) -> Result<()> {
+            let mut mode = self.mode.lock().expect("concurrent mode lock");
+            match *mode {
+                ConcurrentModeState::Legacy => {
+                    *mode = ConcurrentModeState::Mrc2(backing);
+                    Ok(())
+                }
+                ConcurrentModeState::Mrc2(current) if current == backing => Ok(()),
+                ConcurrentModeState::Mrc2(_) => Err(FsError::new(ErrorCode::Estale)),
+                ConcurrentModeState::Mrc1 => Err(FsError::new(ErrorCode::Ebusy)),
+            }
         }
 
         async fn acquire_writer(&self, _owner: &str, _ttl: Duration) -> Result<WriterLease> {
@@ -4781,22 +4985,18 @@ mod tests {
             Err(FsError::new(ErrorCode::Enotsup))
         }
 
-        async fn publish_if_revision(
+        async fn publish_bound_if_revision(
             &self,
+            backing: ConcurrentBackingId,
             expected_revision: u64,
             namespace: Namespace,
         ) -> Result<u64> {
-            namespace.validate()?;
-            let mut state = self.state.lock().expect("revision state lock");
-            if state.revision != expected_revision {
-                return Err(FsError::new(ErrorCode::Eagain));
+            if *self.mode.lock().expect("concurrent mode lock")
+                != ConcurrentModeState::Mrc2(backing)
+            {
+                return Err(FsError::new(ErrorCode::Estale));
             }
-            state.revision = state
-                .revision
-                .checked_add(1)
-                .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-            state.namespace = Some(namespace);
-            Ok(state.revision)
+            self.apply_revision(expected_revision, namespace)
         }
 
         async fn flush(&self) -> Result<()> {
@@ -4824,7 +5024,8 @@ mod tests {
         let remote = metadata.clone();
         metadata.on_next_flush(move || {
             let latest = block_on(remote.load()).expect("load after local CAS");
-            let newer = block_on(remote.publish_if_revision(
+            let newer = block_on(remote.publish_bound_if_revision(
+                test_concurrent_backing(),
                 latest.revision,
                 latest.namespace.expect("published namespace"),
             ))
@@ -4908,7 +5109,9 @@ mod tests {
     #[test]
     fn three_same_clock_concurrent_cas_commits_keep_distinct_mtimes() {
         let metadata = RevisionRaceMetadata::new();
-        block_on(metadata.prepare_concurrent_mode()).expect("prepare concurrent mode");
+        let backing = test_concurrent_backing();
+        block_on(metadata.prepare_bound_concurrent_mode(backing))
+            .expect("prepare bound concurrent mode");
         let options = ChunkedOptions::fixed("mtime-cas", 4).expect("chunker");
         let mut namespace = initial_namespace(&options).expect("initial namespace");
         let root = namespace.root;
@@ -4917,7 +5120,8 @@ mod tests {
         root_stats.mtime_ms = fixed_now;
         root_stats.ctime_ms = fixed_now;
         let mut revision =
-            block_on(metadata.publish_if_revision(0, namespace.clone())).expect("publish baseline");
+            block_on(metadata.publish_bound_if_revision(backing, 0, namespace.clone()))
+                .expect("publish baseline");
 
         for expected in (fixed_now + 1)..=(fixed_now + 3) {
             touch_modified_at(
@@ -4926,8 +5130,9 @@ mod tests {
                 true,
             )
             .expect("stamp one same-clock mutation");
-            revision = block_on(metadata.publish_if_revision(revision, namespace.clone()))
-                .expect("publish one CAS revision");
+            revision =
+                block_on(metadata.publish_bound_if_revision(backing, revision, namespace.clone()))
+                    .expect("publish one CAS revision");
             let loaded = block_on(metadata.load()).expect("load committed revision");
             assert_eq!(loaded.revision, revision);
             assert_eq!(

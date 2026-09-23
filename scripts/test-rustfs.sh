@@ -799,6 +799,39 @@ echo "RUSTFS_READY endpoint=$rustfs_endpoint image=$rustfs_image"
 "$repo_dir/scripts/cargo-shared" test \
   --manifest-path "$repo_dir/tests/rustfs/Cargo.toml" \
   --locked \
+  -- "real_rustfs_signed_backing_identity_two_client_race" --exact --test-threads=1 --nocapture
+
+if [ "${MOUNT_RS_RUSTFS_BACKING_ID_ONLY:-0}" = "1" ]; then
+  bounded_docker_action "stop" docker stop --time=5 "$container_name"
+  if container_is_running; then
+    echo "RustFS remained running during backing identity restart" >&2
+    exit 1
+  else
+    inspect_status=$?
+    if [ "$inspect_status" -eq 2 ]; then
+      echo "Could not verify RustFS stopped during backing identity restart" >&2
+      exit 1
+    fi
+  fi
+  if curl --fail --silent --show-error --max-time 2 "$rustfs_endpoint/health" >/dev/null 2>&1; then
+    echo "RustFS remained reachable during backing identity restart" >&2
+    exit 1
+  fi
+  bounded_docker_action "start" docker start "$container_name"
+  refresh_endpoint
+  wait_for_ready
+  bootstrap_bucket
+  "$repo_dir/scripts/cargo-shared" test \
+    --manifest-path "$repo_dir/tests/rustfs/Cargo.toml" \
+    --locked \
+    -- "real_rustfs_signed_backing_identity_survives_service_restart" --exact --test-threads=1 --nocapture
+  echo "RUSTFS_BACKING_ID_INTEGRATION_PASS endpoint=$rustfs_endpoint prefix=$RUSTFS_TEST_PREFIX"
+  exit 0
+fi
+
+"$repo_dir/scripts/cargo-shared" test \
+  --manifest-path "$repo_dir/tests/rustfs/Cargo.toml" \
+  --locked \
   -- "real_rustfs_block_contract" --exact --test-threads=1 --nocapture
 
 "$repo_dir/scripts/cargo-shared" test \
@@ -865,6 +898,9 @@ run_combo_command() {
     return 0
   else
     combo_status=$?
+    if [ "${MOUNT_RS_RUSTFS_COMBO_TRACE:-0}" = "1" ]; then
+      bounded_docker_command "logs" docker logs --tail 80 "$container_name" >&2 || true
+    fi
     # On an abnormal runner exit, leave combo_pid_file available to the EXIT
     # cleanup. The runner removes it only after it has verified the process
     # group is gone; otherwise cleanup must finish that verification before
@@ -905,6 +941,11 @@ wait_for_ready
 bootstrap_bucket
 echo "RUSTFS_FAULT_RECOVERY_PASS endpoint=$rustfs_endpoint"
 echo "RUSTFS_RESTART_READY endpoint=$rustfs_endpoint"
+
+"$repo_dir/scripts/cargo-shared" test \
+  --manifest-path "$repo_dir/tests/rustfs/Cargo.toml" \
+  --locked \
+  -- "real_rustfs_signed_backing_identity_survives_service_restart" --exact --test-threads=1 --nocapture
 
 RUSTFS_VFS_RESTART_PHASE=reopen "$repo_dir/scripts/cargo-shared" test \
   --manifest-path "$repo_dir/Cargo.toml" \

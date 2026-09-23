@@ -118,6 +118,14 @@ pub(crate) struct OpenStorage {
     pub(crate) resources: StorageResources,
 }
 
+impl OpenStorage {
+    pub(crate) async fn close(self) -> Result<()> {
+        // The provider handles and FoundationDB network guard remain owned by
+        // `self` until resource shutdown finishes on both result paths.
+        self.resources.close().await
+    }
+}
+
 pub(crate) async fn open_storage(
     metadata: &StoreConfig,
     blocks: &StoreConfig,

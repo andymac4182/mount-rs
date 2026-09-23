@@ -12,6 +12,7 @@ are reported without claiming that those topologies are supported.
 """
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -36,6 +37,14 @@ def emit(**fields):
     print(json.dumps(fields, sort_keys=True), flush=True)
 
 
+def sqlite_failure_fields(error):
+    return {
+        name: value
+        for name in ("sqlite_errorcode", "sqlite_errorname")
+        if (value := getattr(error, name, None)) is not None
+    }
+
+
 def payload(worker, transaction):
     return hashlib.sha256(f"{worker}:{transaction}".encode()).digest() * 128
 
@@ -43,6 +52,35 @@ def payload(worker, transaction):
 def clean_db(path):
     for suffix in ("-wal", "-shm", "-journal", ""):
         Path(f"{path}{suffix}").unlink(missing_ok=True)
+
+
+def remove_owned_directory(path):
+    # NFS can briefly recreate/defer an unlink while closed SQLite journal
+    # handles drain. Retry only this fixture's unique directory for 10 seconds.
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            shutil.rmtree(path)
+        except FileNotFoundError:
+            if not path.exists():
+                emit(case="owned_cleanup", status="pass")
+                return True
+        except OSError as error:
+            if error.errno not in (errno.ENOTEMPTY, errno.EBUSY):
+                raise
+        else:
+            if not path.exists():
+                emit(case="owned_cleanup", status="pass")
+                return True
+        if time.monotonic() >= deadline:
+            try:
+                remaining = sorted(os.listdir(path))[:8]
+            except OSError as error:
+                remaining = [f"list error: {error}"]
+            emit(case="owned_cleanup", status="deferred_until_backing_disposal",
+                 remaining=remaining)
+            return False
+        time.sleep(0.05)
 
 
 def journal_capability(root, journal):
@@ -86,6 +124,10 @@ def load_child(path, journal, worker, transactions):
                         raise
                     retries += 1
             latencies.append(round((time.monotonic() - started) * 1000, 3))
+    except sqlite3.Error as error:
+        emit(worker=worker, status="sqlite_error", error=str(error),
+             **sqlite_failure_fields(error))
+        raise
     finally:
         db.close()
     emit(worker=worker, retries=retries, latencies_ms=latencies)
@@ -143,9 +185,20 @@ def run_load(root, journal, workers, transactions):
         results = []
         for process in processes:
             output, error = process.communicate(timeout=WORKER_TIMEOUT)
-            assert process.returncode == 0, (
-                f"load worker exited {process.returncode}: {error[-800:]}"
-            )
+            if process.returncode != 0:
+                failure = AssertionError(
+                    f"load worker exited {process.returncode}: {error[-800:]}"
+                )
+                for line in output.splitlines():
+                    try:
+                        report = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(report, dict) and report.get("status") == "sqlite_error":
+                        for name in ("sqlite_errorcode", "sqlite_errorname"):
+                            if name in report:
+                                setattr(failure, name, report[name])
+                raise failure
             result = json.loads(output.strip())
             assert len(result["latencies_ms"]) == transactions, result
             results.append(result)
@@ -298,11 +351,14 @@ def run_suite(root, second, workers, transactions, strict_wal, local_alias_contr
     for journal in JOURNALS:
         try:
             actual = journal_capability(root, journal)
+            capability_error = None
         except Exception as error:
             actual = f"error:{type(error).__name__}:{error}"
+            capability_error = error
         if actual != journal:
             status = "unsupported" if journal == "WAL" and not strict_wal else "fail"
-            emit(case="journal_capability", journal=journal, actual=actual, status=status)
+            emit(case="journal_capability", journal=journal, actual=actual, status=status,
+                 **(sqlite_failure_fields(capability_error) if capability_error else {}))
             if status == "fail":
                 failures.append(f"{journal} journal capability: {actual}")
             continue
@@ -313,7 +369,8 @@ def run_suite(root, second, workers, transactions, strict_wal, local_alias_contr
             emit(case="kill_reopen_locking", journal=journal, status="pass")
         except Exception as error:
             failures.append(f"{journal} kill/reopen/locking: {type(error).__name__}: {error}")
-            emit(case="kill_reopen_locking", journal=journal, status="fail", error=str(error))
+            emit(case="kill_reopen_locking", journal=journal, status="fail",
+                 error=str(error), **sqlite_failure_fields(error))
 
     for journal in LOAD_JOURNALS:
         if journal not in supported:
@@ -322,7 +379,8 @@ def run_suite(root, second, workers, transactions, strict_wal, local_alias_contr
             run_load(root, journal, workers, transactions)
         except Exception as error:
             failures.append(f"{journal} load: {type(error).__name__}: {error}")
-            emit(case="load", journal=journal, status="fail", error=str(error))
+            emit(case="load", journal=journal, status="fail", error=str(error),
+                 **sqlite_failure_fields(error))
 
     if second is not None:
         try:
@@ -412,7 +470,12 @@ def main():
                 failed = run_suite(owned, second, args.workers, args.transactions, False)
         finally:
             # Remove only the unique directory made by this fixture.
-            shutil.rmtree(owned)
+            cleaned = remove_owned_directory(owned)
+            if not cleaned and args.second_view is None:
+                # A single-view acceptance run requires exact cleanup. The
+                # two-view diagnostic disposes its entire backing after the
+                # native test unmounts both clients.
+                failed = True
     return 1 if failed else 0
 
 

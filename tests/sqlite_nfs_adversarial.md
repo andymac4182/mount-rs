@@ -95,3 +95,13 @@ reopen; SQLite reported `integrity_check=ok`, 11 busy lock retries,
 TRUNCATE, and PERSIST recovery checks passed; WAL again selected DELETE.
 The exact temporary mount and storage paths were removed after verifying
 the mount table contained no test entry.
+
+The [two-CLI shared backing packet](../apps/mount-rs-cli/tests/native_two_process_sql.md)
+ran the same application matrix through independent macOS NFS mounts using
+the CLI's shared-view `soft,nolocks` profile. It found three rollback-journal
+crash/reopen lock failures and a DELETE load commit disk I/O error, while
+the mount-rs provider's separate 2 × 12 file lifecycle load, fresh reopen,
+and backing integrity all passed. WAL selected DELETE. This packet records
+the two-CLI SQLite application topology as unsupported. Its owned NFS
+directory may retain `.nfs.*` deferred unlink names until the disposable
+backing is unmounted and removed.

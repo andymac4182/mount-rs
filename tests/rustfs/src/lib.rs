@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
 use mount_rs_core::ErrorCode;
-use mount_rs_core::storage::{BlockId, BlockStore, MetadataStore};
+use mount_rs_core::storage::{BlockId, BlockStore, ConcurrentBackingId, MetadataStore};
 use mount_rs_core::{Loopback, MkdirOptions};
 use mount_rs_pglite::PgliteMetadataStore;
 use mount_rs_rustfs::{RustFsBlockStore, RustFsConfig};
@@ -21,6 +21,7 @@ use mount_rs_sdk::{Filesystem, FilesystemKind, SplitOptions, StoreConfig};
 use mount_rs_sqlite::SqliteMetadataStore;
 use object_store::path::Path as ObjectPath;
 use object_store::{GetOptions, ObjectStore, PutMode, PutOptions, PutPayload, UpdateVersion};
+use tokio::sync::Barrier;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -57,6 +58,13 @@ fn fixture_path() -> PathBuf {
     std::env::var_os("RUSTFS_FIXTURE_FILE")
         .map(PathBuf::from)
         .expect("RUSTFS_FIXTURE_FILE must be set")
+}
+
+fn backing_identity_fixture_path() -> PathBuf {
+    std::env::var_os("RUSTFS_RUN_DIR")
+        .map(PathBuf::from)
+        .expect("RUSTFS_RUN_DIR must be set")
+        .join("backing-identity.fixture")
 }
 
 fn object_path(prefix: &str, name: &str) -> ObjectPath {
@@ -246,12 +254,12 @@ async fn real_rustfs_signed_concurrent_preflight_fails_closed_before_mode_conver
         let prefix = format!("{}/preflight-valid", test_prefix());
         let first = RustFsBlockStore::from_config(&valid, prefix.clone(), true).unwrap();
         let second = RustFsBlockStore::from_config(&valid, prefix.clone(), true).unwrap();
-        first.prepare_concurrent_mode().await.unwrap();
-        second.prepare_concurrent_mode().await.unwrap();
+        let id = first.prepare_concurrent_backing().await.unwrap();
+        assert_eq!(second.prepare_concurrent_backing().await.unwrap(), id);
         valid
             .build_store()
             .unwrap()
-            .head(&object_path(&prefix, "_mount-rs-concurrent-probe-v1"))
+            .head(&object_path(&prefix, "_mount-rs-backing-id-v2"))
             .await
             .expect("signed preflight must leave a reusable, remotely visible probe");
 
@@ -292,6 +300,107 @@ async fn real_rustfs_signed_concurrent_preflight_fails_closed_before_mode_conver
             "failed preflight must not replace an existing object"
         );
         println!("RUSTFS_SIGNED_CONCURRENT_PREFLIGHT_PASS");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn real_rustfs_signed_backing_identity_two_client_race() {
+    assert_timeout(async {
+        let config = local_config();
+        let prefix = format!("{}/backing-identity", test_prefix());
+        let service = config.build_store().unwrap();
+        let marker = object_path(&prefix, "_mount-rs-backing-id-v2");
+        assert!(matches!(
+            service.get(&marker).await,
+            Err(object_store::Error::NotFound { .. })
+        ));
+        let start = Arc::new(Barrier::new(3));
+        let mut clients = Vec::new();
+        for _ in 0..2 {
+            let blocks = RustFsBlockStore::from_config(&config, prefix.clone(), true).unwrap();
+            let start = Arc::clone(&start);
+            clients.push(tokio::spawn(async move {
+                start.wait().await;
+                let id = blocks.prepare_concurrent_backing().await?;
+                blocks.verify_concurrent_backing(id).await?;
+                Ok::<_, mount_rs_core::FsError>(id)
+            }));
+        }
+        start.wait().await;
+        let first = clients.remove(0).await.unwrap().unwrap();
+        let second = clients.remove(0).await.unwrap().unwrap();
+        assert_eq!(
+            first, second,
+            "two independent signed clients must return one authority"
+        );
+        let bytes = service.get(&marker).await.unwrap().bytes().await.unwrap();
+        assert_eq!(bytes.len(), 20);
+        assert_eq!(&bytes[..4], b"MRC2");
+        assert_eq!(&bytes[4..], first.as_bytes().as_slice());
+        let fresh = RustFsBlockStore::from_config(&config, prefix, true).unwrap();
+        assert_eq!(fresh.prepare_concurrent_backing().await.unwrap(), first);
+        std::fs::write(backing_identity_fixture_path(), first.to_hex()).unwrap();
+        println!("RUSTFS_SIGNED_BACKING_ID_RACE_PASS id={}", first.to_hex());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn real_rustfs_signed_backing_identity_survives_service_restart() {
+    assert_timeout(async {
+        let config = local_config();
+        let prefix = format!("{}/backing-identity", test_prefix());
+        let fixture = backing_identity_fixture_path();
+        let selected =
+            ConcurrentBackingId::from_hex(&std::fs::read_to_string(&fixture).unwrap()).unwrap();
+        let reopened = RustFsBlockStore::from_config(&config, prefix.clone(), true).unwrap();
+        assert_eq!(
+            reopened.prepare_concurrent_backing().await.unwrap(),
+            selected
+        );
+        reopened.verify_concurrent_backing(selected).await.unwrap();
+
+        let sibling_prefix = format!("{}/backing-identity-sibling", test_prefix());
+        let sibling = RustFsBlockStore::from_config(&config, sibling_prefix.clone(), true).unwrap();
+        let sibling_id = sibling.prepare_concurrent_backing().await.unwrap();
+        assert_ne!(sibling_id, selected);
+        assert!(
+            reopened
+                .verify_concurrent_backing(sibling_id)
+                .await
+                .unwrap_err()
+                .is(ErrorCode::Estale)
+        );
+        assert!(
+            sibling
+                .verify_concurrent_backing(selected)
+                .await
+                .unwrap_err()
+                .is(ErrorCode::Estale)
+        );
+
+        let service = config.build_store().unwrap();
+        for owned_prefix in [&prefix, &sibling_prefix] {
+            let marker = object_path(owned_prefix, "_mount-rs-backing-id-v2");
+            service.delete(&marker).await.unwrap();
+            assert!(matches!(
+                service.get(&marker).await,
+                Err(object_store::Error::NotFound { .. })
+            ));
+        }
+        assert!(
+            reopened
+                .verify_concurrent_backing(selected)
+                .await
+                .unwrap_err()
+                .is(ErrorCode::Estale)
+        );
+        std::fs::remove_file(&fixture).unwrap();
+        println!(
+            "RUSTFS_SIGNED_BACKING_ID_RESTART_PASS id={}",
+            selected.to_hex()
+        );
     })
     .await;
 }

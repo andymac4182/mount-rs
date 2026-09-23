@@ -1,8 +1,440 @@
 use mount_rs_cli::color::Color;
 use mount_rs_cli::parse_args;
 use mount_rs_cli::parser::{CliOptions, Command, DriverChoice, TransportChoice, help_text};
+#[cfg(unix)]
+use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
 use std::fs;
 use std::process::Command as ProcessCommand;
+
+#[test]
+fn non_sqlite_offline_migration_does_not_prepare_a_view() {
+    let scope = tempfile::TempDir::new().unwrap();
+    let view = scope.path().join("view");
+    let config_path = scope.path().join("shared.json");
+    let config = serde_json::json!({
+        "version": 1,
+        "mountpoint": view,
+        "driver": {"kind": "splitstore", "storage": {
+            "concurrent_writes": true,
+            "metadata": {
+                "kind": "pglite",
+                "connection": {"env": "MOUNT_RS_OFFLINE_PATH_FIXTURE_PGLITE_URL"},
+                "volume_key": "offline-path-fixture",
+                "durable": true
+            },
+            "blocks": {
+                "kind": "pglite",
+                "connection": {"env": "MOUNT_RS_OFFLINE_PATH_FIXTURE_PGLITE_URL"},
+                "volume_key": "offline-path-fixture",
+                "durable": true
+            }
+        }}
+    });
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_mount-rs"))
+        .args(["migrate-concurrent-backing", "--config"])
+        .arg(&config_path)
+        .args(["--expected-revision", "0"])
+        .env(
+            "MOUNT_RS_OFFLINE_PATH_FIXTURE_PGLITE_URL",
+            "postgres://offline-fixture@127.0.0.1:1/postgres?sslmode=disable",
+        )
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "fixture has no PGlite service");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("error connecting to server"),
+        "migration must reach provider open without mount inspection: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!view.exists(), "non-SQLite migration prepared a view");
+}
+
+#[cfg(unix)]
+#[test]
+fn migrate_concurrent_backing_cli() {
+    let scope = tempfile::TempDir::new().expect("create owned migration test root");
+    let metadata = scope.path().join("metadata.sqlite");
+    let blocks = scope.path().join("blocks.sqlite");
+    let config_path = scope.path().join("shared.json");
+    let mountpoint = scope.path().join("view");
+
+    // Let the provider exclusively create and stamp each owned file before
+    // seeding the disposable historical MRC1 mode with raw SQLite.
+    drop(SqliteMetadataStore::open(&metadata).expect("create stamped metadata database"));
+    drop(SqliteBlockStore::open(&blocks).expect("create block database"));
+    let connection = rusqlite::Connection::open(&metadata).expect("open metadata database");
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE mount_rs_metadata SET write_mode='MRC1', fence=9223372036854775807
+             WHERE id=1 AND revision=0 AND write_mode IS NULL AND backing_id IS NULL",
+                [],
+            )
+            .expect("create a real offline MRC1 metadata row"),
+        1
+    );
+    drop(connection);
+
+    let config = serde_json::json!({
+        "version": 1,
+        "mountpoint": mountpoint,
+        "driver": {
+            "kind": "splitstore",
+            "storage": {
+                "concurrent_writes": true,
+                "metadata": {"kind": "sqlite", "path": metadata},
+                "blocks": {"kind": "sqlite", "path": blocks}
+            }
+        }
+    });
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&config).expect("serialize migration config"),
+    )
+    .expect("write owned migration config");
+
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_mount-rs"))
+        .arg("migrate-concurrent-backing")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--expected-revision")
+        .arg("0")
+        .output()
+        .expect("run offline migration command");
+    assert!(
+        output.status.success(),
+        "offline migration failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let connection = rusqlite::Connection::open(&metadata).expect("reopen migrated metadata");
+    let (mode, backing_id, revision, namespace): (String, String, i64, Option<String>) = connection
+        .query_row(
+            "SELECT write_mode, backing_id, revision, namespace FROM mount_rs_metadata WHERE id=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("read migrated metadata row");
+    assert_eq!(mode, "MRC2");
+    assert_eq!(
+        revision, 0,
+        "offline migration preserves the exact revision"
+    );
+    assert!(
+        namespace.is_none(),
+        "offline migration preserves the namespace"
+    );
+    assert_eq!(backing_id.len(), 32, "authority ID is a 128-bit hex string");
+    assert!(
+        backing_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+        "authority ID uses canonical lowercase hex"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("revision 0"), "stdout={stdout}");
+    assert!(stdout.contains(&backing_id), "stdout={stdout}");
+    assert!(
+        mountpoint.is_dir(),
+        "offline migration prepares the view for physical path checks"
+    );
+    assert!(
+        fs::read_dir(&mountpoint).unwrap().next().is_none(),
+        "offline migration leaves an empty prepared view"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn offline_migration_rejects_stamped_sqlite_metadata_under_mountpoint_before_claim() {
+    let scope = tempfile::TempDir::new().unwrap();
+    let view = scope.path().join("view");
+    fs::create_dir(&view).unwrap();
+    let metadata = view.join("metadata.sqlite");
+    let blocks = scope.path().join("blocks.sqlite");
+    let config_path = scope.path().join("shared.json");
+    drop(SqliteMetadataStore::open(&metadata).unwrap());
+    assert_eq!(
+        rusqlite::Connection::open(&metadata)
+            .unwrap()
+            .execute(
+                "UPDATE mount_rs_metadata SET write_mode='MRC1', fence=9223372036854775807
+                 WHERE id=1",
+                [],
+            )
+            .unwrap(),
+        1
+    );
+    let config = serde_json::json!({
+        "version": 1,
+        "mountpoint": view,
+        "driver": {"kind": "splitstore", "storage": {
+            "concurrent_writes": true,
+            "metadata": {"kind": "sqlite", "path": metadata},
+            "blocks": {"kind": "sqlite", "path": blocks}
+        }}
+    });
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_mount-rs"))
+        .arg("migrate-concurrent-backing")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--expected-revision")
+        .arg("0")
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "offline migration enrolled backing inside mountpoint: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("outside every mountpoint"));
+    let (mode, backing): (String, Option<String>) = rusqlite::Connection::open(&metadata)
+        .unwrap()
+        .query_row(
+            "SELECT write_mode, backing_id FROM mount_rs_metadata WHERE id=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((mode.as_str(), backing), ("MRC1", None));
+    assert!(
+        !blocks.exists(),
+        "rejected command opened the block backing"
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn assert_offline_migration_rejects_uncreated_sqlite_block_alias(
+    view_name: &str,
+    alias_name: &str,
+) {
+    let scope = tempfile::TempDir::new().expect("own absent alias migration fixture");
+    let view = scope.path().join(view_name);
+    let alias = scope.path().join(alias_name);
+    fs::create_dir(&view).expect("create alias sensitivity probe");
+    assert!(
+        alias.is_dir(),
+        "this regression needs equivalent macOS directory spellings"
+    );
+    fs::remove_dir(&view).expect("remove alias sensitivity probe");
+    let metadata = scope.path().join("metadata.sqlite");
+    let blocks = alias.join("blocks.sqlite");
+    let config_path = scope.path().join("shared.json");
+    drop(SqliteMetadataStore::open(&metadata).expect("create stamped metadata database"));
+    let connection = rusqlite::Connection::open(&metadata).unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE mount_rs_metadata SET write_mode='MRC1', fence=9223372036854775807
+                 WHERE id=1",
+                [],
+            )
+            .unwrap(),
+        1
+    );
+    let before: (String, Option<String>, i64, Option<String>) = connection
+        .query_row(
+            "SELECT write_mode, backing_id, revision, namespace FROM mount_rs_metadata WHERE id=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    drop(connection);
+    let config = serde_json::json!({
+        "version": 1,
+        "mountpoint": view,
+        "driver": {"kind": "splitstore", "storage": {
+            "concurrent_writes": true,
+            "metadata": {"kind": "sqlite", "path": metadata},
+            "blocks": {"kind": "sqlite", "path": blocks}
+        }}
+    });
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    assert!(!view.exists(), "view must start absent");
+    assert!(!alias.exists(), "backing directory must start absent");
+    assert!(!blocks.exists(), "block database must start absent");
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_mount-rs"))
+        .arg("migrate-concurrent-backing")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--expected-revision")
+        .arg("0")
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "offline migration enrolled absent alias backing: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("outside every mountpoint"));
+    let after: (String, Option<String>, i64, Option<String>) = rusqlite::Connection::open(
+        &metadata,
+    )
+    .unwrap()
+    .query_row(
+        "SELECT write_mode, backing_id, revision, namespace FROM mount_rs_metadata WHERE id=1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )
+    .unwrap();
+    assert_eq!(
+        after, before,
+        "rejected migration must preserve mode, authority, revision and namespace"
+    );
+    assert!(!blocks.exists(), "rejected migration opened block backing");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn offline_migration_rejects_uncreated_case_alias_before_claim() {
+    assert_offline_migration_rejects_uncreated_sqlite_block_alias("mnt", "MNT");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn offline_migration_rejects_uncreated_normalization_alias_before_claim() {
+    assert_offline_migration_rejects_uncreated_sqlite_block_alias("caf\u{e9}", "cafe\u{301}");
+}
+
+#[cfg(unix)]
+#[test]
+fn migrate_concurrent_backing_cli_rejects_historical_unstamped_sqlite_metadata() {
+    let scope = tempfile::TempDir::new().expect("own historical SQLite migration fixture");
+    let metadata = scope.path().join("historical-metadata.sqlite");
+    let blocks = scope.path().join("blocks.sqlite");
+    let config_path = scope.path().join("shared.json");
+    let mountpoint = scope.path().join("view");
+    let connection = rusqlite::Connection::open(&metadata).expect("create old metadata file");
+    connection
+        .execute_batch(
+            "CREATE TABLE mount_rs_metadata (
+                id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL,
+                namespace TEXT, owner TEXT, fence INTEGER NOT NULL, expires INTEGER NOT NULL,
+                write_mode TEXT, backing_id TEXT
+             );
+             INSERT INTO mount_rs_metadata VALUES(1,0,NULL,NULL,9223372036854775807,0,'MRC1',NULL);",
+        )
+        .expect("seed an unstamped historical MRC1 row");
+    drop(connection);
+    let config = serde_json::json!({
+        "version": 1,
+        "mountpoint": mountpoint,
+        "driver": {
+            "kind": "splitstore",
+            "storage": {
+                "concurrent_writes": true,
+                "metadata": {"kind": "sqlite", "path": metadata},
+                "blocks": {"kind": "sqlite", "path": blocks}
+            }
+        }
+    });
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_mount-rs"))
+        .arg("migrate-concurrent-backing")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--expected-revision")
+        .arg("0")
+        .output()
+        .expect("run historical migration probe");
+    assert!(
+        !output.status.success(),
+        "historical unstamped metadata was bound: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "failed migration reported success"
+    );
+    let row: (
+        String,
+        Option<String>,
+        i64,
+        i64,
+        Option<String>,
+        Option<String>,
+    ) = rusqlite::Connection::open(&metadata)
+        .unwrap()
+        .query_row(
+            "SELECT write_mode, backing_id, revision, fence, physical_dev, physical_ino
+                 FROM mount_rs_metadata WHERE id=1",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(row, ("MRC1".to_owned(), None, 0, i64::MAX, None, None));
+    let block_markers: i64 = rusqlite::Connection::open(&blocks)
+        .unwrap()
+        .query_row("SELECT count(*) FROM mount_rs_block_authority", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    println!("HISTORICAL_UNSTAMPED_SQLITE_MIGRATION_BLOCK_MARKERS={block_markers}");
+    assert!(
+        mountpoint.is_dir(),
+        "path checks prepare the view before storage opens"
+    );
+    assert!(
+        fs::read_dir(&mountpoint).unwrap().next().is_none(),
+        "failed migration leaves an empty prepared view"
+    );
+}
+
+#[test]
+fn migrate_concurrent_backing_cli_requires_concurrent_splitstore_config() {
+    let scope = tempfile::TempDir::new().expect("create owned config rejection root");
+    let metadata = scope.path().join("metadata.sqlite");
+    let blocks = scope.path().join("blocks.sqlite");
+    let config_path = scope.path().join("single-writer.json");
+    let config = serde_json::json!({
+        "version": 1,
+        "driver": {
+            "kind": "splitstore",
+            "storage": {
+                "concurrent_writes": false,
+                "metadata": {"kind": "sqlite", "path": metadata},
+                "blocks": {"kind": "sqlite", "path": blocks}
+            }
+        }
+    });
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_mount-rs"))
+        .arg("migrate-concurrent-backing")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--expected-revision")
+        .arg("0")
+        .output()
+        .expect("run offline migration with a single-writer config");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "invalid migration config must exit as usage error: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("concurrent_writes=true"));
+    assert!(!metadata.exists());
+    assert!(!blocks.exists());
+}
 
 #[test]
 fn help_and_version_paths_are_pure() {

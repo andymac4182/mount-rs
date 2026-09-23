@@ -240,23 +240,24 @@ Physical cross-host and production operation still need separate evidence.
 The `native-concurrent-sqlite` macOS CI job runs the local DELETE shared-mount
 cases and both NFS backing rejection cases serially. WAL stays an opt-in
 diagnostic because the bundled SQLite release has the documented WAL reset
-issue. The current local-filesystem provider guard is macOS specific; Linux
-network-backed SQLite files have not been qualified for concurrent mode.
+issue. At that checkpoint the local-filesystem provider guard was macOS
+specific. The later bound-backing checks below add Linux filesystem and
+individual-file mount rejection; network-backed SQLite remains unsupported.
 
-The current concurrent mode keeps detached file tombstones and staged blocks
-and has no distributed open-handle pin or online collector. The block-row
+At the first concurrent-writer checkpoint, the mode kept detached file tombstones and staged blocks
+and had no distributed open-handle pin or online collector. The block-row
 growth measured above is a capacity limit even when acknowledged data is
 correct. Every writable CLI must select the same block database or remote
-bucket/prefix; the metadata marker currently does not bind a block-backing
+bucket/prefix; its `MRC1` metadata marker did not bind a block-backing
 identity. An explicit mismatch test shared metadata but gave writers different
 SQLite block files: one writer published a file, the other received an error
 on read, and the correct backing still read exact bytes. A second writer could
 also acknowledge a new file into its different block store, leaving one
 metadata namespace with chunks split across the two backings. A later missing
 backing would make that acknowledged file inaccessible. Matching the block
-backing in every writer's configuration is therefore a required volume
-invariant; a future authority marker should bind a stable backing identity
-before publication. Cross-host physical
+backing in every writer's configuration was therefore a required volume
+invariant. The `MRC2` work below binds a stable backing identity before
+publication. Cross-host physical
 mounts, power-loss recovery, and sustained
 multi-endpoint RustFS visibility are separate qualification gates.
 
@@ -358,7 +359,7 @@ this as cleanup failure and the runner preserves any uncertain mounted root
 for diagnosis. Normal success, injected setup failures, and scoped TERM
 cleanup passed; hard-KILL image reaping was not qualified.
 
-## Final workspace gates
+## First checkpoint workspace gates
 
 After the path-guard and exact cleanup fixes,
 `./scripts/cargo-shared fmt --all -- --check` and strict
@@ -370,3 +371,237 @@ described above. Node addon build, typecheck, CLI/chunked suites, Python script
 AST, changed shell syntax, CI workflow YAML parse, and `git diff --check` also
 passed. The full Cargo suite ran with macOS test-owned socket permissions so
 its 9P tests could bind Unix sockets.
+
+## Bound backing protocol qualification
+
+The coordinated protocol branch changes the concurrent metadata mode to `MRC2`. Metadata stores
+persist a 16-byte backing ID and check it in the same transaction as each
+revision CAS. Block stores persist their own stable authority and verify it
+read-only at mount open and again after the block flush, before each metadata
+CAS. An existing `MRC1` volume returns `EBUSY` with the offline migration command
+before it creates a block marker. Migration directly reads every referenced
+block, checks that each extent fits the returned bytes, and rechecks metadata
+revision before changing the mode without changing namespace bytes.
+Content-addressed object IDs with a full digest also check their bytes against
+that digest. SQLite random IDs and legacy short object IDs cannot detect a
+same-length replacement because the old metadata has no checksum to compare.
+
+The inverse SQLite mismatch regression now rejects a second physical block
+database against one bound metadata file with `ESTALE` before a write or marker
+claim. Deleting the marker makes reopen fail without recreating it or advancing
+metadata; changing it after open stops the next publication with `ESTALE` and
+no metadata revision advance. Migration rejects missing and short blocks,
+references selected from a different SQLite block file, retained unlinked-node
+block damage, stale revisions, and version
+history. A revision change during the direct block scan returns `EAGAIN` while
+the volume stays `MRC1`.
+
+SQLite block and metadata files use separate Unix physical dev/inode and
+canonical pathname stamps to reject a copied backing with the same persisted
+authority or volume ID. The
+metadata stamp is seeded only when the provider exclusively creates a new
+file; a preclaim copy of that file cannot enroll independently. Historical
+unstamped Legacy SQLite metadata can continue in exclusive-writer mode but
+cannot automatically enter `MRC2`. An already `MRC1` SQLite file cannot mount
+with the upgraded binary: it cannot acquire a legacy writer, and its implicit
+`MRC2` migration is refused. Trusted offline re-enrollment has not been
+implemented. An unstamped `MRC2` file refuses startup. On other
+platforms, including Windows, concurrent SQLite backing returns `ENOTSUP`
+because a copied file could carry the same marker while its contents diverge.
+The GNU Linux guard uses `fstatfs` on an `O_PATH` inspection descriptor and allows ext-family,
+XFS, Btrfs, F2FS and tmpfs; it rejects NFS, overlayfs, CIFS, 9P, FUSE and
+unknown types before concurrent claim. tmpfs passes locality but does not
+survive host reboot. The Linux native NFS acceptance fixture places both
+provider database files on its owned NFS view and asserts `ENOTSUP` with no
+metadata revision or block marker change. The Linux native NFS CI job passed
+that owned fixture on head `2ccf9579` with both markers absent and revision zero.
+Closing a regular descriptor for the same inode releases process POSIX locks,
+including SQLite's locks. `O_PATH` avoids that close path. A new distinct-process
+regression holds `BEGIN IMMEDIATE`, requires another process to receive
+`SQLITE_BUSY` before and after inspection, and permits its write after rollback.
+The revised Linux code awaits runtime CI proof; macOS does not execute this test.
+The combined revised checkout passed SQLite 61 tests, CLI 65 library tests,
+16 CLI integration tests, workspace formatting, and strict all-target Clippy
+for both packages. The remote-only offline migration regression went red
+because it created a view directory before provider connection failed; it now
+skips SQLite placement preparation when neither backing is SQLite.
+
+Concurrent SQLite requires exactly one hard link for each metadata and block
+inode at claim, reopen and publication/authority verification. Different
+hard-link names share dev/inode but select different SQLite WAL sidecars. A
+disposable APFS WAL repro acknowledged an A write, then B hit
+`SQLITE_IOERR_SHORT_READ` through the alias; DELETE, TRUNCATE and PERSIST
+appeared usable in a bounded sequential probe but did not establish safety.
+New provider regressions reject aliases before a claim and stop publication
+if a link appears after open. Linux file-only bind mounts can also expose one
+inode at different database paths with link count one and different WAL
+sidecars. GNU Linux now also checks the selected descriptor's
+`STATX_ATTR_MOUNT_ROOT` attribute, before authority insertion or publication.
+An individually mounted database file returns `ENOTSUP`, even when an active
+canonical WAL hides the authority row from the alias. Directory mounts remain
+usable. The attribute's supported mask is required: concurrent SQLite needs
+GNU Linux with kernel 5.8 or newer; other Linux targets fail closed for this
+opt-in mode. The direct `statx` syscall adds no glibc wrapper version requirement.
+The canonical pathname stamp rejects alternate auxiliary paths; symlinks
+resolving to the same canonical path remain usable. The revised SQLite provider
+suite passed 61/61 on macOS, including alternate path, symlink, hard-link and
+portable mount-attribute regressions. The earlier owned Linux file bind
+regression passed in the native NFS CI job on
+`2ccf9579`. That bounded fixture closes both stores before binding; it does
+not qualify a file-only alias opened while a canonical WAL remains active.
+The extended privileged fixture keeps canonical WALs open and verifies in a
+distinct process that an alias seeing an empty authority table cannot install
+a second authority or change metadata. Its runtime CI result is pending.
+Use the same canonical database paths in every SQLite process.
+Pathless development MRC2 prototypes fail closed before release; see the
+[auxiliary path authority](sqlite-auxiliary-path-authority.md) for the format
+and recovery limits.
+
+The offline migration path currently prepares a block authority before it
+directly reads referenced blocks and attempts the metadata transition. A
+disposable historical unstamped SQLite MRC1 CLI fixture rejected migration
+with metadata still `MRC1`, revision zero and no backing ID, but left one
+authority row in the selected block database. That row alone does not publish
+a namespace. Read-only transition and extent preflight before authority claim
+is tracked as the immediate follow-up; until then a rejected historical
+migration can leave this unused marker.
+
+The bounded local SQLite load completed 8 × 100 independent mount lifecycles
+in both modes: DELETE took 48,047 ms and WAL took 41,993 ms. Each run
+acknowledged 2,008 lifecycle operations, reopened exact bytes, and reported
+`PRAGMA integrity_check=ok` on both backing files. Each retained 834 block
+rows and a namespace of about 383,935 bytes. The smaller 4 × 12 DELETE/WAL
+journal matrix passed too. WAL remains a diagnostic because the bundled
+SQLite 3.46 release has the WAL-reset issue described above.
+
+On this branch, the disposable macOS NFS two-CLI SQLite case passed in DELETE
+and WAL: both independently mounted CLIs saw the other's creates, merged
+disjoint same-file ranges, renamed and unlinked files, and a fresh CLI reopened
+the result. Its 2 × 12 loads took 778 and 634 ms, and both backing databases
+passed integrity checks after clean unmount. One CLI serving two writable
+views passed its 2 × 12 load in 1,068 ms. The two-view inner SQLite application
+lock probe returned `blocked` in these runs; it does not qualify SQLite
+application databases across independent NFS views. Concurrent SQLite
+provider files placed on NFS still fail before a volume is created, including
+the mixed local-metadata/NFS-block path. The first sandboxed native attempt
+could not load `mount_nfs` and returned status 5; the same owned cases passed
+with host mount permissions, with no test mount left behind.
+
+A later full SQLite application matrix through two separate CLI mounts
+reproduced the shared-view NFS limit three times. DELETE, TRUNCATE, and
+PERSIST recovered neither the killed uncommitted writer's lock nor a clean
+reopen (`database is locked`); one DELETE load worker failed at commit with
+a disk I/O error, and WAL selected DELETE. This is the CLI's `soft,nolocks`
+shared-view profile, not the separate `locallocks,hard` single-view SQLite
+profile that passed its rollback modes and 100-row load. The mount-rs two-CLI
+file lifecycle load, cross-view visibility, fresh reopen, and both local
+backing databases' integrity checks passed around the failing application
+packet. Three macOS `.nfs.*` deferred unlink names stayed visible for ten
+seconds and were removed with the entire disposable backing after unmount.
+The application packet is diagnostic and does not qualify SQLite files inside
+two independent NFS mountpoints.
+
+Real PGlite socket-server authority and MRC1 migration tests passed 2/2.
+Its disposable macOS two-CLI NFS case passed 160 acknowledged calls in a
+3,721 ms load, cross-view writes, and fresh reopen against one PGlite engine.
+The owned real FoundationDB provider gate passed on both single-node and
+durable three-node clusters: five authority, migration and contract tests plus
+the terminal native network shutdown test each time. The durable readiness
+probe received an ambiguous transaction acknowledgement and confirmed its
+value by readback before accepting the cluster as ready. A separate native
+macOS two-CLI test with FoundationDB serving both metadata and blocks passed
+bidirectional visibility, concurrent writes and fresh reopen; its runner
+verified exact NFS mount and sparse-image cleanup. These are one-host and
+disposable-service results. Physical cross-host mounts, power-loss recovery,
+online reclamation, distributed open-handle pins and sustained production
+performance remain separate qualifications.
+
+## Rebased integrity and service checkpoint
+
+Ordinary FoundationDB block reads now verify the full SHA-256 content ID, as
+the migration read already did. A direct same-length key overwrite is rejected
+with `EIO` in the real durable three-node provider test (five live provider
+tests passed, one ignored, followed by the native shutdown test). Ordinary
+PGlite reads likewise verify their existing legacy MD5-derived content ID;
+the isolated Node-backed same-length BYTEA tamper test failed before the
+change and passed with `EIO` afterward. MD5 checks ordinary accidental
+replacement, not adversarial collision resistance. SQLite's older random
+block IDs do not provide a comparable read digest.
+
+The first PR #13-rebased full RustFS fixture passed signed authority,
+provider, SDK and VFS stages, then one native two-CLI load write returned macOS NFS code 60
+(`ETIMEDOUT`) after 34,280 ms on the shared soft mount. Its exact stalled
+backend request was not retained in that first run. A repeat with bounded
+failure-only CLI and operation diagnostics passed 40/40 native acknowledgements
+in 12,672 ms, and the complete signed provider, SDK, N-API, SQLite VFS,
+service restart and reopen fixture ended with `RUSTFS_INTEGRATION_PASS`.
+The exact post-guard head `ff58b97d` reproduced the timeout at writer A's
+`open /load-a-07`, while writer B acknowledged all 20 operations. A completed
+its filesystem create/open and a later lstat before progress stopped; the
+existing trace did not identify the pending publication or NFS response.
+The disposable mount, image, FoundationDB process and RustFS container were
+removed after the failure. Request-phase tracing is being used to diagnose
+this intermittent soft-NFS timeout; it is not a measured production
+reliability rate. The combined traced head `042734b6` then passed the full
+FoundationDB/RustFS fixture: 40/40 native acknowledgements took 27,200 ms,
+followed by `RUSTFS_COMBO_PASS` and `RUSTFS_INTEGRATION_PASS`. The runner
+verified removal of its exact mounts, images, processes, containers and temp
+roots, and closure of all four owned service ports. This pass does not explain
+the earlier failures. The extended traced fixture on test-only head
+`e4489179` also passed 80/80 acknowledgements, both live verification passes,
+fresh reopen, owned resource cleanup and the complete service fixture.
+Its 94,537 ms native timer includes the live verification passes; it is not
+a write-only throughput measurement. No pending spans were captured at the
+end of either writer's load window.
+
+| Longest traced phase | Writer A, ms | Writer B, ms |
+| --- | ---: | ---: |
+| Local filesystem gate wait | 19.599 | 22.249 |
+| Metadata load | 83.640 | 18.401 |
+| Backing authority verification | 16.216 | 21.187 |
+| FoundationDB metadata CAS | 510.396 | 484.629 |
+| CREATE ownership claim | 271.992 | 326.332 |
+| NFS dispatch | 761.390 | 753.642 |
+
+These maxima come from different requests and are not additive. They identify
+costs in this passing window, not the cause of the earlier timeout. Tracing
+can affect scheduling through stderr I/O; an untraced reliability qualification
+and an explanation of the intermittent failure remain outstanding.
+
+The same combined source passed locked workspace all-targets tests after
+cleaning the local workspace package artifacts from its isolated target:
+1,045 tests across 128 passing suites, zero failures, 75 ignored opt-in tests.
+Workspace formatting and strict all-targets Clippy passed. A shared target
+had previously supplied a CLI binary containing a diagnostic absent from
+the selected checkout; those stale artifacts were removed before these gates.
+
+The corrected native SQLite fixture also passed all four owned macOS cases
+on that source: two CLIs in DELETE and WAL, one CLI with two writable views,
+NFS metadata rejection and mixed local-metadata/NFS-block rejection. The
+two-CLI 2 × 12 loads took 879 ms in DELETE and 710 ms in WAL; the one-CLI
+two-view load took 1,205 ms. Both local backing files passed integrity checks
+and fresh reopen returned exact bytes. The test runner removed its exact
+temporary root and left no matching mount. The native concurrent SQLite CI
+job passed on `2ccf9579` as well.
+
+An earlier CI comparison of main `1a8dac33` and PR head `ff58b97d` used
+400 iterations, concurrency 64, 4 KiB payloads and 64 KiB chunks against the
+disposable Ozone object service. Every provider completed all 1,200 successful
+write/read/delete operations with no timeout and owned cleanup. The metric
+called "successful lifecycle IOPS" counts those three operations per
+lifecycle divided by measured wall time; its configured target is 1,000.
+
+| Metadata provider | Main IOPS | PR IOPS | Target result, main / PR |
+| --- | ---: | ---: | --- |
+| SQLite | 1,010.95 | 944.94 | pass / fail |
+| PGlite | 993.62 | 677.65 | fail / fail |
+| TiDB | 314.74 | 291.69 | fail / fail |
+| FoundationDB | 505.07 | 493.33 | fail / fail |
+
+These single CI samples do not establish a controlled performance comparison.
+SQLite crossed the threshold in the PR sample, and a performance regression
+has not been excluded. The three aggregate Ozone performance jobs failed on
+both revisions. Their functional completion does not qualify the configured
+IOPS target. The Windows Node structural open-flags fixture also failed on
+both revisions with `EINVAL` when opening its writable host file; this is a
+separate baseline failure, not evidence that the full Node test chain passed.

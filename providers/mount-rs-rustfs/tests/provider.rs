@@ -130,14 +130,14 @@ async fn direct_object_store_wrapper_cannot_assert_a_shared_rustfs_backing() {
     let second = RustFsBlockStore::new(backing, "run-owned/preflight", true).unwrap();
     assert!(
         first
-            .prepare_concurrent_mode()
+            .prepare_concurrent_backing()
             .await
             .unwrap_err()
             .is(ErrorCode::Enotsup)
     );
     assert!(
         second
-            .prepare_concurrent_mode()
+            .prepare_concurrent_backing()
             .await
             .unwrap_err()
             .is(ErrorCode::Enotsup)
@@ -151,9 +151,21 @@ async fn concurrent_preflight_rejects_unavailable_rustfs_before_open() {
     let mut config = local_config();
     config.endpoint = "http://127.0.0.1:1".to_owned();
     let blocks = RustFsBlockStore::from_config(&config, "run-owned/unavailable", true).unwrap();
-    let error = blocks.prepare_concurrent_mode().await.unwrap_err();
+    let error = blocks.prepare_concurrent_backing().await.unwrap_err();
     assert!(
         !error.is(ErrorCode::Enotsup),
         "signed RustFS preflight must try the remote backing"
+    );
+}
+
+#[tokio::test]
+async fn signed_backing_identity_attempts_the_unavailable_service() {
+    let mut config = local_config();
+    config.endpoint = "http://127.0.0.1:1".to_owned();
+    let blocks = RustFsBlockStore::from_config(&config, "run-owned/unavailable-id", true).unwrap();
+    let error = blocks.prepare_concurrent_backing().await.unwrap_err();
+    assert!(
+        !error.is(ErrorCode::Enotsup),
+        "a signed RustFS client must attempt a remote claim before MRC2 metadata opens"
     );
 }

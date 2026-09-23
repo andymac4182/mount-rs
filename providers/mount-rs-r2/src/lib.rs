@@ -8,7 +8,9 @@
 
 mod blocks;
 
-pub use blocks::{R2BlockStore, R2BlockStoreErrorClass, R2BlockStoreStats};
+pub use blocks::{
+    R2BlockStore, R2BlockStoreErrorClass, R2BlockStoreStats, R2ConcurrentQualification,
+};
 
 use std::fmt;
 use std::sync::Arc;

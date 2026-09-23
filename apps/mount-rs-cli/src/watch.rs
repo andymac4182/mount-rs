@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use mount_rs_core::diagnostics::RequestTrace;
 use mount_rs_core::{
     Capabilities, DirEntry, FileHandle, FsDriver, GuardedMutation, GuardedMutationResult,
     GuardedRead, GuardedReadResult, MkdirOptions, OpenFlags, Result, Stats, StatsFs,
@@ -70,7 +71,7 @@ impl WatchedDriver {
 
     async fn watched<T, F>(
         &self,
-        operation: &str,
+        operation: &'static str,
         subject: String,
         note: String,
         future: F,
@@ -78,7 +79,16 @@ impl WatchedDriver {
     where
         F: Future<Output = Result<T>>,
     {
+        let mut trace = RequestTrace::new("driver", operation);
+        trace.stage("await", format_args!("path={subject}"));
         let result = future.await;
+        trace.finish(format_args!(
+            "path={subject} outcome={}",
+            result
+                .as_ref()
+                .err()
+                .map_or("ok", |error| error.code.as_str()),
+        ));
         match result {
             Ok(value) => {
                 if self.options.enabled && (self.options.verbose || !NOISY.contains(&operation)) {
@@ -145,11 +155,21 @@ impl WatchedHandle {
         emit_line(&self.options, operation, &self.path, note);
     }
 
-    async fn watched<T, F>(&self, operation: &str, note: String, future: F) -> Result<T>
+    async fn watched<T, F>(&self, operation: &'static str, note: String, future: F) -> Result<T>
     where
         F: Future<Output = Result<T>>,
     {
+        let mut trace = RequestTrace::new("handle", operation);
+        trace.stage("await", format_args!("path={}", self.path));
         let result = future.await;
+        trace.finish(format_args!(
+            "path={} outcome={}",
+            self.path,
+            result
+                .as_ref()
+                .err()
+                .map_or("ok", |error| error.code.as_str()),
+        ));
         match result {
             Ok(value) => {
                 if self.options.enabled && (self.options.verbose || !NOISY.contains(&operation)) {

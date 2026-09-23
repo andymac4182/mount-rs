@@ -1362,7 +1362,10 @@ dependencies = [
  "mount-rs-nfs",
  "mount-rs-observability",
  "mount-rs-sdk",
+ "mount-rs-sqlite",
+ "rusqlite",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 
@@ -1425,6 +1428,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -1552,6 +1556,7 @@ dependencies = [
  "object_store",
  "sha2 0.10.9",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -1594,6 +1599,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-postgres",
+ "uuid",
 ]
 
 [[package]]
@@ -1610,6 +1616,7 @@ name = "mount-rs-r2"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures-util",
  "mount-rs-core",
  "mount-rs-memfs",
  "mount-rs-object-store-blocks",
@@ -1617,6 +1624,7 @@ dependencies = [
  "mount-rs-s3",
  "object_store",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

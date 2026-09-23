@@ -76,7 +76,7 @@ fn concurrent_block_preflight_rejects_an_unavailable_shared_cluster() {
         .build()
         .expect("build bounded provider test runtime");
     let preflight = runtime.block_on(async {
-        tokio::time::timeout(Duration::from_secs(5), blocks.prepare_concurrent_mode()).await
+        tokio::time::timeout(Duration::from_secs(5), blocks.prepare_concurrent_backing()).await
     });
 
     // Drain the native network before asserting the expected RED/GREEN result.
@@ -96,7 +96,7 @@ fn concurrent_block_preflight_rejects_an_unavailable_shared_cluster() {
 
     match preflight {
         Ok(Err(_)) => println!("FOUNDATIONDB_BLOCK_PREFLIGHT_UNAVAILABLE_PASS"),
-        Ok(Ok(())) => panic!("unavailable FoundationDB blocks must fail concurrent preflight"),
+        Ok(Ok(_)) => panic!("unavailable FoundationDB blocks must fail concurrent preflight"),
         Err(_) => panic!("unavailable FoundationDB block preflight must fail within five seconds"),
     }
 }

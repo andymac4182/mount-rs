@@ -11,7 +11,8 @@
 use async_trait::async_trait;
 use md5::{Digest, Md5};
 use mount_rs_core::storage::{
-    BlockId, BlockStore, LoadedMetadata, MetadataStore, Namespace, WriterLease,
+    BlockId, BlockStore, ConcurrentBackingId, ConcurrentModeState, LoadedMetadata, MetadataStore,
+    Namespace, WriterLease,
 };
 use mount_rs_core::versioning::{
     PublicationId, ReadLease, ReadLeaseRequest, VersionHead, VersionId, VersionInfo, VersionKind,
@@ -32,6 +33,7 @@ use super::{CloseGate, postgres_error};
 // a transaction, which matters when a transaction waits for a row lock.
 const NOW: &str = "CAST(EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS BIGINT)";
 const CONCURRENT_WRITE_MODE: &str = "MRC1";
+const BOUND_CONCURRENT_WRITE_MODE: &str = "MRC2";
 // A pre-conversion client still checks fence<INT8_MAX before acquisition.
 // Exhausting the fence in the same atomic update as the mode marker therefore
 // blocks old binaries without relying on their awareness of write_mode.
@@ -45,14 +47,19 @@ const METADATA_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_metadata (
  fence BIGINT NOT NULL CHECK(fence>=0),
  expires BIGINT NOT NULL,
  volume_id TEXT,
- write_mode TEXT);
+ write_mode TEXT,
+ backing_id TEXT);
 ALTER TABLE mount_rs_metadata ADD COLUMN IF NOT EXISTS volume_id TEXT;
 ALTER TABLE mount_rs_metadata ADD COLUMN IF NOT EXISTS write_mode TEXT;
+ALTER TABLE mount_rs_metadata ADD COLUMN IF NOT EXISTS backing_id TEXT;
 ";
 
 const BLOCK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_blocks (
  volume_key TEXT NOT NULL, id TEXT NOT NULL, bytes BYTEA NOT NULL,
- PRIMARY KEY (volume_key, id));";
+ PRIMARY KEY (volume_key, id));
+CREATE TABLE IF NOT EXISTS mount_rs_block_authority (
+ volume_key TEXT PRIMARY KEY NOT NULL,
+ backing_id TEXT NOT NULL);";
 
 const NOW_SELECT: &str = "SELECT CAST(EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS BIGINT)";
 const VERSION_SCHEMA_NAME: &str = "mount-rs-versioning";
@@ -744,29 +751,66 @@ impl MetadataStore for PgliteMetadataStore {
         })
     }
 
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
+    async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
         let client = self.0.lock_client().await?;
-        // One DML statement is one atomic PGlite autocommit transaction. It
-        // races safely with legacy acquisition because both update this row.
+        let row = client
+            .as_ref()
+            .ok_or_else(connection_closed)?
+            .query_typed_opt(
+                "SELECT write_mode, backing_id, owner, fence, expires
+                 FROM mount_rs_metadata WHERE volume_key=$1",
+                &[(&self.0.volume_key, Type::TEXT)],
+            )
+            .await
+            .map_err(postgres_error)?
+            .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
+        let mode = row.get::<_, Option<String>>(0);
+        let backing = row.get::<_, Option<String>>(1);
+        let owner = row.get::<_, Option<String>>(2);
+        let fence = row.get::<_, i64>(3);
+        let expires = row.get::<_, i64>(4);
+        match (mode.as_deref(), backing.as_deref()) {
+            (None, None) if fence != CONCURRENT_FENCE_SENTINEL => Ok(ConcurrentModeState::Legacy),
+            (Some(CONCURRENT_WRITE_MODE), None)
+                if owner.is_none() && fence == CONCURRENT_FENCE_SENTINEL && expires == 0 =>
+            {
+                Ok(ConcurrentModeState::Mrc1)
+            }
+            (Some(BOUND_CONCURRENT_WRITE_MODE), Some(id))
+                if owner.is_none() && fence == CONCURRENT_FENCE_SENTINEL && expires == 0 =>
+            {
+                Ok(ConcurrentModeState::Mrc2(
+                    ConcurrentBackingId::from_hex(id).map_err(|_| stale())?,
+                ))
+            }
+            (Some(BOUND_CONCURRENT_WRITE_MODE), _) => Err(stale()),
+            _ => Err(backend_error(
+                "PGlite concurrent mode, backing ID, and fence disagree",
+            )),
+        }
+    }
+
+    async fn prepare_bound_concurrent_mode(&self, backing: ConcurrentBackingId) -> Result<()> {
+        let client = self.0.lock_client().await?;
+        let backing_text = backing.to_hex();
         let changed = client
             .as_ref()
             .ok_or_else(connection_closed)?
             .execute_typed(
-                "UPDATE mount_rs_metadata SET write_mode=$2, fence=$3
-                 WHERE volume_key=$1 AND write_mode IS NULL
+                "UPDATE mount_rs_metadata SET write_mode=$2, backing_id=$3, fence=$4
+                 WHERE volume_key=$1 AND write_mode IS NULL AND backing_id IS NULL
                    AND revision=0 AND namespace IS NULL
                    AND owner IS NULL AND fence=0 AND expires=0
                    AND EXISTS (
                      SELECT 1 FROM mount_rs_version_state
                      WHERE volume_key=$1 AND head_id IS NULL
                        AND next_sequence=1 AND next_read_fence=0)
-                   AND NOT EXISTS (
-                     SELECT 1 FROM mount_rs_versions WHERE volume_key=$1)
-                   AND NOT EXISTS (
-                     SELECT 1 FROM mount_rs_version_pins WHERE volume_key=$1)",
+                   AND NOT EXISTS (SELECT 1 FROM mount_rs_versions WHERE volume_key=$1)
+                   AND NOT EXISTS (SELECT 1 FROM mount_rs_version_pins WHERE volume_key=$1)",
                 &[
                     (&self.0.volume_key, Type::TEXT),
-                    (&CONCURRENT_WRITE_MODE, Type::TEXT),
+                    (&BOUND_CONCURRENT_WRITE_MODE, Type::TEXT),
+                    (&backing_text, Type::TEXT),
                     (&CONCURRENT_FENCE_SENTINEL, Type::INT8),
                 ],
             )
@@ -775,36 +819,16 @@ impl MetadataStore for PgliteMetadataStore {
         if changed == 1 {
             return Ok(());
         }
-        let row = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .query_typed_opt(
-                "SELECT write_mode, owner, fence, expires
-                 FROM mount_rs_metadata WHERE volume_key=$1",
-                &[(&self.0.volume_key, Type::TEXT)],
-            )
-            .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
-        let mode = row.get::<_, Option<String>>(0);
-        let owner = row.get::<_, Option<String>>(1);
-        let fence = row.get::<_, i64>(2);
-        let expires = row.get::<_, i64>(3);
-        if mode.as_deref() == Some(CONCURRENT_WRITE_MODE)
-            && owner.is_none()
-            && fence == CONCURRENT_FENCE_SENTINEL
-            && expires == 0
-        {
-            return Ok(());
+        drop(client);
+        match self.concurrent_mode_state().await? {
+            ConcurrentModeState::Mrc2(id) if id == backing => Ok(()),
+            ConcurrentModeState::Mrc2(_) => Err(stale()),
+            ConcurrentModeState::Mrc1 => Err(FsError::new(ErrorCode::Ebusy)
+                .with_syscall("prepare bound concurrent PGlite volume")
+                .with_message("MRC1 requires migrate-concurrent-backing")),
+            ConcurrentModeState::Legacy => Err(FsError::new(ErrorCode::Ebusy)
+                .with_syscall("prepare bound concurrent PGlite volume")),
         }
-        if mode.is_some() || fence == CONCURRENT_FENCE_SENTINEL {
-            return Err(backend_error(
-                "PGlite concurrent mode marker and fence sentinel disagree",
-            ));
-        }
-        Err(FsError::new(ErrorCode::Ebusy)
-            .with_syscall("prepare concurrent PGlite volume")
-            .with_message("a fenced legacy volume needs an offline migration"))
     }
 
     async fn acquire_writer(&self, owner: &str, ttl: Duration) -> Result<WriterLease> {
@@ -993,8 +1017,9 @@ impl MetadataStore for PgliteMetadataStore {
         Ok(next as u64)
     }
 
-    async fn publish_if_revision(
+    async fn publish_bound_if_revision(
         &self,
+        backing: ConcurrentBackingId,
         expected_revision: u64,
         namespace: Namespace,
     ) -> Result<u64> {
@@ -1005,24 +1030,25 @@ impl MetadataStore for PgliteMetadataStore {
             .checked_add(1)
             .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
         let namespace = serde_json::to_string(&namespace).map_err(backend_error)?;
+        let backing_text = backing.to_hex();
         let client = self.0.lock_client().await?;
-        // This entire CAS is one autocommit statement. A transport error may
-        // mean the server committed before the reply was lost: propagate it
-        // unchanged and never classify it as a retryable revision conflict.
+        // A failed acknowledgement may follow a committed update. Preserve
+        // transport errors; only a confirmed zero-row update is classified.
         let changed = client
             .as_ref()
             .ok_or_else(connection_closed)?
             .execute_typed(
                 "UPDATE mount_rs_metadata SET revision=$2, namespace=$3
                  WHERE volume_key=$1 AND revision=$4 AND write_mode=$5
-                   AND owner IS NULL AND fence=$6 AND expires=0",
+                   AND owner IS NULL AND fence=$6 AND expires=0 AND backing_id=$7",
                 &[
                     (&self.0.volume_key, Type::TEXT),
                     (&next, Type::INT8),
                     (&namespace, Type::TEXT),
                     (&expected, Type::INT8),
-                    (&CONCURRENT_WRITE_MODE, Type::TEXT),
+                    (&BOUND_CONCURRENT_WRITE_MODE, Type::TEXT),
                     (&CONCURRENT_FENCE_SENTINEL, Type::INT8),
+                    (&backing_text, Type::TEXT),
                 ],
             )
             .await
@@ -1031,43 +1057,98 @@ impl MetadataStore for PgliteMetadataStore {
             return Ok(next as u64);
         }
         if changed != 0 {
-            return Err(backend_error(
-                "PGlite concurrent metadata CAS changed multiple rows",
-            ));
+            return Err(backend_error("PGlite bound CAS changed multiple rows"));
         }
         let row = client
             .as_ref()
             .ok_or_else(connection_closed)?
             .query_typed_opt(
-                "SELECT revision, write_mode, owner, fence, expires
+                "SELECT revision, write_mode, backing_id, owner, fence, expires
                  FROM mount_rs_metadata WHERE volume_key=$1",
                 &[(&self.0.volume_key, Type::TEXT)],
             )
             .await
             .map_err(postgres_error)?
             .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
-        let revision = row.get::<_, i64>(0);
         let mode = row.get::<_, Option<String>>(1);
-        let owner = row.get::<_, Option<String>>(2);
-        let fence = row.get::<_, i64>(3);
-        let expires = row.get::<_, i64>(4);
-        if mode.as_deref() != Some(CONCURRENT_WRITE_MODE)
-            || owner.is_some()
-            || fence != CONCURRENT_FENCE_SENTINEL
-            || expires != 0
+        let actual = row.get::<_, Option<String>>(2);
+        if mode.as_deref() == Some(BOUND_CONCURRENT_WRITE_MODE)
+            && actual.as_deref() != Some(backing_text.as_str())
+        {
+            return Err(stale());
+        }
+        if mode.as_deref() != Some(BOUND_CONCURRENT_WRITE_MODE)
+            || row.get::<_, Option<String>>(3).is_some()
+            || row.get::<_, i64>(4) != CONCURRENT_FENCE_SENTINEL
+            || row.get::<_, i64>(5) != 0
         {
             return Err(FsError::new(ErrorCode::Ebusy)
-                .with_syscall("publish concurrent PGlite metadata")
-                .with_message("concurrent mode or its legacy fence is missing"));
+                .with_syscall("publish bound concurrent PGlite metadata"));
         }
-        if revision != expected {
-            return Err(
-                FsError::new(ErrorCode::Eagain).with_syscall("publish concurrent PGlite metadata")
-            );
+        if row.get::<_, i64>(0) != expected {
+            return Err(FsError::new(ErrorCode::Eagain)
+                .with_syscall("publish bound concurrent PGlite metadata"));
         }
         Err(backend_error(
-            "PGlite concurrent metadata CAS returned zero for an unchanged revision",
+            "PGlite bound CAS returned zero for unchanged revision",
         ))
+    }
+
+    async fn migrate_mrc1_to_bound_mode(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        let expected =
+            i64::try_from(expected_revision).map_err(|_| FsError::new(ErrorCode::Eoverflow))?;
+        let backing_text = backing.to_hex();
+        let client = self.0.lock_client().await?;
+        let changed = client
+            .as_ref()
+            .ok_or_else(connection_closed)?
+            .execute_typed(
+                "UPDATE mount_rs_metadata SET write_mode=$2, backing_id=$3
+                 WHERE volume_key=$1 AND revision=$4 AND write_mode=$5 AND backing_id IS NULL
+                   AND owner IS NULL AND fence=$6 AND expires=0
+                   AND EXISTS (
+                     SELECT 1 FROM mount_rs_version_state
+                     WHERE volume_key=$1 AND head_id IS NULL
+                       AND next_sequence=1 AND next_read_fence=0)
+                   AND NOT EXISTS (SELECT 1 FROM mount_rs_versions WHERE volume_key=$1)
+                   AND NOT EXISTS (SELECT 1 FROM mount_rs_version_pins WHERE volume_key=$1)",
+                &[
+                    (&self.0.volume_key, Type::TEXT),
+                    (&BOUND_CONCURRENT_WRITE_MODE, Type::TEXT),
+                    (&backing_text, Type::TEXT),
+                    (&expected, Type::INT8),
+                    (&CONCURRENT_WRITE_MODE, Type::TEXT),
+                    (&CONCURRENT_FENCE_SENTINEL, Type::INT8),
+                ],
+            )
+            .await
+            .map_err(postgres_error)?;
+        if changed == 1 {
+            return Ok(());
+        }
+        if changed != 0 {
+            return Err(backend_error("PGlite migration changed multiple rows"));
+        }
+        let row = client
+            .as_ref()
+            .ok_or_else(connection_closed)?
+            .query_typed_opt(
+                "SELECT revision FROM mount_rs_metadata WHERE volume_key=$1",
+                &[(&self.0.volume_key, Type::TEXT)],
+            )
+            .await
+            .map_err(postgres_error)?
+            .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
+        if row.get::<_, i64>(0) != expected {
+            return Err(
+                FsError::new(ErrorCode::Eagain).with_syscall("migrate concurrent PGlite mode")
+            );
+        }
+        Err(FsError::new(ErrorCode::Ebusy).with_syscall("migrate concurrent PGlite mode"))
     }
 
     async fn flush(&self) -> Result<()> {
@@ -1760,10 +1841,61 @@ impl BlockStore for PgliteBlockStore {
         self.0.durable
     }
 
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
-        // This block table is scoped by volume_key on the one wire server;
-        // connecting initialized the table and checked the live endpoint.
-        self.0.flush().await
+    async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
+        let candidate = uuid::Uuid::new_v4().simple().to_string();
+        let client = self.0.lock_client().await?;
+        client
+            .as_ref()
+            .ok_or_else(connection_closed)?
+            .execute_typed(
+                "INSERT INTO mount_rs_block_authority (volume_key, backing_id) VALUES ($1, $2)
+                 ON CONFLICT (volume_key) DO NOTHING",
+                &[(&self.0.volume_key, Type::TEXT), (&candidate, Type::TEXT)],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let row = client
+            .as_ref()
+            .ok_or_else(connection_closed)?
+            .query_typed_opt(
+                "SELECT backing_id FROM mount_rs_block_authority WHERE volume_key=$1",
+                &[(&self.0.volume_key, Type::TEXT)],
+            )
+            .await
+            .map_err(postgres_error)?
+            .ok_or_else(|| backend_error("PGlite block authority disappeared"))?;
+        ConcurrentBackingId::from_hex(&row.get::<_, String>(0))
+            .map_err(|_| backend_error("PGlite block authority ID is invalid"))
+    }
+
+    async fn verify_concurrent_backing(&self, expected: ConcurrentBackingId) -> Result<()> {
+        let client = self.0.lock_client().await?;
+        let row = client
+            .as_ref()
+            .ok_or_else(connection_closed)?
+            .query_typed_opt(
+                "SELECT backing_id FROM mount_rs_block_authority WHERE volume_key=$1",
+                &[(&self.0.volume_key, Type::TEXT)],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let Some(row) = row else {
+            return Err(stale());
+        };
+        let actual =
+            ConcurrentBackingId::from_hex(&row.get::<_, String>(0)).map_err(|_| stale())?;
+        if actual != expected {
+            return Err(stale());
+        }
+        Ok(())
+    }
+
+    async fn get_for_migration(&self, id: &BlockId) -> Result<Vec<u8>> {
+        let bytes = self.get(id).await?;
+        if block_id(&bytes) != id.0 {
+            return Err(FsError::new(ErrorCode::Eio).with_syscall("verify PGlite migration block"));
+        }
+        Ok(bytes)
     }
 
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
@@ -1809,7 +1941,7 @@ impl BlockStore for PgliteBlockStore {
 
     async fn get(&self, id: &BlockId) -> Result<Vec<u8>> {
         let client = self.0.lock_client().await?;
-        client
+        let bytes = client
             .as_ref()
             .ok_or_else(connection_closed)?
             .query_typed_opt(
@@ -1819,7 +1951,12 @@ impl BlockStore for PgliteBlockStore {
             .await
             .map_err(postgres_error)?
             .map(|row| row.get::<_, Vec<u8>>(0))
-            .ok_or_else(|| FsError::new(ErrorCode::Enoent).with_syscall("get block"))
+            .ok_or_else(|| FsError::new(ErrorCode::Enoent).with_syscall("get block"))?;
+        drop(client);
+        if block_id(&bytes) != id.0 {
+            return Err(FsError::new(ErrorCode::Eio).with_syscall("verify PGlite block digest"));
+        }
+        Ok(bytes)
     }
 
     async fn flush(&self) -> Result<()> {
@@ -2197,7 +2334,9 @@ mod tests {
     use super::*;
     use mount_rs_core::FsDriver;
     use mount_rs_core::chunking::{Chunker, FixedSizeChunker};
-    use mount_rs_core::storage::{BlockExtent, FileLayout, NodeData, NodeMetadata};
+    use mount_rs_core::storage::{
+        BlockExtent, ConcurrentModeState, FileLayout, NodeData, NodeMetadata,
+    };
     use mount_rs_core::versioning::BlockStoreId;
     use mount_rs_memfs::MemoryFs;
     use std::collections::BTreeMap;
@@ -2739,6 +2878,29 @@ mod tests {
         namespace
     }
 
+    // Only the offline migration tests create an MRC1 volume. Normal
+    // concurrent clients prepare an MRC2 volume with a block authority ID.
+    async fn seed_test_owned_mrc1_volume(metadata: &PgliteMetadataStore) {
+        let client = metadata.0.lock_client().await.unwrap();
+        let changed = client
+            .as_ref()
+            .unwrap()
+            .execute_typed(
+                "UPDATE mount_rs_metadata SET write_mode=$2, fence=$3
+                 WHERE volume_key=$1 AND write_mode IS NULL AND backing_id IS NULL
+                   AND revision=0 AND namespace IS NULL
+                   AND owner IS NULL AND fence=0 AND expires=0",
+                &[
+                    (&metadata.0.volume_key, Type::TEXT),
+                    (&CONCURRENT_WRITE_MODE, Type::TEXT),
+                    (&CONCURRENT_FENCE_SENTINEL, Type::INT8),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(changed, 1, "test-owned MRC1 fixture must start fresh");
+    }
+
     #[test]
     #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
     fn version_head_revision_and_id_share_one_committed_snapshot() {
@@ -3258,15 +3420,32 @@ mod tests {
                 PgliteMetadataStore::connect_with_key(connection_string, "concurrent-fresh")
                     .await
                     .unwrap();
-            metadata.prepare_concurrent_mode().await.unwrap();
-            metadata.prepare_concurrent_mode().await.unwrap();
+            let blocks = PgliteBlockStore::connect_with_key(connection_string, "concurrent-fresh")
+                .await
+                .unwrap();
+            let backing = blocks.prepare_concurrent_backing().await.unwrap();
+            metadata
+                .prepare_bound_concurrent_mode(backing)
+                .await
+                .unwrap();
+            metadata
+                .prepare_bound_concurrent_mode(backing)
+                .await
+                .unwrap();
             metadata.close().await.unwrap();
 
             let reopened =
                 PgliteMetadataStore::connect_with_key(connection_string, "concurrent-fresh")
                     .await
                     .unwrap();
-            reopened.prepare_concurrent_mode().await.unwrap();
+            reopened
+                .prepare_bound_concurrent_mode(backing)
+                .await
+                .unwrap();
+            assert_eq!(
+                reopened.concurrent_mode_state().await.unwrap(),
+                ConcurrentModeState::Mrc2(backing)
+            );
             assert!(
                 reopened
                     .acquire_writer("legacy-writer", Duration::from_secs(60))
@@ -3303,6 +3482,7 @@ mod tests {
             );
             drop(client);
             reopened.close().await.unwrap();
+            blocks.close().await.unwrap();
         });
     }
 
@@ -3330,19 +3510,20 @@ mod tests {
                 .unwrap();
             let block = blocks.put(b"abc").await.unwrap();
             blocks.flush().await.unwrap();
-            first.prepare_concurrent_mode().await.unwrap();
-            second.prepare_concurrent_mode().await.unwrap();
+            let backing = blocks.prepare_concurrent_backing().await.unwrap();
+            first.prepare_bound_concurrent_mode(backing).await.unwrap();
+            second.prepare_bound_concurrent_mode(backing).await.unwrap();
 
             let namespace = namespace(block).await;
             let a = tokio::spawn({
                 let first = first.clone();
                 let namespace = namespace.clone();
-                async move { first.publish_if_revision(0, namespace).await }
+                async move { first.publish_bound_if_revision(backing, 0, namespace).await }
             });
             let b = tokio::spawn({
                 let second = second.clone();
                 let namespace = namespace.clone();
-                async move { second.publish_if_revision(0, namespace).await }
+                async move { second.publish_bound_if_revision(backing, 0, namespace).await }
             });
             let (a, b) = (a.await.unwrap(), b.await.unwrap());
             assert!(
@@ -3375,13 +3556,17 @@ mod tests {
                 PgliteMetadataStore::connect_with_key(connection_string, "concurrent-legacy")
                     .await
                     .unwrap();
+            let blocks = PgliteBlockStore::connect_with_key(connection_string, "concurrent-legacy")
+                .await
+                .unwrap();
+            let backing = blocks.prepare_concurrent_backing().await.unwrap();
             let lease = metadata
                 .acquire_writer("old-client", Duration::from_secs(60))
                 .await
                 .unwrap();
             assert!(
                 metadata
-                    .prepare_concurrent_mode()
+                    .prepare_bound_concurrent_mode(backing)
                     .await
                     .unwrap_err()
                     .is(ErrorCode::Ebusy)
@@ -3389,13 +3574,14 @@ mod tests {
             metadata.release_writer(&lease).await.unwrap();
             assert!(
                 metadata
-                    .prepare_concurrent_mode()
+                    .prepare_bound_concurrent_mode(backing)
                     .await
                     .unwrap_err()
                     .is(ErrorCode::Ebusy),
                 "an expired or released old fence still needs an offline migration"
             );
             metadata.close().await.unwrap();
+            blocks.close().await.unwrap();
         });
     }
 
@@ -3441,6 +3627,10 @@ mod tests {
                 let metadata = PgliteMetadataStore::connect_with_key(connection_string, &key)
                     .await
                     .unwrap();
+                let blocks = PgliteBlockStore::connect_with_key(connection_string, &key)
+                    .await
+                    .unwrap();
+                let backing = blocks.prepare_concurrent_backing().await.unwrap();
                 let client = metadata.0.lock_client().await.unwrap();
                 client
                     .as_ref()
@@ -3450,7 +3640,10 @@ mod tests {
                     .unwrap();
                 drop(client);
 
-                let error = metadata.prepare_concurrent_mode().await.unwrap_err();
+                let error = metadata
+                    .prepare_bound_concurrent_mode(backing)
+                    .await
+                    .unwrap_err();
                 assert!(error.is(ErrorCode::Ebusy), "{suffix}: {error:?}");
                 let client = metadata.0.lock_client().await.unwrap();
                 let row = client
@@ -3467,6 +3660,7 @@ mod tests {
                 assert_eq!(row.get::<_, i64>(1), 0, "{suffix}");
                 drop(client);
                 metadata.close().await.unwrap();
+                blocks.close().await.unwrap();
             }
         });
     }
@@ -3489,9 +3683,13 @@ mod tests {
             let legacy = PgliteMetadataStore::connect_with_options(connection_string, options)
                 .await
                 .unwrap();
+            let blocks = PgliteBlockStore::connect_with_key(connection_string, "concurrent-conversion-race")
+                .await
+                .unwrap();
+            let backing = blocks.prepare_concurrent_backing().await.unwrap();
             let conversion = tokio::spawn({
                 let metadata = metadata.clone();
-                async move { metadata.prepare_concurrent_mode().await }
+                async move { metadata.prepare_bound_concurrent_mode(backing).await }
             });
             let old_acquire = tokio::spawn({
                 let legacy = legacy.clone();
@@ -3501,10 +3699,10 @@ mod tests {
                 (conversion.await.unwrap(), old_acquire.await.unwrap());
             match (conversion, old_acquire) {
                 (Ok(()), Err(error)) if error.is(ErrorCode::Eagain) => {
-                    metadata.prepare_concurrent_mode().await.unwrap();
+                    metadata.prepare_bound_concurrent_mode(backing).await.unwrap();
                 }
                 (Err(error), Ok(lease)) if error.is(ErrorCode::Ebusy) => {
-                    assert!(metadata.prepare_concurrent_mode().await.unwrap_err().is(ErrorCode::Ebusy));
+                    assert!(metadata.prepare_bound_concurrent_mode(backing).await.unwrap_err().is(ErrorCode::Ebusy));
                     legacy.release_writer(&lease).await.unwrap();
                 }
                 (conversion, old_acquire) => {
@@ -3513,6 +3711,7 @@ mod tests {
             }
             metadata.close().await.unwrap();
             legacy.close().await.unwrap();
+            blocks.close().await.unwrap();
         });
     }
 
@@ -3542,18 +3741,24 @@ mod tests {
             });
             let first = first.await.unwrap().unwrap();
             let second = second.await.unwrap().unwrap();
+            let blocks =
+                PgliteBlockStore::connect_with_key(&connection_string, "simultaneous-open")
+                    .await
+                    .unwrap();
+            let backing = blocks.prepare_concurrent_backing().await.unwrap();
             let conversion = tokio::spawn({
                 let first = first.clone();
-                async move { first.prepare_concurrent_mode().await }
+                async move { first.prepare_bound_concurrent_mode(backing).await }
             });
             let other_conversion = tokio::spawn({
                 let second = second.clone();
-                async move { second.prepare_concurrent_mode().await }
+                async move { second.prepare_bound_concurrent_mode(backing).await }
             });
             conversion.await.unwrap().unwrap();
             other_conversion.await.unwrap().unwrap();
             first.close().await.unwrap();
             second.close().await.unwrap();
+            blocks.close().await.unwrap();
         });
     }
 
@@ -3576,6 +3781,7 @@ mod tests {
                 .await
                 .unwrap();
             let block = blocks.put(b"abc").await.unwrap();
+            let backing = blocks.prepare_concurrent_backing().await.unwrap();
             let lease = metadata
                 .acquire_writer("legacy-writer", Duration::from_secs(60))
                 .await
@@ -3584,14 +3790,16 @@ mod tests {
             // correct conversion never leaves a lease live, but operations
             // must fail closed if the marker appears while one is present.
             let client = metadata.0.lock_client().await.unwrap();
+            let backing_text = backing.to_hex();
             client
                 .as_ref()
                 .unwrap()
                 .execute_typed(
-                    "UPDATE mount_rs_metadata SET write_mode=$2 WHERE volume_key=$1",
+                    "UPDATE mount_rs_metadata SET write_mode=$2, backing_id=$3 WHERE volume_key=$1",
                     &[
                         (&metadata.0.volume_key, Type::TEXT),
-                        (&CONCURRENT_WRITE_MODE, Type::TEXT),
+                        (&BOUND_CONCURRENT_WRITE_MODE, Type::TEXT),
+                        (&backing_text, Type::TEXT),
                     ],
                 )
                 .await
@@ -3625,7 +3833,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
-    fn concurrent_publication_rejects_a_damaged_legacy_fence() {
+    fn bound_concurrent_publication_rejects_a_damaged_legacy_fence() {
         let server = PgliteServer::start();
         let connection_string = server.connection_string();
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -3642,7 +3850,11 @@ mod tests {
                 .await
                 .unwrap();
             let block = blocks.put(b"abc").await.unwrap();
-            metadata.prepare_concurrent_mode().await.unwrap();
+            let backing = blocks.prepare_concurrent_backing().await.unwrap();
+            metadata
+                .prepare_bound_concurrent_mode(backing)
+                .await
+                .unwrap();
             let client = metadata.0.lock_client().await.unwrap();
             client
                 .as_ref()
@@ -3656,14 +3868,14 @@ mod tests {
             drop(client);
             assert!(
                 metadata
-                    .prepare_concurrent_mode()
+                    .prepare_bound_concurrent_mode(backing)
                     .await
                     .unwrap_err()
-                    .is(ErrorCode::Eio)
+                    .is(ErrorCode::Estale)
             );
             assert!(
                 metadata
-                    .publish_if_revision(0, namespace(block).await)
+                    .publish_bound_if_revision(backing, 0, namespace(block).await)
                     .await
                     .unwrap_err()
                     .is(ErrorCode::Ebusy),
@@ -3685,14 +3897,23 @@ mod tests {
             .unwrap();
         runtime.block_on(async {
             let options = PgliteStorageOptions::new("concurrent-disconnected-socket");
-            let metadata = PgliteMetadataStore::connect_with_options(&connection_string, options)
+            let metadata =
+                PgliteMetadataStore::connect_with_options(&connection_string, options.clone())
+                    .await
+                    .unwrap();
+            let blocks = PgliteBlockStore::connect_with_options(&connection_string, options)
                 .await
                 .unwrap();
-            metadata.prepare_concurrent_mode().await.unwrap();
+            let backing = blocks.prepare_concurrent_backing().await.unwrap();
+            metadata
+                .prepare_bound_concurrent_mode(backing)
+                .await
+                .unwrap();
+            blocks.close().await.unwrap();
             let namespace = namespace(BlockId("unused-disconnected-block".to_owned())).await;
             drop(server);
             let error = metadata
-                .publish_if_revision(0, namespace)
+                .publish_bound_if_revision(backing, 0, namespace)
                 .await
                 .unwrap_err();
             assert!(
@@ -3814,6 +4035,60 @@ mod tests {
         });
     }
 
+    #[test]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
+    fn normal_block_read_rejects_same_length_tamper() {
+        let server = PgliteServer::start();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let blocks = PgliteBlockStore::connect_with_key(
+                server.connection_string(),
+                "normal-block-read-tamper",
+            )
+            .await
+            .unwrap();
+            let original = b"original";
+            let tampered = b"tampered".to_vec();
+            assert_eq!(original.len(), tampered.len());
+            let id = blocks.put(original).await.unwrap();
+            assert_eq!(blocks.get(&id).await.unwrap(), original);
+            assert_ne!(block_id(&tampered), id.0);
+
+            let peer = PgliteBlockStore::connect_with_key(
+                server.connection_string(),
+                "normal-block-read-tamper",
+            )
+            .await
+            .unwrap();
+            let client = peer.0.lock_client().await.unwrap();
+            assert_eq!(
+                client
+                    .as_ref()
+                    .unwrap()
+                    .execute_typed(
+                        "UPDATE mount_rs_blocks SET bytes=$3 WHERE volume_key=$1 AND id=$2",
+                        &[
+                            (&peer.0.volume_key, Type::TEXT),
+                            (&id.0, Type::TEXT),
+                            (&tampered, Type::BYTEA),
+                        ],
+                    )
+                    .await
+                    .unwrap(),
+                1
+            );
+            drop(client);
+            peer.close().await.unwrap();
+
+            let error = blocks.get(&id).await.unwrap_err();
+            assert!(error.is(ErrorCode::Eio), "unexpected error: {error:?}");
+            blocks.close().await.unwrap();
+        });
+    }
+
     /// Keep the server deliberately bounded so an early close return leaves a
     /// visible connection slot behind. This covers cancellation, simultaneous
     /// closes on clones, repeated idempotent calls, post-close operations, and
@@ -3887,6 +4162,163 @@ mod tests {
                     .await
                     .expect("closing the real connection should release its slot");
             reopened.close().await.unwrap();
+        });
+    }
+    #[test]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
+    fn concurrent_backing_is_stable_per_server_and_key_and_fences_metadata() {
+        let server = PgliteServer::start();
+        let other_server = PgliteServer::start();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let url = server.connection_string();
+            let a = PgliteBlockStore::connect_with_key(url, "bound-a").await.unwrap();
+            let a_reopened = PgliteBlockStore::connect_with_key(url, "bound-a").await.unwrap();
+            let b = PgliteBlockStore::connect_with_key(url, "bound-b").await.unwrap();
+            let other = PgliteBlockStore::connect_with_key(other_server.connection_string(), "bound-a")
+                .await.unwrap();
+            let a_id = a.prepare_concurrent_backing().await.unwrap();
+            assert_eq!(a_id, a_reopened.prepare_concurrent_backing().await.unwrap());
+            let b_id = b.prepare_concurrent_backing().await.unwrap();
+            assert_ne!(a_id, b_id);
+            assert_ne!(a_id, other.prepare_concurrent_backing().await.unwrap());
+            a.verify_concurrent_backing(a_id).await.unwrap();
+            assert!(b.verify_concurrent_backing(a_id).await.unwrap_err().is(ErrorCode::Estale));
+
+            let metadata = PgliteMetadataStore::connect_with_key(url, "bound-a").await.unwrap();
+            let metadata_peer = PgliteMetadataStore::connect_with_key(url, "bound-a").await.unwrap();
+            metadata.prepare_bound_concurrent_mode(a_id).await.unwrap();
+            metadata_peer.prepare_bound_concurrent_mode(a_id).await.unwrap();
+            assert_eq!(metadata.concurrent_mode_state().await.unwrap(), ConcurrentModeState::Mrc2(a_id));
+            assert!(metadata.prepare_bound_concurrent_mode(b_id).await.unwrap_err().is(ErrorCode::Estale));
+            let block = a.put(b"abc").await.unwrap();
+            let namespace = namespace(block).await;
+            assert!(metadata.publish_bound_if_revision(b_id, 0, namespace.clone()).await.unwrap_err().is(ErrorCode::Estale));
+            assert_eq!(metadata.load().await.unwrap().revision, 0);
+            let first_task = tokio::spawn({
+                let metadata = metadata.clone();
+                let namespace = namespace.clone();
+                async move { metadata.publish_bound_if_revision(a_id, 0, namespace).await }
+            });
+            let second_task = tokio::spawn({
+                let metadata_peer = metadata_peer.clone();
+                async move { metadata_peer.publish_bound_if_revision(a_id, 0, namespace).await }
+            });
+            let (first, second) = (first_task.await.unwrap(), second_task.await.unwrap());
+            assert!(matches!((&first, &second), (Ok(1), Err(error)) | (Err(error), Ok(1)) if error.is(ErrorCode::Eagain)));
+            metadata.close().await.unwrap();
+            metadata_peer.close().await.unwrap();
+            a.close().await.unwrap();
+            a_reopened.close().await.unwrap();
+            b.close().await.unwrap();
+            other.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
+    fn concurrent_backing_migration_requires_exact_revision_and_direct_blocks() {
+        let server = PgliteServer::start();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let url = server.connection_string();
+            let metadata = PgliteMetadataStore::connect_with_key(url, "bound-migration")
+                .await
+                .unwrap();
+            let blocks = PgliteBlockStore::connect_with_key(url, "bound-migration")
+                .await
+                .unwrap();
+            seed_test_owned_mrc1_volume(&metadata).await;
+            assert_eq!(
+                metadata.concurrent_mode_state().await.unwrap(),
+                ConcurrentModeState::Mrc1
+            );
+            let id = blocks.prepare_concurrent_backing().await.unwrap();
+            assert!(
+                metadata
+                    .prepare_bound_concurrent_mode(id)
+                    .await
+                    .unwrap_err()
+                    .is(ErrorCode::Ebusy)
+            );
+            assert!(
+                metadata
+                    .migrate_mrc1_to_bound_mode(id, 1)
+                    .await
+                    .unwrap_err()
+                    .is(ErrorCode::Eagain)
+            );
+            assert_eq!(
+                metadata.concurrent_mode_state().await.unwrap(),
+                ConcurrentModeState::Mrc1
+            );
+            let block = blocks.put(b"abc").await.unwrap();
+            assert_eq!(blocks.get_for_migration(&block).await.unwrap(), b"abc");
+            metadata.migrate_mrc1_to_bound_mode(id, 0).await.unwrap();
+            assert_eq!(
+                metadata.concurrent_mode_state().await.unwrap(),
+                ConcurrentModeState::Mrc2(id)
+            );
+            assert_eq!(metadata.load().await.unwrap().revision, 0);
+            let client = metadata.0.lock_client().await.unwrap();
+            client
+                .as_ref()
+                .unwrap()
+                .execute_typed(
+                    "UPDATE mount_rs_metadata SET backing_id=NULL WHERE volume_key=$1",
+                    &[(&metadata.0.volume_key, Type::TEXT)],
+                )
+                .await
+                .unwrap();
+            drop(client);
+            assert!(
+                metadata
+                    .concurrent_mode_state()
+                    .await
+                    .unwrap_err()
+                    .is(ErrorCode::Estale)
+            );
+            let client = metadata.0.lock_client().await.unwrap();
+            let backing_text = id.to_hex();
+            client
+                .as_ref()
+                .unwrap()
+                .execute_typed(
+                    "UPDATE mount_rs_metadata SET backing_id=$2 WHERE volume_key=$1",
+                    &[
+                        (&metadata.0.volume_key, Type::TEXT),
+                        (&backing_text, Type::TEXT),
+                    ],
+                )
+                .await
+                .unwrap();
+            drop(client);
+            let client = blocks.0.lock_client().await.unwrap();
+            client
+                .as_ref()
+                .unwrap()
+                .execute_typed(
+                    "DELETE FROM mount_rs_block_authority WHERE volume_key=$1",
+                    &[(&blocks.0.volume_key, Type::TEXT)],
+                )
+                .await
+                .unwrap();
+            drop(client);
+            assert!(
+                blocks
+                    .verify_concurrent_backing(id)
+                    .await
+                    .unwrap_err()
+                    .is(ErrorCode::Estale)
+            );
+            metadata.close().await.unwrap();
+            blocks.close().await.unwrap();
         });
     }
 }
