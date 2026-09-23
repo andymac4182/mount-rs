@@ -886,3 +886,121 @@ or error counts, and labels tracing availability. Panic cleanup retains
 bounded pending traces with best-effort output when tracing is enabled.
 An external harness deadline need not unwind Rust, so its last printed
 checkpoint remains the retained verification progress boundary.
+
+## Current 400-write attempts and native harness corrections
+
+After the conditional metadata refresh and bundled SQLite 3.51.3 changes
+merged, three further genuine RustFS plus native FoundationDB packets used
+200 files per independent writer. All used debug CLI/addon artifacts,
+`MOUNT_RS_TRACE_REQUESTS=0`, disabled CLI verbose output, no profiling, and
+the same fixed 1,200-second native / 1,500-second combo budgets. These are
+diagnostic qualification attempts, not release-build throughput samples.
+
+| Source | Native duration | Earlier complete write-plus-sync loops | Failure |
+| --- | ---: | ---: | --- |
+| `d983be89` | 101.81 s | 294 | Writer A open 148 and writer B open 146 returned `EIO`; native FoundationDB reported fatal `OutOfMemory`. |
+| `0d683812` | 0.00 s | 0 | Setup could not copy the feature-enabled CLI from a deleted target alias (`ENOENT`), before any native mount or load. |
+| `4e4dce76` on merged main `b22637f2` | 103.73 s | 354 | Writer A `sync_all` 180 returned `EIO`; writer B `sync_all` 174 returned `ESTALE`. |
+
+The completed-loop counts are inferred from the zero-based failure indices;
+each earlier loop returned successfully from both `write_all` and `sync_all`.
+The last two writes in the third attempt returned from `write_all` but failed
+at `sync_all`, so they are not counted as acknowledged. None of these attempts
+printed the full 400-write acknowledgment marker, started live-view checks,
+or reached fresh reopen. Each full service packet failed. No runner or combo
+deadline expired. Request-trace marker counts were zero; CAS retry counts,
+RPC retransmissions and internal phase timings are unavailable.
+
+The first packet used the helper's former 512 MiB FoundationDB process cap.
+Its retained server output reported `OutOfMemory` at 15:10:59 UTC, but did
+not retain RSS metrics or database size. FoundationDB's fatal handler can
+report this event for an exceeded resident-memory cap or an allocation
+failure, so the exact trigger is unconfirmed. The post-cleanup host snapshot
+showed 48 GiB physical RAM and 62% free memory; it does not measure host
+memory at the failure time.
+
+The native helper now restores FoundationDB 7.4.7's documented 8 GiB process
+default and accepts an ASCII decimal test-only override from 256 through
+16,384 MiB. It validates the override before allocating resources and prints
+the selected process, storage-memory and cache parameters. The retained
+storage-memory option is relevant to the memory engine, not this SSD engine.
+No product deadline changed. The helper also retains bounded existing
+`ProgramStart`, peak/latest sampled `ProcessMetrics.ResidentMemory` and
+latest allocator `MemoryMetrics` before cleanup; best-effort diagnostic
+output cannot bypass cleanup on a broken pipe or `KeyboardInterrupt`.
+These parameter meanings are described in the [pinned FoundationDB
+configuration source](https://github.com/apple/foundationdb/blob/7.4.7/documentation/sphinx/source/configuration.rst).
+
+The second failure had a reproducible harness cause: Cargo reused a native
+test executable containing `CARGO_BIN_EXE_mount-rs` from the previous run's
+deleted target alias. The fixture now resolves its CLI from the running
+test's current Cargo `deps` / profile cohort, rejects an invalid layout,
+and pins that feature-enabled binary for the entire mount/reopen sequence.
+The old cached executable failed after the alias moved; the corrected
+cached executable passed the same relocation check without rebuilding it
+for the second alias. Six pure fixture tests, strict feature-enabled CLI
+Clippy, formatting and the Python cleanup/parameter/evidence probes passed.
+The helper now prints its native root, service root and container identity
+before entering Cargo, retaining those identities even on immediate failure.
+
+The third packet confirmed an 8 GiB `ProgramStart.MemoryLimit`
+(`8,589,934,592` bytes). Its greatest retained periodic RSS sample was
+`712,671,232` bytes at 15:35:05 UTC. `ProcessMetrics.Memory` was virtual
+memory, not RSS, and the allocator pools are not a resident-memory total.
+No fatal OOM event appeared in the retained server output. The bounded
+trace scan read 2,003,387 bytes without truncation or parsing errors. These
+periodic samples do not establish a continuous peak or identify the new
+`sync_all` error's originating provider/RPC stage. Both owned CLIs remained
+alive when the writers failed.
+
+Before these packets, all 32 local workspace packages were cleaned in the
+exclusive target's host and explicit arm64 layouts, retaining dependency
+caches. All nine full offline locked standalone dependency graphs passed.
+The relevant feature-enabled suites passed 601 tests across 68 executables,
+with zero failures and 45 ignored opt-in tests; formatting and strict
+all-targets Clippy passed. Fresh builds selected the combined production
+runtime source `d983be89`; subsequent changes were confined to documentation
+and harness/fixture code. The current copied native feature CLI was
+54,745,336 bytes with SHA-256
+`0af3419bc55a995851000546a7cfc3bf647da9ab90767cd00a5d076c73684552`.
+The fresh default-feature arm64 addon was 94,782,888 bytes with SHA-256
+`fb015abd4de60e325ab442890906c5d78f83d896198107c6b55102f6fdb73c0c`;
+it loaded 254 exports and the required `Filesystem` and
+`createChunkedDriver` APIs. The export count is this artifact's observation.
+
+The original logs are immutable and retained separately:
+
+| Attempt | Raw log under `/private/tmp/` | Bytes | SHA-256 |
+| --- | --- | ---: | --- |
+| First | `mount-rs-native-untraced400-d983be8999a569ab1905fb082404ffde3045b910-20260923.log` | 13,325 | `e20db2992f0e44d3ea25e1c46c8e044b5e043398f14818bcee3cb40f8f172806` |
+| Second | `mount-rs-native-untraced400-0d683812e6002202a56b8cd4675cac035c1aea3c-20260923.log` | 7,830 | `a31480f375b50997587cc2529aec3ff5f7bfb8e5d1fc966e394062742d0f6bef` |
+| Third | `mount-rs-native-untraced400-4e4dce762092f13e1e0ed01709f2891e5a0d52e6-20260923.log` | 9,625 | `a4d455e70571c9a369602f9dc5c8db9e69e80a08aaccc1b0b47f11a359f79dcf` |
+
+Structured result, artifact and cleanup proofs are retained beside the logs
+with prefixes `mount-rs-native400-d983`, `mount-rs-native400-0d683` and
+`mount-rs-native400-4e4dc`. Exact owned cleanup was independently checked:
+containers, native roots, mounts, images, processes and observed ports were
+absent, and the two exact borrowed dependency links were removed. The first
+and third service roots were identified and verified absent. The second
+immediate failure did not capture its exact service-root identity before
+exit; its owned container was recovered from timestamped Docker events and
+verified absent, and no matching temporary service root remained. This is
+an identity gap, not an independently verified exact service-root claim.
+The existing user CLI PID 66542, NFS mount and listener 55309 were preserved
+through every attempt.
+
+Before the third packet, one existing macOS S3 network fixture passed in
+4.793 seconds with Node 24.18 and the same fresh addon. It kept the existing
+32-request fanout and 15-second request timeout, covered NodeFs and SQLite
+GET bytes/streamed/stats, and verified its own root/process-group/observed
+port cleanup. Its raw log is
+`/private/tmp/mount-rs-current-macos-s3-network-20260924.log`, with a sibling
+JSON proof. This single macOS pass does not explain the retained Windows CI
+15-second S3 timeout.
+
+The current 400-write native qualification remains incomplete. The 8 GiB
+helper correction and cached-artifact correction address observed harness
+defects; neither explains the third attempt's sync errors or the original
+per-OPEN timeouts. The earlier traced 400-write acknowledgment followed by
+a verification deadline, and the complete untraced 40-write pass, remain
+separate evidence boundaries.
