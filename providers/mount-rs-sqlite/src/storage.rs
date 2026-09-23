@@ -2958,6 +2958,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn test_backing_id() -> ConcurrentBackingId {
         ConcurrentBackingId::from_bytes([0x42; 16]).unwrap()
     }
