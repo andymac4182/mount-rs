@@ -1,5 +1,6 @@
 //! Filesystem facade and its shutdown lifecycle.
 
+use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -88,6 +89,8 @@ impl Filesystem {
 
     /// Bind an offline MRC1 volume to its verified shared block backing.
     /// Call this only after all older mounts of the volume have stopped.
+    /// Provider teardown is attempted after migration; teardown errors do not
+    /// replace an acknowledged backing ID or the original migration error.
     pub async fn migrate_concurrent_backing(
         options: SplitOptions,
         expected_revision: u64,
@@ -100,14 +103,7 @@ impl Filesystem {
         let opened = open_storage(&options.metadata, &options.blocks).await?;
         let migration =
             migrate_mrc1_backing(&opened.metadata, &opened.blocks, expected_revision).await;
-        let cleanup = opened.close().await;
-        match migration {
-            Ok(backing) => {
-                cleanup?;
-                Ok(backing)
-            }
-            Err(error) => Err(error),
-        }
+        complete_migration_after_teardown(migration, opened.close()).await
     }
 
     /// Return the shared driver contract used by transports and loopback
@@ -171,6 +167,16 @@ impl Filesystem {
 fn sqlite_durable_path(path: &Path) -> bool {
     let value = path.to_string_lossy();
     !value.is_empty() && value != ":memory:" && !value.starts_with("file:")
+}
+
+async fn complete_migration_after_teardown(
+    migration: Result<ConcurrentBackingId>,
+    teardown: impl Future<Output = Result<()>>,
+) -> Result<ConcurrentBackingId> {
+    // A committed MRC2 CAS cannot be reversed by a later close error. Keep
+    // provider teardown best effort and preserve the migration outcome.
+    let _ = teardown.await;
+    migration
 }
 
 fn validate_concurrent_split_options(options: &SplitOptions) -> Result<()> {
@@ -239,6 +245,7 @@ impl Clone for Filesystem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[tokio::test]
     async fn migrate_requires_concurrent_writes_before_opening_backing() {
@@ -268,5 +275,39 @@ mod tests {
             .expect_err("local blocks must fail before FoundationDB opens");
         assert_eq!(error.code, ErrorCode::Einval);
         assert!(error.to_string().contains("shared block"));
+    }
+
+    #[tokio::test]
+    async fn acknowledged_migration_keeps_backing_id_after_teardown_error() {
+        let backing = ConcurrentBackingId::from_bytes([0x42; 16]).unwrap();
+        let close_attempted = AtomicBool::new(false);
+        let teardown = async {
+            close_attempted.store(true, Ordering::SeqCst);
+            Err::<(), FsError>(FsError::new(ErrorCode::Eio).with_syscall("provider close"))
+        };
+
+        let returned = complete_migration_after_teardown(Ok(backing), teardown)
+            .await
+            .expect("an acknowledged migration remains successful after teardown fails");
+        assert!(close_attempted.load(Ordering::SeqCst));
+        assert_eq!(returned, backing);
+    }
+
+    #[tokio::test]
+    async fn failed_migration_still_attempts_teardown_and_keeps_primary_error() {
+        let close_attempted = AtomicBool::new(false);
+        let teardown = async {
+            close_attempted.store(true, Ordering::SeqCst);
+            Err::<(), FsError>(FsError::new(ErrorCode::Eio).with_syscall("provider close"))
+        };
+
+        let error = complete_migration_after_teardown(
+            Err(FsError::new(ErrorCode::Eagain).with_syscall("migrate MRC1 backing")),
+            teardown,
+        )
+        .await
+        .expect_err("migration failure remains primary after teardown fails");
+        assert!(close_attempted.load(Ordering::SeqCst));
+        assert_eq!(error.code, ErrorCode::Eagain);
     }
 }
