@@ -1841,12 +1841,6 @@ impl BlockStore for PgliteBlockStore {
         self.0.durable
     }
 
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
-        // This block table is scoped by volume_key on the one wire server;
-        // connecting initialized the table and checked the live endpoint.
-        self.0.flush().await
-    }
-
     async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
         let candidate = uuid::Uuid::new_v4().simple().to_string();
         let client = self.0.lock_client().await?;

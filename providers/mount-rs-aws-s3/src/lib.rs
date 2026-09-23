@@ -137,13 +137,6 @@ impl BlockStore for AwsS3BlockStore {
         self.0.durable()
     }
 
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
-        match &self.1 {
-            Some(probe) => probe_configured_concurrent_prefix(probe.as_ref(), self.prefix()).await,
-            None => self.0.prepare_concurrent_mode().await,
-        }
-    }
-
     async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
         match &self.1 {
             Some(probe) => {

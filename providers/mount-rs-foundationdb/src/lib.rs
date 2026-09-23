@@ -2869,19 +2869,10 @@ impl FoundationDbBlockStore {
     pub fn new(storage: &FoundationDbStorage) -> Self {
         storage.blocks()
     }
-}
 
-#[async_trait]
-impl BlockStore for FoundationDbBlockStore {
-    fn durable(&self) -> bool {
-        self.0.durable
-    }
-
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
-        // Database::from_path only creates a client handle. Probe a key in
-        // this exact block keyspace before metadata irreversibly enters CAS
-        // mode, so an unavailable second block cluster fails closed at open.
-        // This transaction has no mutation and cannot create a test object.
+    async fn probe_concurrent_keyspace(&self) -> Result<()> {
+        // Opening Database::from_path creates only a client handle. Probe
+        // this exact keyspace without mutation before claiming its marker.
         let inner = Arc::clone(&self.0);
         let key = Keyspace::new(&inner.prefix).block(&block_id(
             b"mount-rs FoundationDB concurrent block preflight",
@@ -2913,14 +2904,21 @@ impl BlockStore for FoundationDbBlockStore {
             )
             .await
             .map_err(TxnError::into_fs)
-            .map_err(|error| error.with_syscall("prepare concurrent FoundationDB blocks"))
+            .map_err(|error| error.with_syscall("probe concurrent FoundationDB blocks"))
+    }
+}
+
+#[async_trait]
+impl BlockStore for FoundationDbBlockStore {
+    fn durable(&self) -> bool {
+        self.0.durable
     }
 
     async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
         // A Database handle is not proof that its coordinator is reachable.
         // Preserve the bounded, read-only keyspace probe before creating an
         // authority marker.
-        self.prepare_concurrent_mode().await?;
+        self.probe_concurrent_keyspace().await?;
         let candidate = ConcurrentBackingId::from_bytes(*Uuid::new_v4().as_bytes())?;
         let inner = Arc::clone(&self.0);
         let key = Keyspace::new(&inner.prefix).block_authority();

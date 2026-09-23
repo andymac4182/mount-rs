@@ -1466,16 +1466,6 @@ impl MetadataStore for DynMetadataStore {
         self.0.load()
     }
 
-    fn prepare_concurrent_mode<'a, 'async_trait>(
-        &'a self,
-    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
-    where
-        'a: 'async_trait,
-        Self: 'async_trait,
-    {
-        self.0.prepare_concurrent_mode()
-    }
-
     fn concurrent_mode_state<'a, 'async_trait>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = CoreResult<ConcurrentModeState>> + Send + 'async_trait>>
@@ -1549,18 +1539,6 @@ impl MetadataStore for DynMetadataStore {
         self.0.publish(expected_revision, lease, namespace)
     }
 
-    fn publish_if_revision<'a, 'async_trait>(
-        &'a self,
-        expected_revision: u64,
-        namespace: Namespace,
-    ) -> Pin<Box<dyn Future<Output = CoreResult<u64>> + Send + 'async_trait>>
-    where
-        'a: 'async_trait,
-        Self: 'async_trait,
-    {
-        self.0.publish_if_revision(expected_revision, namespace)
-    }
-
     fn publish_bound_if_revision<'a, 'async_trait>(
         &'a self,
         backing: ConcurrentBackingId,
@@ -1605,16 +1583,6 @@ struct DynBlockStore(Arc<dyn BlockStore>);
 impl BlockStore for DynBlockStore {
     fn durable(&self) -> bool {
         self.0.durable()
-    }
-
-    fn prepare_concurrent_mode<'a, 'async_trait>(
-        &'a self,
-    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
-    where
-        'a: 'async_trait,
-        Self: 'async_trait,
-    {
-        self.0.prepare_concurrent_mode()
     }
 
     fn prepare_concurrent_backing<'a, 'async_trait>(
@@ -4251,10 +4219,10 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_blocks_forward_concurrent_preflight_failure() {
+    fn dynamic_blocks_forward_concurrent_backing_failure() {
         let inner = Arc::new(SqliteBlockStore::open(":memory:").unwrap()) as Arc<dyn BlockStore>;
         let erased = DynBlockStore(inner);
-        let error = block_on(erased.prepare_concurrent_mode())
+        let error = block_on(erased.prepare_concurrent_backing())
             .expect_err("volatile SQLite block preflight must reach the provider");
         assert_eq!(error.code, ErrorCode::Enotsup);
     }

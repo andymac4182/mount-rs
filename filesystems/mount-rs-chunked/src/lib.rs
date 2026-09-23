@@ -4726,10 +4726,6 @@ mod tests {
             self.0.durable()
         }
 
-        async fn prepare_concurrent_mode(&self) -> Result<()> {
-            Ok(())
-        }
-
         async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
             Ok(test_concurrent_backing())
         }
@@ -4830,15 +4826,6 @@ mod tests {
             Ok(self.state.lock().expect("revision state lock").clone())
         }
 
-        async fn prepare_concurrent_mode(&self) -> Result<()> {
-            let mut mode = self.mode.lock().expect("concurrent mode lock");
-            if *mode != ConcurrentModeState::Legacy {
-                return Err(FsError::new(ErrorCode::Ebusy));
-            }
-            *mode = ConcurrentModeState::Mrc1;
-            Ok(())
-        }
-
         async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
             Ok(*self.mode.lock().expect("concurrent mode lock"))
         }
@@ -4875,17 +4862,6 @@ mod tests {
             _namespace: Namespace,
         ) -> Result<u64> {
             Err(FsError::new(ErrorCode::Enotsup))
-        }
-
-        async fn publish_if_revision(
-            &self,
-            expected_revision: u64,
-            namespace: Namespace,
-        ) -> Result<u64> {
-            if *self.mode.lock().expect("concurrent mode lock") != ConcurrentModeState::Mrc1 {
-                return Err(FsError::new(ErrorCode::Estale));
-            }
-            self.apply_revision(expected_revision, namespace)
         }
 
         async fn publish_bound_if_revision(
@@ -5012,7 +4988,9 @@ mod tests {
     #[test]
     fn three_same_clock_concurrent_cas_commits_keep_distinct_mtimes() {
         let metadata = RevisionRaceMetadata::new();
-        block_on(metadata.prepare_concurrent_mode()).expect("prepare concurrent mode");
+        let backing = test_concurrent_backing();
+        block_on(metadata.prepare_bound_concurrent_mode(backing))
+            .expect("prepare bound concurrent mode");
         let options = ChunkedOptions::fixed("mtime-cas", 4).expect("chunker");
         let mut namespace = initial_namespace(&options).expect("initial namespace");
         let root = namespace.root;
@@ -5021,7 +4999,8 @@ mod tests {
         root_stats.mtime_ms = fixed_now;
         root_stats.ctime_ms = fixed_now;
         let mut revision =
-            block_on(metadata.publish_if_revision(0, namespace.clone())).expect("publish baseline");
+            block_on(metadata.publish_bound_if_revision(backing, 0, namespace.clone()))
+                .expect("publish baseline");
 
         for expected in (fixed_now + 1)..=(fixed_now + 3) {
             touch_modified_at(
@@ -5030,8 +5009,9 @@ mod tests {
                 true,
             )
             .expect("stamp one same-clock mutation");
-            revision = block_on(metadata.publish_if_revision(revision, namespace.clone()))
-                .expect("publish one CAS revision");
+            revision =
+                block_on(metadata.publish_bound_if_revision(backing, revision, namespace.clone()))
+                    .expect("publish one CAS revision");
             let loaded = block_on(metadata.load()).expect("load committed revision");
             assert_eq!(loaded.revision, revision);
             assert_eq!(

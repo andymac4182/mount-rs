@@ -2124,13 +2124,8 @@ impl VersionedMetadataStore for SqliteMetadataStore {
     }
 }
 
-#[async_trait]
-impl BlockStore for SqliteBlockStore {
-    fn durable(&self) -> bool {
-        self.0.durable
-    }
-
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
+impl SqliteBlockStore {
+    fn require_concurrent_local_backing(&self) -> Result<()> {
         if !self.0.durable {
             return Err(FsError::new(ErrorCode::Enotsup)
                 .with_syscall("prepare concurrent SQLite blocks")
@@ -2153,9 +2148,16 @@ impl BlockStore for SqliteBlockStore {
         }
         Ok(())
     }
+}
+
+#[async_trait]
+impl BlockStore for SqliteBlockStore {
+    fn durable(&self) -> bool {
+        self.0.durable
+    }
 
     async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
-        self.prepare_concurrent_mode().await?;
+        self.require_concurrent_local_backing()?;
         #[cfg(unix)]
         let physical = self.0.current_file_stamp()?;
         let mut connection = self.0.lock()?;
@@ -2203,7 +2205,7 @@ impl BlockStore for SqliteBlockStore {
     }
 
     async fn verify_concurrent_backing(&self, expected: ConcurrentBackingId) -> Result<()> {
-        self.prepare_concurrent_mode().await?;
+        self.require_concurrent_local_backing()?;
         let connection = self.0.lock()?;
         #[cfg(unix)]
         let physical = self.0.current_file_stamp()?;
@@ -3499,7 +3501,7 @@ mod tests {
     #[test]
     fn concurrent_sqlite_blocks_require_shared_file_backing() {
         let memory = SqliteBlockStore::in_memory().unwrap();
-        let error = run(memory.prepare_concurrent_mode()).unwrap_err();
+        let error = run(memory.prepare_concurrent_backing()).unwrap_err();
         assert!(error.is(ErrorCode::Enotsup));
         assert!(
             error
@@ -3509,7 +3511,8 @@ mod tests {
 
         let path = super::super::tests::unique_database_path();
         let file = SqliteBlockStore::open(&path).unwrap();
-        run(file.prepare_concurrent_mode()).unwrap();
+        let id = run(file.prepare_concurrent_backing()).unwrap();
+        run(file.verify_concurrent_backing(id)).unwrap();
         drop(file);
         std::fs::remove_file(path).unwrap();
     }

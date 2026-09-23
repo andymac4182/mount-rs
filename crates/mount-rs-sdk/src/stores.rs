@@ -53,23 +53,6 @@ impl MetadataStore for ErasedMetadataStore {
         self.inner.load().await
     }
 
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
-        #[cfg(feature = "observability")]
-        {
-            return self
-                .telemetry
-                .observe_fs(
-                    "provider.metadata",
-                    "concurrent.prepare",
-                    None,
-                    self.inner.prepare_concurrent_mode(),
-                )
-                .await;
-        }
-        #[cfg(not(feature = "observability"))]
-        self.inner.prepare_concurrent_mode().await
-    }
-
     async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
         #[cfg(feature = "observability")]
         {
@@ -179,29 +162,6 @@ impl MetadataStore for ErasedMetadataStore {
             .await
     }
 
-    async fn publish_if_revision(
-        &self,
-        expected_revision: u64,
-        namespace: Namespace,
-    ) -> Result<u64> {
-        #[cfg(feature = "observability")]
-        {
-            return self
-                .telemetry
-                .observe_fs(
-                    "provider.metadata",
-                    "concurrent.publish",
-                    None,
-                    self.inner.publish_if_revision(expected_revision, namespace),
-                )
-                .await;
-        }
-        #[cfg(not(feature = "observability"))]
-        self.inner
-            .publish_if_revision(expected_revision, namespace)
-            .await
-    }
-
     async fn publish_bound_if_revision(
         &self,
         backing: ConcurrentBackingId,
@@ -287,23 +247,6 @@ impl ErasedBlockStore {
 impl BlockStore for ErasedBlockStore {
     fn durable(&self) -> bool {
         self.inner.durable()
-    }
-
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
-        #[cfg(feature = "observability")]
-        {
-            return self
-                .telemetry
-                .observe_fs(
-                    "provider.blocks",
-                    "concurrent.prepare",
-                    None,
-                    self.inner.prepare_concurrent_mode(),
-                )
-                .await;
-        }
-        #[cfg(not(feature = "observability"))]
-        self.inner.prepare_concurrent_mode().await
     }
 
     async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
@@ -649,14 +592,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn erased_blocks_forward_concurrent_preflight_failure() {
+    async fn erased_blocks_forward_concurrent_backing_failure() {
         let inner = Arc::new(SqliteBlockStore::open(":memory:").unwrap()) as Arc<dyn BlockStore>;
         #[cfg(feature = "observability")]
         let erased = ErasedBlockStore::new(inner, Telemetry::disabled());
         #[cfg(not(feature = "observability"))]
         let erased = ErasedBlockStore::new(inner);
         let error = erased
-            .prepare_concurrent_mode()
+            .prepare_concurrent_backing()
             .await
             .expect_err("volatile SQLite block preflight must reach the provider");
         assert_eq!(error.code, ErrorCode::Enotsup);

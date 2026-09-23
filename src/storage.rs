@@ -815,15 +815,6 @@ pub trait MetadataStore: Send + Sync {
 #[async_trait]
 pub trait BlockStore: Send + Sync {
     fn durable(&self) -> bool;
-    /// Validate that this backing can participate in the provider's shared
-    /// concurrent mode before metadata is irreversibly converted to CAS.
-    /// Providers must opt in after proving that independently opened clients
-    /// see the same immutable block identities and bytes.
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
-        Err(FsError::new(ErrorCode::Enotsup)
-            .with_syscall("prepare concurrent blocks")
-            .with_message("block provider has not declared a shared concurrent backing"))
-    }
     /// Establish and return the stable identity of this shared block authority.
     async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
         Err(FsError::new(ErrorCode::Enotsup).with_syscall("prepare concurrent backing"))

@@ -898,11 +898,6 @@ impl BlockStore for TidbBlockStore {
         self.0.durable
     }
 
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
-        // The volume_key names one shared immutable block table.
-        self.0.acknowledgement_barrier().await
-    }
-
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
         if bytes.len() > self.0.max_block_bytes {
             return Err(FsError::new(ErrorCode::Efbig)

@@ -291,15 +291,6 @@ impl BlockStore for RustFsBlockStore {
         self.blocks.durable()
     }
 
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
-        let store = self.configured_probe.as_ref().ok_or_else(|| {
-            FsError::new(mount_rs_core::ErrorCode::Enotsup)
-                .with_syscall("prepare concurrent RustFS blocks")
-                .with_message("concurrent RustFS requires a validated signed configuration")
-        })?;
-        probe_configured_concurrent_prefix(store.as_ref(), self.prefix()).await
-    }
-
     async fn prepare_concurrent_backing(
         &self,
     ) -> Result<mount_rs_core::storage::ConcurrentBackingId> {

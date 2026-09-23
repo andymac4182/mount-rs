@@ -98,7 +98,7 @@ async fn configured_r2_gateway_stays_unqualified_for_concurrent_backing() {
     let injected = R2BlockStore::new(config.build_store().unwrap(), prefix, true).unwrap();
     assert!(
         injected
-            .prepare_concurrent_mode()
+            .prepare_concurrent_backing()
             .await
             .expect_err("an injected client has no configured-service attestation")
             .is(ErrorCode::Enotsup)
@@ -108,7 +108,7 @@ async fn configured_r2_gateway_stays_unqualified_for_concurrent_backing() {
     assert!(!blocks.durable());
     assert!(
         blocks
-            .prepare_concurrent_mode()
+            .prepare_concurrent_backing()
             .await
             .unwrap_err()
             .is(ErrorCode::Enotsup)

@@ -990,12 +990,6 @@ impl BlockStore for ObjectStoreBlockStore {
         self.durable
     }
 
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
-        Err(FsError::new(ErrorCode::Enotsup)
-            .with_syscall("prepare concurrent object-store blocks")
-            .with_message("concurrent object-store blocks require a validated signed service"))
-    }
-
     async fn get_for_migration(&self, id: &BlockId) -> Result<Vec<u8>> {
         let path = self.object_path(id)?;
         // Migration must check the current remote bytes rather than a cached
@@ -2136,14 +2130,14 @@ mod tests {
         assert!(declared_durable.durable());
         assert!(
             volatile
-                .prepare_concurrent_mode()
+                .prepare_concurrent_backing()
                 .await
                 .expect_err("an injected object store does not prove a shared backing")
                 .is(ErrorCode::Enotsup)
         );
         assert!(
             declared_durable
-                .prepare_concurrent_mode()
+                .prepare_concurrent_backing()
                 .await
                 .expect_err("durability declarations do not prove a shared backing")
                 .is(ErrorCode::Enotsup)

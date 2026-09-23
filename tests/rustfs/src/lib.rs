@@ -254,12 +254,12 @@ async fn real_rustfs_signed_concurrent_preflight_fails_closed_before_mode_conver
         let prefix = format!("{}/preflight-valid", test_prefix());
         let first = RustFsBlockStore::from_config(&valid, prefix.clone(), true).unwrap();
         let second = RustFsBlockStore::from_config(&valid, prefix.clone(), true).unwrap();
-        first.prepare_concurrent_mode().await.unwrap();
-        second.prepare_concurrent_mode().await.unwrap();
+        let id = first.prepare_concurrent_backing().await.unwrap();
+        assert_eq!(second.prepare_concurrent_backing().await.unwrap(), id);
         valid
             .build_store()
             .unwrap()
-            .head(&object_path(&prefix, "_mount-rs-concurrent-probe-v1"))
+            .head(&object_path(&prefix, "_mount-rs-backing-id-v2"))
             .await
             .expect("signed preflight must leave a reusable, remotely visible probe");
 

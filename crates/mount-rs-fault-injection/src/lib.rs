@@ -844,10 +844,6 @@ where
             .await
     }
 
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
-        self.inner.prepare_concurrent_mode().await
-    }
-
     async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
         self.inner.concurrent_mode_state().await
     }
@@ -905,21 +901,6 @@ where
         self.injector
             .after(FaultBoundary::Metadata, FaultOperation::Publish, || {
                 self.inner.publish(expected_revision, lease, namespace)
-            })
-            .await
-    }
-
-    async fn publish_if_revision(
-        &self,
-        expected_revision: u64,
-        namespace: Namespace,
-    ) -> Result<u64> {
-        self.injector
-            .before(FaultBoundary::Metadata, FaultOperation::Publish)
-            .await?;
-        self.injector
-            .after(FaultBoundary::Metadata, FaultOperation::Publish, || {
-                self.inner.publish_if_revision(expected_revision, namespace)
             })
             .await
     }
@@ -996,12 +977,6 @@ where
 {
     fn durable(&self) -> bool {
         self.inner.durable()
-    }
-
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
-        // Capability validation belongs to the provider and must run before
-        // metadata conversion. Fault plans cover data-plane calls only.
-        self.inner.prepare_concurrent_mode().await
     }
 
     async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {

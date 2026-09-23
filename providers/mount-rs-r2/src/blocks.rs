@@ -419,14 +419,6 @@ impl BlockStore for R2BlockStore {
         self.0.durable()
     }
 
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
-        self.require_qualification()?;
-        match &self.1 {
-            Some(probe) => probe_configured_concurrent_prefix(probe.as_ref(), self.prefix()).await,
-            None => self.0.prepare_concurrent_mode().await,
-        }
-    }
-
     async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
         self.require_qualification()?;
         match &self.1 {

@@ -132,7 +132,7 @@ impl CasMetadata {
 
     async fn publish_cas_internal(
         &self,
-        backing: Option<ConcurrentBackingId>,
+        backing: ConcurrentBackingId,
         expected_revision: u64,
         namespace: Namespace,
     ) -> Result<u64> {
@@ -142,7 +142,7 @@ impl CasMetadata {
             if !state.concurrent_mode {
                 return Err(FsError::new(ErrorCode::Enotsup));
             }
-            if state.backing_id != backing {
+            if state.backing_id != Some(backing) {
                 return Err(FsError::new(ErrorCode::Estale));
             }
             if let Some((first, second)) = state.swap_entries_on_next_cas.take() {
@@ -261,17 +261,6 @@ impl MetadataStore for CasMetadata {
         })
     }
 
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
-        let mut state = self.lock()?;
-        if state.legacy_lease.is_some() {
-            return Err(
-                FsError::new(ErrorCode::Ebusy).with_message("legacy writer still owns the volume")
-            );
-        }
-        state.concurrent_mode = true;
-        Ok(())
-    }
-
     async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
         let state = self.lock()?;
         Ok(match (state.concurrent_mode, state.backing_id) {
@@ -381,22 +370,13 @@ impl MetadataStore for CasMetadata {
         Ok(revision)
     }
 
-    async fn publish_if_revision(
-        &self,
-        expected_revision: u64,
-        namespace: Namespace,
-    ) -> Result<u64> {
-        self.publish_cas_internal(None, expected_revision, namespace)
-            .await
-    }
-
     async fn publish_bound_if_revision(
         &self,
         backing: ConcurrentBackingId,
         expected_revision: u64,
         namespace: Namespace,
     ) -> Result<u64> {
-        self.publish_cas_internal(Some(backing), expected_revision, namespace)
+        self.publish_cas_internal(backing, expected_revision, namespace)
             .await
     }
 
@@ -441,11 +421,6 @@ impl SharedBlocks {
 impl BlockStore for SharedBlocks {
     fn durable(&self) -> bool {
         false
-    }
-
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
-        // Every coordinator in this test shares the same Arc-backed block map.
-        Ok(())
     }
 
     async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
@@ -507,10 +482,6 @@ impl BlockStore for RejectingConcurrentBlocks {
         self.0.durable()
     }
 
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
-        Err(FsError::new(ErrorCode::Enotsup).with_message("block backing cannot share writes"))
-    }
-
     async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
         Err(FsError::new(ErrorCode::Enotsup).with_message("block backing cannot share writes"))
     }
@@ -546,10 +517,6 @@ struct RevisionAdvancingBlocks {
 impl BlockStore for RevisionAdvancingBlocks {
     fn durable(&self) -> bool {
         false
-    }
-
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
-        self.blocks.prepare_concurrent_mode().await
     }
 
     async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
@@ -722,13 +689,17 @@ fn distinct_fake_block_maps_cannot_open_one_bound_metadata_volume() {
 }
 
 #[test]
-fn unbound_fake_cas_cannot_publish_an_mrc2_namespace() {
+fn wrong_backing_fake_cas_cannot_publish_an_mrc2_namespace() {
     let (metadata, first, _) = open_two();
     let loaded = block_on(metadata.load()).expect("load bound namespace");
     let namespace = loaded.namespace.expect("published root");
-    let error = block_on(metadata.publish_if_revision(loaded.revision, namespace))
-        .expect_err("unbound CAS must not publish MRC2");
+    let mut wrong_bytes = metadata.bound_backing().as_bytes();
+    wrong_bytes[0] ^= 0x80;
+    let wrong = ConcurrentBackingId::from_bytes(wrong_bytes).expect("other backing ID");
+    let error = block_on(metadata.publish_bound_if_revision(wrong, loaded.revision, namespace))
+        .expect_err("wrong backing CAS must not publish MRC2");
     assert_eq!(error.code, ErrorCode::Estale);
+    assert_eq!(block_on(metadata.load()).unwrap().revision, loaded.revision);
     block_on(first.shutdown()).unwrap();
 }
 

@@ -1107,17 +1107,6 @@ where
             .await
     }
 
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
-        self.telemetry
-            .observe_fs(
-                "provider.metadata",
-                "concurrent.prepare",
-                None,
-                self.inner.prepare_concurrent_mode(),
-            )
-            .await
-    }
-
     async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
         self.telemetry
             .observe_fs(
@@ -1185,21 +1174,6 @@ where
                 "publish",
                 None,
                 self.inner.publish(expected_revision, lease, namespace),
-            )
-            .await
-    }
-
-    async fn publish_if_revision(
-        &self,
-        expected_revision: u64,
-        namespace: Namespace,
-    ) -> Result<u64> {
-        self.telemetry
-            .observe_fs(
-                "provider.metadata",
-                "concurrent.publish",
-                None,
-                self.inner.publish_if_revision(expected_revision, namespace),
             )
             .await
     }
@@ -1275,17 +1249,6 @@ where
 {
     fn durable(&self) -> bool {
         self.inner.durable()
-    }
-
-    async fn prepare_concurrent_mode(&self) -> Result<()> {
-        self.telemetry
-            .observe_fs(
-                "provider.blocks",
-                "concurrent.prepare",
-                None,
-                self.inner.prepare_concurrent_mode(),
-            )
-            .await
     }
 
     async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
@@ -1700,7 +1663,7 @@ mod tests {
             true
         }
 
-        async fn prepare_concurrent_mode(&self) -> Result<()> {
+        async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
             Err(FsError::new(ErrorCode::Enotsup).with_syscall("prepare rejecting blocks"))
         }
 
@@ -1722,10 +1685,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn instrumented_blocks_forward_concurrent_preflight_and_observe_rejection() {
+    async fn instrumented_blocks_forward_concurrent_backing_rejection_and_observe_it() {
         let telemetry = Telemetry::new(TelemetryConfig::enabled("block-preflight-test"));
         let blocks = InstrumentedBlockStore::new(RejectingConcurrentBlocks, telemetry.clone());
-        let error = blocks.prepare_concurrent_mode().await.unwrap_err();
+        let error = blocks.prepare_concurrent_backing().await.unwrap_err();
         assert!(error.is(ErrorCode::Enotsup));
         assert_eq!(telemetry.snapshot().errors, 1);
     }
