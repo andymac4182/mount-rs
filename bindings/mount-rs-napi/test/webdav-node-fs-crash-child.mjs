@@ -32,7 +32,10 @@ try {
   }
 
   process.stdout.write("READY\n")
-  await new Promise(() => {})
+  // The Rust server has no refed Node event-loop handle. Keep the child live
+  // until the parent forces termination so the crash assertion cannot race
+  // Node's unsettled-top-level-await exit (code 13).
+  await new Promise(() => setInterval(() => {}, 60_000))
 } finally {
   await server.close().catch(() => {})
   await filesystem.shutdown().catch(() => {})
