@@ -6,7 +6,10 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use mount_rs_core::driver::{FileHandle, FsDriver};
+use mount_rs_core::driver::{
+    FileHandle, FsDriver, GuardedDirectoryEntry, GuardedMutation, GuardedMutationResult,
+    GuardedRead, GuardedReadResult, GuardedSetattr, ObservedEntry, PathGuard, PathIdentity,
+};
 use mount_rs_core::error::{ErrorCode, FsError, Result};
 use mount_rs_core::handle::{OpenFlags, checked_position};
 use mount_rs_core::path::{is_path_inside, normalize_path, split_path};
@@ -402,10 +405,19 @@ impl MemoryFs {
             .map_err(|_| FsError::new(ErrorCode::Eio).with_message("filesystem lock poisoned"))
     }
 
-    fn create_node(state: &mut MemoryState, mode: u32, rdev: u64, target: Option<String>) -> u64 {
+    fn create_node(
+        state: &mut MemoryState,
+        mode: u32,
+        rdev: u64,
+        target: Option<String>,
+    ) -> Result<u64> {
         let timestamp = now_ms();
         let ino = state.next_ino;
-        state.next_ino += 1;
+        state.next_ino = state.next_ino.checked_add(1).ok_or_else(|| {
+            FsError::new(ErrorCode::Eoverflow)
+                .with_syscall("create")
+                .with_message("filesystem inode id overflow")
+        })?;
         let node = Node {
             ino,
             mode,
@@ -425,7 +437,7 @@ impl MemoryFs {
         state.used_blocks += node.blocks();
         state.node_count += 1;
         state.nodes.insert(ino, node);
-        ino
+        Ok(ino)
     }
 
     fn walk(
@@ -435,6 +447,11 @@ impl MemoryFs {
         syscall: &str,
         depth: usize,
     ) -> Result<Entry> {
+        if path.contains('\0') {
+            return Err(FsError::new(ErrorCode::Einval)
+                .with_syscall(syscall)
+                .with_path(path));
+        }
         if depth >= MAX_SYMLINK_DEPTH {
             return Err(FsError::new(ErrorCode::Eloop)
                 .with_syscall(syscall)
@@ -605,6 +622,351 @@ impl MemoryFs {
             .get(&node)
             .map(Node::stat)
             .ok_or_else(|| FsError::new(ErrorCode::Estale).with_syscall(syscall))
+    }
+
+    fn stale_guard(path: &str, syscall: &str) -> FsError {
+        FsError::new(ErrorCode::Estale)
+            .with_syscall(syscall)
+            .with_path(path)
+            .with_message("opaque handle no longer names its original inode")
+    }
+
+    fn next_guarded_time(previous: i64, syscall: &str, path: &str) -> Result<i64> {
+        previous
+            .checked_add(1)
+            .map(|next| next.max(now_ms()))
+            .ok_or_else(|| {
+                FsError::new(ErrorCode::Eoverflow)
+                    .with_syscall(syscall)
+                    .with_path(path)
+                    .with_message("filesystem change time overflow")
+            })
+    }
+
+    fn planned_touch(
+        state: &MemoryState,
+        inode: u64,
+        syscall: &str,
+        path: &str,
+    ) -> Result<(i64, i64)> {
+        let node = state
+            .nodes
+            .get(&inode)
+            .ok_or_else(|| Self::stale_guard(path, syscall))?;
+        Ok((
+            Self::next_guarded_time(node.mtime_ms, syscall, path)?,
+            Self::next_guarded_time(node.ctime_ms, syscall, path)?,
+        ))
+    }
+
+    fn apply_touch(state: &mut MemoryState, inode: u64, touch: (i64, i64)) {
+        let node = state
+            .nodes
+            .get_mut(&inode)
+            .expect("inode retained through locked mutation");
+        node.mtime_ms = touch.0;
+        node.ctime_ms = touch.1;
+    }
+
+    fn apply_ctime(state: &mut MemoryState, inode: u64, ctime_ms: i64) {
+        state
+            .nodes
+            .get_mut(&inode)
+            .expect("inode retained through locked mutation")
+            .ctime_ms = ctime_ms;
+    }
+
+    fn check_path_guard(state: &MemoryState, guard: &PathGuard, syscall: &str) -> Result<u64> {
+        let path = normalize_path(&guard.path);
+        if guard.identity.ino == 0 {
+            return Err(Self::stale_guard(&path, syscall));
+        }
+        let inode = Self::resolve(state, &path, false, syscall)
+            .map_err(|_| Self::stale_guard(&path, syscall))?;
+        let node = state
+            .nodes
+            .get(&inode)
+            .ok_or_else(|| Self::stale_guard(&path, syscall))?;
+        if guard.identity.dev != 0 || node.ino != guard.identity.ino {
+            return Err(Self::stale_guard(&path, syscall));
+        }
+        Ok(inode)
+    }
+
+    fn guarded_child_entry(
+        state: &MemoryState,
+        parent: &PathGuard,
+        name: &str,
+        observed: ObservedEntry,
+        syscall: &str,
+    ) -> Result<Entry> {
+        if name.is_empty() || name.contains(['/', '\0']) || matches!(name, "." | "..") {
+            return Err(FsError::new(ErrorCode::Einval)
+                .with_syscall(syscall)
+                .with_path(name));
+        }
+        let parent_inode = Self::check_path_guard(state, parent, syscall)?;
+        if !state
+            .nodes
+            .get(&parent_inode)
+            .is_some_and(Node::is_directory)
+        {
+            return Err(Self::stale_guard(&parent.path, syscall));
+        }
+        let path = normalize_path(&format!("{}/{name}", parent.path));
+        let entry = Self::walk(state, &path, false, syscall, 0)?;
+        if entry.parent != parent_inode {
+            return Err(Self::stale_guard(&parent.path, syscall));
+        }
+        let matches_observed = match observed {
+            ObservedEntry::Any => true,
+            ObservedEntry::Absent => entry.node.is_none(),
+            ObservedEntry::Identity(identity) => {
+                identity.ino != 0
+                    && identity.dev == 0
+                    && entry.node.is_some_and(|inode| inode == identity.ino)
+            }
+        };
+        if !matches_observed {
+            return Err(Self::stale_guard(&entry.path, syscall));
+        }
+        Ok(entry)
+    }
+
+    fn open_flags_locked(
+        &self,
+        state: &mut MemoryState,
+        path: &str,
+        parsed: OpenFlags,
+        mode: u32,
+    ) -> Result<(Arc<dyn FileHandle>, PathIdentity)> {
+        let normalized = normalize_path(path);
+        let umask = state.umask;
+        let entry = Self::walk(
+            state,
+            &normalized,
+            !(parsed.create && parsed.exclusive),
+            "open",
+            0,
+        )?;
+        let node = if let Some(node) = entry.node {
+            if parsed.exclusive {
+                return Err(FsError::new(ErrorCode::Eexist)
+                    .with_syscall("open")
+                    .with_path(entry.path));
+            }
+            let kind = state
+                .nodes
+                .get(&node)
+                .ok_or_else(|| FsError::new(ErrorCode::Estale))?
+                .file_type();
+            if kind == FileType::Directory && parsed.write {
+                return Err(FsError::new(ErrorCode::Eisdir)
+                    .with_syscall("open")
+                    .with_path(entry.path));
+            }
+            if kind.is_special() {
+                return Err(FsError::new(ErrorCode::Enxio)
+                    .with_syscall("open")
+                    .with_path(entry.path));
+            }
+            if parsed.truncate && kind != FileType::Directory {
+                Self::resize(state, node, 0, "truncate")?;
+                if let Some(node) = state.nodes.get_mut(&node) {
+                    node.mtime_ms = now_ms();
+                    node.ctime_ms = node.mtime_ms;
+                }
+            }
+            node
+        } else {
+            if !parsed.create {
+                return Err(FsError::new(ErrorCode::Enoent)
+                    .with_syscall("open")
+                    .with_path(entry.path));
+            }
+            let node = Self::create_node(state, S_IFREG | (mode & !umask & 0o7777), 0, None)?;
+            Self::link_entry(state, &entry, node)?;
+            node
+        };
+        let fd = state.next_fd;
+        state.next_fd += 1;
+        let handle = Arc::new(MemoryHandle {
+            fs: self.clone(),
+            node,
+            flags: parsed,
+            path: normalized,
+            fd,
+            state: Mutex::new(HandleState {
+                position: 0,
+                closed: false,
+            }),
+        });
+        Ok((handle, PathIdentity { dev: 0, ino: node }))
+    }
+
+    fn apply_guarded_setattr(
+        state: &mut MemoryState,
+        target: &PathGuard,
+        change: GuardedSetattr,
+    ) -> Result<()> {
+        let inode = Self::check_path_guard(state, target, "setattr")?;
+        let node = state
+            .nodes
+            .get(&inode)
+            .ok_or_else(|| Self::stale_guard(&target.path, "setattr"))?;
+        if change
+            .expected_ctime_ms
+            .is_some_and(|expected| node.ctime_ms != expected)
+        {
+            return Err(FsError::new(ErrorCode::Eagain)
+                .with_syscall("setattr")
+                .with_path(&target.path)
+                .with_message("change time guard does not match the current inode"));
+        }
+        if change.size.is_some() {
+            match node.file_type() {
+                FileType::Directory => {
+                    return Err(FsError::new(ErrorCode::Eisdir)
+                        .with_syscall("setattr")
+                        .with_path(&target.path));
+                }
+                FileType::File => {}
+                _ => {
+                    return Err(FsError::new(ErrorCode::Einval)
+                        .with_syscall("setattr")
+                        .with_path(&target.path));
+                }
+            }
+        }
+        let changed = change.size.is_some()
+            || change.mode.is_some()
+            || change.uid.is_some_and(|uid| uid != u32::MAX)
+            || change.gid.is_some_and(|gid| gid != u32::MAX)
+            || change.atime_ms.is_some()
+            || change.mtime_ms.is_some();
+        let next_ctime = if changed {
+            Some(Self::next_guarded_time(
+                node.ctime_ms,
+                "setattr",
+                &target.path,
+            )?)
+        } else {
+            None
+        };
+        let next_mtime = if change.size.is_some() && change.mtime_ms.is_none() {
+            Some(Self::next_guarded_time(
+                node.mtime_ms,
+                "setattr",
+                &target.path,
+            )?)
+        } else {
+            None
+        };
+        // Reserve/resize before any metadata change, so an allocation failure
+        // cannot leave half of a compound SETATTR applied.
+        if let Some(length) = change.size {
+            Self::resize(state, inode, length, "setattr")?;
+        }
+        let node = state
+            .nodes
+            .get_mut(&inode)
+            .ok_or_else(|| Self::stale_guard(&target.path, "setattr"))?;
+        if let Some(mode) = change.mode {
+            node.mode = (node.mode & S_IFMT) | (mode & 0o7777);
+        }
+        if let Some(uid) = change.uid
+            && uid != u32::MAX
+        {
+            node.uid = uid;
+        }
+        if let Some(gid) = change.gid
+            && gid != u32::MAX
+        {
+            node.gid = gid;
+        }
+        if let Some(atime_ms) = change.atime_ms {
+            node.atime_ms = atime_ms;
+        }
+        if let Some(mtime_ms) = change.mtime_ms {
+            node.mtime_ms = mtime_ms;
+        } else if let Some(next_mtime) = next_mtime {
+            node.mtime_ms = next_mtime;
+        }
+        if let Some(next_ctime) = next_ctime {
+            node.ctime_ms = next_ctime;
+        }
+        Ok(())
+    }
+
+    fn rename_entries(state: &mut MemoryState, from: Entry, to: Entry) -> Result<()> {
+        let old_path = from.path.clone();
+        let new_path = to.path.clone();
+        let from_node = from.node.ok_or_else(|| {
+            FsError::new(ErrorCode::Enoent)
+                .with_syscall("rename")
+                .with_path(old_path.clone())
+                .with_dest(new_path.clone())
+        })?;
+        if from_node == to.node.unwrap_or(0) {
+            return Ok(());
+        }
+        let is_directory = state
+            .nodes
+            .get(&from_node)
+            .map(Node::is_directory)
+            .unwrap_or(false);
+        if is_directory && is_path_inside(&to.path, &from.path) {
+            return Err(FsError::new(ErrorCode::Einval)
+                .with_syscall("rename")
+                .with_path(old_path)
+                .with_dest(new_path));
+        }
+        if let Some(destination) = to.node {
+            let destination_is_directory = state
+                .nodes
+                .get(&destination)
+                .map(Node::is_directory)
+                .unwrap_or(false);
+            if is_directory {
+                if !destination_is_directory {
+                    return Err(FsError::new(ErrorCode::Enotdir)
+                        .with_syscall("rename")
+                        .with_path(old_path)
+                        .with_dest(new_path));
+                }
+                if state
+                    .nodes
+                    .get(&destination)
+                    .is_some_and(|node| !node.children.is_empty())
+                {
+                    return Err(FsError::new(ErrorCode::Enotempty)
+                        .with_syscall("rename")
+                        .with_path(old_path)
+                        .with_dest(new_path));
+                }
+            } else if destination_is_directory {
+                return Err(FsError::new(ErrorCode::Eisdir)
+                    .with_syscall("rename")
+                    .with_path(old_path)
+                    .with_dest(new_path));
+            }
+            Self::unlink_entry(state, &to, destination)?;
+        }
+        let source_parent = state
+            .nodes
+            .get_mut(&from.parent)
+            .ok_or_else(|| FsError::new(ErrorCode::Estale))?;
+        source_parent.children.remove(&from.name);
+        if is_directory {
+            source_parent.subdirs = source_parent.subdirs.saturating_sub(1);
+        }
+        source_parent.mtime_ms = now_ms();
+        source_parent.ctime_ms = source_parent.mtime_ms;
+        Self::link_entry(state, &to, from_node)?;
+        if let Some(node) = state.nodes.get_mut(&from_node) {
+            node.ctime_ms = now_ms();
+        }
+        Ok(())
     }
 }
 
@@ -781,6 +1143,426 @@ impl FsDriver for MemoryFs {
         }
     }
 
+    fn supports_guarded_mutations(&self) -> bool {
+        true
+    }
+
+    fn supports_guarded_reads(&self) -> bool {
+        true
+    }
+
+    fn stable_inode_ids(&self) -> bool {
+        true
+    }
+
+    async fn guarded_read(&self, request: GuardedRead) -> Result<GuardedReadResult> {
+        let mut state = self.lock()?;
+        match request {
+            GuardedRead::Stat { target } => {
+                let inode = Self::check_path_guard(&state, &target, "stat")?;
+                Ok(GuardedReadResult::Stat(Self::stat_locked(
+                    &state, inode, "stat",
+                )?))
+            }
+            GuardedRead::Lookup { parent, name } => {
+                let inode = Self::check_path_guard(&state, &parent, "lookup")?;
+                let directory = state
+                    .nodes
+                    .get(&inode)
+                    .ok_or_else(|| Self::stale_guard(&parent.path, "lookup"))?;
+                if !directory.is_directory() {
+                    return Err(FsError::new(ErrorCode::Enotdir)
+                        .with_syscall("lookup")
+                        .with_path(parent.path));
+                }
+                let parent_stats = directory.stat();
+                if name.is_empty() || name.contains(['/', '\0']) {
+                    return Err(FsError::new(ErrorCode::Einval)
+                        .with_syscall("lookup")
+                        .with_path(name));
+                }
+                let child = match name.as_str() {
+                    "." => inode,
+                    ".." => {
+                        Self::walk(&state, &parent.path, false, "lookup", 0)
+                            .map_err(|_| Self::stale_guard(&parent.path, "lookup"))?
+                            .parent
+                    }
+                    _ => directory.children.get(&name).copied().ok_or_else(|| {
+                        FsError::new(ErrorCode::Enoent)
+                            .with_syscall("lookup")
+                            .with_path(normalize_path(&format!("{}/{name}", parent.path)))
+                    })?,
+                };
+                Ok(GuardedReadResult::Lookup {
+                    parent: parent_stats,
+                    child: Self::stat_locked(&state, child, "lookup")?,
+                })
+            }
+            GuardedRead::Readdir {
+                directory,
+                max_entries,
+            } => {
+                let inode = Self::check_path_guard(&state, &directory, "scandir")?;
+                if max_entries == 0 {
+                    return Err(FsError::new(ErrorCode::Einval)
+                        .with_syscall("scandir")
+                        .with_path(directory.path)
+                        .with_message("directory entry limit must be positive"));
+                }
+                let (stats, children) = {
+                    let node = state
+                        .nodes
+                        .get_mut(&inode)
+                        .ok_or_else(|| Self::stale_guard(&directory.path, "scandir"))?;
+                    if !node.is_directory() {
+                        return Err(FsError::new(ErrorCode::Enotdir)
+                            .with_syscall("scandir")
+                            .with_path(directory.path));
+                    }
+                    if node.children.order.len() > max_entries {
+                        return Err(FsError::new(ErrorCode::Eoverflow)
+                            .with_syscall("scandir")
+                            .with_path(directory.path)
+                            .with_message("directory exceeds the configured entry limit"));
+                    }
+                    node.atime_ms = now_ms();
+                    (
+                        node.stat(),
+                        node.children
+                            .iter()
+                            .map(|(name, child)| (name.clone(), *child))
+                            .collect::<Vec<_>>(),
+                    )
+                };
+                let entries = children
+                    .into_iter()
+                    .map(|(name, child)| {
+                        Ok(GuardedDirectoryEntry {
+                            name,
+                            stats: Self::stat_locked(&state, child, "scandir")?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(GuardedReadResult::Directory { stats, entries })
+            }
+            GuardedRead::Readlink { target } => {
+                let inode = Self::check_path_guard(&state, &target, "readlink")?;
+                let node = state
+                    .nodes
+                    .get(&inode)
+                    .ok_or_else(|| Self::stale_guard(&target.path, "readlink"))?;
+                if !node.is_symlink() {
+                    return Err(FsError::new(ErrorCode::Einval)
+                        .with_syscall("readlink")
+                        .with_path(target.path));
+                }
+                Ok(GuardedReadResult::Readlink {
+                    stats: node.stat(),
+                    target: node.target.clone().unwrap_or_default(),
+                })
+            }
+        }
+    }
+
+    async fn guarded_mutation(&self, request: GuardedMutation) -> Result<GuardedMutationResult> {
+        let mut state = self.lock()?;
+        match request {
+            GuardedMutation::Setattr { target, change } => {
+                Self::apply_guarded_setattr(&mut state, &target, change)?;
+                Ok(GuardedMutationResult::Applied)
+            }
+            GuardedMutation::Open {
+                parent,
+                name,
+                observed,
+                flags,
+                mode,
+            } => {
+                let entry = Self::guarded_child_entry(&state, &parent, &name, observed, "open")?;
+                if let Some(inode) = entry.node {
+                    let node = state
+                        .nodes
+                        .get(&inode)
+                        .ok_or_else(|| Self::stale_guard(&entry.path, "open"))?;
+                    if node.is_symlink() {
+                        return Err(FsError::new(ErrorCode::Eexist)
+                            .with_syscall("open")
+                            .with_path(entry.path));
+                    }
+                    if flags.truncate
+                        && node.file_type() == FileType::File
+                        && !matches!(observed, ObservedEntry::Identity(_))
+                    {
+                        return Err(Self::stale_guard(&entry.path, "open"));
+                    }
+                }
+                let parent_touch = if entry.node.is_none() && flags.create {
+                    Some(Self::planned_touch(
+                        &state,
+                        entry.parent,
+                        "open",
+                        &entry.path,
+                    )?)
+                } else {
+                    None
+                };
+                let target_touch = if entry.node.is_some() && flags.truncate && !flags.exclusive {
+                    let inode = Self::resolve(&state, &entry.path, true, "open")?;
+                    Some(Self::planned_touch(&state, inode, "open", &entry.path)?)
+                } else {
+                    None
+                };
+                let (handle, identity) =
+                    self.open_flags_locked(&mut state, &entry.path, flags, mode)?;
+                if let Some(touch) = parent_touch {
+                    Self::apply_touch(&mut state, entry.parent, touch);
+                }
+                if let Some(touch) = target_touch {
+                    Self::apply_touch(&mut state, identity.ino, touch);
+                }
+                Ok(GuardedMutationResult::Opened { handle, identity })
+            }
+            GuardedMutation::Mkdir { parent, name, mode } => {
+                let entry =
+                    Self::guarded_child_entry(&state, &parent, &name, ObservedEntry::Any, "mkdir")?;
+                if entry.node.is_some() {
+                    return Err(FsError::new(ErrorCode::Eexist)
+                        .with_syscall("mkdir")
+                        .with_path(entry.path));
+                }
+                let touch = Self::planned_touch(&state, entry.parent, "mkdir", &entry.path)?;
+                let mode = S_IFDIR | (mode & !state.umask & 0o7777);
+                let inode = Self::create_node(&mut state, mode, 0, None)?;
+                Self::link_entry(&mut state, &entry, inode)?;
+                Self::apply_touch(&mut state, entry.parent, touch);
+                Ok(GuardedMutationResult::Created(PathIdentity {
+                    dev: 0,
+                    ino: inode,
+                }))
+            }
+            GuardedMutation::Symlink {
+                parent,
+                name,
+                target,
+            } => {
+                let entry = Self::guarded_child_entry(
+                    &state,
+                    &parent,
+                    &name,
+                    ObservedEntry::Any,
+                    "symlink",
+                )?;
+                if target.is_empty() {
+                    return Err(FsError::new(ErrorCode::Enoent)
+                        .with_syscall("symlink")
+                        .with_path(target)
+                        .with_dest(entry.path));
+                }
+                if entry.node.is_some() {
+                    return Err(FsError::new(ErrorCode::Eexist)
+                        .with_syscall("symlink")
+                        .with_path(target)
+                        .with_dest(entry.path));
+                }
+                let touch = Self::planned_touch(&state, entry.parent, "symlink", &entry.path)?;
+                let inode = Self::create_node(
+                    &mut state,
+                    mount_rs_core::types::S_IFLNK | 0o777,
+                    0,
+                    Some(target),
+                )?;
+                Self::link_entry(&mut state, &entry, inode)?;
+                Self::apply_touch(&mut state, entry.parent, touch);
+                Ok(GuardedMutationResult::Created(PathIdentity {
+                    dev: 0,
+                    ino: inode,
+                }))
+            }
+            GuardedMutation::Mknod {
+                parent,
+                name,
+                mode,
+                dev,
+            } => {
+                let entry =
+                    Self::guarded_child_entry(&state, &parent, &name, ObservedEntry::Any, "mknod")?;
+                if entry.node.is_some() {
+                    return Err(FsError::new(ErrorCode::Eexist)
+                        .with_syscall("mknod")
+                        .with_path(entry.path));
+                }
+                let kind = FileType::from_mode(mode);
+                if !kind.is_special() && kind != FileType::File {
+                    return Err(FsError::new(ErrorCode::Eperm)
+                        .with_syscall("mknod")
+                        .with_path(entry.path));
+                }
+                let mode = kind.mode_bits() | (mode & !S_IFMT & !state.umask & 0o7777);
+                let dev = if matches!(kind, FileType::CharacterDevice | FileType::BlockDevice) {
+                    dev
+                } else {
+                    0
+                };
+                let touch = Self::planned_touch(&state, entry.parent, "mknod", &entry.path)?;
+                let inode = Self::create_node(&mut state, mode, dev, None)?;
+                Self::link_entry(&mut state, &entry, inode)?;
+                Self::apply_touch(&mut state, entry.parent, touch);
+                Ok(GuardedMutationResult::Created(PathIdentity {
+                    dev: 0,
+                    ino: inode,
+                }))
+            }
+            GuardedMutation::Unlink {
+                parent,
+                name,
+                entry,
+            } => {
+                let child = Self::guarded_child_entry(&state, &parent, &name, entry, "unlink")?;
+                let inode = child.node.ok_or_else(|| {
+                    FsError::new(ErrorCode::Enoent)
+                        .with_syscall("unlink")
+                        .with_path(child.path.clone())
+                })?;
+                if state.nodes.get(&inode).is_some_and(Node::is_directory) {
+                    return Err(FsError::new(ErrorCode::Eisdir)
+                        .with_syscall("unlink")
+                        .with_path(child.path));
+                }
+                let parent_touch =
+                    Self::planned_touch(&state, child.parent, "unlink", &child.path)?;
+                let child_ctime =
+                    Self::next_guarded_time(state.nodes[&inode].ctime_ms, "unlink", &child.path)?;
+                Self::unlink_entry(&mut state, &child, inode)?;
+                Self::apply_touch(&mut state, child.parent, parent_touch);
+                Self::apply_ctime(&mut state, inode, child_ctime);
+                Ok(GuardedMutationResult::Applied)
+            }
+            GuardedMutation::Rmdir {
+                parent,
+                name,
+                entry,
+            } => {
+                let child = Self::guarded_child_entry(&state, &parent, &name, entry, "rmdir")?;
+                let inode = child.node.ok_or_else(|| {
+                    FsError::new(ErrorCode::Enoent)
+                        .with_syscall("rmdir")
+                        .with_path(child.path.clone())
+                })?;
+                if inode == state.root {
+                    return Err(FsError::new(ErrorCode::Ebusy)
+                        .with_syscall("rmdir")
+                        .with_path(child.path));
+                }
+                let target = state
+                    .nodes
+                    .get(&inode)
+                    .ok_or_else(|| FsError::new(ErrorCode::Estale))?;
+                if !target.is_directory() {
+                    return Err(FsError::new(ErrorCode::Enotdir)
+                        .with_syscall("rmdir")
+                        .with_path(child.path));
+                }
+                if !target.children.is_empty() {
+                    return Err(FsError::new(ErrorCode::Enotempty)
+                        .with_syscall("rmdir")
+                        .with_path(child.path));
+                }
+                let parent_touch = Self::planned_touch(&state, child.parent, "rmdir", &child.path)?;
+                let child_ctime = Self::next_guarded_time(target.ctime_ms, "rmdir", &child.path)?;
+                Self::unlink_entry(&mut state, &child, inode)?;
+                Self::apply_touch(&mut state, child.parent, parent_touch);
+                Self::apply_ctime(&mut state, inode, child_ctime);
+                Ok(GuardedMutationResult::Applied)
+            }
+            GuardedMutation::Rename {
+                from_parent,
+                from_name,
+                source,
+                to_parent,
+                to_name,
+                destination,
+            } => {
+                let from =
+                    Self::guarded_child_entry(&state, &from_parent, &from_name, source, "rename")?;
+                let to =
+                    Self::guarded_child_entry(&state, &to_parent, &to_name, destination, "rename")?;
+                if let Some(source_inode) = from.node
+                    && Some(source_inode) != to.node
+                {
+                    let from_touch =
+                        Self::planned_touch(&state, from.parent, "rename", &from.path)?;
+                    let to_touch = if from.parent == to.parent {
+                        from_touch
+                    } else {
+                        Self::planned_touch(&state, to.parent, "rename", &to.path)?
+                    };
+                    let source_ctime = Self::next_guarded_time(
+                        state.nodes[&source_inode].ctime_ms,
+                        "rename",
+                        &from.path,
+                    )?;
+                    let destination_ctime = to
+                        .node
+                        .map(|inode| {
+                            Self::next_guarded_time(
+                                state.nodes[&inode].ctime_ms,
+                                "rename",
+                                &to.path,
+                            )
+                            .map(|ctime| (inode, ctime))
+                        })
+                        .transpose()?;
+                    let from_parent_inode = from.parent;
+                    let to_parent_inode = to.parent;
+                    Self::rename_entries(&mut state, from, to)?;
+                    Self::apply_touch(&mut state, from_parent_inode, from_touch);
+                    if from_parent_inode != to_parent_inode {
+                        Self::apply_touch(&mut state, to_parent_inode, to_touch);
+                    }
+                    Self::apply_ctime(&mut state, source_inode, source_ctime);
+                    if let Some((inode, ctime)) = destination_ctime {
+                        Self::apply_ctime(&mut state, inode, ctime);
+                    }
+                    return Ok(GuardedMutationResult::Applied);
+                }
+                Self::rename_entries(&mut state, from, to)?;
+                Ok(GuardedMutationResult::Applied)
+            }
+            GuardedMutation::Link {
+                source,
+                to_parent,
+                to_name,
+                destination,
+            } => {
+                let inode = Self::check_path_guard(&state, &source, "link")?;
+                if state.nodes.get(&inode).is_some_and(Node::is_directory) {
+                    return Err(FsError::new(ErrorCode::Eperm)
+                        .with_syscall("link")
+                        .with_path(source.path));
+                }
+                let to =
+                    Self::guarded_child_entry(&state, &to_parent, &to_name, destination, "link")?;
+                if to.node.is_some() {
+                    return Err(FsError::new(ErrorCode::Eexist)
+                        .with_syscall("link")
+                        .with_path(source.path)
+                        .with_dest(to.path));
+                }
+                let parent_touch = Self::planned_touch(&state, to.parent, "link", &to.path)?;
+                let source_ctime =
+                    Self::next_guarded_time(state.nodes[&inode].ctime_ms, "link", &source.path)?;
+                if let Some(node) = state.nodes.get_mut(&inode) {
+                    node.nlink += 1;
+                    node.ctime_ms = source_ctime;
+                }
+                Self::link_entry(&mut state, &to, inode)?;
+                Self::apply_touch(&mut state, to.parent, parent_touch);
+                Ok(GuardedMutationResult::Applied)
+            }
+        }
+    }
+
     async fn stat(&self, path: &str) -> Result<Stats> {
         let state = self.lock()?;
         let node = Self::resolve(&state, path, true, "stat")?;
@@ -829,71 +1611,17 @@ impl FsDriver for MemoryFs {
         parsed: OpenFlags,
         mode: u32,
     ) -> Result<Arc<dyn FileHandle>> {
-        let normalized = normalize_path(path);
         let mut state = self.lock()?;
-        let umask = state.umask;
-        let entry = Self::walk(
-            &state,
-            &normalized,
-            !(parsed.create && parsed.exclusive),
-            "open",
-            0,
-        )?;
-        let node = if let Some(node) = entry.node {
-            if parsed.exclusive {
-                return Err(FsError::new(ErrorCode::Eexist)
-                    .with_syscall("open")
-                    .with_path(entry.path));
-            }
-            let kind = state
-                .nodes
-                .get(&node)
-                .ok_or_else(|| FsError::new(ErrorCode::Estale))?
-                .file_type();
-            if kind == FileType::Directory && parsed.write {
-                return Err(FsError::new(ErrorCode::Eisdir)
-                    .with_syscall("open")
-                    .with_path(entry.path));
-            }
-            if kind.is_special() {
-                return Err(FsError::new(ErrorCode::Enxio)
-                    .with_syscall("open")
-                    .with_path(entry.path));
-            }
-            if parsed.truncate && kind != FileType::Directory {
-                Self::resize(&mut state, node, 0, "truncate")?;
-                if let Some(node) = state.nodes.get_mut(&node) {
-                    node.mtime_ms = now_ms();
-                    node.ctime_ms = node.mtime_ms;
-                }
-            }
-            node
-        } else {
-            if !parsed.create {
-                return Err(FsError::new(ErrorCode::Enoent)
-                    .with_syscall("open")
-                    .with_path(entry.path));
-            }
-            let node = Self::create_node(&mut state, S_IFREG | (mode & !umask & 0o7777), 0, None);
-            Self::link_entry(&mut state, &entry, node)?;
-            node
-        };
-        let fd = state.next_fd;
-        state.next_fd += 1;
-        Ok(Arc::new(MemoryHandle {
-            fs: self.clone(),
-            node,
-            flags: parsed,
-            path: normalized,
-            fd,
-            state: Mutex::new(HandleState {
-                position: 0,
-                closed: false,
-            }),
-        }))
+        self.open_flags_locked(&mut state, path, parsed, mode)
+            .map(|(handle, _identity)| handle)
     }
 
     async fn mkdir(&self, path: &str, options: MkdirOptions) -> Result<Option<String>> {
+        if path.contains('\0') {
+            return Err(FsError::new(ErrorCode::Einval)
+                .with_syscall("mkdir")
+                .with_path(path));
+        }
         let normalized = normalize_path(path);
         let mut state = self.lock()?;
         let mode = S_IFDIR | ((options.mode.unwrap_or(0o777)) & !state.umask & 0o7777);
@@ -917,7 +1645,7 @@ impl FsDriver for MemoryFs {
                         .with_path(current));
                     }
                 } else {
-                    let node = Self::create_node(&mut state, mode, 0, None);
+                    let node = Self::create_node(&mut state, mode, 0, None)?;
                     Self::link_entry(&mut state, &entry, node)?;
                     first_created.get_or_insert_with(|| current.clone());
                 }
@@ -930,7 +1658,7 @@ impl FsDriver for MemoryFs {
                 .with_syscall("mkdir")
                 .with_path(entry.path));
         }
-        let node = Self::create_node(&mut state, mode, 0, None);
+        let node = Self::create_node(&mut state, mode, 0, None)?;
         Self::link_entry(&mut state, &entry, node)?;
         Ok(None)
     }
@@ -986,73 +1714,14 @@ impl FsDriver for MemoryFs {
         let new_path = normalize_path(new_path);
         let mut state = self.lock()?;
         let from = Self::walk(&state, &old_path, false, "rename", 0)?;
-        let from_node = from.node.ok_or_else(|| {
-            FsError::new(ErrorCode::Enoent)
-                .with_syscall("rename")
-                .with_path(old_path.clone())
-                .with_dest(new_path.clone())
-        })?;
-        let to = Self::walk(&state, &new_path, false, "rename", 0)?;
-        if from_node == to.node.unwrap_or(0) {
-            return Ok(());
-        }
-        let is_directory = state
-            .nodes
-            .get(&from_node)
-            .map(Node::is_directory)
-            .unwrap_or(false);
-        if is_directory && is_path_inside(&to.path, &from.path) {
-            return Err(FsError::new(ErrorCode::Einval)
+        if from.node.is_none() {
+            return Err(FsError::new(ErrorCode::Enoent)
                 .with_syscall("rename")
                 .with_path(old_path)
                 .with_dest(new_path));
         }
-        if let Some(destination) = to.node {
-            let destination_is_directory = state
-                .nodes
-                .get(&destination)
-                .map(Node::is_directory)
-                .unwrap_or(false);
-            if is_directory {
-                if !destination_is_directory {
-                    return Err(FsError::new(ErrorCode::Enotdir)
-                        .with_syscall("rename")
-                        .with_path(old_path)
-                        .with_dest(new_path));
-                }
-                if state
-                    .nodes
-                    .get(&destination)
-                    .is_some_and(|node| !node.children.is_empty())
-                {
-                    return Err(FsError::new(ErrorCode::Enotempty)
-                        .with_syscall("rename")
-                        .with_path(old_path)
-                        .with_dest(new_path));
-                }
-            } else if destination_is_directory {
-                return Err(FsError::new(ErrorCode::Eisdir)
-                    .with_syscall("rename")
-                    .with_path(old_path)
-                    .with_dest(new_path));
-            }
-            Self::unlink_entry(&mut state, &to, destination)?;
-        }
-        let source_parent = state
-            .nodes
-            .get_mut(&from.parent)
-            .ok_or_else(|| FsError::new(ErrorCode::Estale))?;
-        source_parent.children.remove(&from.name);
-        if is_directory {
-            source_parent.subdirs = source_parent.subdirs.saturating_sub(1);
-        }
-        source_parent.mtime_ms = now_ms();
-        source_parent.ctime_ms = source_parent.mtime_ms;
-        Self::link_entry(&mut state, &to, from_node)?;
-        if let Some(node) = state.nodes.get_mut(&from_node) {
-            node.ctime_ms = now_ms();
-        }
-        Ok(())
+        let to = Self::walk(&state, &new_path, false, "rename", 0)?;
+        Self::rename_entries(&mut state, from, to)
     }
 
     async fn link(&self, existing_path: &str, new_path: &str) -> Result<()> {
@@ -1104,7 +1773,7 @@ impl FsDriver for MemoryFs {
             mount_rs_core::types::S_IFLNK | 0o777,
             0,
             Some(target.to_owned()),
-        );
+        )?;
         Self::link_entry(&mut state, &entry, node)
     }
 
@@ -1202,7 +1871,7 @@ impl FsDriver for MemoryFs {
                 0
             },
             None,
-        );
+        )?;
         Self::link_entry(&mut state, &entry, node)
     }
 }

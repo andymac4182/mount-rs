@@ -259,9 +259,41 @@ function configStore(value, role, baseDirectory, resolveValue) {
       durable: configBoolean(store.durable, `driver.storage.${role}.durable`, false),
     };
   }
+  if (kind === "foundationdb") {
+    const leaseAuthority = configString(
+      store.lease_authority,
+      `driver.storage.${role}.lease_authority`,
+    );
+    if (!["persisted-single-authority", "shared-provider"].includes(leaseAuthority)) {
+      throw new CliConfigError(
+        `driver.storage.${role}.lease_authority must be persisted-single-authority or shared-provider`,
+      );
+    }
+    if (leaseAuthority === "shared-provider" && store.authority_prefix === undefined) {
+      throw new CliConfigError(`driver.storage.${role}.authority_prefix is required for shared-provider`);
+    }
+    if (leaseAuthority === "persisted-single-authority" && store.authority_prefix !== undefined) {
+      throw new CliConfigError(`driver.storage.${role}.authority_prefix is only valid for shared-provider`);
+    }
+    return {
+      kind: "foundationdb",
+      uri: configPath(store.cluster_file, `driver.storage.${role}.cluster_file`, baseDirectory),
+      key: configString(store.volume_key, `driver.storage.${role}.volume_key`),
+      durable: configBoolean(store.durable, `driver.storage.${role}.durable`, false),
+      leaseAuthority,
+      ...(leaseAuthority === "shared-provider"
+        ? {
+            authorityPrefix: configString(
+              store.authority_prefix,
+              `driver.storage.${role}.authority_prefix`,
+            ),
+          }
+        : {}),
+    };
+  }
   if (kind === "r2") {
     if (role !== "blocks") {
-      throw new CliConfigError("R2 is a block-only provider; metadata must use memory, sqlite, pglite, or tidb");
+      throw new CliConfigError("R2 is a block-only provider; metadata must use memory, sqlite, pglite, tidb, or foundationdb");
     }
     return {
       kind: "r2",
@@ -513,49 +545,78 @@ async function run(configuration) {
   }
 
   const { mount, sdk } = await loadSdk();
-  if (configuration.sdkSelfTest) {
-    await runSdkSelfTest(
-      () => selectDriver(sdk, configuration),
-      configuration.driver,
-      configuration.reopen,
-    );
-    return;
+  const chunked = configuration.provider?.chunked;
+  const usesFoundationdb =
+    chunked?.metadata?.kind === "foundationdb" ||
+    chunked?.blocks?.kind === "foundationdb";
+  const stopClientNetwork = usesFoundationdb
+    ? findExport(sdk, ["shutdownFoundationdbClientNetwork"])
+    : undefined;
+  if (usesFoundationdb && typeof stopClientNetwork !== "function") {
+    throw new Error("the Node SDK does not export terminal FoundationDB client-network shutdown");
   }
-  if (!configuration.mountpoint) {
-    throw new CliConfigError("--mountpoint or config.mountpoint is required for a native mount");
-  }
-  const driver = await selectDriver(sdk, configuration);
-  const mountOptions = {
-    ...(configuration.transport === "auto" ? {} : { transport: configuration.transport }),
-    ...(configuration.readOnly === undefined ? {} : { readOnly: configuration.readOnly }),
-  };
-  const mounted = await mount(driver, configuration.mountpoint, mountOptions);
-  const closeMount = cleanupFunction(mounted);
-  let mountClosed = false;
-  let driverClosed = false;
-  const closeOnce = async () => {
-    if (!mountClosed) {
-      await closeMount();
-      mountClosed = true;
-    }
-    if (!driverClosed) {
-      await driver.shutdown();
-      driverClosed = true;
-    }
-  };
-
   try {
-    if (configuration.selfTest) {
-      await runSelfTest(configuration.mountpoint, configuration.driver);
-      await closeOnce();
+    if (configuration.sdkSelfTest) {
+      await runSdkSelfTest(
+        () => selectDriver(sdk, configuration),
+        configuration.driver,
+        configuration.reopen,
+      );
       return;
     }
-    console.log(
-      `mounted ${configuration.mountpoint} with Node SDK driver=${configuration.driver} transport=${mounted.transport ?? configuration.transport}; press Ctrl-C to unmount`,
-    );
-    await waitForSigint(closeOnce);
+    if (!configuration.mountpoint) {
+      throw new CliConfigError("--mountpoint or config.mountpoint is required for a native mount");
+    }
+    const driver = await selectDriver(sdk, configuration);
+    const mountOptions = {
+      ...(configuration.transport === "auto" ? {} : { transport: configuration.transport }),
+      ...(configuration.readOnly === undefined ? {} : { readOnly: configuration.readOnly }),
+    };
+    let mounted;
+    try {
+      mounted = await mount(driver, configuration.mountpoint, mountOptions);
+    } catch (error) {
+      await driver.shutdown();
+      throw error;
+    }
+    const closeMount = cleanupFunction(mounted);
+    let mountClosed = false;
+    let driverClosed = false;
+    const closeOnce = async () => {
+      if (!mountClosed) {
+        await closeMount();
+        mountClosed = true;
+      }
+      if (!driverClosed) {
+        await driver.shutdown();
+        driverClosed = true;
+      }
+    };
+
+    try {
+      if (configuration.selfTest) {
+        await runSelfTest(configuration.mountpoint, configuration.driver);
+        await closeOnce();
+        return;
+      }
+      console.log(
+        `mounted ${configuration.mountpoint} with Node SDK driver=${configuration.driver} transport=${mounted.transport ?? configuration.transport}; press Ctrl-C to unmount`,
+      );
+      await waitForSigint(closeOnce);
+    } finally {
+      await closeOnce();
+    }
   } finally {
-    await closeOnce();
+    if (usesFoundationdb) {
+      try {
+        stopClientNetwork();
+      } catch (error) {
+        // A feature-off addon never starts the native client network.
+        if (error?.code === "ENOTSUP") throw error;
+        console.error("FoundationDB client network could not stop safely:", error);
+        process.abort();
+      }
+    }
   }
 }
 

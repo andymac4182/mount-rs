@@ -66,13 +66,21 @@ see [DEPENDENCIES.md](../DEPENDENCIES.md).
    volume or object prefix. Implement `MetadataStore`, `BlockStore`, or both
    from `mount-rs-core::storage`. Keep provider-specific dependencies there.
 2. For metadata, return an uninitialized state as revision zero with no
-   namespace; validate loaded namespaces. Use provider time or a qualified
-   shared lease-time authority, never a requesting client's wall clock, and
-   atomically check the expected revision, current fence and lease expiry when
-   publishing. Namespace records contain attributes and block references, not
-   file bytes.
+   namespace; validate loaded namespaces. In the default exclusive-writer
+   mode, use provider time or a qualified shared lease-time authority, never
+   a requesting client's wall clock. Atomically check the expected revision,
+   current fence and lease expiry when publishing. A provider that supports
+   concurrent writers must additionally implement `prepare_concurrent_mode`
+   and `publish_if_revision`. Persist the mode before opening the namespace,
+   fence legacy lease operations, and reject conversion while an exclusive
+   writer may exist. A revision conflict must be a known non-commit (`EAGAIN`);
+   an uncertain publication error must remain ambiguous and fail closed.
+   Namespace records contain attributes and block references, not file bytes.
 3. For blocks, store immutable bytes under stable identities, reject an
    identity reused for different bytes, and make `flush` cover completed puts.
+   Concurrent writers must use the same shared block backing so a reference
+   published by one writer can be read by the others; `memory` and local
+   `sqlite` block stores are rejected for FoundationDB concurrent mode.
    Deletion/reconciliation needs authoritative roots and an explicit grace
    period; it is not part of ordinary unlink or shutdown.
 4. Make `durable()` reflect the actual configured store. Wire selectable
@@ -86,7 +94,22 @@ Add a crate under `filesystems/` that implements `FsDriver` from core. Keep
 filesystem state, handles and path semantics there. Accept provider traits
 when persistence is needed. A composition should own its writer lifecycle and
 expose an explicit shutdown path. Run loopback contract tests before mounting
-it through a transport.
+it through a transport. To support several writable NFS views, implement
+`FsDriver::guarded_read` and `FsDriver::guarded_mutation`, and advertise both
+`supports_guarded_reads()` and `supports_guarded_mutations()`.
+Guarded stat, lookup, readdir and readlink check an opaque handle's original
+inode and return data from one state lock or namespace snapshot. A directory
+can be renamed remotely and its old path replaced between handle resolution
+and a path-only `lookup` or `readdir`; the read must validate the parent inode
+at the read boundary, before binding returned entries to handles.
+Check a handle's `dev:ino` identity and any observed directory entry inside
+the same state lock or backend commit as the mutation, including every retry.
+Return the committed inode and handle from creation/open; opening the path
+again after commit can bind a replacement. Advertise `stable_inode_ids()` only
+when deleted inode numbers cannot be reused during the driver's lifetime, so
+an NFS handle kept before a remote rename can bind its new alias safely.
+`MemoryFs` and `ChunkedFs` implement this contract. `HostFs` and the legacy
+SQLite snapshot facade remain single-view NFS filesystems.
 
 ### Transport
 
@@ -96,7 +119,17 @@ capabilities, preserve `syncfs` and handle-close semantics, and bound remotely
 supplied bodies and directory
 responses. Own listener or native-mount shutdown in the adapter, and close it
 before the underlying filesystem. Run protocol tests without a kernel mount
-where possible; use separate native tests for mount claims.
+where possible; use separate native tests for mount claims. The shared NFSv3
+profile binds opaque file handles to backend inode identity, verifies opened
+handles, resolves renamed aliases, and sends handle-derived reads and
+mutations through the driver's guarded API. The session's
+`shared_concurrent_view` option enables those semantics and implies WCC
+omission. The independent `omit_wcc_attributes` option can omit WCC in an
+ordinary view. The CLI sets both for shared views because another server may
+commit before the reply.
+Automatic transport selection must choose NFS for a shared view; routing it
+through FUSE or 9P would skip this shared NFS identity and cache profile.
+NFSv4 requests fail closed in this profile.
 
 ### Frontend
 
@@ -110,25 +143,55 @@ mapping and shutdown coverage.
 
 ## Invariants to preserve
 
-- `ChunkedFs::open` acquires a provider-enforced writer lease, loads and
-  validates metadata, and initializes an empty namespace through fenced
-  publication. Ownership loss and ambiguous publication/barrier failures stop
-  that instance; reopen reads the provider's authoritative revision.
+- By default, `ChunkedFs::open` acquires a provider-enforced writer lease,
+  loads and validates metadata, and initializes an empty namespace through
+  fenced publication. Ownership loss stops that instance. The optional
+  experimental FoundationDB concurrent mode opens without a long writer lease.
+  It first persists a write-mode marker and legacy fence sentinel, then
+  initializes a fresh namespace with revision CAS. A prefix containing legacy
+  lease or fence keys needs an offline migration before concurrent mode.
 - Writes complete new immutable blocks and the block barrier before publishing
-  their references with revision CAS and the writer fence. Metadata publication
-  and its barrier complete before success is acknowledged. `syncfs` remains an
-  explicit filesystem-wide barrier. The composed driver advertises durable
-  writes only when **both** providers do.
+  their references. Exclusive mode checks both revision and writer fence;
+  concurrent mode publishes metadata chunks and the manifest in one
+  FoundationDB transaction conditional on the expected revision. The latter
+  reloads the authoritative namespace before operations and can rebuild an
+  operation after a known `EAGAIN` conflict, within a bounded retry count.
+  Ambiguous publication or barrier failures fail closed; they cannot be
+  replayed as known non-commits. Local namespace changes and related side
+  effects follow successful publication. Reopen reads the provider's
+  authoritative revision.
+- Metadata publication and its barrier complete before success is acknowledged.
+  `syncfs` remains an explicit filesystem-wide barrier. The composed driver
+  advertises durable writes only when **both** providers do. Concurrent mode
+  disables automatic atime publication and block reconciliation until
+  distributed open-handle pins and safe reclamation are available; it retains
+  detached file tombstones for remote open handles. Detached tombstones and
+  immutable blocks staged for failed or conflicted publications currently have
+  no built-in retention cap, so storage can grow without bound. The mode is
+  pending a distributed handle-pin and capacity protocol. The final guarded
+  macOS native acceptance passed once each for two independent writable
+  FoundationDB CLIs, one CLI with two FoundationDB mounts, and one CLI with
+  two memory mounts. Cross-host acceptance remains outstanding.
+- Shared NFS views require a driver that atomically guards handle identity
+  during both namespace reads and mutations. A directory handle must identify
+  its original parent while looking up or listing entries under one snapshot.
+  Inode identities cannot be reused if opaque
+  handles are to survive a remote rename before this server sees its new path.
+  `MemoryFs` checks its locked state, and `ChunkedFs` checks an authoritative
+  namespace snapshot for reads and every revision-CAS retry for mutations.
+  Frontend wrappers must forward guarded-read, guarded-mutation and stable-inode
+  capabilities and the corresponding calls.
 - Namespace format version is currently `1`. Future versions fail with
   `ENOTSUP`; malformed supported data fails validation. Each file layout stores
   its chunker configuration, so changing a new-file default cannot reinterpret
   old extents. A new on-disk format needs an explicit compatibility/migration
   design.
-- Coordinator shutdown releases the writer lease; consumer facades then close
-  provider resources they own. Servers and native mounts close first.
-  Unreferenced blocks can survive failed writes.
-  Reclamation is an explicit, fenced maintenance operation, never implicit
-  cleanup on shutdown.
+- Coordinator shutdown releases the lease in exclusive mode. Concurrent mode
+  has no lease to release. Consumer facades then close provider resources they
+  own; servers and native mounts close first. Unreferenced blocks can survive
+  failed writes. Reclamation is an explicit maintenance operation in exclusive
+  mode, never implicit cleanup on shutdown, and is unsupported in concurrent
+  mode until its distributed safety protocol exists.
 
 ## Provider crate versus S3-compatible service
 

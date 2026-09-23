@@ -803,6 +803,11 @@ echo "RUSTFS_READY endpoint=$rustfs_endpoint image=$rustfs_image"
 "$repo_dir/scripts/cargo-shared" test \
   --manifest-path "$repo_dir/tests/rustfs/Cargo.toml" \
   --locked \
+  -- "real_rustfs_sdk_sqlite_metadata_round_trip" --exact --test-threads=1 --nocapture
+
+"$repo_dir/scripts/cargo-shared" test \
+  --manifest-path "$repo_dir/tests/rustfs/Cargo.toml" \
+  --locked \
   -- "real_rustfs_pglite_metadata_round_trip" --exact --test-threads=1 --nocapture
 
 "$repo_dir/scripts/cargo-shared" test \

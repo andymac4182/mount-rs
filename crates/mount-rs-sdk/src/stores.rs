@@ -53,6 +53,23 @@ impl MetadataStore for ErasedMetadataStore {
         self.inner.load().await
     }
 
+    async fn prepare_concurrent_mode(&self) -> Result<()> {
+        #[cfg(feature = "observability")]
+        {
+            return self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "concurrent.prepare",
+                    None,
+                    self.inner.prepare_concurrent_mode(),
+                )
+                .await;
+        }
+        #[cfg(not(feature = "observability"))]
+        self.inner.prepare_concurrent_mode().await
+    }
+
     async fn acquire_writer(&self, owner: &str, ttl: Duration) -> Result<WriterLease> {
         #[cfg(feature = "observability")]
         {
@@ -125,6 +142,29 @@ impl MetadataStore for ErasedMetadataStore {
         #[cfg(not(feature = "observability"))]
         self.inner
             .publish(expected_revision, lease, namespace)
+            .await
+    }
+
+    async fn publish_if_revision(
+        &self,
+        expected_revision: u64,
+        namespace: Namespace,
+    ) -> Result<u64> {
+        #[cfg(feature = "observability")]
+        {
+            return self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "concurrent.publish",
+                    None,
+                    self.inner.publish_if_revision(expected_revision, namespace),
+                )
+                .await;
+        }
+        #[cfg(not(feature = "observability"))]
+        self.inner
+            .publish_if_revision(expected_revision, namespace)
             .await
     }
 

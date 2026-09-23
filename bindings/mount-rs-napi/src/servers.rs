@@ -1446,6 +1446,9 @@ pub struct NfsServerOptions {
     pub max_record: Option<f64>,
     pub max_in_flight: Option<f64>,
     pub use_driver_ino: Option<bool>,
+    /// NFSv3 shared-view policy for identity-guarded writes. The external
+    /// kernel client must also disable metadata and name caches.
+    pub shared_view: Option<bool>,
     #[napi(ts_type = "Uint8Array")]
     pub verifier: Option<Buffer>,
     pub max_handles: Option<f64>,
@@ -1478,6 +1481,7 @@ fn nfs_options(options: Option<NfsServerOptions>) -> Result<ParsedNfsOptions, Er
         max_record: None,
         max_in_flight: None,
         use_driver_ino: None,
+        shared_view: None,
         verifier: None,
         max_handles: None,
         rtmax: None,
@@ -1491,6 +1495,10 @@ fn nfs_options(options: Option<NfsServerOptions>) -> Result<ParsedNfsOptions, Er
     });
     let on_transport_error = options.on_transport_error;
     let on_error = options.on_error;
+    let shared_view = options.shared_view.unwrap_or(false);
+    if shared_view && options.use_driver_ino == Some(false) {
+        return Err(config_error("sharedView requires useDriverIno=true"));
+    }
     let mut callback_keepalive = NfsCallbackKeepalive::default();
     let (host, address) = ip_host(options.host, "127.0.0.1")?;
     let port = u16_number("port", options.port, 0)?;
@@ -1503,6 +1511,8 @@ fn nfs_options(options: Option<NfsServerOptions>) -> Result<ParsedNfsOptions, Er
     output.max_in_flight =
         positive_number("maxInFlight", options.max_in_flight, output.max_in_flight)?;
     output.session.use_driver_ino = options.use_driver_ino.unwrap_or(true);
+    output.session.omit_wcc_attributes = shared_view;
+    output.session.shared_concurrent_view = shared_view;
     output.session.verifier = verifier(options.verifier)?;
     output.session.max_handles = options
         .max_handles
@@ -1608,6 +1618,7 @@ pub struct Nfs4StateOptionsView {
 #[napi(object)]
 pub struct NfsSessionOptionsView {
     pub use_driver_ino: bool,
+    pub shared_view: bool,
     #[napi(ts_type = "Uint8Array | null")]
     pub verifier: Option<Buffer>,
     pub max_handles: Option<f64>,
@@ -1623,6 +1634,7 @@ fn nfs_options_view(options: &TransportNfsSessionOptions) -> NfsSessionOptionsVi
     let nfs4 = &options.nfs4;
     NfsSessionOptionsView {
         use_driver_ino: options.use_driver_ino,
+        shared_view: options.shared_concurrent_view,
         verifier: options.verifier.map(|value| Buffer::from(value.to_vec())),
         max_handles: options.max_handles.map(|value| value as f64),
         rtmax: options.rtmax as f64,
@@ -1756,10 +1768,18 @@ impl Nfs3Session {
         self.inner.destroyed()
     }
 
-    /// Destroy the NFSv3/MOUNT session and release its process-local state.
+    /// Destroy the NFSv3/MOUNT session and close retained handles. An
+    /// incomplete backend close rejects so the caller can retry destroy.
     #[napi]
-    pub async fn destroy(&self) {
-        self.inner.destroy().await;
+    pub async fn destroy(&self) -> napi::Result<()> {
+        if self.inner.destroy().await {
+            Ok(())
+        } else {
+            Err(transport_error(
+                "NFSv3 session destroy",
+                "retained file handles did not finish closing; retry destroy",
+            ))
+        }
     }
 }
 
@@ -1856,10 +1876,17 @@ impl NfsSession {
     }
 
     /// Destroy both versioned sessions and release their shared server state.
+    /// An incomplete v3 backend close rejects so the caller can retry destroy.
     #[napi]
-    pub async fn destroy(&self) {
-        self.inner.destroy().await;
+    pub async fn destroy(&self) -> napi::Result<()> {
+        if !self.inner.destroy().await {
+            return Err(transport_error(
+                "NFS session destroy",
+                "retained file handles did not finish closing; retry destroy",
+            ));
+        }
         self.v4_inner.destroy().await;
+        Ok(())
     }
 }
 
@@ -2050,6 +2077,10 @@ impl NfsServer {
     #[napi]
     pub async fn close(&self) -> napi::Result<()> {
         self.closed.store(true, Ordering::Release);
+        self.inner
+            .close()
+            .await
+            .map_err(|error| transport_error("NFS close", error))?;
         if let Some(callback) = &self.transport_error {
             callback.release();
         }
@@ -2057,10 +2088,7 @@ impl NfsServer {
             callback.release();
         }
         self.callback_keepalive.release();
-        self.inner
-            .close()
-            .await
-            .map_err(|error| transport_error("NFS close", error))
+        Ok(())
     }
 }
 
@@ -2071,6 +2099,9 @@ pub fn create_nfs_server(
 ) -> napi::Result<NfsServer> {
     let (host, requested_port, options, on_transport_error, on_error, callback_keepalive) =
         nfs_options(options)?;
+    if options.session.shared_concurrent_view {
+        super::require_nfs_shared_guarded(driver.driver.as_ref(), "createNfsServer")?;
+    }
     let transport_error = on_transport_error
         .map(TransportErrorCallback::new)
         .transpose()?;
@@ -2409,7 +2440,7 @@ fn p9_qid(value: mount_rs_9p::P9Qid) -> NativeP9Qid {
 fn p9_open_state(value: TransportP9FidOpenView) -> P9FidOpenState {
     P9FidOpenState {
         flags: value.flags as f64,
-        handle: value.handle.map(|handle| JsFileHandle { inner: handle }),
+        handle: value.handle.map(JsFileHandle::from_core),
         directory: value.directory,
         qid: value.qid.map(p9_qid),
     }
@@ -2428,7 +2459,10 @@ fn p9_transport_open_state(value: P9FidOpenState) -> napi::Result<TransportP9Fid
     Ok(TransportP9FidOpenState {
         flags: OpenFlags::from_bits(u64::from(wire_flags)),
         wire_flags,
-        handle: value.handle.map(|handle| handle.inner),
+        handle: value
+            .handle
+            .map(|handle| handle.open_inner("fid"))
+            .transpose()?,
         directory: value.directory,
         qid: value.qid.map(p9_transport_qid).transpose()?,
     })
@@ -2989,7 +3023,7 @@ impl P9FidTable {
             {
                 handles.push(P9OpenHandle {
                     fid: P9Fid::live(self.inner.clone(), fid),
-                    handle: JsFileHandle { inner: handle },
+                    handle: JsFileHandle::from_core(handle),
                 });
             }
         }

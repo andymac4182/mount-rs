@@ -61,6 +61,22 @@ untracked listener running after teardown begins. Closing the server is
 terminal: a later Rust `listen()` call returns `NotConnected` instead of the
 address of a listener that has already stopped.
 
+Call `NfsServer::close().await` before dropping a server that shares its
+filesystem with another live mount. Closing drains retained NFSv3 file
+handles through each backend's asynchronous `close` method. Dropping the
+server only aborts transport tasks; an unclosed handle can keep a local inode
+reference until the shared filesystem shuts down. The CLI's normal unmount
+path awaits server close before shutting down its filesystem.
+Direct users of `Nfs3Session` must call `destroy().await` for the same reason,
+check that it returns `true`, and retry while the session and Tokio runtime
+remain live if a backend close did not finish. `NfsServer::close()` reports an
+error in that case and can also be retried.
+Server close gives serving requests 200 ms to finish, then aborts any that
+remain. The session awaits cleanup of descriptors returned by a backend open
+before an aborted request registered them. A driver that allocates a
+descriptor inside its own `open_flags` future must release that allocation if
+the future is canceled before it returns the handle.
+
 The rootless process-restart gate also starts a real child server over a
 `HostFs` root, writes a `FILE_SYNC` NFSv3 payload, force-terminates that child,
 and recovers the file through MOUNT/LOOKUP/READ from a replacement server.
@@ -78,8 +94,13 @@ The shared file-handle table accepts `max_handles` through
 server options). A positive value is a soft LRU cap: the root and the entry
 currently being returned are protected, and live NFSv4.1 open state pins its
 handle entry so the cap cannot silently break share reservations or locks.
+NFSv3 retained regular-file descriptors also pin their handle entries until
+server close, preserving old file handles after a peer replaces a path.
 When every candidate is pinned the table may exceed the cap until state is
 released; with no value, the table remains uncapped for compatibility.
+In shared mode, visiting many distinct regular files can retain one backend
+descriptor and handle-table entry per file until close. `max_handles` does
+not bound this growth while those entries are pinned.
 
 A real-TCP cross-version regression checks both directions of this shared
 table: v3 MOUNT/CREATE handles match v4.1 PUTFH/LOOKUP/GETFH results, v4.1

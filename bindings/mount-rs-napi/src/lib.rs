@@ -29,7 +29,8 @@ use mount_rs_core::storage::{
 };
 use mount_rs_core::{
     Capabilities, DirEntry, ErrorCode, FileHandle as CoreFileHandle, FsDriver, FsError,
-    MkdirOptions, OpenFlags, Result as CoreResult, Stats, StatsFs,
+    GuardedMutation, GuardedMutationResult, GuardedRead, GuardedReadResult, MkdirOptions,
+    OpenFlags, Result as CoreResult, Stats, StatsFs,
 };
 #[cfg(all(
     feature = "foundationdb",
@@ -669,6 +670,50 @@ impl FsDriver for DriverSlot {
         self.capabilities
     }
 
+    fn supports_guarded_mutations(&self) -> bool {
+        self.get()
+            .is_ok_and(|driver| driver.supports_guarded_mutations())
+    }
+
+    fn supports_guarded_reads(&self) -> bool {
+        self.get()
+            .is_ok_and(|driver| driver.supports_guarded_reads())
+    }
+
+    fn stable_inode_ids(&self) -> bool {
+        self.get().is_ok_and(|driver| driver.stable_inode_ids())
+    }
+
+    fn guarded_mutation<'a, 'async_trait>(
+        &'a self,
+        request: GuardedMutation,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<GuardedMutationResult>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        let driver = match self.get() {
+            Ok(driver) => driver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move { driver.guarded_mutation(request).await })
+    }
+
+    fn guarded_read<'a, 'async_trait>(
+        &'a self,
+        request: GuardedRead,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<GuardedReadResult>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        let driver = match self.get() {
+            Ok(driver) => driver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move { driver.guarded_read(request).await })
+    }
+
     fn syncfs<'a, 'async_trait>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
@@ -1228,6 +1273,12 @@ pub struct JsAutoMountOptions {
     /// Apply hard mounts and same-host locking when the selected transport is
     /// NFS. This does not enable WAL or distributed SQLite locking.
     pub nfs_sqlite_single_host: Option<bool>,
+    /// Select NFS for an automatic mount, use the NFSv3 shared-view server
+    /// policy, and disable the native client's metadata/name caches so another
+    /// mount's committed paths are visible. Explicit FUSE/9P and the local
+    /// SQLite lock profile are incompatible. Shared writes require a backend
+    /// with guarded reads and mutations.
+    pub nfs_shared_view: Option<bool>,
 }
 
 #[napi(object)]
@@ -1272,12 +1323,12 @@ pub struct JsMountFailure {
 pub struct JsChunkedStoreOptions {
     /// Supported values are memory, sqlite, pglite, tidb, foundationdb, and r2
     /// (blocks only). FoundationDB requires the native feature and an
-    /// explicit persisted-single-authority or shared-provider authority.
+    /// explicit persisted-single-authority, shared-provider, or revision-cas authority.
     pub kind: String,
     pub uri: Option<String>,
     pub key: Option<String>,
     pub durable: Option<bool>,
-    /// FoundationDB only: persisted-single-authority or shared-provider.
+    /// FoundationDB only: persisted-single-authority, shared-provider, or revision-cas.
     pub lease_authority: Option<String>,
     /// FoundationDB shared-provider only: the authority record key prefix.
     pub authority_prefix: Option<String>,
@@ -1294,6 +1345,8 @@ pub struct JsChunkedOptions {
     pub chunk_size: f64,
     pub owner: Option<String>,
     pub ttl_ms: Option<f64>,
+    /// Enable persisted multiwriter revision CAS for FoundationDB metadata.
+    pub concurrent_writes: Option<bool>,
     /// Defaults to the current process uid, matching the memory driver.
     pub uid: Option<f64>,
     /// Defaults to the current process gid, matching the memory driver.
@@ -1326,6 +1379,16 @@ impl MetadataStore for DynMetadataStore {
         Self: 'async_trait,
     {
         self.0.load()
+    }
+
+    fn prepare_concurrent_mode<'a, 'async_trait>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.prepare_concurrent_mode()
     }
 
     fn acquire_writer<'a, 'b, 'async_trait>(
@@ -1378,6 +1441,18 @@ impl MetadataStore for DynMetadataStore {
         Self: 'async_trait,
     {
         self.0.publish(expected_revision, lease, namespace)
+    }
+
+    fn publish_if_revision<'a, 'async_trait>(
+        &'a self,
+        expected_revision: u64,
+        namespace: Namespace,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<u64>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.publish_if_revision(expected_revision, namespace)
     }
 
     fn flush<'a, 'async_trait>(
@@ -1469,6 +1544,40 @@ struct MountDriver(Arc<dyn FsDriver>);
 impl FsDriver for MountDriver {
     fn capabilities(&self) -> Capabilities {
         self.0.capabilities()
+    }
+
+    fn supports_guarded_mutations(&self) -> bool {
+        self.0.supports_guarded_mutations()
+    }
+
+    fn supports_guarded_reads(&self) -> bool {
+        self.0.supports_guarded_reads()
+    }
+
+    fn stable_inode_ids(&self) -> bool {
+        self.0.stable_inode_ids()
+    }
+
+    fn guarded_mutation<'a, 'async_trait>(
+        &'a self,
+        request: GuardedMutation,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<GuardedMutationResult>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.guarded_mutation(request)
+    }
+
+    fn guarded_read<'a, 'async_trait>(
+        &'a self,
+        request: GuardedRead,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<GuardedReadResult>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.guarded_read(request)
     }
 
     fn syncfs<'a, 'async_trait>(
@@ -1866,9 +1975,16 @@ fn open_foundationdb_storage(
             .map_err(to_js_error)?;
             storage.with_production_lease_oracle(oracle)
         }
+        "revision-cas" => {
+            reject_set(
+                &options.authority_prefix,
+                &format!("{role}.authorityPrefix"),
+            )?;
+            storage.without_lease_oracle()
+        }
         _ => {
             return Err(config_error(format!(
-                "{role}.leaseAuthority must be 'persisted-single-authority' or 'shared-provider'"
+                "{role}.leaseAuthority must be 'persisted-single-authority', 'shared-provider', or 'revision-cas'"
             )));
         }
     };
@@ -2388,14 +2504,55 @@ fn auto_options(
         on_transport_error: None,
         p9: None,
         nfs_sqlite_single_host: None,
+        nfs_shared_view: None,
     });
+    let nfs_sqlite_single_host = options.nfs_sqlite_single_host.unwrap_or(false);
+    let nfs_shared_view = options.nfs_shared_view.unwrap_or(false);
+    if nfs_sqlite_single_host && nfs_shared_view {
+        return Err(config_error(
+            "nfsSharedView cannot be combined with nfsSqliteSingleHost local locks",
+        ));
+    }
     let transport = parse_auto_transport(options.transport)?;
+    let transport = if nfs_shared_view {
+        match transport {
+            AutoTransport::Auto | AutoTransport::Nfs => AutoTransport::Nfs,
+            AutoTransport::Fuse | AutoTransport::P9 => {
+                return Err(config_error("nfsSharedView requires the NFS transport"));
+            }
+        }
+    } else {
+        transport
+    };
     let unmount_timeout = validate_unmount_timeout(options.unmount_timeout_ms)?;
     let p9 = p9_mount_options(options.p9, options.read_only, unmount_timeout)?;
     let callback = options
         .on_transport_error
         .map(TransportErrorCallback::new)
         .transpose()?;
+    let nfs = (nfs_sqlite_single_host || nfs_shared_view).then(|| {
+        let mut nfs = if nfs_sqlite_single_host {
+            mount_rs_nfs::NfsMountOptions::sqlite_single_host()
+        } else {
+            mount_rs_nfs::NfsMountOptions::default()
+        };
+        nfs.read_only = options.read_only.unwrap_or(false);
+        if let Some(timeout) = options.unmount_timeout_ms {
+            nfs.unmount_timeout = Some(Duration::from_millis(timeout as u64));
+        }
+        if nfs_shared_view {
+            nfs.server_options.session.omit_wcc_attributes = true;
+            nfs.server_options.session.shared_concurrent_view = true;
+            nfs.server_options.session.use_driver_ino = true;
+            #[cfg(target_os = "macos")]
+            nfs.mount_options
+                .extend(["noac".to_owned(), "nonegnamecache".to_owned()]);
+            #[cfg(target_os = "linux")]
+            nfs.mount_options
+                .extend(["noac".to_owned(), "lookupcache=none".to_owned()]);
+        }
+        nfs
+    });
     Ok((
         AutoMountOptions {
             transport,
@@ -2403,17 +2560,24 @@ fn auto_options(
             unmount_timeout,
             fuse: None,
             p9,
-            nfs: options.nfs_sqlite_single_host.unwrap_or(false).then(|| {
-                let mut nfs = mount_rs_nfs::NfsMountOptions::sqlite_single_host();
-                nfs.read_only = options.read_only.unwrap_or(false);
-                if let Some(timeout) = options.unmount_timeout_ms {
-                    nfs.unmount_timeout = Some(Duration::from_millis(timeout as u64));
-                }
-                nfs
-            }),
+            nfs,
         },
         callback,
     ))
+}
+
+fn require_nfs_shared_guarded(driver: &dyn FsDriver, syscall: &str) -> napi::Result<()> {
+    if driver.supports_guarded_mutations() && driver.supports_guarded_reads() {
+        Ok(())
+    } else {
+        Err(to_js_error(
+            FsError::new(ErrorCode::Enotsup)
+                .with_syscall(syscall)
+                .with_message(
+                    "shared NFS views require backend identity-guarded reads and mutations",
+                ),
+        ))
+    }
 }
 
 fn auto_mount_error(error: AutoMountError, syscall: &str, path: Option<&str>) -> Error {
@@ -2552,14 +2716,47 @@ pub struct JsWriteResult {
 #[derive(Clone)]
 #[napi]
 pub struct FileHandle {
-    inner: Arc<dyn CoreFileHandle>,
+    // A closed core handle can still retain the native provider through its
+    // filesystem field. Detach it after close so a retained JS wrapper does
+    // not keep a process-scoped FoundationDB client guard alive until GC.
+    inner: Arc<Mutex<Option<Arc<dyn CoreFileHandle>>>>,
 }
 
 #[napi]
 impl FileHandle {
+    pub(crate) fn from_core(inner: Arc<dyn CoreFileHandle>) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Some(inner))),
+        }
+    }
+
+    pub(crate) fn open_inner(&self, syscall: &str) -> napi::Result<Arc<dyn CoreFileHandle>> {
+        self.inner
+            .lock()
+            .map_err(|_| {
+                to_js_error(
+                    FsError::new(ErrorCode::Eio)
+                        .with_syscall(syscall)
+                        .with_message("file handle lock poisoned"),
+                )
+            })?
+            .clone()
+            .ok_or_else(|| {
+                to_js_error(
+                    FsError::new(ErrorCode::Ebadf)
+                        .with_syscall(syscall)
+                        .with_message("file handle is closed"),
+                )
+            })
+    }
+
     #[napi(getter)]
     pub fn fd(&self) -> Option<f64> {
-        self.inner.fd().map(|value| value as f64)
+        self.inner.lock().ok().and_then(|inner| {
+            inner
+                .as_ref()
+                .and_then(|handle| handle.fd().map(|value| value as f64))
+        })
     }
 
     #[napi]
@@ -2572,9 +2769,9 @@ impl FileHandle {
     ) -> napi::Result<JsReadResult> {
         let range = validate_range(buffer.len(), offset, length, false)?;
         let position = validate_position(position)?;
+        let inner = self.open_inner("read")?;
         let mut target = vec![0_u8; range.count];
-        let bytes_read = self
-            .inner
+        let bytes_read = inner
             .read(&mut target, position)
             .await
             .map_err(to_js_error)?;
@@ -2602,8 +2799,8 @@ impl FileHandle {
     ) -> napi::Result<JsWriteResult> {
         let range = validate_range(buffer.len(), offset, length, true)?;
         let position = validate_position(position)?;
-        let bytes_written = self
-            .inner
+        let inner = self.open_inner("write")?;
+        let bytes_written = inner
             .write(&buffer[range.start..range.start + range.count], position)
             .await
             .map_err(to_js_error)?;
@@ -2620,30 +2817,63 @@ impl FileHandle {
 
     #[napi]
     pub async fn stat(&self) -> napi::Result<JsStats> {
-        self.inner.stat().await.map(Into::into).map_err(to_js_error)
+        self.open_inner("fstat")?
+            .stat()
+            .await
+            .map(Into::into)
+            .map_err(to_js_error)
     }
 
     #[napi]
     pub async fn truncate(&self, length: Option<f64>) -> napi::Result<()> {
-        self.inner
-            .truncate(validate_length(length)?)
+        let length = validate_length(length)?;
+        self.open_inner("ftruncate")?
+            .truncate(length)
             .await
             .map_err(to_js_error)
     }
 
     #[napi]
     pub async fn sync(&self) -> napi::Result<()> {
-        self.inner.sync().await.map_err(to_js_error)
+        self.open_inner("fsync")?.sync().await.map_err(to_js_error)
     }
 
     #[napi]
     pub async fn datasync(&self) -> napi::Result<()> {
-        self.inner.datasync().await.map_err(to_js_error)
+        self.open_inner("fdatasync")?
+            .datasync()
+            .await
+            .map_err(to_js_error)
     }
 
     #[napi]
     pub async fn close(&self) -> napi::Result<()> {
-        self.inner.close().await.map_err(to_js_error)
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| {
+                to_js_error(
+                    FsError::new(ErrorCode::Eio)
+                        .with_syscall("close")
+                        .with_message("file handle lock poisoned"),
+                )
+            })?
+            .clone();
+        let Some(inner) = inner else {
+            return Ok(());
+        };
+        inner.close().await.map_err(to_js_error)?;
+        self.inner
+            .lock()
+            .map_err(|_| {
+                to_js_error(
+                    FsError::new(ErrorCode::Eio)
+                        .with_syscall("close")
+                        .with_message("file handle lock poisoned"),
+                )
+            })?
+            .take();
+        Ok(())
     }
 }
 
@@ -3132,7 +3362,7 @@ impl Filesystem {
         driver
             .open_flags(&path, flags, mode.unwrap_or(0o666))
             .await
-            .map(|inner| FileHandle { inner })
+            .map(FileHandle::from_core)
             .map_err(to_js_error)
     }
 
@@ -3438,6 +3668,27 @@ async fn shutdown_chunked_filesystem(
 
 #[napi]
 pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Filesystem> {
+    let concurrent_writes = options.concurrent_writes.unwrap_or(false);
+    if concurrent_writes {
+        if options.metadata.kind != "foundationdb"
+            || options.metadata.lease_authority.as_deref() != Some("revision-cas")
+        {
+            return Err(config_error(
+                "concurrentWrites requires FoundationDB metadata with leaseAuthority 'revision-cas'",
+            ));
+        }
+        if matches!(options.blocks.kind.as_str(), "memory" | "sqlite") {
+            return Err(config_error(
+                "concurrentWrites requires a shared block provider; memory and local SQLite blocks cannot serve independent mounts",
+            ));
+        }
+    } else if options.metadata.kind == "foundationdb"
+        && options.metadata.lease_authority.as_deref() == Some("revision-cas")
+    {
+        return Err(config_error(
+            "metadata.leaseAuthority 'revision-cas' requires concurrentWrites",
+        ));
+    }
     let owner = chunked_owner(options.owner)?;
     let chunk_size = validate_chunk_size(options.chunk_size)?;
     let ttl = validate_ttl(options.ttl_ms)?;
@@ -3449,6 +3700,7 @@ pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Fi
     let chunk_options = ChunkedOptions::fixed(owner, chunk_size)
         .map_err(to_js_error)?
         .with_lease_ttl(ttl)
+        .with_concurrent_writes(concurrent_writes)
         .with_identity(uid, gid, umask)
         .with_root_mode(root_mode);
 
@@ -3496,6 +3748,45 @@ pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Fi
         Some(shutdown),
         Some(reconcile),
     ))
+}
+
+/// Stop and join the process-wide FoundationDB client network at the Node
+/// application's terminal boundary, after every FoundationDB filesystem has
+/// completed `shutdown()`. A live provider handle returns `EBUSY`; this is
+/// synchronous and cannot be used as a per-filesystem cleanup operation.
+#[napi(js_name = "shutdownFoundationdbClientNetwork")]
+pub fn shutdown_foundationdb_client_network() -> napi::Result<()> {
+    #[cfg(all(
+        feature = "foundationdb",
+        any(
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "aarch64"),
+            all(target_os = "macos", target_arch = "x86_64"),
+            all(target_os = "macos", target_arch = "aarch64"),
+        )
+    ))]
+    {
+        mount_rs_foundationdb::shutdown_client_network().map_err(to_js_error)
+    }
+
+    #[cfg(not(all(
+        feature = "foundationdb",
+        any(
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "aarch64"),
+            all(target_os = "macos", target_arch = "x86_64"),
+            all(target_os = "macos", target_arch = "aarch64"),
+        )
+    )))]
+    {
+        Err(to_js_error(
+            FsError::new(ErrorCode::Enotsup)
+                .with_syscall("shutdownFoundationdbClientNetwork")
+                .with_message(
+                    "FoundationDB client-network shutdown requires the foundationdb feature on a supported native target",
+                ),
+        ))
+    }
 }
 
 /// Create the rooted host-filesystem driver used by the upstream
@@ -3559,6 +3850,13 @@ pub fn mount(
     let (options, transport_error) = auto_options(options)?;
     let mountpoint_for_error = mountpoint.clone();
     let mount_driver = driver.driver()?;
+    if options
+        .nfs
+        .as_ref()
+        .is_some_and(|nfs| nfs.server_options.session.shared_concurrent_view)
+    {
+        require_nfs_shared_guarded(mount_driver.as_ref(), "mount")?;
+    }
     let promise = env.spawn_future(async move {
         let mounted = mount_rs_auto::mount_with_hooks(
             MountDriver(mount_driver),
@@ -3616,6 +3914,7 @@ pub async fn unmount_all() -> Vec<JsMountFailure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mount_rs_core::{PathGuard, PathIdentity};
     use std::future::Future;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{Condvar, Mutex};
@@ -3696,6 +3995,69 @@ mod tests {
             before + 1,
             "the N-API forwarding layer must preserve the atomic one-publication path"
         );
+    }
+
+    #[test]
+    fn nfs_driver_wrappers_preserve_guarded_mutations_and_shutdown() {
+        let slot = Arc::new(DriverSlot::new(Arc::new(MemoryFs::empty())));
+        let root = block_on(slot.stat("/")).expect("memory root should exist");
+        let parent = PathGuard {
+            path: "/".into(),
+            identity: PathIdentity::from_stats(&root).expect("memory root has an inode"),
+        };
+        let mounted = MountDriver(Arc::clone(&slot) as Arc<dyn FsDriver>);
+        assert!(slot.supports_guarded_mutations());
+        assert!(mounted.supports_guarded_mutations());
+        assert!(slot.supports_guarded_reads());
+        assert!(mounted.supports_guarded_reads());
+        assert!(slot.stable_inode_ids());
+        assert!(mounted.stable_inode_ids());
+
+        let guarded_root = block_on(mounted.guarded_read(GuardedRead::Stat {
+            target: parent.clone(),
+        }))
+        .expect("guarded stat should reach the backing driver");
+        assert!(matches!(guarded_root, GuardedReadResult::Stat(_)));
+
+        let created = block_on(mounted.guarded_mutation(GuardedMutation::Mkdir {
+            parent: parent.clone(),
+            name: "guarded".into(),
+            mode: 0o755,
+        }))
+        .expect("guarded mkdir should reach the backing driver");
+        assert!(matches!(created, GuardedMutationResult::Created(_)));
+        assert!(block_on(slot.stat("/guarded")).is_ok());
+        let looked_up = block_on(mounted.guarded_read(GuardedRead::Lookup {
+            parent: parent.clone(),
+            name: "guarded".into(),
+        }))
+        .expect("guarded lookup should reach the backing driver");
+        assert!(matches!(looked_up, GuardedReadResult::Lookup { .. }));
+
+        slot.clear()
+            .expect("shutdown should detach the backing driver");
+        assert!(!slot.supports_guarded_mutations());
+        assert!(!mounted.supports_guarded_mutations());
+        assert!(!slot.supports_guarded_reads());
+        assert!(!mounted.supports_guarded_reads());
+        assert!(!slot.stable_inode_ids());
+        assert!(!mounted.stable_inode_ids());
+        let read_error = match block_on(mounted.guarded_read(GuardedRead::Stat {
+            target: parent.clone(),
+        })) {
+            Err(error) => error,
+            Ok(_) => panic!("closed driver must reject guarded reads"),
+        };
+        assert_eq!(read_error.code, ErrorCode::Ebadf);
+        let error = match block_on(mounted.guarded_mutation(GuardedMutation::Mkdir {
+            parent,
+            name: "after-close".into(),
+            mode: 0o755,
+        })) {
+            Err(error) => error,
+            Ok(_) => panic!("closed driver must reject guarded mutations"),
+        };
+        assert_eq!(error.code, ErrorCode::Ebadf);
     }
 
     #[derive(Default)]
@@ -3932,6 +4294,7 @@ mod tests {
             on_transport_error: None,
             p9: None,
             nfs_sqlite_single_host: Some(true),
+            nfs_shared_view: None,
         }))
         .unwrap();
         assert!(callback.is_none());
@@ -3944,6 +4307,93 @@ mod tests {
                 .unwrap();
         assert!(native.split(',').any(|value| value == "locallocks"));
         assert!(native.split(',').any(|value| value == "hard"));
+    }
+
+    #[test]
+    fn auto_facade_exposes_opt_in_nfs_shared_view() {
+        let (options, _) = auto_options(Some(JsAutoMountOptions {
+            transport: Some("nfs".into()),
+            read_only: Some(false),
+            unmount_timeout_ms: None,
+            on_transport_error: None,
+            p9: None,
+            nfs_sqlite_single_host: None,
+            nfs_shared_view: Some(true),
+        }))
+        .expect("shared NFS view options");
+        let nfs = options.nfs.expect("NFS override");
+        assert!(!nfs.read_only);
+        assert_eq!(nfs.version, mount_rs_nfs::NfsVersion::V3);
+        assert!(nfs.server_options.session.omit_wcc_attributes);
+        assert!(nfs.server_options.session.shared_concurrent_view);
+        assert!(nfs.server_options.session.use_driver_ino);
+        #[cfg(target_os = "macos")]
+        {
+            let macos = mount_rs_nfs::native::nfs_mount_options(
+                2049,
+                &nfs,
+                mount_rs_nfs::NfsPlatform::Macos,
+            )
+            .expect("macOS NFS options");
+            assert!(macos.split(',').any(|option| option == "noac"));
+            assert!(macos.split(',').any(|option| option == "nonegnamecache"));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let linux = mount_rs_nfs::native::nfs_mount_options(
+                2049,
+                &nfs,
+                mount_rs_nfs::NfsPlatform::Linux,
+            )
+            .expect("Linux NFS options");
+            assert!(linux.split(',').any(|option| option == "noac"));
+            assert!(linux.split(',').any(|option| option == "lookupcache=none"));
+        }
+    }
+
+    #[test]
+    fn auto_facade_shared_nfs_view_selects_nfs_and_rejects_local_locking() {
+        let (options, _) = auto_options(Some(JsAutoMountOptions {
+            transport: Some("auto".into()),
+            read_only: None,
+            unmount_timeout_ms: None,
+            on_transport_error: None,
+            p9: None,
+            nfs_sqlite_single_host: None,
+            nfs_shared_view: Some(true),
+        }))
+        .expect("shared NFS view should select NFS");
+        assert_eq!(options.transport, AutoTransport::Nfs);
+
+        for transport in ["fuse", "9p"] {
+            let result = auto_options(Some(JsAutoMountOptions {
+                transport: Some(transport.into()),
+                read_only: None,
+                unmount_timeout_ms: None,
+                on_transport_error: None,
+                p9: None,
+                nfs_sqlite_single_host: None,
+                nfs_shared_view: Some(true),
+            }));
+            assert!(
+                result.is_err(),
+                "{transport} cannot carry an NFS shared view"
+            );
+        }
+
+        let result = auto_options(Some(JsAutoMountOptions {
+            transport: Some("nfs".into()),
+            read_only: None,
+            unmount_timeout_ms: None,
+            on_transport_error: None,
+            p9: None,
+            nfs_sqlite_single_host: Some(true),
+            nfs_shared_view: Some(true),
+        }));
+        assert!(
+            result.is_err(),
+            "local SQLite locks cannot coordinate shared NFS views"
+        );
     }
 
     #[test]

@@ -403,6 +403,14 @@ pub trait MetadataStore: Send + Sync {
     /// False for volatile stores; never advertise durable commits for memfs.
     fn durable(&self) -> bool;
     async fn load(&self) -> Result<LoadedMetadata>;
+    /// Enter an opt-in, persistent concurrent-writer mode before opening the
+    /// namespace. A provider must fence every legacy lease operation after
+    /// this succeeds, and reject conversion while a legacy writer may exist.
+    async fn prepare_concurrent_mode(&self) -> Result<()> {
+        Err(FsError::new(ErrorCode::Enotsup)
+            .with_syscall("prepare concurrent metadata")
+            .with_message("metadata provider does not support concurrent writers"))
+    }
     async fn acquire_writer(&self, owner: &str, ttl: Duration) -> Result<WriterLease>;
     async fn renew_writer(&self, lease: &WriterLease, ttl: Duration) -> Result<WriterLease>;
     async fn release_writer(&self, lease: &WriterLease) -> Result<()>;
@@ -415,6 +423,19 @@ pub trait MetadataStore: Send + Sync {
         lease: &WriterLease,
         namespace: Namespace,
     ) -> Result<u64>;
+    /// Atomically publish a namespace only if its persisted manifest still
+    /// has `expected_revision`. EAGAIN means no commit and permits a caller
+    /// to reload and reconstruct its original operation. An ambiguous I/O
+    /// error must never be retried as though it were a known conflict.
+    async fn publish_if_revision(
+        &self,
+        _expected_revision: u64,
+        _namespace: Namespace,
+    ) -> Result<u64> {
+        Err(FsError::new(ErrorCode::Enotsup)
+            .with_syscall("publish concurrent metadata")
+            .with_message("metadata provider does not support concurrent writers"))
+    }
     /// Return true only when a successful `publish` already completes the
     /// provider's same durability/acknowledgement barrier as `flush` for the
     /// published metadata. The default is conservative for custom providers.

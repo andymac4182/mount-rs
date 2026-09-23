@@ -1103,6 +1103,8 @@ fn parse_handle(
         .transpose()?;
     let state = Arc::new(HandleState {
         closed: AtomicBool::new(false),
+        closing: AtomicBool::new(false),
+        close_gate: tokio::sync::Mutex::new(()),
         waiters: WaiterRegistry::new(),
     });
     let read = build_callback(object, "read", &lifecycle, true)
@@ -1168,7 +1170,18 @@ impl HandleCallbacks {
 
 struct HandleState {
     closed: AtomicBool,
+    closing: AtomicBool,
+    close_gate: tokio::sync::Mutex<()>,
     waiters: WaiterRegistry,
+}
+
+/// Restore the open state if a close callback fails or its waiter is dropped.
+struct ClosingAttempt<'a>(&'a HandleState);
+
+impl Drop for ClosingAttempt<'_> {
+    fn drop(&mut self) {
+        self.0.closing.store(false, Ordering::Release);
+    }
 }
 
 struct JsFileHandle {
@@ -1180,7 +1193,10 @@ struct JsFileHandle {
 
 impl JsFileHandle {
     fn ensure_open(&self) -> CoreResult<()> {
-        if self.lifecycle.is_closed() || self.state.closed.load(Ordering::Acquire) {
+        if self.lifecycle.is_closed()
+            || self.state.closed.load(Ordering::Acquire)
+            || self.state.closing.load(Ordering::Acquire)
+        {
             Err(FsError::new(ErrorCode::Ebadf).with_syscall("file handle"))
         } else {
             Ok(())
@@ -1345,20 +1361,27 @@ impl CoreFileHandle for JsFileHandle {
         'a: 'async_trait,
         Self: 'async_trait,
     {
-        if self.lifecycle.is_closed() || self.state.closed.swap(true, Ordering::AcqRel) {
-            return Box::pin(async { Err(Self::closed_error("close")) });
-        }
-        self.state.waiters.cancel_all();
+        let state = Arc::clone(&self.state);
         let callback = self.callbacks.close.clone();
         let lifecycle = Arc::clone(&self.lifecycle);
         let owner = &self.lifecycle.waiters;
         let callbacks = &self.callbacks;
         let parse = Arc::new(parse_unit);
         Box::pin(async move {
+            let _close_gate = state.close_gate.lock().await;
+            if lifecycle.is_closed() || state.closed.load(Ordering::Acquire) {
+                return Err(Self::closed_error("close"));
+            }
+            state.closing.store(true, Ordering::Release);
+            let _attempt = ClosingAttempt(&state);
+            state.waiters.cancel_all();
             let result = invoke(callback, lifecycle, owner, (), "close", parse)
                 .await
                 .map_err(|error| error.into_fs_error("close", None, None));
-            callbacks.abort();
+            if result.is_ok() {
+                state.closed.store(true, Ordering::Release);
+                callbacks.abort();
+            }
             result
         })
     }

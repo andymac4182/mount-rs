@@ -95,10 +95,13 @@ const selfCommonJs = require("@mount-rs/core");
 assert.equal(typeof direct.Filesystem, "function");
 assert.equal(typeof direct.createLoopback, "function");
 assert.equal(typeof direct.resolveCapabilities, "function");
+assert.equal(typeof direct.shutdownFoundationdbClientNetwork, "function");
 assert.equal(self.Filesystem, direct.Filesystem);
 assert.equal(self.createLoopback, direct.createLoopback);
 assert.equal(self.resolveCapabilities, direct.resolveCapabilities);
+assert.equal(self.shutdownFoundationdbClientNetwork, direct.shutdownFoundationdbClientNetwork);
 assert.equal(selfCommonJs.Filesystem, direct.Filesystem);
+assert.equal(selfCommonJs.shutdownFoundationdbClientNetwork, direct.shutdownFoundationdbClientNetwork);
 assert.equal(require("@mount-rs/core/package.json").name, packageJson.name);
 for (const [path, exported] of [
   ["drivers/memory", "createMemoryDriver"],

@@ -1,9 +1,9 @@
 //! FoundationDB-backed `mount-rs` metadata and immutable block stores.
 //!
 //! The provider is registered in the core workspace, but its native client is
-//! still opt-in. FoundationDB's native client network must be booted by the
-//! application before opening a database and the returned network guard must
-//! outlive every store handle.
+//! still opt-in. Managed constructors boot one shared native client network.
+//! Applications must drop every provider handle and stop/join that network at
+//! their terminal process boundary with [`shutdown_client_network`].
 
 #![cfg(all(
     feature = "foundationdb",
@@ -30,7 +30,7 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::{
-    Arc, OnceLock,
+    Arc, Condvar, Mutex,
     atomic::{AtomicU64, Ordering},
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -66,6 +66,11 @@ const METADATA_MANIFEST_SUFFIX: &[u8] = b"meta/manifest";
 const METADATA_CHUNK_SUFFIX: &[u8] = b"meta/chunk/";
 const METADATA_LEASE_SUFFIX: &[u8] = b"meta/lease";
 const METADATA_FENCE_SUFFIX: &[u8] = b"meta/fence";
+const METADATA_WRITE_MODE_SUFFIX: &[u8] = b"meta/write-mode";
+const CONCURRENT_WRITE_MODE: &[u8; 4] = b"MRC1";
+// The old fenced provider decodes this key as a 12-byte MRF1 record. A
+// different magic makes old clients fail before they can acquire a lease.
+const CONCURRENT_FENCE_SENTINEL: &[u8; FENCE_BYTES] = b"MRCF\0\0\0\0\0\0\0\0";
 const LEASE_ORACLE_SUFFIX: &[u8] = b"meta/lease-oracle";
 const FLUSH_SUFFIX: &[u8] = b"flush";
 const BLOCK_SUFFIX: &[u8] = b"block/";
@@ -82,7 +87,7 @@ pub struct FoundationDbLimits {
     pub max_block_bytes: usize,
     /// Bytes in each metadata shard.
     pub metadata_chunk_bytes: usize,
-    /// Maximum serialized namespace accepted by [`MetadataStore::publish`].
+    /// Maximum serialized namespace accepted by either metadata publication path.
     pub max_metadata_bytes: usize,
     /// Native transaction timeout applied on each transaction attempt.
     pub transaction_timeout: Duration,
@@ -402,7 +407,7 @@ fn emit_lease_authority_telemetry(outcome: &'static str, stats: &LeaseAuthorityS
         event_name = "mount_rs.foundationdb.lease_authority",
         boundary = "provider.foundationdb.lease_authority",
         operation = "publish",
-        outcome = outcome,
+        outcome = %outcome,
         publication_attempts = stats.publication_attempts,
         publication_successes = stats.publication_successes,
         publication_failures = stats.publication_failures,
@@ -423,7 +428,7 @@ fn emit_lease_oracle_telemetry(outcome: &'static str, stats: &LeaseOracleStats) 
         event_name = "mount_rs.foundationdb.lease_oracle",
         boundary = "provider.foundationdb.lease_authority",
         operation = "read",
-        outcome = outcome,
+        outcome = %outcome,
         reader_attempts = stats.read_attempts,
         reader_successes = stats.read_successes,
         reader_failures = stats.read_failures,
@@ -1112,9 +1117,11 @@ impl FoundationDbStorage {
     ///
     /// FoundationDB permits one client-network initialization per process, so
     /// all consumer-facing providers in this process share the same guard.
-    /// The native client remains alive for the process lifetime after the first
-    /// successful call; applications that own a different network lifecycle
-    /// should use [`Self::from_database`] instead and retain their own guard.
+    /// The native client remains alive across sequential opens until the
+    /// application calls [`shutdown_client_network`] at its terminal boundary,
+    /// after every provider handle and operation has been dropped. Applications
+    /// that own a different network lifecycle should use [`Self::from_database`]
+    /// instead and retain their own guard.
     pub fn connect(path: impl AsRef<Path>, options: FoundationDbStorageOptions) -> Result<Self> {
         let network = client_network()?;
         let path = path.as_ref().to_str().ok_or_else(|| {
@@ -1294,23 +1301,109 @@ fn fdb_error(error: FdbError) -> FsError {
     }
 }
 
-static CLIENT_NETWORK: OnceLock<std::result::Result<Arc<NetworkAutoStop>, String>> =
-    OnceLock::new();
+enum ClientNetworkState {
+    Uninitialized,
+    Running(Arc<NetworkAutoStop>),
+    Failed(String),
+    Stopping,
+    Stopped,
+}
+
+static CLIENT_NETWORK: Mutex<ClientNetworkState> = Mutex::new(ClientNetworkState::Uninitialized);
+static CLIENT_NETWORK_STOPPED: Condvar = Condvar::new();
+
+fn client_network_lock() -> Result<std::sync::MutexGuard<'static, ClientNetworkState>> {
+    CLIENT_NETWORK
+        .lock()
+        .map_err(|_| FsError::backend("FoundationDB client network state lock was poisoned"))
+}
 
 fn client_network() -> Result<Arc<NetworkAutoStop>> {
-    let result = CLIENT_NETWORK.get_or_init(|| {
-        let builder = FdbApiBuilder::default()
-            .build()
-            .map_err(|error| format!("FoundationDB client API initialization failed: {error}"))?;
-        let network = unsafe { builder.boot() }.map_err(|error| {
-            format!("FoundationDB client network initialization failed: {error}")
-        })?;
-        Ok(Arc::new(network))
-    });
-    match result {
-        Ok(network) => Ok(Arc::clone(network)),
-        Err(message) => Err(FsError::backend(message.clone())),
+    let mut state = client_network_lock()?;
+    match &*state {
+        ClientNetworkState::Running(network) => return Ok(Arc::clone(network)),
+        ClientNetworkState::Failed(message) => return Err(FsError::backend(message.clone())),
+        ClientNetworkState::Stopping | ClientNetworkState::Stopped => {
+            return Err(FsError::new(ErrorCode::Eio)
+                .with_message("FoundationDB client network has been shut down"));
+        }
+        ClientNetworkState::Uninitialized => {}
     }
+
+    let network = FdbApiBuilder::default()
+        .build()
+        .map_err(|error| format!("FoundationDB client API initialization failed: {error}"))
+        .and_then(|builder| {
+            unsafe { builder.boot() }.map_err(|error| {
+                format!("FoundationDB client network initialization failed: {error}")
+            })
+        });
+    match network {
+        Ok(network) => {
+            let network = Arc::new(network);
+            *state = ClientNetworkState::Running(Arc::clone(&network));
+            Ok(network)
+        }
+        Err(message) => {
+            *state = ClientNetworkState::Failed(message.clone());
+            Err(FsError::backend(message))
+        }
+    }
+}
+
+/// Stop and join the process-wide FoundationDB client network at the
+/// application's terminal boundary.
+///
+/// All providers, databases, in-flight operations, and application runtimes
+/// using this network must be dropped first. An active managed provider guard
+/// returns `Ebusy` and leaves the network running, so the caller can finish
+/// draining and retry. Once shutdown begins, managed connections cannot be
+/// opened again in this process. Concurrent shutdown callers wait until the
+/// native network thread has joined.
+pub fn shutdown_client_network() -> Result<()> {
+    let network = {
+        let mut state = client_network_lock()?;
+        loop {
+            match &*state {
+                ClientNetworkState::Stopped => return Ok(()),
+                ClientNetworkState::Stopping => {
+                    state = CLIENT_NETWORK_STOPPED.wait(state).map_err(|_| {
+                        FsError::backend("FoundationDB client network state lock was poisoned")
+                    })?;
+                }
+                ClientNetworkState::Running(network) if Arc::strong_count(network) > 1 => {
+                    return Err(FsError::new(ErrorCode::Ebusy).with_message(
+                        "FoundationDB client network still has active provider handles",
+                    ));
+                }
+                ClientNetworkState::Running(_) => {
+                    let ClientNetworkState::Running(network) =
+                        std::mem::replace(&mut *state, ClientNetworkState::Stopping)
+                    else {
+                        unreachable!("running client network changed while locked")
+                    };
+                    break network;
+                }
+                ClientNetworkState::Uninitialized | ClientNetworkState::Failed(_) => {
+                    *state = ClientNetworkState::Stopped;
+                    CLIENT_NETWORK_STOPPED.notify_all();
+                    return Ok(());
+                }
+            }
+        }
+    };
+
+    // The FoundationDB wrapper aborts on stop failure and panics if joining
+    // its network thread fails. Never unwind while the shared state remains
+    // Stopping: another terminal caller would otherwise wait forever.
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(network))).is_err() {
+        std::process::abort();
+    }
+
+    let mut state = client_network_lock()?;
+    *state = ClientNetworkState::Stopped;
+    CLIENT_NETWORK_STOPPED.notify_all();
+    Ok(())
 }
 
 fn ambiguous_commit_error(code: i32, message: impl std::fmt::Display) -> FsError {
@@ -1538,6 +1631,38 @@ fn stale() -> FsError {
     FsError::new(ErrorCode::Estale).with_syscall("FoundationDB metadata lease")
 }
 
+fn decode_concurrent_write_mode(raw: Option<Vec<u8>>) -> TxnResult<bool> {
+    match raw {
+        None => Ok(false),
+        Some(value) if value == CONCURRENT_WRITE_MODE => Ok(true),
+        Some(_) => Err(TxnError::Fs(backend_error(
+            "FoundationDB metadata write mode marker is invalid",
+        ))),
+    }
+}
+
+fn require_legacy_write_mode(raw: Option<Vec<u8>>) -> TxnResult<()> {
+    if decode_concurrent_write_mode(raw)? {
+        Err(TxnError::Fs(
+            FsError::enotsup("FoundationDB fenced metadata writer")
+                .with_message("this volume uses concurrent revision publication"),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn require_concurrent_write_mode(raw: Option<Vec<u8>>) -> TxnResult<()> {
+    if decode_concurrent_write_mode(raw)? {
+        Ok(())
+    } else {
+        Err(TxnError::Fs(
+            FsError::enotsup("FoundationDB concurrent metadata publication")
+                .with_message("prepare the volume for concurrent writers first"),
+        ))
+    }
+}
+
 fn require_oracle(inner: &Inner) -> Result<Arc<dyn LeaseOracle>> {
     inner.oracle.clone().ok_or_else(|| {
         FsError::enotsup("FoundationDB metadata lease clock")
@@ -1585,6 +1710,10 @@ impl Keyspace {
 
     fn fence(&self) -> Vec<u8> {
         self.key(METADATA_FENCE_SUFFIX)
+    }
+
+    fn write_mode(&self) -> Vec<u8> {
+        self.key(METADATA_WRITE_MODE_SUFFIX)
     }
 
     fn lease_oracle(&self) -> Vec<u8> {
@@ -1687,6 +1816,8 @@ fn metadata_publication_affected_bytes(
 ) -> Result<usize> {
     let keyspace = Keyspace::new(prefix);
     let lease_key = keyspace.lease();
+    let fence_key = keyspace.fence();
+    let write_mode_key = keyspace.write_mode();
     let manifest_key = keyspace.manifest();
     let chunk_prefix = keyspace.chunks();
     let chunk_end = range_end(&chunk_prefix)?;
@@ -1697,8 +1828,14 @@ fn metadata_publication_affected_bytes(
         .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
 
     let mut affected = 0;
-    // Lease and manifest reads performed before the publication CAS.
+    // The legacy publication reads the lease, mode, and manifest; the CAS
+    // publication reads mode and manifest. Bound both with one estimate.
     add_affected_bytes(&mut affected, key_conflict_range_bytes(lease_key.len())?)?;
+    add_affected_bytes(&mut affected, key_conflict_range_bytes(fence_key.len())?)?;
+    add_affected_bytes(
+        &mut affected,
+        key_conflict_range_bytes(write_mode_key.len())?,
+    )?;
     add_affected_bytes(&mut affected, key_conflict_range_bytes(manifest_key.len())?)?;
     // clear_range(chunk_prefix, chunk_end) contributes both its mutation
     // endpoints and its write-conflict range endpoints.
@@ -1792,7 +1929,8 @@ async fn flush_inner(inner: &Inner) -> Result<()> {
         .await
 }
 
-/// Fenced single-writer metadata stored in FoundationDB.
+/// Metadata stored in FoundationDB, supporting fenced single-writer leases
+/// and opt-in concurrent revision-CAS publication.
 #[derive(Clone)]
 pub struct FoundationDbMetadataStore(Arc<Inner>);
 
@@ -1895,6 +2033,58 @@ impl MetadataStore for FoundationDbMetadataStore {
             .await
     }
 
+    async fn prepare_concurrent_mode(&self) -> Result<()> {
+        let inner = Arc::clone(&self.0);
+        let keyspace = Keyspace::new(&inner.prefix);
+        let mode_key = keyspace.write_mode();
+        let lease_key = keyspace.lease();
+        let fence_key = keyspace.fence();
+        let limits = inner.limits;
+        inner
+            .transact_metadata((), move |trx, _| {
+                let mode_key = mode_key.clone();
+                let lease_key = lease_key.clone();
+                let fence_key = fence_key.clone();
+                Box::pin(async move {
+                    configure_transaction(trx, limits)?;
+                    // Read the marker and both legacy authority records in
+                    // one transaction. A racing legacy acquire reads this
+                    // marker and writes the fence, so only one mode can win.
+                    let (raw_mode, raw_lease, raw_fence) = futures_util::future::try_join3(
+                        get_owned(trx, &mode_key),
+                        get_owned(trx, &lease_key),
+                        get_owned(trx, &fence_key),
+                    )
+                    .await?;
+                    let prepared = decode_concurrent_write_mode(raw_mode)?;
+                    let has_sentinel = raw_fence.as_deref() == Some(CONCURRENT_FENCE_SENTINEL);
+                    if prepared {
+                        if raw_lease.is_none() && has_sentinel {
+                            return Ok(());
+                        }
+                        return Err(TxnError::Fs(backend_error(
+                            "FoundationDB concurrent mode marker and fence sentinel disagree",
+                        )));
+                    }
+                    if raw_lease.is_some() || raw_fence.is_some() {
+                        return Err(TxnError::Fs(
+                            FsError::new(ErrorCode::Ebusy)
+                                .with_syscall("prepare concurrent FoundationDB volume")
+                                .with_message("a fenced legacy volume needs an offline migration"),
+                        ));
+                    }
+                    // The pair is committed atomically. Old lease acquisition
+                    // reads this fence key before its own write, so a race
+                    // conflicts and an old client that starts later rejects
+                    // the deliberately invalid fence record.
+                    trx.set(&mode_key, CONCURRENT_WRITE_MODE);
+                    trx.set(&fence_key, CONCURRENT_FENCE_SENTINEL);
+                    Ok(())
+                })
+            })
+            .await
+    }
+
     async fn acquire_writer(&self, owner: &str, ttl: Duration) -> Result<WriterLease> {
         validate_owner(owner)?;
         let ttl = ttl_ms(ttl)?;
@@ -1903,16 +2093,19 @@ impl MetadataStore for FoundationDbMetadataStore {
         let keyspace = Keyspace::new(&inner.prefix);
         let lease_key = keyspace.lease();
         let fence_key = keyspace.fence();
+        let mode_key = keyspace.write_mode();
         let oracle = require_oracle(&inner)?;
         let limits = inner.limits;
         inner
             .transact_metadata((), move |trx, _| {
                 let lease_key = lease_key.clone();
                 let fence_key = fence_key.clone();
+                let mode_key = mode_key.clone();
                 let owner = owner.clone();
                 let oracle = Arc::clone(&oracle);
                 Box::pin(async move {
                     configure_transaction(trx, limits)?;
+                    require_legacy_write_mode(get_owned(trx, &mode_key).await?)?;
                     let current = get_owned(trx, &lease_key)
                         .await?
                         .map(|bytes| decode_lease(&bytes).map_err(TxnError::Fs))
@@ -1967,15 +2160,18 @@ impl MetadataStore for FoundationDbMetadataStore {
         let ttl = ttl_ms(ttl)?;
         let inner = Arc::clone(&self.0);
         let lease_key = Keyspace::new(&inner.prefix).lease();
+        let mode_key = Keyspace::new(&inner.prefix).write_mode();
         let oracle = require_oracle(&inner)?;
         let limits = inner.limits;
         inner
             .transact_metadata((), move |trx, _| {
                 let lease_key = lease_key.clone();
+                let mode_key = mode_key.clone();
                 let requested = requested.clone();
                 let oracle = Arc::clone(&oracle);
                 Box::pin(async move {
                     configure_transaction(trx, limits)?;
+                    require_legacy_write_mode(get_owned(trx, &mode_key).await?)?;
                     let current = get_owned(trx, &lease_key)
                         .await?
                         .ok_or_else(|| TxnError::Fs(stale()))
@@ -2010,15 +2206,18 @@ impl MetadataStore for FoundationDbMetadataStore {
         let requested = lease_from_input(lease)?;
         let inner = Arc::clone(&self.0);
         let lease_key = Keyspace::new(&inner.prefix).lease();
+        let mode_key = Keyspace::new(&inner.prefix).write_mode();
         let oracle = require_oracle(&inner)?;
         let limits = inner.limits;
         inner
             .transact_metadata((), move |trx, _| {
                 let lease_key = lease_key.clone();
+                let mode_key = mode_key.clone();
                 let requested = requested.clone();
                 let oracle = Arc::clone(&oracle);
                 Box::pin(async move {
                     configure_transaction(trx, limits)?;
+                    require_legacy_write_mode(get_owned(trx, &mode_key).await?)?;
                     let current = get_owned(trx, &lease_key)
                         .await?
                         .ok_or_else(|| TxnError::Fs(stale()))
@@ -2073,6 +2272,7 @@ impl MetadataStore for FoundationDbMetadataStore {
         let requested = lease_from_input(lease)?;
         let keyspace = Keyspace::new(&inner.prefix);
         let lease_key = keyspace.lease();
+        let mode_key = keyspace.write_mode();
         let manifest_key = keyspace.manifest();
         let chunk_prefix = keyspace.chunks();
         let chunk_end = range_end(&chunk_prefix)?;
@@ -2081,6 +2281,7 @@ impl MetadataStore for FoundationDbMetadataStore {
         inner
             .transact_metadata((), move |trx, _| {
                 let lease_key = lease_key.clone();
+                let mode_key = mode_key.clone();
                 let manifest_key = manifest_key.clone();
                 let chunk_prefix = chunk_prefix.clone();
                 let chunk_end = chunk_end.clone();
@@ -2101,12 +2302,15 @@ impl MetadataStore for FoundationDbMetadataStore {
                             .await
                             .map_err(TxnError::Fs)
                     };
-                    let (raw_lease, raw_manifest, now_ms) = futures_util::future::try_join3(
-                        get_owned(trx, &lease_key),
-                        get_owned(trx, &manifest_key),
-                        authority_time,
-                    )
-                    .await?;
+                    let (raw_mode, raw_lease, raw_manifest, now_ms) =
+                        futures_util::future::try_join4(
+                            get_owned(trx, &mode_key),
+                            get_owned(trx, &lease_key),
+                            get_owned(trx, &manifest_key),
+                            authority_time,
+                        )
+                        .await?;
+                    require_legacy_write_mode(raw_mode)?;
                     let current_lease = raw_lease
                         .ok_or_else(|| TxnError::Fs(stale()))
                         .and_then(|bytes| decode_lease(&bytes).map_err(TxnError::Fs))?;
@@ -2120,6 +2324,107 @@ impl MetadataStore for FoundationDbMetadataStore {
                     if current_revision != expected_revision {
                         return Err(TxnError::Fs(
                             FsError::new(ErrorCode::Eagain).with_syscall("publish metadata"),
+                        ));
+                    }
+                    if let Some(clear_start) =
+                        metadata_chunk_clear_start(&chunk_prefix, current_manifest, chunk_count)
+                    {
+                        trx.clear_range(&clear_start, &chunk_end);
+                    }
+                    for index in 0..chunk_count {
+                        let start = index as usize * limits.metadata_chunk_bytes;
+                        let end = (start + limits.metadata_chunk_bytes).min(payload.len());
+                        let key = metadata_chunk_key(&chunk_prefix, index);
+                        trx.set(&key, &payload[start..end]);
+                    }
+                    trx.set(&manifest_key, &manifest);
+                    Ok(next_revision)
+                })
+            })
+            .await
+    }
+
+    async fn publish_if_revision(
+        &self,
+        expected_revision: u64,
+        namespace: Namespace,
+    ) -> Result<u64> {
+        namespace.validate()?;
+        validate_namespace_chunkers(&namespace, self.0.limits)?;
+        let payload = serde_json::to_vec(&namespace).map_err(backend_error)?;
+        let inner = Arc::clone(&self.0);
+        if payload.len() > inner.limits.max_metadata_bytes {
+            return Err(FsError::new(ErrorCode::Efbig)
+                .with_message("FoundationDB namespace exceeds configured limit"));
+        }
+        let affected_bytes = metadata_publication_affected_bytes(
+            &inner.prefix,
+            inner.limits.metadata_chunk_bytes,
+            payload.len(),
+        )?;
+        if affected_bytes > FOUNDATIONDB_MAX_TRANSACTION_BYTES {
+            return Err(metadata_transaction_too_large(affected_bytes));
+        }
+        let next_revision = expected_revision
+            .checked_add(1)
+            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        let chunk_count = payload.len().div_ceil(inner.limits.metadata_chunk_bytes);
+        let chunk_count = u32::try_from(chunk_count)
+            .map_err(|_| FsError::new(ErrorCode::Efbig).with_message("too many metadata chunks"))?;
+        let manifest = encode_manifest(Manifest {
+            revision: next_revision,
+            chunk_count,
+            payload_len: payload.len() as u64,
+        });
+        let keyspace = Keyspace::new(&inner.prefix);
+        let mode_key = keyspace.write_mode();
+        let lease_key = keyspace.lease();
+        let fence_key = keyspace.fence();
+        let manifest_key = keyspace.manifest();
+        let chunk_prefix = keyspace.chunks();
+        let chunk_end = range_end(&chunk_prefix)?;
+        let limits = inner.limits;
+        inner
+            .transact_metadata((), move |trx, _| {
+                let mode_key = mode_key.clone();
+                let lease_key = lease_key.clone();
+                let fence_key = fence_key.clone();
+                let manifest_key = manifest_key.clone();
+                let chunk_prefix = chunk_prefix.clone();
+                let chunk_end = chunk_end.clone();
+                let payload = payload.clone();
+                let manifest = manifest.clone();
+                Box::pin(async move {
+                    configure_transaction(trx, limits)?;
+                    // All guards and the manifest CAS use one FDB read
+                    // version. Reading the manifest adds a conflict range;
+                    // only one concurrent revision writer can commit.
+                    let (raw_mode, raw_lease, raw_fence, raw_manifest) =
+                        futures_util::future::try_join4(
+                            get_owned(trx, &mode_key),
+                            get_owned(trx, &lease_key),
+                            get_owned(trx, &fence_key),
+                            get_owned(trx, &manifest_key),
+                        )
+                        .await?;
+                    require_concurrent_write_mode(raw_mode)?;
+                    if raw_lease.is_some()
+                        || raw_fence.as_deref() != Some(CONCURRENT_FENCE_SENTINEL)
+                    {
+                        return Err(TxnError::Fs(
+                            FsError::new(ErrorCode::Ebusy)
+                                .with_syscall("publish concurrent FoundationDB metadata")
+                                .with_message("the concurrent fence sentinel is missing or a legacy writer has claimed this volume"),
+                        ));
+                    }
+                    let current_manifest = raw_manifest
+                        .map(|bytes| decode_manifest(&bytes).map_err(TxnError::Fs))
+                        .transpose()?;
+                    let current_revision = current_manifest.map_or(0, |value| value.revision);
+                    if current_revision != expected_revision {
+                        return Err(TxnError::Fs(
+                            FsError::new(ErrorCode::Eagain)
+                                .with_syscall("publish concurrent FoundationDB metadata"),
                         ));
                     }
                     if let Some(clear_start) =
@@ -2288,7 +2593,7 @@ mod tests {
         assert!(rendered.contains("mount_rs.foundationdb.lease_authority"));
         assert!(rendered.contains("publication_attempts=2"));
         assert!(rendered.contains("publication_failures=1"));
-        assert!(rendered.contains("outcome=error"));
+        assert!(rendered.contains("outcome=error"), "{rendered}");
         assert!(!rendered.contains("cluster_file"));
         assert!(!rendered.contains("credentials"));
     }
@@ -2311,7 +2616,7 @@ mod tests {
         assert!(rendered.contains("mount_rs.foundationdb.lease_oracle"));
         assert!(rendered.contains("reader_attempts=5"));
         assert!(rendered.contains("reader_failures=1"));
-        assert!(rendered.contains("outcome=ok"));
+        assert!(rendered.contains("outcome=ok"), "{rendered}");
         assert!(!rendered.contains("authority_prefix"));
         assert!(!rendered.contains("provider_error"));
     }
@@ -2471,6 +2776,16 @@ mod tests {
         );
         assert_eq!(decode_oracle_time(&encode_oracle_time(123)).unwrap(), 123);
         assert_eq!(decode_last_fence(&encode_last_fence(17)).unwrap(), 17);
+    }
+
+    #[test]
+    fn concurrent_fence_sentinel_rejects_the_legacy_decoder() {
+        assert_eq!(CONCURRENT_FENCE_SENTINEL.len(), FENCE_BYTES);
+        assert_ne!(&CONCURRENT_FENCE_SENTINEL[..4], FENCE_MAGIC);
+        // This is the unchanged decoder that origin/main's acquire_writer
+        // uses before it can write a lease or advance the fence.
+        assert!(decode_last_fence(CONCURRENT_FENCE_SENTINEL).is_err());
+        assert!(decode_concurrent_write_mode(Some(CONCURRENT_WRITE_MODE.to_vec())).unwrap());
     }
 
     #[test]

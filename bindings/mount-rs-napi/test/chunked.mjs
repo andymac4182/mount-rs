@@ -115,22 +115,50 @@ try {
       }),
     "EINVAL",
   )
-  if (process.env.MOUNT_RS_NAPI_FOUNDATIONDB !== "1") {
+  await assertCode(
+    () => createChunkedDriver({ ...memoryStores(), chunkSize: 4096, concurrentWrites: true }),
+    "EINVAL",
+  )
+  const concurrentMetadata = {
+    kind: "foundationdb",
+    uri: "/missing/fdb.cluster",
+    key: "concurrent-validation",
+    leaseAuthority: "revision-cas",
+  }
+  for (const kind of ["memory", "sqlite"]) {
     await assertCode(
       () =>
         createChunkedDriver({
-          metadata: {
-            kind: "foundationdb",
-            uri: "/missing/fdb.cluster",
-            key: "feature-off",
-            leaseAuthority: "persisted-single-authority",
-          },
-          blocks: { kind: "memory" },
+          metadata: concurrentMetadata,
+          blocks: { kind, uri: "/missing/local-blocks.sqlite" },
           chunkSize: 4096,
+          concurrentWrites: true,
         }),
       "EINVAL",
     )
   }
+  await assertCode(
+    () =>
+      createChunkedDriver({
+        metadata: concurrentMetadata,
+        blocks: { kind: "memory" },
+        chunkSize: 4096,
+      }),
+    "EINVAL",
+  )
+  await assertCode(
+    () =>
+      createChunkedDriver({
+        metadata: {
+          kind: "foundationdb",
+          key: "missing-cluster-uri",
+          leaseAuthority: "persisted-single-authority",
+        },
+        blocks: { kind: "memory" },
+        chunkSize: 4096,
+      }),
+    "EINVAL",
+  )
   await assertCode(
     () =>
       createChunkedDriver({

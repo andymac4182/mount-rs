@@ -6,6 +6,173 @@ use crate::error::{FsError, Result};
 use crate::path::normalize_path;
 use crate::types::{Capabilities, DirEntry, MkdirOptions, Stats, StatsFs};
 
+/// Stable backend identity captured when a transport first bound a handle.
+/// An inode value of zero cannot guard an operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathIdentity {
+    pub dev: u64,
+    pub ino: u64,
+}
+
+impl PathIdentity {
+    pub fn from_stats(stats: &Stats) -> Option<Self> {
+        (stats.ino != 0).then_some(Self {
+            dev: stats.dev,
+            ino: stats.ino,
+        })
+    }
+
+    /// Parse the `dev:ino` key retained by an opaque file-handle table.
+    pub fn parse_backend_key(key: &str) -> Option<Self> {
+        let (dev, ino) = key.split_once(':')?;
+        let identity = Self {
+            dev: dev.parse().ok()?,
+            ino: ino.parse().ok()?,
+        };
+        (identity.ino != 0).then_some(identity)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathGuard {
+    pub path: String,
+    pub identity: PathIdentity,
+}
+
+/// What the caller observed at a name before starting a guarded operation.
+/// `Any` is appropriate when the wire request names an entry without a prior
+/// lookup. `Absent` and `Identity` prevent a later replacement from being
+/// mistaken for the observed entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservedEntry {
+    Any,
+    Absent,
+    Identity(PathIdentity),
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GuardedSetattr {
+    pub mode: Option<u32>,
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
+    pub size: Option<u64>,
+    pub atime_ms: Option<i64>,
+    pub mtime_ms: Option<i64>,
+    /// Compare the exact backend change time within the mutation boundary.
+    pub expected_ctime_ms: Option<i64>,
+}
+
+/// Handle-derived namespace operations. A driver with durable shared writers
+/// must check every guard within the same backend commit as the mutation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuardedMutation {
+    Setattr {
+        target: PathGuard,
+        change: GuardedSetattr,
+    },
+    Open {
+        parent: PathGuard,
+        name: String,
+        observed: ObservedEntry,
+        flags: crate::OpenFlags,
+        mode: u32,
+    },
+    Mkdir {
+        parent: PathGuard,
+        name: String,
+        mode: u32,
+    },
+    Symlink {
+        parent: PathGuard,
+        name: String,
+        target: String,
+    },
+    Mknod {
+        parent: PathGuard,
+        name: String,
+        mode: u32,
+        dev: u64,
+    },
+    Unlink {
+        parent: PathGuard,
+        name: String,
+        entry: ObservedEntry,
+    },
+    Rmdir {
+        parent: PathGuard,
+        name: String,
+        entry: ObservedEntry,
+    },
+    Rename {
+        from_parent: PathGuard,
+        from_name: String,
+        source: ObservedEntry,
+        to_parent: PathGuard,
+        to_name: String,
+        destination: ObservedEntry,
+    },
+    Link {
+        source: PathGuard,
+        to_parent: PathGuard,
+        to_name: String,
+        destination: ObservedEntry,
+    },
+}
+
+pub enum GuardedMutationResult {
+    Applied,
+    Created(PathIdentity),
+    Opened {
+        handle: Arc<dyn FileHandle>,
+        identity: PathIdentity,
+    },
+}
+
+/// Handle-derived reads. Each driver checks the original handle identity and
+/// returns its answer from the same namespace snapshot. Names in `Lookup`
+/// refer to children of the guarded directory, including `.` and `..`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuardedRead {
+    Stat {
+        target: PathGuard,
+    },
+    Lookup {
+        parent: PathGuard,
+        name: String,
+    },
+    Readdir {
+        directory: PathGuard,
+        max_entries: usize,
+    },
+    Readlink {
+        target: PathGuard,
+    },
+}
+
+/// A directory child and its nofollow attributes from one guarded snapshot.
+#[derive(Debug, Clone)]
+pub struct GuardedDirectoryEntry {
+    pub name: String,
+    pub stats: Stats,
+}
+
+#[derive(Debug, Clone)]
+pub enum GuardedReadResult {
+    Stat(Stats),
+    Lookup {
+        parent: Stats,
+        child: Stats,
+    },
+    Directory {
+        stats: Stats,
+        entries: Vec<GuardedDirectoryEntry>,
+    },
+    Readlink {
+        stats: Stats,
+        target: String,
+    },
+}
+
 /// An open file handle. The buffer passed to `read` is owned by the caller;
 /// `position == None` uses and advances the handle cursor, while `Some` is an
 /// explicit positional operation.
@@ -31,6 +198,33 @@ pub trait FileHandle: Send + Sync {
 #[async_trait]
 pub trait FsDriver: Send + Sync {
     fn capabilities(&self) -> Capabilities;
+
+    /// Whether this driver can commit handle identity checks atomically with
+    /// the corresponding namespace mutation.
+    fn supports_guarded_mutations(&self) -> bool {
+        false
+    }
+
+    /// Whether this driver can check handle identity and produce an entire
+    /// handle-derived read response from one namespace snapshot.
+    fn supports_guarded_reads(&self) -> bool {
+        false
+    }
+
+    /// Whether this driver's inode numbers remain unique for its lifetime.
+    /// Transports may retain a temporarily nameless handle's identity only
+    /// when a later object cannot reuse that inode number.
+    fn stable_inode_ids(&self) -> bool {
+        false
+    }
+
+    async fn guarded_mutation(&self, _request: GuardedMutation) -> Result<GuardedMutationResult> {
+        Err(crate::error::FsError::enotsup("guarded mutation"))
+    }
+
+    async fn guarded_read(&self, _request: GuardedRead) -> Result<GuardedReadResult> {
+        Err(crate::error::FsError::enotsup("guarded read"))
+    }
 
     /// Establish a filesystem-wide persistence barrier.
     ///

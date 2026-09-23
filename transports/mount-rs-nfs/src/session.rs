@@ -12,20 +12,22 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mount_rs_core::{
-    ErrorCode, FileHandle, FsDriver, FsError, Loopback, MkdirOptions, OpenFlags,
-    Result as FsResult, S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFMT, S_IFSOCK,
+    ErrorCode, FileHandle, FsDriver, FsError, GuardedDirectoryEntry, GuardedMutation,
+    GuardedMutationResult, GuardedRead, GuardedReadResult, GuardedSetattr, Loopback, MkdirOptions,
+    ObservedEntry, OpenFlags, PathGuard, PathIdentity, Result as FsResult, S_IFBLK, S_IFCHR,
+    S_IFDIR, S_IFIFO, S_IFMT, S_IFSOCK,
 };
 
 use crate::constants::*;
 use crate::handles::{
     DirectorySnapshot, DirectorySnapshots, FH_SIZE, FileHandleTable, FileHandleTableOptions,
-    HandleEntry, cookie_verifier, same_backend_inode, same_verifier,
+    HandleEntry, cookie_verifier, guarded_cookie_verifier, same_backend_inode, same_verifier,
 };
 use crate::protocol::*;
 use crate::rpc::{
     AUTH_NONE, AUTH_SYS, RPC_GARBAGE_ARGS, RPC_PROC_UNAVAIL, RPC_PROG_MISMATCH, RPC_PROG_UNAVAIL,
-    RPC_VERSION, RpcCall, RpcCredentials, checked_credentials_of, decode_call, encode_accept_error,
-    encode_auth_error, encode_rpc_mismatch, write_accepted_reply_header,
+    RPC_SYSTEM_ERR, RPC_VERSION, RpcCall, RpcCredentials, checked_credentials_of, decode_call,
+    encode_accept_error, encode_auth_error, encode_rpc_mismatch, write_accepted_reply_header,
 };
 use crate::v4::{NFS_V4, Nfs4Session};
 use crate::xdr::{XdrError, XdrReader, XdrWriter};
@@ -296,6 +298,14 @@ impl Default for Nfs4StateOptions {
 pub struct NfsSessionOptions {
     pub use_driver_ino: bool,
     pub verifier: Option<[u8; 8]>,
+    /// Validate opaque handles against the live backend inode and require
+    /// atomic identity guards for NFSv3 mutations. NFSv4 is unavailable in
+    /// this mode until it can apply the same guards.
+    pub shared_concurrent_view: bool,
+    /// Omit NFSv3 weak cache consistency attributes for a nonshared view.
+    /// Shared views always omit them because another server can change
+    /// post-operation attributes before this server writes its reply.
+    pub omit_wcc_attributes: bool,
     /// Positive values bound the shared handle table with a soft LRU cap.
     pub max_handles: Option<usize>,
     pub rtmax: usize,
@@ -312,6 +322,8 @@ impl Default for NfsSessionOptions {
         Self {
             use_driver_ino: true,
             verifier: None,
+            shared_concurrent_view: false,
+            omit_wcc_attributes: false,
             max_handles: None,
             rtmax: DEFAULT_RTMAX,
             wtmax: DEFAULT_WTMAX,
@@ -438,8 +450,8 @@ impl SharedNfsState {
 }
 
 /// Route one unframed RPC call across the server's shared NFSv3/MOUNTv3 and
-/// NFSv4.1 sessions. An unsupported NFS program version advertises the full
-/// 3..4 range; standalone versioned sessions retain their own narrower range.
+/// NFSv4.1 sessions. Shared multiwriter sessions advertise only NFSv3, since
+/// NFSv4 handle mutations do not use the v3 identity guards.
 pub async fn route_nfs_call(
     v3: &Nfs3Session,
     v4: &Nfs4Session,
@@ -476,7 +488,12 @@ pub async fn route_nfs_call(
             } else if call.program != NFS_PROGRAM {
                 encode_accept_error(call.xid, RPC_PROG_UNAVAIL, None)
             } else {
-                encode_accept_error(call.xid, RPC_PROG_MISMATCH, Some((NFS_V3, NFS_V4)))
+                let highest = if v3.options.shared_concurrent_view {
+                    NFS_V3
+                } else {
+                    NFS_V4
+                };
+                encode_accept_error(call.xid, RPC_PROG_MISMATCH, Some((NFS_V3, highest)))
             };
             let mut stats = v3.stats.0.lock().expect("NFS stats lock");
             stats.replies = stats.replies.saturating_add(1);
@@ -494,6 +511,7 @@ struct MountRecord {
 #[derive(Debug)]
 struct ExclusiveCreate {
     verifier: Vec<u8>,
+    identity: Option<PathIdentity>,
     recorded: Instant,
 }
 
@@ -510,12 +528,13 @@ struct ExclusiveCreates {
 }
 
 impl ExclusiveCreates {
-    fn set(&mut self, path: String, verifier: Vec<u8>) {
+    fn set(&mut self, path: String, verifier: Vec<u8>, identity: Option<PathIdentity>) {
         self.forget(&path);
         self.entries.insert(
             path.clone(),
             ExclusiveCreate {
                 verifier,
+                identity,
                 recorded: Instant::now(),
             },
         );
@@ -527,7 +546,7 @@ impl ExclusiveCreates {
         }
     }
 
-    fn matches(&mut self, path: &str, verifier: &[u8]) -> bool {
+    fn matches(&mut self, path: &str, verifier: &[u8], identity: Option<PathIdentity>) -> bool {
         let expired = self
             .entries
             .get(path)
@@ -538,7 +557,7 @@ impl ExclusiveCreates {
         }
         self.entries
             .get(path)
-            .is_some_and(|entry| entry.verifier == verifier)
+            .is_some_and(|entry| entry.verifier == verifier && entry.identity == identity)
     }
 
     fn forget(&mut self, path: &str) {
@@ -568,6 +587,9 @@ impl From<XdrError> for DispatchError {
 }
 
 #[derive(Clone)]
+/// Byte-oriented NFSv3 session. Call [`Self::destroy`] before dropping a
+/// session that shares its driver with another live mount. Retained backend
+/// file handles require asynchronous close.
 pub struct Nfs3Session {
     pub driver: Loopback,
     pub options: NfsSessionOptions,
@@ -579,11 +601,330 @@ pub struct Nfs3Session {
     /// NFSv3 has no OPEN on the wire. Keep one backend read handle for every
     /// regular filehandle we expose so an unlink can detach the namespace name
     /// without destroying the object a client is still holding.
-    retained_handles: Arc<Mutex<HashMap<u64, Arc<dyn FileHandle>>>>,
+    retained_handles: Arc<RetainedHandles>,
     stats: SharedStats,
     destroyed: Arc<Mutex<bool>>,
     path_lock: Arc<tokio::sync::RwLock<()>>,
     hooks: NfsSessionHooks,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CloseOutcome {
+    Pending,
+    Succeeded,
+    Failed,
+}
+
+struct CloseEntry {
+    handle: Arc<dyn FileHandle>,
+    closing: Option<tokio::sync::watch::Receiver<CloseOutcome>>,
+}
+
+impl CloseEntry {
+    fn needs_attempt(&self) -> bool {
+        match self.closing.as_ref() {
+            None => true,
+            Some(wait) => match *wait.borrow() {
+                CloseOutcome::Pending => wait.has_changed().is_err(),
+                CloseOutcome::Succeeded => false,
+                CloseOutcome::Failed => true,
+            },
+        }
+    }
+}
+
+struct ProvisionalCloses {
+    next_id: u64,
+    by_id: HashMap<u64, CloseEntry>,
+}
+
+struct RetainedHandles {
+    table: FileHandleTable,
+    by_id: Mutex<HashMap<u64, CloseEntry>>,
+    provisional: Mutex<ProvisionalCloses>,
+    active: tokio::sync::watch::Sender<usize>,
+}
+
+impl RetainedHandles {
+    fn begin(self: &Arc<Self>) -> ActiveRetention {
+        self.active
+            .send_modify(|count| *count = count.saturating_add(1));
+        ActiveRetention {
+            retained: Arc::clone(self),
+        }
+    }
+
+    async fn await_active_zero(&self) {
+        let mut active = self.active.subscribe();
+        while *active.borrow_and_update() > 0 {
+            if active.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+
+    fn register_provisional(&self, handle: Arc<dyn FileHandle>) -> u64 {
+        let mut state = self.provisional.lock().expect("NFS provisional close lock");
+        let id = state.next_id;
+        state.next_id = state
+            .next_id
+            .checked_add(1)
+            .expect("provisional close id overflow");
+        state.by_id.insert(
+            id,
+            CloseEntry {
+                handle,
+                closing: None,
+            },
+        );
+        id
+    }
+
+    fn schedule_retained(
+        self: &Arc<Self>,
+        runtime: &tokio::runtime::Handle,
+    ) -> Vec<tokio::sync::watch::Receiver<CloseOutcome>> {
+        let mut retained = self.by_id.lock().expect("NFS retained handle lock");
+        let mut waits = Vec::with_capacity(retained.len());
+        for (&id, entry) in retained.iter_mut() {
+            if entry.needs_attempt() {
+                let handle = Arc::clone(&entry.handle);
+                let owner = Arc::clone(self);
+                let (completed, wait) = tokio::sync::watch::channel(CloseOutcome::Pending);
+                runtime.spawn(async move {
+                    let outcome = if handle.close().await.is_ok() {
+                        let removed = owner
+                            .by_id
+                            .lock()
+                            .expect("NFS retained handle lock")
+                            .remove(&id);
+                        if removed.is_some() {
+                            owner.table.unpin(id);
+                        }
+                        CloseOutcome::Succeeded
+                    } else {
+                        CloseOutcome::Failed
+                    };
+                    let _ = completed.send(outcome);
+                });
+                entry.closing = Some(wait);
+            }
+            waits.push(
+                entry
+                    .closing
+                    .as_ref()
+                    .expect("retained close waiter")
+                    .clone(),
+            );
+        }
+        waits
+    }
+
+    fn schedule_provisional(
+        self: &Arc<Self>,
+        id: u64,
+        runtime: &tokio::runtime::Handle,
+    ) -> Option<tokio::sync::watch::Receiver<CloseOutcome>> {
+        let mut state = self.provisional.lock().expect("NFS provisional close lock");
+        let entry = state.by_id.get_mut(&id)?;
+        if entry.needs_attempt() {
+            let handle = Arc::clone(&entry.handle);
+            let owner = Arc::clone(self);
+            let (completed, wait) = tokio::sync::watch::channel(CloseOutcome::Pending);
+            runtime.spawn(async move {
+                let outcome = if handle.close().await.is_ok() {
+                    owner
+                        .provisional
+                        .lock()
+                        .expect("NFS provisional close lock")
+                        .by_id
+                        .remove(&id);
+                    CloseOutcome::Succeeded
+                } else {
+                    CloseOutcome::Failed
+                };
+                let _ = completed.send(outcome);
+            });
+            entry.closing = Some(wait);
+        }
+        entry.closing.clone()
+    }
+
+    fn schedule_all_provisional(
+        self: &Arc<Self>,
+        runtime: &tokio::runtime::Handle,
+    ) -> Vec<tokio::sync::watch::Receiver<CloseOutcome>> {
+        let ids = self
+            .provisional
+            .lock()
+            .expect("NFS provisional close lock")
+            .by_id
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        ids.into_iter()
+            .filter_map(|id| self.schedule_provisional(id, runtime))
+            .collect()
+    }
+
+    async fn await_attempts(waits: Vec<tokio::sync::watch::Receiver<CloseOutcome>>) {
+        for mut wait in waits {
+            while *wait.borrow_and_update() == CloseOutcome::Pending {
+                if wait.changed().await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn all_closed(&self) -> bool {
+        self.by_id
+            .lock()
+            .expect("NFS retained handle lock")
+            .is_empty()
+            && self
+                .provisional
+                .lock()
+                .expect("NFS provisional close lock")
+                .by_id
+                .is_empty()
+    }
+}
+
+struct ActiveRetention {
+    retained: Arc<RetainedHandles>,
+}
+
+impl Drop for ActiveRetention {
+    fn drop(&mut self) {
+        self.retained
+            .active
+            .send_modify(|count| *count = count.saturating_sub(1));
+    }
+}
+
+impl Drop for RetainedHandles {
+    fn drop(&mut self) {
+        // Balance table pins even if a caller drops the last session clone
+        // without async destroy. Backend handles still require async close;
+        // dropping their Arc alone does not release every backend open ref.
+        let retained = std::mem::take(
+            self.by_id
+                .get_mut()
+                .unwrap_or_else(|error| error.into_inner()),
+        );
+        for (id, entry) in retained {
+            drop(entry);
+            self.table.unpin(id);
+        }
+    }
+}
+
+struct ProvisionalRetainedPin {
+    table: FileHandleTable,
+    id: u64,
+    transferred: bool,
+}
+
+impl ProvisionalRetainedPin {
+    fn new(table: &FileHandleTable, id: u64) -> Self {
+        Self {
+            table: table.clone(),
+            id,
+            transferred: false,
+        }
+    }
+
+    fn transfer(&mut self) {
+        self.transferred = true;
+    }
+}
+
+impl Drop for ProvisionalRetainedPin {
+    fn drop(&mut self) {
+        if !self.transferred {
+            self.table.unpin(self.id);
+        }
+    }
+}
+
+/// Own a newly opened descriptor until it is registered as a retained handle.
+/// Aborting an RPC while validating its identity must still close the backend
+/// handle, even though the provisional table pin already drops with the RPC.
+struct ProvisionalOpenedHandle {
+    handle: Option<Arc<dyn FileHandle>>,
+    runtime: Option<tokio::runtime::Handle>,
+    retained: Arc<RetainedHandles>,
+}
+
+impl ProvisionalOpenedHandle {
+    fn new(handle: Arc<dyn FileHandle>, retained: Arc<RetainedHandles>) -> Self {
+        Self {
+            handle: Some(handle),
+            runtime: tokio::runtime::Handle::try_current().ok(),
+            retained,
+        }
+    }
+
+    fn as_ref(&self) -> &dyn FileHandle {
+        self.handle
+            .as_ref()
+            .expect("provisional open handle")
+            .as_ref()
+    }
+
+    fn clone_handle(&self) -> Arc<dyn FileHandle> {
+        self.handle
+            .as_ref()
+            .expect("provisional open handle")
+            .clone()
+    }
+
+    fn transfer(mut self) -> Arc<dyn FileHandle> {
+        self.handle.take().expect("provisional open handle")
+    }
+
+    fn schedule_close(&mut self) -> Option<tokio::sync::watch::Receiver<CloseOutcome>> {
+        let handle = self.handle.take()?;
+        let id = self.retained.register_provisional(handle);
+        if let Some(runtime) = self
+            .runtime
+            .clone()
+            .or_else(|| tokio::runtime::Handle::try_current().ok())
+        {
+            self.retained.schedule_provisional(id, &runtime)
+        } else if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            // Direct session users may poll on a non-Tokio executor. There
+            // is no current runtime to schedule onto, so close synchronously.
+            let wait = self.retained.schedule_provisional(id, runtime.handle())?;
+            runtime.block_on(RetainedHandles::await_attempts(vec![wait.clone()]));
+            Some(wait)
+        } else {
+            // Keep the descriptor registered for a later destroy retry.
+            None
+        }
+    }
+
+    async fn close(&mut self) {
+        if let Some(mut completed) = self.schedule_close() {
+            // Cancellation only drops this waiter; the single close task
+            // continues through backend close_inode and is drained by destroy.
+            while *completed.borrow_and_update() == CloseOutcome::Pending {
+                if completed.changed().await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+impl Drop for ProvisionalOpenedHandle {
+    fn drop(&mut self) {
+        let _ = self.schedule_close();
+    }
 }
 
 impl Nfs3Session {
@@ -636,7 +977,20 @@ impl Nfs3Session {
         hooks: NfsSessionHooks,
     ) -> Self {
         let handles = shared.handles.clone();
+        if options.shared_concurrent_view && driver.driver.stable_inode_ids() {
+            handles.trust_stable_inode_ids();
+        }
         let write_verifier = handles.verifier();
+        let (active, _) = tokio::sync::watch::channel(0usize);
+        let retained_handles = Arc::new(RetainedHandles {
+            table: handles.clone(),
+            by_id: Mutex::new(HashMap::new()),
+            provisional: Mutex::new(ProvisionalCloses {
+                next_id: 1,
+                by_id: HashMap::new(),
+            }),
+            active,
+        });
         Self {
             driver,
             options: options.clone(),
@@ -645,7 +999,7 @@ impl Nfs3Session {
             snapshots: DirectorySnapshots::new(options.snapshot_cache),
             mounts: Arc::new(Mutex::new(Vec::new())),
             exclusive_creates: Arc::new(Mutex::new(ExclusiveCreates::default())),
-            retained_handles: Arc::new(Mutex::new(HashMap::new())),
+            retained_handles,
             stats: shared.stats.clone(),
             destroyed: Arc::new(Mutex::new(false)),
             path_lock: Arc::clone(&shared.path_lock),
@@ -683,17 +1037,53 @@ impl Nfs3Session {
         *self.destroyed.lock().expect("NFS destroyed lock")
     }
 
-    pub async fn destroy(&self) {
+    /// Returns `true` after all retained and provisional descriptors close
+    /// and the session's handle table is cleared. `false` means at least one
+    /// close is incomplete; the caller must retry while the session and a
+    /// Tokio runtime remain live. New RPCs are rejected after the first call.
+    pub async fn destroy(&self) -> bool {
+        let _path_guard = self.path_lock.write().await;
         *self.destroyed.lock().expect("NFS destroyed lock") = true;
-        let retained: Vec<_> = self
-            .retained_handles
-            .lock()
-            .expect("NFS retained handle lock")
-            .drain()
-            .map(|(_, handle)| handle)
-            .collect();
-        for handle in retained {
-            let _ = handle.close().await;
+        // Retention begins under the same destroyed lock. Wait for every
+        // in-flight opener to register its descriptor or provisional close
+        // before taking a snapshot of work to close.
+        self.retained_handles.await_active_zero().await;
+        let current_runtime = tokio::runtime::Handle::try_current().ok();
+        let fallback_runtime = if current_runtime.is_none() {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .ok()
+        } else {
+            None
+        };
+        let close_runtime = current_runtime.or_else(|| {
+            fallback_runtime
+                .as_ref()
+                .map(|runtime| runtime.handle().clone())
+        });
+        let Some(close_runtime) = close_runtime else {
+            // Keep the map intact so a caller can retry destroy if even a
+            // local Tokio runtime cannot be created to finish async closes.
+            return false;
+        };
+        // Keep each Arc in the registry until close succeeds. If a runtime
+        // stops midway through teardown, a later destroy can schedule every
+        // unfinished descriptor on the new runtime without losing its pin.
+        let mut waits = self.retained_handles.schedule_retained(&close_runtime);
+        waits.extend(
+            self.retained_handles
+                .schedule_all_provisional(&close_runtime),
+        );
+        if let Some(runtime) = fallback_runtime {
+            runtime.block_on(RetainedHandles::await_attempts(waits));
+        } else {
+            RetainedHandles::await_attempts(waits).await;
+        }
+        if !self.retained_handles.all_closed() {
+            // A backend close failed or its runtime stopped. Preserve the
+            // registry and table for a later destroy attempt.
+            return false;
         }
         self.handles.clear();
         self.snapshots.clear();
@@ -702,6 +1092,7 @@ impl Nfs3Session {
             .lock()
             .expect("NFS exclusive-create lock")
             .clear();
+        true
     }
 
     /// Handle one complete, unframed RPC record. Malformed records that still
@@ -720,6 +1111,12 @@ impl Nfs3Session {
                 return None;
             }
         };
+        if self.destroyed() {
+            self.record_error();
+            let mut stats = self.stats.0.lock().expect("NFS stats lock");
+            stats.replies = stats.replies.saturating_add(1);
+            return Some(encode_accept_error(call.xid, RPC_SYSTEM_ERR, None));
+        }
         let reply = match self.dispatch(&call, &mut args, &context).await {
             Ok(reply) => reply,
             Err(DispatchError::Xdr(error)) => {
@@ -795,11 +1192,17 @@ impl Nfs3Session {
                 // Destructive namespace changes must wait for a stat/bind in
                 // either version, or an unlinked path can be rebound later.
                 let _guard = self.path_lock.write().await;
+                if self.destroyed() {
+                    return Ok(encode_accept_error(call.xid, RPC_SYSTEM_ERR, None));
+                }
                 self.nfs(call.procedure, args, &credentials, &mut writer)
                     .await?;
             }
             _ => {
                 let _guard = self.path_lock.read().await;
+                if self.destroyed() {
+                    return Ok(encode_accept_error(call.xid, RPC_SYSTEM_ERR, None));
+                }
                 if call.program == NFS_PROGRAM {
                     self.nfs(call.procedure, args, &credentials, &mut writer)
                         .await?;
@@ -859,13 +1262,48 @@ impl Nfs3Session {
 
     async fn attr_of(&self, path: &str) -> FsResult<(HandleEntry, Fattr3, mount_rs_core::Stats)> {
         let stats = self.stat_of(path).await?;
-        let entry = self.handles.bind(path, &stats);
+        self.describe_stats(path, stats).await
+    }
+
+    async fn describe_stats(
+        &self,
+        path: &str,
+        stats: mount_rs_core::Stats,
+    ) -> FsResult<(HandleEntry, Fattr3, mount_rs_core::Stats)> {
+        self.require_driver_inode_keys()?;
+        if self.options.shared_concurrent_view && PathIdentity::from_stats(&stats).is_none() {
+            return Err(FsError::new(ErrorCode::Estale)
+                .with_message("shared view requires stable backend inode identity"));
+        }
+        let active = if stats.is_file() {
+            Some(self.begin_retention()?)
+        } else {
+            None
+        };
+        let entry = if stats.is_file() {
+            self.handles.bind_pinned(path, &stats)
+        } else {
+            self.handles.bind(path, &stats)
+        };
         if stats.is_file() {
             // Best effort: a lookup must still be able to report attributes for
             // a read-only/special backend that cannot create a second handle.
             // The normal regular-file path can retain a descriptor, which is
             // what makes NFSv3's synthetic client-side OPEN survive unlink.
-            let _ = self.ensure_retained_handle(&entry, path).await;
+            let pin = ProvisionalRetainedPin::new(&self.handles, entry.id);
+            if let Err(error) = self
+                .ensure_retained_handle_with_pin(
+                    &entry,
+                    path,
+                    pin,
+                    active.expect("regular file has active retention"),
+                )
+                .await
+                && self.options.shared_concurrent_view
+                && error.code == ErrorCode::Estale
+            {
+                return Err(error);
+            }
         }
         let attr = fattr_of(&stats, entry.fileid);
         Ok((entry, attr, stats))
@@ -873,16 +1311,54 @@ impl Nfs3Session {
 
     fn retained_handle(&self, id: u64) -> Option<Arc<dyn FileHandle>> {
         self.retained_handles
+            .by_id
             .lock()
             .expect("NFS retained handle lock")
             .get(&id)
-            .cloned()
+            .map(|entry| Arc::clone(&entry.handle))
+    }
+
+    fn begin_retention(&self) -> FsResult<ActiveRetention> {
+        let destroyed = self.destroyed.lock().expect("NFS destroyed lock");
+        if *destroyed {
+            return Err(FsError::new(ErrorCode::Estale).with_message("NFS session was destroyed"));
+        }
+        Ok(self.retained_handles.begin())
+    }
+
+    async fn retained_attributes(&self, entry: Option<&HandleEntry>) -> Option<FsResult<Fattr3>> {
+        let entry = entry?;
+        let retained = self.retained_handle(entry.id)?;
+        Some(retained.stat().await.and_then(|stats| {
+            self.check_handle_identity(entry, &stats)?;
+            Ok(fattr_of(&stats, entry.fileid))
+        }))
     }
 
     async fn ensure_retained_handle(
         &self,
         entry: &HandleEntry,
         path: &str,
+    ) -> FsResult<Arc<dyn FileHandle>> {
+        let active = self.begin_retention()?;
+        if let Some(handle) = self.retained_handle(entry.id) {
+            return Ok(handle);
+        }
+        if !self.handles.try_pin(entry.id) {
+            return Err(FsError::new(ErrorCode::Estale)
+                .with_message("file handle was retired before opening a descriptor"));
+        }
+        let pin = ProvisionalRetainedPin::new(&self.handles, entry.id);
+        self.ensure_retained_handle_with_pin(entry, path, pin, active)
+            .await
+    }
+
+    async fn ensure_retained_handle_with_pin(
+        &self,
+        entry: &HandleEntry,
+        path: &str,
+        mut pin: ProvisionalRetainedPin,
+        _active: ActiveRetention,
     ) -> FsResult<Arc<dyn FileHandle>> {
         if let Some(handle) = self.retained_handle(entry.id) {
             return Ok(handle);
@@ -891,23 +1367,48 @@ impl Nfs3Session {
             .driver
             .open_flags(path, OpenFlags::READ_ONLY, 0)
             .await?;
+        let mut opened = ProvisionalOpenedHandle::new(handle, Arc::clone(&self.retained_handles));
+        if let Err(error) = self.check_opened_handle(entry, opened.as_ref()).await {
+            opened.close().await;
+            return Err(error);
+        }
         let existing = {
             let mut retained = self
                 .retained_handles
+                .by_id
                 .lock()
                 .expect("NFS retained handle lock");
-            if let Some(existing) = retained.get(&entry.id).cloned() {
-                Some(existing)
+            if let Some(existing) = retained
+                .get(&entry.id)
+                .map(|entry| Arc::clone(&entry.handle))
+            {
+                Ok(Some(existing))
+            } else if *self.destroyed.lock().expect("NFS destroyed lock") {
+                Err(FsError::new(ErrorCode::Estale)
+                    .with_message("NFS session was destroyed while retaining a file handle"))
             } else {
-                retained.insert(entry.id, handle.clone());
-                None
+                retained.insert(
+                    entry.id,
+                    CloseEntry {
+                        handle: opened.clone_handle(),
+                        closing: None,
+                    },
+                );
+                pin.transfer();
+                Ok(None)
             }
         };
-        if let Some(existing) = existing {
-            let _ = handle.close().await;
-            return Ok(existing);
+        match existing {
+            Ok(Some(existing)) => {
+                opened.close().await;
+                Ok(existing)
+            }
+            Ok(None) => Ok(opened.transfer()),
+            Err(error) => {
+                opened.close().await;
+                Err(error)
+            }
         }
-        Ok(handle)
     }
 
     async fn post_op(&self, path: Option<&str>) -> Option<Fattr3> {
@@ -916,6 +1417,9 @@ impl Nfs3Session {
     }
 
     async fn pre_op(&self, path: &str) -> Option<WccAttr> {
+        if self.options.shared_concurrent_view || self.options.omit_wcc_attributes {
+            return None;
+        }
         self.stat_of(path)
             .await
             .ok()
@@ -923,14 +1427,283 @@ impl Nfs3Session {
     }
 
     async fn wcc(&self, before: Option<WccAttr>, path: &str) -> WccData {
+        self.wcc_opt(before, Some(path)).await
+    }
+
+    async fn wcc_opt(&self, before: Option<WccAttr>, path: Option<&str>) -> WccData {
+        if self.options.shared_concurrent_view || self.options.omit_wcc_attributes {
+            return WccData {
+                before: None,
+                after: None,
+            };
+        }
         WccData {
             before,
-            after: self.post_op(Some(path)).await,
+            after: self.post_op(path).await,
         }
     }
 
-    fn path_of(&self, handle: &[u8]) -> FsResult<String> {
-        self.handles.resolve(handle)
+    async fn path_of(&self, handle: &[u8]) -> FsResult<String> {
+        let entry = self.handles.decode(handle)?;
+        self.path_of_entry(&entry).await
+    }
+
+    async fn path_of_entry(&self, entry: &HandleEntry) -> FsResult<String> {
+        if self.options.shared_concurrent_view {
+            let preserve_orphan_key =
+                self.retained_handle(entry.id).is_some() || self.driver.driver.stable_inode_ids();
+            self.handles
+                .live_path_of(entry, self.driver.driver.as_ref(), preserve_orphan_key)
+                .await
+        } else {
+            self.handles.path_of(entry)
+        }
+    }
+
+    fn check_handle_identity(
+        &self,
+        entry: &HandleEntry,
+        stats: &mount_rs_core::Stats,
+    ) -> FsResult<()> {
+        if !self.options.shared_concurrent_view || entry.id == crate::handles::ROOT_HANDLE_ID {
+            return Ok(());
+        }
+        let expected = entry
+            .key
+            .as_deref()
+            .and_then(PathIdentity::parse_backend_key)
+            .ok_or_else(|| {
+                FsError::new(ErrorCode::Estale).with_message("handle has no inode key")
+            })?;
+        let actual = PathIdentity::from_stats(stats)
+            .ok_or_else(|| FsError::new(ErrorCode::Estale).with_message("inode is unknown"))?;
+        if actual != expected {
+            return Err(FsError::new(ErrorCode::Estale)
+                .with_message("path no longer names the handle's inode"));
+        }
+        Ok(())
+    }
+
+    async fn check_opened_handle(
+        &self,
+        entry: &HandleEntry,
+        handle: &dyn FileHandle,
+    ) -> FsResult<()> {
+        if self.options.shared_concurrent_view {
+            self.check_handle_identity(entry, &handle.stat().await?)?;
+        }
+        Ok(())
+    }
+
+    fn require_driver_inode_keys(&self) -> FsResult<()> {
+        if self.options.shared_concurrent_view && !self.options.use_driver_ino {
+            Err(FsError::new(ErrorCode::Enotsup)
+                .with_message("shared NFS requires backend inode handle keys"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn require_guarded_mutations(&self) -> FsResult<()> {
+        self.require_driver_inode_keys()?;
+        if self.options.shared_concurrent_view && !self.driver.driver.supports_guarded_mutations() {
+            Err(FsError::new(ErrorCode::Enotsup)
+                .with_message("shared NFS mutations require backend identity guards"))
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn path_guard(&self, handle: &[u8]) -> FsResult<PathGuard> {
+        let entry = self.handles.decode(handle)?;
+        let path = self.path_of_entry(&entry).await?;
+        let identity = if entry.id == crate::handles::ROOT_HANDLE_ID {
+            PathIdentity::from_stats(&self.stat_of(&path).await?)
+        } else {
+            entry
+                .key
+                .as_deref()
+                .and_then(PathIdentity::parse_backend_key)
+        }
+        .ok_or_else(|| FsError::new(ErrorCode::Estale).with_message("handle has no inode key"))?;
+        Ok(PathGuard { path, identity })
+    }
+
+    async fn observed_entry(&self, path: &str) -> FsResult<ObservedEntry> {
+        match self.stat_of(path).await {
+            Ok(stats) => PathIdentity::from_stats(&stats)
+                .map(ObservedEntry::Identity)
+                .ok_or_else(|| FsError::new(ErrorCode::Estale)),
+            Err(error) if error.code == ErrorCode::Enoent => Ok(ObservedEntry::Absent),
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn guarded(&self, request: GuardedMutation) -> FsResult<GuardedMutationResult> {
+        self.require_guarded_mutations()?;
+        self.driver.driver.guarded_mutation(request).await
+    }
+
+    fn require_guarded_reads(&self) -> FsResult<()> {
+        self.require_driver_inode_keys()?;
+        if self.options.shared_concurrent_view && !self.driver.driver.supports_guarded_reads() {
+            Err(FsError::new(ErrorCode::Enotsup)
+                .with_message("shared NFS reads require backend identity guards"))
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn guarded_read(&self, request: GuardedRead) -> FsResult<GuardedReadResult> {
+        self.require_guarded_reads()?;
+        self.driver.driver.guarded_read(request).await
+    }
+
+    fn guarded_sattr(
+        attr: &Sattr3,
+        current: &mount_rs_core::Stats,
+        expected_ctime_ms: Option<i64>,
+    ) -> FsResult<GuardedSetattr> {
+        let now = now_ms();
+        let time = |value: &SetTime3, old| match value.how {
+            DONT_CHANGE => None,
+            SET_TO_SERVER_TIME => Some(now),
+            SET_TO_CLIENT_TIME => Some(from_time(value.time.unwrap_or(NfsTime3 {
+                seconds: 0,
+                nseconds: 0,
+            }))),
+            _ => Some(old),
+        };
+        Ok(GuardedSetattr {
+            mode: if current.mode & S_IFMT == mount_rs_core::types::S_IFLNK {
+                None
+            } else {
+                attr.mode.map(|mode| mode & 0o7777)
+            },
+            uid: attr.uid,
+            gid: attr.gid,
+            size: attr
+                .size
+                .map(|size| Self::offset(size, "truncate"))
+                .transpose()?,
+            atime_ms: time(&attr.atime, current.atime_ms),
+            mtime_ms: time(&attr.mtime, current.mtime_ms),
+            expected_ctime_ms,
+        })
+    }
+
+    async fn created_stats(&self, target: &PathGuard) -> FsResult<mount_rs_core::Stats> {
+        let stats = self.stat_of(&target.path).await?;
+        if PathIdentity::from_stats(&stats) != Some(target.identity) {
+            return Err(FsError::new(ErrorCode::Estale)
+                .with_message("created path no longer names the committed inode"));
+        }
+        Ok(stats)
+    }
+
+    async fn apply_created_sattr(&self, target: &PathGuard, attr: &Sattr3) -> FsResult<()> {
+        let current = self.created_stats(target).await?;
+        let change = Self::guarded_sattr(attr, &current, None)?;
+        self.guarded(GuardedMutation::Setattr {
+            target: target.clone(),
+            change,
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn claim_created_owner(
+        &self,
+        target: &PathGuard,
+        credentials: &RpcCredentials,
+        parent: Option<&mount_rs_core::Stats>,
+        directory: bool,
+        mode: u32,
+    ) -> FsResult<()> {
+        if !self.options.claim_ownership {
+            return Ok(());
+        }
+        let uid = credentials.uid.unwrap_or(u32::MAX);
+        let parent_setgid = parent.is_some_and(|stats| stats.mode & S_ISGID != 0);
+        let gid = if parent_setgid {
+            parent.map_or(u32::MAX, |stats| stats.gid)
+        } else {
+            credentials.gid.unwrap_or(u32::MAX)
+        };
+        let current = self.created_stats(target).await?;
+        let current_mode = current.mode & 0o7777;
+        let wanted_mode = if !parent_setgid {
+            current_mode
+        } else if directory {
+            current_mode | S_ISGID
+        } else {
+            let setgid_executable = mode & (S_ISGID | S_IXGRP) == (S_ISGID | S_IXGRP);
+            let member = credentials.gid == Some(gid) || credentials.gids.contains(&gid);
+            if setgid_executable && !member && uid != 0 {
+                current_mode & !S_ISGID
+            } else {
+                current_mode
+            }
+        };
+        let change = GuardedSetattr {
+            mode: (wanted_mode != current_mode).then_some(wanted_mode),
+            uid: (uid != u32::MAX).then_some(uid),
+            gid: (gid != u32::MAX).then_some(gid),
+            ..GuardedSetattr::default()
+        };
+        if change.mode.is_some() || change.uid.is_some() || change.gid.is_some() {
+            self.guarded(GuardedMutation::Setattr {
+                target: target.clone(),
+                change,
+            })
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn open_child(
+        &self,
+        parent: Option<&PathGuard>,
+        name: &str,
+        path: &str,
+        observed: ObservedEntry,
+        flags: OpenFlags,
+        mode: u32,
+    ) -> FsResult<(Arc<dyn FileHandle>, Option<PathIdentity>)> {
+        if let Some(parent) = parent {
+            let result = self
+                .guarded(GuardedMutation::Open {
+                    parent: parent.clone(),
+                    name: name.to_owned(),
+                    observed,
+                    flags,
+                    mode,
+                })
+                .await?;
+            match result {
+                GuardedMutationResult::Opened { handle, identity } => {
+                    let stats = match handle.stat().await {
+                        Ok(stats) => stats,
+                        Err(error) => {
+                            let _ = handle.close().await;
+                            return Err(error);
+                        }
+                    };
+                    if PathIdentity::from_stats(&stats) != Some(identity) {
+                        let _ = handle.close().await;
+                        return Err(FsError::new(ErrorCode::Estale));
+                    }
+                    Ok((handle, Some(identity)))
+                }
+                _ => Err(FsError::new(ErrorCode::Eio)
+                    .with_message("guarded open returned no file handle")),
+            }
+        } else {
+            self.driver
+                .open_flags(path, flags, mode)
+                .await
+                .map(|handle| (handle, None))
+        }
     }
 
     fn join_path(directory: &str, name: &str) -> String {
@@ -938,7 +1711,7 @@ impl Nfs3Session {
     }
 
     fn check_name(name: &str) -> FsResult<()> {
-        if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+        if name.is_empty() || name.contains(['/', '\0']) || name == "." || name == ".." {
             return Err(FsError::new(ErrorCode::Einval)
                 .with_message(format!("EINVAL: invalid NFS directory entry name {name:?}")));
         }
@@ -986,72 +1759,55 @@ impl Nfs3Session {
     ) -> Result<(), DispatchError> {
         let handle = args.var_opaque(NFS3_FHSIZE, "nfs_fh3")?;
         args.end("GETATTR arguments")?;
-        match self.path_of(&handle) {
-            Ok(path) => match self.attr_of(&path).await {
-                Ok((_, attr, _)) => write_getattr_res(
+        let entry = self.handles.decode(&handle).ok();
+        let attributes = if self.options.shared_concurrent_view {
+            async {
+                let target = self.path_guard(&handle).await?;
+                let GuardedReadResult::Stat(stats) =
+                    self.guarded_read(GuardedRead::Stat { target }).await?
+                else {
+                    return Err(FsError::new(ErrorCode::Eio));
+                };
+                let entry = entry
+                    .as_ref()
+                    .ok_or_else(|| FsError::new(ErrorCode::Estale))?;
+                self.check_handle_identity(entry, &stats)?;
+                Ok(fattr_of(&stats, entry.fileid))
+            }
+            .await
+        } else {
+            match self.path_of(&handle).await {
+                Ok(path) => self.attr_of(&path).await.map(|(_, attr, _)| attr),
+                Err(error) => Err(error),
+            }
+        };
+        // An NFSv3 client can hold an inode after its last name disappears.
+        // If namespace validation loses that name, describe the original
+        // retained descriptor only after checking its dev:ino against the FH.
+        let attributes = match attributes {
+            Ok(attr) => Ok(attr),
+            Err(error) => self
+                .retained_attributes(entry.as_ref())
+                .await
+                .unwrap_or(Err(error)),
+        };
+        match attributes {
+            Ok(attr) => write_getattr_res(
+                writer,
+                &Getattr3res {
+                    status: NFS3_OK,
+                    attributes: Some(attr),
+                },
+            ),
+            Err(error) => {
+                self.record_error();
+                write_getattr_res(
                     writer,
                     &Getattr3res {
-                        status: NFS3_OK,
-                        attributes: Some(attr),
+                        status: Self::status(&error),
+                        attributes: None,
                     },
-                ),
-                Err(error) => {
-                    self.record_error();
-                    write_getattr_res(
-                        writer,
-                        &Getattr3res {
-                            status: Self::status(&error),
-                            attributes: None,
-                        },
-                    );
-                }
-            },
-            Err(error) => {
-                // A regular file can be unlinked while a client still holds
-                // its NFSv3 filehandle.  There is no OPEN state on the wire,
-                // so use the retained backend descriptor rather than turning
-                // the otherwise valid handle into ESTALE.
-                let orphan = self
-                    .handles
-                    .decode(&handle)
-                    .ok()
-                    .and_then(|entry| self.retained_handle(entry.id));
-                if let Some(orphan) = orphan {
-                    match orphan.stat().await {
-                        Ok(stats) => {
-                            let entry = self
-                                .handles
-                                .decode(&handle)
-                                .expect("retained handle was decoded above");
-                            write_getattr_res(
-                                writer,
-                                &Getattr3res {
-                                    status: NFS3_OK,
-                                    attributes: Some(fattr_of(&stats, entry.fileid)),
-                                },
-                            );
-                        }
-                        Err(error) => {
-                            self.record_error();
-                            write_getattr_res(
-                                writer,
-                                &Getattr3res {
-                                    status: Self::status(&error),
-                                    attributes: None,
-                                },
-                            );
-                        }
-                    }
-                } else {
-                    self.record_error();
-                    write_getattr_res(
-                        writer,
-                        &Getattr3res {
-                            status: Self::status(&error),
-                            attributes: None,
-                        },
-                    );
-                }
+                );
             }
         }
         Ok(())
@@ -1068,18 +1824,43 @@ impl Nfs3Session {
         let mut before = None;
         let mut forced_status = None;
         let result = async {
-            let resolved = self.path_of(&request.object)?;
+            let target = if self.options.shared_concurrent_view {
+                self.require_guarded_mutations()?;
+                Some(self.path_guard(&request.object).await?)
+            } else {
+                None
+            };
+            let resolved = match target.as_ref() {
+                Some(target) => target.path.clone(),
+                None => self.path_of(&request.object).await?,
+            };
             let current = self.stat_of(&resolved).await?;
+            if let Some(target) = target.as_ref()
+                && PathIdentity::from_stats(&current) != Some(target.identity)
+            {
+                return Err(FsError::new(ErrorCode::Estale));
+            }
             path = Some(resolved.clone());
             before = Some(wcc_attr_of(&current));
             if let Some(guard) = request.guard
-                && guard.seconds != (current.ctime_ms.max(0) / 1000) as u32
+                && guard != to_time(current.ctime_ms)
             {
                 forced_status = Some(NFS3ERR_NOT_SYNC);
                 return Err(FsError::new(ErrorCode::Eio));
             }
-            self.apply_sattr(&resolved, &request.attributes, &current)
-                .await
+            if let Some(target) = target {
+                let change = Self::guarded_sattr(
+                    &request.attributes,
+                    &current,
+                    request.guard.map(from_time),
+                )?;
+                self.guarded(GuardedMutation::Setattr { target, change })
+                    .await?;
+                Ok(())
+            } else {
+                self.apply_sattr(&resolved, &request.attributes, &current)
+                    .await
+            }
         }
         .await;
         match result {
@@ -1103,11 +1884,14 @@ impl Nfs3Session {
                 write_wcc_res(
                     writer,
                     &WccRes {
-                        status: forced_status.unwrap_or_else(|| Self::status(&error)),
-                        wcc: WccData {
-                            before,
-                            after: self.post_op(path.as_deref()).await,
-                        },
+                        status: forced_status.unwrap_or_else(|| {
+                            if request.guard.is_some() && error.code == ErrorCode::Eagain {
+                                NFS3ERR_NOT_SYNC
+                            } else {
+                                Self::status(&error)
+                            }
+                        }),
+                        wcc: self.wcc_opt(before, path.as_deref()).await,
                     },
                 );
             }
@@ -1188,50 +1972,58 @@ impl Nfs3Session {
     ) -> Result<(), DispatchError> {
         let request = read_dir_op(args)?;
         args.end("LOOKUP arguments")?;
-        let directory = match self.path_of(&request.dir) {
-            Ok(path) => path,
-            Err(error) => {
-                self.record_error();
-                write_lookup_res(
-                    writer,
-                    &Lookup3res {
-                        status: Self::status(&error),
-                        object: None,
-                        obj_attributes: None,
-                        dir_attributes: None,
-                    },
-                );
-                return Ok(());
+        let mut directory = None;
+        let result = async {
+            let parent_guard = if self.options.shared_concurrent_view {
+                self.require_guarded_reads()?;
+                Some(self.path_guard(&request.dir).await?)
+            } else {
+                None
+            };
+            let dir = match parent_guard.as_ref() {
+                Some(guard) => guard.path.clone(),
+                None => self.path_of(&request.dir).await?,
+            };
+            directory = Some(dir.clone());
+            let path = if request.name == "." {
+                dir.clone()
+            } else if request.name == ".." {
+                mount_rs_core::path::dirname(&dir)
+            } else {
+                Self::check_name(&request.name)?;
+                Self::join_path(&dir, &request.name)
+            };
+            if let Some(parent_guard) = parent_guard {
+                let parent_entry = self.handles.decode(&request.dir)?;
+                let original_identity = parent_guard.identity;
+                let GuardedReadResult::Lookup { parent, child } = self
+                    .guarded_read(GuardedRead::Lookup {
+                        parent: parent_guard,
+                        name: request.name.clone(),
+                    })
+                    .await?
+                else {
+                    return Err(FsError::new(ErrorCode::Eio));
+                };
+                if PathIdentity::from_stats(&parent) != Some(original_identity) {
+                    return Err(FsError::new(ErrorCode::Estale));
+                }
+                let (entry, attr, _) = self.describe_stats(&path, child).await?;
+                Ok((entry, attr, Some(fattr_of(&parent, parent_entry.fileid))))
+            } else {
+                let (entry, attr, _) = self.attr_of(&path).await?;
+                Ok((entry, attr, self.post_op(Some(&dir)).await))
             }
-        };
-        let path = if request.name == "." {
-            directory.clone()
-        } else if request.name == ".." {
-            mount_rs_core::path::dirname(&directory)
-        } else {
-            if let Err(error) = Self::check_name(&request.name) {
-                self.record_error();
-                write_lookup_res(
-                    writer,
-                    &Lookup3res {
-                        status: Self::status(&error),
-                        object: None,
-                        obj_attributes: None,
-                        dir_attributes: self.post_op(Some(&directory)).await,
-                    },
-                );
-                return Ok(());
-            }
-            Self::join_path(&directory, &request.name)
-        };
-        match self.attr_of(&path).await {
-            Ok((entry, attr, _)) => write_lookup_res(
+        }
+        .await;
+        match result {
+            Ok((entry, attr, dir_attributes)) => write_lookup_res(
                 writer,
                 &Lookup3res {
                     status: NFS3_OK,
                     object: Some(self.handles.encode(&entry)),
                     obj_attributes: Some(attr),
-                    dir_attributes: self.post_op(Some(&directory)).await,
+                    dir_attributes,
                 },
             ),
             Err(error) => {
@@ -1242,7 +2034,11 @@ impl Nfs3Session {
                         status: Self::status(&error),
                         object: None,
                         obj_attributes: None,
-                        dir_attributes: self.post_op(Some(&directory)).await,
+                        dir_attributes: if self.options.shared_concurrent_view {
+                            None
+                        } else {
+                            self.post_op(directory.as_deref()).await
+                        },
                     },
                 );
             }
@@ -1258,31 +2054,37 @@ impl Nfs3Session {
     ) -> Result<(), DispatchError> {
         let request = read_access_args(args)?;
         args.end("ACCESS arguments")?;
-        match self.path_of(&request.object) {
-            Ok(path) => match self.attr_of(&path).await {
-                Ok((_, attr, stats)) => {
-                    let rights = allowed_access(&stats, credentials);
-                    write_access_res(
-                        writer,
-                        &Access3res {
-                            status: NFS3_OK,
-                            attributes: Some(attr),
-                            access: request.access & access_bits3(rights),
-                        },
-                    );
-                }
-                Err(error) => {
-                    self.record_error();
-                    write_access_res(
-                        writer,
-                        &Access3res {
-                            status: Self::status(&error),
-                            attributes: None,
-                            access: 0,
-                        },
-                    );
-                }
-            },
+        let result = async {
+            if self.options.shared_concurrent_view {
+                let entry = self.handles.decode(&request.object)?;
+                let target = self.path_guard(&request.object).await?;
+                let GuardedReadResult::Stat(stats) =
+                    self.guarded_read(GuardedRead::Stat { target }).await?
+                else {
+                    return Err(FsError::new(ErrorCode::Eio));
+                };
+                self.check_handle_identity(&entry, &stats)?;
+                Ok((fattr_of(&stats, entry.fileid), stats))
+            } else {
+                let path = self.path_of(&request.object).await?;
+                self.attr_of(&path)
+                    .await
+                    .map(|(_, attr, stats)| (attr, stats))
+            }
+        }
+        .await;
+        match result {
+            Ok((attr, stats)) => {
+                let rights = allowed_access(&stats, credentials);
+                write_access_res(
+                    writer,
+                    &Access3res {
+                        status: NFS3_OK,
+                        attributes: Some(attr),
+                        access: request.access & access_bits3(rights),
+                    },
+                );
+            }
             Err(error) => {
                 self.record_error();
                 write_access_res(
@@ -1305,37 +2107,46 @@ impl Nfs3Session {
     ) -> Result<(), DispatchError> {
         let handle = args.var_opaque(NFS3_FHSIZE, "nfs_fh3")?;
         args.end("READLINK arguments")?;
-        let path = self.path_of(&handle).ok();
-        match path.as_deref() {
-            Some(path) => match self.driver.readlink(path).await {
-                Ok(target) => write_readlink_res(
-                    writer,
-                    &Readlink3res {
-                        status: NFS3_OK,
-                        attributes: self.post_op(Some(path)).await,
-                        target: Some(target),
-                    },
-                ),
-                Err(error) => {
-                    self.record_error();
-                    write_readlink_res(
-                        writer,
-                        &Readlink3res {
-                            status: Self::status(&error),
-                            attributes: self.post_op(Some(path)).await,
-                            target: None,
-                        },
-                    );
-                }
-            },
-            None => {
-                let error = FsError::new(ErrorCode::Estale);
+        let mut default_path = None;
+        let result = async {
+            if self.options.shared_concurrent_view {
+                let entry = self.handles.decode(&handle)?;
+                let target = self.path_guard(&handle).await?;
+                let GuardedReadResult::Readlink { stats, target } =
+                    self.guarded_read(GuardedRead::Readlink { target }).await?
+                else {
+                    return Err(FsError::new(ErrorCode::Eio));
+                };
+                self.check_handle_identity(&entry, &stats)?;
+                Ok((target, Some(fattr_of(&stats, entry.fileid))))
+            } else {
+                let path = self.path_of(&handle).await?;
+                default_path = Some(path.clone());
+                let target = self.driver.readlink(&path).await?;
+                Ok((target, self.post_op(Some(&path)).await))
+            }
+        }
+        .await;
+        match result {
+            Ok((target, attributes)) => write_readlink_res(
+                writer,
+                &Readlink3res {
+                    status: NFS3_OK,
+                    attributes,
+                    target: Some(target),
+                },
+            ),
+            Err(error) => {
                 self.record_error();
                 write_readlink_res(
                     writer,
                     &Readlink3res {
                         status: Self::status(&error),
-                        attributes: None,
+                        attributes: if self.options.shared_concurrent_view {
+                            None
+                        } else {
+                            self.post_op(default_path.as_deref()).await
+                        },
                         target: None,
                     },
                 );
@@ -1368,7 +2179,7 @@ impl Nfs3Session {
                 return Ok(());
             }
         };
-        let path = self.handles.path_of(&entry).ok();
+        let path = self.path_of_entry(&entry).await.ok();
         let handle = match path.as_deref() {
             Some(path) => self.ensure_retained_handle(&entry, path).await,
             None => self.retained_handle(entry.id).ok_or_else(|| {
@@ -1399,9 +2210,10 @@ impl Nfs3Session {
             Ok(offset) => offset,
             Err(error) => {
                 self.record_error();
-                let attributes = match path.as_deref() {
-                    Some(path) => self.post_op(Some(path)).await,
-                    None => None,
+                let attributes = if self.options.shared_concurrent_view {
+                    None
+                } else {
+                    self.post_op(path.as_deref()).await
                 };
                 write_read_res(
                     writer,
@@ -1417,20 +2229,34 @@ impl Nfs3Session {
             }
         };
         let result = async {
+            self.check_opened_handle(&entry, handle.as_ref()).await?;
             let mut data = vec![0_u8; count];
             let read = handle.read(&mut data, Some(offset)).await;
             let read = read?;
             data.truncate(read);
-            Ok::<(Vec<u8>, Option<mount_rs_core::Stats>), FsError>((data, handle.stat().await.ok()))
+            let retained_stats = if self.options.shared_concurrent_view {
+                let stats = handle.stat().await?;
+                self.check_handle_identity(&entry, &stats)?;
+                Some(stats)
+            } else {
+                handle.stat().await.ok()
+            };
+            Ok::<(Vec<u8>, Option<mount_rs_core::Stats>), FsError>((data, retained_stats))
         }
         .await;
         match result {
             Ok((data, retained_stats)) => {
-                let attributes = match path.as_deref() {
-                    Some(path) => self.post_op(Some(path)).await,
-                    None => retained_stats
+                let attributes = if self.options.shared_concurrent_view {
+                    retained_stats
                         .as_ref()
-                        .map(|stats| fattr_of(stats, entry.fileid)),
+                        .map(|stats| fattr_of(stats, entry.fileid))
+                } else {
+                    match path.as_deref() {
+                        Some(path) => self.post_op(Some(path)).await,
+                        None => retained_stats
+                            .as_ref()
+                            .map(|stats| fattr_of(stats, entry.fileid)),
+                    }
                 };
                 let eof = attributes.as_ref().map_or(data.len() < count, |attr| {
                     request.offset.saturating_add(data.len() as u64) >= attr.size
@@ -1448,9 +2274,13 @@ impl Nfs3Session {
             }
             Err(error) => {
                 self.record_error();
-                let attributes = match path.as_deref() {
-                    Some(path) => self.post_op(Some(path)).await,
-                    None => None,
+                let attributes = if self.options.shared_concurrent_view {
+                    None
+                } else {
+                    match path.as_deref() {
+                        Some(path) => self.post_op(Some(path)).await,
+                        None => None,
+                    }
                 };
                 write_read_res(
                     writer,
@@ -1474,7 +2304,11 @@ impl Nfs3Session {
     ) -> Result<(), DispatchError> {
         let request = read_write_args(args, self.options.wtmax)?;
         args.end("WRITE arguments")?;
-        let path = self.path_of(&request.file).ok();
+        let entry = self.handles.decode(&request.file).ok();
+        let path = match entry.as_ref() {
+            Some(entry) => self.path_of_entry(entry).await.ok(),
+            None => None,
+        };
         let Some(path) = path else {
             let error = FsError::new(ErrorCode::Estale);
             self.record_error();
@@ -1501,10 +2335,7 @@ impl Nfs3Session {
                     writer,
                     &Write3res {
                         status: Self::status(&error),
-                        wcc: WccData {
-                            before: None,
-                            after: self.post_op(Some(&path)).await,
-                        },
+                        wcc: self.wcc_opt(None, Some(&path)).await,
                         count: 0,
                         committed: FILE_SYNC,
                         verf: self.write_verifier.to_vec(),
@@ -1524,6 +2355,12 @@ impl Nfs3Session {
                 exclusive: false,
             };
             let handle = self.driver.open_flags(&path, flags, 0).await?;
+            if let Some(entry) = entry.as_ref()
+                && let Err(error) = self.check_opened_handle(entry, handle.as_ref()).await
+            {
+                let _ = handle.close().await;
+                return Err(error);
+            }
             let written = handle.write(&request.data, Some(offset)).await;
             let result = match written {
                 Ok(written) => handle.sync().await.map(|()| written),
@@ -1551,10 +2388,7 @@ impl Nfs3Session {
                     writer,
                     &Write3res {
                         status: Self::status(&error),
-                        wcc: WccData {
-                            before,
-                            after: self.post_op(Some(&path)).await,
-                        },
+                        wcc: self.wcc(before, &path).await,
                         count: 0,
                         committed: FILE_SYNC,
                         verf: self.write_verifier.to_vec(),
@@ -1572,7 +2406,7 @@ impl Nfs3Session {
     ) -> Result<(), DispatchError> {
         let request = read_commit_args(args)?;
         args.end("COMMIT arguments")?;
-        let path = self.path_of(&request.file).ok();
+        let path = self.path_of(&request.file).await.ok();
         let Some(path) = path else {
             let error = FsError::new(ErrorCode::Estale);
             self.record_error();
@@ -1610,17 +2444,37 @@ impl Nfs3Session {
         directory: &str,
         before: Option<WccAttr>,
         path: &str,
+        expected: Option<PathIdentity>,
     ) {
         match self.attr_of(path).await {
-            Ok((entry, attr, _)) => write_create_res(
-                writer,
-                &CreateRes {
-                    status: NFS3_OK,
-                    obj: Some(self.handles.encode(&entry)),
-                    obj_attributes: Some(attr),
-                    dir_wcc: self.wcc(before, directory).await,
-                },
-            ),
+            Ok((entry, attr, stats))
+                if !self.options.shared_concurrent_view
+                    || expected.is_some_and(|identity| {
+                        PathIdentity::from_stats(&stats) == Some(identity)
+                    }) =>
+            {
+                write_create_res(
+                    writer,
+                    &CreateRes {
+                        status: NFS3_OK,
+                        obj: Some(self.handles.encode(&entry)),
+                        obj_attributes: Some(attr),
+                        dir_wcc: self.wcc(before, directory).await,
+                    },
+                )
+            }
+            Ok(_) => {
+                self.record_error();
+                write_create_res(
+                    writer,
+                    &CreateRes {
+                        status: NFS3ERR_STALE,
+                        obj: None,
+                        obj_attributes: None,
+                        dir_wcc: self.wcc(before, directory).await,
+                    },
+                );
+            }
             Err(error) => {
                 self.record_error();
                 write_create_res(
@@ -1629,10 +2483,7 @@ impl Nfs3Session {
                         status: Self::status(&error),
                         obj: None,
                         obj_attributes: None,
-                        dir_wcc: WccData {
-                            before,
-                            after: self.post_op(Some(directory)).await,
-                        },
+                        dir_wcc: self.wcc(before, directory).await,
                     },
                 );
             }
@@ -1723,8 +2574,18 @@ impl Nfs3Session {
         args.end("CREATE arguments")?;
         let mut directory = None;
         let mut before = None;
+        let mut created_identity = None;
         let result = async {
-            let dir = self.path_of(&request.where_.dir)?;
+            let parent_guard = if self.options.shared_concurrent_view {
+                self.require_guarded_mutations()?;
+                Some(self.path_guard(&request.where_.dir).await?)
+            } else {
+                None
+            };
+            let dir = match parent_guard.as_ref() {
+                Some(guard) => guard.path.clone(),
+                None => self.path_of(&request.where_.dir).await?,
+            };
             Self::check_name(&request.where_.name)?;
             let path = Self::join_path(&dir, &request.where_.name);
             directory = Some(dir.clone());
@@ -1744,8 +2605,19 @@ impl Nfs3Session {
                 append: false,
                 exclusive: true,
             };
-            let newly_created = match self.driver.open_flags(&path, create_flags, mode).await {
-                Ok(handle) => {
+            let newly_created = match self
+                .open_child(
+                    parent_guard.as_ref(),
+                    &request.where_.name,
+                    &path,
+                    ObservedEntry::Any,
+                    create_flags,
+                    mode,
+                )
+                .await
+            {
+                Ok((handle, identity)) => {
+                    created_identity = identity;
                     if request.mode == CREATE_EXCLUSIVE {
                         let verifier = request
                             .verf
@@ -1754,7 +2626,7 @@ impl Nfs3Session {
                         self.exclusive_creates
                             .lock()
                             .expect("NFS exclusive-create lock")
-                            .set(path.clone(), verifier);
+                            .set(path.clone(), verifier, created_identity);
                     }
                     handle.close().await?;
                     true
@@ -1764,13 +2636,27 @@ impl Nfs3Session {
             };
             if newly_created {
                 self.invalidate(&dir);
-                self.claim_owner(&path, credentials, parent.as_ref(), false, mode)
-                    .await?;
-                if request.mode != CREATE_EXCLUSIVE
-                    && let Some(attributes) = request.attributes.as_ref()
-                {
-                    let current = self.stat_of(&path).await?;
-                    self.apply_sattr(&path, attributes, &current).await?;
+                if let Some(identity) = created_identity {
+                    let target = PathGuard {
+                        path: path.clone(),
+                        identity,
+                    };
+                    self.claim_created_owner(&target, credentials, parent.as_ref(), false, mode)
+                        .await?;
+                    if request.mode != CREATE_EXCLUSIVE
+                        && let Some(attributes) = request.attributes.as_ref()
+                    {
+                        self.apply_created_sattr(&target, attributes).await?;
+                    }
+                } else {
+                    self.claim_owner(&path, credentials, parent.as_ref(), false, mode)
+                        .await?;
+                    if request.mode != CREATE_EXCLUSIVE
+                        && let Some(attributes) = request.attributes.as_ref()
+                    {
+                        let current = self.stat_of(&path).await?;
+                        self.apply_sattr(&path, attributes, &current).await?;
+                    }
                 }
                 return Ok(path);
             }
@@ -1778,12 +2664,21 @@ impl Nfs3Session {
                 CREATE_GUARDED => Err(FsError::new(ErrorCode::Eexist)),
                 CREATE_EXCLUSIVE => {
                     let verifier = request.verf.as_deref().unwrap_or(&[0; NFS3_CREATEVERFSIZE]);
+                    let existing_identity = if self.options.shared_concurrent_view {
+                        Some(
+                            PathIdentity::from_stats(&self.stat_of(&path).await?)
+                                .ok_or_else(|| FsError::new(ErrorCode::Estale))?,
+                        )
+                    } else {
+                        None
+                    };
                     let matches = self
                         .exclusive_creates
                         .lock()
                         .expect("NFS exclusive-create lock")
-                        .matches(&path, verifier);
+                        .matches(&path, verifier, existing_identity);
                     if matches {
+                        created_identity = existing_identity;
                         Ok(path)
                     } else {
                         Err(FsError::new(ErrorCode::Eexist))
@@ -1798,13 +2693,35 @@ impl Nfs3Session {
                         append: false,
                         exclusive: false,
                     };
-                    let handle = self.driver.open_flags(&path, flags, mode).await?;
+                    let (handle, identity) = self
+                        .open_child(
+                            parent_guard.as_ref(),
+                            &request.where_.name,
+                            &path,
+                            if parent_guard.is_some() {
+                                self.observed_entry(&path).await?
+                            } else {
+                                ObservedEntry::Any
+                            },
+                            flags,
+                            mode,
+                        )
+                        .await?;
+                    created_identity = identity;
                     handle.close().await?;
                     if let Some(attributes) = request.attributes.as_ref() {
-                        let current = self.stat_of(&path).await?;
                         let mut attributes = attributes.clone();
                         attributes.mode = None;
-                        self.apply_sattr(&path, &attributes, &current).await?;
+                        if let Some(identity) = created_identity {
+                            let target = PathGuard {
+                                path: path.clone(),
+                                identity,
+                            };
+                            self.apply_created_sattr(&target, &attributes).await?;
+                        } else {
+                            let current = self.stat_of(&path).await?;
+                            self.apply_sattr(&path, &attributes, &current).await?;
+                        }
                     }
                     Ok(path)
                 }
@@ -1813,8 +2730,14 @@ impl Nfs3Session {
         .await;
         match result {
             Ok(path) => {
-                self.created_response(writer, directory.as_deref().unwrap_or("/"), before, &path)
-                    .await;
+                self.created_response(
+                    writer,
+                    directory.as_deref().unwrap_or("/"),
+                    before,
+                    &path,
+                    created_identity,
+                )
+                .await;
             }
             Err(error) => {
                 self.record_error();
@@ -1824,10 +2747,7 @@ impl Nfs3Session {
                         status: Self::status(&error),
                         obj: None,
                         obj_attributes: None,
-                        dir_wcc: WccData {
-                            before,
-                            after: self.post_op(directory.as_deref()).await,
-                        },
+                        dir_wcc: self.wcc_opt(before, directory.as_deref()).await,
                     },
                 );
             }
@@ -1845,37 +2765,77 @@ impl Nfs3Session {
         args.end("MKDIR arguments")?;
         let mut directory = None;
         let mut before = None;
+        let mut created_identity = None;
         let result = async {
-            let dir = self.path_of(&request.where_.dir)?;
+            let parent_guard = if self.options.shared_concurrent_view {
+                self.require_guarded_mutations()?;
+                Some(self.path_guard(&request.where_.dir).await?)
+            } else {
+                None
+            };
+            let dir = match parent_guard.as_ref() {
+                Some(guard) => guard.path.clone(),
+                None => self.path_of(&request.where_.dir).await?,
+            };
             Self::check_name(&request.where_.name)?;
             let path = Self::join_path(&dir, &request.where_.name);
             directory = Some(dir.clone());
             let parent = self.stat_of(&dir).await.ok();
             before = parent.as_ref().map(wcc_attr_of);
             let mode = request.attributes.mode.unwrap_or(0o777) & 0o7777;
-            self.driver
-                .mkdir(
-                    &path,
-                    MkdirOptions {
-                        recursive: false,
-                        mode: Some(mode),
-                    },
-                )
-                .await?;
+            if let Some(parent_guard) = parent_guard {
+                created_identity = match self
+                    .guarded(GuardedMutation::Mkdir {
+                        parent: parent_guard,
+                        name: request.where_.name.clone(),
+                        mode,
+                    })
+                    .await?
+                {
+                    GuardedMutationResult::Created(identity) => Some(identity),
+                    _ => return Err(FsError::new(ErrorCode::Eio)),
+                };
+            } else {
+                self.driver
+                    .mkdir(
+                        &path,
+                        MkdirOptions {
+                            recursive: false,
+                            mode: Some(mode),
+                        },
+                    )
+                    .await?;
+            }
             self.invalidate(&dir);
-            self.claim_owner(&path, credentials, parent.as_ref(), true, mode)
-                .await?;
-            let current = self.stat_of(&path).await?;
             let mut attributes = request.attributes.clone();
             attributes.mode = None;
-            self.apply_sattr(&path, &attributes, &current).await?;
+            if let Some(identity) = created_identity {
+                let target = PathGuard {
+                    path: path.clone(),
+                    identity,
+                };
+                self.claim_created_owner(&target, credentials, parent.as_ref(), true, mode)
+                    .await?;
+                self.apply_created_sattr(&target, &attributes).await?;
+            } else {
+                self.claim_owner(&path, credentials, parent.as_ref(), true, mode)
+                    .await?;
+                let current = self.stat_of(&path).await?;
+                self.apply_sattr(&path, &attributes, &current).await?;
+            }
             Ok::<String, FsError>(path)
         }
         .await;
         match result {
             Ok(path) => {
-                self.created_response(writer, directory.as_deref().unwrap_or("/"), before, &path)
-                    .await
+                self.created_response(
+                    writer,
+                    directory.as_deref().unwrap_or("/"),
+                    before,
+                    &path,
+                    created_identity,
+                )
+                .await
             }
             Err(error) => {
                 self.record_error();
@@ -1885,10 +2845,7 @@ impl Nfs3Session {
                         status: Self::status(&error),
                         obj: None,
                         obj_attributes: None,
-                        dir_wcc: WccData {
-                            before,
-                            after: self.post_op(directory.as_deref()).await,
-                        },
+                        dir_wcc: self.wcc_opt(before, directory.as_deref()).await,
                     },
                 );
             }
@@ -1906,30 +2863,70 @@ impl Nfs3Session {
         args.end("SYMLINK arguments")?;
         let mut directory = None;
         let mut before = None;
+        let mut created_identity = None;
         let result = async {
-            let dir = self.path_of(&request.where_.dir)?;
+            let parent_guard = if self.options.shared_concurrent_view {
+                self.require_guarded_mutations()?;
+                Some(self.path_guard(&request.where_.dir).await?)
+            } else {
+                None
+            };
+            let dir = match parent_guard.as_ref() {
+                Some(guard) => guard.path.clone(),
+                None => self.path_of(&request.where_.dir).await?,
+            };
             Self::check_name(&request.where_.name)?;
             let path = Self::join_path(&dir, &request.where_.name);
             directory = Some(dir.clone());
             let parent = self.stat_of(&dir).await.ok();
             before = parent.as_ref().map(wcc_attr_of);
-            self.driver.symlink(&request.target, &path).await?;
+            if let Some(parent_guard) = parent_guard {
+                created_identity = match self
+                    .guarded(GuardedMutation::Symlink {
+                        parent: parent_guard,
+                        name: request.where_.name.clone(),
+                        target: request.target.clone(),
+                    })
+                    .await?
+                {
+                    GuardedMutationResult::Created(identity) => Some(identity),
+                    _ => return Err(FsError::new(ErrorCode::Eio)),
+                };
+            } else {
+                self.driver.symlink(&request.target, &path).await?;
+            }
             self.invalidate(&dir);
-            self.claim_owner(&path, credentials, parent.as_ref(), false, 0o777)
-                .await?;
             // Symlink mode is fixed by POSIX; apply only timestamps/ownership.
-            let current = self.stat_of(&path).await?;
             let mut attributes = request.attributes.clone();
             attributes.mode = None;
             attributes.size = None;
-            self.apply_sattr(&path, &attributes, &current).await?;
+            if let Some(identity) = created_identity {
+                let target = PathGuard {
+                    path: path.clone(),
+                    identity,
+                };
+                self.claim_created_owner(&target, credentials, parent.as_ref(), false, 0o777)
+                    .await?;
+                self.apply_created_sattr(&target, &attributes).await?;
+            } else {
+                self.claim_owner(&path, credentials, parent.as_ref(), false, 0o777)
+                    .await?;
+                let current = self.stat_of(&path).await?;
+                self.apply_sattr(&path, &attributes, &current).await?;
+            }
             Ok::<String, FsError>(path)
         }
         .await;
         match result {
             Ok(path) => {
-                self.created_response(writer, directory.as_deref().unwrap_or("/"), before, &path)
-                    .await
+                self.created_response(
+                    writer,
+                    directory.as_deref().unwrap_or("/"),
+                    before,
+                    &path,
+                    created_identity,
+                )
+                .await
             }
             Err(error) => {
                 self.record_error();
@@ -1939,10 +2936,7 @@ impl Nfs3Session {
                         status: Self::status(&error),
                         obj: None,
                         obj_attributes: None,
-                        dir_wcc: WccData {
-                            before,
-                            after: self.post_op(directory.as_deref()).await,
-                        },
+                        dir_wcc: self.wcc_opt(before, directory.as_deref()).await,
                     },
                 );
             }
@@ -1960,8 +2954,18 @@ impl Nfs3Session {
         args.end("MKNOD arguments")?;
         let mut directory = None;
         let mut before = None;
+        let mut created_identity = None;
         let result = async {
-            let dir = self.path_of(&request.where_.dir)?;
+            let parent_guard = if self.options.shared_concurrent_view {
+                self.require_guarded_mutations()?;
+                Some(self.path_guard(&request.where_.dir).await?)
+            } else {
+                None
+            };
+            let dir = match parent_guard.as_ref() {
+                Some(guard) => guard.path.clone(),
+                None => self.path_of(&request.where_.dir).await?,
+            };
             Self::check_name(&request.where_.name)?;
             let path = Self::join_path(&dir, &request.where_.name);
             directory = Some(dir.clone());
@@ -1984,17 +2988,47 @@ impl Nfs3Session {
                 .spec
                 .map(|spec| (u64::from(spec.major) << 8) | u64::from(spec.minor))
                 .unwrap_or(0);
-            self.driver.mknod(&path, kind | mode, dev).await?;
+            if let Some(parent_guard) = parent_guard {
+                created_identity = match self
+                    .guarded(GuardedMutation::Mknod {
+                        parent: parent_guard,
+                        name: request.where_.name.clone(),
+                        mode: kind | mode,
+                        dev,
+                    })
+                    .await?
+                {
+                    GuardedMutationResult::Created(identity) => Some(identity),
+                    _ => return Err(FsError::new(ErrorCode::Eio)),
+                };
+            } else {
+                self.driver.mknod(&path, kind | mode, dev).await?;
+            }
             self.invalidate(&dir);
-            self.claim_owner(&path, credentials, parent.as_ref(), false, mode)
-                .await?;
+            if let Some(identity) = created_identity {
+                let target = PathGuard {
+                    path: path.clone(),
+                    identity,
+                };
+                self.claim_created_owner(&target, credentials, parent.as_ref(), false, mode)
+                    .await?;
+            } else {
+                self.claim_owner(&path, credentials, parent.as_ref(), false, mode)
+                    .await?;
+            }
             Ok::<String, FsError>(path)
         }
         .await;
         match result {
             Ok(path) => {
-                self.created_response(writer, directory.as_deref().unwrap_or("/"), before, &path)
-                    .await
+                self.created_response(
+                    writer,
+                    directory.as_deref().unwrap_or("/"),
+                    before,
+                    &path,
+                    created_identity,
+                )
+                .await
             }
             Err(error) => {
                 self.record_error();
@@ -2004,10 +3038,7 @@ impl Nfs3Session {
                         status: Self::status(&error),
                         obj: None,
                         obj_attributes: None,
-                        dir_wcc: WccData {
-                            before,
-                            after: self.post_op(directory.as_deref()).await,
-                        },
+                        dir_wcc: self.wcc_opt(before, directory.as_deref()).await,
                     },
                 );
             }
@@ -2030,7 +3061,16 @@ impl Nfs3Session {
         let mut dir = None;
         let mut before = None;
         let result = async {
-            let parent = self.path_of(&request.dir)?;
+            let parent_guard = if self.options.shared_concurrent_view {
+                self.require_guarded_mutations()?;
+                Some(self.path_guard(&request.dir).await?)
+            } else {
+                None
+            };
+            let parent = match parent_guard.as_ref() {
+                Some(guard) => guard.path.clone(),
+                None => self.path_of(&request.dir).await?,
+            };
             Self::check_name(&request.name)?;
             let path = Self::join_path(&parent, &request.name);
             dir = Some(parent.clone());
@@ -2046,15 +3086,33 @@ impl Nfs3Session {
                 let entry = self.handles.bind(&path, stats);
                 let _ = self.ensure_retained_handle(&entry, &path).await;
             }
-            if directory {
+            if let Some(parent_guard) = parent_guard {
+                let entry = self.observed_entry(&path).await?;
+                let mutation = if directory {
+                    GuardedMutation::Rmdir {
+                        parent: parent_guard,
+                        name: request.name.clone(),
+                        entry,
+                    }
+                } else {
+                    GuardedMutation::Unlink {
+                        parent: parent_guard,
+                        name: request.name.clone(),
+                        entry,
+                    }
+                };
+                self.guarded(mutation).await?;
+            } else if directory {
                 self.driver.rmdir(&path).await?;
             } else {
                 self.driver.unlink(&path).await?;
             }
-            if directory {
-                self.handles.forget(&path);
-            } else {
-                self.handles.orphan(&path);
+            if !self.options.shared_concurrent_view {
+                if directory {
+                    self.handles.forget(&path);
+                } else {
+                    self.handles.orphan(&path);
+                }
             }
             self.exclusive_creates
                 .lock()
@@ -2078,10 +3136,7 @@ impl Nfs3Session {
                     writer,
                     &WccRes {
                         status: Self::status(&error),
-                        wcc: WccData {
-                            before,
-                            after: self.post_op(dir.as_deref()).await,
-                        },
+                        wcc: self.wcc_opt(before, dir.as_deref()).await,
                     },
                 );
             }
@@ -2101,8 +3156,25 @@ impl Nfs3Session {
         let mut from_before = None;
         let mut to_before = None;
         let result = async {
-            let from_parent = self.path_of(&request.from.dir)?;
-            let to_parent = self.path_of(&request.to.dir)?;
+            let from_guard = if self.options.shared_concurrent_view {
+                self.require_guarded_mutations()?;
+                Some(self.path_guard(&request.from.dir).await?)
+            } else {
+                None
+            };
+            let to_guard = if self.options.shared_concurrent_view {
+                Some(self.path_guard(&request.to.dir).await?)
+            } else {
+                None
+            };
+            let from_parent = match from_guard.as_ref() {
+                Some(guard) => guard.path.clone(),
+                None => self.path_of(&request.from.dir).await?,
+            };
+            let to_parent = match to_guard.as_ref() {
+                Some(guard) => guard.path.clone(),
+                None => self.path_of(&request.to.dir).await?,
+            };
             Self::check_name(&request.from.name)?;
             Self::check_name(&request.to.name)?;
             let from = Self::join_path(&from_parent, &request.from.name);
@@ -2115,7 +3187,7 @@ impl Nfs3Session {
             } else {
                 self.pre_op(&to_parent).await
             };
-            let same_inode = if from == to {
+            let same_inode = if self.options.shared_concurrent_view || from == to {
                 true
             } else {
                 match (self.stat_of(&from).await, self.stat_of(&to).await) {
@@ -2123,8 +3195,22 @@ impl Nfs3Session {
                     _ => false,
                 }
             };
-            self.driver.rename(&from, &to).await?;
-            if !same_inode {
+            if let (Some(from_parent), Some(to_parent)) = (from_guard, to_guard) {
+                let source = self.observed_entry(&from).await?;
+                let destination = self.observed_entry(&to).await?;
+                self.guarded(GuardedMutation::Rename {
+                    from_parent,
+                    from_name: request.from.name.clone(),
+                    source,
+                    to_parent,
+                    to_name: request.to.name.clone(),
+                    destination,
+                })
+                .await?;
+            } else {
+                self.driver.rename(&from, &to).await?;
+            }
+            if !same_inode && !self.options.shared_concurrent_view {
                 self.handles.remap(&from, &to);
                 self.exclusive_creates
                     .lock()
@@ -2159,14 +3245,8 @@ impl Nfs3Session {
                     writer,
                     &Rename3res {
                         status: Self::status(&error),
-                        from_wcc: WccData {
-                            before: from_before,
-                            after: self.post_op(from_dir.as_deref()).await,
-                        },
-                        to_wcc: WccData {
-                            before: to_before,
-                            after: self.post_op(to_dir.as_deref()).await,
-                        },
+                        from_wcc: self.wcc_opt(from_before, from_dir.as_deref()).await,
+                        to_wcc: self.wcc_opt(to_before, to_dir.as_deref()).await,
                     },
                 );
             }
@@ -2185,16 +3265,46 @@ impl Nfs3Session {
         let mut directory = None;
         let mut before = None;
         let result = async {
-            let source = self.path_of(&request.file)?;
-            let parent = self.path_of(&request.link.dir)?;
+            let source_guard = if self.options.shared_concurrent_view {
+                self.require_guarded_mutations()?;
+                Some(self.path_guard(&request.file).await?)
+            } else {
+                None
+            };
+            let parent_guard = if self.options.shared_concurrent_view {
+                Some(self.path_guard(&request.link.dir).await?)
+            } else {
+                None
+            };
+            let source = match source_guard.as_ref() {
+                Some(guard) => guard.path.clone(),
+                None => self.path_of(&request.file).await?,
+            };
+            let parent = match parent_guard.as_ref() {
+                Some(guard) => guard.path.clone(),
+                None => self.path_of(&request.link.dir).await?,
+            };
             Self::check_name(&request.link.name)?;
             let path = Self::join_path(&parent, &request.link.name);
             file = Some(source.clone());
             directory = Some(parent.clone());
             before = self.pre_op(&parent).await;
-            self.driver.link(&source, &path).await?;
+            if let (Some(source_guard), Some(parent_guard)) = (source_guard, parent_guard) {
+                let destination = self.observed_entry(&path).await?;
+                self.guarded(GuardedMutation::Link {
+                    source: source_guard,
+                    to_parent: parent_guard,
+                    to_name: request.link.name.clone(),
+                    destination,
+                })
+                .await?;
+            } else {
+                self.driver.link(&source, &path).await?;
+            }
             self.invalidate(&parent);
-            self.attr_of(&path).await?;
+            if !self.options.shared_concurrent_view {
+                self.attr_of(&path).await?;
+            }
             Ok::<(), FsError>(())
         }
         .await;
@@ -2203,7 +3313,11 @@ impl Nfs3Session {
                 writer,
                 &Link3res {
                     status: NFS3_OK,
-                    attributes: self.post_op(file.as_deref()).await,
+                    attributes: if self.options.shared_concurrent_view {
+                        None
+                    } else {
+                        self.post_op(file.as_deref()).await
+                    },
                     linkdir_wcc: self.wcc(before, directory.as_deref().unwrap_or("/")).await,
                 },
             ),
@@ -2213,11 +3327,12 @@ impl Nfs3Session {
                     writer,
                     &Link3res {
                         status: Self::status(&error),
-                        attributes: self.post_op(file.as_deref()).await,
-                        linkdir_wcc: WccData {
-                            before,
-                            after: self.post_op(directory.as_deref()).await,
+                        attributes: if self.options.shared_concurrent_view {
+                            None
+                        } else {
+                            self.post_op(file.as_deref()).await
                         },
+                        linkdir_wcc: self.wcc_opt(before, directory.as_deref()).await,
                     },
                 );
             }
@@ -2231,11 +3346,66 @@ impl Nfs3Session {
         path: &str,
         cookie: u64,
         cookieverf: &[u8],
-    ) -> FsResult<(DirectorySnapshot, usize)> {
+    ) -> FsResult<(
+        DirectorySnapshot,
+        usize,
+        Option<(mount_rs_core::Stats, Vec<GuardedDirectoryEntry>)>,
+    )> {
+        if self.options.shared_concurrent_view {
+            let identity = if entry.id == crate::handles::ROOT_HANDLE_ID {
+                PathIdentity::from_stats(&self.stat_of(path).await?)
+            } else {
+                entry
+                    .key
+                    .as_deref()
+                    .and_then(PathIdentity::parse_backend_key)
+            }
+            .ok_or_else(|| FsError::new(ErrorCode::Estale))?;
+            let guarded = self
+                .guarded_read(GuardedRead::Readdir {
+                    directory: PathGuard {
+                        path: path.to_owned(),
+                        identity,
+                    },
+                    max_entries: usize::MAX,
+                })
+                .await?;
+            let GuardedReadResult::Directory { stats, entries } = guarded else {
+                return Err(FsError::new(ErrorCode::Eproto)
+                    .with_message("guarded readdir returned the wrong result"));
+            };
+            if PathIdentity::from_stats(&stats) != Some(identity)
+                || entries
+                    .iter()
+                    .any(|child| PathIdentity::from_stats(&child.stats).is_none())
+            {
+                return Err(FsError::new(ErrorCode::Estale)
+                    .with_message("shared directory snapshot has an unknown inode"));
+            }
+            for child in &entries {
+                Self::check_name(&child.name).map_err(|_| {
+                    FsError::new(ErrorCode::Eproto)
+                        .with_message("guarded readdir returned an invalid child name")
+                })?;
+            }
+            let verifier = guarded_cookie_verifier(&stats, &entries);
+            if cookie != 0 && !same_verifier(&verifier, cookieverf) {
+                return Err(FsError::new(ErrorCode::Einval)
+                    .with_message("NFS3ERR_BAD_COOKIE: directory verifier mismatch"));
+            }
+            let names = entries.iter().map(|child| child.name.clone()).collect();
+            let snapshot = DirectorySnapshot { names, verifier };
+            let from = usize::try_from(cookie).map_err(|_| FsError::new(ErrorCode::Einval))?;
+            if from > snapshot.names.len() {
+                return Err(FsError::new(ErrorCode::Einval)
+                    .with_message("NFS3ERR_BAD_COOKIE: cookie is past the end"));
+            }
+            return Ok((snapshot, from, Some((stats, entries))));
+        }
         if cookie == 0 {
             let entries = self.driver.readdir(path).await?;
             let names = entries.into_iter().map(|entry| entry.name).collect();
-            return Ok((self.snapshots.set(entry.id, names), 0));
+            return Ok((self.snapshots.set(entry.id, names), 0, None));
         }
         let snapshot = match self.snapshots.get(entry.id) {
             Some(snapshot) if same_verifier(&snapshot.verifier, cookieverf) => snapshot,
@@ -2254,7 +3424,7 @@ impl Nfs3Session {
             return Err(FsError::new(ErrorCode::Einval)
                 .with_message("NFS3ERR_BAD_COOKIE: cookie is past the end"));
         }
-        Ok((snapshot, from))
+        Ok((snapshot, from, None))
     }
 
     async fn readdir(
@@ -2266,7 +3436,7 @@ impl Nfs3Session {
         if plus {
             let request = read_readdirplus_args(args)?;
             args.end("READDIRPLUS arguments")?;
-            let path_result = self.path_of(&request.dir);
+            let path_result = self.path_of(&request.dir).await;
             let path = match path_result {
                 Ok(path) => path,
                 Err(error) => {
@@ -2305,7 +3475,7 @@ impl Nfs3Session {
                 .directory_page(&entry, &path, request.cookie, &request.cookieverf)
                 .await;
             match result {
-                Ok((snapshot, from)) => {
+                Ok((snapshot, from, shared)) => {
                     let dir_budget = request.dircount.saturating_sub(128) as usize;
                     let max_budget = (request.maxcount as usize)
                         .min(self.options.rtmax)
@@ -2333,7 +3503,11 @@ impl Nfs3Session {
                             writer,
                             &Readdirplus3res {
                                 status: NFS3ERR_TOOSMALL,
-                                dir_attributes: self.post_op(Some(&path)).await,
+                                dir_attributes: if let Some((stats, _)) = &shared {
+                                    Some(fattr_of(stats, entry.fileid))
+                                } else {
+                                    self.post_op(Some(&path)).await
+                                },
                                 cookieverf: snapshot.verifier,
                                 entries: Vec::new(),
                                 eof: false,
@@ -2345,22 +3519,45 @@ impl Nfs3Session {
                     let mut entries = Vec::with_capacity(chosen.len());
                     for (index, name) in chosen {
                         let child = Self::join_path(&path, &name);
-                        let described = self.attr_of(&child).await.ok();
+                        let described = if let Some((_, children)) = &shared {
+                            self.describe_stats(&child, children[index].stats.clone())
+                                .await
+                                .ok()
+                                .map(|(child_entry, attr, _)| (child_entry, attr))
+                        } else {
+                            self.attr_of(&child)
+                                .await
+                                .ok()
+                                .map(|(child_entry, attr, _)| (child_entry, attr))
+                        };
+                        let snapshot_attr = shared.as_ref().map(|(_, children)| {
+                            fattr_of(&children[index].stats, children[index].stats.ino)
+                        });
+                        let fileid = snapshot_attr
+                            .as_ref()
+                            .map(|attr| attr.fileid)
+                            .or_else(|| described.as_ref().map(|(_, attr)| attr.fileid))
+                            .unwrap_or(0);
                         entries.push(EntryPlus3 {
-                            fileid: described.as_ref().map_or(0, |(_, attr, _)| attr.fileid),
+                            fileid,
                             name,
                             cookie: (index + 1) as u64,
-                            attributes: described.as_ref().map(|(_, attr, _)| attr.clone()),
+                            attributes: snapshot_attr
+                                .or_else(|| described.as_ref().map(|(_, attr)| attr.clone())),
                             handle: described
                                 .as_ref()
-                                .map(|(entry, _, _)| self.handles.encode(entry)),
+                                .map(|(entry, _)| self.handles.encode(entry)),
                         });
                     }
                     write_readdirplus_res(
                         writer,
                         &Readdirplus3res {
                             status: NFS3_OK,
-                            dir_attributes: self.post_op(Some(&path)).await,
+                            dir_attributes: if let Some((stats, _)) = &shared {
+                                Some(fattr_of(stats, entry.fileid))
+                            } else {
+                                self.post_op(Some(&path)).await
+                            },
                             cookieverf: snapshot.verifier,
                             entries,
                             eof: index >= snapshot.names.len(),
@@ -2378,7 +3575,11 @@ impl Nfs3Session {
                         writer,
                         &Readdirplus3res {
                             status,
-                            dir_attributes: self.post_op(Some(&path)).await,
+                            dir_attributes: if self.options.shared_concurrent_view {
+                                None
+                            } else {
+                                self.post_op(Some(&path)).await
+                            },
                             cookieverf: vec![0; NFS3_COOKIEVERFSIZE],
                             entries: Vec::new(),
                             eof: false,
@@ -2389,7 +3590,7 @@ impl Nfs3Session {
         } else {
             let request = read_readdir_args(args)?;
             args.end("READDIR arguments")?;
-            let path_result = self.path_of(&request.dir);
+            let path_result = self.path_of(&request.dir).await;
             let path = match path_result {
                 Ok(path) => path,
                 Err(error) => {
@@ -2428,7 +3629,7 @@ impl Nfs3Session {
                 .directory_page(&entry, &path, request.cookie, &request.cookieverf)
                 .await
             {
-                Ok((snapshot, from)) => {
+                Ok((snapshot, from, shared)) => {
                     let budget = (request.count as usize)
                         .min(self.options.rtmax)
                         .saturating_sub(128);
@@ -2451,7 +3652,11 @@ impl Nfs3Session {
                             writer,
                             &Readdir3res {
                                 status: NFS3ERR_TOOSMALL,
-                                dir_attributes: self.post_op(Some(&path)).await,
+                                dir_attributes: if let Some((stats, _)) = &shared {
+                                    Some(fattr_of(stats, entry.fileid))
+                                } else {
+                                    self.post_op(Some(&path)).await
+                                },
                                 cookieverf: snapshot.verifier,
                                 entries: Vec::new(),
                                 eof: false,
@@ -2462,13 +3667,17 @@ impl Nfs3Session {
                     let mut entries = Vec::with_capacity(chosen.len());
                     for (index, name) in chosen {
                         let child = Self::join_path(&path, &name);
-                        let fileid = match self.handles.at(&child) {
-                            Some(entry) => entry.fileid,
-                            None => self
-                                .stat_of(&child)
-                                .await
-                                .map(|stats| self.handles.bind(&child, &stats).fileid)
-                                .unwrap_or(0),
+                        let fileid = if let Some((_, children)) = &shared {
+                            self.handles.bind(&child, &children[index].stats).fileid
+                        } else {
+                            match self.handles.at(&child) {
+                                Some(entry) => entry.fileid,
+                                None => self
+                                    .stat_of(&child)
+                                    .await
+                                    .map(|stats| self.handles.bind(&child, &stats).fileid)
+                                    .unwrap_or(0),
+                            }
                         };
                         entries.push(Entry3 {
                             fileid,
@@ -2480,7 +3689,11 @@ impl Nfs3Session {
                         writer,
                         &Readdir3res {
                             status: NFS3_OK,
-                            dir_attributes: self.post_op(Some(&path)).await,
+                            dir_attributes: if let Some((stats, _)) = &shared {
+                                Some(fattr_of(stats, entry.fileid))
+                            } else {
+                                self.post_op(Some(&path)).await
+                            },
                             cookieverf: snapshot.verifier,
                             entries,
                             eof: index >= snapshot.names.len(),
@@ -2498,7 +3711,11 @@ impl Nfs3Session {
                         writer,
                         &Readdir3res {
                             status,
-                            dir_attributes: self.post_op(Some(&path)).await,
+                            dir_attributes: if self.options.shared_concurrent_view {
+                                None
+                            } else {
+                                self.post_op(Some(&path)).await
+                            },
                             cookieverf: vec![0; NFS3_COOKIEVERFSIZE],
                             entries: Vec::new(),
                             eof: false,
@@ -2517,7 +3734,7 @@ impl Nfs3Session {
     ) -> Result<(), DispatchError> {
         let handle = args.var_opaque(NFS3_FHSIZE, "nfs_fh3")?;
         args.end("FSSTAT arguments")?;
-        match self.path_of(&handle) {
+        match self.path_of(&handle).await {
             Ok(path) => match self.driver.statfs(&path).await {
                 Ok(stats) => {
                     let block_size = stats.block_size.max(4096);
@@ -2525,7 +3742,11 @@ impl Nfs3Session {
                         writer,
                         &Fsstat3res {
                             status: NFS3_OK,
-                            attributes: self.post_op(Some(&path)).await,
+                            attributes: if self.options.shared_concurrent_view {
+                                None
+                            } else {
+                                self.post_op(Some(&path)).await
+                            },
                             tbytes: stats.blocks.saturating_mul(block_size),
                             fbytes: stats.blocks_free.saturating_mul(block_size),
                             abytes: stats.blocks_available.saturating_mul(block_size),
@@ -2542,7 +3763,11 @@ impl Nfs3Session {
                         writer,
                         &Fsstat3res {
                             status: Self::status(&error),
-                            attributes: self.post_op(Some(&path)).await,
+                            attributes: if self.options.shared_concurrent_view {
+                                None
+                            } else {
+                                self.post_op(Some(&path)).await
+                            },
                             tbytes: 0,
                             fbytes: 0,
                             abytes: 0,
@@ -2582,14 +3807,18 @@ impl Nfs3Session {
     ) -> Result<(), DispatchError> {
         let handle = args.var_opaque(NFS3_FHSIZE, "nfs_fh3")?;
         args.end("FSINFO arguments")?;
-        match self.path_of(&handle) {
+        match self.path_of(&handle).await {
             Ok(path) => {
                 let capabilities = self.driver.capabilities;
                 write_fsinfo_res(
                     writer,
                     &Fsinfo3res {
                         status: NFS3_OK,
-                        attributes: self.post_op(Some(&path)).await,
+                        attributes: if self.options.shared_concurrent_view {
+                            None
+                        } else {
+                            self.post_op(Some(&path)).await
+                        },
                         rtmax: self.options.rtmax as u32,
                         rtpref: self.options.rtmax as u32,
                         rtmult: 4096,
@@ -2651,14 +3880,18 @@ impl Nfs3Session {
     ) -> Result<(), DispatchError> {
         let handle = args.var_opaque(NFS3_FHSIZE, "nfs_fh3")?;
         args.end("PATHCONF arguments")?;
-        match self.path_of(&handle) {
+        match self.path_of(&handle).await {
             Ok(path) => {
                 let capabilities = self.driver.capabilities;
                 write_pathconf_res(
                     writer,
                     &Pathconf3res {
                         status: NFS3_OK,
-                        attributes: self.post_op(Some(&path)).await,
+                        attributes: if self.options.shared_concurrent_view {
+                            None
+                        } else {
+                            self.post_op(Some(&path)).await
+                        },
                         linkmax: if capabilities.hardlinks { 32_000 } else { 1 },
                         name_max: NAME_MAX as u32,
                         no_trunc: true,
@@ -2741,6 +3974,7 @@ impl Nfs3Session {
                             ErrorCode::Eacces => MNT3ERR_ACCES,
                             ErrorCode::Eperm => MNT3ERR_PERM,
                             ErrorCode::Enametoolong => MNT3ERR_NAMETOOLONG,
+                            ErrorCode::Enotsup => MNT3ERR_NOTSUPP,
                             _ => MNT3ERR_IO,
                         };
                         write_mount_res(

@@ -2,13 +2,16 @@
 //!
 //! [`ChunkedFs`] deliberately keeps namespace records and file bytes in
 //! separate providers. A write stores new immutable blocks and flushes them
-//! before the fenced metadata revision publishes references to those blocks.
+//! before a coordinated metadata revision publishes references to those blocks.
 //! The implementation is intentionally not a snapshot adapter and does not
 //! provide copy-on-write views.
 
 use async_trait::async_trait;
 use mount_rs_core::chunking::{Chunker, FixedSizeChunker, from_config};
-use mount_rs_core::driver::{FileHandle, FsDriver};
+use mount_rs_core::driver::{
+    FileHandle, FsDriver, GuardedDirectoryEntry, GuardedMutation, GuardedMutationResult,
+    GuardedRead, GuardedReadResult, GuardedSetattr, ObservedEntry, PathGuard, PathIdentity,
+};
 use mount_rs_core::error::{ErrorCode, FsError, Result};
 use mount_rs_core::handle::OpenFlags;
 use mount_rs_core::path::{is_path_inside, normalize_path, split_path};
@@ -34,6 +37,7 @@ const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(30);
 const LEASE_RENEWAL_MARGIN: Duration = Duration::from_secs(5);
 const DEFAULT_CHUNK_SIZE: usize = 64 * 1024;
 const MAX_PENDING_MUTATIONS: usize = 1024;
+const MAX_CONCURRENT_CAS_RETRIES: usize = 32;
 // The W26 Ozone qualification uses 64 concurrent lifecycle workers. Start
 // with the small fast-path window used by local providers, then extend it
 // only while newly-prepared remote operations are still arriving. The total
@@ -53,6 +57,7 @@ const MUTATION_BATCH_REQUEST_TARGET: usize = 64;
 pub struct ChunkedOptions {
     pub owner: String,
     pub lease_ttl: Duration,
+    pub concurrent_writes: bool,
     pub chunker: Arc<dyn Chunker>,
     pub uid: u32,
     pub gid: u32,
@@ -65,6 +70,7 @@ impl ChunkedOptions {
         Self {
             owner: owner.into(),
             lease_ttl: DEFAULT_LEASE_TTL,
+            concurrent_writes: false,
             chunker,
             uid: 0,
             gid: 0,
@@ -82,6 +88,11 @@ impl ChunkedOptions {
 
     pub fn with_lease_ttl(mut self, lease_ttl: Duration) -> Self {
         self.lease_ttl = lease_ttl;
+        self
+    }
+
+    pub fn with_concurrent_writes(mut self, concurrent_writes: bool) -> Self {
+        self.concurrent_writes = concurrent_writes;
         self
     }
 
@@ -147,6 +158,25 @@ struct RuntimeState {
     closed: bool,
 }
 
+fn retain_open_detached(state: &mut RuntimeState, next: &Namespace) {
+    let detached: Vec<_> = state
+        .open_refs
+        .iter()
+        .filter(|(inode, count)| **count > 0 && !next.nodes.contains_key(inode))
+        .filter_map(|(inode, _)| {
+            state
+                .namespace
+                .nodes
+                .get(inode)
+                .cloned()
+                .map(|node| (*inode, node))
+        })
+        .collect();
+    for (inode, node) in detached {
+        state.orphans.entry(inode).or_insert(node);
+    }
+}
+
 enum MutationResult {
     WholeFile(WholeFileMutationResult),
     Unit,
@@ -157,6 +187,7 @@ enum WholeFileMutationResult {
     Conflict,
 }
 
+#[derive(Clone)]
 struct WholeFileMutation {
     path: String,
     inode: InodeId,
@@ -324,12 +355,75 @@ where
     M: MetadataStore + 'static,
     B: BlockStore + 'static,
 {
-    /// Acquire the provider-enforced writer lease and open the current
-    /// namespace. An empty metadata store is initialized with an empty root
-    /// directory through the same fenced publication path.
+    /// Open the current namespace. The default mode acquires a fenced writer
+    /// lease; opt-in concurrent mode prepares the provider's revision-CAS
+    /// protocol. An empty metadata store is initialized with an empty root
+    /// directory through the selected publication path.
     pub async fn open(metadata: M, blocks: B, options: ChunkedOptions) -> Result<Self> {
         let metadata = Arc::new(metadata);
         let blocks = Arc::new(blocks);
+        if options.concurrent_writes {
+            metadata.prepare_concurrent_mode().await?;
+            // Two clients may initialize one fresh volume together. Only one
+            // CAS publishes its root; the loser reloads the winner's root.
+            for _ in 0..MAX_CONCURRENT_CAS_RETRIES {
+                let loaded = metadata.load().await?;
+                loaded.validate()?;
+                let (namespace, revision) = match loaded.namespace {
+                    Some(namespace) => (namespace, loaded.revision),
+                    None if loaded.revision == 0 => {
+                        let namespace = initial_namespace(&options)?;
+                        namespace.validate()?;
+                        blocks.flush().await?;
+                        match metadata.publish_if_revision(0, namespace.clone()).await {
+                            Ok(revision) => {
+                                if !metadata.publish_includes_flush_barrier() {
+                                    metadata.flush().await?;
+                                }
+                                (namespace, revision)
+                            }
+                            Err(error) if error.code == ErrorCode::Eagain => {
+                                cooperative_yield().await;
+                                continue;
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    None => {
+                        return Err(FsError::backend(
+                            "metadata revision has no corresponding namespace",
+                        ));
+                    }
+                };
+                return Ok(Self {
+                    inner: Arc::new(ChunkedInner {
+                        metadata,
+                        blocks,
+                        options,
+                        gate: AsyncGate::new(),
+                        lifecycle: tokio::sync::RwLock::new(()),
+                        state: Mutex::new(RuntimeState {
+                            namespace,
+                            revision,
+                            next_fd: 3,
+                            open_refs: HashMap::new(),
+                            pending_atime: HashMap::new(),
+                            orphans: HashMap::new(),
+                            failure: None,
+                            closed: false,
+                        }),
+                        lease: Mutex::new(None),
+                        lease_gate: AsyncGate::new(),
+                        lease_renewed: AtomicBool::new(false),
+                        preparing_mutations: Arc::new(AtomicUsize::new(0)),
+                        mutations: Mutex::new(MutationQueue::new()),
+                    }),
+                });
+            }
+            return Err(FsError::new(ErrorCode::Eagain)
+                .with_syscall("initialize concurrent metadata")
+                .with_message("another writer repeatedly changed the new volume"));
+        }
         let lease = metadata
             .acquire_writer(&options.owner, options.lease_ttl)
             .await?;
@@ -474,6 +568,13 @@ where
     /// crashed or ambiguous publication in another process. Open unlinked
     /// files remain roots until their final handle closes.
     pub async fn reconcile_blocks(&self, grace: Duration) -> Result<BlockReconcileReport> {
+        if self.inner.options.concurrent_writes {
+            return Err(FsError::new(ErrorCode::Enotsup)
+                .with_syscall("reconcile blocks")
+                .with_message(
+                    "concurrent writers need distributed open-handle pins before block reclamation",
+                ));
+        }
         if grace.is_zero() {
             return Err(FsError::new(ErrorCode::Einval)
                 .with_syscall("reconcile blocks")
@@ -561,12 +662,62 @@ where
         error
     }
 
+    /// A concurrent client cannot trust its local namespace after another
+    /// process commits. Refresh before each lookup or mutation. In-flight
+    /// local operations may finish between the remote load and state lock;
+    /// never replace a newer locally acknowledged revision with an older one.
+    async fn refresh_concurrent_namespace(&self) -> Result<()> {
+        {
+            let state = self.lock_state()?;
+            if let Some(error) = &state.failure {
+                return Err(error.clone());
+            }
+            if state.closed {
+                return Err(FsError::new(ErrorCode::Ebadf).with_message("filesystem is closed"));
+            }
+        }
+        let loaded = self
+            .inner
+            .metadata
+            .load()
+            .await
+            .map_err(|error| self.fail_closed(with_context(error, "metadata-load", None)))?;
+        loaded
+            .validate()
+            .map_err(|error| self.fail_closed(with_context(error, "metadata-validate", None)))?;
+        let namespace = loaded.namespace.ok_or_else(|| {
+            self.fail_closed(FsError::backend(
+                "concurrent metadata revision has no published namespace",
+            ))
+        })?;
+        let mut state = self.lock_state()?;
+        if let Some(error) = &state.failure {
+            return Err(error.clone());
+        }
+        if state.closed {
+            return Err(FsError::new(ErrorCode::Ebadf).with_message("filesystem is closed"));
+        }
+        if loaded.revision > state.revision {
+            // Remote rmdir can remove a directory inode entirely. A local
+            // handle already opened on that inode must retain its metadata
+            // until close, even though path lookup sees the new namespace.
+            retain_open_detached(&mut state, &namespace);
+            state.namespace = namespace;
+            state.revision = loaded.revision;
+            state.pending_atime.clear();
+        }
+        Ok(())
+    }
+
     async fn renew_lease(&self) -> Result<WriterLease> {
         let _lease_gate = self.inner.lease_gate.lock().await;
         self.renew_lease_inner(false).await
     }
 
     async fn validate_lease(&self) -> Result<()> {
+        if self.inner.options.concurrent_writes {
+            return self.refresh_concurrent_namespace().await;
+        }
         let _lease_gate = self.inner.lease_gate.lock().await;
         self.renew_lease_inner(true).await.map(|_| ())
     }
@@ -706,6 +857,9 @@ where
     }
 
     async fn ensure_operation_lease(&self) -> Result<()> {
+        if self.inner.options.concurrent_writes {
+            return self.refresh_concurrent_namespace().await;
+        }
         self.renew_lease().await.map(|_| ())
     }
 
@@ -721,6 +875,48 @@ where
                 .flush()
                 .await
                 .map_err(|error| with_context(error, "block-flush", None))?;
+        }
+        if self.inner.options.concurrent_writes {
+            let revision = match self
+                .inner
+                .metadata
+                .publish_if_revision(expected_revision, namespace.clone())
+                .await
+            {
+                Ok(revision) => revision,
+                Err(error) if error.code == ErrorCode::Eagain => {
+                    // This is a known non-commit. The caller may reload and
+                    // reconstruct its original operation; local state stays
+                    // unchanged until a successful acknowledgement.
+                    return Err(with_context(error, "metadata-publish", None));
+                }
+                Err(error) => {
+                    return Err(self.fail_closed(with_context(error, "metadata-publish", None)));
+                }
+            };
+            if !self.inner.metadata.publish_includes_flush_barrier()
+                && let Err(error) = self.inner.metadata.flush().await
+            {
+                return Err(self.fail_closed(with_context(error, "metadata-flush", None)));
+            }
+            let mut state = self.lock_state()?;
+            if state.closed {
+                drop(state);
+                return Err(self.fail_closed(
+                    FsError::new(ErrorCode::Ebadf)
+                        .with_message("filesystem closed during concurrent publication"),
+                ));
+            }
+            if revision > state.revision {
+                // Only a successful CAS may move detached local nodes into
+                // private handle state. A retryable conflict has no local
+                // orphan side effect.
+                retain_open_detached(&mut state, &namespace);
+                state.namespace = namespace;
+                state.revision = revision;
+                state.pending_atime.clear();
+            }
+            return Ok(revision);
         }
         let lease = self.renew_lease().await?;
         let revision = match self
@@ -750,6 +946,9 @@ where
     /// operation gate. Ordinary mutation paths call `snapshot`, so pending
     /// values are included in any later namespace publication too.
     async fn flush_pending_atime(&self) -> Result<()> {
+        if self.inner.options.concurrent_writes {
+            return Ok(());
+        }
         let has_pending = !self.lock_state()?.pending_atime.is_empty();
         if !has_pending {
             return Ok(());
@@ -884,97 +1083,143 @@ where
     }
 
     async fn apply_mutation_batch(&self, requests: Vec<MutationRequest>) {
-        let mut responses = Vec::with_capacity(requests.len());
         let _gate = self.inner.gate.lock().await;
-        let prepared = self
-            .ensure_operation_lease()
-            .await
-            .and_then(|_| self.snapshot());
-        let (mut namespace, revision) = match prepared {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                for request in requests {
-                    mutation_reply(request, Err(error.clone()));
-                }
-                return;
-            }
+        let attempts = if self.inner.options.concurrent_writes {
+            MAX_CONCURRENT_CAS_RETRIES
+        } else {
+            1
         };
-        let mut changed = false;
-
-        for request in requests {
-            match request {
-                MutationRequest::WholeFile { mutation, reply } => {
-                    if reply.is_closed() {
-                        continue;
+        for attempt in 0..attempts {
+            let prepared = self
+                .ensure_operation_lease()
+                .await
+                .and_then(|_| self.snapshot());
+            let (mut namespace, revision) = match prepared {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    for request in requests {
+                        mutation_reply(request, Err(error.clone()));
                     }
-                    let mut mutation = mutation;
-                    // Concurrent creates can all snapshot the same next inode
-                    // before this batch publishes. Rebase only those creates
-                    // that were prepared from this batch's revision; stale
-                    // requests still take the serialized conflict path.
-                    if mutation.new_inode && mutation.expected_revision == revision {
-                        mutation.inode = namespace.next_inode;
-                    }
-                    let mut candidate = namespace.clone();
-                    let result = apply_whole_file_mutation(&mut candidate, revision, &mutation);
-                    match result {
-                        Ok(WholeFileMutationResult::Committed) => {
-                            namespace = candidate;
-                            changed = true;
-                            responses.push((
-                                reply,
-                                Ok(MutationResult::WholeFile(
-                                    WholeFileMutationResult::Committed,
-                                )),
-                            ));
-                        }
-                        Ok(WholeFileMutationResult::Conflict) => {
-                            responses.push((
-                                reply,
-                                Ok(MutationResult::WholeFile(WholeFileMutationResult::Conflict)),
-                            ));
-                        }
-                        Err(error) => responses.push((reply, Err(error))),
-                    }
+                    return;
                 }
-                MutationRequest::Unlink { path, reply } => {
-                    if reply.is_closed() {
-                        continue;
-                    }
-                    let mut candidate = namespace.clone();
-                    match apply_unlink_mutation(self, &mut candidate, &path) {
-                        Ok(()) => {
-                            namespace = candidate;
-                            changed = true;
-                            responses.push((reply, Ok(MutationResult::Unit)));
+            };
+            let mut changed = false;
+            let mut responses = Vec::with_capacity(requests.len());
+
+            for request in &requests {
+                match request {
+                    MutationRequest::WholeFile { mutation, reply } => {
+                        if reply.is_closed() {
+                            responses.push(None);
+                            continue;
                         }
-                        Err(error) => responses.push((reply, Err(error))),
+                        let mut mutation = (**mutation).clone();
+                        // Same-revision creates can share one batch. A
+                        // remote CAS loss invalidates prepared inode/layout
+                        // assumptions, so those requests report Conflict
+                        // and take the caller's full replay path.
+                        if mutation.new_inode && mutation.expected_revision == revision {
+                            mutation.inode = namespace.next_inode;
+                        }
+                        let mut candidate = namespace.clone();
+                        let result = apply_whole_file_mutation(
+                            &mut candidate,
+                            revision,
+                            &mutation,
+                            self.inner.options.concurrent_writes,
+                        );
+                        match result {
+                            Ok(WholeFileMutationResult::Committed) => {
+                                namespace = candidate;
+                                changed = true;
+                                responses.push(Some(Ok(MutationResult::WholeFile(
+                                    WholeFileMutationResult::Committed,
+                                ))));
+                            }
+                            Ok(WholeFileMutationResult::Conflict) => responses.push(Some(Ok(
+                                MutationResult::WholeFile(WholeFileMutationResult::Conflict),
+                            ))),
+                            Err(error) => responses.push(Some(Err(error))),
+                        }
+                    }
+                    MutationRequest::Unlink { path, reply } => {
+                        if reply.is_closed() {
+                            responses.push(None);
+                            continue;
+                        }
+                        let mut candidate = namespace.clone();
+                        match apply_unlink_mutation(self, &mut candidate, path) {
+                            Ok(()) => {
+                                namespace = candidate;
+                                changed = true;
+                                responses.push(Some(Ok(MutationResult::Unit)));
+                            }
+                            Err(error) => responses.push(Some(Err(error))),
+                        }
                     }
                 }
             }
-        }
 
-        if changed && let Err(error) = self.publish_namespace(revision, namespace, true).await {
-            for (reply, _) in responses {
-                let _ = reply.send(Err(error.clone()));
+            if changed {
+                match self.publish_namespace(revision, namespace, true).await {
+                    Ok(_) => {}
+                    Err(error)
+                        if self.inner.options.concurrent_writes
+                            && error.code == ErrorCode::Eagain
+                            && attempt + 1 < attempts =>
+                    {
+                        // The provider confirmed no commit. Replay every
+                        // request against a fresh revision before replying;
+                        // only an acknowledged batch may report success.
+                        cooperative_yield().await;
+                        continue;
+                    }
+                    Err(error) => {
+                        for request in requests {
+                            mutation_reply(request, Err(error.clone()));
+                        }
+                        return;
+                    }
+                }
+            }
+            for (request, response) in requests.into_iter().zip(responses) {
+                if let Some(response) = response {
+                    mutation_reply(request, response);
+                }
             }
             return;
         }
-        for (reply, result) in responses {
-            let _ = reply.send(result);
-        }
     }
 
-    async fn mutate<F, R>(&self, operation: F) -> Result<R>
+    async fn mutate<F, R>(&self, mut operation: F) -> Result<R>
     where
-        F: FnOnce(&mut Namespace) -> Result<R>,
+        F: FnMut(&mut Namespace) -> Result<R>,
     {
         let _gate = self.inner.gate.lock().await;
-        self.ensure_operation_lease().await?;
-        let (mut namespace, revision) = self.snapshot()?;
-        let result = operation(&mut namespace)?;
-        self.publish_namespace(revision, namespace, false).await?;
-        Ok(result)
+        let attempts = if self.inner.options.concurrent_writes {
+            MAX_CONCURRENT_CAS_RETRIES
+        } else {
+            1
+        };
+        for attempt in 0..attempts {
+            self.ensure_operation_lease().await?;
+            let (mut namespace, revision) = self.snapshot()?;
+            let result = operation(&mut namespace)?;
+            match self.publish_namespace(revision, namespace, false).await {
+                Ok(_) => return Ok(result),
+                Err(error)
+                    if self.inner.options.concurrent_writes
+                        && error.code == ErrorCode::Eagain
+                        && attempt + 1 < attempts =>
+                {
+                    cooperative_yield().await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(FsError::new(ErrorCode::Eagain)
+            .with_syscall("publish concurrent metadata")
+            .with_message("another writer repeatedly changed the namespace"))
     }
 
     async fn read_at(
@@ -1025,6 +1270,9 @@ where
         }
         let _gate = self.inner.gate.lock().await;
         self.ensure_operation_lease().await?;
+        if self.inner.options.concurrent_writes {
+            return Ok(count);
+        }
         if count == 0 {
             return Ok(0);
         }
@@ -1122,7 +1370,7 @@ where
                     Some(target) if write_base_unchanged(target, &original) => {
                         target.data = NodeData::File(new_layout);
                         set_file_size(&mut target.stats, new_size);
-                        touch_modified(&mut target.stats);
+                        touch_modified(&mut target.stats, self.inner.options.concurrent_writes)?;
                         Some((buffer.len(), end))
                     }
                     _ => None,
@@ -1142,9 +1390,20 @@ where
                         .ok_or_else(|| error_with_path(ErrorCode::Estale, "write", path))?;
                     target.data = NodeData::File(new_layout);
                     set_file_size(&mut target.stats, new_size);
-                    touch_modified(&mut target.stats);
-                    self.publish_namespace(revision, namespace, true).await?;
-                    Some((buffer.len(), end))
+                    touch_modified(&mut target.stats, self.inner.options.concurrent_writes)?;
+                    match self.publish_namespace(revision, namespace, true).await {
+                        Ok(_) => Some((buffer.len(), end)),
+                        Err(error)
+                            if self.inner.options.concurrent_writes
+                                && error.code == ErrorCode::Eagain =>
+                        {
+                            // A known CAS loss has not published these
+                            // immutable blocks. Rewrite against the winner's
+                            // layout in the serialized fallback below.
+                            None
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
             }
         };
@@ -1168,62 +1427,83 @@ where
         append: bool,
     ) -> Result<(usize, u64)> {
         let _gate = self.inner.gate.lock().await;
-        self.ensure_operation_lease().await?;
-        let (mut namespace, revision) = self.snapshot()?;
-        let (node, orphan) = self.node_snapshot(&namespace, inode, "write", path)?;
-        let layout = match &node.data {
-            NodeData::File(layout) => layout.clone(),
-            NodeData::Directory { .. } => {
-                return Err(error_with_path(ErrorCode::Eisdir, "write", path));
-            }
-            NodeData::Special => return Err(error_with_path(ErrorCode::Enxio, "write", path)),
-            NodeData::Symlink { .. } => return Err(error_with_path(ErrorCode::Eio, "write", path)),
+        let attempts = if self.inner.options.concurrent_writes {
+            MAX_CONCURRENT_CAS_RETRIES
+        } else {
+            1
         };
-        let start = if append { node.stats.size } else { position };
-        let input_length = u64::try_from(buffer.len())
-            .map_err(|_| error_with_path(ErrorCode::Efbig, "write", path))?;
-        let end = start
-            .checked_add(input_length)
-            .ok_or_else(|| error_with_path(ErrorCode::Efbig, "write", path))?;
-        if buffer.is_empty() {
-            return Ok((0, start));
-        }
-        let new_size = node.stats.size.max(end);
-        let new_layout = rewrite_layout(
-            &self.inner.blocks,
-            &layout,
-            node.stats.size,
-            start,
-            buffer,
-            new_size,
-            path,
-        )
-        .await?;
-        self.inner
-            .blocks
-            .flush()
-            .await
-            .map_err(|error| with_context(error, "block-flush", Some(path)))?;
-        if orphan {
-            let mut state = self.lock_state()?;
-            let target = state
-                .orphans
+        for attempt in 0..attempts {
+            self.ensure_operation_lease().await?;
+            let (mut namespace, revision) = self.snapshot()?;
+            let (node, orphan) = self.node_snapshot(&namespace, inode, "write", path)?;
+            let layout = match &node.data {
+                NodeData::File(layout) => layout.clone(),
+                NodeData::Directory { .. } => {
+                    return Err(error_with_path(ErrorCode::Eisdir, "write", path));
+                }
+                NodeData::Special => return Err(error_with_path(ErrorCode::Enxio, "write", path)),
+                NodeData::Symlink { .. } => {
+                    return Err(error_with_path(ErrorCode::Eio, "write", path));
+                }
+            };
+            let start = if append { node.stats.size } else { position };
+            let input_length = u64::try_from(buffer.len())
+                .map_err(|_| error_with_path(ErrorCode::Efbig, "write", path))?;
+            let end = start
+                .checked_add(input_length)
+                .ok_or_else(|| error_with_path(ErrorCode::Efbig, "write", path))?;
+            if buffer.is_empty() {
+                return Ok((0, start));
+            }
+            let new_size = node.stats.size.max(end);
+            let new_layout = rewrite_layout(
+                &self.inner.blocks,
+                &layout,
+                node.stats.size,
+                start,
+                buffer,
+                new_size,
+                path,
+            )
+            .await?;
+            self.inner
+                .blocks
+                .flush()
+                .await
+                .map_err(|error| with_context(error, "block-flush", Some(path)))?;
+            if orphan {
+                let mut state = self.lock_state()?;
+                let target = state
+                    .orphans
+                    .get_mut(&inode)
+                    .ok_or_else(|| error_with_path(ErrorCode::Estale, "write", path))?;
+                target.data = NodeData::File(new_layout);
+                set_file_size(&mut target.stats, new_size);
+                touch_modified(&mut target.stats, self.inner.options.concurrent_writes)?;
+                return Ok((buffer.len(), end));
+            }
+            let target = namespace
+                .nodes
                 .get_mut(&inode)
                 .ok_or_else(|| error_with_path(ErrorCode::Estale, "write", path))?;
             target.data = NodeData::File(new_layout);
             set_file_size(&mut target.stats, new_size);
-            touch_modified(&mut target.stats);
-            return Ok((buffer.len(), end));
+            touch_modified(&mut target.stats, self.inner.options.concurrent_writes)?;
+            match self.publish_namespace(revision, namespace, true).await {
+                Ok(_) => return Ok((buffer.len(), end)),
+                Err(error)
+                    if self.inner.options.concurrent_writes
+                        && error.code == ErrorCode::Eagain
+                        && attempt + 1 < attempts =>
+                {
+                    cooperative_yield().await;
+                }
+                Err(error) => return Err(error),
+            }
         }
-        let target = namespace
-            .nodes
-            .get_mut(&inode)
-            .ok_or_else(|| error_with_path(ErrorCode::Estale, "write", path))?;
-        target.data = NodeData::File(new_layout);
-        set_file_size(&mut target.stats, new_size);
-        touch_modified(&mut target.stats);
-        self.publish_namespace(revision, namespace, true).await?;
-        Ok((buffer.len(), end))
+        Err(FsError::new(ErrorCode::Eagain)
+            .with_syscall("write")
+            .with_message("another writer repeatedly changed the file"))
     }
 
     async fn write_file_atomic(&self, path: &str, data: &[u8]) -> Result<()> {
@@ -1324,9 +1604,18 @@ where
         // do not count this request while it waits for the shared publication
         // response; otherwise the first runner would wait on itself.
         preparation.release();
-        let committed = self.submit_whole_file_mutation(mutation).await?;
-        if matches!(committed, WholeFileMutationResult::Committed) {
-            return Ok(());
+        match self.submit_whole_file_mutation(mutation).await {
+            Ok(WholeFileMutationResult::Committed) => return Ok(()),
+            Ok(WholeFileMutationResult::Conflict) => {}
+            Err(error)
+                if self.inner.options.concurrent_writes && error.code == ErrorCode::Eagain => {}
+            Err(error) => return Err(error),
+        }
+
+        if self.inner.options.concurrent_writes {
+            return self
+                .write_file_atomic_concurrent_replay(&normalized, data)
+                .await;
         }
 
         // A concurrent namespace change won the optimistic race. Preserve the
@@ -1367,44 +1656,180 @@ where
         }
     }
 
+    /// A prepared whole-file batch can lose its CAS to an unrelated writer.
+    /// Reprepare against the winner's namespace and publish the full layout
+    /// in one transaction. Truncate followed by byte writes would expose an
+    /// empty or partial file between revisions.
+    async fn write_file_atomic_concurrent_replay(&self, path: &str, data: &[u8]) -> Result<()> {
+        let _gate = self.inner.gate.lock().await;
+        let data_length = u64::try_from(data.len())
+            .map_err(|_| error_with_path(ErrorCode::Efbig, "write", path))?;
+        for attempt in 0..MAX_CONCURRENT_CAS_RETRIES {
+            self.ensure_operation_lease().await?;
+            let (mut namespace, revision) = self.snapshot()?;
+            let entry = walk(&namespace, path, true, "open", 0)?;
+            let (inode, chunker, new_inode) = if let Some(inode) = entry.node {
+                let node = namespace
+                    .nodes
+                    .get(&inode)
+                    .ok_or_else(|| error_with_path(ErrorCode::Estale, "open", &entry.path))?;
+                let chunker = match &node.data {
+                    NodeData::File(layout) => layout.chunker.clone(),
+                    NodeData::Directory { .. } => {
+                        return Err(error_with_path(ErrorCode::Eisdir, "open", &entry.path));
+                    }
+                    NodeData::Special => {
+                        return Err(error_with_path(ErrorCode::Enxio, "open", &entry.path));
+                    }
+                    NodeData::Symlink { .. } => {
+                        return Err(error_with_path(ErrorCode::Eio, "open", &entry.path));
+                    }
+                };
+                (inode, chunker, false)
+            } else {
+                let parent = namespace
+                    .nodes
+                    .get(&entry.parent)
+                    .ok_or_else(|| error_with_path(ErrorCode::Estale, "open", &entry.path))?;
+                if !matches!(parent.data, NodeData::Directory { .. }) {
+                    return Err(error_with_path(ErrorCode::Enotdir, "open", &entry.path));
+                }
+                (
+                    namespace.next_inode,
+                    namespace.default_chunker.clone(),
+                    true,
+                )
+            };
+            let empty_layout = FileLayout {
+                chunker,
+                extents: Vec::new(),
+            };
+            let new_layout = if data.is_empty() {
+                empty_layout
+            } else {
+                rewrite_layout(
+                    &self.inner.blocks,
+                    &empty_layout,
+                    0,
+                    0,
+                    data,
+                    data_length,
+                    path,
+                )
+                .await?
+            };
+            self.inner
+                .blocks
+                .flush()
+                .await
+                .map_err(|error| with_context(error, "block-flush", Some(path)))?;
+            if new_inode {
+                namespace.next_inode = namespace
+                    .next_inode
+                    .checked_add(1)
+                    .ok_or_else(|| error_with_path(ErrorCode::Eoverflow, "open", &entry.path))?;
+                namespace.nodes.insert(
+                    inode,
+                    new_file_node(
+                        inode,
+                        S_IFREG | (0o666 & !namespace.umask & 0o7777),
+                        namespace.default_uid,
+                        namespace.default_gid,
+                        namespace.default_chunker.clone(),
+                    ),
+                );
+                add_entry(
+                    &mut namespace,
+                    entry.parent,
+                    entry.name,
+                    inode,
+                    "open",
+                    &entry.path,
+                    true,
+                )?;
+            }
+            let target = namespace
+                .nodes
+                .get_mut(&inode)
+                .ok_or_else(|| error_with_path(ErrorCode::Estale, "write", path))?;
+            target.data = NodeData::File(new_layout);
+            set_file_size(&mut target.stats, data_length);
+            touch_modified(&mut target.stats, self.inner.options.concurrent_writes)?;
+            match self.publish_namespace(revision, namespace, true).await {
+                Ok(_) => return Ok(()),
+                Err(error)
+                    if error.code == ErrorCode::Eagain
+                        && attempt + 1 < MAX_CONCURRENT_CAS_RETRIES =>
+                {
+                    cooperative_yield().await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(FsError::new(ErrorCode::Eagain)
+            .with_syscall("write file")
+            .with_message("another writer repeatedly changed the namespace"))
+    }
+
     async fn truncate_inode(&self, inode: InodeId, path: &str, length: u64) -> Result<()> {
         let _gate = self.inner.gate.lock().await;
-        self.ensure_operation_lease().await?;
-        let (mut namespace, revision) = self.snapshot()?;
-        let (node, orphan) = self.node_snapshot(&namespace, inode, "ftruncate", path)?;
-        let mut layout = match &node.data {
-            NodeData::File(layout) => layout.clone(),
-            NodeData::Directory { .. } => {
-                return Err(error_with_path(ErrorCode::Eisdir, "ftruncate", path));
-            }
-            NodeData::Special => return Err(error_with_path(ErrorCode::Enxio, "ftruncate", path)),
-            NodeData::Symlink { .. } => {
-                return Err(error_with_path(ErrorCode::Eio, "ftruncate", path));
-            }
+        let attempts = if self.inner.options.concurrent_writes {
+            MAX_CONCURRENT_CAS_RETRIES
+        } else {
+            1
         };
-        if length < node.stats.size {
-            trim_extents(&mut layout.extents, length)?;
-        }
-        if orphan {
-            let mut state = self.lock_state()?;
-            let target = state
-                .orphans
+        for attempt in 0..attempts {
+            self.ensure_operation_lease().await?;
+            let (mut namespace, revision) = self.snapshot()?;
+            let (node, orphan) = self.node_snapshot(&namespace, inode, "ftruncate", path)?;
+            let mut layout = match &node.data {
+                NodeData::File(layout) => layout.clone(),
+                NodeData::Directory { .. } => {
+                    return Err(error_with_path(ErrorCode::Eisdir, "ftruncate", path));
+                }
+                NodeData::Special => {
+                    return Err(error_with_path(ErrorCode::Enxio, "ftruncate", path));
+                }
+                NodeData::Symlink { .. } => {
+                    return Err(error_with_path(ErrorCode::Eio, "ftruncate", path));
+                }
+            };
+            if length < node.stats.size {
+                trim_extents(&mut layout.extents, length)?;
+            }
+            if orphan {
+                let mut state = self.lock_state()?;
+                let target = state
+                    .orphans
+                    .get_mut(&inode)
+                    .ok_or_else(|| error_with_path(ErrorCode::Estale, "ftruncate", path))?;
+                target.data = NodeData::File(layout);
+                set_file_size(&mut target.stats, length);
+                touch_modified(&mut target.stats, self.inner.options.concurrent_writes)?;
+                return Ok(());
+            }
+            let target = namespace
+                .nodes
                 .get_mut(&inode)
                 .ok_or_else(|| error_with_path(ErrorCode::Estale, "ftruncate", path))?;
             target.data = NodeData::File(layout);
             set_file_size(&mut target.stats, length);
-            touch_modified(&mut target.stats);
-            return Ok(());
+            touch_modified(&mut target.stats, self.inner.options.concurrent_writes)?;
+            match self.publish_namespace(revision, namespace, false).await {
+                Ok(_) => return Ok(()),
+                Err(error)
+                    if self.inner.options.concurrent_writes
+                        && error.code == ErrorCode::Eagain
+                        && attempt + 1 < attempts =>
+                {
+                    cooperative_yield().await;
+                }
+                Err(error) => return Err(error),
+            }
         }
-        let target = namespace
-            .nodes
-            .get_mut(&inode)
-            .ok_or_else(|| error_with_path(ErrorCode::Estale, "ftruncate", path))?;
-        target.data = NodeData::File(layout);
-        set_file_size(&mut target.stats, length);
-        touch_modified(&mut target.stats);
-        self.publish_namespace(revision, namespace, false).await?;
-        Ok(())
+        Err(FsError::new(ErrorCode::Eagain)
+            .with_syscall("ftruncate")
+            .with_message("another writer repeatedly changed the file"))
     }
 
     fn allocate_fd(&self, inode: InodeId) -> Result<u64> {
@@ -1433,33 +1858,46 @@ where
         Ok(fd)
     }
 
-    async fn close_inode(&self, inode: InodeId) -> Result<()> {
-        let _gate = self.inner.gate.lock().await;
-        self.ensure_operation_lease().await?;
-        let (namespace, revision) = {
-            let mut state = self.lock_state()?;
-            if let Some(count) = state.open_refs.get_mut(&inode) {
-                *count = count.saturating_sub(1);
-                if *count == 0 {
-                    state.open_refs.remove(&inode);
+    /// Called with `inner.gate` held after the handle is marked closed. The
+    /// local reference must be released before the first await so canceling a
+    /// close cannot strand an inode behind a permanently closed handle.
+    async fn close_inode_after_gate(&self, inode: InodeId) -> Result<()> {
+        let should_reap =
+            {
+                let mut state = self.lock_state()?;
+                if let Some(count) = state.open_refs.get_mut(&inode) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        state.open_refs.remove(&inode);
+                    }
                 }
-            }
-            if state.failure.is_some() || state.closed {
-                return Ok(());
-            }
-            if state.orphans.contains_key(&inode) && !state.open_refs.contains_key(&inode) {
-                state.orphans.remove(&inode);
-                return Ok(());
-            }
-            let should_remove =
+                if !state.open_refs.contains_key(&inode) {
+                    state.orphans.remove(&inode);
+                }
+                if self.inner.options.concurrent_writes || state.failure.is_some() || state.closed {
+                    return Ok(());
+                }
                 state.namespace.nodes.get(&inode).is_some_and(|node| {
                     node.stats.nlink == 0 && !state.open_refs.contains_key(&inode)
-                });
-            if !should_remove {
-                return Ok(());
-            }
-            (state.namespace.clone(), state.revision)
-        };
+                })
+            };
+        if !should_reap {
+            return Ok(());
+        }
+        self.ensure_operation_lease().await?;
+        let (namespace, revision) =
+            {
+                let state = self.lock_state()?;
+                if state.failure.is_some() || state.closed {
+                    return Ok(());
+                }
+                if !state.namespace.nodes.get(&inode).is_some_and(|node| {
+                    node.stats.nlink == 0 && !state.open_refs.contains_key(&inode)
+                }) {
+                    return Ok(());
+                }
+                (state.namespace.clone(), state.revision)
+            };
         let mut namespace = namespace;
         namespace.nodes.remove(&inode);
         self.publish_namespace(revision, namespace, false).await?;
@@ -1492,6 +1930,20 @@ where
     /// POSIX unlink/rmdir lifetime without publishing an unreachable
     /// directory or a stale nlink graph.
     fn reap_detached(&self, namespace: &mut Namespace, inode: InodeId) -> Result<()> {
+        if self.inner.options.concurrent_writes {
+            if namespace
+                .nodes
+                .get(&inode)
+                .is_some_and(|node| !matches!(node.data, NodeData::Directory { .. }))
+            {
+                // A nlink=0 tombstone retains inode identity for handles in
+                // any process. Replaying a CAS conflict has no local side
+                // effect, and no writer may reclaim its blocks yet.
+                return Ok(());
+            }
+            namespace.nodes.remove(&inode);
+            return Ok(());
+        }
         let should_reap = namespace.nodes.get(&inode).is_some_and(|node| {
             matches!(node.data, NodeData::Directory { .. }) || node.stats.nlink == 0
         });
@@ -1558,7 +2010,7 @@ where
             if gid != u32::MAX {
                 node.stats.gid = gid;
             }
-            node.stats.ctime_ms = now_ms();
+            touch_changed(&mut node.stats, self.inner.options.concurrent_writes)?;
             Ok(())
         })
         .await
@@ -1581,10 +2033,170 @@ where
                 .ok_or_else(|| error_with_path(ErrorCode::Estale, syscall, &normalized))?;
             node.stats.atime_ms = atime_ms;
             node.stats.mtime_ms = mtime_ms;
-            node.stats.ctime_ms = now_ms();
+            touch_changed(&mut node.stats, self.inner.options.concurrent_writes)?;
             Ok(())
         })
         .await
+    }
+
+    async fn open_flags_inner(
+        &self,
+        path: &str,
+        flags: OpenFlags,
+        mode: u32,
+        guard: Option<(&PathGuard, &str, ObservedEntry)>,
+    ) -> Result<(Arc<dyn FileHandle>, PathIdentity)> {
+        if !flags.read && !flags.write {
+            return Err(error_with_path(ErrorCode::Einval, "open", path));
+        }
+        if flags.truncate && !flags.write {
+            return Err(error_with_path(ErrorCode::Einval, "open", path));
+        }
+        let normalized = normalize_path(path);
+        let _gate = self.inner.gate.lock().await;
+        let attempts = if self.inner.options.concurrent_writes {
+            MAX_CONCURRENT_CAS_RETRIES
+        } else {
+            1
+        };
+        for attempt in 0..attempts {
+            self.ensure_operation_lease().await?;
+            let (mut namespace, revision) = self.snapshot()?;
+            let entry = walk(
+                &namespace,
+                &normalized,
+                !(flags.create && flags.exclusive),
+                "open",
+                0,
+            )?;
+            if let Some((parent_guard, name, observed)) = guard {
+                let original =
+                    guarded_child_entry(&namespace, parent_guard, name, observed, "open")?;
+                if original.path != normalized || entry.parent != original.parent {
+                    return Err(stale_guard(&parent_guard.path, "open"));
+                }
+                if original.node.is_some_and(|inode| {
+                    namespace
+                        .nodes
+                        .get(&inode)
+                        .is_some_and(|node| matches!(node.data, NodeData::Symlink { .. }))
+                }) {
+                    // Regular-file CREATE must not follow a final symlink to
+                    // an unobserved target, even when it stays in this parent.
+                    return Err(error_with_path(ErrorCode::Eexist, "open", &normalized));
+                }
+                if entry.node != original.node {
+                    return Err(stale_guard(&normalized, "open"));
+                }
+                if flags.truncate
+                    && !flags.exclusive
+                    && original.node.is_some()
+                    && !matches!(observed, ObservedEntry::Identity(_))
+                {
+                    return Err(stale_guard(&normalized, "open"));
+                }
+            }
+            let inode = if let Some(inode) = entry.node {
+                if flags.exclusive {
+                    return Err(error_with_path(ErrorCode::Eexist, "open", &entry.path));
+                }
+                let node = namespace
+                    .nodes
+                    .get(&inode)
+                    .ok_or_else(|| error_with_path(ErrorCode::Estale, "open", &entry.path))?;
+                let kind = FileType::from_mode(node.stats.mode);
+                if kind == FileType::Directory && flags.write {
+                    return Err(error_with_path(ErrorCode::Eisdir, "open", &entry.path));
+                }
+                if kind.is_special() {
+                    return Err(error_with_path(ErrorCode::Enxio, "open", &entry.path));
+                }
+                if flags.truncate {
+                    let node = namespace
+                        .nodes
+                        .get_mut(&inode)
+                        .ok_or_else(|| error_with_path(ErrorCode::Estale, "open", &entry.path))?;
+                    if let NodeData::File(layout) = &mut node.data {
+                        layout.extents.clear();
+                    }
+                    set_file_size(&mut node.stats, 0);
+                    touch_modified(&mut node.stats, self.inner.options.concurrent_writes)?;
+                }
+                inode
+            } else {
+                if !flags.create {
+                    return Err(error_with_path(ErrorCode::Enoent, "open", &entry.path));
+                }
+                let parent = namespace
+                    .nodes
+                    .get(&entry.parent)
+                    .ok_or_else(|| error_with_path(ErrorCode::Estale, "open", &entry.path))?;
+                if !matches!(parent.data, NodeData::Directory { .. }) {
+                    return Err(error_with_path(ErrorCode::Enotdir, "open", &entry.path));
+                }
+                let inode = namespace.next_inode;
+                namespace.next_inode = namespace
+                    .next_inode
+                    .checked_add(1)
+                    .ok_or_else(|| error_with_path(ErrorCode::Eoverflow, "open", &entry.path))?;
+                let mode = S_IFREG | (mode & !namespace.umask & 0o7777);
+                namespace.nodes.insert(
+                    inode,
+                    new_file_node(
+                        inode,
+                        mode,
+                        namespace.default_uid,
+                        namespace.default_gid,
+                        namespace.default_chunker.clone(),
+                    ),
+                );
+                add_entry(
+                    &mut namespace,
+                    entry.parent,
+                    entry.name,
+                    inode,
+                    "open",
+                    &entry.path,
+                    self.inner.options.concurrent_writes,
+                )?;
+                inode
+            };
+
+            let changed = entry.node.is_none() || flags.truncate;
+            if changed {
+                match self.publish_namespace(revision, namespace, false).await {
+                    Ok(_) => {}
+                    Err(error)
+                        if self.inner.options.concurrent_writes
+                            && error.code == ErrorCode::Eagain
+                            && attempt + 1 < attempts =>
+                    {
+                        cooperative_yield().await;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            let fd = self.allocate_fd(inode)?;
+            return Ok((
+                Arc::new(ChunkedHandle {
+                    filesystem: self.clone(),
+                    inode,
+                    path: normalized,
+                    fd,
+                    flags,
+                    state: Mutex::new(HandleState {
+                        position: 0,
+                        closed: false,
+                    }),
+                    gate: AsyncGate::new(),
+                }),
+                PathIdentity { dev: 0, ino: inode },
+            ));
+        }
+        Err(FsError::new(ErrorCode::Eagain)
+            .with_syscall("open")
+            .with_message("another writer repeatedly changed the namespace"))
     }
 }
 
@@ -1732,6 +2344,9 @@ where
 
     async fn close(&self) -> Result<()> {
         let _gate = self.gate.lock().await;
+        // Both gates are acquired before closing the handle. If this future
+        // is canceled while waiting for either gate, a later close can retry.
+        let _filesystem_gate = self.filesystem.inner.gate.lock().await;
         {
             let mut state = self.lock_state()?;
             if state.closed {
@@ -1739,7 +2354,7 @@ where
             }
             state.closed = true;
         }
-        self.filesystem.close_inode(self.inode).await
+        self.filesystem.close_inode_after_gate(self.inode).await
     }
 }
 
@@ -1749,6 +2364,318 @@ where
     M: MetadataStore + 'static,
     B: BlockStore + 'static,
 {
+    fn supports_guarded_mutations(&self) -> bool {
+        true
+    }
+
+    fn supports_guarded_reads(&self) -> bool {
+        true
+    }
+
+    fn stable_inode_ids(&self) -> bool {
+        true
+    }
+
+    async fn guarded_read(&self, request: GuardedRead) -> Result<GuardedReadResult> {
+        let _gate = self.inner.gate.lock().await;
+        self.ensure_operation_lease().await?;
+        let (namespace, _) = self.snapshot()?;
+        match request {
+            GuardedRead::Stat { target } => {
+                let inode = check_path_guard(&namespace, &target, "guarded stat")?;
+                let node = namespace
+                    .nodes
+                    .get(&inode)
+                    .ok_or_else(|| stale_guard(&target.path, "guarded stat"))?;
+                Ok(GuardedReadResult::Stat(node.stats.clone()))
+            }
+            GuardedRead::Lookup { parent, name } => {
+                let inode = check_path_guard(&namespace, &parent, "guarded lookup")?;
+                let node = namespace
+                    .nodes
+                    .get(&inode)
+                    .ok_or_else(|| stale_guard(&parent.path, "guarded lookup"))?;
+                let NodeData::Directory { entries } = &node.data else {
+                    return Err(error_with_path(
+                        ErrorCode::Enotdir,
+                        "guarded lookup",
+                        &parent.path,
+                    ));
+                };
+                let child = match name.as_str() {
+                    "." => inode,
+                    ".." => walk(&namespace, &parent.path, false, "guarded lookup", 0)?.parent,
+                    _ => {
+                        guarded_child_path(&parent, &name, "guarded lookup")?;
+                        entries
+                            .iter()
+                            .find(|entry| entry.name == name)
+                            .map(|entry| entry.inode)
+                            .ok_or_else(|| {
+                                error_with_path(
+                                    ErrorCode::Enoent,
+                                    "guarded lookup",
+                                    &format!("{}/{name}", parent.path),
+                                )
+                            })?
+                    }
+                };
+                let child_node = namespace.nodes.get(&child).ok_or_else(|| {
+                    stale_guard(&format!("{}/{name}", parent.path), "guarded lookup")
+                })?;
+                Ok(GuardedReadResult::Lookup {
+                    parent: node.stats.clone(),
+                    child: child_node.stats.clone(),
+                })
+            }
+            GuardedRead::Readdir {
+                directory,
+                max_entries,
+            } => {
+                if max_entries == 0 {
+                    return Err(error_with_path(
+                        ErrorCode::Einval,
+                        "guarded readdir",
+                        &directory.path,
+                    )
+                    .with_message("directory entry limit must be positive"));
+                }
+                let inode = check_path_guard(&namespace, &directory, "guarded readdir")?;
+                let node = namespace
+                    .nodes
+                    .get(&inode)
+                    .ok_or_else(|| stale_guard(&directory.path, "guarded readdir"))?;
+                let NodeData::Directory { entries } = &node.data else {
+                    return Err(error_with_path(
+                        ErrorCode::Enotdir,
+                        "guarded readdir",
+                        &directory.path,
+                    ));
+                };
+                if entries.len() > max_entries {
+                    return Err(error_with_path(
+                        ErrorCode::Eoverflow,
+                        "guarded readdir",
+                        &directory.path,
+                    )
+                    .with_message("directory exceeds the configured entry limit"));
+                }
+                let mut result = Vec::with_capacity(entries.len());
+                for entry in entries {
+                    let child = namespace
+                        .nodes
+                        .get(&entry.inode)
+                        .ok_or_else(|| stale_guard(&directory.path, "guarded readdir"))?;
+                    result.push(GuardedDirectoryEntry {
+                        name: entry.name.clone(),
+                        stats: child.stats.clone(),
+                    });
+                }
+                Ok(GuardedReadResult::Directory {
+                    stats: node.stats.clone(),
+                    entries: result,
+                })
+            }
+            GuardedRead::Readlink { target } => {
+                let inode = check_path_guard(&namespace, &target, "guarded readlink")?;
+                let node = namespace
+                    .nodes
+                    .get(&inode)
+                    .ok_or_else(|| stale_guard(&target.path, "guarded readlink"))?;
+                let NodeData::Symlink { target: link } = &node.data else {
+                    return Err(error_with_path(
+                        ErrorCode::Einval,
+                        "guarded readlink",
+                        &target.path,
+                    ));
+                };
+                Ok(GuardedReadResult::Readlink {
+                    stats: node.stats.clone(),
+                    target: link.clone(),
+                })
+            }
+        }
+    }
+
+    async fn guarded_mutation(&self, request: GuardedMutation) -> Result<GuardedMutationResult> {
+        match request {
+            GuardedMutation::Setattr { target, change } => {
+                self.mutate(|namespace| {
+                    apply_guarded_setattr(
+                        namespace,
+                        &target,
+                        change,
+                        self.inner.options.concurrent_writes,
+                    )
+                })
+                .await?;
+                Ok(GuardedMutationResult::Applied)
+            }
+            GuardedMutation::Open {
+                parent,
+                name,
+                observed,
+                flags,
+                mode,
+            } => {
+                let path = guarded_child_path(&parent, &name, "open")?;
+                let (handle, identity) = self
+                    .open_flags_inner(&path, flags, mode, Some((&parent, &name, observed)))
+                    .await?;
+                Ok(GuardedMutationResult::Opened { handle, identity })
+            }
+            GuardedMutation::Mkdir { parent, name, mode } => {
+                let path = guarded_child_path(&parent, &name, "mkdir")?;
+                let inode = self
+                    .mutate(|namespace| {
+                        guarded_child_entry(
+                            namespace,
+                            &parent,
+                            &name,
+                            ObservedEntry::Any,
+                            "mkdir",
+                        )?;
+                        apply_mkdir_mutation(
+                            namespace,
+                            &path,
+                            mode,
+                            self.inner.options.concurrent_writes,
+                        )
+                    })
+                    .await?;
+                Ok(GuardedMutationResult::Created(PathIdentity {
+                    dev: 0,
+                    ino: inode,
+                }))
+            }
+            GuardedMutation::Symlink {
+                parent,
+                name,
+                target,
+            } => {
+                let path = guarded_child_path(&parent, &name, "symlink")?;
+                let inode = self
+                    .mutate(|namespace| {
+                        guarded_child_entry(
+                            namespace,
+                            &parent,
+                            &name,
+                            ObservedEntry::Any,
+                            "symlink",
+                        )?;
+                        apply_symlink_mutation(
+                            namespace,
+                            &target,
+                            &path,
+                            self.inner.options.concurrent_writes,
+                        )
+                    })
+                    .await?;
+                Ok(GuardedMutationResult::Created(PathIdentity {
+                    dev: 0,
+                    ino: inode,
+                }))
+            }
+            GuardedMutation::Mknod {
+                parent,
+                name,
+                mode,
+                dev,
+            } => {
+                let path = guarded_child_path(&parent, &name, "mknod")?;
+                let inode = self
+                    .mutate(|namespace| {
+                        guarded_child_entry(
+                            namespace,
+                            &parent,
+                            &name,
+                            ObservedEntry::Any,
+                            "mknod",
+                        )?;
+                        apply_mknod_mutation(
+                            namespace,
+                            &path,
+                            mode,
+                            dev,
+                            self.inner.options.concurrent_writes,
+                        )
+                    })
+                    .await?;
+                Ok(GuardedMutationResult::Created(PathIdentity {
+                    dev: 0,
+                    ino: inode,
+                }))
+            }
+            GuardedMutation::Unlink {
+                parent,
+                name,
+                entry,
+            } => {
+                let path = guarded_child_path(&parent, &name, "unlink")?;
+                let runtime = self.clone();
+                self.mutate(|namespace| {
+                    guarded_child_entry(namespace, &parent, &name, entry, "unlink")?;
+                    apply_unlink_mutation(&runtime, namespace, &path)
+                })
+                .await?;
+                Ok(GuardedMutationResult::Applied)
+            }
+            GuardedMutation::Rmdir {
+                parent,
+                name,
+                entry,
+            } => {
+                let path = guarded_child_path(&parent, &name, "rmdir")?;
+                let runtime = self.clone();
+                self.mutate(|namespace| {
+                    guarded_child_entry(namespace, &parent, &name, entry, "rmdir")?;
+                    apply_rmdir_mutation(&runtime, namespace, &path)
+                })
+                .await?;
+                Ok(GuardedMutationResult::Applied)
+            }
+            GuardedMutation::Rename {
+                from_parent,
+                from_name,
+                source,
+                to_parent,
+                to_name,
+                destination,
+            } => {
+                let old_path = guarded_child_path(&from_parent, &from_name, "rename")?;
+                let new_path = guarded_child_path(&to_parent, &to_name, "rename")?;
+                let runtime = self.clone();
+                self.mutate(|namespace| {
+                    guarded_child_entry(namespace, &from_parent, &from_name, source, "rename")?;
+                    guarded_child_entry(namespace, &to_parent, &to_name, destination, "rename")?;
+                    apply_rename_mutation(&runtime, namespace, &old_path, &new_path)
+                })
+                .await?;
+                Ok(GuardedMutationResult::Applied)
+            }
+            GuardedMutation::Link {
+                source,
+                to_parent,
+                to_name,
+                destination,
+            } => {
+                let new_path = guarded_child_path(&to_parent, &to_name, "link")?;
+                self.mutate(|namespace| {
+                    check_path_guard(namespace, &source, "link")?;
+                    guarded_child_entry(namespace, &to_parent, &to_name, destination, "link")?;
+                    apply_link_mutation(
+                        namespace,
+                        &source.path,
+                        &new_path,
+                        self.inner.options.concurrent_writes,
+                    )
+                })
+                .await?;
+                Ok(GuardedMutationResult::Applied)
+            }
+        }
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             handles: true,
@@ -1838,6 +2765,9 @@ where
                 })
             })
             .collect();
+        if self.inner.options.concurrent_writes {
+            return Ok(result);
+        }
         if let Some(node) = namespace.nodes.get_mut(&inode) {
             node.stats.atime_ms = now_ms();
         }
@@ -1879,6 +2809,9 @@ where
                 });
             }
         }
+        if self.inner.options.concurrent_writes {
+            return Ok(result);
+        }
         if let Some(node) = namespace.nodes.get_mut(&inode) {
             node.stats.atime_ms = now_ms();
         }
@@ -1901,105 +2834,9 @@ where
         flags: OpenFlags,
         mode: u32,
     ) -> Result<Arc<dyn FileHandle>> {
-        if !flags.read && !flags.write {
-            return Err(error_with_path(ErrorCode::Einval, "open", path));
-        }
-        if flags.truncate && !flags.write {
-            return Err(error_with_path(ErrorCode::Einval, "open", path));
-        }
-        let _gate = self.inner.gate.lock().await;
-        self.ensure_operation_lease().await?;
-        let (mut namespace, revision) = self.snapshot()?;
-        let normalized = normalize_path(path);
-        let entry = walk(
-            &namespace,
-            &normalized,
-            !(flags.create && flags.exclusive),
-            "open",
-            0,
-        )?;
-        let inode = if let Some(inode) = entry.node {
-            if flags.exclusive {
-                return Err(error_with_path(ErrorCode::Eexist, "open", &entry.path));
-            }
-            let node = namespace
-                .nodes
-                .get(&inode)
-                .ok_or_else(|| error_with_path(ErrorCode::Estale, "open", &entry.path))?;
-            let kind = FileType::from_mode(node.stats.mode);
-            if kind == FileType::Directory && flags.write {
-                return Err(error_with_path(ErrorCode::Eisdir, "open", &entry.path));
-            }
-            if kind.is_special() {
-                return Err(error_with_path(ErrorCode::Enxio, "open", &entry.path));
-            }
-            if flags.truncate {
-                let node = namespace
-                    .nodes
-                    .get_mut(&inode)
-                    .ok_or_else(|| error_with_path(ErrorCode::Estale, "open", &entry.path))?;
-                if let NodeData::File(layout) = &mut node.data {
-                    layout.extents.clear();
-                }
-                set_file_size(&mut node.stats, 0);
-                touch_modified(&mut node.stats);
-            }
-            inode
-        } else {
-            if !flags.create {
-                return Err(error_with_path(ErrorCode::Enoent, "open", &entry.path));
-            }
-            let parent = namespace
-                .nodes
-                .get(&entry.parent)
-                .ok_or_else(|| error_with_path(ErrorCode::Estale, "open", &entry.path))?;
-            if !matches!(parent.data, NodeData::Directory { .. }) {
-                return Err(error_with_path(ErrorCode::Enotdir, "open", &entry.path));
-            }
-            let inode = namespace.next_inode;
-            namespace.next_inode = namespace
-                .next_inode
-                .checked_add(1)
-                .ok_or_else(|| error_with_path(ErrorCode::Eoverflow, "open", &entry.path))?;
-            let mode = S_IFREG | (mode & !namespace.umask & 0o7777);
-            namespace.nodes.insert(
-                inode,
-                new_file_node(
-                    inode,
-                    mode,
-                    namespace.default_uid,
-                    namespace.default_gid,
-                    namespace.default_chunker.clone(),
-                ),
-            );
-            add_entry(
-                &mut namespace,
-                entry.parent,
-                entry.name,
-                inode,
-                "open",
-                &entry.path,
-            )?;
-            inode
-        };
-
-        let changed = entry.node.is_none() || flags.truncate;
-        if changed {
-            self.publish_namespace(revision, namespace, false).await?;
-        }
-        let fd = self.allocate_fd(inode)?;
-        Ok(Arc::new(ChunkedHandle {
-            filesystem: self.clone(),
-            inode,
-            path: normalized,
-            fd,
-            flags,
-            state: Mutex::new(HandleState {
-                position: 0,
-                closed: false,
-            }),
-            gate: AsyncGate::new(),
-        }))
+        self.open_flags_inner(path, flags, mode, None)
+            .await
+            .map(|(handle, _)| handle)
     }
 
     async fn mkdir(&self, path: &str, options: MkdirOptions) -> Result<Option<String>> {
@@ -2053,34 +2890,20 @@ where
                             inode,
                             "mkdir",
                             &current,
+                            self.inner.options.concurrent_writes,
                         )?;
                         first_created.get_or_insert(current.clone());
                     }
                 }
                 Ok(first_created)
             } else {
-                let entry = walk(namespace, &normalized, false, "mkdir", 0)?;
-                if entry.node.is_some() {
-                    return Err(error_with_path(ErrorCode::Eexist, "mkdir", &entry.path));
-                }
-                let inode = namespace.next_inode;
-                namespace.next_inode = namespace
-                    .next_inode
-                    .checked_add(1)
-                    .ok_or_else(|| error_with_path(ErrorCode::Eoverflow, "mkdir", &normalized))?;
-                namespace.nodes.insert(
-                    inode,
-                    new_directory_node(inode, mode, namespace.default_uid, namespace.default_gid),
-                );
-                add_entry(
+                apply_mkdir_mutation(
                     namespace,
-                    entry.parent,
-                    entry.name,
-                    inode,
-                    "mkdir",
                     &normalized,
-                )?;
-                Ok(None)
+                    mode,
+                    self.inner.options.concurrent_writes,
+                )
+                .map(|_| None)
             }
         })
         .await
@@ -2089,37 +2912,8 @@ where
     async fn rmdir(&self, path: &str) -> Result<()> {
         let normalized = normalize_path(path);
         let runtime = self.clone();
-        self.mutate(|namespace| {
-            let entry = walk(namespace, &normalized, false, "rmdir", 0)?;
-            let inode = entry
-                .node
-                .ok_or_else(|| error_with_path(ErrorCode::Enoent, "rmdir", &entry.path))?;
-            if inode == namespace.root {
-                return Err(error_with_path(ErrorCode::Ebusy, "rmdir", &entry.path));
-            }
-            let node = namespace
-                .nodes
-                .get(&inode)
-                .ok_or_else(|| error_with_path(ErrorCode::Estale, "rmdir", &entry.path))?;
-            if !matches!(node.data, NodeData::Directory { .. }) {
-                return Err(error_with_path(ErrorCode::Enotdir, "rmdir", &entry.path));
-            }
-            if let NodeData::Directory { entries } = &node.data
-                && !entries.is_empty()
-            {
-                return Err(error_with_path(ErrorCode::Enotempty, "rmdir", &entry.path));
-            }
-            detach_entry(
-                namespace,
-                entry.parent,
-                &entry.name,
-                true,
-                "rmdir",
-                &entry.path,
-            )?;
-            runtime.reap_detached(namespace, inode)
-        })
-        .await
+        self.mutate(|namespace| apply_rmdir_mutation(&runtime, namespace, &normalized))
+            .await
     }
 
     async fn unlink(&self, path: &str) -> Result<()> {
@@ -2133,79 +2927,7 @@ where
         let new_normalized = normalize_path(new_path);
         let runtime = self.clone();
         self.mutate(|namespace| {
-            let from = walk(namespace, &old_normalized, false, "rename", 0)?;
-            let source = from.node.ok_or_else(|| {
-                error_with_path(ErrorCode::Enoent, "rename", &old_normalized)
-                    .with_dest(new_normalized.clone())
-            })?;
-            if source == namespace.root {
-                return Err(error_with_path(
-                    ErrorCode::Einval,
-                    "rename",
-                    &old_normalized,
-                ));
-            }
-            let to = walk(namespace, &new_normalized, false, "rename", 0)?;
-            if to.node == Some(source) {
-                return Ok(());
-            }
-            let source_is_dir = namespace
-                .nodes
-                .get(&source)
-                .is_some_and(|node| matches!(node.data, NodeData::Directory { .. }));
-            if source_is_dir && is_path_inside(&to.path, &from.path) {
-                return Err(
-                    error_with_path(ErrorCode::Einval, "rename", &old_normalized)
-                        .with_dest(new_normalized),
-                );
-            }
-            if let Some(destination) = to.node {
-                let destination_is_dir = namespace
-                    .nodes
-                    .get(&destination)
-                    .is_some_and(|node| matches!(node.data, NodeData::Directory { .. }));
-                if source_is_dir {
-                    if !destination_is_dir {
-                        return Err(
-                            error_with_path(ErrorCode::Enotdir, "rename", &old_normalized)
-                                .with_dest(new_normalized),
-                        );
-                    }
-                    if let Some(NodeMetadata {
-                        data: NodeData::Directory { entries },
-                        ..
-                    }) = namespace.nodes.get(&destination)
-                        && !entries.is_empty()
-                    {
-                        return Err(error_with_path(
-                            ErrorCode::Enotempty,
-                            "rename",
-                            &old_normalized,
-                        )
-                        .with_dest(new_normalized));
-                    }
-                } else if destination_is_dir {
-                    return Err(
-                        error_with_path(ErrorCode::Eisdir, "rename", &old_normalized)
-                            .with_dest(new_normalized),
-                    );
-                }
-                detach_entry(namespace, to.parent, &to.name, true, "rename", &to.path)?;
-                runtime.reap_detached(namespace, destination)?;
-            }
-            detach_entry(
-                namespace,
-                from.parent,
-                &from.name,
-                false,
-                "rename",
-                &from.path,
-            )?;
-            add_entry(namespace, to.parent, to.name, source, "rename", &to.path)?;
-            if let Some(node) = namespace.nodes.get_mut(&source) {
-                node.stats.ctime_ms = now_ms();
-            }
-            Ok(())
+            apply_rename_mutation(&runtime, namespace, &old_normalized, &new_normalized)
         })
         .await
     }
@@ -2214,31 +2936,12 @@ where
         let existing = normalize_path(existing_path);
         let new_path = normalize_path(new_path);
         self.mutate(|namespace| {
-            let from = walk(namespace, &existing, false, "link", 0)?;
-            let inode = from.node.ok_or_else(|| {
-                error_with_path(ErrorCode::Enoent, "link", &from.path).with_dest(new_path.clone())
-            })?;
-            if namespace
-                .nodes
-                .get(&inode)
-                .is_some_and(|node| matches!(node.data, NodeData::Directory { .. }))
-            {
-                return Err(error_with_path(ErrorCode::Eperm, "link", &from.path)
-                    .with_dest(new_path.clone()));
-            }
-            let to = walk(namespace, &new_path, false, "link", 0)?;
-            if to.node.is_some() {
-                return Err(error_with_path(ErrorCode::Eexist, "link", &to.path));
-            }
-            if let Some(node) = namespace.nodes.get_mut(&inode) {
-                node.stats.nlink = node
-                    .stats
-                    .nlink
-                    .checked_add(1)
-                    .ok_or_else(|| error_with_path(ErrorCode::Emlink, "link", &from.path))?;
-                node.stats.ctime_ms = now_ms();
-            }
-            add_entry(namespace, to.parent, to.name, inode, "link", &to.path)
+            apply_link_mutation(
+                namespace,
+                &existing,
+                &new_path,
+                self.inner.options.concurrent_writes,
+            )
         })
         .await
     }
@@ -2246,56 +2949,13 @@ where
     async fn symlink(&self, target: &str, path: &str) -> Result<()> {
         let normalized = normalize_path(path);
         self.mutate(|namespace| {
-            if target.is_empty() {
-                return Err(error_with_path(ErrorCode::Enoent, "symlink", target)
-                    .with_dest(normalized.clone()));
-            }
-            let entry = walk(namespace, &normalized, false, "symlink", 0)?;
-            if entry.node.is_some() {
-                return Err(error_with_path(ErrorCode::Eexist, "symlink", &entry.path));
-            }
-            let inode = namespace.next_inode;
-            namespace.next_inode = namespace
-                .next_inode
-                .checked_add(1)
-                .ok_or_else(|| error_with_path(ErrorCode::Eoverflow, "symlink", &normalized))?;
-            let timestamp = now_ms();
-            namespace.nodes.insert(
-                inode,
-                NodeMetadata {
-                    stats: Stats {
-                        dev: 0,
-                        ino: inode,
-                        mode: mount_rs_core::types::S_IFLNK | 0o777,
-                        nlink: 1,
-                        uid: namespace.default_uid,
-                        gid: namespace.default_gid,
-                        rdev: 0,
-                        size: u64::try_from(target.len()).map_err(|_| {
-                            error_with_path(ErrorCode::Efbig, "symlink", &entry.path)
-                        })?,
-                        blksize: BLOCK_SIZE,
-                        blocks: u64::try_from(target.len())
-                            .map_err(|_| error_with_path(ErrorCode::Efbig, "symlink", &entry.path))?
-                            .div_ceil(512),
-                        atime_ms: timestamp,
-                        mtime_ms: timestamp,
-                        ctime_ms: timestamp,
-                        birthtime_ms: timestamp,
-                    },
-                    data: NodeData::Symlink {
-                        target: target.to_owned(),
-                    },
-                },
-            );
-            add_entry(
+            apply_symlink_mutation(
                 namespace,
-                entry.parent,
-                entry.name,
-                inode,
-                "symlink",
-                &entry.path,
+                target,
+                &normalized,
+                self.inner.options.concurrent_writes,
             )
+            .map(|_| ())
         })
         .await
     }
@@ -2326,7 +2986,7 @@ where
                 .get_mut(&inode)
                 .ok_or_else(|| error_with_path(ErrorCode::Estale, "chmod", &normalized))?;
             node.stats.mode = (node.stats.mode & S_IFMT) | (mode & 0o7777);
-            node.stats.ctime_ms = now_ms();
+            touch_changed(&mut node.stats, self.inner.options.concurrent_writes)?;
             Ok(())
         })
         .await
@@ -2365,7 +3025,7 @@ where
             }
             node.data = NodeData::File(layout);
             set_file_size(&mut node.stats, length);
-            touch_modified(&mut node.stats);
+            touch_modified(&mut node.stats, self.inner.options.concurrent_writes)?;
             Ok(())
         })
         .await
@@ -2384,65 +3044,365 @@ where
     async fn mknod(&self, path: &str, mode: u32, dev: u64) -> Result<()> {
         let normalized = normalize_path(path);
         self.mutate(|namespace| {
-            let entry = walk(namespace, &normalized, false, "mknod", 0)?;
-            if entry.node.is_some() {
-                return Err(error_with_path(ErrorCode::Eexist, "mknod", &entry.path));
-            }
-            let kind = FileType::from_mode(mode);
-            if !kind.is_special() && kind != FileType::File {
-                return Err(error_with_path(ErrorCode::Eperm, "mknod", &entry.path));
-            }
-            let inode = namespace.next_inode;
-            namespace.next_inode = namespace
-                .next_inode
-                .checked_add(1)
-                .ok_or_else(|| error_with_path(ErrorCode::Eoverflow, "mknod", &normalized))?;
-            let timestamp = now_ms();
-            let mode = kind.mode_bits() | (mode & !S_IFMT & !namespace.umask & 0o7777);
-            namespace.nodes.insert(
-                inode,
-                NodeMetadata {
-                    stats: Stats {
-                        dev: 0,
-                        ino: inode,
-                        mode,
-                        nlink: 1,
-                        uid: namespace.default_uid,
-                        gid: namespace.default_gid,
-                        rdev: if matches!(kind, FileType::BlockDevice | FileType::CharacterDevice) {
-                            dev
-                        } else {
-                            0
-                        },
-                        size: 0,
-                        blksize: BLOCK_SIZE,
-                        blocks: 0,
-                        atime_ms: timestamp,
-                        mtime_ms: timestamp,
-                        ctime_ms: timestamp,
-                        birthtime_ms: timestamp,
-                    },
-                    data: if kind == FileType::File {
-                        NodeData::File(FileLayout {
-                            chunker: namespace.default_chunker.clone(),
-                            extents: Vec::new(),
-                        })
-                    } else {
-                        NodeData::Special
-                    },
-                },
-            );
-            add_entry(
+            apply_mknod_mutation(
                 namespace,
-                entry.parent,
-                entry.name,
-                inode,
-                "mknod",
-                &entry.path,
+                &normalized,
+                mode,
+                dev,
+                self.inner.options.concurrent_writes,
             )
+            .map(|_| ())
         })
         .await
     }
+}
+
+fn apply_rmdir_mutation<M, B>(
+    runtime: &ChunkedFs<M, B>,
+    namespace: &mut Namespace,
+    path: &str,
+) -> Result<()>
+where
+    M: MetadataStore + 'static,
+    B: BlockStore + 'static,
+{
+    let normalized = normalize_path(path);
+
+    let entry = walk(namespace, &normalized, false, "rmdir", 0)?;
+    let inode = entry
+        .node
+        .ok_or_else(|| error_with_path(ErrorCode::Enoent, "rmdir", &entry.path))?;
+    if inode == namespace.root {
+        return Err(error_with_path(ErrorCode::Ebusy, "rmdir", &entry.path));
+    }
+    let node = namespace
+        .nodes
+        .get(&inode)
+        .ok_or_else(|| error_with_path(ErrorCode::Estale, "rmdir", &entry.path))?;
+    if !matches!(node.data, NodeData::Directory { .. }) {
+        return Err(error_with_path(ErrorCode::Enotdir, "rmdir", &entry.path));
+    }
+    if let NodeData::Directory { entries } = &node.data
+        && !entries.is_empty()
+    {
+        return Err(error_with_path(ErrorCode::Enotempty, "rmdir", &entry.path));
+    }
+    detach_entry(
+        namespace,
+        entry.parent,
+        &entry.name,
+        true,
+        "rmdir",
+        &entry.path,
+        runtime.inner.options.concurrent_writes,
+    )?;
+    runtime.reap_detached(namespace, inode)
+}
+
+fn apply_rename_mutation<M, B>(
+    runtime: &ChunkedFs<M, B>,
+    namespace: &mut Namespace,
+    old_path: &str,
+    new_path: &str,
+) -> Result<()>
+where
+    M: MetadataStore + 'static,
+    B: BlockStore + 'static,
+{
+    let old_normalized = normalize_path(old_path);
+    let new_normalized = normalize_path(new_path);
+
+    let from = walk(namespace, &old_normalized, false, "rename", 0)?;
+    let source = from.node.ok_or_else(|| {
+        error_with_path(ErrorCode::Enoent, "rename", &old_normalized)
+            .with_dest(new_normalized.clone())
+    })?;
+    if source == namespace.root {
+        return Err(error_with_path(
+            ErrorCode::Einval,
+            "rename",
+            &old_normalized,
+        ));
+    }
+    let to = walk(namespace, &new_normalized, false, "rename", 0)?;
+    if to.node == Some(source) {
+        return Ok(());
+    }
+    let source_is_dir = namespace
+        .nodes
+        .get(&source)
+        .is_some_and(|node| matches!(node.data, NodeData::Directory { .. }));
+    if source_is_dir && is_path_inside(&to.path, &from.path) {
+        return Err(
+            error_with_path(ErrorCode::Einval, "rename", &old_normalized)
+                .with_dest(new_normalized.clone()),
+        );
+    }
+    if let Some(destination) = to.node {
+        let destination_is_dir = namespace
+            .nodes
+            .get(&destination)
+            .is_some_and(|node| matches!(node.data, NodeData::Directory { .. }));
+        if source_is_dir {
+            if !destination_is_dir {
+                return Err(
+                    error_with_path(ErrorCode::Enotdir, "rename", &old_normalized)
+                        .with_dest(new_normalized.clone()),
+                );
+            }
+            if let Some(NodeMetadata {
+                data: NodeData::Directory { entries },
+                ..
+            }) = namespace.nodes.get(&destination)
+                && !entries.is_empty()
+            {
+                return Err(
+                    error_with_path(ErrorCode::Enotempty, "rename", &old_normalized)
+                        .with_dest(new_normalized.clone()),
+                );
+            }
+        } else if destination_is_dir {
+            return Err(
+                error_with_path(ErrorCode::Eisdir, "rename", &old_normalized)
+                    .with_dest(new_normalized.clone()),
+            );
+        }
+        detach_entry(
+            namespace,
+            to.parent,
+            &to.name,
+            true,
+            "rename",
+            &to.path,
+            runtime.inner.options.concurrent_writes,
+        )?;
+        runtime.reap_detached(namespace, destination)?;
+    }
+    detach_entry(
+        namespace,
+        from.parent,
+        &from.name,
+        false,
+        "rename",
+        &from.path,
+        runtime.inner.options.concurrent_writes,
+    )?;
+    add_entry(
+        namespace,
+        to.parent,
+        to.name,
+        source,
+        "rename",
+        &to.path,
+        runtime.inner.options.concurrent_writes,
+    )?;
+    if let Some(node) = namespace.nodes.get_mut(&source) {
+        touch_changed(&mut node.stats, runtime.inner.options.concurrent_writes)?;
+    }
+    Ok(())
+}
+
+fn apply_link_mutation(
+    namespace: &mut Namespace,
+    existing_path: &str,
+    target_path: &str,
+    concurrent: bool,
+) -> Result<()> {
+    let existing = normalize_path(existing_path);
+    let new_path = normalize_path(target_path);
+
+    let from = walk(namespace, &existing, false, "link", 0)?;
+    let inode = from.node.ok_or_else(|| {
+        error_with_path(ErrorCode::Enoent, "link", &from.path).with_dest(new_path.clone())
+    })?;
+    if namespace
+        .nodes
+        .get(&inode)
+        .is_some_and(|node| matches!(node.data, NodeData::Directory { .. }))
+    {
+        return Err(
+            error_with_path(ErrorCode::Eperm, "link", &from.path).with_dest(new_path.clone())
+        );
+    }
+    let to = walk(namespace, &new_path, false, "link", 0)?;
+    if to.node.is_some() {
+        return Err(error_with_path(ErrorCode::Eexist, "link", &to.path));
+    }
+    if let Some(node) = namespace.nodes.get_mut(&inode) {
+        node.stats.nlink = node
+            .stats
+            .nlink
+            .checked_add(1)
+            .ok_or_else(|| error_with_path(ErrorCode::Emlink, "link", &from.path))?;
+        touch_changed(&mut node.stats, concurrent)?;
+    }
+    add_entry(
+        namespace, to.parent, to.name, inode, "link", &to.path, concurrent,
+    )
+}
+
+fn apply_mkdir_mutation(
+    namespace: &mut Namespace,
+    path: &str,
+    mode: u32,
+    concurrent: bool,
+) -> Result<InodeId> {
+    let normalized = normalize_path(path);
+    let entry = walk(namespace, &normalized, false, "mkdir", 0)?;
+    if entry.node.is_some() {
+        return Err(error_with_path(ErrorCode::Eexist, "mkdir", &entry.path));
+    }
+    let inode = namespace.next_inode;
+    namespace.next_inode = namespace
+        .next_inode
+        .checked_add(1)
+        .ok_or_else(|| error_with_path(ErrorCode::Eoverflow, "mkdir", &normalized))?;
+    let mode = S_IFDIR | (mode & !namespace.umask & 0o7777);
+    namespace.nodes.insert(
+        inode,
+        new_directory_node(inode, mode, namespace.default_uid, namespace.default_gid),
+    );
+    add_entry(
+        namespace,
+        entry.parent,
+        entry.name,
+        inode,
+        "mkdir",
+        &entry.path,
+        concurrent,
+    )?;
+    Ok(inode)
+}
+
+fn apply_symlink_mutation(
+    namespace: &mut Namespace,
+    target: &str,
+    path: &str,
+    concurrent: bool,
+) -> Result<InodeId> {
+    let normalized = normalize_path(path);
+
+    if target.is_empty() {
+        return Err(
+            error_with_path(ErrorCode::Enoent, "symlink", target).with_dest(normalized.clone())
+        );
+    }
+    let entry = walk(namespace, &normalized, false, "symlink", 0)?;
+    if entry.node.is_some() {
+        return Err(error_with_path(ErrorCode::Eexist, "symlink", &entry.path));
+    }
+    let inode = namespace.next_inode;
+    namespace.next_inode = namespace
+        .next_inode
+        .checked_add(1)
+        .ok_or_else(|| error_with_path(ErrorCode::Eoverflow, "symlink", &normalized))?;
+    let timestamp = now_ms();
+    namespace.nodes.insert(
+        inode,
+        NodeMetadata {
+            stats: Stats {
+                dev: 0,
+                ino: inode,
+                mode: mount_rs_core::types::S_IFLNK | 0o777,
+                nlink: 1,
+                uid: namespace.default_uid,
+                gid: namespace.default_gid,
+                rdev: 0,
+                size: u64::try_from(target.len())
+                    .map_err(|_| error_with_path(ErrorCode::Efbig, "symlink", &entry.path))?,
+                blksize: BLOCK_SIZE,
+                blocks: u64::try_from(target.len())
+                    .map_err(|_| error_with_path(ErrorCode::Efbig, "symlink", &entry.path))?
+                    .div_ceil(512),
+                atime_ms: timestamp,
+                mtime_ms: timestamp,
+                ctime_ms: timestamp,
+                birthtime_ms: timestamp,
+            },
+            data: NodeData::Symlink {
+                target: target.to_owned(),
+            },
+        },
+    );
+    add_entry(
+        namespace,
+        entry.parent,
+        entry.name,
+        inode,
+        "symlink",
+        &entry.path,
+        concurrent,
+    )?;
+    Ok(inode)
+}
+
+fn apply_mknod_mutation(
+    namespace: &mut Namespace,
+    path: &str,
+    mode: u32,
+    dev: u64,
+    concurrent: bool,
+) -> Result<InodeId> {
+    let normalized = normalize_path(path);
+
+    let entry = walk(namespace, &normalized, false, "mknod", 0)?;
+    if entry.node.is_some() {
+        return Err(error_with_path(ErrorCode::Eexist, "mknod", &entry.path));
+    }
+    let kind = FileType::from_mode(mode);
+    if !kind.is_special() && kind != FileType::File {
+        return Err(error_with_path(ErrorCode::Eperm, "mknod", &entry.path));
+    }
+    let inode = namespace.next_inode;
+    namespace.next_inode = namespace
+        .next_inode
+        .checked_add(1)
+        .ok_or_else(|| error_with_path(ErrorCode::Eoverflow, "mknod", &normalized))?;
+    let timestamp = now_ms();
+    let mode = kind.mode_bits() | (mode & !S_IFMT & !namespace.umask & 0o7777);
+    namespace.nodes.insert(
+        inode,
+        NodeMetadata {
+            stats: Stats {
+                dev: 0,
+                ino: inode,
+                mode,
+                nlink: 1,
+                uid: namespace.default_uid,
+                gid: namespace.default_gid,
+                rdev: if matches!(kind, FileType::BlockDevice | FileType::CharacterDevice) {
+                    dev
+                } else {
+                    0
+                },
+                size: 0,
+                blksize: BLOCK_SIZE,
+                blocks: 0,
+                atime_ms: timestamp,
+                mtime_ms: timestamp,
+                ctime_ms: timestamp,
+                birthtime_ms: timestamp,
+            },
+            data: if kind == FileType::File {
+                NodeData::File(FileLayout {
+                    chunker: namespace.default_chunker.clone(),
+                    extents: Vec::new(),
+                })
+            } else {
+                NodeData::Special
+            },
+        },
+    );
+    add_entry(
+        namespace,
+        entry.parent,
+        entry.name,
+        inode,
+        "mknod",
+        &entry.path,
+        concurrent,
+    )?;
+    Ok(inode)
 }
 
 fn mutation_reply(request: MutationRequest, result: Result<MutationResult>) {
@@ -2457,6 +3417,7 @@ fn apply_whole_file_mutation(
     namespace: &mut Namespace,
     current_revision: u64,
     mutation: &WholeFileMutation,
+    concurrent: bool,
 ) -> Result<WholeFileMutationResult> {
     if mutation.new_inode {
         let entry = walk(namespace, &mutation.path, true, "open", 0)?;
@@ -2485,6 +3446,7 @@ fn apply_whole_file_mutation(
             mutation.inode,
             "open",
             &entry.path,
+            concurrent,
         )?;
         let target = namespace
             .nodes
@@ -2492,11 +3454,21 @@ fn apply_whole_file_mutation(
             .ok_or_else(|| error_with_path(ErrorCode::Estale, "write", &mutation.path))?;
         target.data = NodeData::File(mutation.layout.clone());
         set_file_size(&mut target.stats, mutation.data_length);
-        touch_modified(&mut target.stats);
+        touch_modified(&mut target.stats, concurrent)?;
         return Ok(WholeFileMutationResult::Committed);
     }
 
     if current_revision != mutation.expected_revision {
+        return Ok(WholeFileMutationResult::Conflict);
+    }
+    // A same-batch unlink or rename can leave the old inode as a concurrent
+    // tombstone. Path-based writeFile must not acknowledge bytes on an inode
+    // that the requested path no longer names.
+    if walk(namespace, &mutation.path, true, "write", 0)
+        .ok()
+        .and_then(|entry| entry.node)
+        != Some(mutation.inode)
+    {
         return Ok(WholeFileMutationResult::Conflict);
     }
     let Some(target) = namespace.nodes.get_mut(&mutation.inode) else {
@@ -2511,7 +3483,7 @@ fn apply_whole_file_mutation(
     }
     target.data = NodeData::File(mutation.layout.clone());
     set_file_size(&mut target.stats, mutation.data_length);
-    touch_modified(&mut target.stats);
+    touch_modified(&mut target.stats, concurrent)?;
     Ok(WholeFileMutationResult::Committed)
 }
 
@@ -2542,6 +3514,7 @@ where
         true,
         "unlink",
         &entry.path,
+        runtime.inner.options.concurrent_writes,
     )?;
     runtime.reap_detached(namespace, inode)
 }
@@ -2693,10 +3666,194 @@ fn set_file_size(stats: &mut Stats, size: u64) {
     stats.blocks = size.div_ceil(512);
 }
 
-fn touch_modified(stats: &mut Stats) {
-    let now = now_ms();
-    stats.mtime_ms = now;
-    stats.ctime_ms = now;
+fn touch_modified(stats: &mut Stats, concurrent: bool) -> Result<()> {
+    touch_modified_at(stats, now_ms(), concurrent)
+}
+
+fn touch_changed(stats: &mut Stats, concurrent: bool) -> Result<()> {
+    touch_changed_at(stats, now_ms(), concurrent)
+}
+
+fn touch_changed_at(stats: &mut Stats, now: i64, concurrent: bool) -> Result<()> {
+    stats.ctime_ms = if concurrent {
+        next_concurrent_time(stats.ctime_ms, now, "file change time overflow")?
+    } else {
+        now
+    };
+    Ok(())
+}
+
+fn next_concurrent_time(prior: i64, now: i64, overflow_message: &str) -> Result<i64> {
+    let next = prior
+        .checked_add(1)
+        .ok_or_else(|| FsError::new(ErrorCode::Eoverflow).with_message(overflow_message))?;
+    Ok(now.max(next))
+}
+
+fn touch_modified_at(stats: &mut Stats, now: i64, concurrent: bool) -> Result<()> {
+    if !concurrent {
+        // Preserve the original exclusive-mode semantics, including a write
+        // after explicit future utimes resetting mtime to the write time.
+        stats.mtime_ms = now;
+        stats.ctime_ms = now;
+        return Ok(());
+    }
+    // Concurrent CAS writers can commit inside one millisecond or use host
+    // clocks with skew. Distinct persisted mtimes prevent NFS clients from
+    // treating changed data and names as an unchanged cached object.
+    let next_mtime = next_concurrent_time(stats.mtime_ms, now, "file modification time overflow")?;
+    let next_ctime = next_concurrent_time(stats.ctime_ms, now, "file change time overflow")?;
+    stats.mtime_ms = next_mtime;
+    stats.ctime_ms = next_ctime;
+    Ok(())
+}
+
+fn stale_guard(path: &str, syscall: &str) -> FsError {
+    error_with_path(ErrorCode::Estale, syscall, path)
+        .with_message("opaque handle no longer names its original inode")
+}
+
+fn check_path_guard(namespace: &Namespace, guard: &PathGuard, syscall: &str) -> Result<InodeId> {
+    let path = normalize_path(&guard.path);
+    if guard.identity.ino == 0 {
+        return Err(stale_guard(&path, syscall));
+    }
+    let inode =
+        resolve(namespace, &path, false, syscall).map_err(|_| stale_guard(&path, syscall))?;
+    let node = namespace
+        .nodes
+        .get(&inode)
+        .ok_or_else(|| stale_guard(&path, syscall))?;
+    if node.stats.dev != guard.identity.dev || node.stats.ino != guard.identity.ino {
+        return Err(stale_guard(&path, syscall));
+    }
+    Ok(inode)
+}
+
+fn guarded_child_path(parent: &PathGuard, name: &str, syscall: &str) -> Result<String> {
+    if name.is_empty() || name.contains('/') || name.contains('\0') || matches!(name, "." | "..") {
+        return Err(error_with_path(ErrorCode::Einval, syscall, name));
+    }
+    Ok(normalize_path(&format!("{}/{name}", parent.path)))
+}
+
+fn check_observed_entry(
+    namespace: &Namespace,
+    inode: Option<InodeId>,
+    observed: ObservedEntry,
+    path: &str,
+    syscall: &str,
+) -> Result<()> {
+    match observed {
+        ObservedEntry::Any => Ok(()),
+        ObservedEntry::Absent if inode.is_none() => Ok(()),
+        ObservedEntry::Identity(identity) if identity.ino != 0 => {
+            let node = inode
+                .and_then(|inode| namespace.nodes.get(&inode))
+                .ok_or_else(|| stale_guard(path, syscall))?;
+            if node.stats.dev == identity.dev && node.stats.ino == identity.ino {
+                Ok(())
+            } else {
+                Err(stale_guard(path, syscall))
+            }
+        }
+        _ => Err(stale_guard(path, syscall)),
+    }
+}
+
+fn guarded_child_entry(
+    namespace: &Namespace,
+    parent: &PathGuard,
+    name: &str,
+    observed: ObservedEntry,
+    syscall: &str,
+) -> Result<Entry> {
+    let parent_inode = check_path_guard(namespace, parent, syscall)?;
+    let parent_node = namespace
+        .nodes
+        .get(&parent_inode)
+        .ok_or_else(|| stale_guard(&parent.path, syscall))?;
+    if !matches!(parent_node.data, NodeData::Directory { .. }) {
+        return Err(stale_guard(&parent.path, syscall));
+    }
+    let path = guarded_child_path(parent, name, syscall)?;
+    let entry = walk(namespace, &path, false, syscall, 0)?;
+    if entry.parent != parent_inode {
+        return Err(stale_guard(&parent.path, syscall));
+    }
+    check_observed_entry(namespace, entry.node, observed, &path, syscall)?;
+    Ok(entry)
+}
+
+fn apply_guarded_setattr(
+    namespace: &mut Namespace,
+    target: &PathGuard,
+    change: GuardedSetattr,
+    concurrent: bool,
+) -> Result<()> {
+    let inode = check_path_guard(namespace, target, "setattr")?;
+    let node = namespace
+        .nodes
+        .get_mut(&inode)
+        .ok_or_else(|| stale_guard(&target.path, "setattr"))?;
+    if change
+        .expected_ctime_ms
+        .is_some_and(|expected| node.stats.ctime_ms != expected)
+    {
+        return Err(error_with_path(ErrorCode::Eagain, "setattr", &target.path)
+            .with_message("change time guard does not match the current inode"));
+    }
+    let mut metadata_changed = false;
+    if let Some(mode) = change.mode {
+        node.stats.mode = (node.stats.mode & S_IFMT) | (mode & 0o7777);
+        metadata_changed = true;
+    }
+    if let Some(uid) = change.uid
+        && uid != u32::MAX
+    {
+        node.stats.uid = uid;
+        metadata_changed = true;
+    }
+    if let Some(gid) = change.gid
+        && gid != u32::MAX
+    {
+        node.stats.gid = gid;
+        metadata_changed = true;
+    }
+    let size_changed = if let Some(length) = change.size {
+        let layout = match &mut node.data {
+            NodeData::File(layout) => layout,
+            NodeData::Directory { .. } => {
+                return Err(error_with_path(ErrorCode::Eisdir, "setattr", &target.path));
+            }
+            NodeData::Special => {
+                return Err(error_with_path(ErrorCode::Einval, "setattr", &target.path));
+            }
+            NodeData::Symlink { .. } => {
+                return Err(error_with_path(ErrorCode::Eio, "setattr", &target.path));
+            }
+        };
+        if length < node.stats.size {
+            trim_extents(&mut layout.extents, length)?;
+        }
+        set_file_size(&mut node.stats, length);
+        touch_modified(&mut node.stats, concurrent)?;
+        true
+    } else {
+        false
+    };
+    if let Some(atime_ms) = change.atime_ms {
+        node.stats.atime_ms = atime_ms;
+        metadata_changed = true;
+    }
+    if let Some(mtime_ms) = change.mtime_ms {
+        node.stats.mtime_ms = mtime_ms;
+        metadata_changed = true;
+    }
+    if metadata_changed && !size_changed {
+        touch_changed(&mut node.stats, concurrent)?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -2817,6 +3974,7 @@ fn add_entry(
     inode: InodeId,
     syscall: &str,
     path: &str,
+    concurrent: bool,
 ) -> Result<()> {
     let is_directory = namespace
         .nodes
@@ -2841,7 +3999,7 @@ fn add_entry(
             .checked_add(1)
             .ok_or_else(|| error_with_path(ErrorCode::Emlink, syscall, path))?;
     }
-    touch_modified(&mut parent_node.stats);
+    touch_modified(&mut parent_node.stats, concurrent)?;
     Ok(())
 }
 
@@ -2852,6 +4010,7 @@ fn detach_entry(
     decrement_link: bool,
     syscall: &str,
     path: &str,
+    concurrent: bool,
 ) -> Result<InodeId> {
     let inode = {
         let inode = namespace
@@ -2888,7 +4047,7 @@ fn detach_entry(
                 .checked_sub(1)
                 .ok_or_else(|| error_with_path(ErrorCode::Eio, syscall, path))?;
         }
-        touch_modified(&mut parent_node.stats);
+        touch_modified(&mut parent_node.stats, concurrent)?;
         inode
     };
     if decrement_link
@@ -2900,7 +4059,7 @@ fn detach_entry(
             .nlink
             .checked_sub(1)
             .ok_or_else(|| error_with_path(ErrorCode::Eio, syscall, path))?;
-        node.stats.ctime_ms = now_ms();
+        touch_changed(&mut node.stats, concurrent)?;
     }
     Ok(inode)
 }
@@ -3303,6 +4462,224 @@ mod tests {
                 gets: Arc::new(AtomicUsize::new(0)),
                 reconciled: Arc::new(Mutex::new(None)),
             }
+        }
+    }
+
+    type FlushHook = Box<dyn FnOnce() + Send>;
+
+    #[derive(Clone)]
+    struct RevisionRaceMetadata {
+        state: Arc<Mutex<LoadedMetadata>>,
+        on_flush: Arc<Mutex<Option<FlushHook>>>,
+    }
+
+    impl RevisionRaceMetadata {
+        fn new() -> Self {
+            Self {
+                state: Arc::new(Mutex::new(LoadedMetadata {
+                    revision: 0,
+                    namespace: None,
+                })),
+                on_flush: Arc::new(Mutex::new(None)),
+            }
+        }
+
+        fn on_next_flush(&self, callback: impl FnOnce() + Send + 'static) {
+            *self.on_flush.lock().expect("flush hook lock") = Some(Box::new(callback));
+        }
+    }
+
+    #[async_trait]
+    impl MetadataStore for RevisionRaceMetadata {
+        fn durable(&self) -> bool {
+            false
+        }
+
+        async fn load(&self) -> Result<LoadedMetadata> {
+            Ok(self.state.lock().expect("revision state lock").clone())
+        }
+
+        async fn prepare_concurrent_mode(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn acquire_writer(&self, _owner: &str, _ttl: Duration) -> Result<WriterLease> {
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+
+        async fn renew_writer(&self, _lease: &WriterLease, _ttl: Duration) -> Result<WriterLease> {
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+
+        async fn release_writer(&self, _lease: &WriterLease) -> Result<()> {
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+
+        async fn publish(
+            &self,
+            _expected_revision: u64,
+            _lease: &WriterLease,
+            _namespace: Namespace,
+        ) -> Result<u64> {
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+
+        async fn publish_if_revision(
+            &self,
+            expected_revision: u64,
+            namespace: Namespace,
+        ) -> Result<u64> {
+            namespace.validate()?;
+            let mut state = self.state.lock().expect("revision state lock");
+            if state.revision != expected_revision {
+                return Err(FsError::new(ErrorCode::Eagain));
+            }
+            state.revision = state
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+            state.namespace = Some(namespace);
+            Ok(state.revision)
+        }
+
+        async fn flush(&self) -> Result<()> {
+            let hook = self.on_flush.lock().expect("flush hook lock").take();
+            if let Some(hook) = hook {
+                hook();
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn concurrent_ack_does_not_regress_a_newer_locally_loaded_revision() {
+        let metadata = RevisionRaceMetadata::new();
+        let fs = block_on(ChunkedFs::open(
+            metadata.clone(),
+            MemoryBlockStore::new(),
+            ChunkedOptions::fixed("race", 4)
+                .expect("chunker")
+                .with_concurrent_writes(true),
+        ))
+        .expect("open concurrent filesystem");
+        let (namespace, revision) = fs.snapshot().expect("initial snapshot");
+        let refreshing = fs.clone();
+        let remote = metadata.clone();
+        metadata.on_next_flush(move || {
+            let latest = block_on(remote.load()).expect("load after local CAS");
+            let newer = block_on(remote.publish_if_revision(
+                latest.revision,
+                latest.namespace.expect("published namespace"),
+            ))
+            .expect("remote writer commits a newer revision");
+            block_on(refreshing.refresh_concurrent_namespace()).expect("refresh newer revision");
+            assert_eq!(refreshing.snapshot().expect("newer snapshot").1, newer);
+        });
+
+        let acknowledged = block_on(fs.publish_namespace(revision, namespace, true))
+            .expect("local publication acknowledges");
+        assert_eq!(acknowledged, revision + 1);
+        assert_eq!(
+            fs.snapshot().expect("post-ack snapshot").1,
+            revision + 2,
+            "the older acknowledgement must not overwrite a newer remote refresh"
+        );
+        block_on(fs.shutdown()).expect("shutdown");
+    }
+
+    #[test]
+    fn prepared_whole_file_mutation_conflicts_if_same_batch_unlinks_its_path() {
+        let fs = block_on(ChunkedFs::open(
+            RevisionRaceMetadata::new(),
+            MemoryBlockStore::new(),
+            ChunkedOptions::fixed("batch-path", 4)
+                .expect("chunker")
+                .with_concurrent_writes(true),
+        ))
+        .expect("open concurrent filesystem");
+        block_on(fs.write_file("/victim", b"old")).expect("create victim");
+        let (mut candidate, revision) = fs.snapshot().expect("prebatch snapshot");
+        let inode = resolve(&candidate, "/victim", true, "test").expect("victim inode");
+        let original = candidate.nodes.get(&inode).expect("victim node").clone();
+        let NodeData::File(layout) = &original.data else {
+            panic!("victim must be a file")
+        };
+        let mutation = WholeFileMutation {
+            path: "/victim".to_owned(),
+            inode,
+            expected_revision: revision,
+            new_inode: false,
+            original: Some(original.clone()),
+            layout: layout.clone(),
+            data_length: original.stats.size,
+        };
+
+        apply_unlink_mutation(&fs, &mut candidate, "/victim").expect("earlier batch unlink");
+        assert!(
+            candidate.nodes.contains_key(&inode),
+            "concurrent tombstone remains"
+        );
+        assert!(matches!(
+            apply_whole_file_mutation(&mut candidate, revision, &mutation, true)
+                .expect("prepared write outcome"),
+            WholeFileMutationResult::Conflict,
+        ));
+        block_on(fs.shutdown()).expect("shutdown");
+    }
+
+    #[test]
+    fn exclusive_write_resets_explicit_future_mtime_to_write_time() {
+        let fs = block_on(ChunkedFs::open(
+            MemoryMetadataStore::new(),
+            MemoryBlockStore::new(),
+            ChunkedOptions::fixed("legacy-mtime", 4).expect("chunker"),
+        ))
+        .expect("open exclusive filesystem");
+        block_on(fs.write_file("/legacy", b"old")).expect("create legacy file");
+        let future = now_ms()
+            .checked_add(60_000)
+            .expect("test timestamp fits i64");
+        block_on(fs.utimes("/legacy", future, future)).expect("set explicit future mtime");
+        block_on(fs.write_file("/legacy", b"new")).expect("replace file bytes");
+        assert!(
+            block_on(fs.stat("/legacy")).expect("legacy stat").mtime_ms < future,
+            "exclusive mode keeps its original write-after-utimes timestamp semantics"
+        );
+        block_on(fs.shutdown()).expect("shutdown");
+    }
+
+    #[test]
+    fn three_same_clock_concurrent_cas_commits_keep_distinct_mtimes() {
+        let metadata = RevisionRaceMetadata::new();
+        block_on(metadata.prepare_concurrent_mode()).expect("prepare concurrent mode");
+        let options = ChunkedOptions::fixed("mtime-cas", 4).expect("chunker");
+        let mut namespace = initial_namespace(&options).expect("initial namespace");
+        let root = namespace.root;
+        let fixed_now = 123_456_i64;
+        let root_stats = &mut namespace.nodes.get_mut(&root).expect("root node").stats;
+        root_stats.mtime_ms = fixed_now;
+        root_stats.ctime_ms = fixed_now;
+        let mut revision =
+            block_on(metadata.publish_if_revision(0, namespace.clone())).expect("publish baseline");
+
+        for expected in (fixed_now + 1)..=(fixed_now + 3) {
+            touch_modified_at(
+                &mut namespace.nodes.get_mut(&root).expect("root node").stats,
+                fixed_now,
+                true,
+            )
+            .expect("stamp one same-clock mutation");
+            revision = block_on(metadata.publish_if_revision(revision, namespace.clone()))
+                .expect("publish one CAS revision");
+            let loaded = block_on(metadata.load()).expect("load committed revision");
+            assert_eq!(loaded.revision, revision);
+            assert_eq!(
+                loaded.namespace.expect("published namespace").nodes[&root]
+                    .stats
+                    .mtime_ms,
+                expected,
+                "successive same-clock revisions must not reuse an older mtime",
+            );
         }
     }
 
@@ -4335,5 +5712,146 @@ mod tests {
         );
         block_on(file.close()).unwrap();
         assert_eq!(block_on(filesystem.readdir("/a/b")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn canceled_exclusive_close_can_retry_and_reap_an_unlinked_inode() {
+        let metadata = MemoryMetadataStore::new();
+        let filesystem = block_on(ChunkedFs::open(
+            metadata.clone(),
+            MemoryBlockStore::new(),
+            options("canceled-exclusive-close"),
+        ))
+        .expect("open exclusive filesystem");
+        let handle = block_on(filesystem.open("/file", "w+", 0o600)).expect("open file");
+        let inode = block_on(handle.stat()).expect("fstat before unlink").ino;
+        block_on(filesystem.unlink("/file")).expect("unlink open file");
+        assert_eq!(
+            filesystem.lock_state().unwrap().open_refs.get(&inode),
+            Some(&1)
+        );
+        assert!(
+            filesystem
+                .lock_state()
+                .unwrap()
+                .orphans
+                .contains_key(&inode)
+        );
+        assert!(
+            !block_on(metadata.load())
+                .unwrap()
+                .namespace
+                .unwrap()
+                .nodes
+                .contains_key(&inode)
+        );
+
+        let filesystem_gate = block_on(filesystem.inner.gate.lock());
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut context = Context::from_waker(&waker);
+        let mut interrupted = Box::pin(handle.close());
+        assert!(matches!(
+            Future::poll(interrupted.as_mut(), &mut context),
+            Poll::Pending
+        ));
+        drop(interrupted);
+        drop(filesystem_gate);
+
+        block_on(handle.close()).expect("retry interrupted close");
+        assert!(
+            !filesystem
+                .lock_state()
+                .unwrap()
+                .open_refs
+                .contains_key(&inode)
+        );
+        assert!(
+            !filesystem
+                .lock_state()
+                .unwrap()
+                .orphans
+                .contains_key(&inode)
+        );
+        assert!(
+            !block_on(metadata.load())
+                .unwrap()
+                .namespace
+                .unwrap()
+                .nodes
+                .contains_key(&inode)
+        );
+        block_on(filesystem.shutdown()).expect("shutdown exclusive filesystem");
+    }
+
+    #[test]
+    fn canceled_concurrent_close_can_retry_and_release_ref_after_remote_unlink() {
+        let metadata = RevisionRaceMetadata::new();
+        let blocks = MemoryBlockStore::new();
+        let first = block_on(ChunkedFs::open(
+            metadata.clone(),
+            blocks.clone(),
+            ChunkedOptions::fixed("canceled-concurrent-a", 4)
+                .expect("chunker")
+                .with_concurrent_writes(true),
+        ))
+        .expect("open first concurrent coordinator");
+        let second = block_on(ChunkedFs::open(
+            metadata,
+            blocks,
+            ChunkedOptions::fixed("canceled-concurrent-b", 4)
+                .expect("chunker")
+                .with_concurrent_writes(true),
+        ))
+        .expect("open second concurrent coordinator");
+        let handle = block_on(first.open("/file", "w+", 0o600)).expect("open file");
+        let inode = block_on(handle.stat())
+            .expect("fstat before remote unlink")
+            .ino;
+        block_on(second.unlink("/file")).expect("remote unlink");
+        assert_eq!(
+            block_on(handle.stat()).expect("open orphan fstat").ino,
+            inode
+        );
+        assert_eq!(first.lock_state().unwrap().open_refs.get(&inode), Some(&1));
+        assert_eq!(
+            first
+                .lock_state()
+                .unwrap()
+                .namespace
+                .nodes
+                .get(&inode)
+                .expect("concurrent tombstone")
+                .stats
+                .nlink,
+            0
+        );
+
+        let filesystem_gate = block_on(first.inner.gate.lock());
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut context = Context::from_waker(&waker);
+        let mut interrupted = Box::pin(handle.close());
+        assert!(matches!(
+            Future::poll(interrupted.as_mut(), &mut context),
+            Poll::Pending
+        ));
+        drop(interrupted);
+        drop(filesystem_gate);
+
+        block_on(handle.close()).expect("retry interrupted concurrent close");
+        let state = first.lock_state().unwrap();
+        assert!(!state.open_refs.contains_key(&inode));
+        assert_eq!(
+            state
+                .namespace
+                .nodes
+                .get(&inode)
+                .expect("remote tombstone remains until distributed reclamation")
+                .stats
+                .nlink,
+            0
+        );
+        drop(state);
+        block_on(first.shutdown()).expect("shutdown first coordinator");
+        block_on(second.shutdown()).expect("shutdown second coordinator");
     }
 }

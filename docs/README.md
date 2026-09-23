@@ -2,6 +2,8 @@
 
 - [Code architecture](code-architecture.md): workspace map, dependency direction
   and extension recipes.
+- [macOS usage](macos-usage.md): native NFS mount, Finder path, and backend
+  prerequisites.
 - [Storage composition and durability](../ARCHITECTURE.md): provider roles,
   publication ordering and verified safety boundaries.
 - [Work tracker](../WORK_TRACKER.md) and [porting status](../PORTING_STATUS.md):

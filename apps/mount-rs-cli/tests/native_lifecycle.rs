@@ -405,6 +405,131 @@ fn cli_nfs_config_binary_persists_bytes_and_cleans_up_on_sigint() {
 
 #[test]
 #[cfg(target_os = "macos")]
+#[ignore = "requires opt-in macOS NFS access; see the test command in the CLI README"]
+fn cli_nfs_memory_config_binary_mounts_io_and_resets_on_restart() {
+    require_opt_in("MOUNT_RS_CLI_NATIVE_NFS");
+
+    let mountpoint = unique_mountpoint();
+    let config_path = mountpoint.with_extension("memory.json");
+    let mut artifacts = NativeArtifacts::new(mountpoint.clone(), "nfs");
+    artifacts.file(config_path.clone());
+    fs::create_dir(&mountpoint).expect("create disposable memory NFS mountpoint");
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "version": 1,
+            "mountpoint": mountpoint,
+            "transport": "nfs",
+            "empty": true,
+            "driver": { "kind": "memory" }
+        }))
+        .expect("serialize memory NFS config"),
+    )
+    .expect("write memory NFS config");
+
+    let name = "volatile-native-memory";
+    let first_payload = b"first CLI memory process";
+    run_configured_mount_cycle(&config_path, &mountpoint, "nfs", |target| {
+        let path = target.join(name);
+        fs::write(&path, first_payload)?;
+        if fs::read(path)? != first_payload {
+            return Err(std::io::Error::other("memory NFS byte read mismatch"));
+        }
+        Ok(())
+    });
+
+    // A fresh CLI process must expose an empty memory filesystem, while the
+    // same native mountpoint remains usable for new I/O.
+    run_configured_mount_cycle(&config_path, &mountpoint, "nfs", |target| {
+        let path = target.join(name);
+        match fs::metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => return Err(std::io::Error::other("memory NFS state survived restart")),
+            Err(error) => return Err(error),
+        }
+        let second_payload = b"second CLI memory process";
+        fs::write(&path, second_payload)?;
+        if fs::read(&path)? != second_payload {
+            return Err(std::io::Error::other("restarted memory NFS read mismatch"));
+        }
+        fs::remove_file(path)
+    });
+
+    artifacts.finish();
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+#[ignore = "requires opt-in macOS NFS access and an isolated PGlite server"]
+fn cli_nfs_pglite_config_binary_mounts_io_and_reopens() {
+    require_opt_in("MOUNT_RS_CLI_NATIVE_NFS");
+    let database_url = std::env::var("PGLITE_DATABASE_URL")
+        .expect("PGLITE_DATABASE_URL must point to the isolated PGlite server");
+    assert!(
+        !database_url.trim().is_empty(),
+        "PGLITE_DATABASE_URL must not be empty"
+    );
+
+    let mountpoint = unique_mountpoint();
+    let config_path = mountpoint.with_extension("pglite.json");
+    let stem = mountpoint
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("UTF-8 unique PGlite NFS mountpoint name");
+    let volume_key = format!("mount-rs/cli-native-pglite/{stem}");
+    let mut artifacts = NativeArtifacts::new(mountpoint.clone(), "nfs");
+    artifacts.file(config_path.clone());
+    fs::create_dir(&mountpoint).expect("create disposable PGlite NFS mountpoint");
+    let provider = serde_json::json!({
+        "kind": "pglite",
+        "connection": { "env": "PGLITE_DATABASE_URL" },
+        "volume_key": volume_key,
+        "durable": false
+    });
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "version": 1,
+            "mountpoint": mountpoint,
+            "transport": "nfs",
+            "driver": {
+                "kind": "splitstore",
+                "storage": {
+                    "metadata": provider,
+                    "blocks": provider,
+                    "chunk_size_bytes": 4096
+                }
+            }
+        }))
+        .expect("serialize PGlite NFS config"),
+    )
+    .expect("write PGlite NFS config");
+
+    let name = "pglite-native-round-trip";
+    let payload = b"PGlite metadata and blocks over macOS native NFS";
+    run_configured_mount_cycle(&config_path, &mountpoint, "nfs", |target| {
+        let path = target.join(name);
+        fs::write(&path, payload)?;
+        if fs::read(&path)? != payload {
+            return Err(std::io::Error::other("PGlite NFS byte read mismatch"));
+        }
+        Ok(())
+    });
+    // The isolated server stays alive while a second CLI process reconnects
+    // to the same volume and serves the bytes through a fresh NFS mount.
+    run_configured_mount_cycle(&config_path, &mountpoint, "nfs", |target| {
+        let path = target.join(name);
+        if fs::read(&path)? != payload {
+            return Err(std::io::Error::other("PGlite NFS reopen mismatch"));
+        }
+        fs::remove_file(path)
+    });
+
+    artifacts.finish();
+}
+
+#[test]
+#[cfg(target_os = "macos")]
 #[ignore = "requires opt-in macOS NFS access and Python sqlite3"]
 fn cli_nfs_sqlite_config_binary_hosts_sqlite_and_reopens() {
     require_opt_in("MOUNT_RS_CLI_NATIVE_NFS");
@@ -660,14 +785,13 @@ fn run_configured_mount_cycle<F>(
         "send SIGINT to config-backed mount-rs {transport}"
     );
     let status = wait_for_exit(child_guard.child_mut());
-    assert!(
-        status.success(),
-        "config-backed {transport} CLI did not exit cleanly: {status}"
-    );
-
     stdout_thread.join().expect("join CLI stdout reader");
     let stderr_lines = stderr_thread.join().expect("join CLI stderr reader");
     output.extend(line_receiver.try_iter());
+    assert!(
+        status.success(),
+        "config-backed {transport} CLI did not exit cleanly: {status}; stdout={output:?}; stderr={stderr_lines:?}"
+    );
     assert!(
         io_result.is_ok(),
         "config-backed {transport} I/O failed: {io_result:?}"

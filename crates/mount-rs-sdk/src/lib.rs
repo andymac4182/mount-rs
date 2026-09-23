@@ -81,6 +81,35 @@ mod tests {
         filesystem.shutdown().await.unwrap();
     }
 
+    #[tokio::test]
+    async fn concurrent_sdk_rejects_process_local_block_backings_before_open() {
+        let metadata = StoreConfig::FoundationDb {
+            cluster_file: "/nonexistent/fdb.cluster".into(),
+            volume_key: "sdk-concurrent-check".to_owned(),
+            durable: true,
+            lease_authority: FoundationDbLeaseAuthority::RevisionCas,
+        };
+        for blocks in [
+            StoreConfig::Memory,
+            StoreConfig::Sqlite {
+                path: "/tmp/sdk-local-blocks.sqlite".into(),
+            },
+        ] {
+            let options = SplitOptions {
+                metadata: metadata.clone(),
+                blocks,
+                ..SplitOptions::memory("sdk-concurrent-check", 4096)
+            }
+            .with_concurrent_writes(true);
+            let error = Filesystem::split(options)
+                .await
+                .err()
+                .expect("local blocks must fail before provider open");
+            assert_eq!(error.code, ErrorCode::Einval);
+            assert!(error.to_string().contains("shared block"));
+        }
+    }
+
     #[cfg(feature = "observability")]
     #[tokio::test]
     async fn opt_in_driver_telemetry_preserves_sdk_roundtrip() {

@@ -22,6 +22,7 @@ const facadeExportMarkers = [
   "module.exports.mount = nativeBinding.mount",
   "module.exports.liveMounts = nativeBinding.liveMounts",
   "module.exports.unmountAll = nativeBinding.unmountAll",
+  "module.exports.shutdownFoundationdbClientNetwork = nativeBinding.shutdownFoundationdbClientNetwork",
 ]
 let source = await readFile(loader, "utf8")
 let changed = false

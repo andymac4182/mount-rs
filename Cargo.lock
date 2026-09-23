@@ -1309,6 +1309,7 @@ dependencies = [
  "libc",
  "mount-rs-auto",
  "mount-rs-core",
+ "mount-rs-foundationdb",
  "mount-rs-http",
  "mount-rs-memfs",
  "mount-rs-nfs",
@@ -1486,6 +1487,7 @@ dependencies = [
 name = "mount-rs-nfs"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "mount-rs-core",
  "mount-rs-host",
  "mount-rs-memfs",

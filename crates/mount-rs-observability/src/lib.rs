@@ -677,6 +677,82 @@ impl FsDriver for InstrumentedDriver {
         self.inner.capabilities()
     }
 
+    fn supports_guarded_mutations(&self) -> bool {
+        self.inner.supports_guarded_mutations()
+    }
+
+    fn supports_guarded_reads(&self) -> bool {
+        self.inner.supports_guarded_reads()
+    }
+
+    fn stable_inode_ids(&self) -> bool {
+        self.inner.stable_inode_ids()
+    }
+
+    async fn guarded_mutation(
+        &self,
+        request: mount_rs_core::GuardedMutation,
+    ) -> Result<mount_rs_core::GuardedMutationResult> {
+        let path = self.telemetry.is_enabled().then(|| {
+            match &request {
+                mount_rs_core::GuardedMutation::Setattr { target, .. } => &target.path,
+                mount_rs_core::GuardedMutation::Open { parent, .. }
+                | mount_rs_core::GuardedMutation::Mkdir { parent, .. }
+                | mount_rs_core::GuardedMutation::Symlink { parent, .. }
+                | mount_rs_core::GuardedMutation::Mknod { parent, .. }
+                | mount_rs_core::GuardedMutation::Unlink { parent, .. }
+                | mount_rs_core::GuardedMutation::Rmdir { parent, .. } => &parent.path,
+                mount_rs_core::GuardedMutation::Rename { from_parent, .. } => &from_parent.path,
+                mount_rs_core::GuardedMutation::Link { source, .. } => &source.path,
+            }
+            .to_owned()
+        });
+        let result = self
+            .telemetry
+            .observe_fs(
+                "core",
+                "guarded_mutation",
+                path.as_deref(),
+                self.inner.guarded_mutation(request),
+            )
+            .await?;
+        Ok(match result {
+            mount_rs_core::GuardedMutationResult::Opened { handle, identity } => {
+                mount_rs_core::GuardedMutationResult::Opened {
+                    handle: Arc::new(InstrumentedFileHandle {
+                        inner: handle,
+                        telemetry: self.telemetry.clone(),
+                    }),
+                    identity,
+                }
+            }
+            other => other,
+        })
+    }
+
+    async fn guarded_read(
+        &self,
+        request: mount_rs_core::GuardedRead,
+    ) -> Result<mount_rs_core::GuardedReadResult> {
+        let path = self.telemetry.is_enabled().then(|| {
+            match &request {
+                mount_rs_core::GuardedRead::Stat { target }
+                | mount_rs_core::GuardedRead::Readlink { target } => &target.path,
+                mount_rs_core::GuardedRead::Lookup { parent, .. } => &parent.path,
+                mount_rs_core::GuardedRead::Readdir { directory, .. } => &directory.path,
+            }
+            .to_owned()
+        });
+        self.telemetry
+            .observe_fs(
+                "core",
+                "guarded_read",
+                path.as_deref(),
+                self.inner.guarded_read(request),
+            )
+            .await
+    }
+
     async fn syncfs(&self) -> Result<()> {
         self.telemetry
             .observe_fs("core", "syncfs", None, self.inner.syncfs())
@@ -1031,6 +1107,17 @@ where
             .await
     }
 
+    async fn prepare_concurrent_mode(&self) -> Result<()> {
+        self.telemetry
+            .observe_fs(
+                "provider.metadata",
+                "concurrent.prepare",
+                None,
+                self.inner.prepare_concurrent_mode(),
+            )
+            .await
+    }
+
     async fn acquire_writer(&self, owner: &str, ttl: Duration) -> Result<WriterLease> {
         self.telemetry
             .observe_fs(
@@ -1076,6 +1163,21 @@ where
                 "publish",
                 None,
                 self.inner.publish(expected_revision, lease, namespace),
+            )
+            .await
+    }
+
+    async fn publish_if_revision(
+        &self,
+        expected_revision: u64,
+        namespace: Namespace,
+    ) -> Result<u64> {
+        self.telemetry
+            .observe_fs(
+                "provider.metadata",
+                "concurrent.publish",
+                None,
+                self.inner.publish_if_revision(expected_revision, namespace),
             )
             .await
     }
@@ -1484,7 +1586,10 @@ pub use http_propagation::{HeaderExtractor, HeaderInjector, extract_headers, inj
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mount_rs_core::FsDriver;
+    use mount_rs_core::{
+        ErrorCode, FsDriver, GuardedMutation, GuardedMutationResult, GuardedRead,
+        GuardedReadResult, GuardedSetattr, ObservedEntry, OpenFlags, PathGuard, PathIdentity,
+    };
     use mount_rs_memfs::{MemoryFs, MemoryOptions};
 
     #[test]
@@ -1533,6 +1638,139 @@ mod tests {
         assert_eq!(telemetry.snapshot().bytes_written, 5);
         assert_eq!(telemetry.snapshot().errors, 0);
         assert!(telemetry.snapshot().operations >= 2);
+    }
+
+    #[tokio::test]
+    async fn instrumented_driver_forwards_guarded_open_and_observes_its_handle() {
+        let telemetry = Telemetry::new(TelemetryConfig::enabled("guarded-test"));
+        let backing = MemoryFs::empty();
+        let root = PathIdentity::from_stats(&backing.stat("/").await.unwrap()).unwrap();
+        let driver = InstrumentedDriver::new(backing, telemetry.clone());
+
+        assert!(driver.supports_guarded_mutations());
+        assert!(driver.stable_inode_ids());
+        let opened = driver
+            .guarded_mutation(GuardedMutation::Open {
+                parent: PathGuard {
+                    path: "/".into(),
+                    identity: root,
+                },
+                name: "file".into(),
+                observed: ObservedEntry::Absent,
+                flags: OpenFlags::parse("wx", "/file").unwrap(),
+                mode: 0o600,
+            })
+            .await
+            .unwrap();
+        let GuardedMutationResult::Opened { handle, identity } = opened else {
+            panic!("guarded open must return a file handle");
+        };
+        assert_eq!(handle.write(b"hello", Some(0)).await.unwrap(), 5);
+        handle.close().await.unwrap();
+        assert_eq!(
+            PathIdentity::from_stats(&driver.stat("/file").await.unwrap()),
+            Some(identity)
+        );
+        assert_eq!(telemetry.snapshot().bytes_written, 5);
+    }
+
+    #[tokio::test]
+    async fn instrumented_driver_preserves_guarded_stale_error_and_records_it() {
+        let telemetry = Telemetry::new(TelemetryConfig::enabled("guarded-error-test"));
+        let backing = MemoryFs::empty();
+        backing
+            .open("/file", "wx", 0o600)
+            .await
+            .unwrap()
+            .close()
+            .await
+            .unwrap();
+        let original = PathIdentity::from_stats(&backing.lstat("/file").await.unwrap()).unwrap();
+        backing.unlink("/file").await.unwrap();
+        backing
+            .open("/file", "wx", 0o600)
+            .await
+            .unwrap()
+            .close()
+            .await
+            .unwrap();
+        let driver = InstrumentedDriver::new(backing, telemetry.clone());
+
+        let error = driver
+            .guarded_mutation(GuardedMutation::Setattr {
+                target: PathGuard {
+                    path: "/file".into(),
+                    identity: original,
+                },
+                change: GuardedSetattr {
+                    mode: Some(0o777),
+                    ..GuardedSetattr::default()
+                },
+            })
+            .await
+            .err()
+            .expect("replaced file must fail guarded mutation");
+        assert_eq!(error.code, ErrorCode::Estale);
+        assert_eq!(driver.lstat("/file").await.unwrap().mode & 0o777, 0o600);
+        assert_eq!(telemetry.snapshot().errors, 1);
+    }
+
+    #[tokio::test]
+    async fn instrumented_driver_forwards_guarded_reads_and_records_stale_error() {
+        let telemetry = Telemetry::new(TelemetryConfig::enabled("guarded-read-test"));
+        let backing = MemoryFs::empty();
+        backing
+            .open("/file", "wx", 0o600)
+            .await
+            .unwrap()
+            .close()
+            .await
+            .unwrap();
+        let root = backing.stat("/").await.unwrap();
+        let file = backing.lstat("/file").await.unwrap();
+        let driver = InstrumentedDriver::new(backing, telemetry.clone());
+
+        assert!(driver.supports_guarded_reads());
+        let result = driver
+            .guarded_read(GuardedRead::Readdir {
+                directory: PathGuard {
+                    path: "/".into(),
+                    identity: PathIdentity::from_stats(&root).unwrap(),
+                },
+                max_entries: 8,
+            })
+            .await
+            .unwrap();
+        let GuardedReadResult::Directory { stats, entries } = result else {
+            panic!("guarded readdir must return directory and child attributes");
+        };
+        assert_eq!(stats.ino, root.ino);
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.name == "file" && entry.stats.ino == file.ino)
+        );
+        assert_eq!(telemetry.snapshot().operations, 1);
+
+        driver.unlink("/file").await.unwrap();
+        driver
+            .open("/file", "wx", 0o600)
+            .await
+            .unwrap()
+            .close()
+            .await
+            .unwrap();
+        let error = driver
+            .guarded_read(GuardedRead::Stat {
+                target: PathGuard {
+                    path: "/file".into(),
+                    identity: PathIdentity::from_stats(&file).unwrap(),
+                },
+            })
+            .await
+            .expect_err("replaced file must fail guarded stat");
+        assert_eq!(error.code, ErrorCode::Estale);
+        assert_eq!(telemetry.snapshot().errors, 1);
     }
 
     #[test]

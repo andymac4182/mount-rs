@@ -19,14 +19,15 @@ use mount_rs_core::{
     S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK, Stats, StatsFs,
 };
 
+use crate::constants::NFS_V3;
 use crate::handles::{
     DirectorySnapshots, FileHandleTable, HandleEntry, cookie_verifier, same_backend_inode,
     same_verifier,
 };
 use crate::rpc::{
     AUTH_NONE, AUTH_SYS, RPC_GARBAGE_ARGS, RPC_PROC_UNAVAIL, RPC_PROG_MISMATCH, RPC_PROG_UNAVAIL,
-    RPC_VERSION, RpcCredentials, checked_credentials_of, decode_call, encode_accept_error,
-    encode_accepted_reply, encode_auth_error, encode_rpc_mismatch,
+    RPC_SYSTEM_ERR, RPC_VERSION, RpcCredentials, checked_credentials_of, decode_call,
+    encode_accept_error, encode_accepted_reply, encode_auth_error, encode_rpc_mismatch,
 };
 use crate::session::{
     NfsRequestContext, NfsSessionError, NfsSessionHooks, NfsSessionOptions, NfsSessionStats,
@@ -1700,6 +1701,7 @@ pub struct Nfs4Session {
     pub options: NfsSessionOptions,
     pub handles: FileHandleTable,
     pub write_verifier: [u8; 8],
+    owns_handle_table: bool,
     stats: SharedStats,
     snapshots: DirectorySnapshots,
     state: Arc<Mutex<V4State>>,
@@ -1730,7 +1732,9 @@ impl Nfs4Session {
 
     pub fn from_loopback(driver: Loopback, options: NfsSessionOptions) -> Self {
         let shared = SharedNfsState::new(&options);
-        Self::from_loopback_shared(driver, options, &shared)
+        let mut session = Self::from_loopback_shared(driver, options, &shared);
+        session.owns_handle_table = true;
+        session
     }
 
     /// Construct a loopback session with a request-level error hook.
@@ -1740,7 +1744,9 @@ impl Nfs4Session {
         hooks: NfsSessionHooks,
     ) -> Self {
         let shared = SharedNfsState::new(&options);
-        Self::from_loopback_shared_with_hooks(driver, options, &shared, hooks)
+        let mut session = Self::from_loopback_shared_with_hooks(driver, options, &shared, hooks);
+        session.owns_handle_table = true;
+        session
     }
 
     pub(crate) fn from_loopback_shared(
@@ -1764,6 +1770,7 @@ impl Nfs4Session {
             options: options.clone(),
             handles,
             write_verifier,
+            owns_handle_table: false,
             stats: shared.stats.clone(),
             snapshots: DirectorySnapshots::new(options.snapshot_cache),
             state: Arc::new(Mutex::new(V4State {
@@ -1793,6 +1800,12 @@ impl Nfs4Session {
     fn record_stat_error(&self) {
         let mut stats = self.stats.0.lock().expect("NFS stats lock");
         stats.errors = stats.errors.saturating_add(1);
+    }
+
+    fn destroyed_rpc_reply(&self, xid: u32, peer: Option<&str>) -> Vec<u8> {
+        self.record_stat_error();
+        v4_trace("rpc-reply", peer, xid, format_args!("status=destroyed"));
+        encode_accept_error(xid, RPC_SYSTEM_ERR, None)
     }
 
     fn record_status_error(&self, status: u32) {
@@ -1884,8 +1897,11 @@ impl Nfs4Session {
     }
 
     pub async fn destroy(&self) {
+        let _guard = self.path_lock.write().await;
         *self.destroyed.lock().expect("NFSv4 destroyed lock") = true;
-        self.handles.clear();
+        if self.owns_handle_table {
+            self.handles.clear();
+        }
         self.snapshots.clear();
         let open_handles = {
             let mut state = self.state.lock().expect("NFSv4 state lock");
@@ -1977,6 +1993,9 @@ impl Nfs4Session {
                 args.remaining()
             ),
         );
+        if self.destroyed() {
+            return Some(self.destroyed_rpc_reply(call.xid, peer));
+        }
         if call.rpc_version != RPC_VERSION {
             v4_trace(
                 "rpc-reply",
@@ -2018,6 +2037,22 @@ impl Nfs4Session {
                 call.xid,
                 RPC_PROG_MISMATCH,
                 Some((4, 4)),
+            ));
+        }
+        if self.options.shared_concurrent_view {
+            // This shared backing can change between handle resolution and a
+            // path-based v4 mutation. Refuse v4 until it has backend inode
+            // guards; the same router still serves the v3 protocol.
+            v4_trace(
+                "rpc-reply",
+                peer,
+                call.xid,
+                format_args!("status=shared-view-v4-unavailable"),
+            );
+            return Some(encode_accept_error(
+                call.xid,
+                RPC_PROG_MISMATCH,
+                Some((NFS_V3, NFS_V3)),
             ));
         }
         if call.procedure == NFSPROC4_NULL {
@@ -2064,6 +2099,11 @@ impl Nfs4Session {
                 drop(expiry_guard);
             })
         };
+        // A COMPOUND can queue behind teardown after its initial check.
+        // Refuse it after taking the path lock, before it can bind a new FH.
+        if self.destroyed() {
+            return Some(self.destroyed_rpc_reply(call.xid, peer));
+        }
         match self
             .dispatch_compound(&mut args, &credentials, peer, call.xid)
             .await

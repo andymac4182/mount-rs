@@ -1029,6 +1029,7 @@ module.exports.S_IFREG = nativeBinding.S_IFREG
 module.exports.S_IFSOCK = nativeBinding.S_IFSOCK
 module.exports.S_ISGID = nativeBinding.S_ISGID
 module.exports.S_IXGRP = nativeBinding.S_IXGRP
+module.exports.shutdownFoundationdbClientNetwork = nativeBinding.shutdownFoundationdbClientNetwork
 module.exports.splitPath = nativeBinding.splitPath
 module.exports.unmountAll = nativeBinding.unmountAll
 

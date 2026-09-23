@@ -12,10 +12,16 @@ cleanup() {
     kill "$server_pid" 2>/dev/null || true
     wait "$server_pid" 2>/dev/null || true
   fi
+  rm -f -- "$log_file"
 }
 trap cleanup EXIT INT TERM
 
-PGLITE_PORT="$port" node "$server_dir/server.mjs" >"$log_file" 2>&1 &
+# This harness owns only an in-memory server. Other lifecycle runners set
+# PGLITE_DATA_DIR explicitly for their own disposable persistent state.
+(
+  unset PGLITE_DATA_DIR
+  PGLITE_PORT="$port" exec node "$server_dir/server.mjs"
+) >"$log_file" 2>&1 &
 server_pid=$!
 ready=0
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
@@ -46,6 +52,19 @@ if [ "${MOUNT_RS_PGLITE_TEST_SCOPE:-}" = "native-fuse" ]; then
   MOUNT_RS_RUN_NATIVE_PGLITE_SQLITE=1 \
   PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
     "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-core --test native_pglite_sqlite -- --ignored --nocapture
+  exit 0
+fi
+
+if [ "${MOUNT_RS_PGLITE_TEST_SCOPE:-}" = "native-nfs" ]; then
+  if [ "$(uname -s)" != "Darwin" ]; then
+    echo "native-nfs scope requires macOS" >&2
+    exit 1
+  fi
+  MOUNT_RS_CLI_NATIVE_NFS=1 \
+  PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
+    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-cli \
+      --test native_lifecycle cli_nfs_pglite_config_binary_mounts_io_and_reopens \
+      -- --ignored --exact --nocapture
   exit 0
 fi
 

@@ -13,7 +13,11 @@ observability = [
     "mount-rs-http/observability",
     "mount-rs-sdk/observability",
 ]
-foundationdb = ["mount-rs-sdk/foundationdb"]
+foundationdb = [
+    "mount-rs-sdk/foundationdb",
+    "dep:mount-rs-foundationdb",
+    "mount-rs-foundationdb/foundationdb",
+]
 rustls = ["mount-rs-sdk/rustls"]
 
 [[bin]]
@@ -24,6 +28,7 @@ path = "src/main.rs"
 async-trait = "0.1"
 mount-rs-auto = { path = "../../transports/mount-rs-auto" }
 mount-rs-core = { path = "../.." }
+mount-rs-foundationdb = { path = "../../providers/mount-rs-foundationdb", optional = true }
 mount-rs-http = { path = "../../transports/mount-rs-http" }
 mount-rs-observability = { path = "../../crates/mount-rs-observability", optional = true }
 mount-rs-nfs = { path = "../../transports/mount-rs-nfs" }

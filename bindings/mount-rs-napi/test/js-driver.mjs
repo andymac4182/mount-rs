@@ -197,6 +197,101 @@ try {
   await failingFs.shutdown()
 }
 
+// Concurrent closes must wait for the in-flight callback. If that callback
+// fails, the waiting close should be able to retry the same descriptor.
+const serializedBacking = createMemoryDriver()
+let serializedAttempts = 0
+let closeStarted
+let releaseFirstClose
+const closeStartedPromise = new Promise((resolve) => { closeStarted = resolve })
+const firstCloseGate = new Promise((resolve) => { releaseFirstClose = resolve })
+const serializedDriver = {
+  ...serializedBacking,
+  async open(path, flags, mode) {
+    const handle = await serializedBacking.open(path, flags, mode)
+    if (path !== "/serialized-close") return handle
+    return {
+      ...handle,
+      async close() {
+        serializedAttempts++
+        if (serializedAttempts === 1) {
+          closeStarted()
+          await firstCloseGate
+          throw Object.assign(new Error("temporary close failure"), {
+            code: "EIO",
+            syscall: "close",
+          })
+        }
+        return handle.close()
+      },
+    }
+  },
+}
+const serializedFs = createDriver(serializedDriver)
+let serializedHandle
+let firstClose
+let secondClose
+try {
+  serializedHandle = await serializedFs.open("/serialized-close", "w")
+  firstClose = serializedHandle.close()
+  await closeStartedPromise
+  secondClose = serializedHandle.close()
+  const secondOutcome = secondClose.then(
+    () => ({ ok: true }),
+    (error) => ({ ok: false, error }),
+  )
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(serializedAttempts, 1, "second close must wait for the first")
+  releaseFirstClose()
+  await assert.rejects(firstClose, (error) => error.code === "EIO")
+  const outcome = await secondOutcome
+  assert.equal(outcome.ok, true, outcome.error?.message)
+  assert.equal(serializedAttempts, 2, "waiting close must retry after failure")
+} finally {
+  releaseFirstClose()
+  await Promise.allSettled([firstClose, secondClose].filter(Boolean))
+  await serializedHandle?.close().catch(() => {})
+  await serializedFs.shutdown()
+}
+
+// A failed structural handle close must leave its callback and descriptor
+// available so a later close can finish provider cleanup.
+const closeBacking = createMemoryDriver()
+let closeAttempts = 0
+const transientClose = {
+  ...closeBacking,
+  async open(path, flags, mode) {
+    const handle = await closeBacking.open(path, flags, mode)
+    if (path !== "/close-retry") return handle
+    return {
+      ...handle,
+      async close() {
+        closeAttempts++
+        if (closeAttempts === 1) {
+          throw Object.assign(new Error("temporary close failure"), {
+            code: "EIO",
+            syscall: "close",
+          })
+        }
+        return handle.close()
+      },
+    }
+  },
+}
+const transientFs = createDriver(transientClose)
+let transientHandle
+try {
+  transientHandle = await transientFs.open("/close-retry", "w")
+  await assert.rejects(() => transientHandle.close(), (error) => error.code === "EIO")
+  await transientHandle.stat()
+  await transientHandle.close()
+  assert.equal(closeAttempts, 2, "failed close must be invoked again")
+  await assert.rejects(() => transientHandle.stat(), (error) => error.code === "EBADF")
+} finally {
+  await transientHandle?.close().catch(() => {})
+  await transientFs.shutdown()
+}
+
 // An unresolved callback must be cancellable by explicit shutdown. This also
 // guards the strong TSFN reference: after shutdown there is no native handle
 // left that can keep Node alive while the JavaScript promise remains pending.
