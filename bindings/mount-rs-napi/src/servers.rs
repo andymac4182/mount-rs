@@ -2097,6 +2097,7 @@ pub fn create_nfs_server(
     driver: &Filesystem,
     options: Option<NfsServerOptions>,
 ) -> napi::Result<NfsServer> {
+    driver.reject_delegated_export()?;
     let (host, requested_port, options, on_transport_error, on_error, callback_keepalive) =
         nfs_options(options)?;
     if options.session.shared_concurrent_view {
@@ -3744,6 +3745,7 @@ pub fn create_p9_server(
     driver: &Filesystem,
     options: Option<P9ServerOptions>,
 ) -> napi::Result<P9Server> {
+    driver.reject_delegated_export()?;
     let (host, requested_port, mut options, on_transport_error, on_error, on_assertion) =
         p9_options(options)?;
     // The native listener and the JavaScript attach seam must share byte-range
@@ -3925,6 +3927,7 @@ fn s3_buckets(
 ) -> Result<S3BucketEntries, Error> {
     match source {
         Either::A(driver) => {
+            driver.reject_delegated_export()?;
             let bucket = bucket.unwrap_or_else(|| "mountx".to_owned());
             if !valid_s3_bucket_name(&bucket) {
                 return Err(config_error(format!("invalid S3 bucket name {bucket:?}")));
@@ -3947,6 +3950,7 @@ fn s3_buckets(
                     .map_err(|_| {
                         config_error(format!("S3 bucket {name:?} must contain a Filesystem"))
                     })?;
+                driver.reject_delegated_export()?;
                 entries.push((name, Arc::clone(&driver.driver)));
             }
             Ok(entries)
@@ -5148,6 +5152,7 @@ pub fn create_webdav_server(
     driver: &Filesystem,
     options: Option<WebdavServerOptions>,
 ) -> napi::Result<WebdavServer> {
+    driver.reject_delegated_export()?;
     let (host, _requested_port, options, on_transport_error, on_error) = webdav_options(options)?;
     let transport_error_callback = on_transport_error
         .map(TransportErrorCallback::new)

@@ -4,8 +4,9 @@
 
 use async_trait::async_trait;
 use mount_rs_core::storage::{
-    BlockId, BlockStore, ConcurrentBackingId, ConcurrentModeState, LoadedMetadata, MetadataStore,
-    Namespace, WriterLease,
+    BlockId, BlockStore, CheckoutRequest, ConcurrentBackingId, ConcurrentModeState,
+    DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState, DirectoryGrant,
+    LoadedMetadata, MetadataStore, Namespace, WriterLease,
 };
 use mount_rs_core::versioning::{
     PublicationId, ReadLease, ReadLeaseRequest, VersionHead, VersionId, VersionInfo, VersionKind,
@@ -27,6 +28,7 @@ const NOW: &str = "CAST(unixepoch('subsec') * 1000 AS INTEGER)";
 const NOW_SELECT: &str = "SELECT CAST(unixepoch('subsec') * 1000 AS INTEGER)";
 const CONCURRENT_WRITE_MODE: &str = "MRC1";
 const BOUND_WRITE_MODE: &str = "MRC2";
+const DELEGATED_WRITE_MODE: &str = "MRC3";
 const CONCURRENT_FENCE_SENTINEL: i64 = i64::MAX;
 const MAX_SQLITE_BUSY_RETRIES: usize = 16;
 const SQLITE_BUSY_RETRY_BUDGET: Duration = Duration::from_secs(30);
@@ -892,6 +894,13 @@ fn initialize_version_schema(database: &Database) -> Result<()> {
         &["id", "revision", "namespace", "owner", "fence", "expires"],
     )?;
     require_primary_key(&tx, "mount_rs_metadata", "id")?;
+    if !metadata_columns.contains("delegation_state") {
+        tx.execute(
+            "ALTER TABLE mount_rs_metadata ADD COLUMN delegation_state TEXT",
+            [],
+        )
+        .map_err(backend_error)?;
+    }
     let has_volume_id = metadata_columns.contains("volume_id");
     let has_write_mode = metadata_columns.contains("write_mode");
     let has_backing_id = metadata_columns.contains("backing_id");
@@ -959,7 +968,7 @@ fn initialize_version_schema(database: &Database) -> Result<()> {
                 && owner.is_none()
                 && fence == CONCURRENT_FENCE_SENTINEL
                 && expires == 0 => {}
-        Some(BOUND_WRITE_MODE)
+        Some(BOUND_WRITE_MODE | DELEGATED_WRITE_MODE)
             if backing
                 .as_deref()
                 .is_some_and(|id| ConcurrentBackingId::from_hex(id).is_ok())
@@ -975,7 +984,10 @@ fn initialize_version_schema(database: &Database) -> Result<()> {
     #[cfg(unix)]
     {
         let stamp = FileStamp::from_text(physical_dev.as_deref(), physical_ino.as_deref())?;
-        if mode.as_deref() == Some(BOUND_WRITE_MODE) {
+        if matches!(
+            mode.as_deref(),
+            Some(BOUND_WRITE_MODE | DELEGATED_WRITE_MODE)
+        ) {
             require_matching_metadata_stamp(
                 database,
                 physical_dev.as_deref(),
@@ -1005,11 +1017,43 @@ fn initialize_version_schema(database: &Database) -> Result<()> {
     #[cfg(not(unix))]
     {
         let _ = (&physical_dev, &physical_ino, &physical_path);
-        if mode.as_deref() == Some(BOUND_WRITE_MODE) {
+        if matches!(
+            mode.as_deref(),
+            Some(BOUND_WRITE_MODE | DELEGATED_WRITE_MODE)
+        ) {
             return Err(incompatible_schema(
                 "this platform cannot bind MRC2 SQLite metadata to a physical file",
             ));
         }
+    }
+    let (delegation_json, namespace_json): (Option<String>, Option<String>) = tx
+        .query_row(
+            "SELECT delegation_state, namespace FROM mount_rs_metadata WHERE id=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(backend_error)?;
+    if mode.as_deref() == Some(DELEGATED_WRITE_MODE) {
+        let state: DelegationState = serde_json::from_str(
+            delegation_json
+                .as_deref()
+                .ok_or_else(|| incompatible_schema("MRC3 grant state is missing"))?,
+        )
+        .map_err(backend_error)?;
+        let namespace: Namespace = serde_json::from_str(
+            namespace_json
+                .as_deref()
+                .ok_or_else(|| incompatible_schema("MRC3 namespace is missing"))?,
+        )
+        .map_err(backend_error)?;
+        if Some(state.backing.to_hex()).as_deref() != backing.as_deref() {
+            return Err(incompatible_schema("MRC3 backing and grants disagree"));
+        }
+        state.validate(&namespace)?;
+    } else if delegation_json.is_some() {
+        return Err(incompatible_schema(
+            "nondelegated SQLite metadata contains grants",
+        ));
     }
     tx.execute(
         "UPDATE mount_rs_metadata
@@ -1582,6 +1626,88 @@ fn stored_version_is_loadable(connection: &Connection, id: &VersionId) -> Result
     Ok(decode_version_for_id(raw, id).is_ok())
 }
 
+#[cfg(unix)]
+struct DelegatedRow {
+    revision: u64,
+    namespace: Namespace,
+    state: DelegationState,
+}
+
+#[cfg(unix)]
+fn load_delegated(
+    database: &Database,
+    connection: &Connection,
+    backing: Option<ConcurrentBackingId>,
+) -> Result<DelegatedRow> {
+    let (mode, stored, owner, fence, expires, revision, dev, ino, path): MetadataPublicationRow = connection.query_row(
+        "SELECT write_mode, backing_id, owner, fence, expires, revision, physical_dev, physical_ino, physical_path FROM mount_rs_metadata WHERE id=1", [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?)),
+    ).map_err(backend_error)?;
+    if mode.as_deref() != Some(DELEGATED_WRITE_MODE)
+        || backing.is_some_and(|id| Some(id.to_hex()).as_deref() != stored.as_deref())
+    {
+        return Err(stale());
+    }
+    if owner.is_some() || fence != CONCURRENT_FENCE_SENTINEL || expires != 0 {
+        return Err(incompatible_schema("MRC3 legacy fence is invalid"));
+    }
+    require_matching_metadata_stamp(database, dev.as_deref(), ino.as_deref(), path.as_deref())?;
+    let (namespace, state): (String, String) = connection
+        .query_row(
+            "SELECT namespace, delegation_state FROM mount_rs_metadata WHERE id=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(backend_error)?;
+    let namespace: Namespace = serde_json::from_str(&namespace).map_err(backend_error)?;
+    let state: DelegationState = serde_json::from_str(&state).map_err(backend_error)?;
+    if Some(state.backing.to_hex()).as_deref() != stored.as_deref() {
+        return Err(stale());
+    }
+    state.validate(&namespace)?;
+    Ok(DelegatedRow {
+        revision: u64::try_from(revision).map_err(backend_error)?,
+        namespace,
+        state,
+    })
+}
+
+#[cfg(unix)]
+impl SqliteMetadataStore {
+    fn mutate_delegation<T>(
+        &self,
+        backing: ConcurrentBackingId,
+        expected: Option<u64>,
+        mutation: impl FnOnce(&mut DelegatedRow) -> Result<T>,
+    ) -> Result<T> {
+        self.0.with_concurrent_publish_timeout(|connection| {
+            let was_autocommit = connection.is_autocommit();
+            let tx = match connection.transaction_with_behavior(TransactionBehavior::Immediate) {
+                Ok(tx) => tx,
+                Err(error) => return Err(sqlite_busy_known_noncommit(&error, was_autocommit, "mutate delegated SQLite metadata").unwrap_or_else(|| backend_error(error))),
+            };
+            let mut row = load_delegated(&self.0, &tx, Some(backing))?;
+            if expected.is_some_and(|expected| row.revision != expected) { return Err(FsError::new(ErrorCode::Eagain)); }
+            let previous = (row.revision, serde_json::to_string(&row.namespace).map_err(backend_error)?, serde_json::to_string(&row.state).map_err(backend_error)?);
+            let result = mutation(&mut row)?;
+            row.state.validate(&row.namespace)?;
+            let revision = i64::try_from(row.revision).map_err(|_| FsError::new(ErrorCode::Eoverflow))?;
+            let namespace_json = serde_json::to_string(&row.namespace).map_err(backend_error)?;
+            let state_json = serde_json::to_string(&row.state).map_err(backend_error)?;
+            if previous != (row.revision, namespace_json.clone(), state_json.clone()) {
+                let changed = tx.execute("UPDATE mount_rs_metadata SET revision=?1, namespace=?2, delegation_state=?3 WHERE id=1 AND write_mode='MRC3'", params![revision, namespace_json, state_json]).map_err(backend_error)?;
+                if changed != 1 { return Err(backend_error("SQLite delegation update returned zero rows")); }
+            }
+            self.0.current_file_stamp()?;
+            if let Err(error) = tx.commit() {
+                return Err(sqlite_busy_known_noncommit(&error, connection.is_autocommit(), "mutate delegated SQLite metadata").unwrap_or_else(|| backend_error(error)));
+            }
+            self.0.current_file_stamp()?;
+            Ok(result)
+        })
+    }
+}
+
 #[async_trait]
 impl MetadataStore for SqliteMetadataStore {
     fn durable(&self) -> bool {
@@ -1610,6 +1736,200 @@ impl MetadataStore for SqliteMetadataStore {
                 .transpose()
                 .map_err(backend_error)?,
         })
+    }
+
+    async fn delegation_state(&self) -> Result<Option<DelegationState>> {
+        #[cfg(not(unix))]
+        {
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+        #[cfg(unix)]
+        {
+            if !self.0.durable {
+                return Err(FsError::new(ErrorCode::Enotsup));
+            }
+            let connection = self.0.lock()?;
+            let mode: Option<String> = connection
+                .query_row(
+                    "SELECT write_mode FROM mount_rs_metadata WHERE id=1",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(backend_error)?;
+            if mode.as_deref() != Some(DELEGATED_WRITE_MODE) {
+                return Ok(None);
+            }
+            Ok(Some(load_delegated(&self.0, &connection, None)?.state))
+        }
+    }
+
+    async fn prepare_delegated_mode(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        #[cfg(not(unix))]
+        {
+            let _ = (backing, expected_revision);
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+        #[cfg(unix)]
+        {
+            if !self.0.durable {
+                return Err(FsError::new(ErrorCode::Enotsup));
+            }
+            let mut connection = self.0.lock()?;
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(backend_error)?;
+            let (mode, stored, revision, namespace, owner, fence, expires, dev, ino, path): MetadataClaimRow = tx.query_row(
+                "SELECT write_mode, backing_id, revision, namespace, owner, fence, expires, physical_dev, physical_ino, physical_path FROM mount_rs_metadata WHERE id=1", [],
+                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?,row.get(7)?,row.get(8)?,row.get(9)?)),
+            ).map_err(backend_error)?;
+            if mode.as_deref() == Some(DELEGATED_WRITE_MODE) {
+                let current = load_delegated(&self.0, &tx, Some(backing))?;
+                return if current.revision == expected_revision {
+                    Ok(())
+                } else {
+                    Err(FsError::new(ErrorCode::Eagain))
+                };
+            }
+            if owner.is_some() || expires != 0 {
+                return Err(FsError::new(ErrorCode::Ebusy));
+            }
+            match mode.as_deref() {
+                None if stored.is_none() && fence != CONCURRENT_FENCE_SENTINEL => {}
+                Some(BOUND_WRITE_MODE)
+                    if stored.as_deref() == Some(backing.to_hex().as_str())
+                        && fence == CONCURRENT_FENCE_SENTINEL => {}
+                _ => return Err(FsError::new(ErrorCode::Ebusy)),
+            }
+            if u64::try_from(revision).map_err(backend_error)? != expected_revision {
+                return Err(FsError::new(ErrorCode::Eagain));
+            }
+            require_matching_metadata_stamp(
+                &self.0,
+                dev.as_deref(),
+                ino.as_deref(),
+                path.as_deref(),
+            )?;
+            let namespace: Namespace =
+                serde_json::from_str(namespace.as_deref().ok_or_else(|| {
+                    FsError::new(ErrorCode::Ebusy)
+                        .with_message("initialize namespace before offline MRC3 enrollment")
+                })?)
+                .map_err(backend_error)?;
+            namespace.validate()?;
+            if namespace.nodes.values().any(|node| node.stats.nlink == 0) {
+                return Err(FsError::new(ErrorCode::Ebusy)
+                    .with_message("unowned orphan nodes prevent MRC3 enrollment"));
+            }
+            let (head, versions, pins): (Option<String>, i64, i64) = tx.query_row("SELECT head_id, (SELECT count(*) FROM mount_rs_versions), (SELECT count(*) FROM mount_rs_version_pins) FROM mount_rs_version_state WHERE id=1", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).map_err(backend_error)?;
+            if head.is_some() || versions != 0 || pins != 0 {
+                return Err(FsError::new(ErrorCode::Ebusy));
+            }
+            let state = DelegationState::new(backing);
+            state.validate(&namespace)?;
+            let changed = tx.execute("UPDATE mount_rs_metadata SET write_mode='MRC3', backing_id=?1, fence=?2, delegation_state=?3 WHERE id=1", params![backing.to_hex(), CONCURRENT_FENCE_SENTINEL, serde_json::to_string(&state).map_err(backend_error)?]).map_err(backend_error)?;
+            if changed != 1 {
+                return Err(backend_error(
+                    "SQLite delegation enrollment returned zero rows",
+                ));
+            }
+            self.0.current_file_stamp()?;
+            tx.commit().map_err(backend_error)?;
+            self.0.current_file_stamp()?;
+            Ok(())
+        }
+    }
+
+    async fn checkout(&self, request: &CheckoutRequest) -> Result<DirectoryGrant> {
+        #[cfg(not(unix))]
+        {
+            let _ = request;
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+        #[cfg(unix)]
+        {
+            self.mutate_delegation(request.backing, None, |row| {
+                row.state
+                    .checkout(&row.namespace, request.root, &request.owner)
+            })
+        }
+    }
+
+    async fn publish_delegated(
+        &self,
+        publication: &DelegatedPublish,
+        namespace: Namespace,
+    ) -> Result<u64> {
+        #[cfg(not(unix))]
+        {
+            let _ = (publication, namespace);
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+        #[cfg(unix)]
+        {
+            self.mutate_delegation(
+                publication.backing,
+                Some(publication.expected_revision),
+                |row| {
+                    row.state
+                        .authorize_publish(&row.namespace, &namespace, &publication.token)?;
+                    row.revision = row
+                        .revision
+                        .checked_add(1)
+                        .filter(|revision| *revision <= i64::MAX as u64)
+                        .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+                    row.namespace = namespace;
+                    Ok(row.revision)
+                },
+            )
+        }
+    }
+
+    async fn checkin(&self, release: &DelegatedCheckin) -> Result<()> {
+        #[cfg(not(unix))]
+        {
+            let _ = release;
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+        #[cfg(unix)]
+        {
+            self.mutate_delegation(release.backing, None, |row| {
+                if row.state.retired.contains(&release.token) {
+                    return Ok(());
+                }
+                if row.revision != release.expected_revision {
+                    return Err(FsError::new(ErrorCode::Eagain));
+                }
+                row.state.checkin(&release.token, &row.namespace)
+            })
+        }
+    }
+
+    async fn recover(&self, recovery: &DelegatedRecovery) -> Result<()> {
+        #[cfg(not(unix))]
+        {
+            let _ = recovery;
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+        #[cfg(unix)]
+        {
+            self.mutate_delegation(recovery.backing, None, |row| {
+                let old_namespace = serde_json::to_string(&row.namespace).map_err(backend_error)?;
+                row.state
+                    .recover(recovery.root, recovery.expected_fence, &mut row.namespace)?;
+                if serde_json::to_string(&row.namespace).map_err(backend_error)? != old_namespace {
+                    row.revision = row
+                        .revision
+                        .checked_add(1)
+                        .filter(|revision| *revision <= i64::MAX as u64)
+                        .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+                }
+                Ok(())
+            })
+        }
     }
 
     async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
@@ -3602,6 +3922,369 @@ mod tests {
                 },
             )]),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delegated_authority_is_durable_and_fences_old_writers() {
+        use mount_rs_core::storage::{CheckoutRequest, DelegatedCheckin, DelegatedPublish};
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        let backing = prepare_bound_metadata(&store);
+        let ns = namespace();
+        run(store.publish_bound_if_revision(backing, 0, ns.clone())).unwrap();
+        run(store.prepare_delegated_mode(backing, 1)).unwrap();
+        assert_eq!(
+            run(store.acquire_writer("old", Duration::from_secs(30)))
+                .unwrap_err()
+                .code,
+            ErrorCode::Ebusy
+        );
+        assert_eq!(
+            run(store.publish_bound_if_revision(backing, 1, ns.clone()))
+                .unwrap_err()
+                .code,
+            ErrorCode::Estale
+        );
+        let request = CheckoutRequest {
+            backing,
+            root: ns.clone().root,
+            owner: "session-a".into(),
+        };
+        let grant = run(store.checkout(&request)).unwrap();
+        assert_eq!(run(store.checkout(&request)).unwrap().token, grant.token);
+        assert_eq!(
+            run(store.checkout(&CheckoutRequest {
+                owner: "session-b".into(),
+                ..request
+            }))
+            .unwrap_err()
+            .code,
+            ErrorCode::Estale
+        );
+        drop(store);
+        let reopened = SqliteMetadataStore::open(&path).unwrap();
+        assert_eq!(
+            run(reopened.delegation_state())
+                .unwrap()
+                .unwrap()
+                .grants
+                .get(&grant.token.root)
+                .unwrap()
+                .token,
+            grant.token
+        );
+        let publication = DelegatedPublish {
+            backing,
+            token: grant.token.clone(),
+            expected_revision: 1,
+        };
+        assert_eq!(
+            run(reopened.publish_delegated(&publication, ns.clone())).unwrap(),
+            2
+        );
+        let release = DelegatedCheckin {
+            backing,
+            token: grant.token.clone(),
+            expected_revision: 2,
+        };
+        run(reopened.checkin(&release)).unwrap();
+        run(reopened.checkin(&release)).unwrap();
+        let next = run(reopened.checkout(&CheckoutRequest {
+            backing,
+            root: ns.clone().root,
+            owner: "session-b".into(),
+        }))
+        .unwrap();
+        assert!(next.token.fence > grant.token.fence);
+        let current = run(reopened.load()).unwrap().namespace.unwrap();
+        assert_eq!(
+            run(reopened.publish_delegated(
+                &DelegatedPublish {
+                    backing,
+                    token: next.token,
+                    expected_revision: 2
+                },
+                current
+            ))
+            .unwrap(),
+            3
+        );
+        run(reopened.checkin(&release)).unwrap();
+
+        assert_eq!(
+            run(reopened.publish_delegated(
+                &DelegatedPublish {
+                    expected_revision: 3,
+                    ..publication
+                },
+                ns.clone()
+            ))
+            .unwrap_err()
+            .code,
+            ErrorCode::Estale
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delegated_publication_checks_header_backing_and_revision_inside_transaction() {
+        use mount_rs_core::storage::{CheckoutRequest, DelegatedPublish, DelegatedRecovery};
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        let backing = prepare_bound_metadata(&store);
+        run(store.publish_bound_if_revision(backing, 0, namespace())).unwrap();
+        run(store.prepare_delegated_mode(backing, 1)).unwrap();
+        let grant = run(store.checkout(&CheckoutRequest {
+            backing,
+            root: namespace().root,
+            owner: "session".into(),
+        }))
+        .unwrap();
+        let publication = DelegatedPublish {
+            backing,
+            token: grant.token.clone(),
+            expected_revision: 1,
+        };
+        let mut hostile = namespace();
+        hostile.umask = 0o077;
+        assert!(run(store.publish_delegated(&publication, hostile)).is_err());
+        assert_eq!(
+            run(store.publish_delegated(
+                &DelegatedPublish {
+                    expected_revision: 0,
+                    ..publication.clone()
+                },
+                namespace()
+            ))
+            .unwrap_err()
+            .code,
+            ErrorCode::Eagain
+        );
+        assert_eq!(
+            run(store.publish_delegated(
+                &DelegatedPublish {
+                    backing: ConcurrentBackingId::from_bytes([0x43; 16]).unwrap(),
+                    ..publication.clone()
+                },
+                namespace()
+            ))
+            .unwrap_err()
+            .code,
+            ErrorCode::Estale
+        );
+        assert_eq!(
+            run(store.recover(&DelegatedRecovery {
+                backing,
+                root: grant.token.root,
+                expected_fence: grant.token.fence + 1
+            }))
+            .unwrap_err()
+            .code,
+            ErrorCode::Estale
+        );
+        run(store.recover(&DelegatedRecovery {
+            backing,
+            root: grant.token.root,
+            expected_fence: grant.token.fence,
+        }))
+        .unwrap();
+        assert_eq!(
+            run(store.publish_delegated(&publication, namespace()))
+                .unwrap_err()
+                .code,
+            ErrorCode::Estale
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    fn delegated_two_directories() -> Namespace {
+        use mount_rs_core::storage::DirectoryEntry;
+        let mut ns = namespace();
+        let root = ns.root;
+        for inode in [root + 1, root + 2] {
+            let mut node = ns.nodes[&root].clone();
+            node.stats.ino = inode;
+            node.stats.nlink = 2;
+            ns.nodes.insert(inode, node);
+        }
+        ns.nodes.get_mut(&root).unwrap().stats.nlink = 4;
+        ns.nodes.get_mut(&root).unwrap().data = NodeData::Directory {
+            entries: vec![
+                DirectoryEntry {
+                    name: "a".into(),
+                    inode: root + 1,
+                },
+                DirectoryEntry {
+                    name: "b".into(),
+                    inode: root + 2,
+                },
+            ],
+        };
+        ns.next_inode = root + 3;
+        ns.validate().unwrap();
+        ns
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delegated_subtree_blocks_hostile_outside_edits_and_allocation_reuse() {
+        use mount_rs_core::storage::{CheckoutRequest, DelegatedPublish};
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        let backing = prepare_bound_metadata(&store);
+        let ns = delegated_two_directories();
+        run(store.publish_bound_if_revision(backing, 0, ns.clone())).unwrap();
+        run(store.prepare_delegated_mode(backing, 1)).unwrap();
+        let a = run(store.checkout(&CheckoutRequest {
+            backing,
+            root: ns.root + 1,
+            owner: "a".into(),
+        }))
+        .unwrap();
+        let _b = run(store.checkout(&CheckoutRequest {
+            backing,
+            root: ns.root + 2,
+            owner: "b".into(),
+        }))
+        .unwrap();
+        assert!(
+            run(store.checkout(&CheckoutRequest {
+                backing,
+                root: ns.root,
+                owner: "parent".into()
+            }))
+            .is_err()
+        );
+        let publish = DelegatedPublish {
+            backing,
+            token: a.token,
+            expected_revision: 1,
+        };
+        let mut hostile = ns.clone();
+        hostile.nodes.get_mut(&(ns.root + 2)).unwrap().stats.uid = 123;
+        assert!(run(store.publish_delegated(&publish, hostile)).is_err());
+        let mut hostile = ns.clone();
+        hostile.next_inode -= 1;
+        assert!(run(store.publish_delegated(&publish, hostile)).is_err());
+        let mut allowed = ns;
+        allowed
+            .nodes
+            .get_mut(&(allowed.root + 1))
+            .unwrap()
+            .stats
+            .uid = 123;
+        assert_eq!(run(store.publish_delegated(&publish, allowed)).unwrap(), 2);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delegated_failed_claim_commit_retains_no_authority_and_copy_is_rejected() {
+        use mount_rs_core::storage::CheckoutRequest;
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        let backing = prepare_bound_metadata(&store);
+        run(store.publish_bound_if_revision(backing, 0, namespace())).unwrap();
+        run(store.prepare_delegated_mode(backing, 1)).unwrap();
+        // A rollback-journal reader permits BEGIN IMMEDIATE but prevents COMMIT.
+        store
+            .0
+            .lock()
+            .unwrap()
+            .execute_batch("PRAGMA journal_mode=DELETE")
+            .unwrap();
+        let reader = Connection::open(&path).unwrap();
+        reader
+            .execute_batch("BEGIN; SELECT namespace FROM mount_rs_metadata")
+            .unwrap();
+        let request = CheckoutRequest {
+            backing,
+            root: namespace().root,
+            owner: "retry".into(),
+        };
+        assert_eq!(
+            run(store.checkout(&request)).unwrap_err().code,
+            ErrorCode::Eagain
+        );
+        reader.execute_batch("ROLLBACK").unwrap();
+        assert!(
+            run(store.delegation_state())
+                .unwrap()
+                .unwrap()
+                .grants
+                .is_empty()
+        );
+        let granted = run(store.checkout(&request)).unwrap();
+        assert_eq!(granted.token.fence, 1);
+        reader
+            .execute_batch("BEGIN; SELECT namespace FROM mount_rs_metadata")
+            .unwrap();
+        let release = mount_rs_core::storage::DelegatedCheckin {
+            backing,
+            token: granted.token.clone(),
+            expected_revision: 1,
+        };
+        assert_eq!(
+            run(store.checkin(&release)).unwrap_err().code,
+            ErrorCode::Eagain
+        );
+        reader.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(
+            run(store.delegation_state())
+                .unwrap()
+                .unwrap()
+                .grants
+                .get(&granted.token.root)
+                .unwrap()
+                .token,
+            granted.token
+        );
+        run(store.checkin(&release)).unwrap();
+        drop(store);
+        let copy = super::super::tests::unique_database_path();
+        std::fs::copy(&path, &copy).unwrap();
+        assert!(SqliteMetadataStore::open(&copy).is_err());
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(copy);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delegated_ignored_updates_cannot_acknowledge_authority() {
+        use mount_rs_core::storage::CheckoutRequest;
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        let backing = prepare_bound_metadata(&store);
+        run(store.publish_bound_if_revision(backing, 0, namespace())).unwrap();
+        store.0.lock().unwrap().execute_batch("CREATE TRIGGER ignore_delegation BEFORE UPDATE ON mount_rs_metadata BEGIN SELECT RAISE(IGNORE); END").unwrap();
+        assert!(run(store.prepare_delegated_mode(backing, 1)).is_err());
+        store
+            .0
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER ignore_delegation")
+            .unwrap();
+        run(store.prepare_delegated_mode(backing, 1)).unwrap();
+        store.0.lock().unwrap().execute_batch("CREATE TRIGGER ignore_delegation BEFORE UPDATE ON mount_rs_metadata BEGIN SELECT RAISE(IGNORE); END").unwrap();
+        assert!(
+            run(store.checkout(&CheckoutRequest {
+                backing,
+                root: namespace().root,
+                owner: "ignored".into()
+            }))
+            .is_err()
+        );
+        assert!(
+            run(store.delegation_state())
+                .unwrap()
+                .unwrap()
+                .grants
+                .is_empty()
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[cfg(unix)]

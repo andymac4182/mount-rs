@@ -77,5 +77,10 @@ pub fn create_memory_driver(
         }))),
         shutdown: None,
         reconcile: Mutex::new(None),
+        delegation: Mutex::new(None),
+        delegated_ownership: false,
+        native_delegation_mounts: Arc::new(tokio::sync::Mutex::new(
+            super::DelegatedNativeState::default(),
+        )),
     })
 }

@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createChunkedDriver } from "../index.js"
+import { createChunkedDriver, createNfsServer, createP9Server, createWebdavServer, createS3Server, mount } from "../index.js"
 
 const suffix = `${process.pid}-${Date.now()}`
 
@@ -48,6 +48,17 @@ async function exercise(options, expected) {
 
 const directory = await mkdtemp(join(tmpdir(), "mount-rs-napi-chunked-"))
 try {
+  for (const ownershipMode of ["invalid", "shared"]) {
+    await assertCode(() => openDriver({ ownershipMode }), "EINVAL")
+  }
+  for (const [ownershipMode, concurrentWrites] of [["exclusive", true], ["shared", false]]) {
+    await assertCode(() => openDriver({ ownershipMode, concurrentWrites }), "EINVAL")
+  }
+  for (const ownershipMode of [undefined, "exclusive"]) {
+    await assertCode(() => openDriver({ ownershipMode, checkoutPath: "/" }), "EINVAL")
+  }
+  await exercise({ ownershipMode: "exclusive" }, "exclusive")
+
   const defaults = await openDriver()
   try {
     const root = await defaults.stat("/")
@@ -73,7 +84,7 @@ try {
     metadata: { kind: "sqlite", uri: join(directory, "metadata.sqlite") },
     blocks: { kind: "sqlite", uri: join(directory, "blocks.sqlite") },
   }
-  const first = await openDriver({ ...sqliteOptions, owner: `sqlite-first-${suffix}` })
+  const first = await openDriver({ ...sqliteOptions, ownershipMode: "exclusive", owner: `sqlite-first-${suffix}` })
   await first.writeFile("/reopen.txt", Buffer.from("durable sqlite"))
   await first.shutdown()
   const reopened = await openDriver({ ...sqliteOptions, owner: `sqlite-second-${suffix}` })
@@ -107,6 +118,60 @@ try {
       await writerB.shutdown()
       await writerA.shutdown()
     }
+  }
+
+  if (process.platform !== "win32") {
+    const delegated = {
+      metadata: { kind: "sqlite", uri: join(directory, "delegated-metadata.sqlite") },
+      blocks: { kind: "sqlite", uri: join(directory, "delegated-blocks.sqlite") },
+      ownershipMode: "shared",
+    }
+    const bootstrap = await openDriver({ ...delegated, checkoutPath: "/" })
+    try {
+      for (const createServer of [createNfsServer, createP9Server, createWebdavServer, createS3Server]) {
+        assert.throws(() => createServer(bootstrap), (error) => error.code === "ENOTSUP")
+      }
+      assert.throws(() => createS3Server({ buckets: { owned: bootstrap } }), (error) => error.code === "ENOTSUP")
+      await assertCode(() => mount(bootstrap, join(directory, "unsupported-mount"), { nfsSharedView: true }), "ENOTSUP")
+      for (const transport of ["nfs", "9p"]) {
+        await assertCode(() => mount(bootstrap, join(directory, "unsupported-mount"), { transport }), "ENOTSUP")
+      }
+      const rootGrant = await bootstrap.delegationStatus()
+      assert.equal(typeof rootGrant.fence, "string", "fences retain all 64 bits")
+      await bootstrap.mkdir("/owned-a")
+      await bootstrap.mkdir("/owned-b")
+      await bootstrap.checkinScope()
+      assert.equal(await bootstrap.delegationStatus(), null)
+      await assertCode(
+        () => mount(bootstrap, join(directory, "unclaimed-mount"), { transport: "fuse" }),
+        process.platform === "linux" ? "EACCES" : "ENOTSUP",
+      )
+    } finally {
+      await bootstrap.shutdown()
+    }
+    const ownerA = await openDriver({ ...delegated, checkoutPath: "/owned-a", owner: `directory-a-${suffix}` })
+    const ownerB = await openDriver({ ...delegated, checkoutPath: "/owned-b", owner: `directory-b-${suffix}` })
+    try {
+      await ownerA.writeFile("/owned-a/database", Buffer.from("a owns database"))
+      await ownerB.writeFile("/owned-b/database", Buffer.from("b owns database"))
+      await assertCode(() => ownerB.readFile("/owned-a/database"), "EACCES")
+      await assertCode(() => ownerB.writeFile("/owned-a/database", Buffer.from("denied")), "EACCES")
+      await assertCode(() => openDriver({ ...delegated, checkoutPath: "/owned-a" }), "ESTALE")
+      const handle = await ownerA.open("/owned-a/database", "r")
+      await assertCode(() => ownerA.checkinScope(), "EBUSY")
+      await handle.close()
+      await ownerA.checkinScope()
+      await assertCode(() => ownerA.readFile("/owned-a/database"), "EACCES")
+      await ownerB.checkinScope()
+      const handedOff = await ownerB.checkoutScope("/owned-a")
+      assert.equal(typeof handedOff.root, "string")
+      assert.equal(Buffer.from(await ownerB.readFile("/owned-a/database")).toString(), "a owns database")
+      await ownerB.checkinScope()
+    } finally {
+      await ownerB.shutdown()
+      await ownerA.shutdown()
+    }
+    console.log("mount-rs N-API delegated SQLite: PASS (disjoint scopes, denied access, clean handoff)")
   }
 
   // The provider lease is held until shutdown, so a second writer fails

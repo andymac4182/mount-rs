@@ -237,6 +237,12 @@ pub struct SplitOptions {
     /// Persisted, opt-in concurrent metadata mode; the provider must support
     /// revision CAS and fence legacy lease clients on the same volume.
     pub concurrent_writes: bool,
+    /// Defer exclusive namespace publication until synchronization.
+    pub writeback: bool,
+    /// Persisted directory checkout authority (MRC3), distinct from legacy CAS.
+    pub delegated: bool,
+    /// Claim this virtual directory before exposing a fresh mount.
+    pub checkout_path: Option<String>,
     pub uid: u32,
     pub gid: u32,
     pub umask: u32,
@@ -252,6 +258,9 @@ impl SplitOptions {
             owner: owner.into(),
             lease_ttl: Duration::from_secs(30),
             concurrent_writes: false,
+            writeback: false,
+            delegated: false,
+            checkout_path: None,
             uid: 0,
             gid: 0,
             umask: 0,
@@ -270,6 +279,31 @@ impl SplitOptions {
 
     pub fn with_concurrent_writes(mut self, concurrent_writes: bool) -> Self {
         self.concurrent_writes = concurrent_writes;
+        self.delegated = false;
+        self.checkout_path = None;
+        self
+    }
+
+    /// Select the mount authority. Explicit exclusive ownership enables
+    /// writeback; shared ownership requires persisted directory checkout authority.
+    pub fn with_ownership_mode(mut self, mode: mount_rs_chunked::OwnershipMode) -> Self {
+        self.concurrent_writes = mode == mount_rs_chunked::OwnershipMode::Shared;
+        self.writeback = mode == mount_rs_chunked::OwnershipMode::Exclusive;
+        self.delegated = mode == mount_rs_chunked::OwnershipMode::Shared;
+        if !self.delegated {
+            self.checkout_path = None;
+        }
+        self
+    }
+
+    pub fn with_checkout_path(self, path: impl Into<String>) -> Self {
+        let mut options = self.with_ownership_mode(mount_rs_chunked::OwnershipMode::Shared);
+        options.checkout_path = Some(path.into());
+        options
+    }
+
+    pub fn with_writeback(mut self, writeback: bool) -> Self {
+        self.writeback = writeback;
         self
     }
 

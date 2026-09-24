@@ -15,6 +15,7 @@ pub use mount_rs_auto::{
     AutoMount, AutoMountError, AutoMountOptions, AutoProbe, AutoTransport, Transport,
     TransportProbe, probe_transports,
 };
+pub use mount_rs_chunked::OwnershipMode;
 pub use mount_rs_core::{
     Capabilities, DirEntry, ErrorCode, FileHandle, FsDriver, Loopback, MkdirOptions, OpenFlags,
     Result, Stats, StatsFs,
@@ -30,6 +31,40 @@ pub use options::{FoundationDbLeaseAuthority, SplitOptions, StoreConfig};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ownership_builders_preserve_legacy_defaults_and_select_writeback() {
+        let legacy = SplitOptions::memory("legacy", 4096);
+        assert!(!legacy.writeback);
+        assert!(!legacy.concurrent_writes);
+        assert!(!legacy.delegated);
+        assert!(legacy.checkout_path.is_none());
+        let exclusive = legacy.clone().with_ownership_mode(OwnershipMode::Exclusive);
+        assert!(exclusive.writeback);
+        assert!(!exclusive.concurrent_writes);
+        let shared = exclusive.with_ownership_mode(OwnershipMode::Shared);
+        assert!(!shared.writeback);
+        assert!(shared.concurrent_writes);
+        assert!(shared.delegated);
+        let scoped = shared.with_checkout_path("/tenant");
+        assert_eq!(scoped.checkout_path.as_deref(), Some("/tenant"));
+        let legacy_cas = scoped.clone().with_concurrent_writes(true);
+        assert!(!legacy_cas.delegated);
+        assert!(legacy_cas.checkout_path.is_none());
+        let exclusive = scoped.with_ownership_mode(OwnershipMode::Exclusive);
+        assert!(!exclusive.delegated);
+        assert!(exclusive.checkout_path.is_none());
+    }
+
+    #[tokio::test]
+    async fn shared_writeback_is_rejected_before_provider_open() {
+        let options = SplitOptions::memory("invalid", 4096)
+            .with_concurrent_writes(true)
+            .with_writeback(true);
+        let error = Filesystem::split(options).await.err().unwrap();
+        assert_eq!(error.code, ErrorCode::Einval);
+        assert!(error.to_string().contains("writeback requires exclusive"));
+    }
 
     #[test]
     fn store_config_debug_redacts_credential_bearing_values() {
@@ -98,6 +133,127 @@ mod tests {
         assert_eq!(view.read_file("/split.txt").await.unwrap(), b"split sdk");
         assert_eq!(filesystem.kind(), FilesystemKind::SplitStore);
         filesystem.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sqlite_sdk_directory_handoff_and_expected_fence_recovery() {
+        use mount_rs_core::storage::MetadataStore;
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let temp = std::env::temp_dir().join(format!(
+            "mount-sdk-delegation-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&temp).unwrap();
+        let metadata_path = temp.join("metadata.sqlite");
+        let mut options = SplitOptions::memory("sdk-owner", 4096);
+        options.metadata = StoreConfig::Sqlite {
+            path: metadata_path.clone(),
+        };
+        options.blocks = StoreConfig::Sqlite {
+            path: temp.join("blocks.sqlite"),
+        };
+        let bootstrap = Filesystem::split(options.clone()).await.unwrap();
+        let view = Loopback::from_arc(bootstrap.driver());
+        view.mkdir("/left", MkdirOptions::default()).await.unwrap();
+        view.mkdir("/right", MkdirOptions::default()).await.unwrap();
+        bootstrap.shutdown().await.unwrap();
+        let revision = mount_rs_sqlite::SqliteMetadataStore::open(&metadata_path)
+            .unwrap()
+            .load()
+            .await
+            .unwrap()
+            .revision;
+        let options = options.with_ownership_mode(OwnershipMode::Shared);
+        Filesystem::enroll_directory_ownership(options.clone(), revision)
+            .await
+            .unwrap();
+        let left = Filesystem::split(options.clone().with_checkout_path("/left"))
+            .await
+            .unwrap();
+        let right = Filesystem::split(options.clone().with_checkout_path("/right"))
+            .await
+            .unwrap();
+        let left_view = Loopback::from_arc(left.driver());
+        let right_view = Loopback::from_arc(right.driver());
+        left_view
+            .write_file("/left/data", b"left durable bytes")
+            .await
+            .unwrap();
+        right_view
+            .write_file("/right/data", b"right durable bytes")
+            .await
+            .unwrap();
+        assert!(left_view.read_file("/right/data").await.is_err());
+        assert!(
+            Filesystem::split(options.clone().with_checkout_path("/left"))
+                .await
+                .is_err()
+        );
+        let first = left.delegation_status().await.unwrap().unwrap();
+        left.checkin_scope().await.unwrap();
+        let handed = Filesystem::split(options.clone().with_checkout_path("/left"))
+            .await
+            .unwrap();
+        let handed_view = Loopback::from_arc(handed.driver());
+        assert_eq!(
+            handed_view.read_file("/left/data").await.unwrap(),
+            b"left durable bytes"
+        );
+        let second = handed.delegation_status().await.unwrap().unwrap();
+        assert!(second.token.fence > first.token.fence);
+        assert!(
+            Filesystem::recover_directory_ownership(
+                options.clone(),
+                first.token.root,
+                first.token.fence
+            )
+            .await
+            .is_err()
+        );
+        Filesystem::recover_directory_ownership(
+            options.clone(),
+            second.token.root,
+            second.token.fence,
+        )
+        .await
+        .unwrap();
+        assert!(
+            handed_view
+                .write_file("/left/data", b"stale")
+                .await
+                .is_err()
+        );
+        let fresh = Filesystem::split(options.clone().with_checkout_path("/left"))
+            .await
+            .unwrap();
+        assert_eq!(
+            Loopback::from_arc(fresh.driver())
+                .read_file("/left/data")
+                .await
+                .unwrap(),
+            b"left durable bytes"
+        );
+        let state = Filesystem::directory_ownership_state(options)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.grants.len(), 2);
+        fresh.shutdown().await.unwrap();
+        right.shutdown().await.unwrap();
+        left.shutdown().await.unwrap();
+        let _ = handed.shutdown().await;
+        drop((
+            left,
+            right,
+            handed,
+            fresh,
+            bootstrap,
+            left_view,
+            right_view,
+            handed_view,
+        ));
+        std::fs::remove_dir_all(temp).unwrap();
     }
 
     #[tokio::test]

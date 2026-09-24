@@ -11,8 +11,9 @@
 use async_trait::async_trait;
 use md5::{Digest, Md5};
 use mount_rs_core::storage::{
-    BlockId, BlockStore, ConcurrentBackingId, ConcurrentModeState, LoadedMetadata, MetadataStore,
-    Namespace, WriterLease,
+    BlockId, BlockStore, CheckoutRequest, ConcurrentBackingId, ConcurrentModeState,
+    DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState, DirectoryGrant,
+    GrantToken, LoadedMetadata, MetadataStore, Namespace, WriterLease,
 };
 use mount_rs_core::versioning::{
     PublicationId, ReadLease, ReadLeaseRequest, VersionHead, VersionId, VersionInfo, VersionKind,
@@ -48,10 +49,11 @@ const METADATA_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_metadata (
  expires BIGINT NOT NULL,
  volume_id TEXT,
  write_mode TEXT,
- backing_id TEXT);
+ backing_id TEXT, delegation TEXT);
 ALTER TABLE mount_rs_metadata ADD COLUMN IF NOT EXISTS volume_id TEXT;
 ALTER TABLE mount_rs_metadata ADD COLUMN IF NOT EXISTS write_mode TEXT;
 ALTER TABLE mount_rs_metadata ADD COLUMN IF NOT EXISTS backing_id TEXT;
+ALTER TABLE mount_rs_metadata ADD COLUMN IF NOT EXISTS delegation TEXT;
 ";
 
 const BLOCK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_blocks (
@@ -267,7 +269,72 @@ impl Database {
 #[derive(Clone)]
 pub struct PgliteMetadataStore(Database, VolumeId);
 
+fn decode_delegation_row(row: &tokio_postgres::Row) -> Result<(DelegationState, Namespace)> {
+    if row.get::<_, Option<String>>(0).as_deref() != Some("MRC3")
+        || row.get::<_, Option<String>>(4).is_some()
+        || row.get::<_, i64>(5) != CONCURRENT_FENCE_SENTINEL
+        || row.get::<_, i64>(6) != 0
+    {
+        return Err(stale());
+    }
+    let state: DelegationState =
+        serde_json::from_str(&row.get::<_, Option<String>>(2).ok_or_else(stale)?)
+            .map_err(backend_error)?;
+    if row.get::<_, Option<String>>(1).as_deref() != Some(state.backing.to_hex().as_str()) {
+        return Err(stale());
+    }
+    let ns: Namespace = serde_json::from_str(&row.get::<_, Option<String>>(3).ok_or_else(stale)?)
+        .map_err(backend_error)?;
+    state.validate(&ns)?;
+    Ok((state, ns))
+}
+
 impl PgliteMetadataStore {
+    async fn delegation_transaction<T>(
+        &self,
+        backing: ConcurrentBackingId,
+        expected: Option<u64>,
+        force_revision: bool,
+        retired_receipt: Option<&GrantToken>,
+        operation: impl FnOnce(&mut DelegationState, &mut Namespace) -> Result<T> + Send,
+    ) -> Result<T> {
+        let mut guard = self.0.lock_client().await?;
+        let tx = guard
+            .as_mut()
+            .ok_or_else(connection_closed)?
+            .transaction()
+            .await
+            .map_err(postgres_error)?;
+        let row = tx.query_one("SELECT write_mode, backing_id, delegation, namespace, owner, fence, expires, revision FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE", &[&self.0.volume_key]).await.map_err(postgres_error)?;
+        let (mut state, mut ns) = decode_delegation_row(&row)?;
+        if state.backing != backing {
+            return Err(stale());
+        }
+        let revision = nonnegative(row.get(7), "revision")?;
+        if expected.is_some_and(|value| value != revision)
+            && !retired_receipt.is_some_and(|token| state.retired.contains(token))
+        {
+            return Err(FsError::new(ErrorCode::Eagain));
+        }
+        let before = serde_json::to_string(&ns).map_err(backend_error)?;
+        let result = operation(&mut state, &mut ns)?;
+        state.validate(&ns)?;
+        let after = serde_json::to_string(&ns).map_err(backend_error)?;
+        let next = if force_revision || before != after {
+            revision.checked_add(1).ok_or_else(stale)?
+        } else {
+            revision
+        };
+        let next = i64::try_from(next).map_err(|_| stale())?;
+        let state = serde_json::to_string(&state).map_err(backend_error)?;
+        let changed = tx.execute("UPDATE mount_rs_metadata SET revision=$2, namespace=$3, delegation=$4 WHERE volume_key=$1", &[&self.0.volume_key, &next, &after, &state]).await.map_err(postgres_error)?;
+        if changed != 1 {
+            return Err(stale());
+        }
+        tx.commit().await.map_err(postgres_error)?;
+        Ok(result)
+    }
+
     /// Connect to a PGlite PostgreSQL-wire endpoint and initialize the
     /// provider's metadata table. The endpoint is expected to provide the
     /// desired external durability policy.
@@ -783,7 +850,7 @@ impl MetadataStore for PgliteMetadataStore {
                     ConcurrentBackingId::from_hex(id).map_err(|_| stale())?,
                 ))
             }
-            (Some(BOUND_CONCURRENT_WRITE_MODE), _) => Err(stale()),
+            (Some(BOUND_CONCURRENT_WRITE_MODE), _) | (Some("MRC3"), _) => Err(stale()),
             _ => Err(backend_error(
                 "PGlite concurrent mode, backing ID, and fence disagree",
             )),
@@ -855,6 +922,121 @@ impl MetadataStore for PgliteMetadataStore {
             ConcurrentModeState::Legacy => Err(FsError::new(ErrorCode::Ebusy)
                 .with_syscall("prepare bound concurrent PGlite volume")),
         }
+    }
+
+    async fn delegation_state(&self) -> Result<Option<DelegationState>> {
+        let client = self.0.lock_client().await?;
+        let row = client.as_ref().ok_or_else(connection_closed)?.query_one(
+            "SELECT write_mode, backing_id, delegation, namespace, owner, fence, expires FROM mount_rs_metadata WHERE volume_key=$1", &[&self.0.volume_key]
+        ).await.map_err(postgres_error)?;
+        if row.get::<_, Option<String>>(0).as_deref() != Some("MRC3") {
+            return Ok(None);
+        }
+        let (state, _) = decode_delegation_row(&row)?;
+        Ok(Some(state))
+    }
+
+    async fn prepare_delegated_mode(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        let mut guard = self.0.lock_client().await?;
+        let tx = guard
+            .as_mut()
+            .ok_or_else(connection_closed)?
+            .transaction()
+            .await
+            .map_err(postgres_error)?;
+        let row = tx.query_one("SELECT write_mode, backing_id, delegation, namespace, owner, fence, expires, revision FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE", &[&self.0.volume_key]).await.map_err(postgres_error)?;
+        let revision = nonnegative(row.get(7), "revision")?;
+        if row.get::<_, Option<String>>(0).as_deref() == Some("MRC3") {
+            let (state, _) = decode_delegation_row(&row)?;
+            if state.backing != backing {
+                return Err(stale());
+            }
+            tx.commit().await.map_err(postgres_error)?;
+            return Ok(());
+        }
+        if revision != expected_revision {
+            return Err(FsError::new(ErrorCode::Eagain));
+        }
+        let mode = row.get::<_, Option<String>>(0);
+        let valid_mode = mode.is_none() || mode.as_deref() == Some(BOUND_CONCURRENT_WRITE_MODE);
+        if !valid_mode || row.get::<_, Option<String>>(4).is_some() {
+            return Err(FsError::new(ErrorCode::Ebusy));
+        }
+        if mode.is_some()
+            && row.get::<_, Option<String>>(1).as_deref() != Some(backing.to_hex().as_str())
+        {
+            return Err(stale());
+        }
+        if row.get::<_, Option<String>>(2).is_some()
+            || (mode.is_none()
+                && (row.get::<_, Option<String>>(1).is_some()
+                    || row.get::<_, i64>(5) == CONCURRENT_FENCE_SENTINEL))
+            || (mode.is_some() && row.get::<_, i64>(5) != CONCURRENT_FENCE_SENTINEL)
+            || row.get::<_, i64>(6) != 0
+        {
+            return Err(stale());
+        }
+        let ns: Namespace =
+            serde_json::from_str(&row.get::<_, Option<String>>(3).ok_or_else(stale)?)
+                .map_err(backend_error)?;
+        ns.validate()?;
+        let historical: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM mount_rs_versions WHERE volume_key=$1) OR EXISTS(SELECT 1 FROM mount_rs_version_pins WHERE volume_key=$1) OR EXISTS(SELECT 1 FROM mount_rs_version_state WHERE volume_key=$1 AND (head_id IS NOT NULL OR next_sequence<>1 OR next_read_fence<>0))", &[&self.0.volume_key]).await.map_err(postgres_error)?.get(0);
+        if historical {
+            return Err(FsError::new(ErrorCode::Ebusy));
+        }
+        let state = serde_json::to_string(&DelegationState::new(backing)).map_err(backend_error)?;
+        let changed = tx.execute("UPDATE mount_rs_metadata SET write_mode='MRC3', backing_id=$2, delegation=$3, owner=NULL, fence=$4, expires=0 WHERE volume_key=$1", &[&self.0.volume_key, &backing.to_hex(), &state, &CONCURRENT_FENCE_SENTINEL]).await.map_err(postgres_error)?;
+        if changed != 1 {
+            return Err(stale());
+        }
+        tx.commit().await.map_err(postgres_error)?;
+        Ok(())
+    }
+
+    async fn checkout(&self, request: &CheckoutRequest) -> Result<DirectoryGrant> {
+        self.delegation_transaction(request.backing, None, false, None, |state, ns| {
+            state.checkout(ns, request.root, &request.owner)
+        })
+        .await
+    }
+    async fn publish_delegated(
+        &self,
+        request: &DelegatedPublish,
+        namespace: Namespace,
+    ) -> Result<u64> {
+        self.delegation_transaction(
+            request.backing,
+            Some(request.expected_revision),
+            true,
+            None,
+            |state, ns| {
+                state.authorize_publish(ns, &namespace, &request.token)?;
+                *ns = namespace;
+                Ok(())
+            },
+        )
+        .await?;
+        request.expected_revision.checked_add(1).ok_or_else(stale)
+    }
+    async fn checkin(&self, request: &DelegatedCheckin) -> Result<()> {
+        self.delegation_transaction(
+            request.backing,
+            Some(request.expected_revision),
+            false,
+            Some(&request.token),
+            |state, ns| state.checkin(&request.token, ns),
+        )
+        .await
+    }
+    async fn recover(&self, request: &DelegatedRecovery) -> Result<()> {
+        self.delegation_transaction(request.backing, None, false, None, |state, ns| {
+            state.recover(request.root, request.expected_fence, ns)
+        })
+        .await
     }
 
     async fn acquire_writer(&self, owner: &str, ttl: Duration) -> Result<WriterLease> {
@@ -3465,6 +3647,144 @@ mod tests {
             assert!(error.is(ErrorCode::Eio));
             metadata.delete_version(&writer, &first.id).await.unwrap();
             metadata.release_writer(&writer).await.unwrap();
+            metadata.close().await.unwrap();
+            blocks.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
+    fn delegated_grants_are_persisted_fenced_and_retry_safe() {
+        let server = PgliteServer::start();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let metadata =
+                PgliteMetadataStore::connect_with_key(server.connection_string(), "delegation")
+                    .await
+                    .unwrap();
+            let blocks =
+                PgliteBlockStore::connect_with_key(server.connection_string(), "delegation")
+                    .await
+                    .unwrap();
+            let backing = blocks.prepare_concurrent_backing().await.unwrap();
+            let ns = namespace(blocks.put(b"abc").await.unwrap()).await;
+            let lease = metadata
+                .acquire_writer("initializer", Duration::from_secs(60))
+                .await
+                .unwrap();
+            metadata.publish(0, &lease, ns.clone()).await.unwrap();
+            assert!(
+                metadata
+                    .prepare_delegated_mode(backing, 1)
+                    .await
+                    .unwrap_err()
+                    .is(ErrorCode::Ebusy)
+            );
+            metadata.release_writer(&lease).await.unwrap();
+            metadata.prepare_delegated_mode(backing, 1).await.unwrap();
+            let request = CheckoutRequest {
+                backing,
+                root: ns.root,
+                owner: "session-one".into(),
+            };
+            let grant = metadata.checkout(&request).await.unwrap();
+            assert_eq!(metadata.checkout(&request).await.unwrap(), grant);
+            assert!(
+                metadata
+                    .acquire_writer("old", Duration::from_secs(60))
+                    .await
+                    .is_err()
+            );
+            assert!(
+                metadata
+                    .publish_bound_if_revision(backing, 1, ns.clone())
+                    .await
+                    .is_err()
+            );
+            let mut hostile = ns.clone();
+            hostile.umask = 0;
+            let publish = DelegatedPublish {
+                backing,
+                token: grant.token.clone(),
+                expected_revision: 1,
+            };
+            assert!(
+                metadata
+                    .publish_delegated(&publish, hostile)
+                    .await
+                    .unwrap_err()
+                    .is(ErrorCode::Estale)
+            );
+            assert_eq!(
+                metadata
+                    .publish_delegated(&publish, ns.clone())
+                    .await
+                    .unwrap(),
+                2
+            );
+            let checkin = DelegatedCheckin {
+                backing,
+                token: grant.token.clone(),
+                expected_revision: 2,
+            };
+            metadata.checkin(&checkin).await.unwrap();
+            metadata.checkin(&checkin).await.unwrap();
+            assert!(metadata.checkout(&request).await.is_err());
+            let newer = metadata
+                .checkout(&CheckoutRequest {
+                    owner: "session-two".into(),
+                    ..request
+                })
+                .await
+                .unwrap();
+            assert!(newer.token.fence > grant.token.fence);
+            metadata
+                .publish_delegated(
+                    &DelegatedPublish {
+                        backing,
+                        token: newer.token.clone(),
+                        expected_revision: 2,
+                    },
+                    ns.clone(),
+                )
+                .await
+                .unwrap();
+            metadata.checkin(&checkin).await.unwrap();
+            assert_eq!(
+                metadata.delegation_state().await.unwrap().unwrap().grants[&ns.root].token,
+                newer.token
+            );
+
+            assert!(
+                metadata
+                    .recover(&DelegatedRecovery {
+                        backing,
+                        root: ns.root,
+                        expected_fence: grant.token.fence
+                    })
+                    .await
+                    .is_err()
+            );
+            metadata
+                .recover(&DelegatedRecovery {
+                    backing,
+                    root: ns.root,
+                    expected_fence: newer.token.fence,
+                })
+                .await
+                .unwrap();
+            let peer =
+                PgliteMetadataStore::connect_with_key(server.connection_string(), "delegation")
+                    .await
+                    .unwrap();
+            assert_eq!(
+                peer.delegation_state().await.unwrap(),
+                metadata.delegation_state().await.unwrap()
+            );
+            peer.close().await.unwrap();
             metadata.close().await.unwrap();
             blocks.close().await.unwrap();
         });

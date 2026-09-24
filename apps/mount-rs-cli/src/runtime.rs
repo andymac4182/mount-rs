@@ -251,6 +251,9 @@ fn split_options(options: &CliOptions, uid: u32, gid: u32) -> Result<SplitOption
                 .map(Duration::from_millis)
                 .unwrap_or_else(|| Duration::from_secs(30)),
             concurrent_writes: storage.concurrent_writes,
+            delegated: storage.delegated,
+            checkout_path: storage.checkout_path.clone(),
+            writeback: storage.writeback,
             uid,
             gid,
             umask: 0,
@@ -280,6 +283,9 @@ fn split_options(options: &CliOptions, uid: u32, gid: u32) -> Result<SplitOption
         owner: unique_default_owner(),
         lease_ttl: Duration::from_secs(30),
         concurrent_writes: false,
+        delegated: false,
+        checkout_path: None,
+        writeback: false,
         uid,
         gid,
         umask: 0,
@@ -443,6 +449,34 @@ where
             println!("valid config: {}", path.display());
             Ok(())
         }
+        Command::EnrollDirectoryOwnership {
+            config,
+            expected_revision,
+        } => {
+            let split = directory_ownership_options(&config)?;
+            let backing = Filesystem::enroll_directory_ownership(split, expected_revision).await?;
+            println!(
+                "enrolled MRC3 directory ownership at revision {expected_revision} with backing ID {}",
+                backing.to_hex()
+            );
+            Ok(())
+        }
+        Command::DirectoryOwnershipStatus { config } => {
+            let split = directory_ownership_options(&config)?;
+            let state = Filesystem::directory_ownership_state(split).await?;
+            println!("{}", render_directory_ownership_state(&state)?);
+            Ok(())
+        }
+        Command::RecoverDirectoryOwnership {
+            config,
+            root,
+            expected_fence,
+        } => {
+            let split = directory_ownership_options(&config)?;
+            Filesystem::recover_directory_ownership(split, root, expected_fence).await?;
+            println!("recovered directory {root} at expected fence {expected_fence}");
+            Ok(())
+        }
         Command::MigrateConcurrentBacking {
             config,
             expected_revision,
@@ -481,6 +515,33 @@ fn initialize_telemetry() {
     }
 }
 
+fn render_directory_ownership_state(
+    state: &Option<mount_rs_core::delegation::DelegationState>,
+) -> Result<String, CliError> {
+    serde_json::to_string_pretty(state).map_err(|error| {
+        CliError::runtime(format!("cannot render directory ownership status: {error}"))
+    })
+}
+
+fn directory_ownership_options(config_path: &Path) -> Result<SplitOptions, CliError> {
+    let options = resolve_cli_options(CliOptions {
+        config: Some(config_path.to_path_buf()),
+        ..CliOptions::default()
+    })?;
+    if options.driver != DriverChoice::SplitStore
+        || !options
+            .storage
+            .as_ref()
+            .is_some_and(|storage| storage.delegated)
+    {
+        return Err(CliError::usage(
+            "directory ownership commands require explicit ownership_mode 'shared'",
+        ));
+    }
+    let (uid, gid) = effective_identity();
+    split_options(&options, uid, gid)
+}
+
 /// Perform the offline protocol migration using the SDK's storage path. This
 /// command prepares SQLite view directories for physical path checks, without
 /// constructing a filesystem driver or starting a native transport.
@@ -497,7 +558,7 @@ async fn migrate_concurrent_backing_command(
         || !options
             .storage
             .as_ref()
-            .is_some_and(|storage| storage.concurrent_writes)
+            .is_some_and(|storage| storage.concurrent_writes && !storage.delegated)
     {
         return Err(CliError::usage(
             "migrate-concurrent-backing requires a splitstore config with concurrent_writes=true",
@@ -531,7 +592,7 @@ async fn reenroll_sqlite_concurrent_backing_command(
         || !options
             .storage
             .as_ref()
-            .is_some_and(|storage| storage.concurrent_writes)
+            .is_some_and(|storage| storage.concurrent_writes && !storage.delegated)
     {
         return Err(CliError::usage(
             "reenroll-sqlite-concurrent-backing requires a splitstore config with concurrent_writes=true",
@@ -803,6 +864,7 @@ async fn shutdown_runtimes(runtimes: &[DriverRuntime]) -> FsResult<()> {
 }
 
 async fn mount_command(options: CliOptions) -> Result<(), CliError> {
+    crate::config::validate_resolved_options(&options)?;
     let mountpoints = requested_mountpoints(&options)?;
     let preopen_sqlite_path_guard = concurrent_sqlite_backing_requested(&options);
     let shared_view = shared_view_requested(&options);
@@ -860,20 +922,7 @@ async fn mount_command(options: CliOptions) -> Result<(), CliError> {
         let _ = runtime.shutdown().await;
         return Err(error);
     }
-    let mount_options = AutoMountOptions {
-        transport: if options.transport == TransportChoice::Auto && shared_view {
-            AutoTransport::Nfs
-        } else {
-            options.transport.into()
-        },
-        read_only: Some(options.read_only),
-        nfs: shared_view_nfs_options(&options),
-        fuse: Some(mount_rs_auto::MountOptions {
-            allow_other: options.allow_other || uid == 0,
-            ..mount_rs_auto::MountOptions::default()
-        }),
-        ..AutoMountOptions::default()
-    };
+    let mount_options = native_mount_options(&options, uid);
 
     let mut ctrl_c = match CtrlCHandler::install().await {
         Ok(handler) => handler,
@@ -1053,6 +1102,30 @@ fn sqlite_single_host_nfs_options(options: &CliOptions) -> Option<mount_rs_nfs::
     Some(nfs)
 }
 
+fn native_mount_options(options: &CliOptions, uid: u32) -> AutoMountOptions {
+    AutoMountOptions {
+        transport: if options.transport == TransportChoice::Auto
+            && options
+                .storage
+                .as_ref()
+                .is_some_and(|storage| storage.delegated)
+        {
+            AutoTransport::Fuse
+        } else if options.transport == TransportChoice::Auto && shared_view_requested(options) {
+            AutoTransport::Nfs
+        } else {
+            options.transport.into()
+        },
+        read_only: Some(options.read_only),
+        nfs: shared_view_nfs_options(options),
+        fuse: Some(mount_rs_auto::MountOptions {
+            allow_other: options.allow_other || uid == 0,
+            ..mount_rs_auto::MountOptions::default()
+        }),
+        ..AutoMountOptions::default()
+    }
+}
+
 fn shared_view_nfs_options(options: &CliOptions) -> Option<mount_rs_nfs::NfsMountOptions> {
     let mut nfs = sqlite_single_host_nfs_options(options);
     if !shared_view_requested(options) {
@@ -1086,13 +1159,30 @@ fn shared_view_requested(options: &CliOptions) -> bool {
         || options
             .storage
             .as_ref()
-            .is_some_and(|storage| storage.concurrent_writes)
+            .is_some_and(|storage| storage.concurrent_writes && !storage.delegated)
 }
 
 fn select_auto_transport(
     options: &CliOptions,
     probe: &mount_rs_auto::AutoProbe,
 ) -> Result<mount_rs_auto::Transport, CliError> {
+    if options
+        .storage
+        .as_ref()
+        .is_some_and(|storage| storage.delegated)
+    {
+        if probe.fuse.usable {
+            return Ok(mount_rs_auto::Transport::Fuse);
+        }
+        return Err(CliError::runtime(format!(
+            "shared directory ownership native mounts require usable FUSE: {}",
+            probe
+                .fuse
+                .reason
+                .as_deref()
+                .unwrap_or("FUSE is unavailable")
+        )));
+    }
     if shared_view_requested(options) {
         if probe.nfs.usable {
             return Ok(mount_rs_auto::Transport::Nfs);
@@ -1675,6 +1765,9 @@ mod tests {
                 chunk_size_bytes: 4096,
                 lease_ttl_ms: None,
                 concurrent_writes: true,
+                delegated: false,
+                checkout_path: None,
+                writeback: false,
                 owner: None,
             })),
             ..CliOptions::default()
@@ -1726,6 +1819,9 @@ mod tests {
                 chunk_size_bytes: 4096,
                 lease_ttl_ms: None,
                 concurrent_writes: true,
+                delegated: false,
+                checkout_path: None,
+                writeback: false,
                 owner: None,
             })),
             ..CliOptions::default()
@@ -1774,6 +1870,9 @@ mod tests {
                 chunk_size_bytes: 4096,
                 lease_ttl_ms: None,
                 concurrent_writes: true,
+                delegated: false,
+                checkout_path: None,
+                writeback: false,
                 owner: None,
             })),
             ..CliOptions::default()
@@ -1876,6 +1975,9 @@ mod tests {
                 chunk_size_bytes: 4096,
                 lease_ttl_ms: None,
                 concurrent_writes: true,
+                delegated: false,
+                checkout_path: None,
+                writeback: false,
                 owner: None,
             })),
             ..CliOptions::default()
@@ -2055,12 +2157,204 @@ mod tests {
                 chunk_size_bytes: 4096,
                 lease_ttl_ms: Some(120_000),
                 concurrent_writes: false,
+                delegated: false,
+                checkout_path: None,
+                writeback: false,
                 owner: Some("runtime-ttl-test-owner".to_owned()),
             })),
             ..CliOptions::default()
         };
         let split = split_options(&options, 1000, 1000).unwrap();
         assert_eq!(split.lease_ttl, Duration::from_millis(120_000));
+    }
+
+    #[tokio::test]
+    async fn offline_directory_commands_enroll_report_and_recover_exact_sqlite_fences() {
+        use mount_rs_core::storage::MetadataStore;
+        let temp = tempfile::tempdir().unwrap();
+        let metadata_path = temp.path().join("metadata.sqlite");
+        let block_path = temp.path().join("blocks.sqlite");
+        let mut bootstrap_options = SplitOptions::memory("cli-bootstrap", 4096);
+        bootstrap_options.metadata = StoreConfig::Sqlite {
+            path: metadata_path.clone(),
+        };
+        bootstrap_options.blocks = StoreConfig::Sqlite {
+            path: block_path.clone(),
+        };
+        let bootstrap = Filesystem::split(bootstrap_options).await.unwrap();
+        bootstrap
+            .driver()
+            .mkdir("/project", mount_rs_core::MkdirOptions::default())
+            .await
+            .unwrap();
+        bootstrap.shutdown().await.unwrap();
+        let revision = mount_rs_sqlite::SqliteMetadataStore::open(&metadata_path)
+            .unwrap()
+            .load()
+            .await
+            .unwrap()
+            .revision;
+        let config = temp.path().join("shared.json");
+        std::fs::write(
+            &config,
+            serde_json::json!({"version":1,"driver":{"kind":"splitstore","storage":{
+                "ownership_mode":"shared","checkout_path":"/project",
+                "metadata":{"kind":"sqlite","path":metadata_path},
+                "blocks":{"kind":"sqlite","path":block_path}
+            }}})
+            .to_string(),
+        )
+        .unwrap();
+        let config_arg = config.to_str().unwrap();
+        assert!(
+            run([
+                "mount-rs",
+                "enroll-directory-ownership",
+                "--config",
+                config_arg,
+                "--expected-revision",
+                "0"
+            ])
+            .await
+            .is_err()
+        );
+        run([
+            "mount-rs",
+            "enroll-directory-ownership",
+            "--config",
+            config_arg,
+            "--expected-revision",
+            &revision.to_string(),
+        ])
+        .await
+        .unwrap();
+        let shared = directory_ownership_options(&config).unwrap();
+        let first = Filesystem::split(shared.clone()).await.unwrap();
+        let old = first.delegation_status().await.unwrap().unwrap().token;
+        first.checkin_scope().await.unwrap();
+        let second = Filesystem::split(directory_ownership_options(&config).unwrap())
+            .await
+            .unwrap();
+        let current = second.delegation_status().await.unwrap().unwrap().token;
+        assert!(current.fence > old.fence);
+        assert!(
+            run([
+                "mount-rs",
+                "recover-directory-ownership",
+                "--config",
+                config_arg,
+                "--root-inode",
+                &old.root.to_string(),
+                "--expected-fence",
+                &old.fence.to_string()
+            ])
+            .await
+            .is_err()
+        );
+        let state = Filesystem::directory_ownership_state(shared.clone())
+            .await
+            .unwrap();
+        assert_eq!(state.as_ref().unwrap().grants[&current.root].token, current);
+        let json: serde_json::Value =
+            serde_json::from_str(&render_directory_ownership_state(&state).unwrap()).unwrap();
+        assert_eq!(
+            json["grants"][current.root.to_string()]["token"]["fence"],
+            current.fence
+        );
+        run([
+            "mount-rs",
+            "directory-ownership-status",
+            "--config",
+            config_arg,
+        ])
+        .await
+        .unwrap();
+        drop(second);
+        run([
+            "mount-rs",
+            "recover-directory-ownership",
+            "--config",
+            config_arg,
+            "--root-inode",
+            &current.root.to_string(),
+            "--expected-fence",
+            &current.fence.to_string(),
+        ])
+        .await
+        .unwrap();
+        assert!(
+            Filesystem::directory_ownership_state(shared)
+                .await
+                .unwrap()
+                .unwrap()
+                .grants
+                .is_empty()
+        );
+        first.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn structured_storage_propagates_shared_checkout_without_legacy_nfs_restrictions() {
+        let spec = crate::config::parse_config_str(
+            r#"{"version":1,"driver":{"kind":"splitstore","storage":{
+                "ownership_mode":"shared","checkout_path":"/project", "metadata":{"kind":"sqlite","path":"/tmp/shared-meta.sqlite"},
+                "blocks":{"kind":"sqlite","path":"/tmp/shared-blocks.sqlite"}}}}"#,
+            Path::new("/tmp"),
+        )
+        .unwrap();
+        let options = spec.to_options();
+        let split = split_options(&options, 1000, 1000).unwrap();
+        assert!(split.delegated);
+        assert_eq!(split.checkout_path.as_deref(), Some("/project"));
+        assert!(split.concurrent_writes);
+        assert!(!shared_view_requested(&options));
+    }
+
+    #[test]
+    fn delegated_shared_native_options_pin_auto_to_fuse() {
+        let spec = crate::config::parse_config_str(
+            r#"{"version":1,"driver":{"kind":"splitstore","storage":{
+                "ownership_mode":"shared","checkout_path":"/project", "metadata":{"kind":"sqlite","path":"/tmp/shared-meta.sqlite"},
+                "blocks":{"kind":"sqlite","path":"/tmp/shared-blocks.sqlite"}}}}"#,
+            Path::new("/tmp"),
+        ).unwrap();
+        let options = spec.to_options();
+        let actual = native_mount_options(&options, 1000);
+        assert_eq!(actual.transport, AutoTransport::Fuse);
+    }
+
+    #[test]
+    fn delegated_shared_auto_requires_fuse_and_rejects_cache_unqualified_transports() {
+        let spec = crate::config::parse_config_str(
+            r#"{"version":1,"driver":{"kind":"splitstore","storage":{
+                "ownership_mode":"shared","checkout_path":"/project", "metadata":{"kind":"sqlite","path":"/tmp/shared-meta.sqlite"},
+                "blocks":{"kind":"sqlite","path":"/tmp/shared-blocks.sqlite"}}}}"#,
+            Path::new("/tmp"),
+        )
+        .unwrap();
+        let mut options = spec.to_options();
+        let probe = mount_rs_auto::probe_transports_for("darwin");
+        assert!(select_auto_transport(&options, &probe).is_err());
+        options.transport = TransportChoice::Nfs;
+        assert!(crate::config::validate_resolved_options(&options).is_err());
+        options.transport = TransportChoice::P9;
+        assert!(crate::config::validate_resolved_options(&options).is_err());
+        options.transport = TransportChoice::Fuse;
+        assert!(crate::config::validate_resolved_options(&options).is_ok());
+    }
+
+    #[test]
+    fn structured_storage_propagates_exclusive_writeback() {
+        let spec = crate::config::parse_config_str(
+            r#"{"version":1,"driver":{"kind":"splitstore","storage":{
+                "ownership_mode":"exclusive","metadata":{"kind":"memory"},
+                "blocks":{"kind":"memory"}}}}"#,
+            Path::new("/tmp"),
+        )
+        .unwrap();
+        let split = split_options(&spec.to_options(), 1000, 1000).unwrap();
+        assert!(split.writeback);
+        assert!(!split.concurrent_writes);
     }
 
     #[test]
@@ -2242,6 +2536,9 @@ mod tests {
                 chunk_size_bytes: 4096,
                 lease_ttl_ms: Some(120_000),
                 concurrent_writes: false,
+                delegated: false,
+                checkout_path: None,
+                writeback: false,
                 owner: Some("runtime-test-owner".to_owned()),
             })),
             ..CliOptions::default()
@@ -2276,6 +2573,9 @@ mod tests {
                 chunk_size_bytes: 4096,
                 lease_ttl_ms: None,
                 concurrent_writes: false,
+                delegated: false,
+                checkout_path: None,
+                writeback: false,
                 owner: None,
             })),
             ..CliOptions::default()

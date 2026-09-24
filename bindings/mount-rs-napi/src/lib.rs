@@ -22,10 +22,11 @@ use mount_rs_auto::{
     AutoMount, AutoMountError, AutoMountHooks, AutoMountOptions, AutoTransport, Transport,
     TransportProbe,
 };
-use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
+use mount_rs_chunked::{ChunkedFs, ChunkedOptions, OwnershipMode};
 use mount_rs_core::storage::{
-    BlockId, BlockReconcileReport, BlockStore, ConcurrentBackingId, ConcurrentModeState,
-    LoadedMetadata, MetadataStore, Namespace, WriterLease,
+    BlockId, BlockReconcileReport, BlockStore, CheckoutRequest, ConcurrentBackingId,
+    ConcurrentModeState, DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState,
+    DirectoryGrant, LoadedMetadata, MetadataStore, Namespace, WriterLease,
 };
 use mount_rs_core::versioning::VolumeId;
 use mount_rs_core::{
@@ -1433,6 +1434,13 @@ pub struct JsChunkedOptions {
     /// Enable persisted multiwriter revision CAS for FoundationDB, PGlite, or
     /// local SQLite metadata. SQLite metadata and blocks are same-host only.
     pub concurrent_writes: Option<bool>,
+    /// Explicit exclusive ownership enables writeback until sync or shutdown.
+    /// Shared ownership uses fenced directory delegation; same-host SQLite constraints remain.
+    /// Must agree with concurrentWrites when both options are supplied.
+    #[napi(ts_type = "'exclusive' | 'shared'")]
+    pub ownership_mode: Option<String>,
+    /// Directory to claim before exposing the filesystem. Requires explicit shared ownership.
+    pub checkout_path: Option<String>,
     /// Defaults to the current process uid, matching the memory driver.
     pub uid: Option<f64>,
     /// Defaults to the current process gid, matching the memory driver.
@@ -1507,6 +1515,77 @@ impl MetadataStore for DynMetadataStore {
         Self: 'async_trait,
     {
         self.0.prepare_bound_concurrent_mode(backing)
+    }
+
+    fn delegation_state<'a, 'async_trait>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<Option<DelegationState>>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.delegation_state()
+    }
+
+    fn prepare_delegated_mode<'a, 'async_trait>(
+        &'a self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.prepare_delegated_mode(backing, expected_revision)
+    }
+
+    fn checkout<'a, 'b, 'async_trait>(
+        &'a self,
+        request: &'b CheckoutRequest,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<DirectoryGrant>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.checkout(request)
+    }
+
+    fn publish_delegated<'a, 'b, 'async_trait>(
+        &'a self,
+        request: &'b DelegatedPublish,
+        namespace: Namespace,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<u64>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.publish_delegated(request, namespace)
+    }
+
+    fn checkin<'a, 'b, 'async_trait>(
+        &'a self,
+        request: &'b DelegatedCheckin,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.checkin(request)
+    }
+
+    fn recover<'a, 'b, 'async_trait>(
+        &'a self,
+        request: &'b DelegatedRecovery,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.recover(request)
     }
 
     fn acquire_writer<'a, 'b, 'async_trait>(
@@ -3376,11 +3455,72 @@ async fn run_shutdown(
     }
 }
 
+/// Integer authority identifiers are decimal strings to preserve all 64 bits.
+#[napi(object)]
+pub struct JsDirectoryGrant {
+    pub root: String,
+    pub owner: String,
+    pub fence: String,
+}
+
+impl From<DirectoryGrant> for JsDirectoryGrant {
+    fn from(grant: DirectoryGrant) -> Self {
+        Self {
+            root: grant.token.root.to_string(),
+            owner: grant.token.owner,
+            fence: grant.token.fence.to_string(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct DelegatedNativeState {
+    mounts: Vec<AutoMount>,
+    creation_uncertain: bool,
+}
+
+// An unsuccessful or canceled create may leave a kernel session awaiting cleanup.
+async fn track_delegated_creation(
+    state: &mut DelegatedNativeState,
+    creation: impl Future<Output = napi::Result<AutoMount>>,
+) -> napi::Result<AutoMount> {
+    state.creation_uncertain = true;
+    let mounted = creation.await?;
+    state.mounts.push(mounted.clone());
+    state.creation_uncertain = false;
+    Ok(mounted)
+}
+
+// FUSE becomes inactive before its shared teardown attempt finishes.
+async fn complete_inactive_delegation_mounts(state: &mut DelegatedNativeState) -> napi::Result<()> {
+    if state.creation_uncertain {
+        return Err(to_js_error(FsError::new(ErrorCode::Ebusy).with_message(
+            "native mount creation retirement is unconfirmed; verify OS unmount and recover ownership offline",
+        )));
+    }
+    while let Some(mount) = state.mounts.last() {
+        if mount.active() {
+            return Err(to_js_error(FsError::new(ErrorCode::Ebusy).with_message(
+                "unmount before directory ownership control or shutdown",
+            )));
+        }
+        mount
+            .unmount()
+            .await
+            .map_err(|error| auto_mount_error(error, "unmount", None))?;
+        state.mounts.pop();
+    }
+    Ok(())
+}
+
 #[napi]
 pub struct Filesystem {
     driver: Arc<dyn FsDriver>,
     shutdown: Option<Arc<ShutdownCallback>>,
     reconcile: Mutex<Option<Arc<ReconcileCallback>>>,
+    delegation: Mutex<Option<ChunkedFs<DynMetadataStore, DynBlockStore>>>,
+    delegated_ownership: bool,
+    native_delegation_mounts: Arc<tokio::sync::Mutex<DelegatedNativeState>>,
 }
 
 #[napi]
@@ -3396,6 +3536,11 @@ impl Filesystem {
             driver: slot,
             shutdown: Some(ShutdownController::callback(controller)),
             reconcile: Mutex::new(reconcile),
+            delegation: Mutex::new(None),
+            delegated_ownership: false,
+            native_delegation_mounts: Arc::new(tokio::sync::Mutex::new(
+                DelegatedNativeState::default(),
+            )),
         }
     }
 
@@ -3472,6 +3617,7 @@ impl Filesystem {
     /// before relying on shutdown to permit removal of backing files.
     #[napi]
     pub async fn shutdown(&self) -> napi::Result<()> {
+        let _native_gate = self.unmounted_delegation_gate().await?;
         if let Some(shutdown) = &self.shutdown {
             shutdown().await.map_err(to_js_error)?;
         }
@@ -3479,11 +3625,70 @@ impl Filesystem {
         // of DriverSlot. Detach it after the provider shutdown succeeds so
         // durable SQLite files can be removed immediately on Windows rather
         // than waiting for JavaScript garbage collection.
+        self.delegation
+            .lock()
+            .map_err(|_| to_js_error(FsError::new(ErrorCode::Eio)))?
+            .take();
         self.reconcile
             .lock()
             .map_err(|_| to_js_error(FsError::new(ErrorCode::Eio)))?
             .take();
         Ok(())
+    }
+
+    fn reject_delegated_export(&self) -> napi::Result<()> {
+        if self.delegated_ownership {
+            return Err(to_js_error(FsError::new(ErrorCode::Enotsup).with_message(
+                "delegated ownership supports direct drivers and fresh Linux FUSE mounts only",
+            )));
+        }
+        Ok(())
+    }
+
+    async fn unmounted_delegation_gate(
+        &self,
+    ) -> napi::Result<tokio::sync::MutexGuard<'_, DelegatedNativeState>> {
+        let mut mounts = self.native_delegation_mounts.lock().await;
+        complete_inactive_delegation_mounts(&mut mounts).await?;
+        Ok(mounts)
+    }
+
+    fn delegated_filesystem(&self) -> napi::Result<ChunkedFs<DynMetadataStore, DynBlockStore>> {
+        self.delegation
+            .lock()
+            .map_err(|_| to_js_error(FsError::new(ErrorCode::Eio)))?
+            .clone()
+            .ok_or_else(|| to_js_error(FsError::new(ErrorCode::Enotsup)))
+    }
+
+    /// Claim a directory for this direct driver session. Native handoff requires unmount/remount.
+    #[napi(js_name = "checkoutScope")]
+    pub async fn checkout_scope(&self, path: String) -> napi::Result<JsDirectoryGrant> {
+        let _native_gate = self.unmounted_delegation_gate().await?;
+        self.delegated_filesystem()?
+            .checkout_scope(&path)
+            .await
+            .map(Into::into)
+            .map_err(to_js_error)
+    }
+
+    /// Close application handles before releasing a directory. This does not revoke kernel caches.
+    #[napi(js_name = "checkinScope")]
+    pub async fn checkin_scope(&self) -> napi::Result<()> {
+        let _native_gate = self.unmounted_delegation_gate().await?;
+        self.delegated_filesystem()?
+            .checkin_scope()
+            .await
+            .map_err(to_js_error)
+    }
+
+    #[napi(js_name = "delegationStatus")]
+    pub async fn delegation_status(&self) -> napi::Result<Option<JsDirectoryGrant>> {
+        self.delegated_filesystem()?
+            .delegation_status()
+            .await
+            .map(|grant| grant.map(Into::into))
+            .map_err(to_js_error)
     }
 
     /// Reconcile aged, unreferenced blocks for a chunked provider. The grace
@@ -3894,9 +4099,31 @@ async fn shutdown_chunked_filesystem(
     filesystem_result.and(resources_result)
 }
 
+fn chunked_ownership_mode(
+    ownership_mode: Option<&str>,
+    concurrent_writes: Option<bool>,
+) -> napi::Result<(Option<OwnershipMode>, bool)> {
+    let mode = match ownership_mode {
+        None => None,
+        Some("exclusive") => Some(OwnershipMode::Exclusive),
+        Some("shared") => Some(OwnershipMode::Shared),
+        Some(_) => {
+            return Err(config_error(
+                "ownershipMode must be 'exclusive' or 'shared'",
+            ));
+        }
+    };
+    let shared = mode.map(|mode| mode == OwnershipMode::Shared);
+    if shared.is_some_and(|shared| concurrent_writes.is_some_and(|legacy| legacy != shared)) {
+        return Err(config_error("ownershipMode contradicts concurrentWrites"));
+    }
+    Ok((mode, shared.or(concurrent_writes).unwrap_or(false)))
+}
+
 #[napi]
 pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Filesystem> {
-    let concurrent_writes = options.concurrent_writes.unwrap_or(false);
+    let (ownership_mode, concurrent_writes) =
+        chunked_ownership_mode(options.ownership_mode.as_deref(), options.concurrent_writes)?;
     if concurrent_writes {
         match options.metadata.kind.as_str() {
             "foundationdb"
@@ -3943,6 +4170,9 @@ pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Fi
             "metadata.leaseAuthority 'revision-cas' requires concurrentWrites",
         ));
     }
+    if options.checkout_path.is_some() && ownership_mode != Some(OwnershipMode::Shared) {
+        return Err(config_error("checkoutPath requires ownershipMode 'shared'"));
+    }
     let owner = chunked_owner(options.owner)?;
     let chunk_size = validate_chunk_size(options.chunk_size)?;
     let ttl = validate_ttl(options.ttl_ms)?;
@@ -3951,12 +4181,18 @@ pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Fi
     let gid = optional_u32("gid", options.gid, process_gid)?;
     let umask = optional_u32("umask", options.umask, 0)?;
     let root_mode = optional_u32("rootMode", options.root_mode, 0o755)?;
-    let chunk_options = ChunkedOptions::fixed(owner, chunk_size)
+    let mut chunk_options = ChunkedOptions::fixed(owner, chunk_size)
         .map_err(to_js_error)?
         .with_lease_ttl(ttl)
         .with_concurrent_writes(concurrent_writes)
         .with_identity(uid, gid, umask)
         .with_root_mode(root_mode);
+    if let Some(mode) = ownership_mode {
+        chunk_options = chunk_options.with_ownership_mode(mode);
+    }
+    if let Some(path) = options.checkout_path {
+        chunk_options = chunk_options.with_checkout_path(path);
+    }
 
     let (metadata_store, metadata_resource) = build_metadata_store(&options.metadata).await?;
     let (block_store, block_resource) = match build_block_store(&options.blocks).await {
@@ -3997,11 +4233,12 @@ pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Fi
         let filesystem = reconcile_filesystem.clone();
         Box::pin(async move { filesystem.reconcile_blocks(grace).await })
     });
-    Ok(Filesystem::from_driver(
-        Arc::new(filesystem),
-        Some(shutdown),
-        Some(reconcile),
-    ))
+    let delegation = filesystem.clone();
+    let mut wrapper =
+        Filesystem::from_driver(Arc::new(filesystem), Some(shutdown), Some(reconcile));
+    wrapper.delegation = Mutex::new(Some(delegation));
+    wrapper.delegated_ownership = ownership_mode == Some(OwnershipMode::Shared);
+    Ok(wrapper)
 }
 
 fn sqlite_durable_uri(uri: &str) -> bool {
@@ -4105,7 +4342,27 @@ pub fn mount(
     mountpoint: String,
     options: Option<JsAutoMountOptions>,
 ) -> napi::Result<PromiseRaw<'static, Mounted>> {
-    let (options, transport_error) = auto_options(options)?;
+    let (mut options, transport_error) = auto_options(options)?;
+    let delegated = if driver.delegated_ownership {
+        if !matches!(options.transport, AutoTransport::Auto | AutoTransport::Fuse)
+            || options.nfs.is_some()
+            || options.p9.is_some()
+        {
+            return Err(to_js_error(FsError::new(ErrorCode::Enotsup).with_message(
+                "delegated ownership requires fresh Linux FUSE mounts",
+            )));
+        }
+        if !cfg!(target_os = "linux") {
+            return Err(to_js_error(FsError::new(ErrorCode::Enotsup).with_message(
+                "delegated native ownership is qualified only on Linux FUSE",
+            )));
+        }
+        options.transport = AutoTransport::Fuse;
+        Some(driver.delegated_filesystem()?)
+    } else {
+        None
+    };
+    let native_delegation_mounts = Arc::clone(&driver.native_delegation_mounts);
     let mountpoint_for_error = mountpoint.clone();
     let mount_driver = driver.driver()?;
     if options
@@ -4116,22 +4373,46 @@ pub fn mount(
         require_nfs_shared_guarded(mount_driver.as_ref(), "mount")?;
     }
     let promise = env.spawn_future(async move {
-        let mounted = mount_rs_auto::mount_with_hooks(
-            MountDriver(mount_driver),
-            mountpoint,
-            options,
-            AutoMountHooks {
-                fuse: fuse_hooks(transport_error.as_ref()),
-                p9: transport_error
-                    .as_ref()
-                    .map(|_| p9_hooks(transport_error.as_ref())),
-                nfs: transport_error
-                    .as_ref()
-                    .map(|_| nfs_hooks(transport_error.as_ref(), None)),
-            },
-        )
-        .await
-        .map_err(|error| auto_mount_error(error, "mount", Some(&mountpoint_for_error)))?;
+        let mut native_gate = if let Some(filesystem) = delegated {
+            let mut mounts = native_delegation_mounts.lock().await;
+            complete_inactive_delegation_mounts(&mut mounts).await?;
+            if filesystem
+                .delegation_status()
+                .await
+                .map_err(to_js_error)?
+                .is_none()
+            {
+                return Err(to_js_error(FsError::new(ErrorCode::Eacces).with_message(
+                    "checkout a directory before exposing a delegated FUSE mount",
+                )));
+            }
+            Some(mounts)
+        } else {
+            None
+        };
+        let creation = async {
+            mount_rs_auto::mount_with_hooks(
+                MountDriver(mount_driver),
+                mountpoint,
+                options,
+                AutoMountHooks {
+                    fuse: fuse_hooks(transport_error.as_ref()),
+                    p9: transport_error
+                        .as_ref()
+                        .map(|_| p9_hooks(transport_error.as_ref())),
+                    nfs: transport_error
+                        .as_ref()
+                        .map(|_| nfs_hooks(transport_error.as_ref(), None)),
+                },
+            )
+            .await
+            .map_err(|error| auto_mount_error(error, "mount", Some(&mountpoint_for_error)))
+        };
+        let mounted = if let Some(state) = &mut native_gate {
+            track_delegated_creation(state, creation).await?
+        } else {
+            creation.await?
+        };
         Ok(Mounted {
             inner: Arc::new(mounted),
             transport_error,
@@ -4681,6 +4962,62 @@ mod tests {
             Duration::from_millis(120)
         );
         assert!(validate_ttl(Some(0.0)).is_err());
+    }
+
+    #[test]
+    fn canceled_native_creation_blocks_ownership_release() {
+        let mut state = DelegatedNativeState::default();
+        let mut creation = Box::pin(track_delegated_creation(&mut state, std::future::pending()));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(creation.as_mut().poll(&mut context).is_pending());
+        drop(creation);
+        assert!(
+            state.creation_uncertain,
+            "canceled mount creation must retain a retirement tombstone"
+        );
+        assert!(block_on(complete_inactive_delegation_mounts(&mut state)).is_err());
+    }
+
+    #[test]
+    fn failed_native_creation_blocks_ownership_release() {
+        let mut state = DelegatedNativeState::default();
+        let error = Error::from_reason("injected uncertain FUSE INIT failure");
+        assert!(
+            block_on(track_delegated_creation(
+                &mut state,
+                std::future::ready(Err(error))
+            ))
+            .is_err()
+        );
+        assert!(
+            state.creation_uncertain,
+            "failed mount cleanup must not permit checkin"
+        );
+        assert!(block_on(complete_inactive_delegation_mounts(&mut state)).is_err());
+    }
+
+    #[test]
+    fn chunked_ownership_modes_preserve_legacy_defaults_and_reject_contradictions() {
+        assert_eq!(chunked_ownership_mode(None, None).unwrap(), (None, false));
+        assert_eq!(
+            chunked_ownership_mode(None, Some(true)).unwrap(),
+            (None, true)
+        );
+        for (name, mode, shared) in [
+            ("exclusive", OwnershipMode::Exclusive, false),
+            ("shared", OwnershipMode::Shared, true),
+        ] {
+            assert_eq!(
+                chunked_ownership_mode(Some(name), None).unwrap(),
+                (Some(mode), shared)
+            );
+            assert_eq!(
+                chunked_ownership_mode(Some(name), Some(shared)).unwrap(),
+                (Some(mode), shared)
+            );
+            assert!(chunked_ownership_mode(Some(name), Some(!shared)).is_err());
+        }
+        assert!(chunked_ownership_mode(Some("invalid"), None).is_err());
     }
 
     #[test]

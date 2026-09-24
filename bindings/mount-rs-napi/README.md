@@ -72,6 +72,52 @@ before the mount starts. A direct `createNfsServer(filesystem, { sharedView:
 true })` selects the same server policy. Callers mounting that server through
 an external NFS client must configure those client cache options themselves.
 
+## Chunked ownership
+
+`createChunkedDriver` accepts `ownershipMode: "exclusive" | "shared"`.
+Explicit exclusive ownership holds the fenced volume lease and enables writeback:
+changes are locally visible and publish at sync barriers or orderly shutdown.
+Always await `shutdown()` before exiting. Shared ownership selects the separate MRC3 directory delegation protocol.
+Supply `checkoutPath: "/database"` to claim a directory before the driver is
+returned. The directory must already exist: bootstrap a new volume by checking
+out `/`, creating the database directories, then checking `/` back in.
+Only that session may access files inside its checked-out directory;
+disjoint directories can have separate owners. Delegated mutations publish
+immediately. This does not provide distributed POSIX locks or shared WAL-index
+access to one database from independent mounts.
+
+Omitting `ownershipMode` preserves the legacy write-through behavior and
+`concurrentWrites` default. If both are supplied, `exclusive` requires
+`concurrentWrites: false` and `shared` requires `concurrentWrites: true`;
+contradictions are rejected before providers open. Legacy
+`concurrentWrites: true` keeps the MRC2 revision-CAS protocol; it does not select
+directory delegation. Existing legacy/MRC2 volumes require offline enrollment
+through the Rust SDK before opening with explicit shared ownership. New empty
+stores can initialize directly in shared mode.
+
+Direct drivers expose `checkoutScope(path)`, `checkinScope()` and
+`delegationStatus()`. Status returns the current grant or `null`; grant `root`
+and `fence` are decimal strings so no 64-bit authority value loses precision.
+Close every application handle before checkin; an open handle causes `EBUSY`.
+After checkin, another session can claim the directory. Crashed ownership needs
+explicit operator recovery through the Rust SDK; there is no timed takeover.
+
+These methods govern direct driver sessions. Native handoff requires stopping
+the SQLite application, closing its connections, unmounting, successful
+shutdown/checkin, and mounting a fresh kernel generation. Calling checkin on a
+live native mount does not revoke cached kernel data. The generic `mount()` helper selects Linux FUSE for delegated ownership and
+requires an active grant before exposing a mount. It rejects NFS/9P options;
+the NFS, 9P, WebDAV and S3 server factories reject delegated drivers. This keeps
+protocol adapter aliases from losing the ownership control state. While a
+tracked native mount remains active, checkout, checkin and shutdown return
+`EBUSY`; unmount it first. An inactive FUSE mount is retained until its
+shared unmount attempt confirms successful teardown. Failed or canceled native
+creation conservatively retains a retirement tombstone and the grant: verify
+that the kernel mount has been removed, discard the affected session, and use
+explicit offline operator recovery before handing the directory to a new
+session. Initial native delegated qualification is Linux
+FUSE only; live NFS/FSKit handoff is unsupported.
+
 ## FoundationDB chunked provider
 
 The chunked Node factory accepts a foundationdb provider when the N-API crate
