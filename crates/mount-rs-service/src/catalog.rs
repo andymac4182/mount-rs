@@ -8,7 +8,6 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-#[cfg(any(unix, test))]
 use std::sync::Mutex;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -235,6 +234,11 @@ fn validate_id(value: &str) -> Result<(), CatalogError> {
 #[async_trait]
 pub trait CatalogStore: Send + Sync {
     async fn load_current(&self) -> Result<CatalogSnapshot, CatalogError>;
+
+    /// Load an immutable snapshot. Providers may override this to share decoded metadata.
+    async fn load_shared_current(&self) -> Result<Arc<CatalogSnapshot>, CatalogError> {
+        self.load_current().await.map(Arc::new)
+    }
     async fn compare_and_swap(
         &self,
         expected_revision: u64,
@@ -249,12 +253,44 @@ pub struct SqliteCatalog {
 
 struct CatalogConnections {
     path: PathBuf,
+    current: Mutex<Option<CachedSnapshot>>,
     #[cfg(unix)]
     identity: FileIdentity,
     #[cfg(unix)]
     connections: Vec<Mutex<Connection>>,
     #[cfg(unix)]
     next: AtomicUsize,
+}
+
+struct CachedSnapshot {
+    revision: i64,
+    document: Box<[u8]>,
+    snapshot: Arc<CatalogSnapshot>,
+}
+
+// The caller holds the single catalog cache lock while querying its authoritative row.
+// Reuse requires exact document equality as well as the SQL revision: out-of-band
+// edits at an unchanged revision must still be decoded and validated.
+fn shared_snapshot(
+    current: &mut Option<CachedSnapshot>,
+    revision: i64,
+    document: &[u8],
+) -> Result<Arc<CatalogSnapshot>, CatalogError> {
+    if let Some(cached) = current.as_ref()
+        && cached.revision == revision
+        && cached.document.as_ref() == document
+    {
+        return Ok(Arc::clone(&cached.snapshot));
+    }
+    let decode_profile = Span::new(Event::CatalogDecode).units(document.len() as u64);
+    let snapshot = Arc::new(decode_snapshot(revision, document)?);
+    drop(decode_profile);
+    *current = Some(CachedSnapshot {
+        revision,
+        document: document.into(),
+        snapshot: Arc::clone(&snapshot),
+    });
+    Ok(snapshot)
 }
 
 #[cfg(unix)]
@@ -346,6 +382,7 @@ impl SqliteCatalog {
             }
             Ok(CatalogConnections {
                 path: setup_path,
+                current: Mutex::new(None),
                 identity,
                 connections,
                 next: AtomicUsize::new(0),
@@ -354,7 +391,7 @@ impl SqliteCatalog {
             #[cfg(not(unix))]
             {
                 drop(connection);
-                Ok(CatalogConnections { path: setup_path })
+                Ok(CatalogConnections { path: setup_path, current: Mutex::new(None) })
             }
         })
         .await??;
@@ -365,6 +402,10 @@ impl SqliteCatalog {
 
     pub async fn load_current(&self) -> Result<CatalogSnapshot, CatalogError> {
         <Self as CatalogStore>::load_current(self).await
+    }
+
+    pub async fn load_shared_current(&self) -> Result<Arc<CatalogSnapshot>, CatalogError> {
+        <Self as CatalogStore>::load_shared_current(self).await
     }
 
     pub async fn compare_and_swap(
@@ -379,6 +420,12 @@ impl SqliteCatalog {
 #[async_trait]
 impl CatalogStore for SqliteCatalog {
     async fn load_current(&self) -> Result<CatalogSnapshot, CatalogError> {
+        self.load_shared_current()
+            .await
+            .map(|snapshot| (*snapshot).clone())
+    }
+
+    async fn load_shared_current(&self) -> Result<Arc<CatalogSnapshot>, CatalogError> {
         let _load_profile = Span::new(Event::CatalogLoad);
         let queue_profile = Span::new(Event::CatalogQueue);
         let shared = Arc::clone(&self.shared);
@@ -388,24 +435,33 @@ impl CatalogStore for SqliteCatalog {
             let connection = shared.connection()?;
             #[cfg(not(unix))]
             let connection = connect(&shared.path)?;
+            // Serialize selection with the query so an older concurrent read cannot
+            // overwrite a newer cached document. The row itself is read every time.
+            let mut current = shared.current.lock()
+                .map_err(|_| CatalogError::Invalid("catalog snapshot unavailable"))?;
             let mut query_profile = Span::new(Event::CatalogQuery);
-            let row: Option<(i64, Vec<u8>)> = connection
-                .query_row(
-                    "SELECT revision, length(document), document FROM service_catalog WHERE singleton = 1",
-                    [],
-                    |row| {
-                        let length:i64=row.get(1)?;
-                        if length<0 || length>MAX_DOCUMENT_BYTES as i64 {return Err(rusqlite::Error::InvalidQuery);}
-                        Ok((row.get(0)?,row.get(2)?))
-                    },
-                )
-                .optional()?;
-            let (revision, document) = row.ok_or(CatalogError::Invalid("catalog row missing"))?;
-            query_profile.set_units(document.len() as u64);
+            let mut statement = connection.prepare_cached(
+                "SELECT revision, length(document), document FROM service_catalog WHERE singleton = 1",
+            )?;
+            let row = statement.query_row([], |row| {
+                let length: i64 = row.get(1)?;
+                if length < 0 || length > MAX_DOCUMENT_BYTES as i64 {
+                    return Err(rusqlite::Error::InvalidQuery);
+                }
+                let document = match row.get_ref(2)? {
+                    rusqlite::types::ValueRef::Blob(document) => document,
+                    _ => return Err(rusqlite::Error::InvalidQuery),
+                };
+                if document.len() != length as usize {
+                    return Err(rusqlite::Error::InvalidQuery);
+                }
+                query_profile.set_units(document.len() as u64);
+                Ok(shared_snapshot(&mut current, row.get(0)?, document))
+            }).optional()?;
+            let result = row.ok_or(CatalogError::Invalid("catalog row missing"))?;
+            drop(statement);
+            drop(current);
             drop(query_profile);
-            let decode_profile = Span::new(Event::CatalogDecode).units(document.len() as u64);
-            let result = decode_snapshot(revision, &document);
-            drop(decode_profile);
             #[cfg(feature = "io-profiling")]
             if profile::enabled() {
                 let sample = mount_rs_sqlite::connection_page_diagnostics(&connection, true);
@@ -610,6 +666,128 @@ mod reuse_tests {
     use super::*;
 
     #[test]
+    fn unchanged_document_selection_allocates_no_snapshot_or_document_data() {
+        let mut snapshot = CatalogSnapshot::empty();
+        snapshot.partitions.insert(
+            "red".into(),
+            PartitionDefinition {
+                drives: BTreeMap::from([(
+                    "data".into(),
+                    DriveDefinition {
+                        driver: serde_json::json!({"kind": "memory"}),
+                    },
+                )]),
+            },
+        );
+        let document = serde_json::to_vec(&snapshot).unwrap();
+        let mut current = None;
+        let first = shared_snapshot(&mut current, 0, &document).unwrap();
+        // The former owned-snapshot path is a positive control for this counter.
+        let owned = crate::dispatch::allocation_tests::count(|| {
+            std::hint::black_box((*first).clone());
+        });
+        assert!(owned.0 > 0 && owned.1 > 0);
+        let shared = crate::dispatch::allocation_tests::count(|| {
+            for _ in 0..32 {
+                let loaded = shared_snapshot(&mut current, 0, &document).unwrap();
+                assert!(Arc::ptr_eq(&first, &loaded));
+                std::hint::black_box(loaded);
+            }
+        });
+        assert_eq!(shared, (0, 0), "unchanged catalog data allocates");
+    }
+
+    #[tokio::test]
+    async fn unchanged_documents_share_the_decoded_snapshot_across_clones() {
+        let directory = tempfile::tempdir().unwrap();
+        let catalog = SqliteCatalog::open(directory.path().join("catalog.sqlite"))
+            .await
+            .unwrap();
+        let first = catalog.load_shared_current().await.unwrap();
+        for _ in 0..16 {
+            let current = catalog.clone().load_shared_current().await.unwrap();
+            assert!(Arc::ptr_eq(&first, &current));
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_reads_validate_every_byte_even_when_revision_is_unchanged() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("catalog.sqlite");
+        let catalog = SqliteCatalog::open(&path).await.unwrap();
+        let first = catalog.load_shared_current().await.unwrap();
+        let mut changed = CatalogSnapshot::empty();
+        changed.partitions.insert(
+            "new".into(),
+            PartitionDefinition {
+                drives: BTreeMap::new(),
+            },
+        );
+        let connection = Connection::open(&path).unwrap();
+        let document = serde_json::to_vec(&changed).unwrap();
+        connection
+            .execute("UPDATE service_catalog SET document=?1", params![document])
+            .unwrap();
+        let current = catalog.load_shared_current().await.unwrap();
+        assert!(!Arc::ptr_eq(&first, &current));
+        assert!(current.partitions.contains_key("new"));
+        connection
+            .execute(
+                "UPDATE service_catalog SET document=?1",
+                params![b"malformed".as_slice()],
+            )
+            .unwrap();
+        assert!(catalog.load_shared_current().await.is_err());
+        connection
+            .execute(
+                "UPDATE service_catalog SET document=?1",
+                params![serde_json::to_vec(&changed).unwrap()],
+            )
+            .unwrap();
+        assert!(
+            catalog
+                .load_shared_current()
+                .await
+                .unwrap()
+                .partitions
+                .contains_key("new")
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_snapshot_never_masks_invalid_authoritative_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("catalog.sqlite");
+        let catalog = SqliteCatalog::open(&path).await.unwrap();
+        let snapshot = catalog.load_shared_current().await.unwrap();
+        let document = serde_json::to_vec(snapshot.as_ref()).unwrap();
+        let connection = Connection::open(&path).unwrap();
+        // SQLite permits a text value in this BLOB column. Reject its type even
+        // when the UTF-8 bytes exactly match a previously validated document.
+        connection
+            .execute(
+                "UPDATE service_catalog SET document=?1",
+                params![std::str::from_utf8(&document).unwrap()],
+            )
+            .unwrap();
+        assert!(catalog.load_shared_current().await.is_err());
+        connection
+            .execute("UPDATE service_catalog SET document=?1", params![document])
+            .unwrap();
+        connection
+            .execute("UPDATE service_catalog SET revision=1", [])
+            .unwrap();
+        assert!(catalog.load_shared_current().await.is_err());
+        connection
+            .execute(
+                "UPDATE service_catalog SET revision=0, document=zeroblob(0)",
+                [],
+            )
+            .unwrap();
+        assert!(catalog.load_shared_current().await.is_err());
+    }
+
+    #[test]
     fn catalog_requires_a_durable_non_uri_path() {
         assert!(validate_catalog_path(Path::new(":memory:")).is_err());
         assert!(validate_catalog_path(Path::new("file:catalog?mode=memory")).is_err());
@@ -683,7 +861,7 @@ mod reuse_tests {
         writer.compare_and_swap(0, initial).await.unwrap();
         assert!(
             reader
-                .load_current()
+                .load_shared_current()
                 .await
                 .unwrap()
                 .grants
@@ -692,7 +870,7 @@ mod reuse_tests {
         let mut revoked = writer.load_current().await.unwrap();
         revoked.grants.clear();
         writer.compare_and_swap(1, revoked).await.unwrap();
-        let current = reader.load_current().await.unwrap();
+        let current = reader.load_shared_current().await.unwrap();
         assert_eq!(current.revision, 2);
         assert!(current.grants.is_empty());
     }
@@ -703,7 +881,7 @@ mod reuse_tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("catalog.sqlite");
         let catalog = SqliteCatalog::open(&path).await.unwrap();
-        assert_eq!(catalog.load_current().await.unwrap().revision, 0);
+        assert_eq!(catalog.load_shared_current().await.unwrap().revision, 0);
         let replacement_path = directory.path().join("replacement.sqlite");
         let replacement = SqliteCatalog::open(&replacement_path).await.unwrap();
         replacement
@@ -712,7 +890,7 @@ mod reuse_tests {
             .unwrap();
         drop(replacement);
         std::fs::rename(&replacement_path, &path).unwrap();
-        assert!(catalog.load_current().await.is_err());
+        assert!(catalog.load_shared_current().await.is_err());
         assert!(
             catalog
                 .compare_and_swap(0, CatalogSnapshot::empty())

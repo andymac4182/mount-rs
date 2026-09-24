@@ -164,7 +164,7 @@ async fn binary_client_reads_writes_and_renews_same_handle() {
     let f = Fixture::new().await;
     f.hello().await;
     let handle = f.open().await;
-    let request = IoRequest {
+    let request: IoRequest = IoRequest {
         drive_id: "data".into(),
         handle,
         position: Some(0),
@@ -237,7 +237,7 @@ async fn v2_trailing_bytes_are_rejected_before_backend_write() {
         &mut send,
         2,
         &IoRequest {
-            drive_id: "data".into(),
+            drive_id: "data",
             handle,
             position: Some(0),
         },

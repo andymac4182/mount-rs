@@ -1,14 +1,17 @@
 //! Negotiated v2 envelope. Header admission is separate from body allocation.
 //! All integers are big endian; reserved bytes must be zero. One envelope per stream.
 use crate::{FrameError, Message, WireError};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub const VERSION: u16 = crate::PROTOCOL_VERSION;
 pub const MAX_IO_BYTES: usize = 1024 * 1024;
 pub const MAX_CONTROL_BYTES: usize = crate::MAX_FRAME_BYTES;
 pub const HEADER_BYTES: usize = 32;
-pub const MAX_IO_CONTROL_BYTES: usize = 64 * 1024;
+pub const IO_PREFIX_BYTES: usize = 18;
+pub const MAX_DRIVE_ID_BYTES: usize = 64;
+pub const MIN_IO_CONTROL_BYTES: usize = IO_PREFIX_BYTES + 1;
+pub const MAX_IO_CONTROL_BYTES: usize = IO_PREFIX_BYTES + MAX_DRIVE_ID_BYTES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -99,32 +102,72 @@ fn valid_lengths(kind: Kind, id: u64, control: usize, payload: usize, count: usi
     }
     match kind {
         Kind::Control => id == 0 && control > 0 && payload == 0 && count == 0,
-        Kind::Read => id > 0 && control > 0 && control <= MAX_IO_CONTROL_BYTES && payload == 0,
-        Kind::Write => id > 0 && control > 0 && control <= MAX_IO_CONTROL_BYTES && count == 0,
+        Kind::Read => {
+            id > 0
+                && (MIN_IO_CONTROL_BYTES..=MAX_IO_CONTROL_BYTES).contains(&control)
+                && payload == 0
+        }
+        Kind::Write => {
+            id > 0 && (MIN_IO_CONTROL_BYTES..=MAX_IO_CONTROL_BYTES).contains(&control) && count == 0
+        }
         Kind::ReadResult => id > 0 && control == 0 && count == payload,
         Kind::WriteResult => id > 0 && control == 0 && payload == 0,
         Kind::Error => id > 0 && (1..=64).contains(&control) && payload == 0 && count == 0,
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct IoRequest {
-    pub drive_id: String,
+#[derive(Debug, Clone)]
+pub struct IoRequest<D = String> {
+    pub drive_id: D,
     pub handle: u64,
     pub position: Option<u64>,
+}
+
+/// An owned catalog Drive ID stored without a heap allocation.
+#[derive(Clone, PartialEq, Eq)]
+pub struct InlineDriveId {
+    bytes: [u8; MAX_DRIVE_ID_BYTES],
+    len: u8,
+}
+impl AsRef<str> for InlineDriveId {
+    fn as_ref(&self) -> &str {
+        // Construction validates ASCII before storing the ID.
+        std::str::from_utf8(&self.bytes[..usize::from(self.len)]).unwrap()
+    }
+}
+impl std::ops::Deref for InlineDriveId {
+    type Target = str;
+    fn deref(&self) -> &str {
+        self.as_ref()
+    }
+}
+impl std::fmt::Display for InlineDriveId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_ref())
+    }
+}
+impl std::fmt::Debug for InlineDriveId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self.as_ref(), f)
+    }
+}
+fn valid_drive_id(bytes: &[u8]) -> bool {
+    (1..=MAX_DRIVE_ID_BYTES).contains(&bytes.len())
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 #[derive(Debug)]
 pub enum Incoming {
     Control(Message),
     Read {
         request_id: u64,
-        request: IoRequest,
+        request: IoRequest<InlineDriveId>,
         length: usize,
     },
     Write {
         request_id: u64,
-        request: IoRequest,
+        request: IoRequest<InlineDriveId>,
         data: Vec<u8>,
     },
 }
@@ -178,41 +221,81 @@ pub async fn read_control<R: AsyncRead + Unpin>(r: &mut R) -> Result<Message, Fr
         _ => Err(FrameError::InvalidLength),
     }
 }
-pub async fn write_request<W: AsyncWrite + Unpin>(
+pub async fn write_request<W: AsyncWrite + Unpin, D: AsRef<str>>(
     w: &mut W,
     id: u64,
-    request: &IoRequest,
+    request: &IoRequest<D>,
     length: usize,
     data: Option<&[u8]>,
 ) -> Result<(), FrameError> {
-    // Validate raw length before even serializing metadata.
+    let drive = request.drive_id.as_ref().as_bytes();
+    if !valid_drive_id(drive) {
+        return Err(FrameError::InvalidLength);
+    }
     let (kind, payload, count) = match data {
         Some(b) => (Kind::Write, b.len(), 0),
         None => (Kind::Read, 0, length),
     };
-    Header::new(kind, id, 1, payload, count)?;
-    let mut out = Capped(Vec::new(), MAX_IO_CONTROL_BYTES);
-    serde_json::to_writer(&mut out, request)?;
-    let b = out.0;
+    let control_len = IO_PREFIX_BYTES + drive.len();
+    let header = Header::new(kind, id, control_len, payload, count)?;
+    let mut metadata = [0; MAX_IO_CONTROL_BYTES];
+    metadata[0] = drive.len() as u8;
+    metadata[1] = u8::from(request.position.is_some());
+    metadata[2..10].copy_from_slice(&request.handle.to_be_bytes());
+    metadata[10..18].copy_from_slice(&request.position.unwrap_or(0).to_be_bytes());
+    metadata[18..control_len].copy_from_slice(drive);
     emit(
         w,
-        Header::new(kind, id, b.len(), payload, count)?,
-        &b,
+        header,
+        &metadata[..control_len],
         data.unwrap_or_default(),
     )
     .await
+}
+
+/// Read typed I/O metadata into bounded inline storage, leaving raw payload unread.
+pub async fn read_io_metadata<R: AsyncRead + Unpin>(
+    r: &mut R,
+    h: Header,
+) -> Result<IoRequest<InlineDriveId>, FrameError> {
+    Header::new(h.kind, h.request_id, h.control_len, h.payload_len, h.count)?;
+    if !matches!(h.kind, Kind::Read | Kind::Write) {
+        return Err(FrameError::InvalidLength);
+    }
+    let mut metadata = [0; MAX_IO_CONTROL_BYTES];
+    r.read_exact(&mut metadata[..h.control_len]).await?;
+    let len = usize::from(metadata[0]);
+    let flags = metadata[1];
+    let position = u64::from_be_bytes(metadata[10..18].try_into().unwrap());
+    if flags & !1 != 0
+        || h.control_len != IO_PREFIX_BYTES + len
+        || (flags == 0 && position != 0)
+        || !valid_drive_id(&metadata[IO_PREFIX_BYTES..h.control_len])
+    {
+        return Err(FrameError::InvalidLength);
+    }
+    let mut bytes = [0; MAX_DRIVE_ID_BYTES];
+    bytes[..len].copy_from_slice(&metadata[IO_PREFIX_BYTES..h.control_len]);
+    Ok(IoRequest {
+        drive_id: InlineDriveId {
+            bytes,
+            len: len as u8,
+        },
+        handle: u64::from_be_bytes(metadata[2..10].try_into().unwrap()),
+        position: (flags == 1).then_some(position),
+    })
 }
 pub async fn read_body<R: AsyncRead + Unpin>(r: &mut R, h: Header) -> Result<Incoming, FrameError> {
     Header::new(h.kind, h.request_id, h.control_len, h.payload_len, h.count)?;
     if !matches!(h.kind, Kind::Control | Kind::Read | Kind::Write) {
         return Err(FrameError::InvalidLength);
     }
-    let mut b = vec![0; h.control_len];
-    r.read_exact(&mut b).await?;
     if h.kind == Kind::Control {
+        let mut b = vec![0; h.control_len];
+        r.read_exact(&mut b).await?;
         return Ok(Incoming::Control(serde_json::from_slice(&b)?));
     }
-    let request = serde_json::from_slice(&b)?;
+    let request = read_io_metadata(r, h).await?;
     if h.kind == Kind::Read {
         return Ok(Incoming::Read {
             request_id: h.request_id,
@@ -337,9 +420,13 @@ mod proofs {
                     assert_eq!(payload, count);
                     assert_eq!(control, 0);
                 }
+                if matches!(kind, Kind::Read | Kind::Write) {
+                    assert!(control >= MIN_IO_CONTROL_BYTES);
+                    assert!(control <= MAX_IO_CONTROL_BYTES);
+                    assert!(control - IO_PREFIX_BYTES <= MAX_DRIVE_ID_BYTES);
+                }
                 if kind == Kind::Write {
                     assert_eq!(count, 0);
-                    assert!(control <= MAX_IO_CONTROL_BYTES);
                 }
             }
         }

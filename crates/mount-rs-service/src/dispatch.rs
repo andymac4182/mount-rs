@@ -13,7 +13,8 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::auth::authorize_drive;
-use crate::catalog::{CatalogStore, DriveKey, IssuerPolicyDefinition, Permission};
+use crate::catalog::{CatalogStore, Permission};
+use crate::request_metadata::{AuditRecord, MatchingGrants, policy_matches, write_audit};
 
 #[derive(Debug, Clone)]
 pub struct SessionIdentity {
@@ -148,14 +149,22 @@ impl SessionHandles {
 #[derive(Clone, Copy)]
 enum PayloadMode<'a> {
     Json,
-    Read,
-    Write(&'a [u8]),
+    Read {
+        handle: u64,
+        position: Option<u64>,
+        length: usize,
+    },
+    Write {
+        handle: u64,
+        position: Option<u64>,
+        data: &'a [u8],
+    },
 }
 
 pub struct DriveDispatcher {
     catalog: Arc<dyn CatalogStore>,
-    drives: BTreeMap<DriveKey, Arc<dyn FsDriver>>,
-    definitions: BTreeMap<DriveKey, Value>,
+    drives: BTreeMap<String, BTreeMap<String, Arc<dyn FsDriver>>>,
+    definitions: BTreeMap<String, BTreeMap<String, Value>>,
 }
 
 impl DriveDispatcher {
@@ -174,14 +183,11 @@ impl DriveDispatcher {
         drive_id: &str,
         driver: Arc<dyn FsDriver>,
     ) -> Result<(), &'static str> {
-        let key = DriveKey {
-            partition_id: partition_id.to_owned(),
-            drive_id: drive_id.to_owned(),
-        };
-        if self.drives.contains_key(&key) {
+        let partition = self.drives.entry(partition_id.to_owned()).or_default();
+        if partition.contains_key(drive_id) {
             return Err("duplicate Drive registration");
         }
-        self.drives.insert(key, driver);
+        partition.insert(drive_id.to_owned(), driver);
         Ok(())
     }
 
@@ -193,18 +199,15 @@ impl DriveDispatcher {
         driver: Arc<dyn FsDriver>,
     ) -> Result<(), &'static str> {
         self.register(partition_id, drive_id, driver)?;
-        self.definitions.insert(
-            DriveKey {
-                partition_id: partition_id.into(),
-                drive_id: drive_id.into(),
-            },
-            definition,
-        );
+        self.definitions
+            .entry(partition_id.to_owned())
+            .or_default()
+            .insert(drive_id.to_owned(), definition);
         Ok(())
     }
 
     pub async fn renewal_matches(&self, current: &SessionIdentity, next: &SessionIdentity) -> bool {
-        let Ok(catalog) = self.catalog.load_current().await else {
+        let Ok(catalog) = self.catalog.load_shared_current().await else {
             return false;
         };
         catalog
@@ -212,7 +215,10 @@ impl DriveDispatcher {
             .values()
             .filter(|g| g.partition_id == current.partition_id && g.policy_id == current.policy_id)
             .flat_map(|g| g.claim_conditions.keys())
-            .all(|pointer| current.claims.pointer(pointer) == next.claims.pointer(pointer))
+            .all(|pointer| {
+                crate::request_metadata::claim_pointer(&current.claims, pointer)
+                    == crate::request_metadata::claim_pointer(&next.claims, pointer)
+            })
     }
 
     pub async fn dispatch(
@@ -260,10 +266,10 @@ impl DriveDispatcher {
         .await
     }
 
-    pub async fn dispatch_io(
+    pub async fn dispatch_io<D: AsRef<str>>(
         &self,
         identity: &SessionIdentity,
-        request: &IoRequest,
+        request: &IoRequest<D>,
         handles: &SessionHandles,
         request_id: u64,
         length: usize,
@@ -275,16 +281,24 @@ impl DriveDispatcher {
             } else {
                 OperationName::HandleRead
             },
-            body: serde_json::json!({"handle":request.handle,"position":request.position,"length":length}),
+            body: Value::Null,
         };
         let mut output = None;
         let mode = match data {
-            Some(data) => PayloadMode::Write(data),
-            None => PayloadMode::Read,
+            Some(data) => PayloadMode::Write {
+                handle: request.handle,
+                position: request.position,
+                data,
+            },
+            None => PayloadMode::Read {
+                handle: request.handle,
+                position: request.position,
+                length,
+            },
         };
         self.dispatch_mode(
             identity,
-            &request.drive_id,
+            request.drive_id.as_ref(),
             &operation,
             handles,
             request_id,
@@ -316,7 +330,7 @@ impl DriveDispatcher {
             handles.close_all().await;
             return Err(error("EACCES"));
         }
-        let catalog = match self.catalog.load_current().await {
+        let catalog = match self.catalog.load_shared_current().await {
             Ok(catalog) => catalog,
             Err(_) => {
                 handles.close_all().await;
@@ -324,24 +338,11 @@ impl DriveDispatcher {
             }
         };
         handles.refresh_revision(catalog.revision).await;
-        let policy: IssuerPolicyDefinition = catalog
+        let policy = catalog
             .issuer_policies
             .get(&identity.policy_id)
-            .cloned()
-            .ok_or_else(|| error("EACCES"))
-            .and_then(|value| serde_json::from_value(value).map_err(|_| error("EACCES")))?;
-        let audience_ok = match identity.claims.get("aud") {
-            Some(Value::String(value)) => policy.audiences.contains(value),
-            Some(Value::Array(values)) => values.iter().any(|v| {
-                v.as_str()
-                    .is_some_and(|v| policy.audiences.iter().any(|a| a == v))
-            }),
-            _ => false,
-        };
-        if policy.issuer != identity.issuer
-            || !audience_ok
-            || !policy.algorithms.contains(&identity.signing_algorithm)
-        {
+            .ok_or_else(|| error("EACCES"))?;
+        if !policy_matches(policy, identity) {
             return Err(error("EACCES"));
         }
         let permission = authorize_drive(
@@ -355,11 +356,10 @@ impl DriveDispatcher {
         if !permission_allows(permission, operation.required_permission()) {
             return Err(error("EACCES"));
         }
-        let key = DriveKey {
-            partition_id: identity.partition_id.clone(),
-            drive_id: drive_id.to_owned(),
-        };
-        if let Some(definition) = self.definitions.get(&key)
+        if let Some(definition) = self
+            .definitions
+            .get(identity.partition_id.as_str())
+            .and_then(|partition| partition.get(drive_id))
             && catalog
                 .partitions
                 .get(&identity.partition_id)
@@ -368,7 +368,11 @@ impl DriveDispatcher {
         {
             return Err(error("ESTALE"));
         }
-        let driver = self.drives.get(&key).ok_or_else(|| error("EACCES"))?;
+        let driver = self
+            .drives
+            .get(identity.partition_id.as_str())
+            .and_then(|partition| partition.get(drive_id))
+            .ok_or_else(|| error("EACCES"))?;
         drop(authorization_profile);
         let body = &operation.body;
         let result = async {
@@ -452,7 +456,12 @@ impl DriveDispatcher {
                 | OperationName::HandleSync
                 | OperationName::HandleDatasync
                 | OperationName::HandleClose => {
-                    let id = number(body, "handle")?;
+                    let id = match mode {
+                        PayloadMode::Json => number(body, "handle")?,
+                        PayloadMode::Read { handle, .. } | PayloadMode::Write { handle, .. } => {
+                            handle
+                        }
+                    };
                     let wait_profile = Span::new(Event::HandleWait);
                     let mut state = handles.state.lock().await;
                     drop(wait_profile);
@@ -468,13 +477,18 @@ impl DriveDispatcher {
                     drop(state);
                     match operation.name {
                         OperationName::HandleRead => {
-                            let length = number(body, "length")?;
+                            let (length, read_position) = match mode {
+                                PayloadMode::Read {
+                                    length, position, ..
+                                } => (length as u64, position),
+                                _ => (number(body, "length")?, position(body)?),
+                            };
                             if length > 1024 * 1024 {
                                 return Err(error("EINVAL"));
                             }
                             let mut data = vec![0; length as usize];
                             let count = handle
-                                .read(&mut data, position(body)?)
+                                .read(&mut data, read_position)
                                 .await
                                 .map_err(fs_error)?;
                             if count > data.len() {
@@ -483,7 +497,7 @@ impl DriveDispatcher {
                             data.truncate(count);
                             // v2 returns the filesystem-owned raw buffer. Legacy
                             // dispatch retains its exact JSON result representation.
-                            if matches!(mode, PayloadMode::Read) {
+                            if matches!(mode, PayloadMode::Read { .. }) {
                                 *raw_output = Some(IoResult::Read(data));
                                 Ok(Value::Null)
                             } else {
@@ -491,14 +505,11 @@ impl DriveDispatcher {
                             }
                         }
                         OperationName::HandleWrite => {
-                            if let PayloadMode::Write(data) = mode {
+                            if let PayloadMode::Write { data, position, .. } = mode {
                                 if data.len() > 1024 * 1024 {
                                     return Err(error("EINVAL"));
                                 }
-                                let count = handle
-                                    .write(data, position(body)?)
-                                    .await
-                                    .map_err(fs_error)?;
+                                let count = handle.write(data, position).await.map_err(fs_error)?;
                                 if count > data.len() {
                                     return Err(error("EIO"));
                                 }
@@ -662,30 +673,31 @@ impl DriveDispatcher {
         }
         .await;
         if request_id != 0 {
-            let grants: Vec<_> = catalog
-                .grants
-                .iter()
-                .filter(|(_, grant)| {
-                    grant.partition_id == identity.partition_id
-                        && grant.policy_id == identity.policy_id
-                        && grant.drives.contains_key(drive_id)
-                        && grant.claim_conditions.iter().all(|(pointer, expected)| {
-                            identity.claims.pointer(pointer).and_then(Value::as_str)
-                                == Some(expected.as_str())
-                        })
-                })
-                .map(|(id, _)| id)
-                .collect();
             let _audit_profile = Span::new(Event::Audit);
-            let line = audit_line(
-                serde_json::json!({"event":"remote_access","partition_id":identity.partition_id,"drive_id":drive_id,"grant_ids":grants,"operation":operation.name,"request_id":request_id,"outcome":result.as_ref().map(|_|"ok").unwrap_or_else(|error|&error.code)}),
-            );
-            eprintln!("{line}");
+            let record = AuditRecord {
+                event: "remote_access",
+                partition_id: &identity.partition_id,
+                drive_id,
+                grant_ids: MatchingGrants {
+                    catalog: &catalog,
+                    identity,
+                    drive_id,
+                },
+                operation: operation.name,
+                request_id,
+                outcome: result
+                    .as_ref()
+                    .map(|_| "ok")
+                    .unwrap_or_else(|error| &error.code),
+            };
+            write_audit(&mut std::io::stderr().lock(), &record)
+                .expect("remote audit output failed");
         }
         result
     }
 }
 
+#[cfg(test)]
 fn audit_line(event: Value) -> String {
     // Serialize before eprintln acquires stderr, then emit one complete line.
     event.to_string()
@@ -1071,3 +1083,7 @@ mod proofs {
         kani::cover!(result == Err(HandleRejection::Full));
     }
 }
+
+#[cfg(test)]
+#[path = "dispatch_allocations.rs"]
+pub(crate) mod allocation_tests;

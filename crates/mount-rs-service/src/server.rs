@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use mount_rs_remote_protocol::binary::{self, Incoming, IoResult};
+use mount_rs_remote_protocol::binary::{self, Incoming, InlineDriveId, IoRequest};
 use mount_rs_remote_protocol::{Message, PROTOCOL_VERSION, WireError};
 use quinn::crypto::rustls::QuicServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -13,6 +13,8 @@ use tokio::sync::{Mutex, Semaphore};
 use crate::dispatch::{DriveDispatcher, SessionHandles, SessionIdentity};
 pub use crate::transfer::RemoteTransferLimits;
 use crate::transfer::{Admission, Budgets, ResponseBuffer, ResponseReservation, charged_bytes};
+
+const OPERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 const ALPN: &[u8] = b"mount-rs/2";
 const MAX_DATA_STREAMS: usize = 32;
@@ -250,7 +252,7 @@ async fn serve_connection(
     let _ = send.finish();
     drop(send);
     drop(recv);
-    let identity = Arc::new(Mutex::new(identity));
+    let identity = Arc::new(Mutex::new(Arc::new(identity)));
     let handles = Arc::new(SessionHandles::default());
     let mut tasks = tokio::task::JoinSet::new();
     while let Ok((send, recv)) = connection.accept_bi().await {
@@ -286,7 +288,7 @@ async fn serve_connection(
 async fn serve_stream(
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
-    identity: Arc<Mutex<SessionIdentity>>,
+    identity: Arc<Mutex<Arc<SessionIdentity>>>,
     dispatcher: Arc<DriveDispatcher>,
     authenticator: Arc<dyn Authenticator>,
     handles: Arc<SessionHandles>,
@@ -310,38 +312,48 @@ async fn serve_stream(
         connection.close(1_u32.into(), b"invalid request stream");
         return;
     }
-    let (message, io) = match incoming {
-        Incoming::Control(m) => (m, None),
+    let message = match incoming {
+        Incoming::Control(message) => message,
         Incoming::Read {
             request_id,
             request,
             length,
-        } => (
-            Message::Request {
+        } => {
+            serve_io(
+                &mut send,
+                &connection,
+                &identity,
+                &dispatcher,
+                &handles,
+                &budgets,
                 request_id,
-                drive_id: request.drive_id.clone(),
-                operation: mount_rs_remote_protocol::Operation {
-                    name: mount_rs_remote_protocol::OperationName::HandleRead,
-                    body: serde_json::Value::Null,
-                },
-            },
-            Some((request, length, None)),
-        ),
+                &request,
+                length,
+                None,
+            )
+            .await;
+            return;
+        }
         Incoming::Write {
             request_id,
             request,
             data,
-        } => (
-            Message::Request {
+        } => {
+            serve_io(
+                &mut send,
+                &connection,
+                &identity,
+                &dispatcher,
+                &handles,
+                &budgets,
                 request_id,
-                drive_id: request.drive_id.clone(),
-                operation: mount_rs_remote_protocol::Operation {
-                    name: mount_rs_remote_protocol::OperationName::HandleWrite,
-                    body: serde_json::Value::Null,
-                },
-            },
-            Some((request, 0, Some(data))),
-        ),
+                &request,
+                0,
+                Some(&data),
+            )
+            .await;
+            return;
+        }
     };
     if matches!(message, Message::Request { .. })
         && (budgets.request_operation(&mut admission).is_err()
@@ -353,16 +365,10 @@ async fn serve_stream(
     }
     // Reserve output before reads or authoritative mutations. Raw reads use
     // their validated declared size; fixed scalar metadata has a small cap.
-    let reservation = if let Some((_, length, _)) = &io {
-        ResponseReservation::io(*length)
-    } else {
-        ResponseReservation::message(&message)
-    };
+    let reservation = ResponseReservation::message(&message);
     let Ok(egress_permit) = budgets.egress(reservation.control, reservation.charge) else {
         return;
     };
-    let mut io_response: Option<Result<IoResult, WireError>> = None;
-    let mut io_id = 0;
     if handles.is_closed().await {
         connection.close(1_u32.into(), b"session invalidated");
         return;
@@ -378,30 +384,10 @@ async fn serve_stream(
                 return;
             }
             let current = identity.lock().await.clone();
-            let result = match tokio::time::timeout(std::time::Duration::from_secs(30), async {
-                if let Some((request, length, data)) = &io {
-                    io_id = request_id;
-                    let result = dispatcher
-                        .dispatch_io(
-                            &current,
-                            request,
-                            &handles,
-                            request_id,
-                            *length,
-                            data.as_deref(),
-                        )
-                        .await;
-                    let control = result
-                        .as_ref()
-                        .map(|_| serde_json::Value::Null)
-                        .map_err(Clone::clone);
-                    io_response = Some(result);
-                    control
-                } else {
-                    dispatcher
-                        .dispatch_request(&current, &drive_id, &operation, &handles, request_id)
-                        .await
-                }
+            let result = match tokio::time::timeout(OPERATION_TIMEOUT, async {
+                dispatcher
+                    .dispatch_request(&current, &drive_id, &operation, &handles, request_id)
+                    .await
             })
             .await
             {
@@ -431,7 +417,7 @@ async fn serve_stream(
             )
             .await
             else {
-                identity.lock().await.expires_at = 0;
+                Arc::make_mut(&mut *identity.lock().await).expires_at = 0;
                 connection.close(1_u32.into(), b"authentication failed");
                 return;
             };
@@ -443,7 +429,7 @@ async fn serve_stream(
                 || next.subject != current.subject
                 || !dispatcher.renewal_matches(&current, &next).await
             {
-                current.expires_at = 0;
+                Arc::make_mut(&mut *current).expires_at = 0;
                 connection.close(1_u32.into(), b"identity changed");
                 denied()
             } else {
@@ -451,7 +437,7 @@ async fn serve_stream(
                     connection.close(1_u32.into(), b"session invalidated");
                     return;
                 }
-                *current = next;
+                *current = Arc::new(next);
                 Message::ServerHello {
                     version: PROTOCOL_VERSION,
                     session_id: "renewed".into(),
@@ -461,15 +447,72 @@ async fn serve_stream(
         _ => denied(),
     };
     let mut buffer = ResponseBuffer::new(reservation.wire_limit);
-    let encoded = if let Some(result) = io_response {
-        binary::write_result(&mut buffer, io_id, result).await
-    } else {
-        binary::write_control(&mut buffer, &response).await
-    };
+    let encoded = binary::write_control(&mut buffer, &response).await;
     if encoded.is_err() {
         return;
     }
     let payload = charged_bytes(buffer.bytes, egress_permit);
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        send.write_chunk(payload),
+    )
+    .await;
+    let _ = send.finish();
+}
+
+// The typed lane retains inline/borrowed metadata through authoritative dispatch.
+#[allow(clippy::too_many_arguments)]
+async fn serve_io(
+    send: &mut quinn::SendStream,
+    connection: &quinn::Connection,
+    identity: &Mutex<Arc<SessionIdentity>>,
+    dispatcher: &DriveDispatcher,
+    handles: &SessionHandles,
+    budgets: &Budgets,
+    request_id: u64,
+    request: &IoRequest<InlineDriveId>,
+    length: usize,
+    data: Option<&[u8]>,
+) {
+    let reservation = ResponseReservation::io(length);
+    let Ok(permit) = budgets.egress(reservation.control, reservation.charge) else {
+        return;
+    };
+    if handles.is_closed().await {
+        connection.close(1_u32.into(), b"session invalidated");
+        return;
+    }
+    let current = Arc::clone(&*identity.lock().await);
+    let result = match tokio::time::timeout(
+        OPERATION_TIMEOUT,
+        dispatcher.dispatch_io(&current, request, handles, request_id, length, data),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            eprintln!(
+                "{}",
+                serde_json::json!({"event":"remote_denial","request_id":request_id,"outcome":"timeout"})
+            );
+            connection.close(1_u32.into(), b"operation timed out");
+            return;
+        }
+    };
+    if let Err(error) = &result {
+        eprintln!(
+            "{}",
+            serde_json::json!({"event":"remote_denial","partition_id":current.partition_id,"drive_id":request.drive_id.as_ref(),"policy_id":current.policy_id,"operation":if data.is_some(){"handle_write"}else{"handle_read"},"request_id":request_id,"outcome":error.code})
+        );
+    }
+    let mut buffer = ResponseBuffer::new(reservation.wire_limit);
+    if binary::write_result(&mut buffer, request_id, result)
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let payload = charged_bytes(buffer.bytes, permit);
     let _ = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         send.write_chunk(payload),

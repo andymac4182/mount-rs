@@ -128,8 +128,8 @@ fn main() {
             write.len() + 4,
             size * std::mem::size_of::<Value>()
         );
-        let request = IoRequest {
-            drive_id: "sandbox-drive".into(),
+        let request: IoRequest<&str> = IoRequest {
+            drive_id: "sandbox-drive",
             handle: 1,
             position: Some(0),
         };
@@ -203,6 +203,11 @@ fn main() {
                 Some(&payload),
             ))
             .unwrap();
+        });
+        measure("binary_request_metadata_decode", size, iterations, || {
+            let mut reader = &binary_write[..];
+            let header = ready(Header::read(&mut reader)).unwrap();
+            black_box(ready(binary::read_io_metadata(&mut reader, header)).unwrap());
         });
         measure("binary_write_decode", size, iterations, || {
             let mut reader = &binary_write[..];

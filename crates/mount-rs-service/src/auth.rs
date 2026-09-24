@@ -472,7 +472,8 @@ pub fn authorize_drive(
                 policy_id,
                 grant.claim_conditions.iter().map(|(path, expected)| {
                     (
-                        claims.pointer(path).and_then(Value::as_str),
+                        crate::request_metadata::claim_pointer(claims, path)
+                            .and_then(Value::as_str),
                         expected.as_str(),
                     )
                 }),

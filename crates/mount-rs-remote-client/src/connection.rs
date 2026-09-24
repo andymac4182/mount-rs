@@ -63,7 +63,7 @@ pub trait Transport: Send + Sync {
     async fn read(
         &self,
         _id: u64,
-        _request: &IoRequest,
+        _request: &IoRequest<&str>,
         _buffer: &mut [u8],
     ) -> Result<usize, ClientError> {
         Err(ClientError::Protocol)
@@ -71,7 +71,7 @@ pub trait Transport: Send + Sync {
     async fn write(
         &self,
         _id: u64,
-        _request: &IoRequest,
+        _request: &IoRequest<&str>,
         _data: &[u8],
     ) -> Result<usize, ClientError> {
         Err(ClientError::Protocol)
@@ -112,7 +112,7 @@ impl Transport for QuicTransport {
     async fn read(
         &self,
         id: u64,
-        request: &IoRequest,
+        request: &IoRequest<&str>,
         buffer: &mut [u8],
     ) -> Result<usize, ClientError> {
         let (mut send, mut recv) = self
@@ -132,7 +132,12 @@ impl Transport for QuicTransport {
             .map_err(|_| ClientError::Protocol)?;
         result.map_err(|e| ClientError::Remote(e.code))
     }
-    async fn write(&self, id: u64, request: &IoRequest, data: &[u8]) -> Result<usize, ClientError> {
+    async fn write(
+        &self,
+        id: u64,
+        request: &IoRequest<&str>,
+        data: &[u8],
+    ) -> Result<usize, ClientError> {
         let (mut send, mut recv) = self
             .connection
             .open_bi()
@@ -339,7 +344,7 @@ impl RemoteConnection {
         }
         let id = self.io_id().await?;
         let request = IoRequest {
-            drive_id: drive_id.to_owned(),
+            drive_id,
             handle,
             position,
         };
@@ -364,7 +369,7 @@ impl RemoteConnection {
         }
         let id = self.io_id().await?;
         let request = IoRequest {
-            drive_id: drive_id.to_owned(),
+            drive_id,
             handle,
             position,
         };

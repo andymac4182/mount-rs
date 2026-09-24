@@ -1,0 +1,43 @@
+   Compiling mount-rs-remote-protocol v0.1.0 (/Users/amcclenaghan/github/andymac4182/mount-rs-remote-drive-mounts/crates/mount-rs-remote-protocol)
+    Finished `release` profile [optimized] target(s) in 1.60s
+     Running `/private/tmp/mount-rs-remote-drive-target/release/examples/wire_profile`
+WIRE_PROFILE serde_value_bytes=32
+WIRE_SIZE pattern=zeros payload_bytes=4096 read_frame_bytes=8248
+WIRE_SIZE pattern=all_255 payload_bytes=4096 read_frame_bytes=16440
+WIRE_SIZE pattern=uniform_bytes payload_bytes=4096 read_frame_bytes=14680 write_frame_bytes=14766 value_array_storage_bytes=131072
+WIRE_BINARY_SIZE payload_bytes=4096 read_frame_bytes=4128 write_frame_bytes=4159
+WIRE_PROFILE name=binary_read_encode_with_provider_vec_clone payload_bytes=4096 iterations=1000 ns_per_op=66 allocs_per_op=1.00 requested_bytes_per_op=4096
+WIRE_PROFILE name=binary_read_decode_into_caller payload_bytes=4096 iterations=1000 ns_per_op=72 allocs_per_op=0.00 requested_bytes_per_op=0
+WIRE_PROFILE name=binary_write_encode_borrowed payload_bytes=4096 iterations=1000 ns_per_op=18 allocs_per_op=0.00 requested_bytes_per_op=0
+WIRE_PROFILE name=binary_request_metadata_decode payload_bytes=4096 iterations=1000 ns_per_op=36 allocs_per_op=0.00 requested_bytes_per_op=0
+WIRE_PROFILE name=binary_write_decode payload_bytes=4096 iterations=1000 ns_per_op=153 allocs_per_op=1.00 requested_bytes_per_op=4096
+WIRE_PROFILE name=numeric_json_read_encode payload_bytes=4096 iterations=1000 ns_per_op=32429 allocs_per_op=9.00 requested_bytes_per_op=163712
+WIRE_PROFILE name=numeric_json_read_decode payload_bytes=4096 iterations=1000 ns_per_op=66217 allocs_per_op=25.00 requested_bytes_per_op=528640
+WIRE_PROFILE name=numeric_json_write_encode payload_bytes=4096 iterations=1000 ns_per_op=33382 allocs_per_op=14.00 requested_bytes_per_op=164375
+WIRE_PROFILE name=numeric_json_write_decode payload_bytes=4096 iterations=1000 ns_per_op=60795 allocs_per_op=31.00 requested_bytes_per_op=529559
+WIRE_SIZE pattern=zeros payload_bytes=65536 read_frame_bytes=131128
+WIRE_SIZE pattern=all_255 payload_bytes=65536 read_frame_bytes=262200
+WIRE_SIZE pattern=uniform_bytes payload_bytes=65536 read_frame_bytes=234040 write_frame_bytes=234126 value_array_storage_bytes=2097152
+WIRE_BINARY_SIZE payload_bytes=65536 read_frame_bytes=65568 write_frame_bytes=65599
+WIRE_PROFILE name=binary_read_encode_with_provider_vec_clone payload_bytes=65536 iterations=100 ns_per_op=667 allocs_per_op=1.00 requested_bytes_per_op=65536
+WIRE_PROFILE name=binary_read_decode_into_caller payload_bytes=65536 iterations=100 ns_per_op=1184 allocs_per_op=0.00 requested_bytes_per_op=0
+WIRE_PROFILE name=binary_write_encode_borrowed payload_bytes=65536 iterations=100 ns_per_op=26 allocs_per_op=0.00 requested_bytes_per_op=0
+WIRE_PROFILE name=binary_request_metadata_decode payload_bytes=65536 iterations=100 ns_per_op=43 allocs_per_op=0.00 requested_bytes_per_op=0
+WIRE_PROFILE name=binary_write_decode payload_bytes=65536 iterations=100 ns_per_op=1174 allocs_per_op=1.00 requested_bytes_per_op=65536
+WIRE_PROFILE name=numeric_json_read_encode payload_bytes=65536 iterations=100 ns_per_op=511655 allocs_per_op=13.00 requested_bytes_per_op=2621312
+WIRE_PROFILE name=numeric_json_read_decode payload_bytes=65536 iterations=100 ns_per_op=910050 allocs_per_op=33.00 requested_bytes_per_op=8454400
+WIRE_PROFILE name=numeric_json_write_encode payload_bytes=65536 iterations=100 ns_per_op=470267 allocs_per_op=18.00 requested_bytes_per_op=2621975
+WIRE_PROFILE name=numeric_json_write_decode payload_bytes=65536 iterations=100 ns_per_op=866001 allocs_per_op=39.00 requested_bytes_per_op=8455319
+WIRE_SIZE pattern=zeros payload_bytes=1048576 read_frame_bytes=2097208
+WIRE_SIZE pattern=all_255 payload_bytes=1048576 read_frame_bytes=4194360
+WIRE_SIZE pattern=uniform_bytes payload_bytes=1048576 read_frame_bytes=3743800 write_frame_bytes=3743886 value_array_storage_bytes=33554432
+WIRE_BINARY_SIZE payload_bytes=1048576 read_frame_bytes=1048608 write_frame_bytes=1048639
+WIRE_PROFILE name=binary_read_encode_with_provider_vec_clone payload_bytes=1048576 iterations=10 ns_per_op=12025 allocs_per_op=1.00 requested_bytes_per_op=1048576
+WIRE_PROFILE name=binary_read_decode_into_caller payload_bytes=1048576 iterations=10 ns_per_op=11317 allocs_per_op=0.00 requested_bytes_per_op=0
+WIRE_PROFILE name=binary_write_encode_borrowed payload_bytes=1048576 iterations=10 ns_per_op=38 allocs_per_op=0.00 requested_bytes_per_op=0
+WIRE_PROFILE name=binary_request_metadata_decode payload_bytes=1048576 iterations=10 ns_per_op=83 allocs_per_op=0.00 requested_bytes_per_op=0
+WIRE_PROFILE name=binary_write_decode payload_bytes=1048576 iterations=10 ns_per_op=18212 allocs_per_op=1.00 requested_bytes_per_op=1048576
+WIRE_PROFILE name=numeric_json_read_encode payload_bytes=1048576 iterations=10 ns_per_op=7815333 allocs_per_op=17.00 requested_bytes_per_op=41942912
+WIRE_PROFILE name=numeric_json_read_decode payload_bytes=1048576 iterations=10 ns_per_op=17889188 allocs_per_op=41.00 requested_bytes_per_op=135266560
+WIRE_PROFILE name=numeric_json_write_encode payload_bytes=1048576 iterations=10 ns_per_op=8229421 allocs_per_op=22.00 requested_bytes_per_op=41943575
+WIRE_PROFILE name=numeric_json_write_decode payload_bytes=1048576 iterations=10 ns_per_op=20417412 allocs_per_op=47.00 requested_bytes_per_op=135267479

@@ -12,7 +12,7 @@ use mount_rs_remote_protocol::{Message, Operation, OperationName};
 
 #[tokio::test]
 async fn raw_binary_roundtrip_and_direct_caller_read() {
-    let request = IoRequest {
+    let request: IoRequest = IoRequest {
         drive_id: "data".into(),
         handle: 17,
         position: Some(9),
@@ -115,7 +115,7 @@ async fn truncation_and_response_identity_fail_before_caller_mutation() {
 
 #[tokio::test]
 async fn oversize_writers_emit_nothing_and_controls_use_configured_capacity() {
-    let request = IoRequest {
+    let request: IoRequest = IoRequest {
         drive_id: "d".into(),
         handle: 1,
         position: None,
@@ -152,4 +152,138 @@ async fn oversize_writers_emit_nothing_and_controls_use_configured_capacity() {
     };
     assert!(binary::write_control(&mut encoded, &message).await.is_err());
     assert!(encoded.is_empty());
+}
+
+#[tokio::test]
+async fn canonical_inline_metadata_boundaries_and_positions() {
+    for drive in ["a", "AZaz09-_.", &"a".repeat(64)] {
+        for position in [None, Some(0), Some(u64::MAX)] {
+            let request = IoRequest {
+                drive_id: drive,
+                handle: u64::MAX,
+                position,
+            };
+            let mut bytes = Vec::new();
+            binary::write_request(&mut bytes, 1, &request, MAX_IO_BYTES, None)
+                .await
+                .unwrap();
+            let mut reader = bytes.as_slice();
+            let h = Header::read(&mut reader).await.unwrap();
+            assert_eq!(h.control_len, 18 + drive.len());
+            assert_eq!(reader[0], drive.len() as u8);
+            assert_eq!(reader[1], u8::from(position.is_some()));
+            assert_eq!(&reader[2..10], &u64::MAX.to_be_bytes());
+            assert_eq!(&reader[10..18], &position.unwrap_or(0).to_be_bytes());
+            let decoded = binary::read_io_metadata(&mut reader, h).await.unwrap();
+            assert_eq!(decoded.drive_id.as_ref(), drive);
+            assert_eq!(decoded.handle, u64::MAX);
+            assert_eq!(decoded.position, position);
+            assert!(reader.is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn malformed_metadata_and_obsolete_json_are_rejected() {
+    let request = IoRequest {
+        drive_id: "abc",
+        handle: 0,
+        position: None,
+    };
+    let mut encoded = Vec::new();
+    binary::write_request(&mut encoded, 1, &request, 0, None)
+        .await
+        .unwrap();
+    let valid = &encoded[binary::HEADER_BYTES..];
+    let h = Header::new(Kind::Read, 1, valid.len(), 0, 0).unwrap();
+    for (index, byte) in [
+        (0, 0),
+        (0, 2),
+        (0, 4),
+        (0, 65),
+        (1, 2),
+        (1, 255),
+        (10, 1),
+        (18, b'/'),
+        (18, 0xff),
+    ] {
+        let mut invalid = valid.to_vec();
+        invalid[index] = byte;
+        assert!(
+            binary::read_io_metadata(&mut invalid.as_slice(), h)
+                .await
+                .is_err(),
+            "accepted mutation at {index}"
+        );
+    }
+    for end in 0..valid.len() {
+        assert!(
+            binary::read_io_metadata(&mut &valid[..end], h)
+                .await
+                .is_err()
+        );
+    }
+    let json = br#"{"drive_id":"abc","handle":0,"position":null}"#;
+    let json_header = Header::new(Kind::Read, 1, json.len(), 0, 0).unwrap();
+    assert!(
+        binary::read_io_metadata(&mut json.as_slice(), json_header)
+            .await
+            .is_err()
+    );
+    // Public Header fields cannot evade admission or overflow the stack buffer.
+    for control_len in [0, 18, 83, usize::MAX] {
+        let forged = Header { control_len, ..h };
+        let mut reader = valid;
+        assert!(binary::read_body(&mut reader, forged).await.is_err());
+        assert_eq!(reader, valid);
+    }
+}
+
+#[tokio::test]
+async fn invalid_outbound_ids_emit_nothing() {
+    for drive in ["", "a/b", "a b", "é", &"a".repeat(65)] {
+        let mut bytes = Vec::new();
+        let request = IoRequest {
+            drive_id: drive,
+            handle: 0,
+            position: None,
+        };
+        assert!(
+            binary::write_request(&mut bytes, 1, &request, 0, None)
+                .await
+                .is_err()
+        );
+        assert!(bytes.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn maximum_raw_write_roundtrip_keeps_payload_separate() {
+    let data = vec![0xa5; MAX_IO_BYTES];
+    let request = IoRequest {
+        drive_id: "drive",
+        handle: 23,
+        position: Some(u64::MAX),
+    };
+    let mut bytes = Vec::new();
+    binary::write_request(&mut bytes, 3, &request, 0, Some(&data))
+        .await
+        .unwrap();
+    assert_eq!(bytes.len(), binary::HEADER_BYTES + 23 + MAX_IO_BYTES);
+    let mut reader = bytes.as_slice();
+    let h = Header::read(&mut reader).await.unwrap();
+    let metadata = binary::read_io_metadata(&mut reader, h).await.unwrap();
+    assert_eq!(metadata.drive_id.as_ref(), "drive");
+    assert_eq!(reader, data);
+    let mut reader = &bytes[binary::HEADER_BYTES..];
+    match binary::read_body(&mut reader, h).await.unwrap() {
+        Incoming::Write { data: raw, .. } => assert_eq!(raw, data),
+        _ => panic!("wrong kind"),
+    }
+    assert!(reader.is_empty());
+    assert!(
+        binary::read_body(&mut &bytes[binary::HEADER_BYTES..bytes.len() - 1], h)
+            .await
+            .is_err()
+    );
 }

@@ -353,12 +353,19 @@ mod tests {
     #[test]
     fn raw_body_and_generic_value_admission_charge_distinct_representations() {
         let budgets = Budgets::new(RemoteTransferLimits::default());
-        let raw = Header::new(Kind::Write, 1, 128, binary::MAX_IO_BYTES, 0).unwrap();
+        let raw = Header::new(
+            Kind::Write,
+            1,
+            binary::MAX_IO_CONTROL_BYTES,
+            binary::MAX_IO_BYTES,
+            0,
+        )
+        .unwrap();
         let before = budgets.ingress_data.available_permits();
         let permit = budgets.ingress(raw).unwrap();
         assert_eq!(
             before - budgets.ingress_data.available_permits(),
-            binary::MAX_IO_BYTES + 256 + IO_METADATA_OVERHEAD
+            binary::MAX_IO_BYTES + 2 * binary::MAX_IO_CONTROL_BYTES + IO_METADATA_OVERHEAD
         );
         drop(permit);
         let generic = Header::new(Kind::Control, 0, binary::MAX_CONTROL_BYTES, 0, 0).unwrap();
@@ -376,7 +383,14 @@ mod tests {
             active_data_operations: 1,
             ..RemoteTransferLimits::default()
         });
-        let data = Header::new(Kind::Read, 1, 128, 0, binary::MAX_IO_BYTES).unwrap();
+        let data = Header::new(
+            Kind::Read,
+            1,
+            binary::MAX_IO_CONTROL_BYTES,
+            0,
+            binary::MAX_IO_BYTES,
+        )
+        .unwrap();
         let held = budgets.ingress(data).unwrap();
         assert!(budgets.ingress(data).is_err());
         let control = Header::new(Kind::Control, 0, 128, 0, 0).unwrap();

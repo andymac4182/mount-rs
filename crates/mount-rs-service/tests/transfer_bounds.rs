@@ -171,18 +171,18 @@ async fn global_data_saturation_keeps_renewal_and_hello_responsive_and_cancel_re
     .await;
     f.hello().await;
     let handle = f.open().await;
-    let request = IoRequest {
+    let request: IoRequest = IoRequest {
         drive_id: "data".into(),
         handle,
         position: Some(0),
     };
-    let metadata = serde_json::to_vec(&request).unwrap();
+    let metadata_len = binary::IO_PREFIX_BYTES + request.drive_id.len();
     let (mut held_send, mut held_recv) = f.connection.open_bi().await.unwrap();
     // Declared raw bytes are charged before either metadata or payload arrives.
     let header = binary::Header::new(
         binary::Kind::Write,
         10,
-        metadata.len(),
+        metadata_len,
         binary::MAX_IO_BYTES,
         0,
     )
@@ -313,7 +313,7 @@ async fn valid_large_generic_control_and_max_raw_payload_share_capacity() {
         })
         .await;
     assert!(matches!(response, Message::Response { result: Ok(_), .. }));
-    let request = IoRequest {
+    let request: IoRequest = IoRequest {
         drive_id: "data".into(),
         handle,
         position: Some(0),
@@ -339,12 +339,12 @@ async fn per_connection_data_saturation_preserves_a_stream_for_renewal() {
     let f = Fixture::new(RemoteTransferLimits::default()).await;
     f.hello().await;
     let handle = f.open().await;
-    let request = IoRequest {
+    let request: IoRequest = IoRequest {
         drive_id: "data".into(),
         handle,
         position: Some(0),
     };
-    let metadata = serde_json::to_vec(&request).unwrap();
+    let metadata_len = binary::IO_PREFIX_BYTES + request.drive_id.len();
     let mut held = Vec::new();
     for id in 100..132 {
         let (mut send, recv) = tokio::time::timeout(Duration::from_secs(2), f.connection.open_bi())
@@ -354,7 +354,7 @@ async fn per_connection_data_saturation_preserves_a_stream_for_renewal() {
         let header = binary::Header::new(
             binary::Kind::Write,
             id,
-            metadata.len(),
+            metadata_len,
             binary::MAX_IO_BYTES,
             0,
         )
