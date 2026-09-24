@@ -51,6 +51,20 @@ def reduce(before, after):
 
 
 def main():
+    if len(sys.argv) == 5 and sys.argv[1] == 'cpu-trace-child':
+        parent_pid, trace_path, status_path = sys.argv[2:]
+        result = {'scope': 'only owned QUIC saturation process', 'parent_pid': int(parent_pid)}
+        try:
+            command = ['/usr/bin/xctrace', 'record', '--template', 'CPU Counters',
+                       '--attach', parent_pid, '--time-limit', '5s', '--no-prompt',
+                       '--output', trace_path]
+            output = subprocess.run(command, capture_output=True, text=True, timeout=30)
+            result.update({'returncode': output.returncode,
+                           'stdout': output.stdout[-8000:], 'stderr': output.stderr[-8000:]})
+        except subprocess.TimeoutExpired:
+            result['error'] = 'owned CPU trace exceeded 30-second deadline'
+        Path(status_path).write_text(json.dumps(result, indent=2) + '\n')
+        return
     phase, mode, depth, stage_id, successes, failures = sys.argv[1:]
     if phase not in ('begin', 'end') or not re.fullmatch(r'[A-Za-z0-9._-]+', stage_id):
         raise ValueError('invalid stage hook arguments')
@@ -61,6 +75,26 @@ def main():
         'mode': mode, 'total_queue_depth': int(depth),
         'successes': int(successes), 'failures': int(failures),
     })
+    if phase == 'begin' and os.environ.get('MOUNT_RS_HOST_CPU_TRACE') == '1':
+        parent_pid = os.getppid()
+        parent_command = subprocess.run(
+            ['/bin/ps', '-p', str(parent_pid), '-o', 'comm='],
+            capture_output=True, text=True, check=True, timeout=5,
+        ).stdout.strip()
+        if not Path(parent_command).name.startswith('quic_tidb_saturation-'):
+            raise ValueError('CPU trace target is not the owned saturation test parent')
+        trace_path = folder / f'{stage_id}.trace'
+        status_path = folder / f'{stage_id}-cpu-trace-status.json'
+        tracer = subprocess.Popen(
+            [sys.executable, __file__, 'cpu-trace-child', str(parent_pid),
+             str(trace_path), str(status_path)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        snapshot['diagnostic_cpu_trace'] = {
+            'owned_parent_pid': parent_pid, 'supervisor_pid': tracer.pid,
+            'status_path': str(status_path), 'trace_path': str(trace_path),
+            'scope': 'CPU Counters on owned process; diagnostic throughput only',
+        }
     if phase == 'begin' and os.environ.get('MOUNT_RS_HOST_STACK_SAMPLE') == '1':
         sample_path = folder / f'{stage_id}-stacks.txt'
         with (folder / f'{stage_id}-sample-status.txt').open('wb') as status:

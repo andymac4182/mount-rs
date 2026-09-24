@@ -7,6 +7,8 @@ license = "Apache-2.0"
 
 [features]
 io-profiling = ["dep:mount-rs-sqlite", "mount-rs-remote-protocol/io-profiling"]
+resource-profiling = ["io-profiling"]
+allocation-profiling = ["resource-profiling"]
 saturation-foundationdb = ["mount-rs-sdk/foundationdb"]
 
 [dependencies]
@@ -38,3 +40,6 @@ rcgen = { version = "=0.14.8", default-features = false, features = ["crypto", "
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"

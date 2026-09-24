@@ -10,6 +10,18 @@ TIDB = runpy.run_path(str(ROOT / 'observe-tidb-stage.py'))
 FDB = runpy.run_path(str(ROOT / 'foundationdb-counter-deltas.py'))
 
 class CounterTests(unittest.TestCase):
+    def test_memory_gauges_remain_gauges(self):
+        raw = '''# TYPE process_resident_memory_bytes gauge
+process_resident_memory_bytes 4096
+# TYPE go_memstats_heap_alloc_bytes gauge
+go_memstats_heap_alloc_bytes 2048
+# TYPE process_cpu_seconds_total counter
+process_cpu_seconds_total 2
+'''
+        gauges = TIDB['parse_memory_gauges'](raw)
+        self.assertEqual(gauges['process_resident_memory_bytes'], 4096)
+        self.assertEqual(gauges['go_memstats_heap_alloc_bytes'], 2048)
+        self.assertNotIn('process_cpu_seconds_total', gauges)
     def test_host_delta_and_invalid_boundaries(self):
         keys = MAC['KEYS']
         before = {'captured_monotonic_ns': 1, 'devices': {'drive': dict.fromkeys(keys, 10)}}

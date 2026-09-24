@@ -1,0 +1,23 @@
+Sort by top of stack, same collapsed (when >= 5):
+        __psynch_cvwait  (in libsystem_kernel.dylib)        48015
+        __semwait_signal  (in libsystem_kernel.dylib)        3492
+        kevent  (in libsystem_kernel.dylib)        834
+        semaphore_wait_trap  (in libsystem_kernel.dylib)        432
+        __psynch_mutexwait  (in libsystem_kernel.dylib)        196
+        fsync  (in libsystem_kernel.dylib)        77
+        stat  (in libsystem_kernel.dylib)        60
+        __unlink  (in libsystem_kernel.dylib)        56
+        __open  (in libsystem_kernel.dylib)        45
+        pread  (in libsystem_kernel.dylib)        39
+        serde_json::ser::format_escaped_str::hacfc314211037187  (in quic_tidb_saturation-8a647023cdf0f35d)        32
+        __sendmsg  (in libsystem_kernel.dylib)        29
+        pwrite  (in libsystem_kernel.dylib)        29
+        _xzm_free  (in libsystem_malloc.dylib)        26
+        _platform_memmove  (in libsystem_platform.dylib)        25
+        _xzm_xzone_malloc_tiny  (in libsystem_malloc.dylib)        16
+        <deduplicated_symbol>  (in libsystem_malloc.dylib)        9
+        __fcntl  (in libsystem_kernel.dylib)        6
+        _malloc_zone_malloc  (in libsystem_malloc.dylib)        6
+        _xzm_xzone_malloc  (in libsystem_malloc.dylib)        6
+        close  (in libsystem_kernel.dylib)        6
+        __getattrlist  (in libsystem_kernel.dylib)        5

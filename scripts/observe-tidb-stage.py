@@ -84,6 +84,28 @@ def parse_proc_io(raw):
     return result
 
 
+def parse_memory_gauges(raw):
+    names = {'process_resident_memory_bytes', 'process_virtual_memory_bytes',
+             'go_memstats_heap_alloc_bytes', 'go_memstats_heap_inuse_bytes',
+             'tikv_allocator_allocated_bytes', 'tikv_allocator_resident_bytes'}
+    gauges = {line.split()[2] for line in raw.splitlines()
+              if line.startswith('# TYPE ') and len(line.split()) == 4
+              and line.split()[3] == 'gauge'}
+    result = {}
+    for line in raw.splitlines():
+        match = SAMPLE.match(line)
+        if not match:
+            continue
+        name, labels, value = match.groups()
+        if name not in names or name not in gauges:
+            continue
+        number = float(value)
+        if number != number or number < 0 or number == float('inf'):
+            raise ValueError('invalid backend memory gauge')
+        result[f'{name}{labels or ""}'] = number
+    return result
+
+
 def parse_cgroup_io(raw):
     result = {}
     for line in raw.splitlines():
@@ -139,6 +161,7 @@ def sample_source(args):
         "captured_at_unix_ns": time.time_ns(),
         "captured_at_monotonic_ns": time.monotonic_ns(),
         "metrics": metrics,
+        "memory_gauges": parse_memory_gauges(raw),
         "metric_families": families,
         "available_metric_names": available,
         "proc_io": proc_io,
@@ -283,6 +306,7 @@ def main():
                 "tidb_executor_statement_", "tidb_server_query_", "tidb_tikvclient_request_",
                 "tikv_grpc_msg_", "tikv_storage_command_", "tikv_storage_rocksdb_perf",
                 "tikv_engine_rocksdb_", "pd_client_",
+                "process_cpu_seconds_total",
             ))
         }
     summary = {
@@ -297,6 +321,11 @@ def main():
         "end_snapshot": str(after_path),
         "counter_deltas": deltas,
         "totals_by_component_kind": totals,
+        "memory_by_source": {
+            name: {'start': before['sources'][name].get('memory_gauges', {}),
+                   'end': source.get('memory_gauges', {})}
+            for name, source in after['sources'].items()
+        },
         "selected_sql_kv_rocksdb_counters": selected,
         "selected_per_logical_success": {
             kind: {family: value / successes for family, value in metrics.items()}

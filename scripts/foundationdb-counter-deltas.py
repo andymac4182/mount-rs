@@ -41,6 +41,20 @@ def deltas(before, after, seconds):
     return output
 
 
+def resource_gauges(cluster):
+    """Preserve exported gauges/rates as snapshots; never difference or integrate them."""
+    output = {}
+    for scope, fields in (("processes", ("cpu", "memory", "network")),
+                          ("machines", ("cpu", "memory", "network"))):
+        output[scope] = {}
+        for source, values in cluster.get(scope, {}).items():
+            output[scope][source] = {
+                field: {"available": field in values, "sample": values.get(field)}
+                for field in fields
+            }
+    return output
+
+
 def reduce_stage(directory, stage):
     begin = directory / f"{stage}.begin"
     end = directory / f"{stage}.end"
@@ -78,6 +92,9 @@ def reduce_stage(directory, stage):
             "application": {"mode": mode, "total_queue_depth": int(queue), "successes": int(successes), "failures": int(failures)},
             "fdb_process_device_counters": process_delta,
             "logical_datastore_counters": deltas(logical_before, logical_after, seconds),
+            "resource_gauges_begin": resource_gauges(before),
+            "resource_gauges_end": resource_gauges(after),
+            "resource_gauge_scope": "FDB exported process/machine samples; cpu usage_cores in cores, memory *_bytes in bytes, network megabits *.hz in megabits/sec. Rates and gauges are neither counter deltas nor stage averages.",
             "latency_probe_seconds_begin": before.get("latency_probe"),
             "latency_probe_seconds_end": after.get("latency_probe"),
             "linux_vm_block_devices": disk_delta,

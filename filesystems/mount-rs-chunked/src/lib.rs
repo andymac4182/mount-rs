@@ -229,7 +229,7 @@ impl AsyncGate {
 }
 
 struct RuntimeState {
-    namespace: Namespace,
+    namespace: Arc<Namespace>,
     /// Local operation generation, incremented for every staged mutation.
     revision: u64,
     /// Provider CAS revision; local generations must never be used for fencing.
@@ -248,6 +248,28 @@ struct RuntimeState {
     orphans: HashMap<InodeId, NodeMetadata>,
     failure: Option<FsError>,
     closed: bool,
+}
+
+enum ReadLayoutSnapshot {
+    SharedNamespace {
+        namespace: Arc<Namespace>,
+        inode: InodeId,
+    },
+    Owned(FileLayout),
+}
+
+impl ReadLayoutSnapshot {
+    fn layout(&self) -> Result<&FileLayout> {
+        match self {
+            Self::Owned(layout) => Ok(layout),
+            Self::SharedNamespace { namespace, inode } => {
+                match namespace.nodes.get(inode).map(|node| &node.data) {
+                    Some(NodeData::File(layout)) => Ok(layout),
+                    _ => Err(FsError::backend("captured read layout is missing")),
+                }
+            }
+        }
+    }
 }
 
 fn retain_open_detached(state: &mut RuntimeState, next: &Namespace) {
@@ -627,7 +649,7 @@ where
                 gate: AsyncGate::new(),
                 lifecycle: tokio::sync::RwLock::new(()),
                 state: Mutex::new(RuntimeState {
-                    namespace,
+                    namespace: Arc::new(namespace),
                     revision: loaded.revision,
                     persisted_revision: loaded.revision,
                     pending_namespace: false,
@@ -931,9 +953,11 @@ where
         let mut state = self.lock_state()?;
         state.orphans.clear();
         state.pending_atime.clear();
-        state.namespace = loaded
-            .namespace
-            .ok_or_else(|| FsError::backend("delegated namespace missing"))?;
+        state.namespace = Arc::new(
+            loaded
+                .namespace
+                .ok_or_else(|| FsError::backend("delegated namespace missing"))?,
+        );
         state.revision = expected_revision;
         state.persisted_revision = expected_revision;
         self.inner
@@ -1078,7 +1102,7 @@ where
                         gate: AsyncGate::new(),
                         lifecycle: tokio::sync::RwLock::new(()),
                         state: Mutex::new(RuntimeState {
-                            namespace,
+                            namespace: Arc::new(namespace),
                             revision,
                             persisted_revision: revision,
                             pending_namespace: false,
@@ -1156,7 +1180,7 @@ where
                 gate: AsyncGate::new(),
                 lifecycle: tokio::sync::RwLock::new(()),
                 state: Mutex::new(RuntimeState {
-                    namespace: namespace.clone(),
+                    namespace: Arc::new(namespace.clone()),
                     revision: loaded.revision,
                     persisted_revision: loaded.revision,
                     pending_namespace: false,
@@ -1332,7 +1356,7 @@ where
             return Err(FsError::new(ErrorCode::Ebadf).with_message("filesystem is closed"));
         }
         let _profile = Span::new(Event::Snapshot).units(state.namespace.nodes.len() as u64);
-        let mut namespace = state.namespace.clone();
+        let mut namespace = state.namespace.as_ref().clone();
         for (inode, atime_ms) in &state.pending_atime {
             if let Some(node) = namespace.nodes.get_mut(inode) {
                 node.stats.atime_ms = node.stats.atime_ms.max(*atime_ms);
@@ -1427,7 +1451,7 @@ where
             // handle already opened on that inode must retain its metadata
             // until close, even though path lookup sees the new namespace.
             retain_open_detached(&mut state, &namespace);
-            state.namespace = namespace;
+            state.namespace = Arc::new(namespace);
             state.revision = revision;
             state.persisted_revision = revision;
             state.pending_atime.clear();
@@ -1629,7 +1653,7 @@ where
             FsError::new(ErrorCode::Eio).with_message("local namespace generation overflow")
         })?;
         retain_open_detached(&mut state, &namespace);
-        state.namespace = namespace;
+        state.namespace = Arc::new(namespace);
         state.revision = generation;
         state.pending_namespace = true;
         state.pending_atime.clear();
@@ -1833,7 +1857,7 @@ where
                 // private handle state. A retryable conflict has no local
                 // orphan side effect.
                 retain_open_detached(&mut state, &namespace);
-                state.namespace = namespace;
+                state.namespace = Arc::new(namespace);
                 state.revision = revision;
                 state.persisted_revision = revision;
                 state.pending_atime.clear();
@@ -1865,7 +1889,7 @@ where
             return Err(self.fail_closed(with_context(error, "metadata-flush", None)));
         }
         let mut state = self.lock_state()?;
-        state.namespace = namespace;
+        state.namespace = Arc::new(namespace);
         if !self.inner.options.writeback {
             state.revision = revision;
         }
@@ -2242,19 +2266,71 @@ where
             let _gate = self.inner.gate.lock().await;
             drop(gate_profile);
             self.ensure_operation_lease().await?;
-            let (namespace, _) = self.snapshot()?;
-            let (node, orphan) = self.node_snapshot(&namespace, inode, "read", path)?;
-            let layout = match &node.data {
-                NodeData::File(layout) => layout.clone(),
-                NodeData::Directory { .. } => {
-                    return Err(error_with_path(ErrorCode::Eisdir, "read", path));
+            let (layout, original, orphan, size) = if self.inner.options.concurrent_writes
+                && !self.inner.options.delegated
+            {
+                // MRC2 reads do not record atime or compare the original node.
+                // Retain immutable metadata across block I/O without copying
+                // extents. Both freshness checks still surround that I/O.
+                let state = self.lock_state()?;
+                if let Some(error) = &state.failure {
+                    return Err(error.clone());
                 }
-                NodeData::Special => return Err(error_with_path(ErrorCode::Enxio, "read", path)),
-                NodeData::Symlink { .. } => {
-                    return Err(error_with_path(ErrorCode::Eio, "read", path));
+                if state.closed {
+                    return Err(FsError::new(ErrorCode::Ebadf).with_message("filesystem is closed"));
                 }
+                let (node, orphan) = if let Some(node) = state.namespace.nodes.get(&inode) {
+                    (node, false)
+                } else {
+                    (
+                        state
+                            .orphans
+                            .get(&inode)
+                            .ok_or_else(|| error_with_path(ErrorCode::Estale, "read", path))?,
+                        true,
+                    )
+                };
+                let layout = match &node.data {
+                    NodeData::File(layout) => {
+                        if orphan {
+                            let _profile = Span::new(Event::Snapshot).units(1);
+                            ReadLayoutSnapshot::Owned(layout.clone())
+                        } else {
+                            ReadLayoutSnapshot::SharedNamespace {
+                                namespace: Arc::clone(&state.namespace),
+                                inode,
+                            }
+                        }
+                    }
+                    NodeData::Directory { .. } => {
+                        return Err(error_with_path(ErrorCode::Eisdir, "read", path));
+                    }
+                    NodeData::Special => {
+                        return Err(error_with_path(ErrorCode::Enxio, "read", path));
+                    }
+                    NodeData::Symlink { .. } => {
+                        return Err(error_with_path(ErrorCode::Eio, "read", path));
+                    }
+                };
+                (layout, None, orphan, node.stats.size)
+            } else {
+                let (namespace, _) = self.snapshot()?;
+                let (node, orphan) = self.node_snapshot(&namespace, inode, "read", path)?;
+                let layout = match &node.data {
+                    NodeData::File(layout) => layout.clone(),
+                    NodeData::Directory { .. } => {
+                        return Err(error_with_path(ErrorCode::Eisdir, "read", path));
+                    }
+                    NodeData::Special => {
+                        return Err(error_with_path(ErrorCode::Enxio, "read", path));
+                    }
+                    NodeData::Symlink { .. } => {
+                        return Err(error_with_path(ErrorCode::Eio, "read", path));
+                    }
+                };
+                let size = node.stats.size;
+                (ReadLayoutSnapshot::Owned(layout), Some(node), orphan, size)
             };
-            let size = node.stats.size;
             let count = if position >= size {
                 0
             } else {
@@ -2263,12 +2339,12 @@ where
                     .len()
                     .min(usize::try_from(available).unwrap_or(usize::MAX))
             };
-            (layout, node, orphan, size, count)
+            (layout, original, orphan, size, count)
         };
         if count > 0 {
             read_layout_into(
                 &self.inner.blocks,
-                &layout,
+                layout.layout()?,
                 size,
                 position,
                 &mut buffer[..count],
@@ -2295,11 +2371,11 @@ where
             return Ok(count);
         }
         let (namespace, _) = self.snapshot()?;
-        if namespace
-            .nodes
-            .get(&inode)
-            .is_some_and(|node| write_base_unchanged(node, &original))
-        {
+        if namespace.nodes.get(&inode).is_some_and(|node| {
+            original
+                .as_ref()
+                .is_some_and(|original| write_base_unchanged(node, original))
+        }) {
             let atime_ms = now_ms();
             let mut state = self.lock_state()?;
             state
@@ -2308,7 +2384,9 @@ where
                 .and_modify(|pending| *pending = (*pending).max(atime_ms))
                 .or_insert(atime_ms);
         } else if let Some(node) = self.lock_state()?.orphans.get_mut(&inode)
-            && write_base_unchanged(node, &original)
+            && original
+                .as_ref()
+                .is_some_and(|original| write_base_unchanged(node, original))
         {
             node.stats.atime_ms = now_ms();
         }
@@ -2937,7 +3015,7 @@ where
                 }) {
                     return Ok(());
                 }
-                (state.namespace.clone(), state.revision)
+                (state.namespace.as_ref().clone(), state.revision)
             };
             namespace.nodes.remove(&inode);
             match self.publish_namespace(revision, namespace, false).await {
@@ -5632,6 +5710,7 @@ mod tests {
         inner: MemoryBlockStore,
         backing: Arc<Mutex<Option<ConcurrentBackingId>>>,
         preparations: Arc<AtomicUsize>,
+        before_get: Arc<Mutex<Option<FlushHook>>>,
     }
 
     impl SharedTestBlockStore {
@@ -5640,6 +5719,7 @@ mod tests {
                 inner: MemoryBlockStore::new(),
                 backing: Arc::new(Mutex::new(None)),
                 preparations: Arc::new(AtomicUsize::new(0)),
+                before_get: Arc::new(Mutex::new(None)),
             }
         }
     }
@@ -5676,6 +5756,10 @@ mod tests {
         }
 
         async fn get(&self, id: &mount_rs_core::storage::BlockId) -> Result<Vec<u8>> {
+            let hook = self.before_get.lock().expect("block get hook").take();
+            if let Some(hook) = hook {
+                hook();
+            }
             self.inner.get(id).await
         }
 
@@ -6027,6 +6111,200 @@ mod tests {
                 .with_concurrent_writes(true),
         ))
         .expect("open concurrent filesystem")
+    }
+
+    #[test]
+    #[ignore = "run alone with MOUNT_RS_PROFILE_IO=1 and --test-threads=1"]
+    fn concurrent_read_profiles_only_requested_inode() {
+        assert!(profile::enabled(), "start with MOUNT_RS_PROFILE_IO=1");
+        let metadata = ConditionalRevisionMetadata::new();
+        let fs = conditional_filesystem(&metadata);
+        let content = vec![0x5a; 128];
+        for index in 0..100 {
+            block_on(fs.write_file(&format!("/file-{index}"), &content)).expect("create file");
+        }
+        let handle = block_on(fs.open("/file-0", "r", 0)).expect("open requested file");
+        let before = profile::snapshot();
+        let conditional_before = metadata.conditional_loads.load(Ordering::SeqCst);
+        let mut bytes = [0; 4];
+        assert_eq!(block_on(handle.read(&mut bytes, Some(0))).expect("read"), 4);
+        assert_eq!(bytes, [0x5a; 4]);
+        let delta = profile::snapshot().delta(&before).expect("profile delta");
+        let cloned_nodes: u64 = delta
+            .entries
+            .iter()
+            .filter(|entry| entry.name == "filesystem.snapshot_nodes")
+            .map(|entry| entry.units)
+            .sum();
+        assert!(
+            cloned_nodes == 0,
+            "one inode read cloned {cloned_nodes} namespace nodes"
+        );
+        assert_eq!(
+            metadata.conditional_loads.load(Ordering::SeqCst) - conditional_before,
+            2,
+            "read checks metadata before and after block I/O"
+        );
+        block_on(handle.close()).expect("close");
+        block_on(fs.shutdown()).expect("shutdown");
+    }
+
+    #[test]
+    fn concurrent_read_pins_original_namespace_until_second_freshness_check() {
+        let metadata = ConditionalRevisionMetadata::new();
+        let fs = conditional_filesystem(&metadata);
+        block_on(fs.write_file("/file", b"old-data")).expect("create original");
+        let handle = block_on(fs.open("/file", "r", 0)).expect("open file");
+        let inode = block_on(handle.stat()).expect("stat").ino;
+        let blocks = fs.block_store();
+        let replacement = block_on(blocks.put(b"new!")).expect("replacement block");
+        let (mut next, revision) = fs.snapshot().expect("published namespace");
+        let NodeData::File(layout) = &mut next.nodes.get_mut(&inode).expect("file inode").data
+        else {
+            panic!("expected file");
+        };
+        for extent in &mut layout.extents {
+            extent.block = replacement.clone();
+        }
+        let original = Arc::downgrade(&fs.lock_state().expect("state").namespace);
+        let during_get = original.clone();
+        let remote = metadata.inner.clone();
+        *blocks.before_get.lock().expect("block get hook") = Some(Box::new(move || {
+            assert_eq!(
+                during_get.strong_count(),
+                2,
+                "state and in-flight read own metadata"
+            );
+            remote
+                .apply_revision(revision, next)
+                .expect("remote replacement during block I/O");
+        }));
+        let before = metadata.conditional_loads.load(Ordering::SeqCst);
+        let mut bytes = [0; 8];
+        assert_eq!(
+            block_on(handle.read(&mut bytes, Some(0))).expect("original read"),
+            8
+        );
+        assert_eq!(&bytes, b"old-data");
+        assert_eq!(
+            metadata.conditional_loads.load(Ordering::SeqCst) - before,
+            2
+        );
+        assert_eq!(fs.lock_state().expect("state").revision, revision + 1);
+        assert!(
+            original.upgrade().is_none(),
+            "completed read releases old revision"
+        );
+        assert_eq!(
+            block_on(handle.read(&mut bytes, Some(0))).expect("updated read"),
+            8
+        );
+        assert_eq!(&bytes, b"new!new!");
+        block_on(handle.close()).expect("close");
+        block_on(fs.shutdown()).expect("shutdown");
+    }
+
+    #[test]
+    fn concurrent_read_checks_metadata_twice_including_eof() {
+        let metadata = ConditionalRevisionMetadata::new();
+        let fs = conditional_filesystem(&metadata);
+        block_on(fs.write_file("/file", b"content")).expect("create file");
+        let handle = block_on(fs.open("/file", "r", 0)).expect("open file");
+        for (position, expected) in [(0, 4), (7, 0)] {
+            let before = metadata.conditional_loads.load(Ordering::SeqCst);
+            let mut bytes = [0; 4];
+            assert_eq!(
+                block_on(handle.read(&mut bytes, Some(position))).expect("read"),
+                expected
+            );
+            assert_eq!(
+                metadata.conditional_loads.load(Ordering::SeqCst) - before,
+                2
+            );
+            if expected != 0 {
+                assert_eq!(&bytes, b"cont");
+            }
+        }
+        block_on(handle.close()).expect("close");
+        block_on(fs.shutdown()).expect("shutdown");
+    }
+
+    #[test]
+    fn concurrent_read_retains_detached_open_inode_bytes() {
+        let metadata = ConditionalRevisionMetadata::new();
+        let fs = conditional_filesystem(&metadata);
+        block_on(fs.write_file("/file", b"content")).expect("create file");
+        let handle = block_on(fs.open("/file", "r", 0)).expect("open file");
+        let inode = block_on(handle.stat()).expect("stat").ino;
+        // Exercise the retained detached-inode representation independently of
+        // concurrent unlink's published tombstone representation.
+        {
+            let mut state = fs.lock_state().expect("state");
+            let node = Arc::make_mut(&mut state.namespace)
+                .nodes
+                .remove(&inode)
+                .expect("live inode");
+            state.orphans.insert(inode, node);
+        }
+        let before = metadata.conditional_loads.load(Ordering::SeqCst);
+        let mut bytes = [0; 7];
+        assert_eq!(
+            block_on(handle.read(&mut bytes, Some(0))).expect("orphan read"),
+            7
+        );
+        assert_eq!(&bytes, b"content");
+        assert_eq!(
+            metadata.conditional_loads.load(Ordering::SeqCst) - before,
+            2
+        );
+        block_on(handle.close()).expect("close orphan");
+        block_on(fs.shutdown()).expect("shutdown");
+    }
+
+    #[test]
+    fn concurrent_read_retains_failure_during_second_metadata_check() {
+        for changed in [false, true] {
+            let metadata = ConditionalRevisionMetadata::new();
+            let fs = conditional_filesystem(&metadata);
+            block_on(fs.write_file("/file", b"content")).expect("create file");
+            let handle = block_on(fs.open("/file", "r", 0)).expect("open file");
+            let second_check = metadata.clone();
+            let failing = fs.clone();
+            metadata.after_next_load(move || {
+                if changed {
+                    let mut remote = second_check.inner.state.lock().expect("remote state");
+                    remote.revision += 1;
+                    remote.namespace.as_mut().expect("namespace").default_uid = 77;
+                }
+                second_check.after_next_load(move || {
+                    failing.fail_closed(
+                        FsError::new(ErrorCode::Eio)
+                            .with_message("failure during second read check"),
+                    );
+                });
+            });
+            let before = metadata.conditional_loads.load(Ordering::SeqCst);
+            let mut bytes = [0; 7];
+            let error = block_on(handle.read(&mut bytes, Some(0))).expect_err("second check fails");
+            assert_eq!(error.code, ErrorCode::Eio);
+            assert!(
+                error
+                    .to_string()
+                    .contains("failure during second read check")
+            );
+            assert_eq!(&bytes, b"content", "block read precedes the second check");
+            assert_eq!(
+                metadata.conditional_loads.load(Ordering::SeqCst) - before,
+                2
+            );
+            let repeated = block_on(handle.read(&mut bytes, Some(0))).expect_err("sticky failure");
+            assert_eq!(repeated.code, ErrorCode::Eio);
+            assert_eq!(
+                metadata.conditional_loads.load(Ordering::SeqCst) - before,
+                2
+            );
+            block_on(handle.close()).expect("close failed handle");
+        }
     }
 
     #[test]

@@ -478,16 +478,30 @@ else
 fi
 
 if [ "$run_service_benchmark" -eq 1 ]; then
+  benchmark_read_only=${MOUNT_RS_FOUNDATIONDB_READ_ONLY:-0}
+  case "$benchmark_read_only" in
+    0|1) ;;
+    *) echo "MOUNT_RS_FOUNDATIONDB_READ_ONLY must be 0 or 1" >&2; exit 2 ;;
+  esac
+  benchmark_service_features=saturation-foundationdb,io-profiling
+  if [ "${MOUNT_RS_RESOURCE_PROFILE:-0}" = "1" ]; then
+    benchmark_service_features="$benchmark_service_features,resource-profiling"
+  fi
+  if [ "${MOUNT_RS_TRACE_ALLOCATIONS:-0}" = "1" ]; then
+    benchmark_service_features="$benchmark_service_features,allocation-profiling"
+  fi
   # Keep real provider contracts in this lane, while avoiding unrelated CLI
   # and N-API builds. Each benchmark invocation owns a separate test process.
   test_command="set -e; cargo test --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb -- --nocapture && cargo test --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test delegation -- --ignored --nocapture"
   if [ "${MOUNT_RS_FOUNDATIONDB_DIRECT_BASELINE:-0}" = "1" ]; then
     test_command="${test_command} && MOUNT_RS_FOUNDATIONDB_DIRECT_OUTPUT=/artifacts/foundationdb-direct-block.json cargo test --release --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test block_datastore_saturation -- --ignored --nocapture --test-threads=1"
   elif [ "$benchmark_prepare_only" -eq 1 ]; then
-    test_command="${test_command} && cargo test --release --locked -p mount-rs-service --features saturation-foundationdb,io-profiling --test quic_tidb_saturation --no-run"
+    test_command="${test_command} && cargo test --release --locked -p mount-rs-service --features $benchmark_service_features --test quic_tidb_saturation --no-run"
   else
-    test_command="${test_command} && MOUNT_RS_REMOTE_TIDB_SATURATION_MODES=read MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS=${MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS:-1,2,4,8,16} MOUNT_RS_REMOTE_TIDB_SATURATION_OUTPUT=/artifacts/foundationdb-read.json cargo test --release --locked -p mount-rs-service --features saturation-foundationdb,io-profiling --test quic_tidb_saturation -- --ignored --nocapture --test-threads=1"
-    test_command="${test_command} && MOUNT_RS_REMOTE_TIDB_SATURATION_MODES=read,write MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS=${MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS:-1,2} MOUNT_RS_REMOTE_TIDB_SATURATION_OUTPUT=/artifacts/foundationdb-read-write.json cargo test --release --locked -p mount-rs-service --features saturation-foundationdb,io-profiling --test quic_tidb_saturation -- --ignored --nocapture --test-threads=1"
+    test_command="${test_command} && MOUNT_RS_REMOTE_TIDB_SATURATION_MODES=read MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS=${MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS:-1,2,4,8,16} MOUNT_RS_REMOTE_TIDB_SATURATION_OUTPUT=/artifacts/foundationdb-read.json cargo test --release --locked -p mount-rs-service --features $benchmark_service_features --test quic_tidb_saturation -- --ignored --nocapture --test-threads=1"
+    if [ "$benchmark_read_only" -eq 0 ]; then
+      test_command="${test_command} && MOUNT_RS_REMOTE_TIDB_SATURATION_MODES=read,write MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS=${MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS:-1,2} MOUNT_RS_REMOTE_TIDB_SATURATION_OUTPUT=/artifacts/foundationdb-read-write.json cargo test --release --locked -p mount-rs-service --features $benchmark_service_features --test quic_tidb_saturation -- --ignored --nocapture --test-threads=1"
+    fi
   fi
 fi
 
@@ -651,6 +665,8 @@ if [ "$run_service_benchmark" -eq 1 ]; then
     --workdir /workspace \
     --env MOUNT_RS_REMOTE_SATURATION_PROVIDER=foundationdb \
     --env MOUNT_RS_PROFILE_IO=1 \
+    --env "MOUNT_RS_RESOURCE_PROFILE=${MOUNT_RS_RESOURCE_PROFILE:-0}" \
+    --env "MOUNT_RS_TRACE_ALLOCATIONS=${MOUNT_RS_TRACE_ALLOCATIONS:-0}" \
     --env "MOUNT_RS_DATASTORE_STAGE_OBSERVER=${MOUNT_RS_DATASTORE_STAGE_OBSERVER:-}" \
     --env MOUNT_RS_FOUNDATIONDB_COUNTER_DIR=/artifacts/counters \
     --env CARGO_BUILD_JOBS=2 \

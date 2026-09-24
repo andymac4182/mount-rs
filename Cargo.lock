@@ -1808,6 +1808,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "libc",
  "mount-rs-chunked",
  "mount-rs-core",
  "mount-rs-memfs",

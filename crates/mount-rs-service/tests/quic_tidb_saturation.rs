@@ -19,6 +19,71 @@ fn measurement_oracles() {
     assert!(h.percentile(99) >= 200);
 }
 
+#[test]
+fn read_content_accepts_exact_payload() {
+    let expected = payload(2, 3, 7);
+    assert!(valid_read_content(&serde_json::json!(expected), &expected).is_ok());
+}
+
+#[test]
+fn read_content_rejects_invalid_bytes_and_shapes() {
+    let expected = payload(2, 3, 7);
+    for invalid in [
+        serde_json::json!(-1),
+        serde_json::json!(256),
+        serde_json::json!(1.5),
+        serde_json::json!("1"),
+        serde_json::Value::Null,
+    ] {
+        let mut received = serde_json::json!(expected);
+        received[BYTES - 1] = invalid;
+        assert!(valid_read_content(&received, &expected).is_err());
+    }
+    for received in [
+        serde_json::Value::Null,
+        serde_json::json!("payload"),
+        serde_json::json!({"data": expected}),
+        serde_json::json!(&expected[..BYTES - 1]),
+        serde_json::json!(vec![0_u8; BYTES + 1]),
+    ] {
+        assert!(valid_read_content(&received, &expected).is_err());
+    }
+    assert!(
+        valid_read_content(
+            &serde_json::json!(&expected[..BYTES - 1]),
+            &expected[..BYTES - 1]
+        )
+        .is_err()
+    );
+    let oversized = vec![0_u8; BYTES + 1];
+    assert!(valid_read_content(&serde_json::json!(oversized), &oversized).is_err());
+}
+
+#[test]
+fn read_content_compares_every_byte_and_payload_marker() {
+    let expected = payload(2, 3, 7);
+    for index in [0, BYTES / 2, BYTES - 1] {
+        let mut received = expected.clone();
+        received[index] ^= 1;
+        assert!(valid_read_content(&serde_json::json!(received), &expected).is_err());
+    }
+    for received in [payload(4, 3, 7), payload(2, 4, 7), payload(2, 3, 8)] {
+        assert!(valid_read_content(&serde_json::json!(received), &expected).is_err());
+    }
+}
+
+#[test]
+fn reused_payload_buffer_preserves_original_pattern_and_marker() {
+    let mut bytes = vec![0; BYTES];
+    for (client, lane, sequence) in [(0, 0, 0), (2, 3, 7), (99, 31, 1_310_000_001)] {
+        payload_into(&mut bytes, client, lane, sequence);
+        assert_eq!(bytes, payload(client, lane, sequence));
+    }
+}
+
+#[cfg(all(feature = "resource-profiling", unix))]
+#[path = "support/resource_profile.rs"]
+mod resource_profile;
 #[path = "support/tidb_wire.rs"]
 mod wire;
 use mount_rs_core::Loopback;
@@ -52,6 +117,22 @@ fn valid_read(v: &Value) -> Result<(), String> {
         Err("partial or invalid read".into())
     }
 }
+fn valid_read_content(received: &Value, expected: &[u8]) -> Result<(), String> {
+    let values = received
+        .as_array()
+        .filter(|values| values.len() == BYTES && expected.len() == BYTES)
+        .ok_or("partial or invalid read")?;
+    for (value, expected_byte) in values.iter().zip(expected) {
+        let byte = value
+            .as_u64()
+            .and_then(|byte| u8::try_from(byte).ok())
+            .ok_or("partial or invalid read")?;
+        if byte != *expected_byte {
+            return Err("read content mismatch".into());
+        }
+    }
+    Ok(())
+}
 fn valid_write(v: &Value) -> Result<(), String> {
     if v == &json!(BYTES) {
         Ok(())
@@ -62,11 +143,26 @@ fn valid_write(v: &Value) -> Result<(), String> {
 fn payload(client: usize, lane: usize, seq: u64) -> Vec<u8> {
     let mut bytes = vec![0; BYTES];
     let marker = format!("client={client};lane={lane};sequence={seq};");
+    fill_payload_pattern(&mut bytes, client, lane, seq);
+    bytes[..marker.len()].copy_from_slice(marker.as_bytes());
+    bytes
+}
+fn fill_payload_pattern(bytes: &mut [u8], client: usize, lane: usize, seq: u64) {
     for (i, b) in bytes.iter_mut().enumerate() {
         *b = (i as u64 * 31 + seq * 13 + client as u64 * 17 + lane as u64 * 19) as u8;
     }
-    bytes[..marker.len()].copy_from_slice(marker.as_bytes());
-    bytes
+}
+fn payload_into(bytes: &mut [u8], client: usize, lane: usize, seq: u64) {
+    use std::io::Write;
+    assert_eq!(bytes.len(), BYTES);
+    fill_payload_pattern(bytes, client, lane, seq);
+    // Three decimal u64-sized identifiers and their labels fit in 128 bytes.
+    let mut marker = [0_u8; 128];
+    let mut cursor = std::io::Cursor::new(marker.as_mut_slice());
+    write!(cursor, "client={client};lane={lane};sequence={seq};")
+        .expect("payload marker fits in stack buffer");
+    let marker_len = cursor.position() as usize;
+    bytes[..marker_len].copy_from_slice(&marker[..marker_len]);
 }
 // Fixed 64-bucket logarithmic histogram, upper-bound microseconds; constant memory per worker.
 #[derive(Clone)]
@@ -158,6 +254,7 @@ async fn lane(
     let mut seq = 0u64;
     let mut rng = (client as u64 + 1) * 7919 + (lane as u64 + 1) * 104729;
     let positions: Vec<usize> = (lane..blocks).step_by(depth).collect();
+    let mut expected_bytes = vec![0; BYTES];
     while Instant::now() < deadline {
         seq += 1;
         rng ^= rng << 13;
@@ -187,7 +284,13 @@ async fn lane(
                 let valid = if writing {
                     valid_write(&v)
                 } else {
-                    valid_read(&v)
+                    payload_into(
+                        &mut expected_bytes,
+                        client,
+                        expected[block].0,
+                        expected[block].1,
+                    );
+                    valid_read_content(&v, &expected_bytes)
                 };
                 if let Err(e) = valid {
                     result.errors.push(e);
@@ -202,10 +305,7 @@ async fn lane(
                         result.last.push((block, base + seq));
                     }
                 } else {
-                    if v != json!(payload(client, expected[block].0, expected[block].1)) {
-                        result.errors.push("read content mismatch".into());
-                        break;
-                    }
+                    // Content generation and validation remain inside the read latency scope.
                     result.read.record(start.elapsed());
                 }
             }
@@ -232,6 +332,9 @@ async fn stage(
     timeout: Duration,
     expected: &[Vec<(usize, u64)>],
 ) -> (Value, Vec<(usize, usize, usize, u64)>, Vec<String>) {
+    #[cfg(all(feature = "resource-profiling", unix))]
+    let resources_before =
+        resource_profile::Snapshot::capture(clients).expect("process resource profile unavailable");
     let start_unix_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -289,11 +392,19 @@ async fn stage(
     }
     let elapsed = start.elapsed().as_secs_f64();
     let iops = (read.count + write.count) as f64 / elapsed;
-    (
-        json!({"mode":format!("{mode:?}"),"nominal_seconds":seconds,"start_unix_ms":start_unix_ms,"finish_unix_ms":SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis(),"clients":CLIENTS,"servers":SERVERS,"per_client_depth":depth,"total_queue_depth":CLIENTS*depth,"elapsed_seconds_including_drain":elapsed,"read":read.json(),"write":write.json(),"read_iops":read.count as f64/elapsed,"write_iops":write.count as f64/elapsed,"total_iops":iops,"payload_mib_per_second":iops*BYTES as f64/1048576.0,"reference_target_iops":100000,"target_attainment":iops/100000.0,"failures":errors.len(),"cache":"cache-warm randomized dataset; no cold-cache claim"}),
-        ledger,
-        errors,
-    )
+    #[cfg(all(feature = "resource-profiling", unix))]
+    let resources = resource_profile::Snapshot::capture(clients)
+        .expect("process resource profile unavailable")
+        .delta(&resources_before)
+        .expect("process resource counters invalid");
+    let report = json!({"mode":format!("{mode:?}"),"nominal_seconds":seconds,"start_unix_ms":start_unix_ms,"finish_unix_ms":SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis(),"clients":CLIENTS,"servers":SERVERS,"per_client_depth":depth,"total_queue_depth":CLIENTS*depth,"elapsed_seconds_including_drain":elapsed,"read":read.json(),"write":write.json(),"read_iops":read.count as f64/elapsed,"write_iops":write.count as f64/elapsed,"total_iops":iops,"payload_mib_per_second":iops*BYTES as f64/1048576.0,"reference_target_iops":100000,"target_attainment":iops/100000.0,"failures":errors.len(),"cache":"cache-warm randomized dataset; no cold-cache claim"});
+    #[cfg(all(feature = "resource-profiling", unix))]
+    let report = {
+        let mut report = report;
+        report["resources"] = resources;
+        report
+    };
+    (report, ledger, errors)
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
 #[ignore = "requires disposable provider; 100 QUIC clients / 10 independent coordinators"]
