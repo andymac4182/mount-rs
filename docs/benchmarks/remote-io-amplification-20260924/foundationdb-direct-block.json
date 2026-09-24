@@ -1,0 +1,34 @@
+{
+  "all_blocks_verified_and_deleted": true,
+  "cache": "warm read dataset",
+  "clients": 100,
+  "payload_bytes": 4096,
+  "provider_handles": 10,
+  "queue_depth": 100,
+  "schema": "mount-rs-foundationdb-direct-block-v1",
+  "scope": "native content-addressed BlockStore; SDK/filesystem/protocol/audit omitted",
+  "seed_dataset_bytes": 13107200,
+  "stages": [
+    {
+      "block_operations_per_second": 42169.40236050487,
+      "elapsed_seconds_including_drain": 15.002370548,
+      "failure_samples": [],
+      "failures": 0,
+      "mode": "read",
+      "p99_us_upper": 4096,
+      "stage_id": "fdb-direct-1790238945799613385-read-q100",
+      "successes": 632641
+    },
+    {
+      "block_operations_per_second": 8163.751497131211,
+      "elapsed_seconds_including_drain": 15.075422132,
+      "failure_samples": [],
+      "failures": 0,
+      "mode": "write",
+      "p99_us_upper": 131072,
+      "stage_id": "fdb-direct-1790238945799613385-write-q100",
+      "successes": 123072
+    }
+  ],
+  "write_semantics": "new immutable 4KiB block each put; metadata pointer publication omitted"
+}

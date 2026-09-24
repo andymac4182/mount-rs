@@ -678,6 +678,9 @@ run_provider_test() {
     MOUNT_RS_TIDB_URL="$tidb_url" \
     MOUNT_RS_TIDB_TEST_VOLUME_KEY="$volume_key" \
     MOUNT_RS_TIDB_EXPECT_PERSISTED="$persistence_expectation" \
+    MOUNT_RS_TIDB_RUN_ID="$run_id" \
+    MOUNT_RS_TIDB_PD_COUNT="$pd_count" \
+    MOUNT_RS_TIDB_TIKV_COUNT="$tikv_count" \
       sh -c "$MOUNT_RS_TIDB_COMPOSITION_COMMAND"
   fi
 }

@@ -62,13 +62,16 @@ if [ "$provider" = pglite ]; then
   export MOUNT_RS_PGLITE_BENCH_IDENTITY="owned PGlite $pglite_version, socket $socket_version, persistent data directory"
 fi
 
+profile_features=""
+if [ "${MOUNT_RS_PROFILE_IO:-0}" = 1 ]; then profile_features="--features=io-profiling"; fi
+
 MOUNT_RS_REMOTE_TIDB_SATURATION_MODES=read \
-MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS=1,2,4,8,16 \
+MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS="${MOUNT_RS_REMOTE_COMPARISON_READ_DEPTHS:-1,2,4,8,16}" \
 MOUNT_RS_REMOTE_TIDB_SATURATION_OUTPUT="$output_dir/$provider-read.json" \
-  "$repo_dir/scripts/cargo-shared" test --release --locked -p mount-rs-service \
+  "$repo_dir/scripts/cargo-shared" test --release --locked $profile_features -p mount-rs-service \
     --test quic_tidb_saturation -- --ignored --nocapture --test-threads=1
 MOUNT_RS_REMOTE_TIDB_SATURATION_MODES=read,write \
-MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS=1,2 \
+MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS="${MOUNT_RS_REMOTE_COMPARISON_READ_WRITE_DEPTHS:-1,2}" \
 MOUNT_RS_REMOTE_TIDB_SATURATION_OUTPUT="$output_dir/$provider-read-write.json" \
-  "$repo_dir/scripts/cargo-shared" test --release --locked -p mount-rs-service \
+  "$repo_dir/scripts/cargo-shared" test --release --locked $profile_features -p mount-rs-service \
     --test quic_tidb_saturation -- --ignored --nocapture --test-threads=1

@@ -2,7 +2,12 @@
 //! Each database contains one namespace. Metadata and blocks may reside in
 //! different databases, or either provider may be paired with another backend.
 
+#[cfg(test)]
+#[path = "direct_io_benchmark.rs"]
+mod direct_io_benchmark;
+
 use async_trait::async_trait;
+use mount_rs_core::diagnostics::profile::{self, Event};
 use mount_rs_core::storage::{
     BlockId, BlockStore, CheckoutRequest, ConcurrentBackingId, ConcurrentModeState,
     DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState, DirectoryGrant,
@@ -250,6 +255,9 @@ fn require_local_concurrent_backing(
 #[derive(Clone)]
 struct Database {
     connection: Arc<Mutex<Connection>>,
+    // Kept alive after the connection field drops, so trace callback contexts
+    // remain valid throughout connection closure. Never installed by default.
+    _io_diagnostics: Option<Arc<super::io_diagnostics::Counts>>,
     durable: bool,
     #[cfg(unix)]
     opened_file: Option<OpenedFile>,
@@ -471,8 +479,11 @@ impl Database {
         connection.execute_batch(schema).map_err(backend_error)?;
         // Empty paths and :memory: are not durable even when passed to open().
         let durable = connection.path().is_some_and(|path| !path.is_empty());
+        let connection = Arc::new(Mutex::new(connection));
+        let diagnostics = super::io_diagnostics::register(&connection)?;
         Ok(Self {
-            connection: Arc::new(Mutex::new(connection)),
+            connection,
+            _io_diagnostics: diagnostics,
             durable,
             #[cfg(unix)]
             opened_file,
@@ -1729,6 +1740,9 @@ impl MetadataStore for SqliteMetadataStore {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(backend_error)?;
+        if let Some(json) = &namespace {
+            profile::add(Event::NamespaceReturned, json.len() as u64);
+        }
         Ok(LoadedMetadata {
             revision,
             namespace: namespace
@@ -1951,6 +1965,9 @@ impl MetadataStore for SqliteMetadataStore {
             .map_err(backend_error)?;
         if revision != 0 && revision == known_revision {
             return Ok(None);
+        }
+        if let Some(json) = &namespace {
+            profile::add(Event::NamespaceReturned, json.len() as u64);
         }
         Ok(Some(LoadedMetadata {
             revision,
@@ -2296,6 +2313,7 @@ impl MetadataStore for SqliteMetadataStore {
             .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
         let (fence, expires) = lease_numbers(lease)?;
         let namespace = serde_json::to_string(&namespace).map_err(backend_error)?;
+        profile::add(Event::NamespaceSerialized, namespace.len() as u64);
         let mut connection = self.0.lock()?;
         // The successful publication path is one fenced conditional UPDATE.
         // SQLite makes a single autocommit statement atomic and durable under
@@ -2365,6 +2383,7 @@ impl MetadataStore for SqliteMetadataStore {
                 .checked_add(1)
                 .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
             let namespace_json = serde_json::to_string(&namespace).map_err(backend_error)?;
+            profile::add(Event::NamespaceSerialized, namespace_json.len() as u64);
             let backing_text = backing.to_hex();
             self.0.with_concurrent_publish_timeout(|connection| {
             let was_autocommit = connection.is_autocommit();

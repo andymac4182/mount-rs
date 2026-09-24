@@ -1,15 +1,33 @@
 //! Versioned service metadata, separate from filesystem namespace metadata.
 
+#[cfg(feature = "io-profiling")]
+use mount_rs_core::diagnostics::profile;
+use mount_rs_core::diagnostics::profile::{Event, Span};
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+#[cfg(any(unix, test))]
+use std::sync::Mutex;
+#[cfg(unix)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
 use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
 const MAX_DOCUMENT_BYTES: usize = 8 * 1024 * 1024;
+#[cfg(unix)]
+const CONNECTION_POOL_SIZE: usize = 8;
+
+#[cfg(test)]
+static TEST_CONNECTION_OPENS: std::sync::LazyLock<Mutex<BTreeMap<PathBuf, usize>>> =
+    std::sync::LazyLock::new(|| Mutex::new(BTreeMap::new()));
 
 #[derive(Debug)]
 pub enum CatalogError {
@@ -224,16 +242,77 @@ pub trait CatalogStore: Send + Sync {
     ) -> Result<u64, CatalogError>;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SqliteCatalog {
+    shared: Arc<CatalogConnections>,
+}
+
+struct CatalogConnections {
     path: PathBuf,
+    #[cfg(unix)]
+    identity: FileIdentity,
+    #[cfg(unix)]
+    connections: Vec<Mutex<Connection>>,
+    #[cfg(unix)]
+    next: AtomicUsize,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl fmt::Debug for SqliteCatalog {
+    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
+        output
+            .debug_struct("SqliteCatalog")
+            .field("path", &self.shared.path)
+            .finish()
+    }
+}
+
+impl Drop for CatalogConnections {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            let _profile = Span::new(Event::CatalogClose);
+            drop(std::mem::take(&mut self.connections));
+        }
+    }
+}
+
+#[cfg(unix)]
+impl CatalogConnections {
+    fn verify_backing(&self) -> Result<(), CatalogError> {
+        let _profile = Span::new(Event::CatalogBackingVerify);
+        if file_identity(&self.path)? != self.identity {
+            return Err(CatalogError::Invalid("catalog backing file changed"));
+        }
+        Ok(())
+    }
+
+    fn connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>, CatalogError> {
+        let index = self.next.fetch_add(1, Ordering::Relaxed) % self.connections.len();
+        let wait_profile = Span::new(Event::CatalogPoolWait);
+        let connection = self.connections[index]
+            .lock()
+            .map_err(|_| CatalogError::Invalid("catalog connection unavailable"))?;
+        drop(wait_profile);
+        self.verify_backing()?;
+        Ok(connection)
+    }
 }
 
 impl SqliteCatalog {
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, CatalogError> {
         let path = path.as_ref().to_path_buf();
+        validate_catalog_path(&path)?;
         let setup_path = path.clone();
-        tokio::task::spawn_blocking(move || -> Result<(), CatalogError> {
+        let shared = tokio::task::spawn_blocking(move || -> Result<CatalogConnections, CatalogError> {
+            #[cfg(unix)]
+            let initial_identity = prepare_file_identity(&setup_path)?;
             let connection = connect(&setup_path)?;
             connection.execute_batch(
                 "CREATE TABLE IF NOT EXISTS service_catalog (\
@@ -247,10 +326,41 @@ impl SqliteCatalog {
                 "INSERT OR IGNORE INTO service_catalog (singleton, revision, document) VALUES (1, 0, ?1)",
                 params![empty],
             )?;
-            Ok(())
+            #[cfg(unix)]
+            {
+            let identity = file_identity(&setup_path)?;
+            if initial_identity != identity {
+                return Err(CatalogError::Invalid("catalog backing file changed"));
+            }
+            let mut connections = Vec::with_capacity(CONNECTION_POOL_SIZE);
+            connections.push(Mutex::new(connection));
+            for _ in 1..CONNECTION_POOL_SIZE {
+                if file_identity(&setup_path)? != identity {
+                    return Err(CatalogError::Invalid("catalog backing file changed"));
+                }
+                let connection = connect(&setup_path)?;
+                if file_identity(&setup_path)? != identity {
+                    return Err(CatalogError::Invalid("catalog backing file changed"));
+                }
+                connections.push(Mutex::new(connection));
+            }
+            Ok(CatalogConnections {
+                path: setup_path,
+                identity,
+                connections,
+                next: AtomicUsize::new(0),
+            })
+            }
+            #[cfg(not(unix))]
+            {
+                drop(connection);
+                Ok(CatalogConnections { path: setup_path })
+            }
         })
         .await??;
-        Ok(Self { path })
+        Ok(Self {
+            shared: Arc::new(shared),
+        })
     }
 
     pub async fn load_current(&self) -> Result<CatalogSnapshot, CatalogError> {
@@ -269,9 +379,16 @@ impl SqliteCatalog {
 #[async_trait]
 impl CatalogStore for SqliteCatalog {
     async fn load_current(&self) -> Result<CatalogSnapshot, CatalogError> {
-        let path = self.path.clone();
+        let _load_profile = Span::new(Event::CatalogLoad);
+        let queue_profile = Span::new(Event::CatalogQueue);
+        let shared = Arc::clone(&self.shared);
         tokio::task::spawn_blocking(move || {
-            let connection = connect(&path)?;
+            drop(queue_profile);
+            #[cfg(unix)]
+            let connection = shared.connection()?;
+            #[cfg(not(unix))]
+            let connection = connect(&shared.path)?;
+            let mut query_profile = Span::new(Event::CatalogQuery);
             let row: Option<(i64, Vec<u8>)> = connection
                 .query_row(
                     "SELECT revision, length(document), document FROM service_catalog WHERE singleton = 1",
@@ -284,7 +401,37 @@ impl CatalogStore for SqliteCatalog {
                 )
                 .optional()?;
             let (revision, document) = row.ok_or(CatalogError::Invalid("catalog row missing"))?;
-            decode_snapshot(revision, &document)
+            query_profile.set_units(document.len() as u64);
+            drop(query_profile);
+            let decode_profile = Span::new(Event::CatalogDecode).units(document.len() as u64);
+            let result = decode_snapshot(revision, &document);
+            drop(decode_profile);
+            #[cfg(feature = "io-profiling")]
+            if profile::enabled() {
+                let sample = mount_rs_sqlite::connection_page_diagnostics(&connection, true);
+                match sample.ok().and_then(|pages| {
+                    Some((
+                        pages["pager"]["cache_hits"].as_u64()?,
+                        pages["pager"]["cache_misses"].as_u64()?,
+                        pages["pager"]["page_writes"].as_u64()?,
+                    ))
+                }) {
+                    Some((hits, misses, writes)) => {
+                        profile::add(Event::CatalogPagerHits, hits);
+                        profile::add(Event::CatalogPagerMisses, misses);
+                        profile::add(Event::CatalogPagerWrites, writes);
+                    }
+                    None => profile::add(Event::CatalogPagerUnavailable, 1),
+                }
+            }
+            #[cfg(unix)]
+            shared.verify_backing()?;
+            #[cfg(not(unix))]
+            {
+                let _close_profile = Span::new(Event::CatalogClose);
+                drop(connection);
+            }
+            result
         })
         .await?
     }
@@ -304,9 +451,12 @@ impl CatalogStore for SqliteCatalog {
         if document.len() > MAX_DOCUMENT_BYTES {
             return Err(CatalogError::Invalid("catalog document too large"));
         }
-        let path = self.path.clone();
+        let shared = Arc::clone(&self.shared);
         tokio::task::spawn_blocking(move || {
-            let mut connection = connect(&path)?;
+            #[cfg(unix)]
+            let mut connection = shared.connection()?;
+            #[cfg(not(unix))]
+            let mut connection = connect(&shared.path)?;
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let previous: i64 = transaction.query_row(
@@ -340,6 +490,8 @@ impl CatalogStore for SqliteCatalog {
                 params![revision_sql, document],
             )?;
             transaction.commit()?;
+            #[cfg(unix)]
+            shared.verify_backing()?;
             Ok(revision)
         })
         .await?
@@ -347,11 +499,70 @@ impl CatalogStore for SqliteCatalog {
 }
 
 fn connect(path: &Path) -> Result<Connection, CatalogError> {
-    let connection = Connection::open(path)?;
+    #[cfg(test)]
+    {
+        *TEST_CONNECTION_OPENS
+            .lock()
+            .unwrap()
+            .entry(path.to_path_buf())
+            .or_default() += 1;
+    }
+    let _profile = Span::new(Event::CatalogConnect);
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+        | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let connection = Connection::open_with_flags(path, flags)?;
     connection.busy_timeout(Duration::from_secs(5))?;
     connection.pragma_update(None, "journal_mode", "WAL")?;
     connection.pragma_update(None, "synchronous", "FULL")?;
     Ok(connection)
+}
+
+fn validate_catalog_path(path: &Path) -> Result<(), CatalogError> {
+    if path
+        .to_str()
+        .is_some_and(|value| value == ":memory:" || value.starts_with("file:"))
+    {
+        return Err(CatalogError::Invalid(
+            "catalog requires a durable file path",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn file_identity(path: &Path) -> Result<FileIdentity, CatalogError> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|_| CatalogError::Invalid("catalog backing file unavailable"))?;
+    if !metadata.is_file() {
+        return Err(CatalogError::Invalid("catalog backing file is not regular"));
+    }
+    Ok(FileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+#[cfg(unix)]
+fn prepare_file_identity(path: &Path) -> Result<FileIdentity, CatalogError> {
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+    {
+        Ok(file) => {
+            let metadata = file
+                .metadata()
+                .map_err(|_| CatalogError::Invalid("catalog backing file unavailable"))?;
+            Ok(FileIdentity {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => file_identity(path),
+        Err(_) => Err(CatalogError::Invalid("catalog backing file unavailable")),
+    }
 }
 
 fn decode_snapshot(revision: i64, document: &[u8]) -> Result<CatalogSnapshot, CatalogError> {
@@ -392,4 +603,121 @@ where
         }
     }
     deserializer.deserialize_map(Unique(std::marker::PhantomData))
+}
+
+#[cfg(test)]
+mod reuse_tests {
+    use super::*;
+
+    #[test]
+    fn catalog_requires_a_durable_non_uri_path() {
+        assert!(validate_catalog_path(Path::new(":memory:")).is_err());
+        assert!(validate_catalog_path(Path::new("file:catalog?mode=memory")).is_err());
+        assert!(validate_catalog_path(Path::new("catalog.sqlite")).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn repeated_loads_reuse_the_open_catalog_connection() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("catalog.sqlite");
+        let catalog = SqliteCatalog::open(&path).await.unwrap();
+        let opened_after_setup = super::TEST_CONNECTION_OPENS.lock().unwrap()[&path];
+        for _ in 0..8 {
+            assert_eq!(catalog.load_current().await.unwrap().revision, 0);
+        }
+        assert_eq!(
+            super::TEST_CONNECTION_OPENS.lock().unwrap()[&path],
+            opened_after_setup,
+            "catalog reads must not open a SQLite connection per request"
+        );
+    }
+
+    #[cfg(not(unix))]
+    #[tokio::test]
+    async fn unsupported_pool_platform_keeps_fresh_catalog_reads() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("catalog.sqlite");
+        let catalog = SqliteCatalog::open(&path).await.unwrap();
+        let opened_after_setup = super::TEST_CONNECTION_OPENS.lock().unwrap()[&path];
+        assert_eq!(catalog.load_current().await.unwrap().revision, 0);
+        assert_eq!(
+            super::TEST_CONNECTION_OPENS.lock().unwrap()[&path],
+            opened_after_setup + 1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reused_reader_observes_an_external_grant_revocation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("catalog.sqlite");
+        let reader = SqliteCatalog::open(&path).await.unwrap();
+        let writer = SqliteCatalog::open(&path).await.unwrap();
+        let mut initial = CatalogSnapshot::empty();
+        initial.partitions.insert(
+            "red".into(),
+            PartitionDefinition {
+                drives: BTreeMap::from([(
+                    "data".into(),
+                    DriveDefinition {
+                        driver: serde_json::json!({"kind":"memory"}),
+                    },
+                )]),
+            },
+        );
+        initial.issuer_policies.insert(
+            "issuer".into(),
+            serde_json::json!({
+                "issuer":"https://issuer.example.com", "audiences":["mount-rs"]
+            }),
+        );
+        initial.grants.insert(
+            "grant".into(),
+            GrantDefinition {
+                partition_id: "red".into(),
+                policy_id: "issuer".into(),
+                drives: BTreeMap::from([("data".into(), Permission::Read)]),
+                claim_conditions: BTreeMap::from([("/sub".into(), "workload".into())]),
+            },
+        );
+        writer.compare_and_swap(0, initial).await.unwrap();
+        assert!(
+            reader
+                .load_current()
+                .await
+                .unwrap()
+                .grants
+                .contains_key("grant")
+        );
+        let mut revoked = writer.load_current().await.unwrap();
+        revoked.grants.clear();
+        writer.compare_and_swap(1, revoked).await.unwrap();
+        let current = reader.load_current().await.unwrap();
+        assert_eq!(current.revision, 2);
+        assert!(current.grants.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn replacing_the_catalog_file_fails_closed_for_existing_connections() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("catalog.sqlite");
+        let catalog = SqliteCatalog::open(&path).await.unwrap();
+        assert_eq!(catalog.load_current().await.unwrap().revision, 0);
+        let replacement_path = directory.path().join("replacement.sqlite");
+        let replacement = SqliteCatalog::open(&replacement_path).await.unwrap();
+        replacement
+            .compare_and_swap(0, CatalogSnapshot::empty())
+            .await
+            .unwrap();
+        drop(replacement);
+        std::fs::rename(&replacement_path, &path).unwrap();
+        assert!(catalog.load_current().await.is_err());
+        assert!(
+            catalog
+                .compare_and_swap(0, CatalogSnapshot::empty())
+                .await
+                .is_err()
+        );
+    }
 }

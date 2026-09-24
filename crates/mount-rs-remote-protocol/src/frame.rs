@@ -1,3 +1,5 @@
+#[cfg(feature = "io-profiling")]
+use mount_rs_core::diagnostics::profile::{Event, Span};
 use std::fmt;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -38,7 +40,14 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
     writer: &mut W,
     message: &Message,
 ) -> Result<(), FrameError> {
+    #[cfg(feature = "io-profiling")]
+    let mut profile = Span::new(Event::WireEncode);
     let body = serde_json::to_vec(message)?;
+    #[cfg(feature = "io-profiling")]
+    {
+        profile.set_units(body.len() as u64);
+        drop(profile);
+    }
     if !valid_frame_length(body.len()) {
         return Err(FrameError::InvalidLength);
     }
@@ -58,6 +67,8 @@ pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Message,
     }
     let mut body = vec![0; length];
     reader.read_exact(&mut body).await?;
+    #[cfg(feature = "io-profiling")]
+    let _profile = Span::new(Event::WireDecode).units(body.len() as u64);
     Ok(serde_json::from_slice(&body)?)
 }
 

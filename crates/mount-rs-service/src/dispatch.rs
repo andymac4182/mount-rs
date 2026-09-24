@@ -1,5 +1,7 @@
 //! One-Partition session routing with a fresh catalog authorization check.
 
+use mount_rs_core::diagnostics::profile::{Event, Span};
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -238,6 +240,8 @@ impl DriveDispatcher {
         handles: &SessionHandles,
         request_id: u64,
     ) -> Result<Value, WireError> {
+        let _dispatch_profile = Span::new(Event::Dispatch);
+        let authorization_profile = Span::new(Event::Authorization);
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| error("EIO"))?
@@ -299,6 +303,7 @@ impl DriveDispatcher {
             return Err(error("ESTALE"));
         }
         let driver = self.drives.get(&key).ok_or_else(|| error("EACCES"))?;
+        drop(authorization_profile);
         let body = &operation.body;
         let result = async {
             match operation.name {
@@ -382,7 +387,9 @@ impl DriveDispatcher {
                 | OperationName::HandleDatasync
                 | OperationName::HandleClose => {
                     let id = number(body, "handle")?;
+                    let wait_profile = Span::new(Event::HandleWait);
                     let mut state = handles.state.lock().await;
+                    drop(wait_profile);
                     let (drive, revision, handle) =
                         state.entries.get(&id).ok_or_else(|| error("EBADF"))?;
                     if !handle_matches(drive, drive_id, *revision, catalog.revision) {
@@ -579,12 +586,67 @@ impl DriveDispatcher {
                 })
                 .map(|(id, _)| id)
                 .collect();
-            eprintln!(
-                "{}",
-                serde_json::json!({"event":"remote_access","partition_id":identity.partition_id,"drive_id":drive_id,"grant_ids":grants,"operation":operation.name,"request_id":request_id,"outcome":result.as_ref().map(|_|"ok").unwrap_or_else(|error|&error.code)})
+            let _audit_profile = Span::new(Event::Audit);
+            let line = audit_line(
+                serde_json::json!({"event":"remote_access","partition_id":identity.partition_id,"drive_id":drive_id,"grant_ids":grants,"operation":operation.name,"request_id":request_id,"outcome":result.as_ref().map(|_|"ok").unwrap_or_else(|error|&error.code)}),
             );
+            eprintln!("{line}");
         }
         result
+    }
+}
+
+fn audit_line(event: Value) -> String {
+    // Serialize before eprintln acquires stderr, then emit one complete line.
+    event.to_string()
+}
+
+#[cfg(test)]
+#[test]
+fn audit_line_preserves_json_with_bounded_writer_fragments() {
+    use std::fmt::Write;
+
+    #[derive(Default)]
+    struct CountingWriter {
+        output: String,
+        fragments: usize,
+    }
+    impl Write for CountingWriter {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            self.fragments += 1;
+            self.output.push_str(text);
+            Ok(())
+        }
+    }
+
+    for outcome in ["ok", "EIO"] {
+        let event = serde_json::json!({
+            "event": "remote_access",
+            "partition_id": "partition\nwith\"escapes",
+            "drive_id": "drive",
+            "grant_ids": ["first", "second"],
+            "operation": "handle_write",
+            "request_id": 42,
+            "outcome": outcome,
+        });
+        let mut legacy = CountingWriter::default();
+        writeln!(&mut legacy, "{event}").unwrap();
+        assert!(
+            legacy.fragments > 8,
+            "legacy JSON formatting must exercise fragmented output"
+        );
+        let mut prepared = CountingWriter::default();
+        writeln!(&mut prepared, "{}", audit_line(event.clone())).unwrap();
+        assert_eq!(prepared.output, legacy.output);
+        assert_eq!(
+            serde_json::from_str::<Value>(&prepared.output).unwrap(),
+            event
+        );
+        assert!(
+            prepared.fragments <= 2,
+            "prepared audit line used {} writer fragments",
+            prepared.fragments
+        );
     }
 }
 

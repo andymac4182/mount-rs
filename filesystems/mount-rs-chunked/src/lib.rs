@@ -12,6 +12,7 @@ pub use migration::{migrate_mrc1_backing, migrate_trusted_unstamped_mrc1_backing
 use async_trait::async_trait;
 use mount_rs_core::chunking::{Chunker, FixedSizeChunker, from_config};
 use mount_rs_core::diagnostics::RequestTrace;
+use mount_rs_core::diagnostics::profile::{self, Event, Span};
 use mount_rs_core::driver::{
     FileHandle, FsDriver, GuardedDirectoryEntry, GuardedMutation, GuardedMutationResult,
     GuardedRead, GuardedReadResult, GuardedSetattr, ObservedEntry, PathGuard, PathIdentity,
@@ -694,7 +695,9 @@ where
         if !self.inner.options.delegated {
             return Err(FsError::new(ErrorCode::Enotsup));
         }
+        let gate_profile = Span::new(Event::GateWait);
         let _gate = self.inner.gate.lock().await;
+        drop(gate_profile);
         self.refresh_concurrent_namespace().await?;
         self.local_grant()
     }
@@ -706,7 +709,9 @@ where
             return Err(FsError::new(ErrorCode::Enotsup));
         }
         let _lifecycle = self.inner.lifecycle.write().await;
+        let gate_profile = Span::new(Event::GateWait);
         let _gate = self.inner.gate.lock().await;
+        drop(gate_profile);
         if self.local_grant()?.is_some() {
             return Err(
                 FsError::new(ErrorCode::Ebusy).with_message("coordinator already owns a scope")
@@ -831,7 +836,9 @@ where
             return Err(FsError::new(ErrorCode::Enotsup));
         }
         let _lifecycle = self.inner.lifecycle.write().await;
+        let gate_profile = Span::new(Event::GateWait);
         let _gate = self.inner.gate.lock().await;
+        drop(gate_profile);
         let Some(grant) = self.local_grant()? else {
             return Ok(());
         };
@@ -1199,7 +1206,9 @@ where
         // releases the writer lease. New optimistic operations are prevented
         // from starting while this writer is queued.
         let _lifecycle = self.inner.lifecycle.write().await;
+        let gate_profile = Span::new(Event::GateWait);
         let _gate = self.inner.gate.lock().await;
+        drop(gate_profile);
         // A failed publication fails the coordinator closed. Pending atime
         // state must not be published after that boundary: snapshot() will
         // deliberately return the original failure, and returning early here
@@ -1274,7 +1283,9 @@ where
                 .with_message("reconciliation grace period must be positive"));
         }
         let _lifecycle = self.inner.lifecycle.write().await;
+        let gate_profile = Span::new(Event::GateWait);
         let _gate = self.inner.gate.lock().await;
+        drop(gate_profile);
         self.validate_lease().await?;
         self.drain_writeback().await?;
         let (namespace, _) = self.snapshot()?;
@@ -1320,6 +1331,7 @@ where
         if state.closed {
             return Err(FsError::new(ErrorCode::Ebadf).with_message("filesystem is closed"));
         }
+        let _profile = Span::new(Event::Snapshot).units(state.namespace.nodes.len() as u64);
         let mut namespace = state.namespace.clone();
         for (inode, atime_ms) in &state.pending_atime {
             if let Some(node) = namespace.nodes.get_mut(inode) {
@@ -1364,6 +1376,7 @@ where
     /// local operations may finish between the remote load and state lock;
     /// never replace a newer locally acknowledged revision with an older one.
     async fn refresh_concurrent_namespace(&self) -> Result<()> {
+        let _profile = Span::new(Event::Refresh);
         if self.inner.options.delegated {
             self.refresh_delegation().await?;
         }
@@ -1393,7 +1406,10 @@ where
                         "concurrent metadata revision has no published namespace",
                     ))
                 })?;
-                Some((namespace, loaded.revision))
+                {
+                    profile::add(Event::Changed, namespace.nodes.len() as u64);
+                    Some((namespace, loaded.revision))
+                }
             }
             None => None,
         };
@@ -1788,6 +1804,7 @@ where
             let revision = match result {
                 Ok(revision) => revision,
                 Err(error) if error.code == ErrorCode::Eagain => {
+                    profile::add(Event::PublishConflict, 0);
                     // This is a known non-commit. The caller may reload and
                     // reconstruct its original operation; local state stays
                     // unchanged until a successful acknowledgement.
@@ -2018,7 +2035,9 @@ where
     }
 
     async fn apply_mutation_batch(&self, requests: Vec<MutationRequest>) {
+        let gate_profile = Span::new(Event::GateWait);
         let _gate = self.inner.gate.lock().await;
+        drop(gate_profile);
         let attempts = if self.inner.options.concurrent_writes {
             MAX_CONCURRENT_CAS_RETRIES
         } else {
@@ -2152,7 +2171,9 @@ where
     {
         let mut trace = RequestTrace::new("chunked", "mutate");
         trace.stage("gate_wait", format_args!(""));
+        let gate_profile = Span::new(Event::GateWait);
         let _gate = self.inner.gate.lock().await;
+        drop(gate_profile);
         trace.stage("gate_acquired", format_args!(""));
         let attempts = if self.inner.options.concurrent_writes {
             MAX_CONCURRENT_CAS_RETRIES
@@ -2217,7 +2238,9 @@ where
     ) -> Result<usize> {
         let _lifecycle = self.inner.lifecycle.read().await;
         let (layout, original, orphan, size, count) = {
+            let gate_profile = Span::new(Event::GateWait);
             let _gate = self.inner.gate.lock().await;
+            drop(gate_profile);
             self.ensure_operation_lease().await?;
             let (namespace, _) = self.snapshot()?;
             let (node, orphan) = self.node_snapshot(&namespace, inode, "read", path)?;
@@ -2254,7 +2277,9 @@ where
             )
             .await?;
         }
+        let gate_profile = Span::new(Event::GateWait);
         let _gate = self.inner.gate.lock().await;
+        drop(gate_profile);
         self.ensure_operation_lease().await?;
         if self.inner.options.concurrent_writes {
             return Ok(count);
@@ -2300,7 +2325,9 @@ where
     ) -> Result<(usize, u64)> {
         let _lifecycle = self.inner.lifecycle.read().await;
         let (layout, original, orphan, start, end, new_size) = {
+            let gate_profile = Span::new(Event::GateWait);
             let _gate = self.inner.gate.lock().await;
+            drop(gate_profile);
             self.ensure_operation_lease().await?;
             let (namespace, _) = self.snapshot()?;
             let (node, orphan) = self.node_snapshot(&namespace, inode, "write", path)?;
@@ -2346,7 +2373,9 @@ where
             .map_err(|error| with_context(error, "block-flush", Some(path)))?;
 
         let fast_commit = {
+            let gate_profile = Span::new(Event::GateWait);
             let _gate = self.inner.gate.lock().await;
+            drop(gate_profile);
             self.ensure_operation_lease().await?;
             if orphan {
                 let mut state = self.lock_state()?;
@@ -2410,7 +2439,10 @@ where
         position: u64,
         append: bool,
     ) -> Result<(usize, u64)> {
+        profile::add(Event::Fallback, 0);
+        let gate_profile = Span::new(Event::GateWait);
         let _gate = self.inner.gate.lock().await;
+        drop(gate_profile);
         let attempts = if self.inner.options.concurrent_writes {
             MAX_CONCURRENT_CAS_RETRIES
         } else {
@@ -2652,7 +2684,9 @@ where
         data: &[u8],
         mut prepared_layout: FileLayout,
     ) -> Result<()> {
+        let gate_profile = Span::new(Event::GateWait);
         let _gate = self.inner.gate.lock().await;
+        drop(gate_profile);
         let data_length = u64::try_from(data.len())
             .map_err(|_| error_with_path(ErrorCode::Efbig, "write", path))?;
         for attempt in 0..MAX_CONCURRENT_CAS_RETRIES {
@@ -2769,7 +2803,9 @@ where
     }
 
     async fn truncate_inode(&self, inode: InodeId, path: &str, length: u64) -> Result<()> {
+        let gate_profile = Span::new(Event::GateWait);
         let _gate = self.inner.gate.lock().await;
+        drop(gate_profile);
         let attempts = if self.inner.options.concurrent_writes {
             MAX_CONCURRENT_CAS_RETRIES
         } else {
@@ -2998,7 +3034,9 @@ where
 
     async fn syncfs_with_syscall(&self, syscall: &str) -> Result<()> {
         let _lifecycle = self.inner.lifecycle.write().await;
+        let gate_profile = Span::new(Event::GateWait);
         let _gate = self.inner.gate.lock().await;
+        drop(gate_profile);
         self.ensure_operation_lease().await?;
         self.snapshot()?;
         let mut barrier = self
@@ -3106,7 +3144,9 @@ where
         }
         let normalized = normalize_path(path);
         trace.stage("gate_wait", format_args!("path={normalized:?}"));
+        let gate_profile = Span::new(Event::GateWait);
         let _gate = self.inner.gate.lock().await;
+        drop(gate_profile);
         trace.stage("gate_acquired", format_args!("path={normalized:?}"));
         let attempts = if self.inner.options.concurrent_writes {
             MAX_CONCURRENT_CAS_RETRIES
@@ -3490,7 +3530,9 @@ where
     }
 
     async fn guarded_read(&self, request: GuardedRead) -> Result<GuardedReadResult> {
+        let gate_profile = Span::new(Event::GateWait);
         let _gate = self.inner.gate.lock().await;
+        drop(gate_profile);
         self.ensure_operation_lease().await?;
         let (namespace, _) = self.snapshot()?;
         match request {
@@ -3807,7 +3849,9 @@ where
     }
 
     async fn stat(&self, path: &str) -> Result<Stats> {
+        let gate_profile = Span::new(Event::GateWait);
         let _gate = self.inner.gate.lock().await;
+        drop(gate_profile);
         self.validate_lease().await?;
         let (namespace, _) = self.snapshot()?;
         let inode = resolve(&namespace, path, true, "stat")?;
@@ -3815,7 +3859,9 @@ where
     }
 
     async fn lstat(&self, path: &str) -> Result<Stats> {
+        let gate_profile = Span::new(Event::GateWait);
         let _gate = self.inner.gate.lock().await;
+        drop(gate_profile);
         self.validate_lease().await?;
         let (namespace, _) = self.snapshot()?;
         let inode = resolve(&namespace, path, false, "lstat")?;
@@ -3823,7 +3869,9 @@ where
     }
 
     async fn statfs(&self, path: &str) -> Result<StatsFs> {
+        let gate_profile = Span::new(Event::GateWait);
         let _gate = self.inner.gate.lock().await;
+        drop(gate_profile);
         self.validate_lease().await?;
         let (namespace, _) = self.snapshot()?;
         resolve(&namespace, path, true, "statfs")?;
@@ -3855,7 +3903,9 @@ where
     }
 
     async fn readdir(&self, path: &str) -> Result<Vec<DirEntry>> {
+        let gate_profile = Span::new(Event::GateWait);
         let _gate = self.inner.gate.lock().await;
+        drop(gate_profile);
         self.ensure_operation_lease().await?;
         let (mut namespace, revision) = self.snapshot()?;
         let normalized = normalize_path(path);
@@ -3893,7 +3943,9 @@ where
             return Err(error_with_path(ErrorCode::Einval, "scandir", path)
                 .with_message("directory entry limit must be positive"));
         }
+        let gate_profile = Span::new(Event::GateWait);
         let _gate = self.inner.gate.lock().await;
+        drop(gate_profile);
         self.ensure_operation_lease().await?;
         let (mut namespace, revision) = self.snapshot()?;
         let normalized = normalize_path(path);
@@ -4074,7 +4126,9 @@ where
     }
 
     async fn readlink(&self, path: &str) -> Result<String> {
+        let gate_profile = Span::new(Event::GateWait);
         let _gate = self.inner.gate.lock().await;
+        drop(gate_profile);
         self.ensure_operation_lease().await?;
         let (namespace, _) = self.snapshot()?;
         let normalized = normalize_path(path);
@@ -5375,20 +5429,26 @@ async fn rewrite_layout<B: BlockStore>(
                 .try_reserve_exact(chunk_length)
                 .map_err(|_| error_with_path(ErrorCode::Enomem, "write", path))?;
             chunk.resize(chunk_length, 0);
-            read_layout_into(
-                blocks,
-                layout,
-                old_size,
-                chunk_start,
-                &mut chunk,
-                path,
-                "write",
-            )
-            .await?;
-            let write_start = position.max(chunk_start);
             let chunk_end = chunk_start
                 .checked_add(chunk_length_u64)
                 .ok_or_else(|| error_with_path(ErrorCode::Efbig, "write", path))?;
+            // Read existing bytes only when the input leaves part of the
+            // resulting chunk untouched, including a short chunk at EOF.
+            if position > chunk_start || input_end < chunk_end {
+                let old_read_profile = Span::new(Event::RewriteRead).units(chunk_length as u64);
+                read_layout_into(
+                    blocks,
+                    layout,
+                    old_size,
+                    chunk_start,
+                    &mut chunk,
+                    path,
+                    "write",
+                )
+                .await?;
+                drop(old_read_profile);
+            }
+            let write_start = position.max(chunk_start);
             let write_end = input_end.min(chunk_end);
             let destination = usize::try_from(write_start - chunk_start)
                 .map_err(|_| error_with_path(ErrorCode::Efbig, "write", path))?;
@@ -5648,6 +5708,70 @@ mod tests {
                 gets: Arc::new(AtomicUsize::new(0)),
                 reconciled: Arc::new(Mutex::new(None)),
             }
+        }
+    }
+
+    #[test]
+    fn fixed_rewrite_reads_only_chunks_with_preserved_bytes() {
+        let mut cross_chunk_expected = vec![1; 12 * 1024];
+        cross_chunk_expected[2048..2048 + 8192].fill(2);
+        let cases = [
+            (vec![1; 4096], 0, vec![2; 4096], vec![2; 4096], 0),
+            (vec![1; 100], 0, vec![2; 100], vec![2; 100], 0),
+            (vec![1; 4096], 0, vec![0; 4096], vec![0; 4096], 0),
+            (vec![1, 2, 3, 4], 1, vec![9, 8], vec![1, 9, 8, 4], 1),
+            (vec![1, 2], 4, vec![9, 8], vec![1, 2, 0, 0, 9, 8], 1),
+            (vec![], 4, vec![9, 8], vec![0, 0, 0, 0, 9, 8], 0),
+            (
+                vec![1; 12 * 1024],
+                2048,
+                vec![2; 8192],
+                cross_chunk_expected,
+                2,
+            ),
+        ];
+        for (old, position, input, expected, gets) in cases {
+            let blocks = Arc::new(FaultBlockStore::new());
+            let extents = old
+                .chunks(4096)
+                .enumerate()
+                .map(|(index, chunk)| BlockExtent {
+                    file_offset: (index * 4096) as u64,
+                    block: block_on(blocks.put(chunk)).unwrap(),
+                    block_offset: 0,
+                    length: chunk.len() as u64,
+                })
+                .collect();
+            let layout = FileLayout {
+                chunker: FixedSizeChunker::new(4096).unwrap().config(),
+                extents,
+            };
+            let rewritten = block_on(rewrite_layout(
+                &blocks,
+                &layout,
+                old.len() as u64,
+                position,
+                &input,
+                expected.len() as u64,
+                "/rewrite",
+            ))
+            .unwrap();
+            assert_eq!(
+                blocks.gets.load(Ordering::SeqCst),
+                gets,
+                "old-block reads at position {position} for {} input bytes",
+                input.len()
+            );
+            assert_eq!(
+                block_on(read_layout_all(
+                    &blocks,
+                    &rewritten,
+                    expected.len() as u64,
+                    "/rewrite",
+                ))
+                .unwrap(),
+                expected
+            );
         }
     }
 

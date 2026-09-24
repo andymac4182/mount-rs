@@ -6,9 +6,11 @@ rust-version = "1.95"
 license = "Apache-2.0"
 
 [features]
+io-profiling = ["dep:mount-rs-sqlite", "mount-rs-remote-protocol/io-profiling"]
 saturation-foundationdb = ["mount-rs-sdk/foundationdb"]
 
 [dependencies]
+mount-rs-sqlite = { path = "../../providers/mount-rs-sqlite", optional = true }
 async-trait = "0.1"
 mount-rs-core = { path = "../.." }
 mount-rs-remote-protocol = { path = "../mount-rs-remote-protocol" }
@@ -24,6 +26,7 @@ quinn = { version = "=0.11.12", default-features = false, features = ["runtime-t
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
 [dev-dependencies]
+mount-rs-sqlite = { path = "../../providers/mount-rs-sqlite" }
 mount-rs-sdk = { path = "../mount-rs-sdk" }
 mount-rs-chunked = { path = "../../filesystems/mount-rs-chunked" }
 mount-rs-tidb = { path = "../../providers/mount-rs-tidb" }

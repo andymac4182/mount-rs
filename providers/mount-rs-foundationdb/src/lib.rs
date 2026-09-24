@@ -1587,6 +1587,10 @@ where
             "FoundationDB metadata payload length is invalid",
         )));
     }
+    mount_rs_core::diagnostics::profile::add(
+        mount_rs_core::diagnostics::profile::Event::NamespaceReturned,
+        payload.len() as u64,
+    );
     let namespace = serde_json::from_slice(&payload)
         .map_err(backend_error)
         .map_err(TxnError::Fs)?;
@@ -2982,6 +2986,10 @@ impl MetadataStore for FoundationDbMetadataStore {
         namespace.validate()?;
         validate_namespace_chunkers(&namespace, self.0.limits)?;
         let payload = serde_json::to_vec(&namespace).map_err(backend_error)?;
+        mount_rs_core::diagnostics::profile::add(
+            mount_rs_core::diagnostics::profile::Event::NamespaceSerialized,
+            payload.len() as u64,
+        );
         let inner = Arc::clone(&self.0);
         if payload.len() > inner.limits.max_metadata_bytes {
             return Err(FsError::new(ErrorCode::Efbig)
@@ -3090,6 +3098,10 @@ impl MetadataStore for FoundationDbMetadataStore {
         namespace.validate()?;
         validate_namespace_chunkers(&namespace, self.0.limits)?;
         let payload = serde_json::to_vec(&namespace).map_err(backend_error)?;
+        mount_rs_core::diagnostics::profile::add(
+            mount_rs_core::diagnostics::profile::Event::NamespaceSerialized,
+            payload.len() as u64,
+        );
         let inner = Arc::clone(&self.0);
         if payload.len() > inner.limits.max_metadata_bytes {
             return Err(FsError::new(ErrorCode::Efbig)

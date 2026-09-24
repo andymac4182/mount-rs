@@ -10,6 +10,7 @@
 
 use async_trait::async_trait;
 use md5::{Digest, Md5};
+use mount_rs_core::diagnostics::profile::{self, Event};
 use mount_rs_core::storage::{
     BlockId, BlockStore, CheckoutRequest, ConcurrentBackingId, ConcurrentModeState,
     DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState, DirectoryGrant,
@@ -809,7 +810,10 @@ impl MetadataStore for PgliteMetadataStore {
         let revision = nonnegative(row.get::<_, i64>(0), "metadata revision")?;
         let namespace = row
             .get::<_, Option<String>>(1)
-            .map(|json| serde_json::from_str(&json))
+            .map(|json| {
+                profile::add(Event::NamespaceReturned, json.len() as u64);
+                serde_json::from_str(&json)
+            })
             .transpose()
             .map_err(backend_error)?;
         Ok(LoadedMetadata {
@@ -843,7 +847,10 @@ impl MetadataStore for PgliteMetadataStore {
         // CASE projection suppresses unchanged namespace bytes before the wire.
         let namespace = row
             .get::<_, Option<String>>(1)
-            .map(|json| serde_json::from_str(&json))
+            .map(|json| {
+                profile::add(Event::NamespaceReturned, json.len() as u64);
+                serde_json::from_str(&json)
+            })
             .transpose()
             .map_err(backend_error)?;
         Ok(Some(LoadedMetadata {
@@ -1182,6 +1189,7 @@ impl MetadataStore for PgliteMetadataStore {
             .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
         let (fence, expires) = lease_numbers(lease)?;
         let namespace = serde_json::to_string(&namespace).map_err(backend_error)?;
+        profile::add(Event::NamespaceSerialized, namespace.len() as u64);
 
         let mut client = self.0.lock_client().await?;
         let client = client.as_mut().ok_or_else(connection_closed)?;
@@ -1272,6 +1280,7 @@ impl MetadataStore for PgliteMetadataStore {
             .checked_add(1)
             .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
         let namespace = serde_json::to_string(&namespace).map_err(backend_error)?;
+        profile::add(Event::NamespaceSerialized, namespace.len() as u64);
         let backing_text = backing.to_hex();
         let client = self.0.lock_client().await?;
         // A failed acknowledgement may follow a committed update. Preserve

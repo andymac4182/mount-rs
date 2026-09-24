@@ -1,0 +1,93 @@
+{
+  "scope": "shared host; adjacent idle controls show substantial background IO; no exact attribution",
+  "stages": [
+    {
+      "counter_interval_seconds": 41.104000708,
+      "deltas": {
+        "Operations (Read)": 719144,
+        "Operations (Write)": 7221,
+        "Bytes (Read)": 3086962688,
+        "Bytes (Write)": 106565632
+      },
+      "rates_per_second": {
+        "Operations (Read)": 17495.717876922725,
+        "Operations (Write)": 175.67633017762645,
+        "Bytes (Read)": 75101270.79671809,
+        "Bytes (Write)": 2592585.397149901
+      },
+      "schema": "mount-rs-host-driver-io-v1",
+      "mode": "idle",
+      "stage_id": "idle-after",
+      "total_queue_depth": 100,
+      "successful_drive_operations": 0,
+      "failed_drive_operations": 0,
+      "scope": "all host IOBlockStorageDriver operations; includes other apps, Docker VM, OS caching/coalescing; not provider-exclusive or NAND IO"
+    },
+    {
+      "counter_interval_seconds": 37.007934958,
+      "deltas": {
+        "Operations (Read)": 646125,
+        "Operations (Write)": 5999,
+        "Bytes (Read)": 2824839168,
+        "Bytes (Write)": 148918272
+      },
+      "rates_per_second": {
+        "Operations (Read)": 17459.09358988233,
+        "Operations (Write)": 162.10037136112066,
+        "Bytes (Read)": 76330634.8005066,
+        "Bytes (Write)": 4023955.191474642
+      },
+      "schema": "mount-rs-host-driver-io-v1",
+      "mode": "idle",
+      "stage_id": "idle-before",
+      "total_queue_depth": 100,
+      "successful_drive_operations": 0,
+      "failed_drive_operations": 0,
+      "scope": "all host IOBlockStorageDriver operations; includes other apps, Docker VM, OS caching/coalescing; not provider-exclusive or NAND IO"
+    },
+    {
+      "counter_interval_seconds": 15.204373042,
+      "deltas": {
+        "Operations (Read)": 162677,
+        "Operations (Write)": 3608,
+        "Bytes (Read)": 734658560,
+        "Bytes (Write)": 71974912
+      },
+      "rates_per_second": {
+        "Operations (Read)": 10699.35600439604,
+        "Operations (Write)": 237.30014976831953,
+        "Bytes (Read)": 48318898.64650165,
+        "Bytes (Write)": 4733829.655532599
+      },
+      "schema": "mount-rs-host-driver-io-v1",
+      "mode": "read",
+      "stage_id": "remote-saturation-44180-1790238399705976000-2",
+      "total_queue_depth": 100,
+      "successful_drive_operations": 94739,
+      "failed_drive_operations": 0,
+      "scope": "all host IOBlockStorageDriver operations; includes other apps, Docker VM, OS caching/coalescing; not provider-exclusive or NAND IO"
+    },
+    {
+      "counter_interval_seconds": 15.516105375,
+      "deltas": {
+        "Operations (Read)": 277324,
+        "Operations (Write)": 102745,
+        "Bytes (Read)": 1176530944,
+        "Bytes (Write)": 1126912000
+      },
+      "rates_per_second": {
+        "Operations (Read)": 17873.299600480444,
+        "Operations (Write)": 6621.829223043672,
+        "Bytes (Read)": 75826434.24784036,
+        "Bytes (Write)": 72628534.85229053
+      },
+      "schema": "mount-rs-host-driver-io-v1",
+      "mode": "write",
+      "stage_id": "remote-saturation-44180-1790238399705976000-4",
+      "total_queue_depth": 100,
+      "successful_drive_operations": 4367,
+      "failed_drive_operations": 0,
+      "scope": "all host IOBlockStorageDriver operations; includes other apps, Docker VM, OS caching/coalescing; not provider-exclusive or NAND IO"
+    }
+  ]
+}

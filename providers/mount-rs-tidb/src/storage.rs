@@ -3,6 +3,7 @@ use mount_rs_core::delegation::{
     CheckoutRequest, DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState,
     DirectoryGrant,
 };
+use mount_rs_core::diagnostics::profile::{self, Event};
 use mount_rs_core::storage::{
     BlockId, BlockStore, ConcurrentBackingId, ConcurrentModeState, LoadedMetadata, MetadataStore,
     Namespace, WriterLease,
@@ -32,6 +33,8 @@ const BOUND_CONCURRENT_WRITE_MODE: &str = "MRC2";
 // Older clients cannot acquire a signed BIGINT fence beyond this value. The
 // marker and exhausted fence are published in the same atomic statement.
 const CONCURRENT_FENCE_SENTINEL: i64 = i64::MAX;
+const REVISION_PROBE_SQL: &str = "SELECT revision FROM mount_rs_tidb_metadata \
+    USE INDEX (idx_mount_rs_volume_revision) WHERE volume_key=?";
 
 const METADATA_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_tidb_metadata (
     volume_key VARBINARY(1020) NOT NULL,
@@ -175,6 +178,7 @@ impl Database {
                 "ALTER TABLE mount_rs_tidb_metadata ADD COLUMN IF NOT EXISTS delegation LONGTEXT NULL",
                 "ALTER TABLE mount_rs_tidb_metadata ADD COLUMN IF NOT EXISTS write_mode VARBINARY(4) NULL",
                 "ALTER TABLE mount_rs_tidb_metadata ADD COLUMN IF NOT EXISTS backing_id VARBINARY(32) NULL",
+                "ALTER TABLE mount_rs_tidb_metadata ADD INDEX IF NOT EXISTS idx_mount_rs_volume_revision (volume_key, revision)",
             ] {
                 connection
                     .query_drop(statement)
@@ -784,11 +788,12 @@ impl TidbMetadataStore {
                 revision,
             });
         }
-        let mut ns: Namespace = serde_json::from_str(&namespace.ok_or_else(|| {
+        let namespace = namespace.ok_or_else(|| {
             FsError::new(ErrorCode::Ebusy)
                 .with_message("initialize namespace before delegation enrollment")
-        })?)
-        .map_err(backend_error)?;
+        })?;
+        profile::add(Event::NamespaceReturned, namespace.len() as u64);
+        let mut ns: Namespace = serde_json::from_str(&namespace).map_err(backend_error)?;
         ns.validate()?;
         let mut grant = None;
         let mut changed_ns = false;
@@ -877,6 +882,7 @@ impl TidbMetadataStore {
                 .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
         }
         let json = serde_json::to_string(&ns).map_err(backend_error)?;
+        profile::add(Event::NamespaceSerialized, json.len() as u64);
         let authority = serde_json::to_string(&state).map_err(backend_error)?;
         if json
             .len()
@@ -931,7 +937,10 @@ impl MetadataStore for TidbMetadataStore {
         };
         let revision = nonnegative(revision, "metadata revision")?;
         let namespace = namespace
-            .map(|json| serde_json::from_str(&json).map_err(backend_error))
+            .map(|json| {
+                profile::add(Event::NamespaceReturned, json.len() as u64);
+                serde_json::from_str(&json).map_err(backend_error)
+            })
             .transpose()?;
         Ok(LoadedMetadata {
             revision,
@@ -997,32 +1006,22 @@ impl MetadataStore for TidbMetadataStore {
             .get_conn()
             .await
             .map_err(|error| db_error("conditionally load TiDB metadata", error))?;
-        // One fresh statement observes revision and payload at the same
-        // snapshot. Suppress the large JSON value in SQL, before wire transfer
-        // and decoding, only on an exact nonzero revision match. Keeping the
-        // row in the result distinguishes unchanged from a missing row.
-        let row: Option<(i64, Option<String>)> = connection
-            .exec_first(
-                "SELECT revision, CASE WHEN revision=? THEN NULL ELSE namespace END
-                 FROM mount_rs_tidb_metadata WHERE volume_key=?",
-                (known_revision, &self.0.volume_key),
-            )
+        // The secondary index covers this header query without fetching the
+        // primary row's large namespace value from TiKV. A changed revision
+        // goes through the existing validated full load on a fresh snapshot.
+        let revision: Option<i64> = connection
+            .exec_first(REVISION_PROBE_SQL, (&self.0.volume_key,))
             .await
             .map_err(|error| db_error("conditionally load TiDB metadata", error))?;
-        let Some((revision, namespace)) = row else {
+        let Some(revision) = revision else {
             return Err(backend_error("TiDB metadata row is missing"));
         };
         let revision = nonnegative(revision, "metadata revision")?;
         if revision == known_revision as u64 {
             return Ok(None);
         }
-        let namespace = namespace
-            .map(|json| serde_json::from_str(&json).map_err(backend_error))
-            .transpose()?;
-        Ok(Some(LoadedMetadata {
-            revision,
-            namespace,
-        }))
+        drop(connection);
+        self.load().await.map(Some)
     }
 
     async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
@@ -1305,6 +1304,7 @@ impl MetadataStore for TidbMetadataStore {
             .checked_add(1)
             .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
         let namespace = serde_json::to_string(&namespace).map_err(backend_error)?;
+        profile::add(Event::NamespaceSerialized, namespace.len() as u64);
         if namespace.len() > self.0.max_namespace_bytes {
             return Err(FsError::new(ErrorCode::Efbig)
                 .with_syscall("TiDB publish metadata")
@@ -1383,6 +1383,7 @@ impl MetadataStore for TidbMetadataStore {
             .checked_add(1)
             .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
         let namespace = serde_json::to_string(&namespace).map_err(backend_error)?;
+        profile::add(Event::NamespaceSerialized, namespace.len() as u64);
         if namespace.len() > self.0.max_namespace_bytes {
             return Err(FsError::new(ErrorCode::Efbig)
                 .with_syscall("TiDB publish bound metadata")
@@ -1711,6 +1712,51 @@ mod tests {
 
     use super::*;
     use mysql_async::{DriverError, ServerError};
+
+    #[tokio::test]
+    #[ignore = "requires an actual TiDB service and MOUNT_RS_TIDB_URL"]
+    async fn actual_tidb_unchanged_revision_uses_covering_index() {
+        let url = std::env::var("MOUNT_RS_TIDB_URL").expect("actual TiDB URL required");
+        let pool = Pool::from_url(&url).unwrap();
+        let mut connection = pool.get_conn().await.unwrap();
+        let version: String = connection
+            .query_first("SELECT VERSION()")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(version.to_ascii_lowercase().contains("tidb"));
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let key = format!("tidb-index-plan-{}-{stamp}", std::process::id());
+        let metadata = TidbMetadataStore::connect_with_options(&url, TidbStorageOptions::new(&key))
+            .await
+            .expect("connect metadata and migrate the covering revision index");
+        let plan: Vec<mysql_async::Row> = connection
+            .exec(format!("EXPLAIN {REVISION_PROBE_SQL}"), (&key,))
+            .await
+            .expect("explain the exact production revision probe");
+        let operators: Vec<String> = plan
+            .iter()
+            .map(|row| row.get::<String, _>("id").expect("EXPLAIN operator id"))
+            .collect();
+        assert!(
+            operators
+                .iter()
+                .any(|operator| operator.starts_with("IndexReader")),
+            "revision probe must use TiDB IndexReader, got {operators:?}"
+        );
+        assert!(
+            !operators
+                .iter()
+                .any(|operator| operator.starts_with("TableReader")),
+            "revision probe must not fetch the namespace table row, got {operators:?}"
+        );
+        metadata.close().await.unwrap();
+        drop(connection);
+        pool.disconnect().await.unwrap();
+    }
 
     fn pristine_concurrent_row() -> ConcurrentRow {
         ConcurrentRow {

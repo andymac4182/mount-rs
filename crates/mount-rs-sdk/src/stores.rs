@@ -7,6 +7,7 @@ use std::time::Duration;
 use crate::Telemetry;
 use async_trait::async_trait;
 use mount_rs_core::Result;
+use mount_rs_core::diagnostics::profile::{Event, Span};
 use mount_rs_core::storage::{
     BlockId, BlockReconcileReport, BlockStore, CheckoutRequest, ConcurrentBackingId,
     ConcurrentModeState, DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState,
@@ -78,6 +79,7 @@ impl MetadataStore for ErasedMetadataStore {
     }
 
     async fn load(&self) -> Result<LoadedMetadata> {
+        let _profile = Span::new(Event::MetadataLoad);
         #[cfg(feature = "observability")]
         {
             return self
@@ -90,6 +92,7 @@ impl MetadataStore for ErasedMetadataStore {
     }
 
     async fn load_if_changed(&self, known_revision: u64) -> Result<Option<LoadedMetadata>> {
+        let _profile = Span::new(Event::MetadataConditional);
         #[cfg(feature = "observability")]
         {
             return self
@@ -238,6 +241,7 @@ impl MetadataStore for ErasedMetadataStore {
         expected_revision: u64,
         namespace: Namespace,
     ) -> Result<u64> {
+        let _profile = Span::new(Event::Publication).units(namespace.nodes.len() as u64);
         #[cfg(feature = "observability")]
         {
             return self
@@ -408,6 +412,7 @@ impl BlockStore for ErasedBlockStore {
     }
 
     async fn verify_concurrent_backing(&self, expected: ConcurrentBackingId) -> Result<()> {
+        let _profile = Span::new(Event::BackingVerify);
         #[cfg(feature = "observability")]
         {
             return self
@@ -442,6 +447,7 @@ impl BlockStore for ErasedBlockStore {
     }
 
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
+        let _profile = Span::new(Event::BlockPut).units(bytes.len() as u64);
         #[cfg(feature = "observability")]
         {
             let count = bytes.len() as u64;
@@ -457,20 +463,29 @@ impl BlockStore for ErasedBlockStore {
     }
 
     async fn get(&self, id: &BlockId) -> Result<Vec<u8>> {
+        let mut profile = Span::new(Event::BlockGet);
         #[cfg(feature = "observability")]
         {
             let result = self
                 .telemetry
                 .observe_fs("provider.blocks", "get", None, self.inner.get(id))
                 .await?;
+            profile.set_units(result.len() as u64);
             self.telemetry.record_bytes("read", result.len() as u64);
             return Ok(result);
         }
         #[cfg(not(feature = "observability"))]
-        self.inner.get(id).await
+        {
+            let result = self.inner.get(id).await;
+            if let Ok(bytes) = &result {
+                profile.set_units(bytes.len() as u64);
+            }
+            result
+        }
     }
 
     async fn flush(&self) -> Result<()> {
+        let _profile = Span::new(Event::BlockFlush);
         #[cfg(feature = "observability")]
         {
             return self

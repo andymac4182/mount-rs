@@ -303,6 +303,56 @@ async fn actual_tidb_100_clients_10_servers_saturation() {
         .expect("overall saturation deadline exceeded")
         .expect("saturation failed");
 }
+async fn stage_observer(
+    phase: &str,
+    mode: Mode,
+    depth: usize,
+    id: &str,
+    successes: u64,
+    failures: usize,
+) -> Result<(), String> {
+    let Ok(executable) = std::env::var("MOUNT_RS_DATASTORE_STAGE_OBSERVER") else {
+        return Ok(());
+    };
+    if executable.is_empty() {
+        return Ok(());
+    }
+    let args = vec![
+        phase.to_owned(),
+        format!("{mode:?}").to_lowercase(),
+        (CLIENTS * depth).to_string(),
+        id.to_owned(),
+        successes.to_string(),
+        failures.to_string(),
+    ];
+    tokio::task::spawn_blocking(move || {
+        let mut child = std::process::Command::new(executable)
+            .args(args)
+            .spawn()
+            .map_err(|_| "datastore observer start failed")?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
+        loop {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|_| "datastore observer wait failed")?
+            {
+                return if status.success() {
+                    Ok(())
+                } else {
+                    Err("datastore observer failed".to_owned())
+                };
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("datastore observer timeout".to_owned());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    })
+    .await
+    .map_err(|_| "datastore observer task failed".to_owned())?
+}
 async fn packet() -> Result<(), String> {
     let depths: Vec<usize> = std::env::var("MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS")
         .unwrap_or("1,2,4,8".into())
@@ -433,7 +483,13 @@ async fn packet() -> Result<(), String> {
             for mode in &modes {
                 for (measured, duration) in [(false, warmup), (true, seconds)] {
                     phase += 1;
-                    let (report, ledger, errors) = stage(
+                    let stage_id = format!("{key}-{phase}");
+                    if measured { stage_observer("begin", *mode, depth, &stage_id, 0, 0).await?; }
+                    let profile_before = mount_rs_core::diagnostics::profile::snapshot();
+                    let sqlite_before = if measured && backend.name == "sqlite" && mount_rs_core::diagnostics::profile::enabled() {
+                        Some(mount_rs_sqlite::sqlite_io_diagnostics(true))
+                    } else { None };
+                    let (mut report, ledger, errors) = stage(
                         &clients,
                         depth,
                         blocks,
@@ -444,6 +500,16 @@ async fn packet() -> Result<(), String> {
                         &expected,
                     )
                     .await;
+                    if measured {
+                        let profile_after = mount_rs_core::diagnostics::profile::snapshot();
+                        report["io_profile"] = serde_json::to_value(profile_after.delta(&profile_before)?).map_err(|_| "profile encode failed")?;
+                        if let Some(before) = sqlite_before {
+                            report["sqlite_io_begin"] = before;
+                            report["sqlite_io_end"] = mount_rs_sqlite::sqlite_io_diagnostics(false);
+                        }
+                        stage_observer("end", *mode, depth, &stage_id,
+                            report["read"]["completed"].as_u64().unwrap_or(0) + report["write"]["completed"].as_u64().unwrap_or(0), errors.len()).await?;
+                    }
                     for (c, l, b, s) in ledger {
                         expected[c][b] = (l, s);
                     }

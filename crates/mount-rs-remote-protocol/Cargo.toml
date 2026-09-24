@@ -5,7 +5,11 @@ edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
 
+[features]
+io-profiling = ["dep:mount-rs-core"]
+
 [dependencies]
+mount-rs-core = { path = "../..", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["io-util"] }

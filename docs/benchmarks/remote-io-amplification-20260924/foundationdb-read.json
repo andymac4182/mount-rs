@@ -1,0 +1,183 @@
+{
+  "audit_logging": "enabled; request audit cost included",
+  "build_profile": "release",
+  "cleanup_error": null,
+  "configured_modes": [
+    "Read"
+  ],
+  "dataset_bytes": 13107200,
+  "debug_assertions": false,
+  "failed_phase": null,
+  "latency_histogram": "power-of-two microsecond upper bounds",
+  "namespace_bytes": null,
+  "nominal_stage_seconds": 15,
+  "provider": "foundationdb",
+  "provider_identity": "{\"data_storage\":\"owned-run-labeled-docker-volume\",\"image\":\"foundationdb/foundationdb:7.4.7@sha256:25d9e2456ca923e70829fc07a15132c1a0c061474cd89826cdc4bbb45de870de\",\"readiness\":\"committed-set-get-clear\",\"redundancy_mode\":\"single\",\"schema\":\"mount-rs-foundationdb-benchmark-identity-v1\",\"server_versions\":[\"7.4.7\"],\"storage_engine\":\"ssd-2\",\"topology\":\"single\"}",
+  "provider_version": "see native harness identity",
+  "schema": "mount-rs-provider-saturation-v2",
+  "server_active_request_limit_per_connection": 32,
+  "stages": [
+    {
+      "cache": "cache-warm randomized dataset; no cold-cache claim",
+      "clients": 100,
+      "elapsed_seconds_including_drain": 15.012758757,
+      "failures": 0,
+      "finish_unix_ms": 1790239118906,
+      "io_profile": {
+        "entries": [
+          {
+            "calls": 166898,
+            "elapsed_ns": 2632714604,
+            "name": "wire.json_encode_bytes",
+            "units": 1237523264
+          },
+          {
+            "calls": 166898,
+            "elapsed_ns": 15783293690,
+            "name": "wire.json_decode_bytes",
+            "units": 1237523264
+          },
+          {
+            "calls": 83449,
+            "elapsed_ns": 8852715277,
+            "name": "catalog.load",
+            "units": 0
+          },
+          {
+            "calls": 83449,
+            "elapsed_ns": 3825077165,
+            "name": "catalog.queue_wait",
+            "units": 0
+          },
+          {
+            "calls": 83449,
+            "elapsed_ns": 21899527,
+            "name": "catalog.pool_wait",
+            "units": 0
+          },
+          {
+            "calls": 166898,
+            "elapsed_ns": 395392075,
+            "name": "catalog.backing_verify",
+            "units": 0
+          },
+          {
+            "calls": 83449,
+            "elapsed_ns": 1283145588,
+            "name": "catalog.query_document_bytes",
+            "units": 39554826
+          },
+          {
+            "calls": 83449,
+            "elapsed_ns": 803954936,
+            "name": "catalog.decode_validate_bytes",
+            "units": 39554826
+          },
+          {
+            "calls": 83449,
+            "elapsed_ns": 0,
+            "name": "catalog.pager_hits",
+            "units": 166898
+          },
+          {
+            "calls": 83449,
+            "elapsed_ns": 0,
+            "name": "catalog.pager_misses",
+            "units": 0
+          },
+          {
+            "calls": 83449,
+            "elapsed_ns": 0,
+            "name": "catalog.pager_writes",
+            "units": 0
+          },
+          {
+            "calls": 83449,
+            "elapsed_ns": 1465256229805,
+            "name": "service.dispatch",
+            "units": 0
+          },
+          {
+            "calls": 83449,
+            "elapsed_ns": 9133157750,
+            "name": "service.authorization",
+            "units": 0
+          },
+          {
+            "calls": 83449,
+            "elapsed_ns": 6320328,
+            "name": "service.handle_lock_wait",
+            "units": 0
+          },
+          {
+            "calls": 83449,
+            "elapsed_ns": 1541596299,
+            "name": "service.audit",
+            "units": 0
+          },
+          {
+            "calls": 166898,
+            "elapsed_ns": 1249566311980,
+            "name": "filesystem.gate_wait",
+            "units": 0
+          },
+          {
+            "calls": 83449,
+            "elapsed_ns": 11952151141,
+            "name": "filesystem.snapshot_nodes",
+            "units": 8428349
+          },
+          {
+            "calls": 166898,
+            "elapsed_ns": 122028569335,
+            "name": "filesystem.metadata_refresh",
+            "units": 0
+          },
+          {
+            "calls": 166898,
+            "elapsed_ns": 121938918835,
+            "name": "provider.metadata.load_if_changed",
+            "units": 0
+          },
+          {
+            "calls": 83449,
+            "elapsed_ns": 64470672547,
+            "name": "provider.blocks.get_bytes",
+            "units": 341807104
+          }
+        ]
+      },
+      "mode": "Read",
+      "nominal_seconds": 15,
+      "payload_mib_per_second": 21.71304165518604,
+      "per_client_depth": 1,
+      "read": {
+        "completed": 83449,
+        "p50_us_upper": 32768,
+        "p95_us_upper": 32768,
+        "p99_us_upper": 32768
+      },
+      "read_iops": 5558.538663727626,
+      "reference_target_iops": 100000,
+      "servers": 10,
+      "start_unix_ms": 1790239103893,
+      "target_attainment": 0.05558538663727626,
+      "total_iops": 5558.538663727626,
+      "total_queue_depth": 100,
+      "write": {
+        "completed": 0,
+        "p50_us_upper": 0,
+        "p95_us_upper": 0,
+        "p99_us_upper": 0
+      },
+      "write_iops": 0.0
+    }
+  ],
+  "topology": "single",
+  "verification_error": null,
+  "verification_status": "passed",
+  "verified_files": 100,
+  "volume_key": "remote-saturation-777-1790239099537461554",
+  "warmup_seconds": 3,
+  "work_error": null
+}

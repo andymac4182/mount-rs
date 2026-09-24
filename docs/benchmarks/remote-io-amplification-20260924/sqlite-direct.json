@@ -1,0 +1,598 @@
+{
+  "source_log": "/private/tmp/sqlite-direct-io-baseline.log",
+  "measurement": "fixed_count_direct_provider_diagnostic",
+  "profile": {
+    "files": 100,
+    "blocks_per_file": 32,
+    "block_bytes": 4096,
+    "logical_clients": 100,
+    "connections": 10,
+    "dispatch": "sequential_round_robin",
+    "rounds": 1
+  },
+  "phases": [
+    {
+      "connections": [
+        {
+          "page_size": 4096,
+          "pager": {
+            "cache_hits": 20914,
+            "cache_misses": 0,
+            "cache_spills": 0,
+            "page_writes": 14542
+          },
+          "pager_read_bytes_estimate": 0,
+          "pager_write_bytes_estimate": 59564032,
+          "sql": {
+            "BEGIN IMMEDIATE": 3200,
+            "COMMIT": 3200,
+            "INSERT INTO mount_rs_blocks(id,bytes) VALUES(?1,?2)": 3200,
+            "SELECT lower(hex(randomblob(32)))": 3200
+          },
+          "sql_statements": 12800
+        }
+      ],
+      "elapsed_seconds": 1.82539625,
+      "epoch_ms": 1790236742867,
+      "logical_bytes": 13107200,
+      "logical_ops": 3200,
+      "logical_ops_per_second": 1753.0440308508357,
+      "pager_misses": 0,
+      "pager_misses_per_logical_op": 0.0,
+      "pager_writes": 14542,
+      "pager_writes_per_logical_op": 4.544375,
+      "phase": "provider_put_single",
+      "sql_per_logical_op": 4.0,
+      "sql_statements": 12800
+    },
+    {
+      "connections": [
+        {
+          "page_size": 4096,
+          "pager": {
+            "cache_hits": 1816,
+            "cache_misses": 104,
+            "cache_spills": 0,
+            "page_writes": 0
+          },
+          "pager_read_bytes_estimate": 425984,
+          "pager_write_bytes_estimate": 0,
+          "sql": {
+            "SELECT bytes FROM mount_rs_blocks WHERE id=?1": 320
+          },
+          "sql_statements": 320
+        },
+        {
+          "page_size": 4096,
+          "pager": {
+            "cache_hits": 1814,
+            "cache_misses": 106,
+            "cache_spills": 0,
+            "page_writes": 0
+          },
+          "pager_read_bytes_estimate": 434176,
+          "pager_write_bytes_estimate": 0,
+          "sql": {
+            "SELECT bytes FROM mount_rs_blocks WHERE id=?1": 320
+          },
+          "sql_statements": 320
+        },
+        {
+          "page_size": 4096,
+          "pager": {
+            "cache_hits": 1815,
+            "cache_misses": 105,
+            "cache_spills": 0,
+            "page_writes": 0
+          },
+          "pager_read_bytes_estimate": 430080,
+          "pager_write_bytes_estimate": 0,
+          "sql": {
+            "SELECT bytes FROM mount_rs_blocks WHERE id=?1": 320
+          },
+          "sql_statements": 320
+        },
+        {
+          "page_size": 4096,
+          "pager": {
+            "cache_hits": 1815,
+            "cache_misses": 105,
+            "cache_spills": 0,
+            "page_writes": 0
+          },
+          "pager_read_bytes_estimate": 430080,
+          "pager_write_bytes_estimate": 0,
+          "sql": {
+            "SELECT bytes FROM mount_rs_blocks WHERE id=?1": 320
+          },
+          "sql_statements": 320
+        },
+        {
+          "page_size": 4096,
+          "pager": {
+            "cache_hits": 1815,
+            "cache_misses": 105,
+            "cache_spills": 0,
+            "page_writes": 0
+          },
+          "pager_read_bytes_estimate": 430080,
+          "pager_write_bytes_estimate": 0,
+          "sql": {
+            "SELECT bytes FROM mount_rs_blocks WHERE id=?1": 320
+          },
+          "sql_statements": 320
+        },
+        {
+          "page_size": 4096,
+          "pager": {
+            "cache_hits": 1814,
+            "cache_misses": 106,
+            "cache_spills": 0,
+            "page_writes": 0
+          },
+          "pager_read_bytes_estimate": 434176,
+          "pager_write_bytes_estimate": 0,
+          "sql": {
+            "SELECT bytes FROM mount_rs_blocks WHERE id=?1": 320
+          },
+          "sql_statements": 320
+        },
+        {
+          "page_size": 4096,
+          "pager": {
+            "cache_hits": 1814,
+            "cache_misses": 106,
+            "cache_spills": 0,
+            "page_writes": 0
+          },
+          "pager_read_bytes_estimate": 434176,
+          "pager_write_bytes_estimate": 0,
+          "sql": {
+            "SELECT bytes FROM mount_rs_blocks WHERE id=?1": 320
+          },
+          "sql_statements": 320
+        },
+        {
+          "page_size": 4096,
+          "pager": {
+            "cache_hits": 1814,
+            "cache_misses": 106,
+            "cache_spills": 0,
+            "page_writes": 0
+          },
+          "pager_read_bytes_estimate": 434176,
+          "pager_write_bytes_estimate": 0,
+          "sql": {
+            "SELECT bytes FROM mount_rs_blocks WHERE id=?1": 320
+          },
+          "sql_statements": 320
+        },
+        {
+          "page_size": 4096,
+          "pager": {
+            "cache_hits": 1815,
+            "cache_misses": 105,
+            "cache_spills": 0,
+            "page_writes": 0
+          },
+          "pager_read_bytes_estimate": 430080,
+          "pager_write_bytes_estimate": 0,
+          "sql": {
+            "SELECT bytes FROM mount_rs_blocks WHERE id=?1": 320
+          },
+          "sql_statements": 320
+        },
+        {
+          "page_size": 4096,
+          "pager": {
+            "cache_hits": 1814,
+            "cache_misses": 106,
+            "cache_spills": 0,
+            "page_writes": 0
+          },
+          "pager_read_bytes_estimate": 434176,
+          "pager_write_bytes_estimate": 0,
+          "sql": {
+            "SELECT bytes FROM mount_rs_blocks WHERE id=?1": 320
+          },
+          "sql_statements": 320
+        }
+      ],
+      "elapsed_seconds": 0.042065666,
+      "epoch_ms": 1790236744696,
+      "logical_bytes": 13107200,
+      "logical_ops": 3200,
+      "logical_ops_per_second": 76071.54014868087,
+      "pager_misses": 1054,
+      "pager_misses_per_logical_op": 0.329375,
+      "pager_writes": 0,
+      "pager_writes_per_logical_op": 0.0,
+      "phase": "provider_get_100_clients_10_connections_first",
+      "sql_per_logical_op": 1.0,
+      "sql_statements": 3200
+    },
+    {
+      "connections": [
+        {
+          "page_size": 4096,
+          "pager": {
+            "cache_hits": 1920,
+            "cache_misses": 0,
+            "cache_spills": 0,
+            "page_writes": 0
+          },
+          "pager_read_bytes_estimate": 0,
+          "pager_write_bytes_estimate": 0,
+          "sql": {
+            "SELECT bytes FROM mount_rs_blocks WHERE id=?1": 320
+          },
+          "sql_statements": 320
+        },
+        {
+          "page_size": 4096,
+          "pager": {
+            "cache_hits": 1920,
+            "cache_misses": 0,
+            "cache_spills": 0,
+            "page_writes": 0
+          },
+          "pager_read_bytes_estimate": 0,
+          "pager_write_bytes_estimate": 0,
+          "sql": {
+            "SELECT bytes FROM mount_rs_blocks WHERE id=?1": 320
+          },
+          "sql_statements": 320
+        },
+        {
+          "page_size": 4096,
+          "pager": {
+            "cache_hits": 1920,
+            "cache_misses": 0,
+            "cache_spills": 0,
+            "page_writes": 0
+          },
+          "pager_read_bytes_estimate": 0,
+          "pager_write_bytes_estimate": 0,
+          "sql": {
+            "SELECT bytes FROM mount_rs_blocks WHERE id=?1": 320
+          },
+          "sql_statements": 320
+        },
+        {
+          "page_size": 4096,
+          "pager": {
+            "cache_hits": 1920,
+            "cache_misses": 0,
+            "cache_spills": 0,
+            "page_writes": 0
+          },
+          "pager_read_bytes_estimate": 0,
+          "pager_write_bytes_estimate": 0,
+          "sql": {
+            "SELECT bytes FROM mount_rs_blocks WHERE id=?1": 320
+          },
+          "sql_statements": 320
+        },
+        {
+          "page_size": 4096,
+          "pager": {
+            "cache_hits": 1920,
+            "cache_misses": 0,
+            "cache_spills": 0,
+            "page_writes": 0
+          },
+          "pager_read_bytes_estimate": 0,
+          "pager_write_bytes_estimate": 0,
+          "sql": {
+            "SELECT bytes FROM mount_rs_blocks WHERE id=?1": 320
+          },
+          "sql_statements": 320
+        },
+        {
+          "page_size": 4096,
+          "pager": {
+            "cache_hits": 1920,
+            "cache_misses": 0,
+            "cache_spills": 0,
+            "page_writes": 0
+          },
+          "pager_read_bytes_estimate": 0,
+          "pager_write_bytes_estimate": 0,
+          "sql": {
+            "SELECT bytes FROM mount_rs_blocks WHERE id=?1": 320
+          },
+          "sql_statements": 320
+        },
+        {
+          "page_size": 4096,
+          "pager": {
+            "cache_hits": 1920,
+            "cache_misses": 0,
+            "cache_spills": 0,
+            "page_writes": 0
+          },
+          "pager_read_bytes_estimate": 0,
+          "pager_write_bytes_estimate": 0,
+          "sql": {
+            "SELECT bytes FROM mount_rs_blocks WHERE id=?1": 320
+          },
+          "sql_statements": 320
+        },
+        {
+          "page_size": 4096,
+          "pager": {
+            "cache_hits": 1920,
+            "cache_misses": 0,
+            "cache_spills": 0,
+            "page_writes": 0
+          },
+          "pager_read_bytes_estimate": 0,
+          "pager_write_bytes_estimate": 0,
+          "sql": {
+            "SELECT bytes FROM mount_rs_blocks WHERE id=?1": 320
+          },
+          "sql_statements": 320
+        },
+        {
+          "page_size": 4096,
+          "pager": {
+            "cache_hits": 1920,
+            "cache_misses": 0,
+            "cache_spills": 0,
+            "page_writes": 0
+          },
+          "pager_read_bytes_estimate": 0,
+          "pager_write_bytes_estimate": 0,
+          "sql": {
+            "SELECT bytes FROM mount_rs_blocks WHERE id=?1": 320
+          },
+          "sql_statements": 320
+        },
+        {
+          "page_size": 4096,
+          "pager": {
+            "cache_hits": 1920,
+            "cache_misses": 0,
+            "cache_spills": 0,
+            "page_writes": 0
+          },
+          "pager_read_bytes_estimate": 0,
+          "pager_write_bytes_estimate": 0,
+          "sql": {
+            "SELECT bytes FROM mount_rs_blocks WHERE id=?1": 320
+          },
+          "sql_statements": 320
+        }
+      ],
+      "elapsed_seconds": 0.044686708,
+      "epoch_ms": 1790236744739,
+      "logical_bytes": 13107200,
+      "logical_ops": 3200,
+      "logical_ops_per_second": 71609.66075191756,
+      "pager_misses": 0,
+      "pager_misses_per_logical_op": 0.0,
+      "pager_writes": 0,
+      "pager_writes_per_logical_op": 0.0,
+      "phase": "provider_get_100_clients_10_connections_repeat",
+      "sql_per_logical_op": 1.0,
+      "sql_statements": 3200
+    },
+    {
+      "connections": [
+        {
+          "page_size": 4096,
+          "pager": {
+            "cache_hits": 18802,
+            "cache_misses": 398,
+            "cache_spills": 0,
+            "page_writes": 0
+          },
+          "pager_read_bytes_estimate": 1630208,
+          "pager_write_bytes_estimate": 0,
+          "sql": {
+            "SELECT bytes FROM mount_rs_blocks WHERE id=?1": 3200
+          },
+          "sql_statements": 3200
+        }
+      ],
+      "elapsed_seconds": 0.041323042,
+      "epoch_ms": 1790236744784,
+      "logical_bytes": 13107200,
+      "logical_ops": 3200,
+      "logical_ops_per_second": 77438.63581001612,
+      "pager_misses": 398,
+      "pager_misses_per_logical_op": 0.124375,
+      "pager_writes": 0,
+      "pager_writes_per_logical_op": 0.0,
+      "phase": "provider_get_single",
+      "sql_per_logical_op": 1.0,
+      "sql_statements": 3200
+    },
+    {
+      "connections": [
+        {
+          "page_size": 4096,
+          "pager": {
+            "cache_hits": 19200,
+            "cache_misses": 0,
+            "cache_spills": 0,
+            "page_writes": 0
+          },
+          "pager_read_bytes_estimate": 0,
+          "pager_write_bytes_estimate": 0,
+          "sql": {
+            "SELECT bytes FROM mount_rs_blocks WHERE id=?1": 3200
+          },
+          "sql_statements": 3200
+        }
+      ],
+      "elapsed_seconds": 0.02842675,
+      "epoch_ms": 1790236744825,
+      "logical_bytes": 13107200,
+      "logical_ops": 3200,
+      "logical_ops_per_second": 112570.02647154528,
+      "pager_misses": 0,
+      "pager_misses_per_logical_op": 0.0,
+      "pager_writes": 0,
+      "pager_writes_per_logical_op": 0.0,
+      "phase": "raw_sql_get_single_prepared",
+      "sql_per_logical_op": 1.0,
+      "sql_statements": 3200
+    },
+    {
+      "connections": [
+        {
+          "page_size": 4096,
+          "pager": {
+            "cache_hits": 25661,
+            "cache_misses": 1,
+            "cache_spills": 0,
+            "page_writes": 14233
+          },
+          "pager_read_bytes_estimate": 4096,
+          "pager_write_bytes_estimate": 58298368,
+          "sql": {
+            "INSERT INTO mount_rs_blocks(id,bytes) VALUES(?1,?2)": 3200
+          },
+          "sql_statements": 3200
+        }
+      ],
+      "elapsed_seconds": 2.173391584,
+      "epoch_ms": 1790236744853,
+      "logical_bytes": 13107200,
+      "logical_ops": 3200,
+      "logical_ops_per_second": 1472.3531753585735,
+      "pager_misses": 1,
+      "pager_misses_per_logical_op": 0.0003125,
+      "pager_writes": 14233,
+      "pager_writes_per_logical_op": 4.4478125,
+      "phase": "raw_sql_put_single_prepared_caller_id_autocommit",
+      "sql_per_logical_op": 1.0,
+      "sql_statements": 3200
+    },
+    {
+      "connections": [
+        {
+          "page_size": 4096,
+          "pager": {
+            "cache_hits": 3,
+            "cache_misses": 0,
+            "cache_spills": 0,
+            "page_writes": 111
+          },
+          "pager_read_bytes_estimate": 0,
+          "pager_write_bytes_estimate": 454656,
+          "sql": {
+            "UPDATE mount_rs_metadata SET revision=?1, namespace=?2\n                     WHERE id=1 AND write_mode IS NULL AND revision=?3 AND owner=?4 AND fence=?5\n                       AND expires=?6 AND expires>CAST(unixepoch('subsec') * 1000 AS INTEGER)": 1
+          },
+          "sql_statements": 1
+        }
+      ],
+      "elapsed_seconds": 0.012640959,
+      "epoch_ms": 1790236747031,
+      "logical_bytes": 0,
+      "logical_ops": 1,
+      "logical_ops_per_second": 79.1079221125549,
+      "pager_misses": 0,
+      "pager_misses_per_logical_op": 0.0,
+      "pager_writes": 111,
+      "pager_writes_per_logical_op": 111.0,
+      "phase": "metadata_publish_initial",
+      "sql_per_logical_op": 1.0,
+      "sql_statements": 1
+    },
+    {
+      "connections": [
+        {
+          "page_size": 4096,
+          "pager": {
+            "cache_hits": 6400,
+            "cache_misses": 0,
+            "cache_spills": 0,
+            "page_writes": 0
+          },
+          "pager_read_bytes_estimate": 0,
+          "pager_write_bytes_estimate": 0,
+          "sql": {
+            "SELECT revision, CASE\n                     WHEN typeof(revision)='integer' AND revision>0 AND revision=?1\n                     THEN NULL ELSE namespace END\n                 FROM mount_rs_metadata WHERE id=1": 3200
+          },
+          "sql_statements": 3200
+        }
+      ],
+      "elapsed_seconds": 0.042014667,
+      "epoch_ms": 1790236747044,
+      "logical_bytes": 0,
+      "logical_ops": 3200,
+      "logical_ops_per_second": 76163.87867598713,
+      "pager_misses": 0,
+      "pager_misses_per_logical_op": 0.0,
+      "pager_writes": 0,
+      "pager_writes_per_logical_op": 0.0,
+      "phase": "metadata_conditional_unchanged",
+      "sql_per_logical_op": 1.0,
+      "sql_statements": 3200
+    },
+    {
+      "connections": [
+        {
+          "page_size": 4096,
+          "pager": {
+            "cache_hits": 200,
+            "cache_misses": 0,
+            "cache_spills": 0,
+            "page_writes": 0
+          },
+          "pager_read_bytes_estimate": 0,
+          "pager_write_bytes_estimate": 0,
+          "sql": {
+            "SELECT revision, namespace FROM mount_rs_metadata WHERE id=1": 100
+          },
+          "sql_statements": 100
+        }
+      ],
+      "elapsed_seconds": 0.644929125,
+      "epoch_ms": 1790236747086,
+      "logical_bytes": 0,
+      "logical_ops": 100,
+      "logical_ops_per_second": 155.05579779793632,
+      "pager_misses": 0,
+      "pager_misses_per_logical_op": 0.0,
+      "pager_writes": 0,
+      "pager_writes_per_logical_op": 0.0,
+      "phase": "metadata_load_full",
+      "sql_per_logical_op": 1.0,
+      "sql_statements": 100
+    },
+    {
+      "connections": [
+        {
+          "page_size": 4096,
+          "pager": {
+            "cache_hits": 23007,
+            "cache_misses": 0,
+            "cache_spills": 0,
+            "page_writes": 310
+          },
+          "pager_read_bytes_estimate": 0,
+          "pager_write_bytes_estimate": 1269760,
+          "sql": {
+            "UPDATE mount_rs_metadata SET revision=?1, namespace=?2\n                     WHERE id=1 AND write_mode IS NULL AND revision=?3 AND owner=?4 AND fence=?5\n                       AND expires=?6 AND expires>CAST(unixepoch('subsec') * 1000 AS INTEGER)": 100
+          },
+          "sql_statements": 100
+        }
+      ],
+      "elapsed_seconds": 1.254347417,
+      "epoch_ms": 1790236747731,
+      "logical_bytes": 0,
+      "logical_ops": 100,
+      "logical_ops_per_second": 79.72272963990167,
+      "pager_misses": 0,
+      "pager_misses_per_logical_op": 0.0,
+      "pager_writes": 310,
+      "pager_writes_per_logical_op": 3.1,
+      "phase": "metadata_publish_existing",
+      "sql_per_logical_op": 1.0,
+      "sql_statements": 100
+    }
+  ]
+}

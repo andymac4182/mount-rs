@@ -1737,6 +1737,7 @@ dependencies = [
 name = "mount-rs-remote-protocol"
 version = "0.1.0"
 dependencies = [
+ "mount-rs-core",
  "serde",
  "serde_json",
  "tokio",
@@ -1812,6 +1813,7 @@ dependencies = [
  "mount-rs-memfs",
  "mount-rs-remote-protocol",
  "mount-rs-sdk",
+ "mount-rs-sqlite",
  "mount-rs-tidb",
  "mysql_async",
  "quinn",

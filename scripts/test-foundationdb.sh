@@ -415,6 +415,9 @@ fi
 if [ "$external_mode" -eq 0 ]; then
   docker cp "$server:/var/fdb/fdb.cluster" "$run_dir/fdb.cluster"
   docker cp "$server:/usr/lib/libfdb_c.so" "$run_dir/libfdb_c.so"
+  if [ "$run_service_benchmark" -eq 1 ]; then
+    docker cp "$server:/usr/bin/fdbcli" "$run_dir/fdbcli"
+  fi
   echo "FOUNDATIONDB_IMAGE_MATCH server=$expected_fdb_image_id client=$expected_fdb_image_id"
 else
   client_container="mount-rs-foundationdb-client-$run_id"
@@ -478,11 +481,13 @@ if [ "$run_service_benchmark" -eq 1 ]; then
   # Keep real provider contracts in this lane, while avoiding unrelated CLI
   # and N-API builds. Each benchmark invocation owns a separate test process.
   test_command="set -e; cargo test --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb -- --nocapture && cargo test --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test delegation -- --ignored --nocapture"
-  if [ "$benchmark_prepare_only" -eq 1 ]; then
-    test_command="${test_command} && cargo test --release --locked -p mount-rs-service --features saturation-foundationdb --test quic_tidb_saturation --no-run"
+  if [ "${MOUNT_RS_FOUNDATIONDB_DIRECT_BASELINE:-0}" = "1" ]; then
+    test_command="${test_command} && MOUNT_RS_FOUNDATIONDB_DIRECT_OUTPUT=/artifacts/foundationdb-direct-block.json cargo test --release --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test block_datastore_saturation -- --ignored --nocapture --test-threads=1"
+  elif [ "$benchmark_prepare_only" -eq 1 ]; then
+    test_command="${test_command} && cargo test --release --locked -p mount-rs-service --features saturation-foundationdb,io-profiling --test quic_tidb_saturation --no-run"
   else
-    test_command="${test_command} && MOUNT_RS_REMOTE_TIDB_SATURATION_MODES=read MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS=1,2,4,8,16 MOUNT_RS_REMOTE_TIDB_SATURATION_OUTPUT=/artifacts/foundationdb-read.json cargo test --release --locked -p mount-rs-service --features saturation-foundationdb --test quic_tidb_saturation -- --ignored --nocapture --test-threads=1"
-    test_command="${test_command} && MOUNT_RS_REMOTE_TIDB_SATURATION_MODES=read,write MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS=1,2 MOUNT_RS_REMOTE_TIDB_SATURATION_OUTPUT=/artifacts/foundationdb-read-write.json cargo test --release --locked -p mount-rs-service --features saturation-foundationdb --test quic_tidb_saturation -- --ignored --nocapture --test-threads=1"
+    test_command="${test_command} && MOUNT_RS_REMOTE_TIDB_SATURATION_MODES=read MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS=${MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS:-1,2,4,8,16} MOUNT_RS_REMOTE_TIDB_SATURATION_OUTPUT=/artifacts/foundationdb-read.json cargo test --release --locked -p mount-rs-service --features saturation-foundationdb,io-profiling --test quic_tidb_saturation -- --ignored --nocapture --test-threads=1"
+    test_command="${test_command} && MOUNT_RS_REMOTE_TIDB_SATURATION_MODES=read,write MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS=${MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS:-1,2} MOUNT_RS_REMOTE_TIDB_SATURATION_OUTPUT=/artifacts/foundationdb-read-write.json cargo test --release --locked -p mount-rs-service --features saturation-foundationdb,io-profiling --test quic_tidb_saturation -- --ignored --nocapture --test-threads=1"
   fi
 fi
 
@@ -645,6 +650,9 @@ if [ "$run_service_benchmark" -eq 1 ]; then
     --volume "$benchmark_output_dir/build-cache:/tmp/mount-rs-foundationdb-target" \
     --workdir /workspace \
     --env MOUNT_RS_REMOTE_SATURATION_PROVIDER=foundationdb \
+    --env MOUNT_RS_PROFILE_IO=1 \
+    --env "MOUNT_RS_DATASTORE_STAGE_OBSERVER=${MOUNT_RS_DATASTORE_STAGE_OBSERVER:-}" \
+    --env MOUNT_RS_FOUNDATIONDB_COUNTER_DIR=/artifacts/counters \
     --env CARGO_BUILD_JOBS=2 \
     --env "MOUNT_RS_FOUNDATIONDB_BENCH_IDENTITY=$benchmark_identity" \
     --env "MOUNT_RS_FOUNDATIONDB_TOPOLOGY=$topology" \
