@@ -1,7 +1,8 @@
 use crate::error::{ErrorCode, FsError, Result};
 
 /// The normalized meaning of the string form accepted by `open(2)` callers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OpenFlags {
     pub read: bool,
     pub write: bool,

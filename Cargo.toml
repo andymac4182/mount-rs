@@ -34,6 +34,7 @@ members = [
     "transports/mount-rs-http",
     "crates/mount-rs-service",
     "crates/mount-rs-remote-protocol",
+    "crates/mount-rs-remote-client",
 ]
 resolver = "3"
 

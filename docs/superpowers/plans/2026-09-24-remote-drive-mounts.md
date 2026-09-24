@@ -109,3 +109,13 @@
 ## Execution notes
 
 Use test-first red/green cycles for every behavior. Re-read this plan after each task; adjust a later task only if an earlier verified interface differs, and record that change in the plan. Do not report remote mounts as complete until the real QUIC service, both native platforms, and permission boundaries have been verified. A skipped platform remains an explicit qualification gap.
+
+## Implementation record (2026-09-24)
+
+Tasks 1–6 are implemented on `codex/remote-drive-mounts`. The concrete client/service config and local revisioned operator command are documented in `docs/remote-drives.md`; integration coverage lives in `crates/mount-rs-remote-client/tests/quic_mount.rs` rather than the originally proposed CLI-only test file. Core traits are unchanged; serde derives were added to the existing decoded flags and guard types. Server Drives reuse `DriverRuntime::open` and SDK resources. No SDK remote dependency is needed.
+
+Task 7 qualification: signed OIDC QUIC, two logical Drives, independent permissions, wrong Partition/TLS rejection, file-token renewal preserving handles, SQLite reopen persistence, grant revocation, RS256/ES256, throttled key rotation and fail-closed renewal are covered. The opt-in native macOS NFS case passed with two simultaneous Drives, read-only enforcement, create/write/read/rename/fsync/unmount. Linux protocol and native qualification are configured in `.github/workflows/remote-drives.yml`; Linux results remain pending CI.
+
+The initial implementation deliberately reopens Drive backends on service restart. A changed active definition yields `ESTALE`; every catalog revision drains all old remote handles and requires an explicit reopen. This conservative policy prevents A→B→A backend edits from reactivating an old handle. Server shutdown joins session tasks and completes handle cleanup before CLI backend shutdown. Transport failure never replays mutations.
+
+Local workspace tests and strict workspace Clippy passed. The first workspace run inside the sandbox failed an existing Unix 9P listener permission check; the same full command passed outside the sandbox. Native macOS mounting also needed execution outside the sandbox. The native test first found missing decoded open-flag forwarding; the regression was reproduced, fixed, and requalified. External issuer/network/production durability and WebSocket qualification remain separate.

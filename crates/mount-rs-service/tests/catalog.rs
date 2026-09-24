@@ -146,3 +146,42 @@ async fn catalog_rejects_insecure_issuer_policy() {
     );
     assert!(catalog.compare_and_swap(0, next).await.is_err());
 }
+
+#[test]
+fn duplicate_catalog_ids_are_rejected() {
+    let document = r#"{"revision":0,"partitions":{"red":{"drives":{}},"red":{"drives":{}}},"issuer_policies":{},"grants":{}}"#;
+    assert!(serde_json::from_str::<CatalogSnapshot>(document).is_err());
+}
+#[tokio::test]
+async fn partition_must_be_empty_before_deletion() {
+    let directory = tempfile::tempdir().unwrap();
+    let catalog = SqliteCatalog::open(directory.path().join("catalog.sqlite"))
+        .await
+        .unwrap();
+    let mut next = CatalogSnapshot::empty();
+    next.partitions.insert(
+        "red".into(),
+        PartitionDefinition {
+            drives: BTreeMap::from([(
+                "data".into(),
+                DriveDefinition {
+                    driver: json!({"kind":"memory"}),
+                },
+            )]),
+        },
+    );
+    catalog.compare_and_swap(0, next).await.unwrap();
+    assert!(
+        catalog
+            .compare_and_swap(1, CatalogSnapshot::empty())
+            .await
+            .is_err()
+    );
+    let mut emptied = catalog.load_current().await.unwrap();
+    emptied.partitions.get_mut("red").unwrap().drives.clear();
+    catalog.compare_and_swap(1, emptied).await.unwrap();
+    catalog
+        .compare_and_swap(2, CatalogSnapshot::empty())
+        .await
+        .unwrap();
+}

@@ -8,7 +8,7 @@ use mount_rs_service::{
         CatalogSnapshot, DriveDefinition, GrantDefinition, PartitionDefinition, Permission,
         SqliteCatalog,
     },
-    dispatch::{DriveDispatcher, SessionIdentity},
+    dispatch::{DriveDispatcher, SessionHandles, SessionIdentity},
 };
 use serde_json::json;
 
@@ -68,7 +68,8 @@ async fn dispatcher_enforces_current_drive_grant_and_partition() {
         policy_id: "oidc".into(),
         issuer: "https://issuer.example.com".into(),
         subject: "workload-1".into(),
-        claims: json!({"repository_id":"repo-1"}),
+        signing_algorithm: "ES256".into(),
+        claims: json!({"repository_id":"repo-1","aud":"mount-rs"}),
         expires_at: i64::MAX,
     };
     let stat = Operation {
@@ -108,9 +109,68 @@ async fn dispatcher_enforces_current_drive_grant_and_partition() {
             .code,
         "EACCES"
     );
+    let mut writable = catalog.load_current().await.unwrap();
+    writable
+        .grants
+        .get_mut("reader")
+        .unwrap()
+        .drives
+        .insert("data".into(), Permission::Write);
+    catalog.compare_and_swap(1, writable).await.unwrap();
+    let handles = SessionHandles::default();
+    let open = Operation {
+        name: OperationName::Open,
+        body: json!({"path":"/file","flags":"w+","mode":420}),
+    };
+    let id = dispatcher
+        .dispatch_with_handles(&identity, "data", &open, &handles)
+        .await
+        .unwrap()
+        .as_u64()
+        .unwrap();
+    let write = Operation {
+        name: OperationName::HandleWrite,
+        body: json!({"handle":id,"data":[104,105],"position":0}),
+    };
+    assert_eq!(
+        dispatcher
+            .dispatch_with_handles(&identity, "data", &write, &handles)
+            .await
+            .unwrap(),
+        json!(2)
+    );
+    let read = Operation {
+        name: OperationName::HandleRead,
+        body: json!({"handle":id,"length":2,"position":0}),
+    };
+    assert_eq!(
+        dispatcher
+            .dispatch_with_handles(&identity, "data", &read, &handles)
+            .await
+            .unwrap(),
+        json!([104, 105])
+    );
+    let other_connection = SessionHandles::default();
+    assert_eq!(
+        dispatcher
+            .dispatch_with_handles(&identity, "data", &read, &other_connection)
+            .await
+            .unwrap_err()
+            .code,
+        "EBADF"
+    );
+    handles.close_all().await;
+    assert_eq!(
+        dispatcher
+            .dispatch_with_handles(&identity, "data", &read, &handles)
+            .await
+            .unwrap_err()
+            .code,
+        "EBADF"
+    );
     let mut revoked = catalog.load_current().await.unwrap();
     revoked.grants.clear();
-    catalog.compare_and_swap(1, revoked).await.unwrap();
+    catalog.compare_and_swap(2, revoked).await.unwrap();
     assert_eq!(
         dispatcher
             .dispatch(&identity, "data", &stat)

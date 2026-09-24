@@ -72,13 +72,13 @@ impl std::error::Error for CliError {}
 /// readiness can be reported. Tokio installs the process signal handler on the
 /// first poll of `signal::ctrl_c`; merely constructing the future is not
 /// sufficient for a caller that may receive SIGINT during mount startup.
-struct CtrlCHandler {
+pub(crate) struct CtrlCHandler {
     signal: Pin<Box<dyn Future<Output = std::io::Result<()>> + Send>>,
     pending_signal: bool,
 }
 
 impl CtrlCHandler {
-    async fn install() -> Result<Self, CliError> {
+    pub(crate) async fn install() -> Result<Self, CliError> {
         let mut signal: Pin<Box<dyn Future<Output = std::io::Result<()>> + Send>> =
             Box::pin(tokio::signal::ctrl_c());
         let received = poll_signal_registration(signal.as_mut()).await?;
@@ -93,7 +93,7 @@ impl CtrlCHandler {
         })
     }
 
-    async fn wait(&mut self) -> Result<(), CliError> {
+    pub(crate) async fn wait(&mut self) -> Result<(), CliError> {
         if self.pending_signal {
             self.pending_signal = false;
             return Ok(());
@@ -148,14 +148,14 @@ impl From<FsError> for CliError {
 }
 
 #[derive(Clone)]
-struct DriverRuntime {
+pub(crate) struct DriverRuntime {
     filesystem: Filesystem,
     #[cfg(feature = "observability")]
     telemetry: Telemetry,
 }
 
 impl DriverRuntime {
-    async fn open(options: &CliOptions, uid: u32, gid: u32) -> Result<Self, CliError> {
+    pub(crate) async fn open(options: &CliOptions, uid: u32, gid: u32) -> Result<Self, CliError> {
         #[cfg(feature = "observability")]
         let telemetry = mount_rs_observability::global();
         let filesystem = match options.driver {
@@ -210,7 +210,7 @@ impl DriverRuntime {
         })
     }
 
-    fn driver(&self) -> Arc<dyn FsDriver> {
+    pub(crate) fn driver(&self) -> Arc<dyn FsDriver> {
         #[cfg(feature = "observability")]
         {
             self.filesystem
@@ -222,7 +222,7 @@ impl DriverRuntime {
         }
     }
 
-    async fn shutdown(&self) -> FsResult<()> {
+    pub(crate) async fn shutdown(&self) -> FsResult<()> {
         self.filesystem.shutdown().await
     }
 
@@ -445,7 +445,11 @@ where
             Ok(())
         }
         Command::ValidateConfig(path) => {
-            validate_config_file(&path)?;
+            if crate::remote::is_remote(&path)? {
+                crate::remote::validate(&path)?;
+            } else {
+                validate_config_file(&path)?;
+            }
             println!("valid config: {}", path.display());
             Ok(())
         }
@@ -497,7 +501,22 @@ where
             sdk_self_test_command(config.as_deref(), reopen).await
         }
         Command::ServeHttp(path) => serve_http_command(&path).await,
+        Command::ServeRemote(path) => crate::remote::serve(&path).await,
+        Command::MountRemote(path) => crate::remote::mount(&path).await,
+        Command::CatalogApply(path) => crate::remote::apply(&path).await,
         Command::Mount(options) => {
+            if let Some(path) = &options.config
+                && crate::remote::is_remote(path)?
+            {
+                if options.overrides != crate::parser::CliOverrides::default()
+                    || !options.also_mountpoints.is_empty()
+                {
+                    return Err(CliError::usage(
+                        "remote mounts configure mount options and Drives in the config file",
+                    ));
+                }
+                return crate::remote::mount(path).await;
+            }
             let options = resolve_cli_options(options)?;
             mount_command(options).await
         }
@@ -1013,7 +1032,7 @@ async fn mount_command(options: CliOptions) -> Result<(), CliError> {
     Ok(())
 }
 
-async fn prepare_mountpoints_before_driver(
+pub(crate) async fn prepare_mountpoints_before_driver(
     options: &CliOptions,
     mountpoints: &[PathBuf],
     preopen: bool,
@@ -1292,7 +1311,10 @@ async fn wait_for_shutdown(mounted: &AutoMount, ctrl_c: &mut CtrlCHandler) {
     retry_unmount(mounted, ctrl_c).await;
 }
 
-async fn wait_for_multiple_nfs_shutdown(mounted: &[AutoMount], ctrl_c: &mut CtrlCHandler) {
+pub(crate) async fn wait_for_multiple_nfs_shutdown(
+    mounted: &[AutoMount],
+    ctrl_c: &mut CtrlCHandler,
+) {
     loop {
         let shutdown_requested = tokio::select! {
             signal = ctrl_c.wait() => {
@@ -1317,7 +1339,7 @@ async fn wait_for_multiple_nfs_shutdown(mounted: &[AutoMount], ctrl_c: &mut Ctrl
     }
 }
 
-async fn retry_unmount(mounted: &AutoMount, ctrl_c: &mut CtrlCHandler) {
+pub(crate) async fn retry_unmount(mounted: &AutoMount, ctrl_c: &mut CtrlCHandler) {
     let mut signal_available = true;
     loop {
         match mounted.unmount().await {
@@ -1629,7 +1651,7 @@ fn home_directory() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn effective_identity() -> (u32, u32) {
+pub(crate) fn effective_identity() -> (u32, u32) {
     let uid = std::env::var("SUDO_UID")
         .ok()
         .and_then(|value| value.parse().ok())

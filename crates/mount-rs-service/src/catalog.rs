@@ -65,6 +65,7 @@ pub struct DriveDefinition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PartitionDefinition {
+    #[serde(deserialize_with = "unique_map")]
     pub drives: BTreeMap<String, DriveDefinition>,
 }
 
@@ -73,7 +74,9 @@ pub struct PartitionDefinition {
 pub struct GrantDefinition {
     pub partition_id: String,
     pub policy_id: String,
+    #[serde(deserialize_with = "unique_map")]
     pub drives: BTreeMap<String, Permission>,
+    #[serde(deserialize_with = "unique_map")]
     pub claim_conditions: BTreeMap<String, String>,
 }
 
@@ -82,15 +85,24 @@ pub struct GrantDefinition {
 pub struct IssuerPolicyDefinition {
     pub issuer: String,
     pub audiences: Vec<String>,
+    #[serde(default = "default_algorithms")]
+    pub algorithms: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogSnapshot {
     pub revision: u64,
+    #[serde(deserialize_with = "unique_map")]
     pub partitions: BTreeMap<String, PartitionDefinition>,
+    #[serde(deserialize_with = "unique_map")]
     pub issuer_policies: BTreeMap<String, serde_json::Value>,
+    #[serde(deserialize_with = "unique_map")]
     pub grants: BTreeMap<String, GrantDefinition>,
+}
+
+fn default_algorithms() -> Vec<String> {
+    vec!["RS256".into(), "ES256".into()]
 }
 
 impl CatalogSnapshot {
@@ -105,6 +117,18 @@ impl CatalogSnapshot {
     }
 
     pub fn validate(&self) -> Result<(), CatalogError> {
+        if self.partitions.len() > 1024
+            || self.issuer_policies.len() > 64
+            || self.grants.len() > 4096
+            || self
+                .partitions
+                .values()
+                .map(|p| p.drives.len())
+                .sum::<usize>()
+                > 4096
+        {
+            return Err(CatalogError::Invalid("catalog count limit exceeded"));
+        }
         for (partition_id, partition) in &self.partitions {
             validate_id(partition_id)?;
             for (drive_id, drive) in &partition.drives {
@@ -119,6 +143,12 @@ impl CatalogSnapshot {
             let policy: IssuerPolicyDefinition = serde_json::from_value(policy.clone())
                 .map_err(|_| CatalogError::Invalid("invalid issuer policy shape"))?;
             if !crate::auth::is_safe_public_https_url(&policy.issuer)
+                || policy.algorithms.is_empty()
+                || policy.algorithms.len() > 2
+                || policy
+                    .algorithms
+                    .iter()
+                    .any(|a| !matches!(a.as_str(), "RS256" | "ES256"))
                 || policy.audiences.is_empty()
                 || policy.audiences.len() > 16
                 || policy
@@ -140,6 +170,16 @@ impl CatalogSnapshot {
             }
             if grant.drives.is_empty() {
                 return Err(CatalogError::Invalid("grant must name a Drive"));
+            }
+            if grant.claim_conditions.len() > 32
+                || grant.claim_conditions.iter().any(|(pointer, value)| {
+                    !pointer.starts_with('/')
+                        || pointer.len() > 512
+                        || value.is_empty()
+                        || value.len() > 2048
+                })
+            {
+                return Err(CatalogError::Invalid("invalid claim conditions"));
             }
             if !grant.claim_conditions.iter().any(|(path, value)| {
                 !value.is_empty()
@@ -234,9 +274,13 @@ impl CatalogStore for SqliteCatalog {
             let connection = connect(&path)?;
             let row: Option<(i64, Vec<u8>)> = connection
                 .query_row(
-                    "SELECT revision, document FROM service_catalog WHERE singleton = 1",
+                    "SELECT revision, length(document), document FROM service_catalog WHERE singleton = 1",
                     [],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| {
+                        let length:i64=row.get(1)?;
+                        if length<0 || length>MAX_DOCUMENT_BYTES as i64 {return Err(rusqlite::Error::InvalidQuery);}
+                        Ok((row.get(0)?,row.get(2)?))
+                    },
                 )
                 .optional()?;
             let (revision, document) = row.ok_or(CatalogError::Invalid("catalog row missing"))?;
@@ -273,6 +317,22 @@ impl CatalogStore for SqliteCatalog {
             if u64::try_from(previous).ok() != Some(expected_revision) {
                 return Err(CatalogError::Conflict);
             }
+            let prior_document: Vec<u8> = transaction.query_row(
+                "SELECT document FROM service_catalog WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )?;
+            let prior = decode_snapshot(previous, &prior_document)?;
+            for (id, partition) in &prior.partitions {
+                if !next.partitions.contains_key(id)
+                    && (!partition.drives.is_empty()
+                        || prior.grants.values().any(|g| g.partition_id == *id))
+                {
+                    return Err(CatalogError::Invalid(
+                        "Partition must be empty before deletion",
+                    ));
+                }
+            }
             let revision_sql =
                 i64::try_from(revision).map_err(|_| CatalogError::Invalid("revision overflow"))?;
             transaction.execute(
@@ -305,4 +365,31 @@ fn decode_snapshot(revision: i64, document: &[u8]) -> Result<CatalogSnapshot, Ca
     }
     snapshot.validate()?;
     Ok(snapshot)
+}
+
+fn unique_map<'de, D, T>(deserializer: D) -> Result<BTreeMap<String, T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct Unique<T>(std::marker::PhantomData<T>);
+    impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for Unique<T> {
+        type Value = BTreeMap<String, T>;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("map with unique identifiers")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut result = BTreeMap::new();
+            while let Some((key, value)) = map.next_entry::<String, T>()? {
+                if result.insert(key, value).is_some() {
+                    return Err(serde::de::Error::custom("duplicate catalog identifier"));
+                }
+            }
+            Ok(result)
+        }
+    }
+    deserializer.deserialize_map(Unique(std::marker::PhantomData))
 }

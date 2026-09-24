@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{FsError, Result};
 use crate::path::normalize_path;
@@ -8,7 +9,7 @@ use crate::types::{Capabilities, DirEntry, MkdirOptions, Stats, StatsFs};
 
 /// Stable backend identity captured when a transport first bound a handle.
 /// An inode value of zero cannot guard an operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PathIdentity {
     pub dev: u64,
     pub ino: u64,
@@ -33,7 +34,7 @@ impl PathIdentity {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PathGuard {
     pub path: String,
     pub identity: PathIdentity,
@@ -43,14 +44,14 @@ pub struct PathGuard {
 /// `Any` is appropriate when the wire request names an entry without a prior
 /// lookup. `Absent` and `Identity` prevent a later replacement from being
 /// mistaken for the observed entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ObservedEntry {
     Any,
     Absent,
     Identity(PathIdentity),
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GuardedSetattr {
     pub mode: Option<u32>,
     pub uid: Option<u32>,
@@ -64,7 +65,7 @@ pub struct GuardedSetattr {
 
 /// Handle-derived namespace operations. A driver with durable shared writers
 /// must check every guard within the same backend commit as the mutation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GuardedMutation {
     Setattr {
         target: PathGuard,
@@ -131,7 +132,7 @@ pub enum GuardedMutationResult {
 /// Handle-derived reads. Each driver checks the original handle identity and
 /// returns its answer from the same namespace snapshot. Names in `Lookup`
 /// refer to children of the guarded directory, including `.` and `..`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GuardedRead {
     Stat {
         target: PathGuard,
@@ -150,13 +151,13 @@ pub enum GuardedRead {
 }
 
 /// A directory child and its nofollow attributes from one guarded snapshot.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuardedDirectoryEntry {
     pub name: String,
     pub stats: Stats,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GuardedReadResult {
     Stat(Stats),
     Lookup {

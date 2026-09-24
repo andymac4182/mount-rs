@@ -65,7 +65,7 @@ fn oidc_verifier_accepts_signed_claims_and_rejects_wrong_audience() {
     .unwrap();
     assert!(wrong_audience.verify(&token, now).is_err());
     assert!(verifier.verify(&token, now + 400).is_err());
-    let mut tampered = token.into_bytes();
+    let mut tampered = token.clone().into_bytes();
     let last = tampered.len() - 2;
     tampered[last] = if tampered[last] == b'A' { b'B' } else { b'A' };
     assert!(
@@ -195,4 +195,202 @@ fn discovery_must_match_pinned_issuer_and_public_jwks_url() {
         )
         .is_err()
     );
+}
+
+struct TestKeySource {
+    key: Jwk,
+}
+#[async_trait::async_trait]
+impl mount_rs_service::auth::OidcKeySource for TestKeySource {
+    async fn fetch(
+        &self,
+        issuer: &str,
+        audiences: &[String],
+    ) -> Result<OidcVerifier, mount_rs_service::auth::AuthError> {
+        OidcVerifier::new(issuer, audiences, vec![self.key.clone()])
+    }
+}
+#[tokio::test]
+async fn catalog_authentication_verifies_signature_and_partition_grants() {
+    use mount_rs_service::{
+        auth::CatalogAuthenticator, catalog::SqliteCatalog, server::Authenticator,
+    };
+    use std::sync::Arc;
+    let directory = tempfile::tempdir().unwrap();
+    let catalog = Arc::new(
+        SqliteCatalog::open(directory.path().join("catalog.sqlite"))
+            .await
+            .unwrap(),
+    );
+    let mut snapshot = CatalogSnapshot::empty();
+    for partition in ["red", "blue"] {
+        snapshot.partitions.insert(
+            partition.into(),
+            PartitionDefinition {
+                drives: BTreeMap::from([(
+                    "data".into(),
+                    DriveDefinition {
+                        driver: json!({"kind":"memory"}),
+                    },
+                )]),
+            },
+        );
+    }
+    snapshot.issuer_policies.insert(
+        "oidc".into(),
+        json!({"issuer":"https://issuer.example.com","audiences":["mount-rs"]}),
+    );
+    snapshot.grants.insert(
+        "writer".into(),
+        GrantDefinition {
+            partition_id: "red".into(),
+            policy_id: "oidc".into(),
+            drives: BTreeMap::from([("data".into(), Permission::Write)]),
+            claim_conditions: BTreeMap::from([("/repository_id".into(), "repo-1".into())]),
+        },
+    );
+    catalog.compare_and_swap(0, snapshot).await.unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let (token, key) = signed_token(
+        json!({"iss":"https://issuer.example.com","aud":"mount-rs","sub":"workload","repository_id":"repo-1","iat":now,"exp":now+300}),
+    );
+    let auth =
+        CatalogAuthenticator::with_key_source(catalog.clone(), Arc::new(TestKeySource { key }));
+    assert_eq!(
+        auth.authenticate(&token, "red").await.unwrap().partition_id,
+        "red"
+    );
+    assert!(auth.authenticate(&token, "blue").await.is_err());
+    let mut overlapping = catalog.load_current().await.unwrap();
+    overlapping.issuer_policies.insert(
+        "duplicate".into(),
+        overlapping.issuer_policies["oidc"].clone(),
+    );
+    let mut grant = overlapping.grants["writer"].clone();
+    grant.policy_id = "duplicate".into();
+    overlapping.grants.insert("duplicate".into(), grant);
+    catalog.compare_and_swap(1, overlapping).await.unwrap();
+    assert!(auth.authenticate(&token, "red").await.is_err());
+    let mut tampered = token.clone().into_bytes();
+    let index = tampered.len() - 2;
+    tampered[index] = if tampered[index] == b'A' { b'B' } else { b'A' };
+    assert!(
+        auth.authenticate(std::str::from_utf8(&tampered).unwrap(), "red")
+            .await
+            .is_err()
+    );
+    let mut snapshot = catalog.load_current().await.unwrap();
+    snapshot.grants.clear();
+    catalog.compare_and_swap(2, snapshot).await.unwrap();
+    // A previously cached signing key must never preserve a revoked grant.
+    assert!(auth.authenticate(&token, "red").await.is_err());
+}
+
+#[test]
+fn rs256_public_fixture_verifies_without_private_key() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/rs256-public.json")).unwrap();
+    let verifier = OidcVerifier::new(
+        "https://issuer.example.com",
+        &["mount-rs".into()],
+        vec![Jwk::Rsa {
+            kid: fixture["kid"].as_str().unwrap().into(),
+            n: fixture["n"].as_str().unwrap().into(),
+            e: fixture["e"].as_str().unwrap().into(),
+        }],
+    )
+    .unwrap();
+    assert_eq!(
+        verifier
+            .verify(fixture["token"].as_str().unwrap(), 1_700_000_001)
+            .unwrap()
+            .subject,
+        "test-workload"
+    );
+    assert!(
+        verifier
+            .verify(fixture["token"].as_str().unwrap(), 1_700_001_000)
+            .is_err()
+    );
+}
+
+struct RotatingKeys {
+    key: std::sync::Mutex<Jwk>,
+    fetches: std::sync::atomic::AtomicUsize,
+}
+#[async_trait::async_trait]
+impl mount_rs_service::auth::OidcKeySource for RotatingKeys {
+    async fn fetch(
+        &self,
+        issuer: &str,
+        audiences: &[String],
+    ) -> Result<OidcVerifier, mount_rs_service::auth::AuthError> {
+        self.fetches
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        OidcVerifier::new(issuer, audiences, vec![self.key.lock().unwrap().clone()])
+    }
+}
+#[tokio::test(start_paused = true)]
+async fn unknown_signing_key_refresh_is_throttled_then_rotation_is_accepted() {
+    use mount_rs_service::{
+        auth::CatalogAuthenticator, catalog::SqliteCatalog, server::Authenticator,
+    };
+    use std::sync::{Arc, atomic::Ordering};
+    let directory = tempfile::tempdir().unwrap();
+    let catalog = Arc::new(
+        SqliteCatalog::open(directory.path().join("catalog.sqlite"))
+            .await
+            .unwrap(),
+    );
+    let mut snapshot = CatalogSnapshot::empty();
+    snapshot.partitions.insert(
+        "red".into(),
+        PartitionDefinition {
+            drives: BTreeMap::from([(
+                "data".into(),
+                DriveDefinition {
+                    driver: json!({"kind":"memory"}),
+                },
+            )]),
+        },
+    );
+    snapshot.issuer_policies.insert(
+        "oidc".into(),
+        json!({"issuer":"https://issuer.example.com","audiences":["mount-rs"]}),
+    );
+    snapshot.grants.insert(
+        "grant".into(),
+        GrantDefinition {
+            partition_id: "red".into(),
+            policy_id: "oidc".into(),
+            drives: BTreeMap::from([("data".into(), Permission::Read)]),
+            claim_conditions: BTreeMap::from([("/sub".into(), "workload".into())]),
+        },
+    );
+    catalog.compare_and_swap(0, snapshot).await.unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let claims = json!({"iss":"https://issuer.example.com","aud":"mount-rs","sub":"workload","iat":now,"exp":now+300});
+    let (old_token, old_key) = signed_token(claims.clone());
+    let (new_token, new_key) = signed_token(claims);
+    let source = Arc::new(RotatingKeys {
+        key: std::sync::Mutex::new(old_key),
+        fetches: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let auth = CatalogAuthenticator::with_key_source(catalog, source.clone());
+    assert!(auth.authenticate(&old_token, "red").await.is_ok());
+    *source.key.lock().unwrap() = new_key;
+    for _ in 0..3 {
+        assert!(auth.authenticate(&new_token, "red").await.is_err());
+    }
+    assert_eq!(source.fetches.load(Ordering::SeqCst), 1);
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    assert!(auth.authenticate(&new_token, "red").await.is_ok());
+    assert_eq!(source.fetches.load(Ordering::SeqCst), 2);
+    assert!(auth.authenticate(&old_token, "red").await.is_err());
 }

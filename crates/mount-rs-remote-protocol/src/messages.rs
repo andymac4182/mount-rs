@@ -73,18 +73,18 @@ impl std::fmt::Debug for Message {
                 .debug_struct("Request")
                 .field("request_id", request_id)
                 .field("drive_id", drive_id)
-                .field("operation", operation)
+                .field("operation", &operation.name)
                 .finish(),
-            Self::Response { request_id, result } => output
+            Self::Response { request_id, .. } => output
                 .debug_struct("Response")
                 .field("request_id", request_id)
-                .field("result", result)
+                .field("result", &"<redacted>")
                 .finish(),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Operation {
     pub name: OperationName,
@@ -95,7 +95,30 @@ impl Operation {
     #[must_use]
     pub fn required_permission(&self) -> Permission {
         match self.name {
-            OperationName::Open if self.body.get("flags").and_then(Value::as_str) == Some("r") => {
+            OperationName::Open
+                if self
+                    .body
+                    .get("flags")
+                    .and_then(Value::as_str)
+                    .is_some_and(|flags| matches!(flags, "r" | "rs")) =>
+            {
+                Permission::Read
+            }
+            OperationName::Open if self.body.get("flags").is_some_and(read_only_flags) => {
+                Permission::Read
+            }
+            OperationName::GuardedMutation
+                if self
+                    .body
+                    .get("Open")
+                    .and_then(|open| open.get("flags"))
+                    .is_some_and(|flags| {
+                        flags.get("read").and_then(Value::as_bool) == Some(true)
+                            && ["write", "create", "truncate", "append", "exclusive"]
+                                .iter()
+                                .all(|name| flags.get(name).and_then(Value::as_bool) == Some(false))
+                    }) =>
+            {
                 Permission::Read
             }
             _ => self.name.required_permission(),
@@ -177,5 +200,22 @@ impl OperationName {
             | Self::GuardedMutation
             | Self::Syncfs => Permission::Write,
         }
+    }
+}
+
+fn read_only_flags(flags: &Value) -> bool {
+    flags.get("read").and_then(Value::as_bool) == Some(true)
+        && ["write", "create", "truncate", "append", "exclusive"]
+            .iter()
+            .all(|name| flags.get(name).and_then(Value::as_bool) == Some(false))
+}
+
+impl std::fmt::Debug for Operation {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output
+            .debug_struct("Operation")
+            .field("name", &self.name)
+            .field("body", &"<redacted>")
+            .finish()
     }
 }

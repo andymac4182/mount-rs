@@ -74,3 +74,33 @@ fn version_and_mutation_classification_are_explicit() {
         Permission::Write
     );
 }
+
+#[test]
+fn read_only_open_variants_do_not_require_write_grants() {
+    assert_eq!(
+        Operation {
+            name: OperationName::Open,
+            body: serde_json::json!({"flags":"rs"})
+        }
+        .required_permission(),
+        Permission::Read
+    );
+    let mut body = serde_json::json!({"Open":{"flags":{"read":true,"write":false,"create":false,"truncate":false,"append":false,"exclusive":false}}});
+    assert_eq!(
+        Operation {
+            name: OperationName::GuardedMutation,
+            body: body.clone()
+        }
+        .required_permission(),
+        Permission::Read
+    );
+    body["Open"]["flags"]["create"] = serde_json::json!(true);
+    assert_eq!(
+        Operation {
+            name: OperationName::GuardedMutation,
+            body
+        }
+        .required_permission(),
+        Permission::Write
+    );
+}

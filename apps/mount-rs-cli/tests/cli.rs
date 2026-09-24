@@ -1337,3 +1337,34 @@ fn actual_binary_runs_live_ozone_split_provider_self_test() {
     );
     assert!(stdout.contains("Rust SDK wrote, shut down, reopened, and read"));
 }
+
+#[test]
+fn actual_binary_validates_remote_provider_without_token_or_network() {
+    let config =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/remote/client.json");
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_mount-rs"))
+        .arg("validate-config")
+        .arg("--config")
+        .arg(&config)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+#[test]
+fn remote_commands_require_config_and_preserve_paths() {
+    for (name, expected) in [
+        ("serve-remote", Command::ServeRemote("remote.json".into())),
+        ("mount-remote", Command::MountRemote("remote.json".into())),
+        ("catalog-apply", Command::CatalogApply("remote.json".into())),
+    ] {
+        assert_eq!(
+            parse_args(["mount-rs", name, "--config", "remote.json"]).unwrap(),
+            expected
+        );
+        assert!(parse_args(["mount-rs", name]).is_err());
+    }
+}

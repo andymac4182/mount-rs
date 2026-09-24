@@ -241,6 +241,10 @@ pub struct OidcVerifier {
 struct JoseHeader {
     alg: String,
     kid: String,
+    #[serde(default)]
+    crit: Vec<String>,
+    #[serde(default)]
+    b64: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -336,7 +340,11 @@ impl OidcVerifier {
         {
             return Err(AuthError("invalid OIDC policy"));
         }
-        if keys.len() > 100 || keys.iter().any(|key| key.kid().is_empty()) {
+        let unique: std::collections::BTreeSet<_> = keys.iter().map(Jwk::kid).collect();
+        if keys.len() > 100
+            || unique.len() != keys.len()
+            || keys.iter().any(|key| key.kid().is_empty())
+        {
             return Err(AuthError("invalid OIDC key set"));
         }
         Ok(Self {
@@ -365,6 +373,9 @@ impl OidcVerifier {
         }
         let header: JoseHeader = serde_json::from_slice(&decode_b64(header)?)
             .map_err(|_| AuthError("malformed JWT header"))?;
+        if !header.crit.is_empty() || header.b64 == Some(false) {
+            return Err(AuthError("unsupported JWT critical header"));
+        }
         let key = self
             .keys
             .iter()
@@ -462,4 +473,150 @@ pub fn authorize_drive(
         })
         .filter_map(|grant| grant.drives.get(drive_id).copied())
         .max_by_key(|permission| matches!(permission, Permission::Write))
+}
+
+/// Production authenticator. Only catalog-pinned policies are contacted.
+pub struct CatalogAuthenticator {
+    catalog: std::sync::Arc<dyn crate::catalog::CatalogStore>,
+    cache: tokio::sync::Mutex<std::collections::BTreeMap<String, CachedPolicy>>,
+    source: std::sync::Arc<dyn OidcKeySource>,
+}
+
+struct CachedPolicy {
+    configuration: Value,
+    verifier: Option<OidcVerifier>,
+    fetched: tokio::time::Instant,
+    attempted: tokio::time::Instant,
+}
+
+#[async_trait::async_trait]
+pub trait OidcKeySource: Send + Sync {
+    async fn fetch(&self, issuer: &str, audiences: &[String]) -> Result<OidcVerifier, AuthError>;
+}
+struct DiscoveryKeySource;
+#[async_trait::async_trait]
+impl OidcKeySource for DiscoveryKeySource {
+    async fn fetch(&self, issuer: &str, audiences: &[String]) -> Result<OidcVerifier, AuthError> {
+        OidcVerifier::from_discovery(issuer, audiences).await
+    }
+}
+impl CatalogAuthenticator {
+    pub fn new(catalog: std::sync::Arc<dyn crate::catalog::CatalogStore>) -> Self {
+        Self::with_key_source(catalog, std::sync::Arc::new(DiscoveryKeySource))
+    }
+    pub fn with_key_source(
+        catalog: std::sync::Arc<dyn crate::catalog::CatalogStore>,
+        source: std::sync::Arc<dyn OidcKeySource>,
+    ) -> Self {
+        Self {
+            catalog,
+            source,
+            cache: tokio::sync::Mutex::new(std::collections::BTreeMap::new()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::server::Authenticator for CatalogAuthenticator {
+    async fn authenticate(
+        &self,
+        token: &str,
+        partition_id: &str,
+    ) -> Result<crate::dispatch::SessionIdentity, ()> {
+        if token.len() > MAX_TOKEN_BYTES {
+            return Err(());
+        }
+        let payload = token.split('.').nth(1).ok_or(())?;
+        let unverified: Value =
+            serde_json::from_slice(&decode_b64(payload).map_err(|_| ())?).map_err(|_| ())?;
+        let header: JoseHeader = serde_json::from_slice(
+            &decode_b64(token.split('.').next().ok_or(())?).map_err(|_| ())?,
+        )
+        .map_err(|_| ())?;
+        let claimed_issuer = unverified.get("iss").and_then(Value::as_str).ok_or(())?;
+        let catalog = self.catalog.load_current().await.map_err(|_| ())?;
+        let partition = catalog.partitions.get(partition_id).ok_or(())?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| ())?
+            .as_secs() as i64;
+        let mut cache = self.cache.lock().await;
+        cache.retain(|id, _| catalog.issuer_policies.contains_key(id));
+        let mut matched = None;
+        for (id, configuration) in &catalog.issuer_policies {
+            if !catalog
+                .grants
+                .values()
+                .any(|grant| grant.partition_id == partition_id && grant.policy_id == *id)
+            {
+                continue;
+            }
+            let policy: crate::catalog::IssuerPolicyDefinition =
+                serde_json::from_value(configuration.clone()).map_err(|_| ())?;
+            if policy.issuer != claimed_issuer || !policy.algorithms.contains(&header.alg) {
+                continue;
+            }
+            let fresh = cache.get(id).is_some_and(|entry| {
+                entry.configuration == *configuration
+                    && (if entry.verifier.is_some() {
+                        entry.fetched.elapsed().as_secs() < 600
+                    } else {
+                        entry.attempted.elapsed().as_secs() < 60
+                    })
+            });
+            if !fresh {
+                let verifier = self
+                    .source
+                    .fetch(&policy.issuer, &policy.audiences)
+                    .await
+                    .ok();
+                cache.insert(
+                    id.clone(),
+                    CachedPolicy {
+                        configuration: configuration.clone(),
+                        verifier,
+                        fetched: tokio::time::Instant::now(),
+                        attempted: tokio::time::Instant::now(),
+                    },
+                );
+            }
+            let entry = cache.get_mut(id).ok_or(())?;
+            let Some(verifier) = &entry.verifier else {
+                continue;
+            };
+            let mut principal = verifier.verify(token, now);
+            // At most one discovery/JWKS refresh per minute, including unknown keys.
+            if principal.is_err() && entry.attempted.elapsed().as_secs() >= 60 {
+                entry.attempted = tokio::time::Instant::now();
+                if let Ok(verifier) = self.source.fetch(&policy.issuer, &policy.audiences).await {
+                    principal = verifier.verify(token, now);
+                    entry.verifier = Some(verifier);
+                    entry.fetched = tokio::time::Instant::now();
+                }
+            }
+            let Ok(principal) = principal else {
+                continue;
+            };
+            if principal.expires_at <= now
+                || !partition.drives.keys().any(|drive| {
+                    authorize_drive(&catalog, id, &principal.claims, partition_id, drive).is_some()
+                })
+            {
+                continue;
+            }
+            if matched.is_some() {
+                return Err(());
+            }
+            matched = Some(crate::dispatch::SessionIdentity {
+                partition_id: partition_id.into(),
+                policy_id: id.clone(),
+                issuer: principal.issuer,
+                subject: principal.subject,
+                signing_algorithm: header.alg.clone(),
+                claims: principal.claims,
+                expires_at: principal.expires_at,
+            });
+        }
+        matched.ok_or(())
+    }
 }

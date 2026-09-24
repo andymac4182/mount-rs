@@ -181,6 +181,9 @@ impl Default for CliOptions {
 pub enum Command {
     Mount(CliOptions),
     ServeHttp(PathBuf),
+    ServeRemote(PathBuf),
+    MountRemote(PathBuf),
+    CatalogApply(PathBuf),
     Probe,
     ValidateConfig(PathBuf),
     EnrollDirectoryOwnership {
@@ -565,7 +568,13 @@ where
                 reopen,
             });
         }
-        if first_argument && raw == "serve-http" {
+        if first_argument
+            && matches!(
+                raw.as_str(),
+                "serve-http" | "serve-remote" | "mount-remote" | "catalog-apply"
+            )
+        {
+            let service_command = raw.clone();
             let mut config_path = None;
             while let Some(raw) = args.next() {
                 let raw = raw.to_string_lossy().into_owned();
@@ -590,7 +599,12 @@ where
                 config_path = Some(PathBuf::from(value("config", inline_value, &mut args)?));
             }
             return config_path
-                .map(Command::ServeHttp)
+                .map(|path| match service_command.as_str() {
+                    "serve-remote" => Command::ServeRemote(path),
+                    "mount-remote" => Command::MountRemote(path),
+                    "catalog-apply" => Command::CatalogApply(path),
+                    _ => Command::ServeHttp(path),
+                })
                 .ok_or_else(|| ParseError::new("serve-http requires --config <path>"));
         }
         if first_argument && raw == "mount" {
@@ -852,7 +866,7 @@ pub fn help_text(color: Color) -> String {
     let b = |text: &str| color.bold(text).to_string();
     let d = |text: &str| color.dim(text).to_string();
     let output = format!(
-        "\n{} {}\n\n{}  mount-rs [mountpoint] [options]\n       mount-rs mount [mountpoint] [options]\n       mount-rs serve-http --config <path>\n       mount-rs sdk-self-test [--config <path>] [--reopen]\n       mount-rs enroll-directory-ownership --config <path> --expected-revision <u64>\n       mount-rs directory-ownership-status --config <path>\n       mount-rs recover-directory-ownership --config <path> --root-inode <u64> --expected-fence <u64>\n\n{}\n  -m, --mountpoint {}  where to mount {}\n      --also-mountpoint <path>  add another NFS view of this filesystem (repeatable)\n  -t, --transport {}   auto | fuse | 9p | nfs {}\n      --sqlite-single-host  use the single-host SQLite NFS profile (nfs or auto)\n  -q, --quiet              do not log filesystem requests\n  -v, --verbose            log metadata polls too {}\n  -r, --read-only          mount read-only\n      --empty              start without the memory README\n      --allow-other        let other users see the FUSE mount\n      --driver {}    memory | host | sqlite | splitstore {}\n      --root {}      host driver root {}\n      --database {}  SQLite state/metadata database\n      --blocks {}    splitstore block database\n      --probe              print transport availability without mounting\n  -h, --help               this\n  -V, --version            print the version\n\n{}\n{}\n",
+        "\n{} {}\n\n{}  mount-rs [mountpoint] [options]\n       mount-rs mount [mountpoint] [options]\n       mount-rs serve-http --config <path>\n       mount-rs serve-remote --config <path>\n       mount-rs mount-remote --config <path>\n       mount-rs catalog-apply --config <path>\n       mount-rs sdk-self-test [--config <path>] [--reopen]\n       mount-rs enroll-directory-ownership --config <path> --expected-revision <u64>\n       mount-rs directory-ownership-status --config <path>\n       mount-rs recover-directory-ownership --config <path> --root-inode <u64> --expected-fence <u64>\n\n{}\n  -m, --mountpoint {}  where to mount {}\n      --also-mountpoint <path>  add another NFS view of this filesystem (repeatable)\n  -t, --transport {}   auto | fuse | 9p | nfs {}\n      --sqlite-single-host  use the single-host SQLite NFS profile (nfs or auto)\n  -q, --quiet              do not log filesystem requests\n  -v, --verbose            log metadata polls too {}\n  -r, --read-only          mount read-only\n      --empty              start without the memory README\n      --allow-other        let other users see the FUSE mount\n      --driver {}    memory | host | sqlite | splitstore {}\n      --root {}      host driver root {}\n      --database {}  SQLite state/metadata database\n      --blocks {}    splitstore block database\n      --probe              print transport availability without mounting\n  -h, --help               this\n  -V, --version            print the version\n\n{}\n{}\n",
         b("mount-rs"),
         d("— mount a selected filesystem driver and watch kernel requests"),
         b("Usage:"),
