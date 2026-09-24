@@ -818,6 +818,40 @@ impl MetadataStore for PgliteMetadataStore {
         })
     }
 
+    async fn load_if_changed(&self, known_revision: u64) -> Result<Option<LoadedMetadata>> {
+        // An out-of-range caller revision cannot match the signed provider
+        // revision. Zero forces a full payload read, including initialization.
+        let known = i64::try_from(known_revision).unwrap_or(0);
+        let client = self.0.lock_client().await?;
+        let row = client
+            .as_ref()
+            .ok_or_else(connection_closed)?
+            .query_typed_opt(
+                "SELECT revision,
+                        CASE WHEN revision > 0 AND revision = $2 THEN NULL ELSE namespace END
+                 FROM mount_rs_metadata WHERE volume_key = $1",
+                &[(&self.0.volume_key, Type::TEXT), (&known, Type::INT8)],
+            )
+            .await
+            .map_err(postgres_error)?
+            .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
+        let revision = nonnegative(row.get::<_, i64>(0), "metadata revision")?;
+        if revision != 0 && revision == known_revision {
+            return Ok(None);
+        }
+        // A single statement snapshot supplies both revision and payload. The
+        // CASE projection suppresses unchanged namespace bytes before the wire.
+        let namespace = row
+            .get::<_, Option<String>>(1)
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(backend_error)?;
+        Ok(Some(LoadedMetadata {
+            revision,
+            namespace,
+        }))
+    }
+
     async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
         let client = self.0.lock_client().await?;
         let row = client
@@ -3122,6 +3156,154 @@ mod tests {
         };
         namespace.validate().unwrap();
         namespace
+    }
+
+    #[test]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
+    fn conditional_load_omits_only_fresh_nonzero_matches() {
+        let server = PgliteServer::start();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let metadata = PgliteMetadataStore::connect_with_key(
+                server.connection_string(),
+                "conditional-load",
+            )
+            .await
+            .unwrap();
+            let blocks =
+                PgliteBlockStore::connect_with_key(server.connection_string(), "conditional-load")
+                    .await
+                    .unwrap();
+            assert_eq!(
+                metadata.load_if_changed(0).await.unwrap().unwrap().revision,
+                0
+            );
+            let lease = metadata
+                .acquire_writer("conditional-reader", Duration::from_secs(60))
+                .await
+                .unwrap();
+            let block = blocks.put(b"abc").await.unwrap();
+            let payload = namespace(block).await;
+            metadata.publish(0, &lease, payload.clone()).await.unwrap();
+            assert!(metadata.load_if_changed(1).await.unwrap().is_none());
+            assert_eq!(
+                serde_json::to_string(
+                    &metadata
+                        .load_if_changed(0)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .namespace
+                )
+                .unwrap(),
+                serde_json::to_string(&Some(payload.clone())).unwrap(),
+            );
+            assert_eq!(
+                metadata
+                    .load_if_changed(u64::MAX)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .revision,
+                1
+            );
+            metadata.publish(1, &lease, payload).await.unwrap();
+            assert_eq!(
+                metadata.load_if_changed(1).await.unwrap().unwrap().revision,
+                2
+            );
+            {
+                let client = metadata.0.lock_client().await.unwrap();
+                client.as_ref().unwrap().execute_typed(
+                    "UPDATE mount_rs_metadata SET namespace='malformed-json' WHERE volume_key=$1",
+                    &[(&metadata.0.volume_key, Type::TEXT)],
+                ).await.unwrap();
+            }
+            // An unchanged revision is not an audit of out-of-band payload edits.
+            assert!(metadata.load_if_changed(2).await.unwrap().is_none());
+            assert!(metadata.load().await.is_err());
+            assert!(metadata.load_if_changed(1).await.is_err());
+            {
+                let client = metadata.0.lock_client().await.unwrap();
+                client.as_ref().unwrap().batch_execute(
+                    "ALTER TABLE mount_rs_metadata DROP CONSTRAINT mount_rs_metadata_revision_check;
+                     UPDATE mount_rs_metadata SET revision=-1;",
+                ).await.unwrap();
+            }
+            assert!(metadata.load_if_changed(u64::MAX).await.is_err());
+            {
+                let client = metadata.0.lock_client().await.unwrap();
+                client
+                    .as_ref()
+                    .unwrap()
+                    .execute_typed(
+                        "DELETE FROM mount_rs_metadata WHERE volume_key=$1",
+                        &[(&metadata.0.volume_key, Type::TEXT)],
+                    )
+                    .await
+                    .unwrap();
+            }
+            assert!(metadata.load_if_changed(2).await.is_err());
+            metadata.close().await.unwrap();
+            assert!(metadata.load_if_changed(2).await.is_err());
+            blocks.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
+    fn conditional_load_revision_and_payload_share_one_committed_snapshot() {
+        let server = PgliteServer::start();
+        let url = server.connection_string();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let options = PgliteStorageOptions::new("conditional-load-snapshot");
+            let writer = PgliteMetadataStore::connect_with_options(url, options.clone())
+                .await
+                .unwrap();
+            let blocks = PgliteBlockStore::connect_with_options(url, options.clone())
+                .await
+                .unwrap();
+            let block = blocks.put(b"abc").await.unwrap();
+            let first = namespace(block.clone()).await;
+            let mut second = namespace(block).await;
+            second.umask = 0o077;
+            let lease = writer
+                .acquire_writer("snapshot-writer", Duration::from_secs(60))
+                .await
+                .unwrap();
+            writer.publish(0, &lease, first.clone()).await.unwrap();
+            let mut proxy = wire_pause::QueryPause::new(url, "mount_rs_metadata");
+            let reader =
+                PgliteMetadataStore::connect_with_options(&proxy.connection_string, options)
+                    .await
+                    .unwrap();
+            proxy.arm();
+            let reading = tokio::spawn(async move {
+                let loaded = reader.load_if_changed(0).await;
+                reader.close().await.unwrap();
+                loaded
+            });
+            proxy.wait_until_paused().await;
+            writer.publish(1, &lease, second).await.unwrap();
+            proxy.release();
+            let observed = reading.await.unwrap().unwrap().unwrap();
+            proxy.finish();
+            assert_eq!(observed.revision, 1);
+            assert_eq!(observed.namespace.unwrap().umask, first.umask);
+            let current = writer.load_if_changed(1).await.unwrap().unwrap();
+            assert_eq!(current.revision, 2);
+            assert_eq!(current.namespace.unwrap().umask, 0o077);
+            writer.release_writer(&lease).await.unwrap();
+            writer.close().await.unwrap();
+            blocks.close().await.unwrap();
+        });
     }
 
     // Only the offline migration tests create an MRC1 volume. Normal

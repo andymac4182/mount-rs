@@ -980,6 +980,51 @@ impl MetadataStore for TidbMetadataStore {
             .await?;
         Ok(())
     }
+
+    async fn load_if_changed(&self, known_revision: u64) -> Result<Option<LoadedMetadata>> {
+        // A zero revision is uninitialized, not a validated namespace. TiDB
+        // revisions are signed BIGINTs; an unrepresentable caller revision
+        // cannot match and must conservatively load the current namespace.
+        let Ok(known_revision) = i64::try_from(known_revision) else {
+            return self.load().await.map(Some);
+        };
+        if known_revision == 0 {
+            return self.load().await.map(Some);
+        }
+        let mut connection = self
+            .0
+            .pool
+            .get_conn()
+            .await
+            .map_err(|error| db_error("conditionally load TiDB metadata", error))?;
+        // One fresh statement observes revision and payload at the same
+        // snapshot. Suppress the large JSON value in SQL, before wire transfer
+        // and decoding, only on an exact nonzero revision match. Keeping the
+        // row in the result distinguishes unchanged from a missing row.
+        let row: Option<(i64, Option<String>)> = connection
+            .exec_first(
+                "SELECT revision, CASE WHEN revision=? THEN NULL ELSE namespace END
+                 FROM mount_rs_tidb_metadata WHERE volume_key=?",
+                (known_revision, &self.0.volume_key),
+            )
+            .await
+            .map_err(|error| db_error("conditionally load TiDB metadata", error))?;
+        let Some((revision, namespace)) = row else {
+            return Err(backend_error("TiDB metadata row is missing"));
+        };
+        let revision = nonnegative(revision, "metadata revision")?;
+        if revision == known_revision as u64 {
+            return Ok(None);
+        }
+        let namespace = namespace
+            .map(|json| serde_json::from_str(&json).map_err(backend_error))
+            .transpose()?;
+        Ok(Some(LoadedMetadata {
+            revision,
+            namespace,
+        }))
+    }
+
     async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
         let mut connection = self
             .0

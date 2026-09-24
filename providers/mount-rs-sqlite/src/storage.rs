@@ -1932,6 +1932,35 @@ impl MetadataStore for SqliteMetadataStore {
         }
     }
 
+    async fn load_if_changed(&self, known_revision: u64) -> Result<Option<LoadedMetadata>> {
+        let connection = self.0.lock()?;
+        // One statement observes a coherent revision/payload pair. SQLite's
+        // lazy CASE skips the namespace column on an exact integer match,
+        // avoiding both materializing the JSON and reading its overflow pages.
+        // Out-of-range caller revisions cannot match SQLite's integer domain.
+        let known = i64::try_from(known_revision).ok();
+        let (revision, namespace): (u64, Option<String>) = connection
+            .query_row(
+                "SELECT revision, CASE
+                     WHEN typeof(revision)='integer' AND revision>0 AND revision=?1
+                     THEN NULL ELSE namespace END
+                 FROM mount_rs_metadata WHERE id=1",
+                params![known],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(backend_error)?;
+        if revision != 0 && revision == known_revision {
+            return Ok(None);
+        }
+        Ok(Some(LoadedMetadata {
+            revision,
+            namespace: namespace
+                .map(|json| serde_json::from_str(&json))
+                .transpose()
+                .map_err(backend_error)?,
+        }))
+    }
+
     async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
         let connection = self.0.lock()?;
         let (mode, backing, physical_dev, physical_ino, physical_path):
@@ -3901,6 +3930,98 @@ mod tests {
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))
             .unwrap();
         assert_eq!(integrity, "ok");
+    }
+
+    #[test]
+    fn conditional_load_omits_payload_only_for_a_fresh_nonzero_revision_match() {
+        let store = SqliteMetadataStore::in_memory().unwrap();
+        let initial = run(store.load_if_changed(0)).unwrap().unwrap();
+        assert_eq!(initial.revision, 0);
+        assert!(initial.namespace.is_none());
+        let lease = run(store.acquire_writer("reader-test", Duration::from_secs(60))).unwrap();
+        run(store.publish(0, &lease, namespace())).unwrap();
+        assert!(run(store.load_if_changed(1)).unwrap().is_none());
+
+        // An unchanged revision check omits the payload; unconditional reads
+        // remain the audit path for out-of-band payload changes.
+        store
+            .0
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE mount_rs_metadata SET namespace='not-json' WHERE id=1",
+                [],
+            )
+            .unwrap();
+        assert!(run(store.load_if_changed(1)).unwrap().is_none());
+        assert!(run(store.load()).unwrap_err().is(ErrorCode::Eio));
+        assert!(
+            run(store.load_if_changed(0))
+                .unwrap_err()
+                .is(ErrorCode::Eio)
+        );
+        assert!(
+            run(store.load_if_changed(2))
+                .unwrap_err()
+                .is(ErrorCode::Eio)
+        );
+
+        let expected = namespace();
+        store
+            .0
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE mount_rs_metadata SET revision=2, namespace=?1 WHERE id=1",
+                params![serde_json::to_string(&expected).unwrap()],
+            )
+            .unwrap();
+        let changed = run(store.load_if_changed(1)).unwrap().unwrap();
+        assert_eq!(changed.revision, 2);
+        assert_eq!(
+            serde_json::to_value(changed.namespace).unwrap(),
+            serde_json::to_value(Some(expected)).unwrap()
+        );
+        assert!(run(store.load_if_changed(2)).unwrap().is_none());
+        assert!(run(store.load_if_changed(u64::MAX)).unwrap().is_some());
+    }
+
+    #[test]
+    fn conditional_load_rejects_missing_and_malformed_revisions() {
+        let store = SqliteMetadataStore::in_memory().unwrap();
+        store
+            .0
+            .lock()
+            .unwrap()
+            .execute_batch("PRAGMA ignore_check_constraints=ON")
+            .unwrap();
+        for revision in ["-1", "'invalid'", "X'31'"] {
+            store
+                .0
+                .lock()
+                .unwrap()
+                .execute(
+                    &format!("UPDATE mount_rs_metadata SET revision={revision} WHERE id=1"),
+                    [],
+                )
+                .unwrap();
+            assert!(
+                run(store.load_if_changed(1))
+                    .unwrap_err()
+                    .is(ErrorCode::Eio)
+            );
+        }
+        store
+            .0
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM mount_rs_metadata WHERE id=1", [])
+            .unwrap();
+        assert!(
+            run(store.load_if_changed(1))
+                .unwrap_err()
+                .is(ErrorCode::Eio)
+        );
     }
 
     fn namespace() -> Namespace {

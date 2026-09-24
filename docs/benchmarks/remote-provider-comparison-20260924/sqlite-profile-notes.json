@@ -1,0 +1,22 @@
+{
+  "benchmark_exit": 0,
+  "samples": [
+    {
+      "mode": "read",
+      "owned_pid": 23598,
+      "sample_exit": 0,
+      "stdout": "",
+      "stderr": "Sampling process 23598 for 3 seconds with 10 milliseconds of run time between samples\nSampling completed, processing symbols...\nSample analysis of process 23598 written to file /private/tmp/remote-provider-comparison-20260924/sqlite-sample-read.txt\n",
+      "path": "/private/tmp/remote-provider-comparison-20260924/sqlite-sample-read.txt"
+    },
+    {
+      "mode": "write",
+      "owned_pid": 23598,
+      "sample_exit": 0,
+      "stdout": "",
+      "stderr": "Sampling process 23598 for 3 seconds with 10 milliseconds of run time between samples\nSampling completed, processing symbols...\nSample analysis of process 23598 written to file /private/tmp/remote-provider-comparison-20260924/sqlite-sample-write.txt\n",
+      "path": "/private/tmp/remote-provider-comparison-20260924/sqlite-sample-write.txt"
+    }
+  ],
+  "qualification": "diagnostic run with profiler overhead; separate from common comparison"
+}

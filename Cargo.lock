@@ -1811,6 +1811,7 @@ dependencies = [
  "mount-rs-core",
  "mount-rs-memfs",
  "mount-rs-remote-protocol",
+ "mount-rs-sdk",
  "mount-rs-tidb",
  "mysql_async",
  "quinn",

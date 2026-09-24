@@ -26,6 +26,26 @@ if [ "${MOUNT_RS_FOUNDATIONDB_IOPS:-0}" = "1" ]; then
     exit 2
   fi
 fi
+run_service_benchmark=${MOUNT_RS_FOUNDATIONDB_SERVICE_BENCHMARK:-0}
+case "$run_service_benchmark" in
+  0|1) ;;
+  *) echo "MOUNT_RS_FOUNDATIONDB_SERVICE_BENCHMARK must be 0 or 1" >&2; exit 2 ;;
+esac
+if [ "$run_service_benchmark" -eq 1 ]; then
+  if [ -n "${RUSTFS_ENDPOINT:-}" ] || [ "$run_napi" -eq 1 ] || [ "${MOUNT_RS_FOUNDATIONDB_NATIVE_CLI:-0}" = "1" ] || [ -n "${MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE:-}" ]; then
+    echo "The service benchmark requires an owned standalone FoundationDB cluster" >&2
+    exit 2
+  fi
+  : "${MOUNT_RS_FOUNDATIONDB_BENCH_OUTPUT_DIR:?set a retained benchmark output directory}"
+  mkdir -p "$MOUNT_RS_FOUNDATIONDB_BENCH_OUTPUT_DIR"
+  benchmark_output_dir=$(CDPATH= cd -- "$MOUNT_RS_FOUNDATIONDB_BENCH_OUTPUT_DIR" && pwd)
+  benchmark_prepare_only=${MOUNT_RS_FOUNDATIONDB_BENCH_PREPARE_ONLY:-0}
+  case "$benchmark_prepare_only" in
+    0|1) ;;
+    *) echo "MOUNT_RS_FOUNDATIONDB_BENCH_PREPARE_ONLY must be 0 or 1" >&2; exit 2 ;;
+  esac
+  mkdir -p "$benchmark_output_dir/build-cache"
+fi
 run_native_cli=0
 if [ "${MOUNT_RS_FOUNDATIONDB_NATIVE_CLI:-0}" = "1" ]; then
   run_native_cli=1
@@ -171,7 +191,7 @@ fdb_ip3=""
 fdb_cluster_file_contents=""
 
 create_foundationdb_network() {
-  if [ "$topology" = "single" ]; then
+  if [ "$topology" = "single" ] && [ "$run_service_benchmark" -eq 0 ]; then
     docker network create --label "$resource_label" "$network" >/dev/null
     created_network=1
     return 0
@@ -206,7 +226,11 @@ create_foundationdb_network() {
   fdb_ip2="$network_prefix.11"
   fdb_ip3="$network_prefix.12"
   cluster_id=$(printf '%s' "$run_id" | tr -cd '[:alnum:]')
-  fdb_cluster_file_contents="mount_rs:$cluster_id@$fdb_ip1:4500,$fdb_ip2:4500,$fdb_ip3:4500"
+  if [ "$topology" = "single" ]; then
+    fdb_cluster_file_contents="mount_rs:$cluster_id@$fdb_ip1:4500"
+  else
+    fdb_cluster_file_contents="mount_rs:$cluster_id@$fdb_ip1:4500,$fdb_ip2:4500,$fdb_ip3:4500"
+  fi
 }
 
 if [ -n "$provided_cluster_file" ]; then
@@ -243,7 +267,11 @@ if [ -n "$provided_cluster_file" ]; then
 fi
 
 docker pull --platform "$docker_platform" "$fdb_image" >/dev/null
-docker pull --platform "$docker_platform" "$rust_image" >/dev/null
+if [ "$run_service_benchmark" -eq 1 ] && docker image inspect "$rust_image" >/dev/null 2>&1; then
+  echo "FOUNDATIONDB_BENCH_CLIENT_IMAGE cached=$rust_image"
+else
+  docker pull --platform "$docker_platform" "$rust_image" >/dev/null
+fi
 if [ "$run_napi" -eq 1 ]; then
   docker pull --platform "$docker_platform" "$node_image" >/dev/null
 fi
@@ -262,7 +290,7 @@ if [ "$external_mode" -eq 1 ]; then
   cp "$provided_cluster_file" "$run_dir/fdb.cluster"
 else
   create_foundationdb_network
-  if [ "$topology" = "single" ]; then
+  if [ "$topology" = "single" ] && [ "$run_service_benchmark" -eq 0 ]; then
     fdb_servers="$server"
     docker run --detach --platform "$docker_platform" \
       --name "$server" --hostname fdb --network "$network" \
@@ -300,6 +328,8 @@ else
 fi
 
 configure_durable_foundationdb() {
+  redundancy=double
+  if [ "$topology" = "single" ]; then redundancy=single; fi
   ticks=0
   while :; do
     all_running=1
@@ -309,12 +339,12 @@ configure_durable_foundationdb() {
         break
       fi
     done
-    if [ "$all_running" -eq 1 ] && docker exec "$server" fdbcli --exec 'configure new double ssd' >"$run_dir/configure.log" 2>&1; then
-      echo "FOUNDATIONDB_CONFIGURED topology=durable redundancy=double storage=ssd servers=$fdb_servers"
+    if [ "$all_running" -eq 1 ] && docker exec "$server" fdbcli --exec "configure new $redundancy ssd" >"$run_dir/configure.log" 2>&1; then
+      echo "FOUNDATIONDB_CONFIGURED topology=$topology redundancy=$redundancy storage=ssd servers=$fdb_servers"
       return 0
     fi
     if [ "$all_running" -eq 1 ] && docker exec "$server" fdbcli --exec 'status json' >"$run_dir/status.json" 2>"$run_dir/status.err"; then
-      echo "FOUNDATIONDB_CONFIGURED topology=durable redundancy=double storage=ssd servers=$fdb_servers"
+      echo "FOUNDATIONDB_CONFIGURED topology=$topology redundancy=$redundancy storage=ssd servers=$fdb_servers"
       return 0
     fi
     if [ "$ticks" -ge 90 ]; then
@@ -329,7 +359,7 @@ configure_durable_foundationdb() {
   done
 }
 
-if [ "$topology" = "durable" ] && [ "$external_mode" -eq 0 ]; then
+if [ "$external_mode" -eq 0 ] && { [ "$topology" = "durable" ] || [ "$run_service_benchmark" -eq 1 ]; }; then
   configure_durable_foundationdb
 fi
 
@@ -371,6 +401,16 @@ wait_for_foundationdb() {
 }
 
 wait_for_foundationdb
+
+if [ "$run_service_benchmark" -eq 1 ]; then
+  # The readiness transaction alone cannot distinguish the memory engine.
+  # Verify actual configuration before any provider/client workloads begin.
+  docker exec "$server" fdbcli --exec 'status json' >"$run_dir/benchmark-status.json"
+  benchmark_identity=$(python3 "$repo_dir/scripts/foundationdb-benchmark-identity.py" \
+    "$run_dir/benchmark-status.json" "$topology" "$fdb_image" \
+    "$benchmark_output_dir/foundationdb-cluster-identity-$run_id.json")
+  echo "FOUNDATIONDB_BENCH_SSD_VERIFIED $benchmark_identity"
+fi
 
 if [ "$external_mode" -eq 0 ]; then
   docker cp "$server:/var/fdb/fdb.cluster" "$run_dir/fdb.cluster"
@@ -431,6 +471,18 @@ else
     test_prefix=${MOUNT_RS_FOUNDATIONDB_TEST_PREFIX:-mount-rs/foundationdb-external/$run_id}
   else
     test_prefix="mount-rs/foundationdb/$run_id"
+  fi
+fi
+
+if [ "$run_service_benchmark" -eq 1 ]; then
+  # Keep real provider contracts in this lane, while avoiding unrelated CLI
+  # and N-API builds. Each benchmark invocation owns a separate test process.
+  test_command="set -e; cargo test --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb -- --nocapture && cargo test --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test delegation -- --ignored --nocapture"
+  if [ "$benchmark_prepare_only" -eq 1 ]; then
+    test_command="${test_command} && cargo test --release --locked -p mount-rs-service --features saturation-foundationdb --test quic_tidb_saturation --no-run"
+  else
+    test_command="${test_command} && MOUNT_RS_REMOTE_TIDB_SATURATION_MODES=read MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS=1,2,4,8,16 MOUNT_RS_REMOTE_TIDB_SATURATION_OUTPUT=/artifacts/foundationdb-read.json cargo test --release --locked -p mount-rs-service --features saturation-foundationdb --test quic_tidb_saturation -- --ignored --nocapture --test-threads=1"
+    test_command="${test_command} && MOUNT_RS_REMOTE_TIDB_SATURATION_MODES=read,write MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS=1,2 MOUNT_RS_REMOTE_TIDB_SATURATION_OUTPUT=/artifacts/foundationdb-read-write.json cargo test --release --locked -p mount-rs-service --features saturation-foundationdb --test quic_tidb_saturation -- --ignored --nocapture --test-threads=1"
   fi
 fi
 
@@ -583,7 +635,39 @@ fi
 # environment variable name, never embedded in Docker's argv or the command
 # string shown by process diagnostics. The test command is passed as a
 # positional argument to the container shell for the same reason.
-if [ -n "$rustfs_endpoint" ]; then
+if [ "$run_service_benchmark" -eq 1 ]; then
+  docker run --rm \
+    --platform "$docker_platform" \
+    --network "$network" \
+    --volume "$repo_dir:/workspace:ro" \
+    --volume "$client_fdb_volume" \
+    --volume "$benchmark_output_dir:/artifacts" \
+    --volume "$benchmark_output_dir/build-cache:/tmp/mount-rs-foundationdb-target" \
+    --workdir /workspace \
+    --env MOUNT_RS_REMOTE_SATURATION_PROVIDER=foundationdb \
+    --env CARGO_BUILD_JOBS=2 \
+    --env "MOUNT_RS_FOUNDATIONDB_BENCH_IDENTITY=$benchmark_identity" \
+    --env "MOUNT_RS_FOUNDATIONDB_TOPOLOGY=$topology" \
+    --env MOUNT_RS_REMOTE_TIDB_SATURATION_SECONDS=15 \
+    --env MOUNT_RS_REMOTE_TIDB_SATURATION_WARMUP_SECONDS=3 \
+    --env MOUNT_RS_REMOTE_TIDB_SATURATION_BLOCKS=32 \
+    --env MOUNT_RS_REMOTE_TIDB_SATURATION_MIXED=0 \
+    --env "MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE=/fdb/fdb.cluster" \
+    --env "MOUNT_RS_FOUNDATIONDB_TEST_PREFIX=$test_prefix" \
+    --env LIBRARY_PATH=/fdb \
+    --env LD_LIBRARY_PATH=/fdb \
+    --env RUSTFLAGS=-Lnative=/fdb \
+    --env CARGO_TARGET_DIR=/tmp/mount-rs-foundationdb-target \
+    "$rust_image" sh -c \
+    'export PATH=/usr/local/cargo/bin:$PATH
+     set -e
+     if ! command -v clang >/dev/null 2>&1 || ! ldconfig -p | grep -q libclang; then
+       apt-get update -qq
+       apt-get install -y -qq --no-install-recommends clang libclang-dev >/dev/null
+     fi
+     exec sh -c "$1"' \
+    mount-rs-foundationdb-service-benchmark "$test_command"
+elif [ -n "$rustfs_endpoint" ]; then
   docker run --rm \
     $native_mount_args \
     --platform "$docker_platform" \

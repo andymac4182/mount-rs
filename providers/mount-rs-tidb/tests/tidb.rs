@@ -712,3 +712,95 @@ async fn delegated_directory_authority_fences_old_and_stale_clients() {
             .contains_key(&2)
     );
 }
+
+#[tokio::test]
+#[ignore = "requires an actual TiDB service and MOUNT_RS_TIDB_URL"]
+async fn actual_tidb_conditional_metadata_load() {
+    let url = tidb_url();
+    assert_actual_tidb(&url).await;
+    let key = unique_volume_key();
+    let metadata = TidbMetadataStore::connect_with_options(&url, TidbStorageOptions::new(&key))
+        .await
+        .expect("connect metadata");
+    assert_eq!(
+        metadata.load_if_changed(0).await.unwrap().unwrap().revision,
+        0
+    );
+    let pool = Pool::from_url(&url).unwrap();
+    let mut connection = pool.get_conn().await.unwrap();
+    let namespace = root_namespace().await;
+    let json = serde_json::to_string(&namespace).unwrap();
+    connection
+        .exec_drop(
+            "UPDATE mount_rs_tidb_metadata SET revision=1, namespace=? WHERE volume_key=?",
+            (&json, &key),
+        )
+        .await
+        .unwrap();
+    let changed = metadata.load_if_changed(0).await.unwrap().unwrap();
+    assert_eq!(changed.revision, 1);
+    assert_eq!(
+        serde_json::to_string(&changed.namespace.unwrap()).unwrap(),
+        json
+    );
+    assert!(metadata.load_if_changed(1).await.unwrap().is_none());
+    // An unchanged revision must not transfer or decode the namespace payload.
+    connection
+        .exec_drop(
+            "UPDATE mount_rs_tidb_metadata SET namespace='invalid JSON' WHERE volume_key=?",
+            (&key,),
+        )
+        .await
+        .unwrap();
+    assert!(metadata.load_if_changed(1).await.unwrap().is_none());
+    assert!(metadata.load_if_changed(0).await.is_err());
+    connection
+        .exec_drop(
+            "UPDATE mount_rs_tidb_metadata SET revision=2, namespace=? WHERE volume_key=?",
+            (&json, &key),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        metadata.load_if_changed(1).await.unwrap().unwrap().revision,
+        2
+    );
+    assert_eq!(
+        metadata
+            .load_if_changed(u64::MAX)
+            .await
+            .unwrap()
+            .unwrap()
+            .revision,
+        2
+    );
+    connection
+        .exec_drop(
+            "UPDATE mount_rs_tidb_metadata SET revision=0, namespace=NULL WHERE volume_key=?",
+            (&key,),
+        )
+        .await
+        .unwrap();
+    let uninitialized = metadata.load_if_changed(2).await.unwrap().unwrap();
+    assert_eq!(uninitialized.revision, 0);
+    assert!(uninitialized.namespace.is_none());
+    connection
+        .exec_drop(
+            "UPDATE mount_rs_tidb_metadata SET revision=-1 WHERE volume_key=?",
+            (&key,),
+        )
+        .await
+        .unwrap();
+    assert!(metadata.load_if_changed(2).await.is_err());
+    connection
+        .exec_drop(
+            "DELETE FROM mount_rs_tidb_metadata WHERE volume_key=?",
+            (&key,),
+        )
+        .await
+        .unwrap();
+    assert!(metadata.load_if_changed(2).await.is_err());
+    metadata.close().await.unwrap();
+    drop(connection);
+    pool.disconnect().await.unwrap();
+}

@@ -23,11 +23,11 @@ fn measurement_oracles() {
 mod wire;
 use mount_rs_core::Loopback;
 use mount_rs_remote_protocol::OperationName;
-use mysql_async::{Pool, prelude::Queryable};
+#[path = "support/saturation_backend.rs"]
+mod backend;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeSet,
-    sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 const CLIENTS: usize = 100;
@@ -296,7 +296,7 @@ async fn stage(
     )
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
-#[ignore = "requires actual disposable TiDB; 100 QUIC clients / 10 independent coordinators"]
+#[ignore = "requires disposable provider; 100 QUIC clients / 10 independent coordinators"]
 async fn actual_tidb_100_clients_10_servers_saturation() {
     tokio::time::timeout(Duration::from_secs(1800), packet())
         .await
@@ -304,7 +304,6 @@ async fn actual_tidb_100_clients_10_servers_saturation() {
         .expect("saturation failed");
 }
 async fn packet() -> Result<(), String> {
-    let url = std::env::var("MOUNT_RS_TIDB_URL").expect("MOUNT_RS_TIDB_URL required");
     let depths: Vec<usize> = std::env::var("MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS")
         .unwrap_or("1,2,4,8".into())
         .split(',')
@@ -328,25 +327,6 @@ async fn packet() -> Result<(), String> {
         1,
         60,
     ) as u64);
-    let pool = Pool::from_url(&url).map_err(|_| "invalid TiDB URL (redacted)")?;
-    let mut conn = pool
-        .get_conn()
-        .await
-        .map_err(|_| "identity connection failed (redacted)")?;
-    let (identity, version): (String, String) = conn
-        .query_first("SELECT tidb_version(), VERSION()")
-        .await
-        .map_err(|_| "TiDB identity query failed (redacted)")?
-        .ok_or("missing TiDB identity")?;
-    if !identity.to_ascii_lowercase().contains("release version:")
-        || !version.to_ascii_lowercase().contains("tidb")
-    {
-        return Err("actual TiDB required".into());
-    }
-    drop(conn);
-    pool.disconnect()
-        .await
-        .map_err(|_| "identity disconnect failed")?;
     let key = format!(
         "remote-saturation-{}-{}",
         std::process::id(),
@@ -355,20 +335,21 @@ async fn packet() -> Result<(), String> {
             .unwrap()
             .as_nanos()
     );
+    let backend = backend::Backend::from_environment(&key).await?;
     let (mut servers, mut endpoints, mut dirs, mut providers) = (vec![], vec![], vec![], vec![]);
     let max_depth = *depths.iter().max().unwrap();
     let mut clients = vec![];
     let mut reports = vec![];
     let mut failed_phase = None;
     let mut namespace_bytes = None;
-    let topology = std::env::var("MOUNT_RS_TIDB_TOPOLOGY").ok();
+    let topology = &backend.topology;
     let mut expected: Vec<Vec<(usize, u64)>> =
         vec![(0..blocks).map(|block| (0, block as u64 + 1)).collect(); CLIENTS];
     let work = tokio::time::timeout(Duration::from_secs(1500), async {
         for i in 0..SERVERS {
-            let (fs, m, b) = wire::open(&url, &key, i).await?;
-            let left = Arc::new(fs.clone());
-            providers.push((fs, m, b));
+            let fs = backend.open(i).await?;
+            let left = fs.driver();
+            providers.push(fs);
             let (s, e, d) = wire::setup_with_left(left).await?;
             servers.push(s);
             endpoints.push(e);
@@ -443,11 +424,10 @@ async fn packet() -> Result<(), String> {
         }
         prepared.sort_by_key(|(client, _)| *client);
         clients.extend(prepared.into_iter().map(|(_, c)| c));
-        namespace_bytes = Some(
-            tokio::time::timeout(Duration::from_secs(30), probe_namespace_bytes(&url, &key))
+        namespace_bytes =
+            tokio::time::timeout(Duration::from_secs(30), backend.namespace_bytes())
                 .await
-                .map_err(|_| "namespace size probe deadline exceeded")??,
-        );
+                .map_err(|_| "namespace size probe deadline exceeded")??;
         let mut phase = 0u64;
         for depth in depths {
             for mode in &modes {
@@ -470,11 +450,11 @@ async fn packet() -> Result<(), String> {
                     if !errors.is_empty() {
                         let samples:Vec<&String>=errors.iter().take(8).collect();
                         failed_phase=Some(json!({"report":report,"measured":measured,"failure_count":errors.len(),"timeout_failures":errors.iter().filter(|e|e.contains("request timeout")).count(),"error_samples":samples}));
-                        if measured {eprintln!("TIDB_REMOTE_SATURATION {report}");reports.push(report);}
+                        if measured {eprintln!("REMOTE_PROVIDER_SATURATION {report}");reports.push(report);}
                         return Err(format!("stage failures: count={} samples={samples:?}",errors.len()));
                     }
                     if measured {
-                        eprintln!("TIDB_REMOTE_SATURATION {report}");
+                        eprintln!("REMOTE_PROVIDER_SATURATION {report}");
                         reports.push(report);
                     }
                 }
@@ -514,15 +494,9 @@ async fn packet() -> Result<(), String> {
             }
         }
 
-        for (fs, m, b) in providers {
+        for fs in providers {
             if fs.shutdown().await.is_err() {
                 failures.push("filesystem shutdown failed");
-            }
-            if m.close().await.is_err() {
-                failures.push("metadata close failed");
-            }
-            if b.close().await.is_err() {
-                failures.push("blocks close failed");
             }
         }
         if failures.is_empty() {
@@ -536,7 +510,7 @@ async fn packet() -> Result<(), String> {
     drop(dirs);
     let verification_run = work.is_ok() && cleanup.is_ok();
     let verification = if verification_run {
-        verify(&url, &key, &expected).await
+        verify(&backend, &expected).await
     } else {
         Ok(())
     };
@@ -547,7 +521,7 @@ async fn packet() -> Result<(), String> {
     } else {
         "failed"
     };
-    let artifact = json!({"schema":"mount-rs-tidb-saturation-v1","tidb_identity":identity,"mysql_version":version,"volume_key":key,"dataset_bytes":CLIENTS*blocks*BYTES,"namespace_bytes":namespace_bytes,"topology":topology,"debug_assertions":cfg!(debug_assertions),"build_profile":if cfg!(debug_assertions){"debug"}else{"release"},"warmup_seconds":warmup,"nominal_stage_seconds":seconds,"configured_modes":modes.iter().map(|m|format!("{m:?}")).collect::<Vec<_>>(),"server_active_request_limit_per_connection":32,"audit_logging":"enabled; request audit cost included","latency_histogram":"power-of-two microsecond upper bounds","stages":reports,"failed_phase":failed_phase,"verification_status":verification_status,"verified_files":if verification_status=="passed"{CLIENTS}else{0},"work_error":work.as_ref().err(),"cleanup_error":cleanup.as_ref().err(),"verification_error":verification.as_ref().err()});
+    let artifact = json!({"schema":"mount-rs-provider-saturation-v2","provider":backend.name,"provider_identity":backend.identity,"provider_version":backend.version,"volume_key":key,"dataset_bytes":CLIENTS*blocks*BYTES,"namespace_bytes":namespace_bytes,"topology":topology,"debug_assertions":cfg!(debug_assertions),"build_profile":if cfg!(debug_assertions){"debug"}else{"release"},"warmup_seconds":warmup,"nominal_stage_seconds":seconds,"configured_modes":modes.iter().map(|m|format!("{m:?}")).collect::<Vec<_>>(),"server_active_request_limit_per_connection":32,"audit_logging":"enabled; request audit cost included","latency_histogram":"power-of-two microsecond upper bounds","stages":reports,"failed_phase":failed_phase,"verification_status":verification_status,"verified_files":if verification_status=="passed"{CLIENTS}else{0},"work_error":work.as_ref().err(),"cleanup_error":cleanup.as_ref().err(),"verification_error":verification.as_ref().err()});
     if let Ok(path) = std::env::var("MOUNT_RS_REMOTE_TIDB_SATURATION_OUTPUT") {
         let path = std::path::PathBuf::from(path);
         let bytes = serde_json::to_vec_pretty(&artifact).unwrap();
@@ -564,9 +538,9 @@ async fn packet() -> Result<(), String> {
     cleanup?;
     verification
 }
-async fn verify(url: &str, key: &str, expected: &[Vec<(usize, u64)>]) -> Result<(), String> {
-    let (fs, m, b) = wire::open(url, key, SERVERS).await?;
-    let view = Loopback::new(fs.clone());
+async fn verify(backend: &backend::Backend, expected: &[Vec<(usize, u64)>]) -> Result<(), String> {
+    let fs = backend.open(SERVERS).await?;
+    let view = Loopback::from_arc(fs.driver());
     let verified = tokio::time::timeout(Duration::from_secs(120), async {
         let names: BTreeSet<String> = view
             .readdir("/")
@@ -601,12 +575,6 @@ async fn verify(url: &str, key: &str, expected: &[Vec<(usize, u64)>]) -> Result<
         if fs.shutdown().await.is_err() {
             failures.push("fresh shutdown failed");
         }
-        if m.close().await.is_err() {
-            failures.push("fresh metadata close failed");
-        }
-        if b.close().await.is_err() {
-            failures.push("fresh blocks close failed");
-        }
         if failures.is_empty() {
             Ok(())
         } else {
@@ -618,35 +586,6 @@ async fn verify(url: &str, key: &str, expected: &[Vec<(usize, u64)>]) -> Result<
     closed?;
     verified??;
     Ok(())
-}
-
-// This diagnostic query and its pool lifecycle complete before any warmup/timed work.
-async fn probe_namespace_bytes(url: &str, key: &str) -> Result<u64, String> {
-    let pool = Pool::from_url(url).map_err(|_| "invalid namespace probe URL (redacted)")?;
-    let queried = async {
-        let mut connection = pool
-            .get_conn()
-            .await
-            .map_err(|_| "namespace probe connect failed (redacted)")?;
-        let bytes: Option<Option<u64>> = connection
-            .exec_first(
-                "SELECT OCTET_LENGTH(namespace) FROM mount_rs_tidb_metadata WHERE volume_key=?",
-                (key,),
-            )
-            .await
-            .map_err(|_| "namespace size query failed (redacted)")?;
-        bytes
-            .flatten()
-            .ok_or_else(|| "namespace missing after setup".to_owned())
-    }
-    .await;
-    let closed = pool
-        .disconnect()
-        .await
-        .map_err(|_| "namespace probe disconnect failed (redacted)");
-    let bytes = queried?;
-    closed?;
-    Ok(bytes)
 }
 
 fn seeded_block(client: usize, block: usize) -> Vec<u8> {

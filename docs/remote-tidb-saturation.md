@@ -157,9 +157,10 @@ capacity probe, using a wrapper that accepted only the recorded timeout
 boundary and successful cleanup. This does not turn the overloaded benchmark
 into a passing integrity test.
 
-The initial namespace occupied 866,917 bytes. Source inspection shows two full
-namespace reloads per read in concurrent mode, and TiDB currently uses the
-default unconditional `load_if_changed`. At this namespace size, that transfers
+Before the conditional-load fix, the initial namespace occupied 866,917 bytes.
+Source inspection showed two full namespace reloads per read in concurrent
+mode, with TiDB using the default unconditional `load_if_changed`. At this
+namespace size, that transferred
 approximately 1.65 MiB of namespace text per 4 KiB read (423 times the payload),
 before other SQL and wire costs. At 100,000 Drive reads/s it would imply roughly
 161 GiB/s of namespace text alone. This identifies a structural amplification
@@ -172,3 +173,35 @@ That run is partial overload evidence and skipped final verification; its
 throughput figures are superseded by the unique-data qualification above.
 An initial attempt also lost its Docker containers while reported daemon
 capacity changed; it yielded no valid measured stages and was discarded.
+
+## Conditional TiDB metadata loads
+
+TiDB now overrides `load_if_changed` with a single fresh SQL statement that
+returns the revision and a `CASE` expression. An exact nonzero revision match
+returns SQL NULL for the namespace, avoiding its transfer over the SQL wire,
+JSON decoding, and replacement of the coordinator's validated namespace.
+Both filesystem consistency checks remain enabled. Revision and payload come
+from the same statement snapshot, so a concurrent publication cannot pair a
+new revision with an older payload. Every publication still increments the
+revision using the existing conditional commit.
+
+Revision zero and caller revisions outside signed BIGINT range use the full
+load path. Missing rows and negative stored revisions remain errors. An
+unchanged revision does not detect out-of-band edits that violate the provider
+contract by changing namespace content without incrementing the revision;
+`load` remains unconditional.
+
+The real TiDB regression first failed with the former unconditional load,
+then passed with the fix. It covers initialization, changed and unchanged
+revisions, malformed JSON, oversized caller revisions, negative stored
+revisions, and missing rows. The multi-coordinator provider tests additionally
+exercise visibility and concurrent publication.
+
+This removes the 423-times namespace transfer on reads whose metadata is
+unchanged. It does not establish a physical TiKV read amplification ratio:
+TiDB/TiKV may still fetch internal row data to evaluate the expression. A
+changed revision still transfers the full namespace, so workloads with
+continuous writes retain metadata publication and refresh costs.
+
+See [the four-provider comparison](remote-provider-comparison.md) for the
+matched SQLite, PGlite, FoundationDB, and TiDB workload and remaining costs.

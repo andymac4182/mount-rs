@@ -1,11 +1,8 @@
-//! Opt-in real TiDB workload: ten independent coordinators and 100 wire QUIC clients.
+//! Shared production QUIC wire fixture for provider saturation workloads.
 use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
 
 use async_trait::async_trait;
-use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
 use mount_rs_core::FsDriver;
-
-use mount_rs_tidb::{TidbBlockStore, TidbMetadataStore, TidbStorageOptions};
 
 struct WorkloadAuthenticator;
 use mount_rs_remote_protocol::{
@@ -233,47 +230,4 @@ pub async fn success(
     request(connection, id, drive, name, body)
         .await?
         .map_err(|e| format!("{drive} request {id}: {e}"))
-}
-
-pub type TidbFs = ChunkedFs<TidbMetadataStore, TidbBlockStore>;
-
-pub async fn open(
-    url: &str,
-    key: &str,
-    index: usize,
-) -> Result<(TidbFs, TidbMetadataStore, TidbBlockStore), String> {
-    let options = TidbStorageOptions::new(key).with_durable(true);
-    // Deliberately redact provider errors: a connection error may contain the operator URL.
-    let metadata = TidbMetadataStore::connect_with_options(url, options.clone())
-        .await
-        .map_err(|_| "TiDB metadata connect failed")?;
-    let chunk_options = ChunkedOptions::fixed(format!("remote-tidb-{index}"), 4096)
-        .map_err(|_| "invalid chunk options")?
-        .with_concurrent_writes(true);
-    let blocks = match TidbBlockStore::connect_with_options(url, options).await {
-        Ok(blocks) => blocks,
-        Err(_) => {
-            let closed = metadata.close().await;
-            return Err(if closed.is_ok() {
-                "TiDB blocks connect failed"
-            } else {
-                "TiDB blocks connect failed; metadata cleanup failed"
-            }
-            .into());
-        }
-    };
-    let fs = match ChunkedFs::open(metadata.clone(), blocks.clone(), chunk_options).await {
-        Ok(fs) => fs,
-        Err(_) => {
-            let m = metadata.close().await;
-            let b = blocks.close().await;
-            return Err(if m.is_ok() && b.is_ok() {
-                "TiDB filesystem open failed"
-            } else {
-                "TiDB filesystem open failed; provider cleanup failed"
-            }
-            .into());
-        }
-    };
-    Ok((fs, metadata, blocks))
 }

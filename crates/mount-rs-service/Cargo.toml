@@ -5,6 +5,9 @@ edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
 
+[features]
+saturation-foundationdb = ["mount-rs-sdk/foundationdb"]
+
 [dependencies]
 async-trait = "0.1"
 mount-rs-core = { path = "../.." }
@@ -21,6 +24,7 @@ quinn = { version = "=0.11.12", default-features = false, features = ["runtime-t
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
 [dev-dependencies]
+mount-rs-sdk = { path = "../mount-rs-sdk" }
 mount-rs-chunked = { path = "../../filesystems/mount-rs-chunked" }
 mount-rs-tidb = { path = "../../providers/mount-rs-tidb" }
 mysql_async = { version = "0.37", default-features = false, features = ["minimal-rust"] }

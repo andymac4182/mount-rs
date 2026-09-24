@@ -1,0 +1,27 @@
+{
+  "audit_logging": "enabled; request audit cost included",
+  "build_profile": "release",
+  "cleanup_error": null,
+  "configured_modes": [
+    "Read"
+  ],
+  "dataset_bytes": 13107200,
+  "debug_assertions": false,
+  "failed_phase": null,
+  "latency_histogram": "power-of-two microsecond upper bounds",
+  "namespace_bytes": null,
+  "nominal_stage_seconds": 15,
+  "provider": "pglite",
+  "provider_identity": "owned PGlite 0.5.8, socket 0.2.11, persistent data directory",
+  "provider_version": "see harness package lock",
+  "schema": "mount-rs-provider-saturation-v2",
+  "server_active_request_limit_per_connection": 32,
+  "stages": [],
+  "topology": "single-persistent-pglite",
+  "verification_error": null,
+  "verification_status": "skipped",
+  "verified_files": 0,
+  "volume_key": "remote-saturation-17331-1790234334672568000",
+  "warmup_seconds": 3,
+  "work_error": "setup failures: count=30 samples=[\"left request 2: EIO\", \"left request 2: EIO\", \"left request 2: EIO\", \"left request 2: EIO\", \"left request 2: EIO\", \"left request 2: EIO\", \"left request 2: EIO\", \"left request 2: EIO\"]"
+}
