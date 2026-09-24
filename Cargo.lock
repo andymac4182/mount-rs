@@ -1631,6 +1631,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mount-rs-remote-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "mount-rs-rustfs"
 version = "0.1.0"
 dependencies = [
