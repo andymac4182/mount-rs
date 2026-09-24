@@ -1,5 +1,9 @@
 # 100-client, 10-server TiDB test
 
+For timed 4 KiB read/write throughput ramps, use the
+[saturation benchmark](remote-tidb-saturation.md). This lifecycle test measures
+correctness under concurrency, rather than steady-state storage IOPS.
+
 This opt-in integration gate runs ten distinct QUIC server listeners, each with
 an independently opened filesystem coordinator. All coordinators use the same
 TiDB metadata and block scope. Ten clients per server connect before a shared

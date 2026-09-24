@@ -3,6 +3,11 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      tidb_saturation:
+        description: Run the release-mode TiDB Drive saturation benchmark
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -67,3 +72,23 @@ jobs:
         with:
           name: remote-tidb-scale
           path: remote-tidb-scale.log
+  tidb-saturation:
+    if: github.event_name == 'workflow_dispatch' && inputs.tidb_saturation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697
+      - name: Measure read and write saturation on replicated TiDB
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-remote-tidb-target
+          MOUNT_RS_REMOTE_TIDB_SATURATION_OUTPUT: remote-tidb-saturation.json
+        run: ./scripts/bench-remote-tidb.sh cluster > remote-tidb-saturation.log 2>&1
+      - name: Retain saturation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: remote-tidb-saturation
+          path: |
+            remote-tidb-saturation.log
+            remote-tidb-saturation*.json
