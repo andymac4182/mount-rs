@@ -79,6 +79,13 @@ pub struct GrantDefinition {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct IssuerPolicyDefinition {
+    pub issuer: String,
+    pub audiences: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CatalogSnapshot {
     pub revision: u64,
     pub partitions: BTreeMap<String, PartitionDefinition>,
@@ -109,8 +116,17 @@ impl CatalogSnapshot {
         }
         for (policy_id, policy) in &self.issuer_policies {
             validate_id(policy_id)?;
-            if !policy.is_object() {
-                return Err(CatalogError::Invalid("issuer policy must be an object"));
+            let policy: IssuerPolicyDefinition = serde_json::from_value(policy.clone())
+                .map_err(|_| CatalogError::Invalid("invalid issuer policy shape"))?;
+            if !crate::auth::is_safe_public_https_url(&policy.issuer)
+                || policy.audiences.is_empty()
+                || policy.audiences.len() > 16
+                || policy
+                    .audiences
+                    .iter()
+                    .any(|aud| aud.is_empty() || aud == "*" || aud.len() > 512)
+            {
+                return Err(CatalogError::Invalid("unsafe issuer policy"));
             }
         }
         for (grant_id, grant) in &self.grants {
@@ -124,6 +140,15 @@ impl CatalogSnapshot {
             }
             if grant.drives.is_empty() {
                 return Err(CatalogError::Invalid("grant must name a Drive"));
+            }
+            if !grant.claim_conditions.iter().any(|(path, value)| {
+                !value.is_empty()
+                    && path.starts_with('/')
+                    && !matches!(path.as_str(), "/iss" | "/aud" | "/exp" | "/iat" | "/nbf")
+            }) {
+                return Err(CatalogError::Invalid(
+                    "grant requires a stable workload identity condition",
+                ));
             }
             for drive_id in grant.drives.keys() {
                 if !partition.drives.contains_key(drive_id) {

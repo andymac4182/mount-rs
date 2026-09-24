@@ -78,7 +78,10 @@ async fn grant_cannot_target_missing_drive() {
             drives: BTreeMap::new(),
         },
     );
-    next.issuer_policies.insert("issuer".into(), json!({}));
+    next.issuer_policies.insert(
+        "issuer".into(),
+        json!({"issuer":"https://issuer.example.com","audiences":["mount-rs"]}),
+    );
     next.grants.insert(
         "grant".into(),
         GrantDefinition {
@@ -94,4 +97,52 @@ async fn grant_cannot_target_missing_drive() {
         "invalid catalog: grant Drive does not exist"
     );
     assert_eq!(catalog.load_current().await.unwrap().revision, 0);
+}
+
+#[tokio::test]
+async fn catalog_rejects_grant_without_stable_identity_condition() {
+    let directory = tempfile::tempdir().unwrap();
+    let catalog = SqliteCatalog::open(directory.path().join("catalog.sqlite"))
+        .await
+        .unwrap();
+    let mut next = CatalogSnapshot::empty();
+    next.partitions.insert(
+        "red".into(),
+        PartitionDefinition {
+            drives: BTreeMap::from([(
+                "data".into(),
+                DriveDefinition {
+                    driver: json!({"kind": "memory"}),
+                },
+            )]),
+        },
+    );
+    next.issuer_policies.insert(
+        "issuer".into(),
+        json!({"issuer":"https://issuer.example.com","audiences":["mount-rs"]}),
+    );
+    next.grants.insert(
+        "grant".into(),
+        GrantDefinition {
+            partition_id: "red".into(),
+            policy_id: "issuer".into(),
+            drives: BTreeMap::from([("data".into(), Permission::Read)]),
+            claim_conditions: BTreeMap::new(),
+        },
+    );
+    assert!(catalog.compare_and_swap(0, next).await.is_err());
+}
+
+#[tokio::test]
+async fn catalog_rejects_insecure_issuer_policy() {
+    let directory = tempfile::tempdir().unwrap();
+    let catalog = SqliteCatalog::open(directory.path().join("catalog.sqlite"))
+        .await
+        .unwrap();
+    let mut next = CatalogSnapshot::empty();
+    next.issuer_policies.insert(
+        "unsafe".into(),
+        json!({"issuer":"https://127.0.0.1", "audiences":["mount-rs"]}),
+    );
+    assert!(catalog.compare_and_swap(0, next).await.is_err());
 }
