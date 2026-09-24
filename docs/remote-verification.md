@@ -138,3 +138,5 @@ opt-in soak is executed separately. Existing Unix socket tests required running
 outside the Codex filesystem sandbox. Hosted Linux/macOS CI and the new Linux
 proof job have not been executed for this change; configured jobs are not hosted
 qualification results.
+
+For the actual TiDB 100-client/10-server gate, see [TiDB scale testing](remote-tidb-load.md).

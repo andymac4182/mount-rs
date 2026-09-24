@@ -21,6 +21,9 @@ quinn = { version = "=0.11.12", default-features = false, features = ["runtime-t
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
 [dev-dependencies]
+mount-rs-chunked = { path = "../../filesystems/mount-rs-chunked" }
+mount-rs-tidb = { path = "../../providers/mount-rs-tidb" }
+mysql_async = { version = "0.37", default-features = false, features = ["minimal-rust"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
 mount-rs-memfs = { path = "../../filesystems/mount-rs-memfs" }

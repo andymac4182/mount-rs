@@ -50,3 +50,20 @@ jobs:
           args: '-p mount-rs-service --harness remote_handle_admission_is_fenced_and_bounded'
       - name: Verify each remote decision separately
         run: ./scripts/verify-remote-formal
+  tidb-scale:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697
+      - name: Run 100 clients against 10 servers on replicated TiDB
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-remote-tidb-target
+        run: ./scripts/test-remote-tidb.sh cluster > remote-tidb-scale.log 2>&1
+      - name: Retain TiDB scale evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: remote-tidb-scale
+          path: remote-tidb-scale.log
