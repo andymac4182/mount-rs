@@ -1,0 +1,25 @@
+{
+  "schema": "mount-rs-inode-formal-result-v1",
+  "date": "2026-09-24",
+  "kani_version": "0.68.0",
+  "cbmc_version": "6.11.0",
+  "package": "mount-rs-core",
+  "harness": "inode_publication_preserves_structural_attributes",
+  "command": "cargo-shared kani -p mount-rs-core --harness inode_publication_preserves_structural_attributes",
+  "failed_checks": 0,
+  "checks": 197,
+  "covers_satisfied": 4,
+  "covers": 4,
+  "verification_seconds": 0.19903916,
+  "unwind": 24,
+  "domain": "Full-range arbitrary Stats pairs; nonzero inode; symbolic file-data-kind flags; actual production attribute eligibility helper",
+  "excluded": [
+    "node construction",
+    "chunker and extent validation",
+    "error paths",
+    "provider transactions",
+    "concurrency",
+    "crash and power loss durability"
+  ],
+  "earlier_full_validator_attempt": "Stopped without a result after expensive heap/error paths"
+}

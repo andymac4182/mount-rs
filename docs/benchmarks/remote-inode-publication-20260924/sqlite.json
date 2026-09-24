@@ -1,0 +1,2031 @@
+{
+  "audit_logging": "enabled; request audit cost included",
+  "build_profile": "release",
+  "cleanup_error": null,
+  "configured_modes": [
+    "Read",
+    "Write"
+  ],
+  "dataset_bytes": 13107200,
+  "debug_assertions": false,
+  "failed_phase": null,
+  "inode_updates": true,
+  "latency_histogram": "power-of-two microsecond upper bounds",
+  "namespace_bytes": null,
+  "nominal_stage_seconds": 15,
+  "provider": "sqlite",
+  "provider_identity": "embedded SQLite, local filesystem",
+  "provider_version": "3.51.3",
+  "schema": "mount-rs-provider-saturation-v2",
+  "server_active_request_limit_per_connection": 32,
+  "stages": [
+    {
+      "cache": "cache-warm randomized dataset; no cold-cache claim",
+      "clients": 100,
+      "elapsed_seconds_including_drain": 15.013706167,
+      "failures": 0,
+      "finish_unix_ms": 1790245634094,
+      "io_profile": {
+        "entries": [
+          {
+            "calls": 162478,
+            "elapsed_ns": 2511385496,
+            "name": "wire.json_encode_bytes",
+            "units": 1204749578
+          },
+          {
+            "calls": 162478,
+            "elapsed_ns": 6122255726,
+            "name": "wire.json_decode_bytes",
+            "units": 1204749578
+          },
+          {
+            "calls": 81239,
+            "elapsed_ns": 81454276584,
+            "name": "catalog.load",
+            "units": 0
+          },
+          {
+            "calls": 81239,
+            "elapsed_ns": 1299451259,
+            "name": "catalog.queue_wait",
+            "units": 0
+          },
+          {
+            "calls": 81239,
+            "elapsed_ns": 248300752,
+            "name": "catalog.pool_wait",
+            "units": 0
+          },
+          {
+            "calls": 162478,
+            "elapsed_ns": 76985002519,
+            "name": "catalog.backing_verify",
+            "units": 0
+          },
+          {
+            "calls": 81239,
+            "elapsed_ns": 1104288801,
+            "name": "catalog.query_document_bytes",
+            "units": 38507286
+          },
+          {
+            "calls": 81239,
+            "elapsed_ns": 558628309,
+            "name": "catalog.decode_validate_bytes",
+            "units": 38507286
+          },
+          {
+            "calls": 81239,
+            "elapsed_ns": 0,
+            "name": "catalog.pager_hits",
+            "units": 162478
+          },
+          {
+            "calls": 81239,
+            "elapsed_ns": 0,
+            "name": "catalog.pager_misses",
+            "units": 0
+          },
+          {
+            "calls": 81239,
+            "elapsed_ns": 0,
+            "name": "catalog.pager_writes",
+            "units": 0
+          },
+          {
+            "calls": 81239,
+            "elapsed_ns": 1284866147264,
+            "name": "service.dispatch",
+            "units": 0
+          },
+          {
+            "calls": 81239,
+            "elapsed_ns": 81677589457,
+            "name": "service.authorization",
+            "units": 0
+          },
+          {
+            "calls": 81239,
+            "elapsed_ns": 7120107,
+            "name": "service.handle_lock_wait",
+            "units": 0
+          },
+          {
+            "calls": 81239,
+            "elapsed_ns": 1378355921,
+            "name": "service.audit",
+            "units": 0
+          },
+          {
+            "calls": 162478,
+            "elapsed_ns": 1065365684569,
+            "name": "filesystem.gate_wait",
+            "units": 0
+          },
+          {
+            "calls": 81239,
+            "elapsed_ns": 2387451227,
+            "name": "provider.blocks.get_bytes",
+            "units": 332754944
+          },
+          {
+            "calls": 162478,
+            "elapsed_ns": 132549240926,
+            "name": "provider.inode.load_if_changed",
+            "units": 0
+          }
+        ]
+      },
+      "mode": "Read",
+      "nominal_seconds": 15,
+      "payload_mib_per_second": 21.136676062537465,
+      "per_client_depth": 1,
+      "read": {
+        "completed": 81239,
+        "p50_us_upper": 32768,
+        "p95_us_upper": 32768,
+        "p99_us_upper": 32768
+      },
+      "read_iops": 5410.989072009591,
+      "reference_target_iops": 100000,
+      "resources": {
+        "block_inputs": 0,
+        "block_outputs": 0,
+        "cpu_system_us": 104758688,
+        "cpu_user_us": 22638651,
+        "involuntary_context_switches": 6323427,
+        "lifetime_peak_rss_bytes": 317374464,
+        "major_faults": 0,
+        "minor_faults": 13,
+        "quic_client_side": {
+          "congestion_events": 0,
+          "lost_bytes": 0,
+          "lost_packets": 0,
+          "rx_bytes": 1222704811,
+          "rx_datagrams": 913687,
+          "rx_ios": 913687,
+          "sent_packets": 350606,
+          "tx_bytes": 24647004,
+          "tx_datagrams": 350606,
+          "tx_ios": 350606
+        },
+        "rss_end_bytes": 267042816,
+        "rss_start_bytes": 317161472,
+        "rust_allocated_bytes": 62207239386,
+        "rust_allocations": 16148720,
+        "rust_allocator_instrumented": true,
+        "rust_deallocations": 16148732,
+        "rust_freed_bytes": 62207388638,
+        "rust_live_end_bytes": 17883897,
+        "rust_live_start_bytes": 18033149,
+        "rust_reallocations": 2762131,
+        "schema": "mount-rs-process-resource-v1",
+        "scope": "one process includes clients, servers, verification and background; System Rust allocations exclude foreign C allocators; QUIC UDP bytes exclude IP/UDP headers; atomic allocator instrumentation affects throughput",
+        "sqlite_heap_end_bytes": 15874400,
+        "sqlite_heap_lifetime_peak_bytes": 15905152,
+        "sqlite_heap_start_bytes": 15874400,
+        "voluntary_context_switches": 5719
+      },
+      "servers": 10,
+      "sqlite_io_begin": {
+        "connections": [
+          {
+            "connection_id": 1,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 22979,
+              "cache_misses": 700,
+              "cache_spills": 0,
+              "page_writes": 1350
+            },
+            "pager_read_bytes_estimate": 2867200,
+            "pager_write_bytes_estimate": 5529600,
+            "sql_categories": {
+              "BEGIN": 83,
+              "COMMIT": 24,
+              "DELETE": 11,
+              "INSERT": 793,
+              "OTHER": 13,
+              "PRAGMA": 53,
+              "ROLLBACK": 56,
+              "SELECT": 3442,
+              "UPDATE": 25
+            },
+            "sql_statements": 4500
+          },
+          {
+            "connection_id": 2,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 13925,
+              "cache_misses": 321,
+              "cache_spills": 0,
+              "page_writes": 1566
+            },
+            "pager_read_bytes_estimate": 1314816,
+            "pager_write_bytes_estimate": 6414336,
+            "sql_categories": {
+              "BEGIN": 322,
+              "COMMIT": 322,
+              "INSERT": 325,
+              "PRAGMA": 2,
+              "SELECT": 2011
+            },
+            "sql_statements": 2982
+          },
+          {
+            "connection_id": 3,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 19531,
+              "cache_misses": 563,
+              "cache_spills": 0,
+              "page_writes": 552
+            },
+            "pager_read_bytes_estimate": 2306048,
+            "pager_write_bytes_estimate": 2260992,
+            "sql_categories": {
+              "BEGIN": 84,
+              "COMMIT": 21,
+              "DELETE": 10,
+              "INSERT": 515,
+              "OTHER": 2,
+              "PRAGMA": 56,
+              "ROLLBACK": 61,
+              "SELECT": 3433,
+              "UPDATE": 21
+            },
+            "sql_statements": 4203
+          },
+          {
+            "connection_id": 4,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 13453,
+              "cache_misses": 314,
+              "cache_spills": 0,
+              "page_writes": 1461
+            },
+            "pager_read_bytes_estimate": 1286144,
+            "pager_write_bytes_estimate": 5984256,
+            "sql_categories": {
+              "BEGIN": 321,
+              "COMMIT": 321,
+              "INSERT": 321,
+              "PRAGMA": 2,
+              "SELECT": 2004,
+              "UPDATE": 3
+            },
+            "sql_statements": 2972
+          },
+          {
+            "connection_id": 5,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 20904,
+              "cache_misses": 429,
+              "cache_spills": 0,
+              "page_writes": 719
+            },
+            "pager_read_bytes_estimate": 1757184,
+            "pager_write_bytes_estimate": 2945024,
+            "sql_categories": {
+              "BEGIN": 86,
+              "COMMIT": 21,
+              "DELETE": 10,
+              "INSERT": 587,
+              "OTHER": 2,
+              "PRAGMA": 61,
+              "ROLLBACK": 64,
+              "SELECT": 3534,
+              "UPDATE": 21
+            },
+            "sql_statements": 4386
+          },
+          {
+            "connection_id": 6,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 15863,
+              "cache_misses": 414,
+              "cache_spills": 0,
+              "page_writes": 3041
+            },
+            "pager_read_bytes_estimate": 1695744,
+            "pager_write_bytes_estimate": 12455936,
+            "sql_categories": {
+              "BEGIN": 641,
+              "COMMIT": 641,
+              "INSERT": 641,
+              "PRAGMA": 2,
+              "SELECT": 2370,
+              "UPDATE": 3
+            },
+            "sql_statements": 4298
+          },
+          {
+            "connection_id": 7,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 23056,
+              "cache_misses": 944,
+              "cache_spills": 0,
+              "page_writes": 1420
+            },
+            "pager_read_bytes_estimate": 3866624,
+            "pager_write_bytes_estimate": 5816320,
+            "sql_categories": {
+              "BEGIN": 72,
+              "COMMIT": 21,
+              "DELETE": 10,
+              "INSERT": 904,
+              "OTHER": 2,
+              "PRAGMA": 50,
+              "ROLLBACK": 46,
+              "SELECT": 3384,
+              "UPDATE": 21
+            },
+            "sql_statements": 4510
+          },
+          {
+            "connection_id": 8,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 13617,
+              "cache_misses": 307,
+              "cache_spills": 0,
+              "page_writes": 1528
+            },
+            "pager_read_bytes_estimate": 1257472,
+            "pager_write_bytes_estimate": 6258688,
+            "sql_categories": {
+              "BEGIN": 321,
+              "COMMIT": 321,
+              "INSERT": 321,
+              "PRAGMA": 2,
+              "SELECT": 1978,
+              "UPDATE": 3
+            },
+            "sql_statements": 2946
+          },
+          {
+            "connection_id": 9,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 16814,
+              "cache_misses": 173,
+              "cache_spills": 0,
+              "page_writes": 120
+            },
+            "pager_read_bytes_estimate": 708608,
+            "pager_write_bytes_estimate": 491520,
+            "sql_categories": {
+              "BEGIN": 68,
+              "COMMIT": 21,
+              "DELETE": 10,
+              "INSERT": 146,
+              "OTHER": 2,
+              "PRAGMA": 51,
+              "ROLLBACK": 47,
+              "SELECT": 3385,
+              "UPDATE": 21
+            },
+            "sql_statements": 3751
+          },
+          {
+            "connection_id": 10,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 15031,
+              "cache_misses": 279,
+              "cache_spills": 0,
+              "page_writes": 2910
+            },
+            "pager_read_bytes_estimate": 1142784,
+            "pager_write_bytes_estimate": 11919360,
+            "sql_categories": {
+              "BEGIN": 641,
+              "COMMIT": 641,
+              "INSERT": 641,
+              "PRAGMA": 2,
+              "SELECT": 2296,
+              "UPDATE": 3
+            },
+            "sql_statements": 4224
+          },
+          {
+            "connection_id": 11,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 21133,
+              "cache_misses": 414,
+              "cache_spills": 0,
+              "page_writes": 734
+            },
+            "pager_read_bytes_estimate": 1695744,
+            "pager_write_bytes_estimate": 3006464,
+            "sql_categories": {
+              "BEGIN": 81,
+              "COMMIT": 21,
+              "DELETE": 10,
+              "INSERT": 646,
+              "OTHER": 2,
+              "PRAGMA": 55,
+              "ROLLBACK": 60,
+              "SELECT": 3523,
+              "UPDATE": 21
+            },
+            "sql_statements": 4419
+          },
+          {
+            "connection_id": 12,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 13881,
+              "cache_misses": 335,
+              "cache_spills": 0,
+              "page_writes": 1803
+            },
+            "pager_read_bytes_estimate": 1372160,
+            "pager_write_bytes_estimate": 7385088,
+            "sql_categories": {
+              "BEGIN": 385,
+              "COMMIT": 385,
+              "INSERT": 385,
+              "PRAGMA": 2,
+              "SELECT": 2111,
+              "UPDATE": 3
+            },
+            "sql_statements": 3271
+          },
+          {
+            "connection_id": 13,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 19419,
+              "cache_misses": 507,
+              "cache_spills": 0,
+              "page_writes": 528
+            },
+            "pager_read_bytes_estimate": 2076672,
+            "pager_write_bytes_estimate": 2162688,
+            "sql_categories": {
+              "BEGIN": 90,
+              "COMMIT": 21,
+              "DELETE": 10,
+              "INSERT": 485,
+              "OTHER": 2,
+              "PRAGMA": 63,
+              "ROLLBACK": 67,
+              "SELECT": 3469,
+              "UPDATE": 21
+            },
+            "sql_statements": 4228
+          },
+          {
+            "connection_id": 14,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 15786,
+              "cache_misses": 481,
+              "cache_spills": 0,
+              "page_writes": 3279
+            },
+            "pager_read_bytes_estimate": 1970176,
+            "pager_write_bytes_estimate": 13430784,
+            "sql_categories": {
+              "BEGIN": 673,
+              "COMMIT": 673,
+              "INSERT": 673,
+              "PRAGMA": 2,
+              "SELECT": 2371,
+              "UPDATE": 3
+            },
+            "sql_statements": 4395
+          },
+          {
+            "connection_id": 15,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 19319,
+              "cache_misses": 425,
+              "cache_spills": 0,
+              "page_writes": 592
+            },
+            "pager_read_bytes_estimate": 1740800,
+            "pager_write_bytes_estimate": 2424832,
+            "sql_categories": {
+              "BEGIN": 76,
+              "COMMIT": 21,
+              "DELETE": 10,
+              "INSERT": 402,
+              "OTHER": 2,
+              "PRAGMA": 52,
+              "ROLLBACK": 52,
+              "SELECT": 3432,
+              "UPDATE": 21
+            },
+            "sql_statements": 4068
+          },
+          {
+            "connection_id": 16,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 13570,
+              "cache_misses": 294,
+              "cache_spills": 0,
+              "page_writes": 1532
+            },
+            "pager_read_bytes_estimate": 1204224,
+            "pager_write_bytes_estimate": 6275072,
+            "sql_categories": {
+              "BEGIN": 321,
+              "COMMIT": 321,
+              "INSERT": 321,
+              "PRAGMA": 2,
+              "SELECT": 2003,
+              "UPDATE": 3
+            },
+            "sql_statements": 2971
+          },
+          {
+            "connection_id": 17,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 18869,
+              "cache_misses": 301,
+              "cache_spills": 0,
+              "page_writes": 355
+            },
+            "pager_read_bytes_estimate": 1232896,
+            "pager_write_bytes_estimate": 1454080,
+            "sql_categories": {
+              "BEGIN": 70,
+              "COMMIT": 21,
+              "DELETE": 10,
+              "INSERT": 418,
+              "OTHER": 2,
+              "PRAGMA": 49,
+              "ROLLBACK": 47,
+              "SELECT": 3463,
+              "UPDATE": 21
+            },
+            "sql_statements": 4101
+          },
+          {
+            "connection_id": 18,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 13561,
+              "cache_misses": 272,
+              "cache_spills": 0,
+              "page_writes": 1625
+            },
+            "pager_read_bytes_estimate": 1114112,
+            "pager_write_bytes_estimate": 6656000,
+            "sql_categories": {
+              "BEGIN": 353,
+              "COMMIT": 353,
+              "INSERT": 353,
+              "PRAGMA": 2,
+              "SELECT": 2050,
+              "UPDATE": 3
+            },
+            "sql_statements": 3114
+          },
+          {
+            "connection_id": 19,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 17846,
+              "cache_misses": 231,
+              "cache_spills": 0,
+              "page_writes": 148
+            },
+            "pager_read_bytes_estimate": 946176,
+            "pager_write_bytes_estimate": 606208,
+            "sql_categories": {
+              "BEGIN": 69,
+              "COMMIT": 21,
+              "DELETE": 10,
+              "INSERT": 266,
+              "OTHER": 2,
+              "PRAGMA": 52,
+              "ROLLBACK": 47,
+              "SELECT": 3492,
+              "UPDATE": 21
+            },
+            "sql_statements": 3980
+          },
+          {
+            "connection_id": 20,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 15673,
+              "cache_misses": 295,
+              "cache_spills": 0,
+              "page_writes": 3078
+            },
+            "pager_read_bytes_estimate": 1208320,
+            "pager_write_bytes_estimate": 12607488,
+            "sql_categories": {
+              "BEGIN": 673,
+              "COMMIT": 673,
+              "INSERT": 673,
+              "PRAGMA": 2,
+              "SELECT": 2382,
+              "UPDATE": 3
+            },
+            "sql_statements": 4406
+          }
+        ],
+        "sql_statements": 77725
+      },
+      "sqlite_io_end": {
+        "connections": [
+          {
+            "connection_id": 1,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 80470,
+              "cache_misses": 0,
+              "cache_spills": 0,
+              "page_writes": 0
+            },
+            "pager_read_bytes_estimate": 0,
+            "pager_write_bytes_estimate": 0,
+            "sql_categories": {
+              "PRAGMA": 0,
+              "SELECT": 16094
+            },
+            "sql_statements": 16094
+          },
+          {
+            "connection_id": 2,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 56329,
+              "cache_misses": 0,
+              "cache_spills": 0,
+              "page_writes": 0
+            },
+            "pager_read_bytes_estimate": 0,
+            "pager_write_bytes_estimate": 0,
+            "sql_categories": {
+              "PRAGMA": 0,
+              "SELECT": 8047
+            },
+            "sql_statements": 8047
+          },
+          {
+            "connection_id": 3,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 81880,
+              "cache_misses": 0,
+              "cache_spills": 0,
+              "page_writes": 0
+            },
+            "pager_read_bytes_estimate": 0,
+            "pager_write_bytes_estimate": 0,
+            "sql_categories": {
+              "PRAGMA": 0,
+              "SELECT": 16376
+            },
+            "sql_statements": 16376
+          },
+          {
+            "connection_id": 4,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 57316,
+              "cache_misses": 0,
+              "cache_spills": 0,
+              "page_writes": 0
+            },
+            "pager_read_bytes_estimate": 0,
+            "pager_write_bytes_estimate": 0,
+            "sql_categories": {
+              "PRAGMA": 0,
+              "SELECT": 8188
+            },
+            "sql_statements": 8188
+          },
+          {
+            "connection_id": 5,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 81800,
+              "cache_misses": 0,
+              "cache_spills": 0,
+              "page_writes": 0
+            },
+            "pager_read_bytes_estimate": 0,
+            "pager_write_bytes_estimate": 0,
+            "sql_categories": {
+              "PRAGMA": 0,
+              "SELECT": 16360
+            },
+            "sql_statements": 16360
+          },
+          {
+            "connection_id": 6,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 57260,
+              "cache_misses": 0,
+              "cache_spills": 0,
+              "page_writes": 0
+            },
+            "pager_read_bytes_estimate": 0,
+            "pager_write_bytes_estimate": 0,
+            "sql_categories": {
+              "PRAGMA": 0,
+              "SELECT": 8180
+            },
+            "sql_statements": 8180
+          },
+          {
+            "connection_id": 7,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 80960,
+              "cache_misses": 0,
+              "cache_spills": 0,
+              "page_writes": 0
+            },
+            "pager_read_bytes_estimate": 0,
+            "pager_write_bytes_estimate": 0,
+            "sql_categories": {
+              "PRAGMA": 0,
+              "SELECT": 16192
+            },
+            "sql_statements": 16192
+          },
+          {
+            "connection_id": 8,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 56672,
+              "cache_misses": 0,
+              "cache_spills": 0,
+              "page_writes": 0
+            },
+            "pager_read_bytes_estimate": 0,
+            "pager_write_bytes_estimate": 0,
+            "sql_categories": {
+              "PRAGMA": 0,
+              "SELECT": 8096
+            },
+            "sql_statements": 8096
+          },
+          {
+            "connection_id": 9,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 80450,
+              "cache_misses": 0,
+              "cache_spills": 0,
+              "page_writes": 0
+            },
+            "pager_read_bytes_estimate": 0,
+            "pager_write_bytes_estimate": 0,
+            "sql_categories": {
+              "PRAGMA": 0,
+              "SELECT": 16090
+            },
+            "sql_statements": 16090
+          },
+          {
+            "connection_id": 10,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 56315,
+              "cache_misses": 0,
+              "cache_spills": 0,
+              "page_writes": 0
+            },
+            "pager_read_bytes_estimate": 0,
+            "pager_write_bytes_estimate": 0,
+            "sql_categories": {
+              "PRAGMA": 0,
+              "SELECT": 8045
+            },
+            "sql_statements": 8045
+          },
+          {
+            "connection_id": 11,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 81780,
+              "cache_misses": 0,
+              "cache_spills": 0,
+              "page_writes": 0
+            },
+            "pager_read_bytes_estimate": 0,
+            "pager_write_bytes_estimate": 0,
+            "sql_categories": {
+              "PRAGMA": 0,
+              "SELECT": 16356
+            },
+            "sql_statements": 16356
+          },
+          {
+            "connection_id": 12,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 57246,
+              "cache_misses": 0,
+              "cache_spills": 0,
+              "page_writes": 0
+            },
+            "pager_read_bytes_estimate": 0,
+            "pager_write_bytes_estimate": 0,
+            "sql_categories": {
+              "PRAGMA": 0,
+              "SELECT": 8178
+            },
+            "sql_statements": 8178
+          },
+          {
+            "connection_id": 13,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 80700,
+              "cache_misses": 0,
+              "cache_spills": 0,
+              "page_writes": 0
+            },
+            "pager_read_bytes_estimate": 0,
+            "pager_write_bytes_estimate": 0,
+            "sql_categories": {
+              "PRAGMA": 0,
+              "SELECT": 16140
+            },
+            "sql_statements": 16140
+          },
+          {
+            "connection_id": 14,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 56490,
+              "cache_misses": 0,
+              "cache_spills": 0,
+              "page_writes": 0
+            },
+            "pager_read_bytes_estimate": 0,
+            "pager_write_bytes_estimate": 0,
+            "sql_categories": {
+              "PRAGMA": 0,
+              "SELECT": 8070
+            },
+            "sql_statements": 8070
+          },
+          {
+            "connection_id": 15,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 81840,
+              "cache_misses": 0,
+              "cache_spills": 0,
+              "page_writes": 0
+            },
+            "pager_read_bytes_estimate": 0,
+            "pager_write_bytes_estimate": 0,
+            "sql_categories": {
+              "PRAGMA": 0,
+              "SELECT": 16368
+            },
+            "sql_statements": 16368
+          },
+          {
+            "connection_id": 16,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 57288,
+              "cache_misses": 0,
+              "cache_spills": 0,
+              "page_writes": 0
+            },
+            "pager_read_bytes_estimate": 0,
+            "pager_write_bytes_estimate": 0,
+            "sql_categories": {
+              "PRAGMA": 0,
+              "SELECT": 8184
+            },
+            "sql_statements": 8184
+          },
+          {
+            "connection_id": 17,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 80920,
+              "cache_misses": 0,
+              "cache_spills": 0,
+              "page_writes": 0
+            },
+            "pager_read_bytes_estimate": 0,
+            "pager_write_bytes_estimate": 0,
+            "sql_categories": {
+              "PRAGMA": 0,
+              "SELECT": 16184
+            },
+            "sql_statements": 16184
+          },
+          {
+            "connection_id": 18,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 56644,
+              "cache_misses": 0,
+              "cache_spills": 0,
+              "page_writes": 0
+            },
+            "pager_read_bytes_estimate": 0,
+            "pager_write_bytes_estimate": 0,
+            "sql_categories": {
+              "PRAGMA": 0,
+              "SELECT": 8092
+            },
+            "sql_statements": 8092
+          },
+          {
+            "connection_id": 19,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 81590,
+              "cache_misses": 0,
+              "cache_spills": 0,
+              "page_writes": 0
+            },
+            "pager_read_bytes_estimate": 0,
+            "pager_write_bytes_estimate": 0,
+            "sql_categories": {
+              "PRAGMA": 0,
+              "SELECT": 16318
+            },
+            "sql_statements": 16318
+          },
+          {
+            "connection_id": 20,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 57113,
+              "cache_misses": 0,
+              "cache_spills": 0,
+              "page_writes": 0
+            },
+            "pager_read_bytes_estimate": 0,
+            "pager_write_bytes_estimate": 0,
+            "sql_categories": {
+              "PRAGMA": 0,
+              "SELECT": 8159
+            },
+            "sql_statements": 8159
+          }
+        ],
+        "sql_statements": 243717
+      },
+      "start_unix_ms": 1790245619081,
+      "target_attainment": 0.05410989072009591,
+      "total_iops": 5410.989072009591,
+      "total_queue_depth": 100,
+      "write": {
+        "completed": 0,
+        "p50_us_upper": 0,
+        "p95_us_upper": 0,
+        "p99_us_upper": 0
+      },
+      "write_iops": 0.0
+    },
+    {
+      "cache": "cache-warm randomized dataset; no cold-cache claim",
+      "clients": 100,
+      "elapsed_seconds_including_drain": 15.170654792,
+      "failures": 0,
+      "finish_unix_ms": 1790245652488,
+      "io_profile": {
+        "entries": [
+          {
+            "calls": 20658,
+            "elapsed_ns": 267502085,
+            "name": "wire.json_encode_bytes",
+            "units": 153116714
+          },
+          {
+            "calls": 20658,
+            "elapsed_ns": 649476704,
+            "name": "wire.json_decode_bytes",
+            "units": 153116714
+          },
+          {
+            "calls": 10329,
+            "elapsed_ns": 1613692536,
+            "name": "catalog.load",
+            "units": 0
+          },
+          {
+            "calls": 10329,
+            "elapsed_ns": 79375395,
+            "name": "catalog.queue_wait",
+            "units": 0
+          },
+          {
+            "calls": 10329,
+            "elapsed_ns": 102165489,
+            "name": "catalog.pool_wait",
+            "units": 0
+          },
+          {
+            "calls": 20658,
+            "elapsed_ns": 1154870651,
+            "name": "catalog.backing_verify",
+            "units": 0
+          },
+          {
+            "calls": 10329,
+            "elapsed_ns": 103605427,
+            "name": "catalog.query_document_bytes",
+            "units": 4895946
+          },
+          {
+            "calls": 10329,
+            "elapsed_ns": 69942590,
+            "name": "catalog.decode_validate_bytes",
+            "units": 4895946
+          },
+          {
+            "calls": 10329,
+            "elapsed_ns": 0,
+            "name": "catalog.pager_hits",
+            "units": 20658
+          },
+          {
+            "calls": 10329,
+            "elapsed_ns": 0,
+            "name": "catalog.pager_misses",
+            "units": 0
+          },
+          {
+            "calls": 10329,
+            "elapsed_ns": 0,
+            "name": "catalog.pager_writes",
+            "units": 0
+          },
+          {
+            "calls": 10329,
+            "elapsed_ns": 1502307613132,
+            "name": "service.dispatch",
+            "units": 0
+          },
+          {
+            "calls": 10329,
+            "elapsed_ns": 1637074653,
+            "name": "service.authorization",
+            "units": 0
+          },
+          {
+            "calls": 10329,
+            "elapsed_ns": 568003,
+            "name": "service.handle_lock_wait",
+            "units": 0
+          },
+          {
+            "calls": 10329,
+            "elapsed_ns": 6195097545,
+            "name": "service.audit",
+            "units": 0
+          },
+          {
+            "calls": 10428,
+            "elapsed_ns": 68347976594,
+            "name": "provider.blocks.put_bytes",
+            "units": 42713088
+          },
+          {
+            "calls": 10428,
+            "elapsed_ns": 46044134,
+            "name": "provider.blocks.flush",
+            "units": 0
+          },
+          {
+            "calls": 10428,
+            "elapsed_ns": 5648037224,
+            "name": "provider.blocks.verify_authority",
+            "units": 0
+          },
+          {
+            "calls": 10428,
+            "elapsed_ns": 1418335166,
+            "name": "provider.inode.load_if_changed",
+            "units": 0
+          },
+          {
+            "calls": 10428,
+            "elapsed_ns": 78150520256,
+            "name": "provider.inode.publish_cas",
+            "units": 0
+          },
+          {
+            "calls": 99,
+            "elapsed_ns": 0,
+            "name": "provider.inode.cas_conflict",
+            "units": 99
+          },
+          {
+            "calls": 10329,
+            "elapsed_ns": 0,
+            "name": "provider.inode_returned_bytes",
+            "units": 45767178
+          },
+          {
+            "calls": 10329,
+            "elapsed_ns": 0,
+            "name": "provider.inode_serialized_bytes",
+            "units": 45767178
+          }
+        ]
+      },
+      "mode": "Write",
+      "nominal_seconds": 15,
+      "payload_mib_per_second": 2.6595856805914986,
+      "per_client_depth": 1,
+      "read": {
+        "completed": 0,
+        "p50_us_upper": 0,
+        "p95_us_upper": 0,
+        "p99_us_upper": 0
+      },
+      "read_iops": 0.0,
+      "reference_target_iops": 100000,
+      "resources": {
+        "block_inputs": 0,
+        "block_outputs": 0,
+        "cpu_system_us": 11886957,
+        "cpu_user_us": 3315804,
+        "involuntary_context_switches": 380258,
+        "lifetime_peak_rss_bytes": 317374464,
+        "major_faults": 0,
+        "minor_faults": 79,
+        "quic_client_side": {
+          "congestion_events": 0,
+          "lost_bytes": 0,
+          "lost_packets": 0,
+          "rx_bytes": 1665158,
+          "rx_datagrams": 25094,
+          "rx_ios": 25094,
+          "sent_packets": 115938,
+          "tx_bytes": 156195982,
+          "tx_datagrams": 115938,
+          "tx_ios": 115938
+        },
+        "rss_end_bytes": 126320640,
+        "rss_start_bytes": 187940864,
+        "rust_allocated_bytes": 8447363260,
+        "rust_allocations": 3845288,
+        "rust_allocator_instrumented": true,
+        "rust_deallocations": 3845217,
+        "rust_freed_bytes": 8446472204,
+        "rust_live_end_bytes": 19591265,
+        "rust_live_start_bytes": 18700209,
+        "rust_reallocations": 529212,
+        "schema": "mount-rs-process-resource-v1",
+        "scope": "one process includes clients, servers, verification and background; System Rust allocations exclude foreign C allocators; QUIC UDP bytes exclude IP/UDP headers; atomic allocator instrumentation affects throughput",
+        "sqlite_heap_end_bytes": 8670560,
+        "sqlite_heap_lifetime_peak_bytes": 15905152,
+        "sqlite_heap_start_bytes": 8680800,
+        "voluntary_context_switches": 117017
+      },
+      "servers": 10,
+      "sqlite_io_begin": {
+        "connections": [
+          {
+            "connection_id": 1,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 81905,
+              "cache_misses": 951,
+              "cache_spills": 0,
+              "page_writes": 472
+            },
+            "pager_read_bytes_estimate": 3895296,
+            "pager_write_bytes_estimate": 1933312,
+            "sql_categories": {
+              "BEGIN": 157,
+              "COMMIT": 157,
+              "PRAGMA": 157,
+              "SELECT": 16565,
+              "UPDATE": 157
+            },
+            "sql_statements": 17193
+          },
+          {
+            "connection_id": 2,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 57364,
+              "cache_misses": 670,
+              "cache_spills": 0,
+              "page_writes": 751
+            },
+            "pager_read_bytes_estimate": 2744320,
+            "pager_write_bytes_estimate": 3076096,
+            "sql_categories": {
+              "BEGIN": 157,
+              "COMMIT": 157,
+              "INSERT": 157,
+              "PRAGMA": 0,
+              "SELECT": 8361
+            },
+            "sql_statements": 8832
+          },
+          {
+            "connection_id": 3,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 84480,
+              "cache_misses": 1900,
+              "cache_spills": 0,
+              "page_writes": 881
+            },
+            "pager_read_bytes_estimate": 7782400,
+            "pager_write_bytes_estimate": 3608576,
+            "sql_categories": {
+              "BEGIN": 296,
+              "COMMIT": 294,
+              "PRAGMA": 296,
+              "SELECT": 17260,
+              "UPDATE": 294
+            },
+            "sql_statements": 18440
+          },
+          {
+            "connection_id": 4,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 59119,
+              "cache_misses": 1278,
+              "cache_spills": 0,
+              "page_writes": 1316
+            },
+            "pager_read_bytes_estimate": 5234688,
+            "pager_write_bytes_estimate": 5390336,
+            "sql_categories": {
+              "BEGIN": 296,
+              "COMMIT": 296,
+              "INSERT": 296,
+              "PRAGMA": 0,
+              "SELECT": 8780
+            },
+            "sql_statements": 9668
+          },
+          {
+            "connection_id": 5,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 83846,
+              "cache_misses": 1415,
+              "cache_spills": 0,
+              "page_writes": 676
+            },
+            "pager_read_bytes_estimate": 5795840,
+            "pager_write_bytes_estimate": 2768896,
+            "sql_categories": {
+              "BEGIN": 228,
+              "COMMIT": 224,
+              "PRAGMA": 228,
+              "SELECT": 17036,
+              "UPDATE": 224
+            },
+            "sql_statements": 17940
+          },
+          {
+            "connection_id": 6,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 58722,
+              "cache_misses": 884,
+              "cache_spills": 0,
+              "page_writes": 1002
+            },
+            "pager_read_bytes_estimate": 3620864,
+            "pager_write_bytes_estimate": 4104192,
+            "sql_categories": {
+              "BEGIN": 228,
+              "COMMIT": 228,
+              "INSERT": 228,
+              "PRAGMA": 0,
+              "SELECT": 8636
+            },
+            "sql_statements": 9320
+          },
+          {
+            "connection_id": 7,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 83129,
+              "cache_misses": 1314,
+              "cache_spills": 0,
+              "page_writes": 691
+            },
+            "pager_read_bytes_estimate": 5382144,
+            "pager_write_bytes_estimate": 2830336,
+            "sql_categories": {
+              "BEGIN": 230,
+              "COMMIT": 229,
+              "PRAGMA": 230,
+              "SELECT": 16880,
+              "UPDATE": 229
+            },
+            "sql_statements": 17798
+          },
+          {
+            "connection_id": 8,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 58156,
+              "cache_misses": 953,
+              "cache_spills": 0,
+              "page_writes": 1058
+            },
+            "pager_read_bytes_estimate": 3903488,
+            "pager_write_bytes_estimate": 4333568,
+            "sql_categories": {
+              "BEGIN": 230,
+              "COMMIT": 230,
+              "INSERT": 230,
+              "PRAGMA": 0,
+              "SELECT": 8556
+            },
+            "sql_statements": 9246
+          },
+          {
+            "connection_id": 9,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 84180,
+              "cache_misses": 2235,
+              "cache_spills": 0,
+              "page_writes": 1166
+            },
+            "pager_read_bytes_estimate": 9154560,
+            "pager_write_bytes_estimate": 4775936,
+            "sql_categories": {
+              "BEGIN": 393,
+              "COMMIT": 392,
+              "PRAGMA": 393,
+              "SELECT": 17267,
+              "UPDATE": 392
+            },
+            "sql_statements": 18837
+          },
+          {
+            "connection_id": 10,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 58813,
+              "cache_misses": 1605,
+              "cache_spills": 0,
+              "page_writes": 1782
+            },
+            "pager_read_bytes_estimate": 6574080,
+            "pager_write_bytes_estimate": 7299072,
+            "sql_categories": {
+              "BEGIN": 393,
+              "COMMIT": 393,
+              "INSERT": 393,
+              "PRAGMA": 0,
+              "SELECT": 8831
+            },
+            "sql_statements": 10010
+          },
+          {
+            "connection_id": 11,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 83103,
+              "cache_misses": 958,
+              "cache_spills": 0,
+              "page_writes": 455
+            },
+            "pager_read_bytes_estimate": 3923968,
+            "pager_write_bytes_estimate": 1863680,
+            "sql_categories": {
+              "BEGIN": 151,
+              "COMMIT": 149,
+              "PRAGMA": 151,
+              "SELECT": 16805,
+              "UPDATE": 149
+            },
+            "sql_statements": 17405
+          },
+          {
+            "connection_id": 12,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 58023,
+              "cache_misses": 843,
+              "cache_spills": 0,
+              "page_writes": 686
+            },
+            "pager_read_bytes_estimate": 3452928,
+            "pager_write_bytes_estimate": 2809856,
+            "sql_categories": {
+              "BEGIN": 151,
+              "COMMIT": 151,
+              "INSERT": 151,
+              "PRAGMA": 0,
+              "SELECT": 8480
+            },
+            "sql_statements": 8933
+          },
+          {
+            "connection_id": 13,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 84127,
+              "cache_misses": 2662,
+              "cache_spills": 0,
+              "page_writes": 1202
+            },
+            "pager_read_bytes_estimate": 10903552,
+            "pager_write_bytes_estimate": 4923392,
+            "sql_categories": {
+              "BEGIN": 402,
+              "COMMIT": 401,
+              "PRAGMA": 402,
+              "SELECT": 17344,
+              "UPDATE": 401
+            },
+            "sql_statements": 18950
+          },
+          {
+            "connection_id": 14,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 58433,
+              "cache_misses": 2323,
+              "cache_spills": 0,
+              "page_writes": 1849
+            },
+            "pager_read_bytes_estimate": 9515008,
+            "pager_write_bytes_estimate": 7573504,
+            "sql_categories": {
+              "BEGIN": 402,
+              "COMMIT": 402,
+              "INSERT": 402,
+              "PRAGMA": 0,
+              "SELECT": 8874
+            },
+            "sql_statements": 10080
+          },
+          {
+            "connection_id": 15,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 84301,
+              "cache_misses": 1656,
+              "cache_spills": 0,
+              "page_writes": 805
+            },
+            "pager_read_bytes_estimate": 6782976,
+            "pager_write_bytes_estimate": 3297280,
+            "sql_categories": {
+              "BEGIN": 270,
+              "COMMIT": 269,
+              "PRAGMA": 270,
+              "SELECT": 17176,
+              "UPDATE": 269
+            },
+            "sql_statements": 18254
+          },
+          {
+            "connection_id": 16,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 59012,
+              "cache_misses": 1115,
+              "cache_spills": 0,
+              "page_writes": 1226
+            },
+            "pager_read_bytes_estimate": 4567040,
+            "pager_write_bytes_estimate": 5021696,
+            "sql_categories": {
+              "BEGIN": 270,
+              "COMMIT": 270,
+              "INSERT": 270,
+              "PRAGMA": 0,
+              "SELECT": 8724
+            },
+            "sql_statements": 9534
+          },
+          {
+            "connection_id": 17,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 83302,
+              "cache_misses": 1555,
+              "cache_spills": 0,
+              "page_writes": 767
+            },
+            "pager_read_bytes_estimate": 6369280,
+            "pager_write_bytes_estimate": 3141632,
+            "sql_categories": {
+              "BEGIN": 260,
+              "COMMIT": 256,
+              "PRAGMA": 260,
+              "SELECT": 16956,
+              "UPDATE": 256
+            },
+            "sql_statements": 17988
+          },
+          {
+            "connection_id": 18,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 58298,
+              "cache_misses": 1038,
+              "cache_spills": 0,
+              "page_writes": 1151
+            },
+            "pager_read_bytes_estimate": 4251648,
+            "pager_write_bytes_estimate": 4714496,
+            "sql_categories": {
+              "BEGIN": 260,
+              "COMMIT": 260,
+              "INSERT": 260,
+              "PRAGMA": 0,
+              "SELECT": 8612
+            },
+            "sql_statements": 9392
+          },
+          {
+            "connection_id": 19,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 83657,
+              "cache_misses": 1355,
+              "cache_spills": 0,
+              "page_writes": 668
+            },
+            "pager_read_bytes_estimate": 5550080,
+            "pager_write_bytes_estimate": 2736128,
+            "sql_categories": {
+              "BEGIN": 224,
+              "COMMIT": 221,
+              "PRAGMA": 224,
+              "SELECT": 16984,
+              "UPDATE": 221
+            },
+            "sql_statements": 17874
+          },
+          {
+            "connection_id": 20,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 58536,
+              "cache_misses": 929,
+              "cache_spills": 0,
+              "page_writes": 1020
+            },
+            "pager_read_bytes_estimate": 3805184,
+            "pager_write_bytes_estimate": 4177920,
+            "sql_categories": {
+              "BEGIN": 224,
+              "COMMIT": 224,
+              "INSERT": 224,
+              "PRAGMA": 0,
+              "SELECT": 8607
+            },
+            "sql_statements": 9279
+          }
+        ],
+        "sql_statements": 274973
+      },
+      "sqlite_io_end": {
+        "connections": [
+          {
+            "connection_id": 1,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 7842,
+              "cache_misses": 5996,
+              "cache_spills": 0,
+              "page_writes": 2684
+            },
+            "pager_read_bytes_estimate": 24559616,
+            "pager_write_bytes_estimate": 10993664,
+            "sql_categories": {
+              "BEGIN": 912,
+              "COMMIT": 904,
+              "PRAGMA": 912,
+              "SELECT": 2720,
+              "UPDATE": 904
+            },
+            "sql_statements": 6352
+          },
+          {
+            "connection_id": 2,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 5179,
+              "cache_misses": 4491,
+              "cache_spills": 0,
+              "page_writes": 4221
+            },
+            "pager_read_bytes_estimate": 18395136,
+            "pager_write_bytes_estimate": 17289216,
+            "sql_categories": {
+              "BEGIN": 912,
+              "COMMIT": 912,
+              "INSERT": 912,
+              "PRAGMA": 0,
+              "SELECT": 1824
+            },
+            "sql_statements": 4560
+          },
+          {
+            "connection_id": 3,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 11461,
+              "cache_misses": 7910,
+              "cache_spills": 0,
+              "page_writes": 3768
+            },
+            "pager_read_bytes_estimate": 32399360,
+            "pager_write_bytes_estimate": 15433728,
+            "sql_categories": {
+              "BEGIN": 1280,
+              "COMMIT": 1270,
+              "PRAGMA": 1280,
+              "SELECT": 3820,
+              "UPDATE": 1270
+            },
+            "sql_statements": 8920
+          },
+          {
+            "connection_id": 4,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 7959,
+              "cache_misses": 5465,
+              "cache_spills": 0,
+              "page_writes": 5842
+            },
+            "pager_read_bytes_estimate": 22384640,
+            "pager_write_bytes_estimate": 23928832,
+            "sql_categories": {
+              "BEGIN": 1280,
+              "COMMIT": 1280,
+              "INSERT": 1280,
+              "PRAGMA": 0,
+              "SELECT": 2560
+            },
+            "sql_statements": 6400
+          },
+          {
+            "connection_id": 5,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 6509,
+              "cache_misses": 4952,
+              "cache_spills": 0,
+              "page_writes": 2243
+            },
+            "pager_read_bytes_estimate": 20283392,
+            "pager_write_bytes_estimate": 9187328,
+            "sql_categories": {
+              "BEGIN": 759,
+              "COMMIT": 753,
+              "PRAGMA": 759,
+              "SELECT": 2265,
+              "UPDATE": 753
+            },
+            "sql_statements": 5289
+          },
+          {
+            "connection_id": 6,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 3991,
+              "cache_misses": 4024,
+              "cache_spills": 0,
+              "page_writes": 3474
+            },
+            "pager_read_bytes_estimate": 16482304,
+            "pager_write_bytes_estimate": 14229504,
+            "sql_categories": {
+              "BEGIN": 759,
+              "COMMIT": 759,
+              "INSERT": 759,
+              "PRAGMA": 0,
+              "SELECT": 1518
+            },
+            "sql_statements": 3795
+          },
+          {
+            "connection_id": 7,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 6120,
+              "cache_misses": 4101,
+              "cache_spills": 0,
+              "page_writes": 1964
+            },
+            "pager_read_bytes_estimate": 16797696,
+            "pager_write_bytes_estimate": 8044544,
+            "sql_categories": {
+              "BEGIN": 674,
+              "COMMIT": 663,
+              "PRAGMA": 674,
+              "SELECT": 2000,
+              "UPDATE": 663
+            },
+            "sql_statements": 4674
+          },
+          {
+            "connection_id": 8,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 4178,
+              "cache_misses": 2944,
+              "cache_spills": 0,
+              "page_writes": 3083
+            },
+            "pager_read_bytes_estimate": 12058624,
+            "pager_write_bytes_estimate": 12627968,
+            "sql_categories": {
+              "BEGIN": 674,
+              "COMMIT": 674,
+              "INSERT": 674,
+              "PRAGMA": 0,
+              "SELECT": 1348
+            },
+            "sql_statements": 3370
+          },
+          {
+            "connection_id": 9,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 11007,
+              "cache_misses": 7093,
+              "cache_spills": 0,
+              "page_writes": 3531
+            },
+            "pager_read_bytes_estimate": 29052928,
+            "pager_write_bytes_estimate": 14462976,
+            "sql_categories": {
+              "BEGIN": 1198,
+              "COMMIT": 1189,
+              "PRAGMA": 1198,
+              "SELECT": 3576,
+              "UPDATE": 1189
+            },
+            "sql_statements": 8350
+          },
+          {
+            "connection_id": 10,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 6276,
+              "cache_misses": 6418,
+              "cache_spills": 0,
+              "page_writes": 5544
+            },
+            "pager_read_bytes_estimate": 26288128,
+            "pager_write_bytes_estimate": 22708224,
+            "sql_categories": {
+              "BEGIN": 1198,
+              "COMMIT": 1198,
+              "INSERT": 1198,
+              "PRAGMA": 0,
+              "SELECT": 2396
+            },
+            "sql_statements": 5990
+          },
+          {
+            "connection_id": 11,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 13255,
+              "cache_misses": 8548,
+              "cache_spills": 0,
+              "page_writes": 4277
+            },
+            "pager_read_bytes_estimate": 35012608,
+            "pager_write_bytes_estimate": 17518592,
+            "sql_categories": {
+              "BEGIN": 1441,
+              "COMMIT": 1434,
+              "PRAGMA": 1441,
+              "SELECT": 4309,
+              "UPDATE": 1434
+            },
+            "sql_statements": 10059
+          },
+          {
+            "connection_id": 12,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 8906,
+              "cache_misses": 6342,
+              "cache_spills": 0,
+              "page_writes": 6682
+            },
+            "pager_read_bytes_estimate": 25976832,
+            "pager_write_bytes_estimate": 27369472,
+            "sql_categories": {
+              "BEGIN": 1441,
+              "COMMIT": 1441,
+              "INSERT": 1441,
+              "PRAGMA": 0,
+              "SELECT": 2882
+            },
+            "sql_statements": 7205
+          },
+          {
+            "connection_id": 13,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 8481,
+              "cache_misses": 5815,
+              "cache_spills": 0,
+              "page_writes": 2787
+            },
+            "pager_read_bytes_estimate": 23818240,
+            "pager_write_bytes_estimate": 11415552,
+            "sql_categories": {
+              "BEGIN": 946,
+              "COMMIT": 934,
+              "PRAGMA": 946,
+              "SELECT": 2814,
+              "UPDATE": 934
+            },
+            "sql_statements": 6574
+          },
+          {
+            "connection_id": 14,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 5855,
+              "cache_misses": 4164,
+              "cache_spills": 0,
+              "page_writes": 4391
+            },
+            "pager_read_bytes_estimate": 17055744,
+            "pager_write_bytes_estimate": 17985536,
+            "sql_categories": {
+              "BEGIN": 946,
+              "COMMIT": 946,
+              "INSERT": 946,
+              "PRAGMA": 0,
+              "SELECT": 1892
+            },
+            "sql_statements": 4730
+          },
+          {
+            "connection_id": 15,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 8602,
+              "cache_misses": 6413,
+              "cache_spills": 0,
+              "page_writes": 2904
+            },
+            "pager_read_bytes_estimate": 26267648,
+            "pager_write_bytes_estimate": 11894784,
+            "sql_categories": {
+              "BEGIN": 995,
+              "COMMIT": 980,
+              "PRAGMA": 995,
+              "SELECT": 2955,
+              "UPDATE": 980
+            },
+            "sql_statements": 6905
+          },
+          {
+            "connection_id": 16,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 5109,
+              "cache_misses": 5420,
+              "cache_spills": 0,
+              "page_writes": 4557
+            },
+            "pager_read_bytes_estimate": 22200320,
+            "pager_write_bytes_estimate": 18665472,
+            "sql_categories": {
+              "BEGIN": 995,
+              "COMMIT": 995,
+              "INSERT": 995,
+              "PRAGMA": 0,
+              "SELECT": 1990
+            },
+            "sql_statements": 4975
+          },
+          {
+            "connection_id": 17,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 11074,
+              "cache_misses": 7114,
+              "cache_spills": 0,
+              "page_writes": 3544
+            },
+            "pager_read_bytes_estimate": 29138944,
+            "pager_write_bytes_estimate": 14516224,
+            "sql_categories": {
+              "BEGIN": 1205,
+              "COMMIT": 1191,
+              "PRAGMA": 1205,
+              "SELECT": 3587,
+              "UPDATE": 1191
+            },
+            "sql_statements": 8379
+          },
+          {
+            "connection_id": 18,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 7430,
+              "cache_misses": 5294,
+              "cache_spills": 0,
+              "page_writes": 5558
+            },
+            "pager_read_bytes_estimate": 21684224,
+            "pager_write_bytes_estimate": 22765568,
+            "sql_categories": {
+              "BEGIN": 1205,
+              "COMMIT": 1205,
+              "INSERT": 1205,
+              "PRAGMA": 0,
+              "SELECT": 2410
+            },
+            "sql_statements": 6025
+          },
+          {
+            "connection_id": 19,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 9501,
+              "cache_misses": 5928,
+              "cache_spills": 0,
+              "page_writes": 3006
+            },
+            "pager_read_bytes_estimate": 24281088,
+            "pager_write_bytes_estimate": 12312576,
+            "sql_categories": {
+              "BEGIN": 1018,
+              "COMMIT": 1011,
+              "PRAGMA": 1018,
+              "SELECT": 3040,
+              "UPDATE": 1011
+            },
+            "sql_statements": 7098
+          },
+          {
+            "connection_id": 20,
+            "page_size": 4096,
+            "pager": {
+              "cache_hits": 6270,
+              "cache_misses": 4489,
+              "cache_spills": 0,
+              "page_writes": 4672
+            },
+            "pager_read_bytes_estimate": 18386944,
+            "pager_write_bytes_estimate": 19136512,
+            "sql_categories": {
+              "BEGIN": 1018,
+              "COMMIT": 1018,
+              "INSERT": 1018,
+              "PRAGMA": 0,
+              "SELECT": 2036
+            },
+            "sql_statements": 5090
+          }
+        ],
+        "sql_statements": 124740
+      },
+      "start_unix_ms": 1790245637318,
+      "target_attainment": 0.006808539342314237,
+      "total_iops": 680.8539342314236,
+      "total_queue_depth": 100,
+      "write": {
+        "completed": 10329,
+        "p50_us_upper": 32768,
+        "p95_us_upper": 1048576,
+        "p99_us_upper": 2097152
+      },
+      "write_iops": 680.8539342314236
+    }
+  ],
+  "topology": "local-file",
+  "verification_error": null,
+  "verification_status": "passed",
+  "verified_files": 100,
+  "volume_key": "remote-saturation-14559-1790245613135442000",
+  "warmup_seconds": 3,
+  "work_error": null
+}

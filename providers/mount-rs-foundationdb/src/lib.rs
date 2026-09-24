@@ -19,17 +19,20 @@ use async_trait::async_trait;
 use foundationdb::api::{FdbApiBuilder, NetworkAutoStop};
 use foundationdb::options::TransactionOption;
 use foundationdb::{Database, FdbError, TransactOption, Transaction};
+use futures_util::TryStreamExt;
 use mount_rs_core::chunking::{ChunkerConfig, from_config};
 use mount_rs_core::delegation::{
     CheckoutRequest, DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState,
     DirectoryGrant,
 };
 use mount_rs_core::storage::{
-    BlockId, BlockStore, ConcurrentBackingId, ConcurrentModeState, LoadedMetadata, MetadataStore,
-    Namespace, NodeData, WriterLease,
+    BlockId, BlockStore, ConcurrentBackingId, ConcurrentModeState, InodeId, InodeMetadataSnapshot,
+    InodeModeState, InodeVersion, LoadedInode, LoadedMetadata, MetadataStore, Namespace, NodeData,
+    NodeMetadata, WriterLease, validate_inode_publication,
 };
 use mount_rs_core::{ErrorCode, FsError, Result, backend_error};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::convert::TryFrom;
 use std::future::Future;
 use std::path::Path;
@@ -2347,6 +2350,122 @@ fn decode_delegation_authority(
     Ok(Some(state))
 }
 
+async fn load_inode_namespace_root(
+    trx: &Transaction,
+    keys: &Keyspace,
+    prefix: &[u8],
+    manifest: Manifest,
+    limits: FoundationDbLimits,
+) -> TxnResult<Namespace> {
+    let payload_len = usize::try_from(manifest.payload_len)
+        .map_err(|_| TxnError::Fs(FsError::new(ErrorCode::Eoverflow)))?;
+    let affected = metadata_load_affected_bytes(prefix, limits.metadata_chunk_bytes, payload_len)
+        .map_err(TxnError::Fs)?;
+    if affected > FOUNDATIONDB_MAX_TRANSACTION_BYTES {
+        return Err(TxnError::Fs(metadata_transaction_too_large(affected)));
+    }
+    let mut payload = Vec::with_capacity(payload_len);
+    for index in 0..manifest.chunk_count {
+        let key = metadata_chunk_key(&keys.chunks(), index);
+        let chunk = get_owned(trx, &key)
+            .await?
+            .ok_or_else(|| TxnError::Fs(backend_error("missing MRC4 namespace chunk")))?;
+        if chunk.len() > limits.metadata_chunk_bytes {
+            return Err(TxnError::Fs(backend_error(
+                "MRC4 namespace chunk exceeds configured limit",
+            )));
+        }
+        payload.extend_from_slice(&chunk);
+    }
+    if payload.len() != payload_len {
+        return Err(TxnError::Fs(backend_error(
+            "MRC4 namespace payload length is invalid",
+        )));
+    }
+    let namespace =
+        mount_rs_core::storage::decode_inode_namespace(&payload).map_err(TxnError::Fs)?;
+    validate_namespace_chunkers(&namespace, limits).map_err(TxnError::Fs)?;
+    mount_rs_core::diagnostics::profile::add(
+        mount_rs_core::diagnostics::profile::Event::NamespaceReturned,
+        payload.len() as u64,
+    );
+    Ok(namespace)
+}
+
+// MRC4 guards contain a fixed version header followed by the complete node.
+fn inode_key(keys: &Keyspace, inode: InodeId) -> Vec<u8> {
+    let mut key = keys.key(b"meta/inode/");
+    key.extend_from_slice(&inode.to_be_bytes());
+    key
+}
+fn inode_token_key(keys: &Keyspace, inode: InodeId) -> Vec<u8> {
+    let mut key = keys.key(b"meta/inode-version/");
+    key.extend_from_slice(&inode.to_be_bytes());
+    key
+}
+fn decode_inode_token(raw: &[u8]) -> Result<InodeVersion> {
+    if raw.len() != 20 || &raw[..4] != b"MRI4" {
+        return Err(backend_error("malformed FoundationDB inode version token"));
+    }
+    let version = InodeVersion {
+        structural_generation: u64::from_be_bytes(raw[4..12].try_into().unwrap()),
+        inode_revision: u64::from_be_bytes(raw[12..20].try_into().unwrap()),
+    };
+    if version.structural_generation == 0 {
+        return Err(backend_error("zero inode generation"));
+    }
+    Ok(version)
+}
+fn inode_version(raw: &[u8]) -> Result<InodeVersion> {
+    if raw.len() <= 20 || raw.len() > FOUNDATIONDB_MAX_VALUE_BYTES || &raw[..4] != b"MRI4" {
+        return Err(backend_error("malformed FoundationDB inode guard"));
+    }
+    decode_inode_token(&raw[..20])
+}
+fn encode_inode(version: InodeVersion, node: &NodeMetadata) -> Result<Vec<u8>> {
+    let mut raw = b"MRI4".to_vec();
+    raw.extend_from_slice(&version.structural_generation.to_be_bytes());
+    raw.extend_from_slice(&version.inode_revision.to_be_bytes());
+    let payload = serde_json::to_vec(node).map_err(backend_error)?;
+    mount_rs_core::diagnostics::profile::add(
+        mount_rs_core::diagnostics::profile::Event::InodeSerialized,
+        payload.len() as u64,
+    );
+    raw.extend_from_slice(&payload);
+    if raw.len() > FOUNDATIONDB_MAX_VALUE_BYTES {
+        return Err(FsError::new(ErrorCode::Efbig));
+    }
+    Ok(raw)
+}
+fn decode_inode(raw: &[u8], inode: InodeId, generation: u64) -> Result<LoadedInode> {
+    let version = inode_version(raw)?;
+    let node: NodeMetadata = serde_json::from_slice(&raw[20..]).map_err(backend_error)?;
+    if version.structural_generation != generation || node.stats.ino != inode {
+        return Err(backend_error("FoundationDB inode identity disagrees"));
+    }
+    mount_rs_core::storage::validate_node_kind(&node)?;
+    mount_rs_core::diagnostics::profile::add(
+        mount_rs_core::diagnostics::profile::Event::InodeReturned,
+        (raw.len() - 20) as u64,
+    );
+    Ok(LoadedInode { version, node })
+}
+#[derive(Clone)]
+enum InodeCommand {
+    Inspect,
+    Prepare(ConcurrentBackingId, u64),
+    Snapshot(ConcurrentBackingId),
+    Load(ConcurrentBackingId, InodeId, Option<InodeVersion>),
+    Publish(ConcurrentBackingId, InodeId, InodeVersion, NodeMetadata),
+    Structure(ConcurrentBackingId, u64, BTreeMap<InodeId, u64>, Namespace),
+}
+struct InodeResult {
+    state: Option<InodeModeState>,
+    snapshot: Option<InodeMetadataSnapshot>,
+    inode: Option<LoadedInode>,
+    version: Option<InodeVersion>,
+    generation: u64,
+}
 #[derive(Clone)]
 enum DelegationCommand {
     Inspect,
@@ -2369,6 +2488,346 @@ pub struct FoundationDbMetadataStore(Arc<Inner>);
 impl FoundationDbMetadataStore {
     pub fn new(storage: &FoundationDbStorage) -> Self {
         storage.metadata()
+    }
+
+    async fn inode_transaction(&self, command: InodeCommand) -> Result<InodeResult> {
+        let inner = Arc::clone(&self.0);
+        let prefix = inner.prefix.clone();
+        let limits = inner.limits;
+        inner
+            .transact_metadata((), move |trx, _| {
+                let prefix = prefix.clone();
+                let command = command.clone();
+                Box::pin(async move {
+                    configure_transaction(trx, limits)?;
+                    let keys = Keyspace::new(&prefix);
+                    let mode_key = keys.write_mode();
+                    let backing_key = keys.metadata_backing();
+                    let block_authority_key = keys.block_authority();
+                    let lease_key = keys.lease();
+                    let fence_key = keys.fence();
+                    let manifest_key = keys.manifest();
+                    let selected_inode = match &command {
+                        InodeCommand::Load(_, inode, _) | InodeCommand::Publish(_, inode, _, _) => Some(*inode),
+                        _ => None,
+                    };
+                    let token_key = selected_inode.map(|inode| inode_token_key(&keys, inode));
+                    // Issue independent authority and selected-token reads together.
+                    // All are ordinary conflict-protected reads at one version;
+                    // validate authority before interpreting any selected result.
+                    let (mode, raw_backing, block_authority, lease, fence, raw_manifest, selected_token) = futures_util::try_join!(
+                        get_owned(trx, &mode_key),
+                        get_owned(trx, &backing_key),
+                        get_owned(trx, &block_authority_key),
+                        get_owned(trx, &lease_key),
+                        get_owned(trx, &fence_key),
+                        get_owned(trx, &manifest_key),
+                        async { match token_key.as_ref() { Some(key) => get_owned(trx, key).await, None => Ok(None) } },
+                    )?;
+                    let mut result = InodeResult {
+                        state: None,
+                        snapshot: None,
+                        inode: None,
+                        version: None,
+                        generation: 0,
+                    };
+                    if matches!(command, InodeCommand::Inspect) && mode.as_deref() != Some(b"MRC4")
+                    {
+                        return Ok(result);
+                    }
+                    let backing = raw_backing
+                        .as_deref()
+                        .and_then(parse_backing_bytes)
+                        .ok_or_else(|| TxnError::Fs(stale_backing()))?;
+                    let expected_backing = match &command {
+                        InodeCommand::Inspect => backing,
+                        InodeCommand::Prepare(b, _)
+                        | InodeCommand::Snapshot(b)
+                        | InodeCommand::Load(b, ..)
+                        | InodeCommand::Publish(b, ..)
+                        | InodeCommand::Structure(b, ..) => *b,
+                    };
+                    if backing != expected_backing
+                        || block_authority.as_deref()
+                            .and_then(parse_backing_bytes)
+                            != Some(backing)
+                    {
+                        return Err(TxnError::Fs(stale_backing()));
+                    }
+                    let prepare = matches!(command, InodeCommand::Prepare(..));
+                    if mode.as_deref() != Some(if prepare { b"MRC2" } else { b"MRC4" })
+                        || lease.is_some()
+                        || fence.as_deref()
+                            != Some(CONCURRENT_FENCE_SENTINEL)
+                    {
+                        return Err(TxnError::Fs(stale_backing()));
+                    }
+                    let raw_manifest = raw_manifest.ok_or_else(|| TxnError::Fs(backend_error("missing inode namespace manifest")))?;
+                    let manifest = decode_manifest(&raw_manifest).map_err(TxnError::Fs)?;
+                    let payload_len = usize::try_from(manifest.payload_len)
+                        .map_err(|_| TxnError::Fs(FsError::new(ErrorCode::Eoverflow)))?;
+                    if payload_len > limits.max_metadata_bytes
+                        || payload_len.div_ceil(limits.metadata_chunk_bytes)
+                            != manifest.chunk_count as usize
+                    {
+                        return Err(TxnError::Fs(backend_error(
+                            "invalid inode namespace manifest limits",
+                        )));
+                    }
+                    let generation = manifest.revision;
+                    result.generation = generation;
+                    result.state = Some(InodeModeState {
+                        backing,
+                        structural_generation: generation,
+                    });
+                    if matches!(command, InodeCommand::Inspect) {
+                        return Ok(result);
+                    }
+                    // A changed structural root proves this old publication cannot
+                    // commit, even if unlink removed its selected guard. Read the
+                    // root normally above so a concurrent structure still conflicts.
+                    if matches!(&command, InodeCommand::Publish(_, _, expected, _) if expected.structural_generation != generation) {
+                        return Err(TxnError::Fs(FsError::new(ErrorCode::Eagain)));
+                    }
+                    if let Some(inode) = match &command {
+                        InodeCommand::Load(_, inode, _) | InodeCommand::Publish(_, inode, _, _) => {
+                            Some(inode)
+                        }
+                        _ => None,
+                    } {
+                        let token = selected_token.as_deref().ok_or_else(|| {
+                            TxnError::Fs(if matches!(&command, InodeCommand::Load(..)) {
+                                FsError::new(ErrorCode::Estale).with_message("FoundationDB selected inode version token is missing")
+                            } else { backend_error("missing inode version token") })
+                        })?;
+                        let version = decode_inode_token(token).map_err(TxnError::Fs)?;
+                        if version.structural_generation != generation { return Err(TxnError::Fs(backend_error("stale inode token generation"))); }
+                        // A fresh exact authority/version match omits the body GET
+                        // and JSON decode. Out-of-band edits retaining the token
+                        // are detected by unconditional/changed/snapshot reads.
+                        if matches!(&command, InodeCommand::Load(_, _, Some(v)) if *v == version) { return Ok(result); }
+                        if matches!(&command, InodeCommand::Publish(_, _, expected, _) if *expected != version) { return Err(TxnError::Fs(FsError::new(ErrorCode::Eagain))); }
+                        let raw = get_owned(trx, &inode_key(&keys, *inode)).await?.ok_or_else(|| {
+                            TxnError::Fs(if matches!(&command, InodeCommand::Load(..)) { FsError::new(ErrorCode::Estale).with_message("FoundationDB selected inode guard is missing") } else { backend_error("missing inode guard") })
+                        })?;
+                        if inode_version(&raw).map_err(TxnError::Fs)? != version { return Err(TxnError::Fs(backend_error("FoundationDB inode body and version token disagree"))); }
+                        let loaded =
+                            decode_inode(&raw, *inode, generation).map_err(TxnError::Fs)?;
+                        if let NodeData::File(layout) = &loaded.node.data {
+                            validate_chunker_config(&layout.chunker, limits)
+                                .map_err(TxnError::Fs)?;
+                        }
+                        if let InodeCommand::Publish(_, inode, expected, node) = &command {
+                            if *expected != version {
+                                return Err(TxnError::Fs(FsError::new(ErrorCode::Eagain)));
+                            }
+                            validate_inode_publication(*inode, &loaded.node, node)
+                                .map_err(TxnError::Fs)?;
+                            if let NodeData::File(layout) = &node.data {
+                                validate_chunker_config(&layout.chunker, limits)
+                                    .map_err(TxnError::Fs)?;
+                            }
+                            let next = InodeVersion {
+                                structural_generation: generation,
+                                inode_revision: version.inode_revision.checked_add(1).ok_or_else(
+                                    || TxnError::Fs(FsError::new(ErrorCode::Eoverflow)),
+                                )?,
+                            };
+                            let payload = encode_inode(next, node).map_err(TxnError::Fs)?;
+                            trx.set(&inode_key(&keys, *inode), &payload);
+                            trx.set(&inode_token_key(&keys, *inode), &payload[..20]);
+                            result.version = Some(next);
+                        } else {
+                            result.inode = Some(loaded);
+                        }
+                        return Ok(result);
+                    }
+                    let mut namespace = if prepare {
+                        load_metadata_if_changed(Some(raw_manifest), &prefix, limits, None, |index| {
+                            let key = metadata_chunk_key(&keys.chunks(), index);
+                            async move { get_owned(trx, &key).await }
+                        }).await?.ok_or_else(|| TxnError::Fs(backend_error("missing inode namespace")))?.namespace.ok_or_else(|| TxnError::Fs(backend_error("uninitialized inode namespace")))?
+                    } else {
+                        load_inode_namespace_root(trx, &keys, &prefix, manifest, limits).await?
+                    };
+                    let guard_prefix = keys.key(b"meta/inode/");
+                    let guard_end = range_end(&guard_prefix).map_err(TxnError::Fs)?;
+                    let mut guards = BTreeMap::new();
+                    let mut affected = metadata_load_affected_bytes(
+                        &prefix,
+                        limits.metadata_chunk_bytes,
+                        manifest.payload_len as usize,
+                    )
+                    .map_err(TxnError::Fs)?;
+                    affected = affected
+                        .checked_add(6 * FOUNDATIONDB_MAX_VALUE_BYTES + 32 * (prefix.len() + 64))
+                        .ok_or_else(|| TxnError::Fs(FsError::new(ErrorCode::Eoverflow)))?;
+                    if affected > FOUNDATIONDB_MAX_TRANSACTION_BYTES {
+                        return Err(TxnError::Fs(metadata_transaction_too_large(affected)));
+                    }
+                    let mut stream = trx.get_ranges_keyvalues(
+                        foundationdb::RangeOption::from((
+                            guard_prefix.as_slice(),
+                            guard_end.as_slice(),
+                        )),
+                        false,
+                    );
+                    while let Some(value) = stream.try_next().await? {
+                        if value.key().len() != guard_prefix.len() + 8 {
+                            return Err(TxnError::Fs(backend_error("malformed inode guard key")));
+                        }
+                        let inode = u64::from_be_bytes(
+                            value.key()[guard_prefix.len()..].try_into().unwrap(),
+                        );
+                        affected = affected
+                            .checked_add(value.key().len() * 4 + value.value().len() * 2)
+                            .ok_or_else(|| TxnError::Fs(FsError::new(ErrorCode::Eoverflow)))?;
+                        if affected > FOUNDATIONDB_MAX_TRANSACTION_BYTES {
+                            return Err(TxnError::Fs(metadata_transaction_too_large(affected)));
+                        }
+                        if prepare {
+                            return Err(TxnError::Fs(backend_error(
+                                "unexpected inode guard before enrollment",
+                            )));
+                        }
+                        let node =
+                            decode_inode(value.value(), inode, generation).map_err(TxnError::Fs)?;
+                        if !namespace.nodes.contains_key(&inode) {
+                            return Err(TxnError::Fs(backend_error(
+                                "unexpected inode guard membership",
+                            )));
+                        }
+                        namespace.nodes.insert(inode, node.node);
+                        guards.insert(inode, node.version.inode_revision);
+                    }
+                    let token_prefix = keys.key(b"meta/inode-version/");
+                    let token_end = range_end(&token_prefix).map_err(TxnError::Fs)?;
+                    let mut tokens = BTreeMap::new();
+                    let mut token_stream = trx.get_ranges_keyvalues(foundationdb::RangeOption::from((token_prefix.as_slice(), token_end.as_slice())), false);
+                    while let Some(value) = token_stream.try_next().await? {
+                        if value.key().len() != token_prefix.len() + 8 { return Err(TxnError::Fs(backend_error("malformed inode token key"))); }
+                        if prepare { return Err(TxnError::Fs(backend_error("unexpected inode token before enrollment"))); }
+                        let inode = u64::from_be_bytes(value.key()[token_prefix.len()..].try_into().unwrap());
+                        let version = decode_inode_token(value.value()).map_err(TxnError::Fs)?;
+                        if version.structural_generation != generation { return Err(TxnError::Fs(backend_error("stale inode token generation"))); }
+                        tokens.insert(inode, version.inode_revision);
+                        affected = affected.checked_add(value.key().len()*4 + value.value().len()*2).ok_or_else(|| TxnError::Fs(FsError::new(ErrorCode::Eoverflow)))?;
+                        if affected > FOUNDATIONDB_MAX_TRANSACTION_BYTES { return Err(TxnError::Fs(metadata_transaction_too_large(affected))); }
+                    }
+                    if !prepare && tokens != guards { return Err(TxnError::Fs(backend_error("FoundationDB inode bodies and version tokens disagree"))); }
+                    if !prepare {
+                        if !guards.keys().eq(namespace.nodes.keys()) {
+                            return Err(TxnError::Fs(backend_error("FoundationDB inode guard membership is incomplete")));
+                        }
+                        let snapshot = InodeMetadataSnapshot {
+                            structural_generation: generation,
+                            namespace: namespace.clone(),
+                            inode_revisions: guards.clone(),
+                        };
+                        snapshot.validate().map_err(TxnError::Fs)?;
+                        if matches!(command, InodeCommand::Snapshot(_)) {
+                            result.snapshot = Some(snapshot);
+                            return Ok(result);
+                        }
+                    }
+                    let (next_generation, next_namespace) = match command {
+                        InodeCommand::Prepare(_, expected) => {
+                            if expected != generation {
+                                return Err(TxnError::Fs(FsError::new(ErrorCode::Eagain)));
+                            }
+                            (generation.checked_add(1).ok_or_else(|| TxnError::Fs(FsError::new(ErrorCode::Eoverflow)))?, namespace)
+                        }
+                        InodeCommand::Structure(_, expected, versions, next) => {
+                            if expected != generation || versions != guards {
+                                return Err(TxnError::Fs(FsError::new(ErrorCode::Eagain)));
+                            }
+                            (
+                                generation.checked_add(1).ok_or_else(|| {
+                                    TxnError::Fs(FsError::new(ErrorCode::Eoverflow))
+                                })?,
+                                next,
+                            )
+                        }
+                        _ => unreachable!(),
+                    };
+                    next_namespace.validate().map_err(TxnError::Fs)?;
+                    validate_namespace_chunkers(&next_namespace, limits).map_err(TxnError::Fs)?;
+                    let payload = mount_rs_core::storage::encode_inode_namespace(&next_namespace).map_err(TxnError::Fs)?;
+                    mount_rs_core::diagnostics::profile::add(
+                        mount_rs_core::diagnostics::profile::Event::NamespaceSerialized,
+                        payload.len() as u64,
+                    );
+                    if payload.len() > limits.max_metadata_bytes {
+                        return Err(TxnError::Fs(FsError::new(ErrorCode::Efbig)));
+                    }
+                    affected = affected
+                        .checked_add(
+                            metadata_publication_affected_bytes(
+                                &prefix,
+                                limits.metadata_chunk_bytes,
+                                payload.len(),
+                            )
+                            .map_err(TxnError::Fs)?,
+                        )
+                        .ok_or_else(|| TxnError::Fs(FsError::new(ErrorCode::Eoverflow)))?;
+                    let mut records = Vec::new();
+                    for (inode, node) in &next_namespace.nodes {
+                        let key = inode_key(&keys, *inode);
+                        let raw = encode_inode(
+                            InodeVersion {
+                                structural_generation: next_generation,
+                                inode_revision: 0,
+                            },
+                            node,
+                        )
+                        .map_err(TxnError::Fs)?;
+                        affected = affected
+                            .checked_add(key.len() * 4 + raw.len() + inode_token_key(&keys, *inode).len() * 4 + 20)
+                            .ok_or_else(|| TxnError::Fs(FsError::new(ErrorCode::Eoverflow)))?;
+                        records.push((key, inode_token_key(&keys, *inode), raw));
+                    }
+                    // Authority read values/conflicts and full-range clearing endpoints.
+                    affected = affected
+                        .checked_add(6 * FOUNDATIONDB_MAX_VALUE_BYTES + 32 * (prefix.len() + 64))
+                        .ok_or_else(|| TxnError::Fs(FsError::new(ErrorCode::Eoverflow)))?;
+                    if affected > FOUNDATIONDB_MAX_TRANSACTION_BYTES {
+                        return Err(TxnError::Fs(metadata_transaction_too_large(affected)));
+                    }
+                    trx.clear_range(&guard_prefix, &guard_end);
+                    trx.clear_range(&token_prefix, &token_end);
+                    for (key, token_key, raw) in records {
+                        trx.set(&key, &raw);
+                        trx.set(&token_key, &raw[..20]);
+                    }
+                    let chunks = payload.len().div_ceil(limits.metadata_chunk_bytes) as u32;
+                    let chunk_prefix = keys.chunks();
+                    if let Some(start) =
+                        metadata_chunk_clear_start(&chunk_prefix, Some(manifest), chunks)
+                    {
+                        trx.clear_range(&start, &range_end(&chunk_prefix).map_err(TxnError::Fs)?);
+                    }
+                    for index in 0..chunks {
+                        let start = index as usize * limits.metadata_chunk_bytes;
+                        trx.set(
+                            &metadata_chunk_key(&chunk_prefix, index),
+                            &payload
+                                [start..(start + limits.metadata_chunk_bytes).min(payload.len())],
+                        );
+                    }
+                    trx.set(
+                        &keys.manifest(),
+                        &encode_manifest(Manifest {
+                            revision: next_generation,
+                            chunk_count: chunks,
+                            payload_len: payload.len() as u64,
+                        }),
+                    );
+                    trx.set(&keys.write_mode(), b"MRC4");
+                    result.generation = next_generation;
+                    Ok(result)
+                })
+            })
+            .await
     }
 
     async fn delegation_transaction(&self, command: DelegationCommand) -> Result<DelegationResult> {
@@ -2609,6 +3068,13 @@ impl FoundationDbMetadataStore {
                 let metadata_prefix = metadata_prefix.clone();
                 Box::pin(async move {
                     configure_transaction(trx, limits)?;
+                    if get_owned(trx, &Keyspace::new(&metadata_prefix).write_mode())
+                        .await?
+                        .as_deref()
+                        == Some(b"MRC4")
+                    {
+                        return Err(TxnError::Fs(stale_backing()));
+                    }
                     let raw_manifest = get_owned(trx, &manifest_key).await?;
                     load_metadata_if_changed(
                         raw_manifest,
@@ -2648,6 +3114,77 @@ impl MetadataStore for FoundationDbMetadataStore {
 
     async fn load_if_changed(&self, known_revision: u64) -> Result<Option<LoadedMetadata>> {
         self.load_conditionally(Some(known_revision)).await
+    }
+
+    async fn inode_mode_state(&self) -> Result<Option<InodeModeState>> {
+        Ok(self.inode_transaction(InodeCommand::Inspect).await?.state)
+    }
+    async fn prepare_inode_mode(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        self.inode_transaction(InodeCommand::Prepare(backing, expected_revision))
+            .await?;
+        Ok(())
+    }
+    async fn load_inode_snapshot(
+        &self,
+        backing: ConcurrentBackingId,
+    ) -> Result<InodeMetadataSnapshot> {
+        self.inode_transaction(InodeCommand::Snapshot(backing))
+            .await?
+            .snapshot
+            .ok_or_else(|| backend_error("missing inode snapshot"))
+    }
+    async fn load_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+    ) -> Result<LoadedInode> {
+        self.load_inode_if_changed(backing, inode, None)
+            .await?
+            .ok_or_else(|| backend_error("missing inode payload"))
+    }
+    async fn load_inode_if_changed(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+        known: Option<InodeVersion>,
+    ) -> Result<Option<LoadedInode>> {
+        Ok(self
+            .inode_transaction(InodeCommand::Load(backing, inode, known))
+            .await?
+            .inode)
+    }
+    async fn publish_inode_if_version(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+        expected: InodeVersion,
+        node: NodeMetadata,
+    ) -> Result<InodeVersion> {
+        self.inode_transaction(InodeCommand::Publish(backing, inode, expected, node))
+            .await?
+            .version
+            .ok_or_else(|| backend_error("missing inode version"))
+    }
+    async fn publish_structure_if_versions(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_generation: u64,
+        expected_inode_revisions: &BTreeMap<InodeId, u64>,
+        namespace: Namespace,
+    ) -> Result<u64> {
+        Ok(self
+            .inode_transaction(InodeCommand::Structure(
+                backing,
+                expected_generation,
+                expected_inode_revisions.clone(),
+                namespace,
+            ))
+            .await?
+            .generation)
     }
 
     async fn delegation_state(&self) -> Result<Option<DelegationState>> {
@@ -3702,6 +4239,36 @@ mod tests {
         };
         namespace.validate().expect("valid conditional fixture");
         serde_json::to_vec(&namespace).expect("serialize namespace")
+    }
+
+    #[test]
+    fn inode_guards_validate_exact_generation_identity_and_record_shape() {
+        let namespace: Namespace = serde_json::from_slice(&conditional_metadata_payload()).unwrap();
+        let node = namespace.nodes[&1].clone();
+        let version = InodeVersion {
+            structural_generation: 7,
+            inode_revision: 0,
+        };
+        let raw = encode_inode(version, &node).unwrap();
+        let decoded = decode_inode(&raw, 1, 7).unwrap();
+        assert_eq!(decoded.version, version);
+        assert_eq!(decoded.node, node);
+        assert_eq!(decode_inode_token(&raw[..20]).unwrap(), version);
+        assert!(decode_inode_token(&raw).is_err());
+        assert!(decode_inode_token(&raw[..19]).is_err());
+        assert!(decode_inode(&raw, 2, 7).is_err());
+        assert!(decode_inode(&raw, 1, 8).is_err());
+        assert!(inode_version(&raw[..20]).is_err());
+        let mut zero = raw.clone();
+        zero[4..12].fill(0);
+        assert!(inode_version(&zero).is_err());
+        let mut malformed = raw.clone();
+        malformed[20..].fill(b'x');
+        assert!(decode_inode(&malformed, 1, 7).is_err());
+        let mut mismatched_kind = node.clone();
+        mismatched_kind.stats.mode = mount_rs_core::S_IFREG | 0o644;
+        assert!(decode_inode(&encode_inode(version, &mismatched_kind).unwrap(), 1, 7).is_err());
+        assert!(inode_version(&vec![0; FOUNDATIONDB_MAX_VALUE_BYTES + 1]).is_err());
     }
 
     fn conditional_manifest(payload: &[u8], limits: FoundationDbLimits) -> Vec<u8> {

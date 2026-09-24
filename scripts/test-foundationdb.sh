@@ -460,7 +460,7 @@ if [ -n "${RUSTFS_ENDPOINT:-}" ]; then
   # The first composed client proves the split ChunkedFs path and the provider
   # contract against the same real cluster. A second client runs after the
   # owned FoundationDB container is restarted below.
-  test_command="set -e; cargo check --locked -p mount-rs-sdk -p mount-rs-cli -p mount-rs-napi --features mount-rs-sdk/foundationdb,mount-rs-cli/foundationdb,mount-rs-napi/foundationdb && cargo test --manifest-path tests/foundationdb/Cargo.toml --locked --lib foundationdb_rustfs_chunked_composition -- --exact --nocapture && cargo test --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb -- --nocapture"
+  test_command="set -e; cargo check --locked -p mount-rs-sdk -p mount-rs-cli -p mount-rs-napi --features mount-rs-sdk/foundationdb,mount-rs-cli/foundationdb,mount-rs-napi/foundationdb && cargo test --manifest-path tests/foundationdb/Cargo.toml --locked --lib foundationdb_rustfs_chunked_composition -- --exact --nocapture && cargo test --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb -- --nocapture && cargo test --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test inode -- --ignored --nocapture"
   test_prefix=${RUSTFS_COMBO_PREFIX:?RUSTFS_COMBO_PREFIX must be set for the composed gate}
   : "${RUSTFS_BUCKET:?RUSTFS_BUCKET must be set for the composed gate}"
   : "${RUSTFS_ACCESS_KEY_ID:?RUSTFS_ACCESS_KEY_ID must be set for the composed gate}"
@@ -469,7 +469,7 @@ if [ -n "${RUSTFS_ENDPOINT:-}" ]; then
 else
   rustfs_endpoint=""
   test_manifest=providers/mount-rs-foundationdb/Cargo.toml
-  test_command="set -e; cargo check --locked -p mount-rs-sdk -p mount-rs-cli -p mount-rs-napi --features mount-rs-sdk/foundationdb,mount-rs-cli/foundationdb,mount-rs-napi/foundationdb && cargo test --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb -- --nocapture"
+  test_command="set -e; cargo check --locked -p mount-rs-sdk -p mount-rs-cli -p mount-rs-napi --features mount-rs-sdk/foundationdb,mount-rs-cli/foundationdb,mount-rs-napi/foundationdb && cargo test --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb -- --nocapture && cargo test --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test inode -- --ignored --nocapture"
   if [ "$external_mode" -eq 1 ]; then
     test_prefix=${MOUNT_RS_FOUNDATIONDB_TEST_PREFIX:-mount-rs/foundationdb-external/$run_id}
   else
@@ -492,7 +492,7 @@ if [ "$run_service_benchmark" -eq 1 ]; then
   fi
   # Keep real provider contracts in this lane, while avoiding unrelated CLI
   # and N-API builds. Each benchmark invocation owns a separate test process.
-  test_command="set -e; cargo test --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb -- --nocapture && cargo test --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test delegation -- --ignored --nocapture"
+  test_command="set -e; if ! cargo clippy --version >/dev/null 2>&1; then rustup component add clippy; fi; cargo clippy --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --all-targets --features foundationdb -- -D warnings && cargo test --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb -- --nocapture && cargo test --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test delegation -- --ignored --nocapture && cargo test --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test inode -- --ignored --nocapture"
   if [ "${MOUNT_RS_FOUNDATIONDB_DIRECT_BASELINE:-0}" = "1" ]; then
     test_command="${test_command} && MOUNT_RS_FOUNDATIONDB_DIRECT_OUTPUT=/artifacts/foundationdb-direct-block.json cargo test --release --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test block_datastore_saturation -- --ignored --nocapture --test-threads=1"
   elif [ "$benchmark_prepare_only" -eq 1 ]; then
@@ -664,6 +664,7 @@ if [ "$run_service_benchmark" -eq 1 ]; then
     --volume "$benchmark_output_dir/build-cache:/tmp/mount-rs-foundationdb-target" \
     --workdir /workspace \
     --env MOUNT_RS_REMOTE_SATURATION_PROVIDER=foundationdb \
+    --env "MOUNT_RS_REMOTE_SATURATION_INODE_UPDATES=${MOUNT_RS_REMOTE_SATURATION_INODE_UPDATES:-0}" \
     --env MOUNT_RS_PROFILE_IO=1 \
     --env "MOUNT_RS_RESOURCE_PROFILE=${MOUNT_RS_RESOURCE_PROFILE:-0}" \
     --env "MOUNT_RS_TRACE_ALLOCATIONS=${MOUNT_RS_TRACE_ALLOCATIONS:-0}" \

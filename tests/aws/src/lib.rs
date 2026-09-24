@@ -61,6 +61,7 @@ fn aws_s3_split_options(
         owner: owner.to_owned(),
         lease_ttl: Duration::from_secs(30),
         concurrent_writes: false,
+        inode_updates: false,
         writeback: false,
         delegated: false,
         checkout_path: None,

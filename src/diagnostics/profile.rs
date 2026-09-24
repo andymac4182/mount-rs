@@ -50,6 +50,12 @@ events! {
     PublishConflict => "provider.metadata.cas_conflict",
     NamespaceReturned => "provider.namespace_returned_bytes",
     NamespaceSerialized => "provider.namespace_serialized_bytes",
+    InodeLoad => "provider.inode.load",
+    InodeConditional => "provider.inode.load_if_changed",
+    InodePublication => "provider.inode.publish_cas",
+    InodeConflict => "provider.inode.cas_conflict",
+    InodeReturned => "provider.inode_returned_bytes",
+    InodeSerialized => "provider.inode_serialized_bytes",
 }
 
 #[derive(Default)]

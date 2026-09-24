@@ -202,6 +202,7 @@ pub struct SplitStorageConfig {
     pub chunk_size_bytes: usize,
     pub lease_ttl_ms: Option<u64>,
     pub concurrent_writes: bool,
+    pub inode_updates: bool,
     pub writeback: bool,
     pub delegated: bool,
     pub checkout_path: Option<String>,
@@ -628,6 +629,7 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
             "chunk_size_bytes",
             "lease_ttl_ms",
             "concurrent_writes",
+            "inode_updates",
             "ownership_mode",
             "checkout_path",
             "owner",
@@ -663,6 +665,11 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
         .get("concurrent_writes")
         .map(|value| required_value_bool(value, "config.driver.storage.concurrent_writes"))
         .transpose()?;
+    let inode_updates = object
+        .get("inode_updates")
+        .map(|value| required_value_bool(value, "config.driver.storage.inode_updates"))
+        .transpose()?
+        .unwrap_or(false);
     let ownership = object
         .get("ownership_mode")
         .map(|value| required_value_string(value, "config.driver.storage.ownership_mode"))
@@ -670,7 +677,7 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
     let (concurrent_writes, writeback) = match ownership.as_deref() {
         Some("exclusive") => (false, true),
         Some("shared") => (true, false),
-        None => (legacy_concurrent.unwrap_or(false), false),
+        None => (legacy_concurrent.unwrap_or(inode_updates), false),
         Some(_) => {
             return Err(ConfigError::at(
                 "config.driver.storage.ownership_mode",
@@ -685,6 +692,12 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
         ));
     }
     let delegated = ownership.as_deref() == Some("shared");
+    if inode_updates && (!concurrent_writes || delegated || writeback) {
+        return Err(ConfigError::at(
+            "config.driver.storage.inode_updates",
+            "requires concurrent writes without directory ownership or writeback",
+        ));
+    }
     let checkout_path = object
         .get("checkout_path")
         .map(|value| required_value_string(value, "config.driver.storage.checkout_path"))
@@ -806,6 +819,7 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
         chunk_size_bytes,
         lease_ttl_ms,
         concurrent_writes,
+        inode_updates,
         writeback,
         delegated,
         checkout_path,
@@ -1775,6 +1789,38 @@ mod tests {
             }
         }
     }"#;
+
+    #[test]
+    fn inode_updates_are_explicit_and_validate_ownership() {
+        let driver = serde_json::json!({
+            "version": 1,
+            "driver": { "kind": "splitstore", "storage": {
+                "metadata": { "kind": "sqlite", "path": "metadata.db" },
+                "blocks": { "kind": "sqlite", "path": "blocks.db" }
+            }}
+        });
+        let parse = |value: &Value| parse_config_str(&value.to_string(), Path::new("/tmp/config"));
+        assert!(!parse(&driver).unwrap().storage.unwrap().inode_updates);
+        let mut enabled = driver.clone();
+        enabled["driver"]["storage"]["inode_updates"] = Value::Bool(true);
+        let storage = parse(&enabled).unwrap().storage.unwrap();
+        assert!(storage.inode_updates);
+        assert!(storage.concurrent_writes);
+        for (field, value) in [
+            ("concurrent_writes", Value::Bool(false)),
+            ("ownership_mode", Value::String("exclusive".into())),
+            ("ownership_mode", Value::String("shared".into())),
+        ] {
+            let mut invalid = enabled.clone();
+            invalid["driver"]["storage"][field] = value;
+            assert!(
+                parse(&invalid)
+                    .unwrap_err()
+                    .message()
+                    .contains("inode_updates")
+            );
+        }
+    }
 
     #[test]
     fn structured_splitstore_has_no_legacy_or_host_fields() {

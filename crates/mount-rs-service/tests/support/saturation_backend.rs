@@ -123,6 +123,9 @@ impl Backend {
     pub async fn open(&self, index: usize) -> Result<Filesystem, String> {
         let mut options = SplitOptions::memory(format!("remote-saturation-{index}"), 4096)
             .with_concurrent_writes(true);
+        if std::env::var("MOUNT_RS_REMOTE_SATURATION_INODE_UPDATES").as_deref() == Ok("1") {
+            options = options.with_inode_updates(true);
+        }
         options.metadata = self.store.clone();
         options.blocks = self.store.clone();
         Filesystem::split(options)

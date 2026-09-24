@@ -78,6 +78,7 @@ impl Filesystem {
         let mut chunk_options = ChunkedOptions::fixed(options.owner, options.chunk_size_bytes)?
             .with_lease_ttl(options.lease_ttl)
             .with_concurrent_writes(options.concurrent_writes)
+            .with_inode_updates(options.inode_updates)
             .with_writeback(options.writeback)
             .with_identity(options.uid, options.gid, options.umask);
         if options.delegated {
@@ -336,6 +337,13 @@ async fn complete_migration_after_teardown(
 }
 
 fn validate_concurrent_split_options(options: &SplitOptions) -> Result<()> {
+    if options.inode_updates
+        && (!options.concurrent_writes || options.delegated || options.writeback)
+    {
+        return Err(FsError::new(ErrorCode::Einval).with_message(
+            "inode_updates requires concurrent writes without directory ownership or writeback",
+        ));
+    }
     if options.delegated && (!options.concurrent_writes || options.writeback) {
         return Err(FsError::new(ErrorCode::Einval)
             .with_message("directory ownership requires shared mode without writeback"));
@@ -416,6 +424,44 @@ impl Clone for Filesystem {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn inode_options_reject_incompatible_modes_before_opening_storage() {
+        let base = SplitOptions {
+            metadata: StoreConfig::Tidb {
+                connection: "mysql://root@127.0.0.1:1/test".into(),
+                volume_key: "inode-validation".into(),
+                durable: true,
+            },
+            blocks: StoreConfig::Tidb {
+                connection: "mysql://root@127.0.0.1:1/test".into(),
+                volume_key: "inode-validation".into(),
+                durable: true,
+            },
+            ..SplitOptions::memory("inode-validation", 4096).with_inode_updates(true)
+        };
+        for options in [
+            base.clone().with_writeback(true),
+            base.clone()
+                .with_ownership_mode(mount_rs_chunked::OwnershipMode::Shared),
+            base.clone().with_concurrent_writes(false),
+        ] {
+            let error = Filesystem::split(options).await.err().unwrap();
+            assert_eq!(error.code, ErrorCode::Einval);
+            assert!(error.to_string().contains("inode_updates"));
+        }
+        let error = Filesystem::split(
+            SplitOptions::memory("inode-validation", 4096).with_inode_updates(true),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(error.code, ErrorCode::Einval);
+        assert!(error.to_string().contains("concurrent_writes requires"));
+        assert!(base.clone().with_inode_updates(false).concurrent_writes);
+        assert!(base.clone().with_concurrent_writes(true).inode_updates);
+        assert!(base.with_inode_updates(true).concurrent_writes);
+    }
 
     #[tokio::test]
     async fn concurrent_tidb_validates_shared_pairing_before_connecting() {

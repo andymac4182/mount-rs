@@ -11,7 +11,9 @@ use mount_rs_core::diagnostics::profile::{self, Event};
 use mount_rs_core::storage::{
     BlockId, BlockStore, CheckoutRequest, ConcurrentBackingId, ConcurrentModeState,
     DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState, DirectoryGrant,
-    LoadedMetadata, MetadataStore, Namespace, WriterLease,
+    InodeMetadataSnapshot, InodeModeState, InodeVersion, LoadedInode, LoadedMetadata,
+    MetadataStore, Namespace, NodeMetadata, WriterLease, decode_inode_namespace,
+    encode_inode_namespace, validate_inode_publication, validate_node_kind,
 };
 use mount_rs_core::versioning::{
     PublicationId, ReadLease, ReadLeaseRequest, VersionHead, VersionId, VersionInfo, VersionKind,
@@ -20,13 +22,18 @@ use mount_rs_core::versioning::{
 use mount_rs_core::{ErrorCode, FsError, Result, backend_error};
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::Path,
     sync::{Arc, Mutex, MutexGuard},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 #[cfg(unix)]
-use std::{os::unix::ffi::OsStrExt, os::unix::fs::MetadataExt, path::PathBuf};
+use std::{
+    os::unix::ffi::OsStrExt,
+    os::unix::fs::MetadataExt,
+    path::PathBuf,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 // SQLite supplies the clock inside the same statement as lease validation.
 const NOW: &str = "CAST(unixepoch('subsec') * 1000 AS INTEGER)";
@@ -34,6 +41,14 @@ const NOW_SELECT: &str = "SELECT CAST(unixepoch('subsec') * 1000 AS INTEGER)";
 const CONCURRENT_WRITE_MODE: &str = "MRC1";
 const BOUND_WRITE_MODE: &str = "MRC2";
 const DELEGATED_WRITE_MODE: &str = "MRC3";
+const INODE_WRITE_MODE: &str = "MRC4";
+const INODE_CONDITIONAL_SQL: &str = "SELECT m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.revision,
+                    m.physical_dev,m.physical_ino,m.physical_path,
+                    g.structural_generation,g.inode_revision,
+                    CASE WHEN g.structural_generation=?2 AND g.inode_revision=?3
+                        THEN NULL ELSE g.node END
+                 FROM mount_rs_metadata m INDEXED BY mount_rs_inode_authority LEFT JOIN mount_rs_inode_guards g ON g.inode=?1
+                 WHERE m.id=1";
 const CONCURRENT_FENCE_SENTINEL: i64 = i64::MAX;
 const MAX_SQLITE_BUSY_RETRIES: usize = 16;
 const SQLITE_BUSY_RETRY_BUDGET: Duration = Duration::from_secs(30);
@@ -261,6 +276,8 @@ struct Database {
     durable: bool,
     #[cfg(unix)]
     opened_file: Option<OpenedFile>,
+    #[cfg(unix)]
+    local_file_qualified: Arc<AtomicBool>,
 }
 
 #[cfg(unix)]
@@ -359,6 +376,7 @@ struct OpenedFile {
     // they do not prove descriptor identity across an adversarial ABA swap.
     requested: PathBuf,
     canonical: PathBuf,
+    auxiliary_path: String,
     stamp: FileStamp,
     created_by_open: bool,
 }
@@ -462,6 +480,7 @@ impl Database {
                     .with_message("SQLite file changed while opening"));
             }
             Some(OpenedFile {
+                auxiliary_path: encode_auxiliary_path(&canonical),
                 requested,
                 canonical,
                 stamp,
@@ -487,6 +506,8 @@ impl Database {
             durable,
             #[cfg(unix)]
             opened_file,
+            #[cfg(unix)]
+            local_file_qualified: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -511,7 +532,7 @@ impl Database {
         let opened = self.opened_file.as_ref().ok_or_else(|| {
             FsError::new(ErrorCode::Enotsup).with_syscall("inspect concurrent SQLite backing")
         })?;
-        Ok(encode_auxiliary_path(&opened.canonical))
+        Ok(opened.auxiliary_path.clone())
     }
 
     #[cfg(unix)]
@@ -540,7 +561,37 @@ impl Database {
             .with_syscall("inspect concurrent SQLite backing")
             .with_message("this Unix platform has no qualified SQLite filesystem guard"));
         self.current_file_stamp()?;
+        self.local_file_qualified.store(true, Ordering::Release);
         Ok(stamp)
+    }
+
+    #[cfg(unix)]
+    fn require_fresh_inode_read_file(&self) -> Result<()> {
+        if !self.local_file_qualified.load(Ordering::Acquire) {
+            self.require_concurrent_local_file("metadata")?;
+        }
+        let opened = self
+            .opened_file
+            .as_ref()
+            .ok_or_else(|| FsError::new(ErrorCode::Enotsup))?;
+        // Local-filesystem qualification belongs to the opened physical file.
+        // Fresh stats retain pathname, physical identity and hard-link checks
+        // without repeating canonicalization/statfs for every read token.
+        for path in [&opened.requested, &opened.canonical] {
+            let metadata = std::fs::metadata(path).map_err(|_| stale())?;
+            if (FileStamp {
+                dev: metadata.dev(),
+                ino: metadata.ino(),
+            }) != opened.stamp
+            {
+                return Err(stale());
+            }
+            if metadata.nlink() != 1 {
+                return Err(FsError::new(ErrorCode::Enotsup)
+                    .with_message("concurrent SQLite metadata requires a single pathname"));
+            }
+        }
+        Ok(())
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
@@ -979,7 +1030,7 @@ fn initialize_version_schema(database: &Database) -> Result<()> {
                 && owner.is_none()
                 && fence == CONCURRENT_FENCE_SENTINEL
                 && expires == 0 => {}
-        Some(BOUND_WRITE_MODE | DELEGATED_WRITE_MODE)
+        Some(BOUND_WRITE_MODE | DELEGATED_WRITE_MODE | INODE_WRITE_MODE)
             if backing
                 .as_deref()
                 .is_some_and(|id| ConcurrentBackingId::from_hex(id).is_ok())
@@ -997,7 +1048,7 @@ fn initialize_version_schema(database: &Database) -> Result<()> {
         let stamp = FileStamp::from_text(physical_dev.as_deref(), physical_ino.as_deref())?;
         if matches!(
             mode.as_deref(),
-            Some(BOUND_WRITE_MODE | DELEGATED_WRITE_MODE)
+            Some(BOUND_WRITE_MODE | DELEGATED_WRITE_MODE | INODE_WRITE_MODE)
         ) {
             require_matching_metadata_stamp(
                 database,
@@ -1030,13 +1081,38 @@ fn initialize_version_schema(database: &Database) -> Result<()> {
         let _ = (&physical_dev, &physical_ino, &physical_path);
         if matches!(
             mode.as_deref(),
-            Some(BOUND_WRITE_MODE | DELEGATED_WRITE_MODE)
+            Some(BOUND_WRITE_MODE | DELEGATED_WRITE_MODE | INODE_WRITE_MODE)
         ) {
             return Err(incompatible_schema(
                 "this platform cannot bind MRC2 SQLite metadata to a physical file",
             ));
         }
     }
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS mount_rs_inode_guards (
+        inode TEXT PRIMARY KEY NOT NULL,
+        structural_generation INTEGER NOT NULL CHECK(structural_generation>0),
+        inode_revision INTEGER NOT NULL CHECK(inode_revision>=0),
+        node TEXT NOT NULL)",
+    )
+    .map_err(backend_error)?;
+    // Authority columns occur after the potentially large namespace in the
+    // table record. Cover these probes so SQLite never traverses namespace
+    // overflow pages merely to validate an inode token.
+    tx.execute_batch(
+        "CREATE INDEX IF NOT EXISTS mount_rs_inode_authority
+        ON mount_rs_metadata(id, write_mode, backing_id, owner, fence, expires,
+            revision, physical_dev, physical_ino, physical_path)",
+    )
+    .map_err(backend_error)?;
+    let guard_columns = table_columns(&tx, "mount_rs_inode_guards")?
+        .ok_or_else(|| incompatible_schema("MRC4 inode guard table missing"))?;
+    require_columns(
+        "mount_rs_inode_guards",
+        &guard_columns,
+        &["inode", "structural_generation", "inode_revision", "node"],
+    )?;
+    require_primary_key(&tx, "mount_rs_inode_guards", "inode")?;
     let (delegation_json, namespace_json): (Option<String>, Option<String>) = tx
         .query_row(
             "SELECT delegation_state, namespace FROM mount_rs_metadata WHERE id=1",
@@ -1719,6 +1795,156 @@ impl SqliteMetadataStore {
     }
 }
 
+fn inode_conflict() -> FsError {
+    FsError::new(ErrorCode::Eagain).with_syscall("publish SQLite inode metadata")
+}
+
+fn checked_sqlite_next(revision: u64) -> Result<i64> {
+    i64::try_from(revision)
+        .ok()
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))
+}
+
+#[cfg(unix)]
+type InodeConditionalRow = (
+    MetadataPublicationRow,
+    (Option<u64>, Option<u64>, Option<String>),
+);
+
+fn inode_authority(
+    database: &Database,
+    connection: &Connection,
+    backing: ConcurrentBackingId,
+) -> Result<u64> {
+    #[cfg(not(unix))]
+    {
+        let _ = (database, connection, backing);
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
+    #[cfg(unix)]
+    {
+        let row: MetadataPublicationRow = connection.query_row(
+            "SELECT write_mode,backing_id,owner,fence,expires,revision,physical_dev,physical_ino,physical_path FROM mount_rs_metadata INDEXED BY mount_rs_inode_authority WHERE id=1",[],
+            |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?,row.get(7)?,row.get(8)?))).map_err(backend_error)?;
+        validate_inode_authority(database, backing, row)
+    }
+}
+
+#[cfg(unix)]
+fn validate_inode_authority(
+    database: &Database,
+    backing: ConcurrentBackingId,
+    row: MetadataPublicationRow,
+) -> Result<u64> {
+    require_matching_metadata_stamp(
+        database,
+        row.6.as_deref(),
+        row.7.as_deref(),
+        row.8.as_deref(),
+    )?;
+    validate_inode_authority_fields(database, backing, row)
+}
+
+#[cfg(unix)]
+fn validate_inode_authority_fields(
+    database: &Database,
+    backing: ConcurrentBackingId,
+    row: MetadataPublicationRow,
+) -> Result<u64> {
+    let (mode, stored, owner, fence, expires, revision, dev, ino, path) = row;
+    if mode.as_deref() != Some(INODE_WRITE_MODE)
+        || stored.as_deref() != Some(backing.to_hex().as_str())
+    {
+        return Err(stale());
+    }
+    let opened = database
+        .opened_file
+        .as_ref()
+        .ok_or_else(|| FsError::new(ErrorCode::Enotsup))?;
+    let persisted = FileStamp::from_text(dev.as_deref(), ino.as_deref())?
+        .ok_or_else(|| incompatible_schema("MRC4 metadata has no trusted physical stamp"))?;
+    if persisted != opened.stamp || path.as_deref() != Some(opened.auxiliary_path.as_str()) {
+        return Err(stale());
+    }
+    if owner.is_some() || fence != CONCURRENT_FENCE_SENTINEL || expires != 0 || revision <= 0 {
+        return Err(incompatible_schema(
+            "invalid MRC4 authority fence or generation",
+        ));
+    }
+    Ok(revision as u64)
+}
+
+fn inode_guard_versions(
+    connection: &Connection,
+    generation: u64,
+    namespace: &mut Namespace,
+) -> Result<BTreeMap<u64, u64>> {
+    let mut statement = connection
+        .prepare(
+            "SELECT inode,structural_generation,inode_revision,node FROM mount_rs_inode_guards",
+        )
+        .map_err(backend_error)?;
+    let mut rows = statement.query([]).map_err(backend_error)?;
+    let mut versions = BTreeMap::new();
+    while let Some(row) = rows.next().map_err(backend_error)? {
+        let inode: String = row.get(0).map_err(backend_error)?;
+        let inode = inode.parse::<u64>().map_err(backend_error)?;
+        let actual: u64 = row.get(1).map_err(backend_error)?;
+        let revision: u64 = row.get(2).map_err(backend_error)?;
+        let json: String = row.get(3).map_err(backend_error)?;
+        if actual != generation
+            || !namespace.nodes.contains_key(&inode)
+            || versions.insert(inode, revision).is_some()
+        {
+            return Err(incompatible_schema(
+                "MRC4 inode guard generation or identity invalid",
+            ));
+        }
+        namespace
+            .nodes
+            .insert(inode, decode_inode_guard(inode, &json)?);
+    }
+    if !versions.keys().eq(namespace.nodes.keys()) {
+        return Err(incompatible_schema(
+            "MRC4 guard membership differs from namespace",
+        ));
+    }
+    namespace.validate()?;
+    Ok(versions)
+}
+
+fn decode_inode_guard(inode: u64, json: &str) -> Result<NodeMetadata> {
+    profile::add(Event::InodeReturned, json.len() as u64);
+    let node: NodeMetadata = serde_json::from_str(json).map_err(backend_error)?;
+    if inode == 0 || node.stats.ino != inode {
+        return Err(incompatible_schema("MRC4 inode guard identity mismatch"));
+    }
+    validate_node_kind(&node)?;
+    Ok(node)
+}
+
+fn rebuild_inode_guards(
+    connection: &Connection,
+    generation: u64,
+    namespace: &Namespace,
+) -> Result<()> {
+    let generation = i64::try_from(generation).map_err(|_| FsError::new(ErrorCode::Eoverflow))?;
+    let mut statement = connection.prepare("INSERT INTO mount_rs_inode_guards(inode,structural_generation,inode_revision,node) VALUES(?1,?2,0,?3)").map_err(backend_error)?;
+    for (inode, node) in &namespace.nodes {
+        let json = serde_json::to_string(node).map_err(backend_error)?;
+        profile::add(Event::InodeSerialized, json.len() as u64);
+        if statement
+            .execute(params![inode.to_string(), generation, json])
+            .map_err(backend_error)?
+            != 1
+        {
+            return Err(stale());
+        }
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl MetadataStore for SqliteMetadataStore {
     fn durable(&self) -> bool {
@@ -1733,13 +1959,16 @@ impl MetadataStore for SqliteMetadataStore {
 
     async fn load(&self) -> Result<LoadedMetadata> {
         let connection = self.0.lock()?;
-        let (revision, namespace): (u64, Option<String>) = connection
+        let (revision, namespace, mode): (u64, Option<String>, Option<String>) = connection
             .query_row(
-                "SELECT revision, namespace FROM mount_rs_metadata WHERE id=1",
+                "SELECT revision, namespace, write_mode FROM mount_rs_metadata WHERE id=1",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .map_err(backend_error)?;
+        if mode.as_deref() == Some(INODE_WRITE_MODE) {
+            return Err(stale());
+        }
         if let Some(json) = &namespace {
             profile::add(Event::NamespaceReturned, json.len() as u64);
         }
@@ -1953,16 +2182,19 @@ impl MetadataStore for SqliteMetadataStore {
         // avoiding both materializing the JSON and reading its overflow pages.
         // Out-of-range caller revisions cannot match SQLite's integer domain.
         let known = i64::try_from(known_revision).ok();
-        let (revision, namespace): (u64, Option<String>) = connection
+        let (revision, namespace, mode): (u64, Option<String>, Option<String>) = connection
             .query_row(
                 "SELECT revision, CASE
                      WHEN typeof(revision)='integer' AND revision>0 AND revision=?1
-                     THEN NULL ELSE namespace END
+                     THEN NULL ELSE namespace END, write_mode
                  FROM mount_rs_metadata WHERE id=1",
                 params![known],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .map_err(backend_error)?;
+        if mode.as_deref() == Some(INODE_WRITE_MODE) {
+            return Err(stale());
+        }
         if revision != 0 && revision == known_revision {
             return Ok(None);
         }
@@ -1976,6 +2208,280 @@ impl MetadataStore for SqliteMetadataStore {
                 .transpose()
                 .map_err(backend_error)?,
         }))
+    }
+
+    async fn inode_mode_state(&self) -> Result<Option<InodeModeState>> {
+        let mut connection = self.0.lock()?;
+        let tx = connection.transaction().map_err(backend_error)?;
+        let mode: Option<String> = tx
+            .query_row(
+                "SELECT write_mode FROM mount_rs_metadata WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(backend_error)?;
+        if mode.as_deref() != Some(INODE_WRITE_MODE) {
+            return Ok(None);
+        }
+        let backing: String = tx
+            .query_row(
+                "SELECT backing_id FROM mount_rs_metadata WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(backend_error)?;
+        let backing = ConcurrentBackingId::from_hex(&backing).map_err(backend_error)?;
+        let structural_generation = inode_authority(&self.0, &tx, backing)?;
+        Ok(Some(InodeModeState {
+            backing,
+            structural_generation,
+        }))
+    }
+
+    async fn prepare_inode_mode(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        #[cfg(not(unix))]
+        {
+            let _ = (backing, expected_revision);
+            return Err(FsError::new(ErrorCode::Enotsup));
+        }
+        #[cfg(unix)]
+        {
+            self.0.with_concurrent_publish_timeout(|connection| {
+                let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(backend_error)?;
+                let (mode, stored, owner, fence, expires, revision, dev, ino, path): MetadataPublicationRow = tx.query_row(
+                    "SELECT write_mode, backing_id, owner, fence, expires, revision, physical_dev, physical_ino, physical_path FROM mount_rs_metadata WHERE id=1", [],
+                    |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?,row.get(7)?,row.get(8)?))).map_err(backend_error)?;
+                if mode.as_deref() != Some(BOUND_WRITE_MODE) || stored.as_deref() != Some(backing.to_hex().as_str()) { return Err(stale()); }
+                require_matching_metadata_stamp(&self.0,dev.as_deref(),ino.as_deref(),path.as_deref())?;
+                if owner.is_some() || fence != CONCURRENT_FENCE_SENTINEL || expires != 0 { return Err(incompatible_schema("invalid MRC4 enrollment fence")); }
+                if revision <= 0 || u64::try_from(revision).ok() != Some(expected_revision) { return Err(inode_conflict()); }
+                let json: String = tx.query_row("SELECT namespace FROM mount_rs_metadata WHERE id=1",[],|row|row.get(0)).map_err(backend_error)?;
+                let namespace: Namespace = serde_json::from_str(&json).map_err(backend_error)?;
+                namespace.validate()?;
+                tx.execute("DELETE FROM mount_rs_inode_guards",[]).map_err(backend_error)?;
+                let next = checked_sqlite_next(expected_revision)?;
+                let wrapped = encode_inode_namespace(&namespace)?;
+                profile::add(Event::NamespaceSerialized, wrapped.len() as u64);
+                let wrapped = String::from_utf8(wrapped).map_err(backend_error)?;
+                rebuild_inode_guards(&tx, next as u64, &namespace)?;
+                if tx.execute("UPDATE mount_rs_metadata SET write_mode='MRC4', revision=?1, namespace=?2 WHERE id=1 AND write_mode='MRC2' AND revision=?3",params![next,wrapped,expected_revision]).map_err(backend_error)? != 1 { return Err(stale()); }
+                self.0.current_file_stamp()?;
+                tx.commit().map_err(backend_error)?;
+                self.0.current_file_stamp()?;
+                Ok(())
+            })
+        }
+    }
+
+    async fn load_inode_snapshot(
+        &self,
+        backing: ConcurrentBackingId,
+    ) -> Result<InodeMetadataSnapshot> {
+        let mut connection = self.0.lock()?;
+        let tx = connection.transaction().map_err(backend_error)?;
+        let structural_generation = inode_authority(&self.0, &tx, backing)?;
+        let json: String = tx
+            .query_row(
+                "SELECT namespace FROM mount_rs_metadata WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(backend_error)?;
+        profile::add(Event::NamespaceReturned, json.len() as u64);
+        let mut namespace: Namespace = decode_inode_namespace(json.as_bytes())?;
+        let mut inode_revisions = BTreeMap::new();
+        let mut statement = tx.prepare("SELECT inode, structural_generation, inode_revision, node FROM mount_rs_inode_guards").map_err(backend_error)?;
+        let mut rows = statement.query([]).map_err(backend_error)?;
+        while let Some(row) = rows.next().map_err(backend_error)? {
+            let inode: String = row.get(0).map_err(backend_error)?;
+            let inode = inode.parse::<u64>().map_err(backend_error)?;
+            let generation: u64 = row.get(1).map_err(backend_error)?;
+            let revision: u64 = row.get(2).map_err(backend_error)?;
+            let json: String = row.get(3).map_err(backend_error)?;
+            if generation != structural_generation
+                || !namespace.nodes.contains_key(&inode)
+                || inode_revisions.insert(inode, revision).is_some()
+            {
+                return Err(incompatible_schema(
+                    "MRC4 inode membership or generation mismatch",
+                ));
+            }
+            namespace
+                .nodes
+                .insert(inode, decode_inode_guard(inode, &json)?);
+        }
+        let snapshot = InodeMetadataSnapshot {
+            structural_generation,
+            namespace,
+            inode_revisions,
+        };
+        snapshot.validate()?;
+        Ok(snapshot)
+    }
+
+    async fn load_inode(&self, backing: ConcurrentBackingId, inode: u64) -> Result<LoadedInode> {
+        self.load_inode_if_changed(backing, inode, None)
+            .await?
+            .ok_or_else(|| incompatible_schema("unconditional inode load omitted payload"))
+    }
+
+    async fn load_inode_if_changed(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: u64,
+        known: Option<InodeVersion>,
+    ) -> Result<Option<LoadedInode>> {
+        #[cfg(not(unix))]
+        {
+            let _ = (backing, inode, known);
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+        #[cfg(unix)]
+        {
+            self.0.require_fresh_inode_read_file()?;
+            let connection = self.0.lock()?;
+            let known_generation =
+                known.and_then(|version| i64::try_from(version.structural_generation).ok());
+            let known_revision =
+                known.and_then(|version| i64::try_from(version.inode_revision).ok());
+            // One statement reads root authority and the selected guard from
+            // the same SQLite snapshot. CASE avoids fetching the JSON overflow
+            // pages entirely on an exact token match.
+            let (authority, guard): InodeConditionalRow = connection
+                .query_row(
+                    INODE_CONDITIONAL_SQL,
+                    params![inode.to_string(), known_generation, known_revision],
+                    |row| {
+                        Ok((
+                            (
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                                row.get(5)?,
+                                row.get(6)?,
+                                row.get(7)?,
+                                row.get(8)?,
+                            ),
+                            (row.get(9)?, row.get(10)?, row.get(11)?),
+                        ))
+                    },
+                )
+                .map_err(backend_error)?;
+            let generation = validate_inode_authority_fields(&self.0, backing, authority)?;
+            self.0.require_fresh_inode_read_file()?;
+            let (structural_generation, inode_revision, json) = guard;
+            let structural_generation = structural_generation.ok_or_else(stale)?;
+            let inode_revision = inode_revision.ok_or_else(stale)?;
+            if structural_generation != generation {
+                return Err(incompatible_schema("MRC4 inode generation mismatch"));
+            }
+            let version = InodeVersion {
+                structural_generation,
+                inode_revision,
+            };
+            if known == Some(version) {
+                return Ok(None);
+            }
+            let json = json.ok_or_else(|| incompatible_schema("MRC4 inode payload missing"))?;
+            Ok(Some(LoadedInode {
+                version,
+                node: decode_inode_guard(inode, &json)?,
+            }))
+        }
+    }
+
+    async fn publish_inode_if_version(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: u64,
+        expected: InodeVersion,
+        node: NodeMetadata,
+    ) -> Result<InodeVersion> {
+        #[cfg(not(unix))]
+        {
+            let _ = (backing, inode, expected, node);
+            return Err(FsError::new(ErrorCode::Enotsup));
+        }
+        #[cfg(unix)]
+        {
+            self.0.with_concurrent_publish_timeout(|connection| {
+                let was_autocommit = connection.is_autocommit();
+                let tx = match connection.transaction_with_behavior(TransactionBehavior::Immediate) {
+                    Ok(tx) => tx,
+                    Err(error) => return Err(sqlite_busy_known_noncommit(&error,was_autocommit,"publish SQLite inode").unwrap_or_else(||backend_error(error))),
+                };
+                let generation = inode_authority(&self.0,&tx,backing)?;
+                if generation != expected.structural_generation { return Err(inode_conflict()); }
+                let row: Option<(u64,u64,String)> = tx.query_row("SELECT structural_generation,inode_revision,node FROM mount_rs_inode_guards WHERE inode=?1",params![inode.to_string()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional().map_err(backend_error)?;
+                let (stored_generation,revision,json) = row.ok_or_else(stale)?;
+                if stored_generation != generation { return Err(incompatible_schema("MRC4 inode generation mismatch")); }
+                if revision != expected.inode_revision { return Err(inode_conflict()); }
+                let original = decode_inode_guard(inode, &json)?;
+                validate_inode_publication(inode,&original,&node)?;
+                let next = checked_sqlite_next(revision)?;
+                let json = serde_json::to_string(&node).map_err(backend_error)?;
+                profile::add(Event::InodeSerialized, json.len() as u64);
+                if tx.execute("UPDATE mount_rs_inode_guards SET inode_revision=?1,node=?2 WHERE inode=?3 AND structural_generation=?4 AND inode_revision=?5",params![next,json,inode.to_string(),generation,revision]).map_err(backend_error)? != 1 { return Err(inode_conflict()); }
+                self.0.current_file_stamp()?;
+                if let Err(error) = tx.commit() { return Err(sqlite_busy_known_noncommit(&error,connection.is_autocommit(),"publish SQLite inode").unwrap_or_else(||backend_error(error))); }
+                self.0.current_file_stamp()?;
+                Ok(InodeVersion { structural_generation:generation,inode_revision:next as u64 })
+            })
+        }
+    }
+
+    async fn publish_structure_if_versions(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_generation: u64,
+        expected_inode_revisions: &BTreeMap<u64, u64>,
+        namespace: Namespace,
+    ) -> Result<u64> {
+        #[cfg(not(unix))]
+        {
+            let _ = (
+                backing,
+                expected_generation,
+                expected_inode_revisions,
+                namespace,
+            );
+            return Err(FsError::new(ErrorCode::Enotsup));
+        }
+        #[cfg(unix)]
+        {
+            namespace.validate()?;
+            let next = checked_sqlite_next(expected_generation)?;
+            let json =
+                String::from_utf8(encode_inode_namespace(&namespace)?).map_err(backend_error)?;
+            profile::add(Event::NamespaceSerialized, json.len() as u64);
+            self.0.with_concurrent_publish_timeout(|connection| {
+                let was_autocommit = connection.is_autocommit();
+                let tx = match connection.transaction_with_behavior(TransactionBehavior::Immediate) {
+                    Ok(tx) => tx,
+                    Err(error) => return Err(sqlite_busy_known_noncommit(&error,was_autocommit,"publish SQLite structure").unwrap_or_else(||backend_error(error))),
+                };
+                if inode_authority(&self.0,&tx,backing)? != expected_generation { return Err(inode_conflict()); }
+                let base: String = tx.query_row("SELECT namespace FROM mount_rs_metadata WHERE id=1", [], |row| row.get(0)).map_err(backend_error)?;
+                profile::add(Event::NamespaceReturned, base.len() as u64);
+                let mut base = decode_inode_namespace(base.as_bytes())?;
+                let actual = inode_guard_versions(&tx,expected_generation,&mut base)?;
+
+                if &actual != expected_inode_revisions { return Err(inode_conflict()); }
+                if tx.execute("UPDATE mount_rs_metadata SET revision=?1,namespace=?2 WHERE id=1 AND write_mode='MRC4' AND revision=?3",params![next,json,expected_generation]).map_err(backend_error)? != 1 { return Err(inode_conflict()); }
+                tx.execute("DELETE FROM mount_rs_inode_guards",[]).map_err(backend_error)?;
+                rebuild_inode_guards(&tx,next as u64,&namespace)?;
+                self.0.current_file_stamp()?;
+                if let Err(error) = tx.commit() { return Err(sqlite_busy_known_noncommit(&error,connection.is_autocommit(),"publish SQLite structure").unwrap_or_else(||backend_error(error))); }
+                self.0.current_file_stamp()?;
+                Ok(next as u64)
+            })
+        }
     }
 
     async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
@@ -4062,6 +4568,430 @@ mod tests {
                 },
             )]),
         }
+    }
+
+    #[cfg(unix)]
+    fn inode_namespace() -> Namespace {
+        let mut ns = namespace();
+        for inode in [ns.root + 1, ns.root + 2] {
+            let mut stats = ns.nodes[&ns.root].stats.clone();
+            stats.ino = inode;
+            stats.mode = mount_rs_core::S_IFREG | 0o644;
+            stats.nlink = 1;
+            stats.size = 0;
+            stats.blocks = 0;
+            ns.nodes.insert(
+                inode,
+                NodeMetadata {
+                    stats,
+                    data: NodeData::File(mount_rs_core::storage::FileLayout {
+                        chunker: ns.default_chunker.clone(),
+                        extents: vec![],
+                    }),
+                },
+            );
+            let NodeData::Directory { entries } = &mut ns.nodes.get_mut(&ns.root).unwrap().data
+            else {
+                unreachable!()
+            };
+            entries.push(mount_rs_core::storage::DirectoryEntry {
+                name: format!("file-{inode}"),
+                inode,
+            });
+        }
+        ns.next_inode = ns.root + 3;
+        ns.validate().unwrap();
+        ns
+    }
+
+    #[cfg(unix)]
+    fn prepare_inode_metadata(store: &SqliteMetadataStore) -> ConcurrentBackingId {
+        let backing = prepare_bound_metadata(store);
+        run(store.publish_bound_if_revision(backing, 0, inode_namespace())).unwrap();
+        run(store.prepare_inode_mode(backing, 1)).unwrap();
+        backing
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inode_writers_have_independent_cas_and_same_inode_has_one_loser() {
+        use std::sync::Barrier;
+        let path = super::super::tests::unique_database_path();
+        let setup = SqliteMetadataStore::open(&path).unwrap();
+        let backing = prepare_inode_metadata(&setup);
+        let ns = run(setup.load_inode_snapshot(backing)).unwrap().namespace;
+        let ids = [ns.root + 1, ns.root + 2];
+        let expected = InodeVersion {
+            structural_generation: 2,
+            inode_revision: 0,
+        };
+        let barrier = Arc::new(Barrier::new(2));
+        let workers: Vec<_> = ids
+            .into_iter()
+            .map(|inode| {
+                let store = SqliteMetadataStore::open(&path).unwrap();
+                let barrier = Arc::clone(&barrier);
+                let mut node = ns.nodes[&inode].clone();
+                node.stats.size = inode;
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    run(store.publish_inode_if_version(backing, inode, expected, node))
+                })
+            })
+            .collect();
+        for worker in workers {
+            assert_eq!(worker.join().unwrap().unwrap().inode_revision, 1);
+        }
+        let snapshot = run(setup.load_inode_snapshot(backing)).unwrap();
+        assert_eq!(snapshot.structural_generation, 2);
+        assert_eq!(snapshot.inode_revisions[&ns.root], 0);
+        assert_eq!(snapshot.inode_revisions[&ids[0]], 1);
+        assert_eq!(snapshot.inode_revisions[&ids[1]], 1);
+        let barrier = Arc::new(Barrier::new(2));
+        let expected = InodeVersion {
+            structural_generation: 2,
+            inode_revision: 1,
+        };
+        let workers: Vec<_> = [31, 32]
+            .into_iter()
+            .map(|size| {
+                let store = SqliteMetadataStore::open(&path).unwrap();
+                let barrier = Arc::clone(&barrier);
+                let mut node = snapshot.namespace.nodes[&ids[0]].clone();
+                node.stats.size = size;
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    run(store.publish_inode_if_version(backing, ids[0], expected, node))
+                })
+            })
+            .collect();
+        let results: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result
+                    .as_ref()
+                    .is_err_and(|error| error.is(ErrorCode::Eagain)))
+                .count(),
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inode_structure_fences_content_and_reopen_preserves_guard_payload() {
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        let backing = prepare_inode_metadata(&store);
+        let before = run(store.load_inode_snapshot(backing)).unwrap();
+        let inode = before.namespace.root + 1;
+        let loaded = run(store.load_inode(backing, inode)).unwrap();
+        let mut node = loaded.node.clone();
+        node.stats.size = 77;
+        let version =
+            run(store.publish_inode_if_version(backing, inode, loaded.version, node)).unwrap();
+        assert!(
+            run(store.publish_structure_if_versions(
+                backing,
+                2,
+                &before.inode_revisions,
+                before.namespace
+            ))
+            .unwrap_err()
+            .is(ErrorCode::Eagain)
+        );
+        assert!(
+            run(store.load_inode_if_changed(backing, inode, Some(version)))
+                .unwrap()
+                .is_none()
+        );
+        assert!(run(store.load()).unwrap_err().is(ErrorCode::Estale));
+        assert!(
+            run(store.load_if_changed(1))
+                .unwrap_err()
+                .is(ErrorCode::Estale)
+        );
+        assert!(run(store.concurrent_mode_state()).is_err());
+        assert!(
+            run(store.publish_bound_if_revision(backing, 1, inode_namespace()))
+                .unwrap_err()
+                .is(ErrorCode::Estale)
+        );
+        drop(store);
+        let reopened = SqliteMetadataStore::open(&path).unwrap();
+        let snapshot = run(reopened.load_inode_snapshot(backing)).unwrap();
+        assert_eq!(snapshot.namespace.nodes[&inode].stats.size, 77);
+        assert_eq!(snapshot.inode_revisions[&inode], 1);
+        let generation = run(reopened.publish_structure_if_versions(
+            backing,
+            2,
+            &snapshot.inode_revisions,
+            snapshot.namespace,
+        ))
+        .unwrap();
+        assert_eq!(generation, 3);
+        assert!(
+            run(reopened.publish_inode_if_version(backing, inode, version, loaded.node))
+                .unwrap_err()
+                .is(ErrorCode::Eagain)
+        );
+        let after = run(reopened.load_inode_snapshot(backing)).unwrap();
+        assert!(
+            after
+                .inode_revisions
+                .values()
+                .all(|revision| *revision == 0)
+        );
+        assert_eq!(after.namespace.nodes[&inode].stats.size, 77);
+        assert!(
+            run(reopened.load_inode_if_changed(backing, inode, Some(version)))
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inode_fresh_conditional_reads_validate_authority_and_failed_structure_rolls_back() {
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        let backing = prepare_inode_metadata(&store);
+        let snapshot = run(store.load_inode_snapshot(backing)).unwrap();
+        let inode = snapshot.namespace.root + 1;
+        let loaded = run(store.load_inode(backing, inode)).unwrap();
+        {
+            let connection = store.0.lock().unwrap();
+            connection
+                .execute("UPDATE mount_rs_metadata SET fence=0 WHERE id=1", [])
+                .unwrap();
+        }
+        assert!(run(store.load_inode_if_changed(backing, inode, Some(loaded.version))).is_err());
+        {
+            let connection = store.0.lock().unwrap();
+            connection
+                .execute(
+                    "UPDATE mount_rs_metadata SET fence=?1 WHERE id=1",
+                    params![CONCURRENT_FENCE_SENTINEL],
+                )
+                .unwrap();
+            connection.execute_batch("CREATE TRIGGER abort_inode_rebuild BEFORE INSERT ON mount_rs_inode_guards BEGIN SELECT RAISE(ABORT,'injected structure failure'); END;").unwrap();
+        }
+        assert!(
+            run(store.publish_structure_if_versions(
+                backing,
+                2,
+                &snapshot.inode_revisions,
+                snapshot.namespace
+            ))
+            .is_err()
+        );
+        {
+            let connection = store.0.lock().unwrap();
+            connection
+                .execute_batch("DROP TRIGGER abort_inode_rebuild")
+                .unwrap();
+        }
+        drop(store);
+        let reopened = SqliteMetadataStore::open(&path).unwrap();
+        let after = run(reopened.load_inode_snapshot(backing)).unwrap();
+        assert_eq!(after.structural_generation, 2);
+        assert!(
+            after
+                .inode_revisions
+                .values()
+                .all(|revision| *revision == 0)
+        );
+        assert_eq!(
+            run(reopened.load_inode(backing, inode)).unwrap().node,
+            loaded.node
+        );
+        assert!(
+            run(reopened.load_inode_if_changed(
+                ConcurrentBackingId::from_bytes([0x43; 16]).unwrap(),
+                inode,
+                Some(loaded.version)
+            ))
+            .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inode_structure_rejects_same_version_corrupt_guards_without_overwriting_them() {
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        let backing = prepare_inode_metadata(&store);
+        let snapshot = run(store.load_inode_snapshot(backing)).unwrap();
+        let inode = snapshot.namespace.root + 1;
+        let mut invalid = snapshot.namespace.nodes[&inode].clone();
+        invalid.stats.size = 1;
+        let NodeData::File(layout) = &mut invalid.data else {
+            unreachable!()
+        };
+        layout.extents.push(mount_rs_core::storage::BlockExtent {
+            file_offset: 0,
+            block: BlockId("invalid-layout".into()),
+            block_offset: 0,
+            length: 2,
+        });
+        let invalid_layout = serde_json::to_string(&invalid).unwrap();
+        for corrupt in ["not JSON".to_owned(), invalid_layout] {
+            let before: (u64, String) = {
+                let connection = store.0.lock().unwrap();
+                connection
+                    .execute(
+                        "UPDATE mount_rs_inode_guards SET node=?1 WHERE inode=?2",
+                        params![corrupt, inode.to_string()],
+                    )
+                    .unwrap();
+                connection
+                    .query_row(
+                        "SELECT revision,namespace FROM mount_rs_metadata WHERE id=1",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .unwrap()
+            };
+            assert!(
+                run(store.publish_structure_if_versions(
+                    backing,
+                    2,
+                    &snapshot.inode_revisions,
+                    snapshot.namespace.clone()
+                ))
+                .is_err()
+            );
+            let connection = store.0.lock().unwrap();
+            let after: (u64, String) = connection
+                .query_row(
+                    "SELECT revision,namespace FROM mount_rs_metadata WHERE id=1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            let guard: (u64,u64,String) = connection.query_row("SELECT structural_generation,inode_revision,node FROM mount_rs_inode_guards WHERE inode=?1",params![inode.to_string()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+            assert_eq!(after, before);
+            assert_eq!(guard, (2, 0, corrupt));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inode_conditional_query_covers_root_authority_without_namespace_pages() {
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        prepare_inode_metadata(&store);
+        let connection = store.0.lock().unwrap();
+        let mut statement = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {INODE_CONDITIONAL_SQL}"))
+            .unwrap();
+        let plan: Vec<String> = statement
+            .query_map(params!["2", 1, 0], |row| row.get(3))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        assert!(
+            plan.iter()
+                .any(|line| line.contains("COVERING INDEX mount_rs_inode_authority")),
+            "{plan:?}"
+        );
+        assert!(
+            plan.iter()
+                .any(|line| line.contains("SEARCH g USING INDEX")),
+            "{plan:?}"
+        );
+        assert!(!plan.iter().any(|line| line.contains("SCAN")), "{plan:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inode_cached_local_qualification_keeps_fresh_link_and_persisted_path_checks() {
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        let backing = prepare_inode_metadata(&store);
+        let inode = inode_namespace().root + 1;
+        let version = run(store.load_inode(backing, inode)).unwrap().version;
+        let link = path.with_extension("inode-hot-read-link");
+        std::fs::hard_link(&path, &link).unwrap();
+        assert!(
+            run(store.load_inode_if_changed(backing, inode, Some(version)))
+                .unwrap_err()
+                .is(ErrorCode::Enotsup)
+        );
+        std::fs::remove_file(link).unwrap();
+        assert!(
+            run(store.load_inode_if_changed(backing, inode, Some(version)))
+                .unwrap()
+                .is_none()
+        );
+        {
+            let connection = store.0.lock().unwrap();
+            connection
+                .execute(
+                    "UPDATE mount_rs_metadata SET physical_path='00' WHERE id=1",
+                    [],
+                )
+                .unwrap();
+        }
+        assert!(
+            run(store.load_inode_if_changed(backing, inode, Some(version)))
+                .unwrap_err()
+                .is(ErrorCode::Estale)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inode_enrollment_fences_already_running_old_conditional_and_full_readers() {
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        let backing = prepare_bound_metadata(&store);
+        let old_revision =
+            run(store.publish_bound_if_revision(backing, 0, inode_namespace())).unwrap();
+        run(store.prepare_inode_mode(backing, old_revision)).unwrap();
+        let connection = store.0.lock().unwrap();
+        // Exact pre-MRC4 query: it has no write_mode check. The transition
+        // must change the revision and return an old-format-incompatible body.
+        let (revision, namespace): (u64, Option<String>) = connection.query_row(
+            "SELECT revision, CASE WHEN typeof(revision)='integer' AND revision>0 AND revision=?1 THEN NULL ELSE namespace END FROM mount_rs_metadata WHERE id=1",
+            params![old_revision], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(revision, old_revision + 1);
+        let namespace = namespace.unwrap();
+        assert!(serde_json::from_str::<Namespace>(&namespace).is_err());
+        let unconditional: String = connection
+            .query_row(
+                "SELECT namespace FROM mount_rs_metadata WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(serde_json::from_str::<Namespace>(&unconditional).is_err());
+        assert!(decode_inode_namespace(unconditional.as_bytes()).is_ok());
+        drop(connection);
+        let snapshot = run(store.load_inode_snapshot(backing)).unwrap();
+        assert_eq!(snapshot.structural_generation, old_revision + 1);
+        let next = run(store.publish_structure_if_versions(
+            backing,
+            snapshot.structural_generation,
+            &snapshot.inode_revisions,
+            snapshot.namespace,
+        ))
+        .unwrap();
+        let connection = store.0.lock().unwrap();
+        let (revision, json): (u64, String) = connection
+            .query_row(
+                "SELECT revision,namespace FROM mount_rs_metadata WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(revision, next);
+        assert!(serde_json::from_str::<Namespace>(&json).is_err());
+        assert!(decode_inode_namespace(json.as_bytes()).is_ok());
     }
 
     #[cfg(unix)]

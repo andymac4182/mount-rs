@@ -4,7 +4,10 @@ use rusqlite::{Connection, ffi};
 use std::{
     collections::BTreeMap,
     ffi::{CStr, c_void},
-    sync::{Arc, Mutex, OnceLock, Weak},
+    sync::{
+        Arc, Mutex, OnceLock, Weak,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 #[derive(Default)]
@@ -12,10 +15,12 @@ pub(crate) struct Counts {
     sql: Mutex<BTreeMap<&'static str, u64>>,
 }
 struct Entry {
+    id: u64,
     connection: Weak<Mutex<Connection>>,
     counts: Weak<Counts>,
 }
 static REGISTRY: OnceLock<Mutex<Vec<Entry>>> = OnceLock::new();
+static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 unsafe extern "C" fn trace(
     mask: u32,
     context: *mut c_void,
@@ -83,6 +88,7 @@ pub(crate) fn register(connection: &Arc<Mutex<Connection>>) -> Result<Option<Arc
         }
     }
     registry.push(Entry {
+        id: NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed),
         connection: Arc::downgrade(connection),
         counts: Arc::downgrade(&counts),
     });
@@ -128,6 +134,8 @@ pub fn connection_page_diagnostics(
 /// Sample/reset all live provider connections opened with MOUNT_RS_PROFILE_IO=1.
 /// SQL counts contain statement categories only; they never contain SQL values.
 /// Reset is a phase boundary operation and requires callers to drain workloads.
+/// Match connection_id across snapshots; aggregate totals can decrease when
+/// connections close. Missing end IDs cannot provide complete stage attribution.
 pub fn sqlite_io_diagnostics(reset: bool) -> serde_json::Value {
     let Some(registry) = REGISTRY.get() else {
         return serde_json::json!({"connections":[],"sql_statements":0});
@@ -161,6 +169,7 @@ pub fn sqlite_io_diagnostics(reset: bool) -> serde_json::Value {
             Err(error) => serde_json::json!({"error":error.to_string()}),
         };
         value["sql_statements"] = serde_json::json!(sql.values().sum::<u64>());
+        value["connection_id"] = serde_json::json!(entry.id);
         value["sql_categories"] = serde_json::json!(*sql);
         if reset {
             sql.clear();
@@ -195,11 +204,14 @@ mod tests {
             );
         });
         let sample = sqlite_io_diagnostics(true);
+        let first_id = sample["connections"][0]["connection_id"].as_u64().unwrap();
         assert_eq!(sample["connections"].as_array().unwrap().len(), 1);
         assert_eq!(sample["sql_statements"], 5);
         assert_eq!(sample["connections"][0]["sql_categories"]["SELECT"], 2);
         assert!(!sample.to_string().contains("diagnostic-sensitive-payload"));
-        assert_eq!(sqlite_io_diagnostics(false)["sql_statements"], 0);
+        let unchanged = sqlite_io_diagnostics(false);
+        assert_eq!(unchanged["sql_statements"], 0);
+        assert_eq!(unchanged["connections"][0]["connection_id"], first_id);
         drop(store);
         assert!(
             sqlite_io_diagnostics(false)["connections"]
@@ -208,6 +220,12 @@ mod tests {
                 .is_empty()
         );
         let reopened = SqliteBlockStore::in_memory().unwrap();
+        assert!(
+            sqlite_io_diagnostics(false)["connections"][0]["connection_id"]
+                .as_u64()
+                .unwrap()
+                > first_id
+        );
         assert_eq!(
             sqlite_io_diagnostics(true)["connections"]
                 .as_array()

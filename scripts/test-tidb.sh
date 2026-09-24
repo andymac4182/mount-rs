@@ -656,6 +656,12 @@ run_direct_provider_test() {
   MOUNT_RS_TIDB_EXPECT_PERSISTED="$persistence_expectation" \
   MOUNT_RS_TIDB_GLOBAL_AUTOCOMMIT_TEST=1 \
     sh "$repo_dir/scripts/test-tidb-concurrent-consumers.sh"
+  if [ "${MOUNT_RS_REMOTE_SATURATION_INODE_UPDATES:-0}" = 1 ]; then
+    MOUNT_RS_TIDB_URL="$tidb_url" \
+      "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --lib \
+        actual_tidb_inode_versions_preserve_unrelated_writes_and_fence_structure \
+        -- --ignored --nocapture --test-threads=1
+  fi
 }
 
 run_provider_test() {

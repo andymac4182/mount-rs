@@ -8,24 +8,24 @@ use serde_json::json;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn observer(phase: &str, mode: &str, stage: &str, successes: u64, failures: u64) {
-    if let Ok(path) = std::env::var("MOUNT_RS_DATASTORE_STAGE_OBSERVER") {
-        if !path.is_empty() {
-            assert!(
-                std::process::Command::new(path)
-                    .args([
-                        phase,
-                        mode,
-                        "100",
-                        stage,
-                        &successes.to_string(),
-                        &failures.to_string()
-                    ])
-                    .status()
-                    .expect("observer process")
-                    .success(),
-                "observer failed"
-            );
-        }
+    if let Ok(path) = std::env::var("MOUNT_RS_DATASTORE_STAGE_OBSERVER")
+        && !path.is_empty()
+    {
+        assert!(
+            std::process::Command::new(path)
+                .args([
+                    phase,
+                    mode,
+                    "100",
+                    stage,
+                    &successes.to_string(),
+                    &failures.to_string()
+                ])
+                .status()
+                .expect("observer process")
+                .success(),
+            "observer failed"
+        );
     }
 }
 
