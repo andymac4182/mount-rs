@@ -1690,6 +1690,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mount-rs-service"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "mount-rs-sqlite"
 version = "0.1.0"
 dependencies = [
