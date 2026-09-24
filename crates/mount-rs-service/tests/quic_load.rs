@@ -185,7 +185,7 @@ async fn setup_with_left_and_options(
     .unwrap()
     .with_root_certificates(roots)
     .with_no_client_auth();
-    tls.alpn_protocols = vec![b"mount-rs/1".to_vec()];
+    tls.alpn_protocols = vec![b"mount-rs/2".to_vec()];
     let config = quinn::ClientConfig::new(Arc::new(
         quinn::crypto::rustls::QuicClientConfig::try_from(tls).unwrap(),
     ));
@@ -459,7 +459,7 @@ async fn concurrent_clients_mixed_read_write_preserve_drive_isolation() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn one_connection_limits_active_streams_to_32_then_drains_48_requests() {
+async fn one_connection_admits_32_data_requests_and_rejects_16_overflow_requests() {
     let (arrivals, mut observed) = tokio::sync::watch::channel(0);
     let gate = Arc::new(StatGate {
         arrivals,
@@ -504,7 +504,7 @@ async fn one_connection_limits_active_streams_to_32_then_drains_48_requests() {
         .await
         .is_ok();
     let before_release = *observed.borrow();
-    gate.release.add_permits(48);
+
     assert!(
         reached_limit.is_ok(),
         "only {held} stat calls reached the backend"
@@ -512,17 +512,32 @@ async fn one_connection_limits_active_streams_to_32_then_drains_48_requests() {
     assert_eq!(held, 32, "server admitted more than 32 active streams");
     assert!(!exceeded_limit, "a 33rd stat call entered before release");
     assert_eq!(before_release, 32);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for _ in 0..16 {
+            assert!(
+                jobs.join_next().await.unwrap().unwrap().is_err(),
+                "overflow request entered dispatch"
+            );
+        }
+    })
+    .await
+    .expect("overflow requests did not fail fast");
+    assert_eq!(*observed.borrow(), 32);
+    gate.release.add_permits(32);
     tokio::time::timeout(Duration::from_secs(20), async {
+        let mut completed = 0;
         while let Some(result) = jobs.join_next().await {
             assert!(
                 result.unwrap().unwrap().is_object(),
                 "stat returned invalid data"
             );
+            completed += 1;
         }
+        assert_eq!(completed, 32);
     })
     .await
-    .expect("contended streams did not complete");
-    assert_eq!(*observed.borrow(), 48);
+    .expect("admitted streams did not complete");
+    assert_eq!(*observed.borrow(), 32);
     assert!(gate.peak.load(Ordering::SeqCst) <= 32);
     assert_eq!(gate.active.load(Ordering::SeqCst), 0);
     connection.close(0_u32.into(), b"completed");

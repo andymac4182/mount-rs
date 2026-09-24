@@ -1,5 +1,39 @@
 //! Codec-only diagnostic. Excludes QUIC, filesystem/storage, and input preparation.
-use mount_rs_remote_protocol::{Message, Operation, OperationName};
+use mount_rs_remote_protocol::{
+    Message, Operation, OperationName,
+    binary::{self, Header, IoRequest, IoResult},
+};
+use std::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll, Waker},
+};
+use tokio::io::AsyncWrite;
+struct Sink;
+impl AsyncWrite for Sink {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        b: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        black_box(b);
+        Poll::Ready(Ok(b.len()))
+    }
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+fn ready<T>(future: impl Future<Output = T>) -> T {
+    let mut future = std::pin::pin!(future);
+    let mut cx = Context::from_waker(Waker::noop());
+    match future.as_mut().poll(&mut cx) {
+        Poll::Ready(v) => v,
+        Poll::Pending => panic!("memory codec yielded"),
+    }
+}
 use serde_json::{Value, json};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
@@ -94,10 +128,91 @@ fn main() {
             write.len() + 4,
             size * std::mem::size_of::<Value>()
         );
-        measure("read_encode", size, iterations, || {
+        let request = IoRequest {
+            drive_id: "sandbox-drive".into(),
+            handle: 1,
+            position: Some(0),
+        };
+        let mut binary_read = Vec::new();
+        ready(binary::write_result(
+            &mut binary_read,
+            1,
+            Ok(IoResult::Read(payload.clone())),
+        ))
+        .unwrap();
+        let mut binary_write = Vec::new();
+        ready(binary::write_request(
+            &mut binary_write,
+            1,
+            &request,
+            size,
+            Some(&payload),
+        ))
+        .unwrap();
+        let mut buffer = vec![0; size];
+        assert_eq!(
+            ready(binary::read_result(
+                &mut &binary_read[..],
+                1,
+                true,
+                &mut buffer,
+                0
+            ))
+            .unwrap()
+            .unwrap(),
+            size
+        );
+        assert_eq!(buffer, payload);
+        println!(
+            "WIRE_BINARY_SIZE payload_bytes={size} read_frame_bytes={} write_frame_bytes={}",
+            binary_read.len(),
+            binary_write.len()
+        );
+        measure(
+            "binary_read_encode_with_provider_vec_clone",
+            size,
+            iterations,
+            || {
+                ready(binary::write_result(
+                    &mut Sink,
+                    1,
+                    Ok(IoResult::Read(payload.clone())),
+                ))
+                .unwrap();
+            },
+        );
+        measure("binary_read_decode_into_caller", size, iterations, || {
+            black_box(
+                ready(binary::read_result(
+                    &mut &binary_read[..],
+                    1,
+                    true,
+                    &mut buffer,
+                    0,
+                ))
+                .unwrap()
+                .unwrap(),
+            );
+        });
+        measure("binary_write_encode_borrowed", size, iterations, || {
+            ready(binary::write_request(
+                &mut Sink,
+                1,
+                &request,
+                size,
+                Some(&payload),
+            ))
+            .unwrap();
+        });
+        measure("binary_write_decode", size, iterations, || {
+            let mut reader = &binary_write[..];
+            let header = ready(Header::read(&mut reader)).unwrap();
+            black_box(ready(binary::read_body(&mut reader, header)).unwrap());
+        });
+        measure("numeric_json_read_encode", size, iterations, || {
             black_box(serde_json::to_vec(&response(black_box(&payload))).unwrap());
         });
-        measure("read_decode", size, iterations, || {
+        measure("numeric_json_read_decode", size, iterations, || {
             let Message::Response {
                 result: Ok(value), ..
             } = serde_json::from_slice(black_box(&read)).unwrap()
@@ -106,10 +221,10 @@ fn main() {
             };
             black_box(serde_json::from_value::<Vec<u8>>(value).unwrap());
         });
-        measure("write_encode", size, iterations, || {
+        measure("numeric_json_write_encode", size, iterations, || {
             black_box(serde_json::to_vec(&write_request(black_box(&payload))).unwrap());
         });
-        measure("write_decode", size, iterations, || {
+        measure("numeric_json_write_decode", size, iterations, || {
             let Message::Request { operation, .. } =
                 serde_json::from_slice(black_box(&write)).unwrap()
             else {

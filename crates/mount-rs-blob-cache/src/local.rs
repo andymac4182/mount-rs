@@ -265,7 +265,7 @@ impl LocalCache {
         self.config.directory.join(hex_key(&Self::key(scope, id)))
     }
     /// RAM bytes are immutable and verified at admission; only the returned Vec allocates.
-    pub fn get_memory_hashed(&self, key: &CacheKey) -> Option<Vec<u8>> {
+    pub fn get_memory_shared_hashed(&self, key: &CacheKey) -> Option<Arc<[u8]>> {
         let bytes = {
             let mut state = self.state.lock().ok()?;
             state.tick = state.tick.wrapping_add(1);
@@ -274,7 +274,11 @@ impl LocalCache {
             entry.tick = tick;
             entry.bytes.clone()?
         };
-        Some(bytes.to_vec())
+        Some(bytes)
+    }
+    pub fn get_memory_hashed(&self, key: &CacheKey) -> Option<Vec<u8>> {
+        self.get_memory_shared_hashed(key)
+            .map(|bytes| bytes.to_vec())
     }
     pub fn should_advertise_key(&self, key: &CacheKey, interval: std::time::Duration) -> bool {
         let Ok(mut state) = self.state.lock() else {

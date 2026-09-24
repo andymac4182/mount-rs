@@ -9,8 +9,8 @@ fn measurement_oracles() {
     assert!(validate_depths(&[0]).is_err());
     assert!(validate_depths(&[33]).is_err());
     assert!(validate_depths(&[1, 1]).is_err());
-    assert!(valid_read(&serde_json::json!([1, 2])).is_err());
-    assert!(valid_write(&serde_json::json!(4095)).is_err());
+    assert!(valid_read(2).is_err());
+    assert!(valid_write(4095).is_err());
     assert_ne!(payload(0, 0, 1), payload(0, 1, 1));
     let mut h = Histogram::default();
     h.record(std::time::Duration::from_micros(100));
@@ -22,53 +22,28 @@ fn measurement_oracles() {
 #[test]
 fn read_content_accepts_exact_payload() {
     let expected = payload(2, 3, 7);
-    assert!(valid_read_content(&serde_json::json!(expected), &expected).is_ok());
+    assert!(valid_read_content(&expected, &expected).is_ok());
 }
-
 #[test]
-fn read_content_rejects_invalid_bytes_and_shapes() {
+fn read_content_rejects_invalid_lengths() {
     let expected = payload(2, 3, 7);
-    for invalid in [
-        serde_json::json!(-1),
-        serde_json::json!(256),
-        serde_json::json!(1.5),
-        serde_json::json!("1"),
-        serde_json::Value::Null,
-    ] {
-        let mut received = serde_json::json!(expected);
-        received[BYTES - 1] = invalid;
-        assert!(valid_read_content(&received, &expected).is_err());
+    for received in [&[][..], &expected[..BYTES - 1], &vec![0; BYTES + 1][..]] {
+        assert!(valid_read_content(received, &expected).is_err());
     }
-    for received in [
-        serde_json::Value::Null,
-        serde_json::json!("payload"),
-        serde_json::json!({"data": expected}),
-        serde_json::json!(&expected[..BYTES - 1]),
-        serde_json::json!(vec![0_u8; BYTES + 1]),
-    ] {
-        assert!(valid_read_content(&received, &expected).is_err());
-    }
-    assert!(
-        valid_read_content(
-            &serde_json::json!(&expected[..BYTES - 1]),
-            &expected[..BYTES - 1]
-        )
-        .is_err()
-    );
-    let oversized = vec![0_u8; BYTES + 1];
-    assert!(valid_read_content(&serde_json::json!(oversized), &oversized).is_err());
+    assert!(valid_read_content(&expected[..BYTES - 1], &expected[..BYTES - 1]).is_err());
+    let oversized = vec![0; BYTES + 1];
+    assert!(valid_read_content(&oversized, &oversized).is_err());
 }
-
 #[test]
 fn read_content_compares_every_byte_and_payload_marker() {
     let expected = payload(2, 3, 7);
-    for index in [0, BYTES / 2, BYTES - 1] {
+    for index in 0..BYTES {
         let mut received = expected.clone();
         received[index] ^= 1;
-        assert!(valid_read_content(&serde_json::json!(received), &expected).is_err());
+        assert!(valid_read_content(&received, &expected).is_err());
     }
     for received in [payload(4, 3, 7), payload(2, 4, 7), payload(2, 3, 8)] {
-        assert!(valid_read_content(&serde_json::json!(received), &expected).is_err());
+        assert!(valid_read_content(&received, &expected).is_err());
     }
 }
 
@@ -87,7 +62,7 @@ mod resource_profile;
 #[path = "support/tidb_wire.rs"]
 mod wire;
 use mount_rs_core::Loopback;
-use mount_rs_remote_protocol::OperationName;
+use mount_rs_remote_protocol::{OperationName, binary::IoRequest};
 #[path = "support/saturation_backend.rs"]
 mod backend;
 use serde_json::{Value, json};
@@ -108,38 +83,97 @@ fn validate_depths(depths: &[usize]) -> Result<(), String> {
     }
     Ok(())
 }
-fn valid_read(v: &Value) -> Result<(), String> {
-    if v.as_array()
-        .is_some_and(|a| a.len() == BYTES && a.iter().all(|v| v.as_u64().is_some_and(|b| b <= 255)))
-    {
+fn valid_read(count: usize) -> Result<(), String> {
+    if count == BYTES {
         Ok(())
     } else {
         Err("partial or invalid read".into())
     }
 }
-fn valid_read_content(received: &Value, expected: &[u8]) -> Result<(), String> {
-    let values = received
-        .as_array()
-        .filter(|values| values.len() == BYTES && expected.len() == BYTES)
-        .ok_or("partial or invalid read")?;
-    for (value, expected_byte) in values.iter().zip(expected) {
-        let byte = value
-            .as_u64()
-            .and_then(|byte| u8::try_from(byte).ok())
-            .ok_or("partial or invalid read")?;
-        if byte != *expected_byte {
-            return Err("read content mismatch".into());
-        }
+fn valid_read_content(received: &[u8], expected: &[u8]) -> Result<(), String> {
+    valid_read(received.len())?;
+    if expected.len() != BYTES {
+        return Err("partial or invalid expected payload".into());
+    }
+    if received != expected {
+        return Err("read content mismatch".into());
     }
     Ok(())
 }
-fn valid_write(v: &Value) -> Result<(), String> {
-    if v == &json!(BYTES) {
+fn valid_write(count: usize) -> Result<(), String> {
+    if count == BYTES {
         Ok(())
     } else {
         Err("partial or invalid write".into())
     }
 }
+// Numeric arrays are a diagnostic lane on the current v2 control envelope.
+// This mode is test-only and does not add production codec compatibility.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Codec {
+    Binary,
+    NumericJson,
+}
+impl Codec {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "binary" => Ok(Self::Binary),
+            "numeric-json" => Ok(Self::NumericJson),
+            _ => Err("codec requires binary or numeric-json".into()),
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Self::Binary => "binary",
+            Self::NumericJson => "numeric-json",
+        }
+    }
+}
+enum IoReply {
+    Count(usize),
+    Numeric(Value),
+}
+fn valid_numeric_read(received: &Value, expected: &[u8]) -> Result<(), String> {
+    let values = received
+        .as_array()
+        .filter(|v| v.len() == BYTES && expected.len() == BYTES)
+        .ok_or("partial or invalid read")?;
+    if values
+        .iter()
+        .zip(expected)
+        .all(|(value, expected)| value.as_u64() == Some(u64::from(*expected)))
+    {
+        Ok(())
+    } else {
+        Err("read content mismatch".into())
+    }
+}
+fn valid_numeric_write(received: &Value) -> Result<(), String> {
+    if received.as_u64() == Some(BYTES as u64) {
+        Ok(())
+    } else {
+        Err("partial or invalid write".into())
+    }
+}
+#[test]
+fn diagnostic_codec_selection_and_numeric_oracles_are_explicit() {
+    assert_eq!(Codec::parse("binary").unwrap(), Codec::Binary);
+    assert_eq!(Codec::parse("numeric-json").unwrap(), Codec::NumericJson);
+    for invalid in ["", "v1", "json", "fallback"] {
+        assert!(Codec::parse(invalid).is_err());
+    }
+    let expected = payload(2, 3, 7);
+    assert!(valid_numeric_read(&json!(&expected), &expected).is_ok());
+    assert!(valid_numeric_read(&json!(&expected[..BYTES - 1]), &expected).is_err());
+    for invalid in [json!(-1), json!(256), json!(1.5), json!("1"), Value::Null] {
+        let mut received = json!(&expected);
+        received[BYTES - 1] = invalid;
+        assert!(valid_numeric_read(&received, &expected).is_err());
+    }
+    assert!(valid_numeric_write(&json!(BYTES)).is_ok());
+    assert!(valid_numeric_write(&json!(BYTES - 1)).is_err());
+}
+
 fn payload(client: usize, lane: usize, seq: u64) -> Vec<u8> {
     let mut bytes = vec![0; BYTES];
     let marker = format!("client={client};lane={lane};sequence={seq};");
@@ -247,6 +281,7 @@ async fn lane(
     depth: usize,
     blocks: usize,
     mode: Mode,
+    codec: Codec,
     deadline: Instant,
     base: u64,
     timeout: Duration,
@@ -257,6 +292,12 @@ async fn lane(
     let mut rng = (client as u64 + 1) * 7919 + (lane as u64 + 1) * 104729;
     let positions: Vec<usize> = (lane..blocks).step_by(depth).collect();
     let mut expected_bytes = vec![0; BYTES];
+    let mut read_buffer = vec![0; BYTES];
+    let mut request = IoRequest {
+        drive_id: drive,
+        handle,
+        position: None,
+    };
     while Instant::now() < deadline {
         seq += 1;
         rng ^= rng << 13;
@@ -265,34 +306,41 @@ async fn lane(
         let block = positions[rng as usize % positions.len()];
         let writing =
             matches!(mode, Mode::Write) || matches!(mode, Mode::Mixed) && seq.is_multiple_of(2);
-        let name = if writing {
-            OperationName::HandleWrite
-        } else {
-            OperationName::HandleRead
-        };
-        let body = if writing {
-            json!({"handle":handle,"position":block*BYTES,"data":payload(client,lane,base+seq)})
-        } else {
-            json!({"handle":handle,"position":block*BYTES,"length":BYTES})
-        };
+        request.position = Some((block * BYTES) as u64);
+        if writing {
+            payload_into(&mut expected_bytes, client, lane, base + seq);
+        }
         let start = Instant::now();
-        let response = tokio::time::timeout(
-            timeout,
-            wire::success(&connection, base + seq, &drive, name, body),
-        )
-        .await;
+        let response=tokio::time::timeout(timeout,async {
+            match codec {
+                Codec::Binary=>{
+                    let count=if writing { wire::handle_write(&connection,base+seq,&request,&expected_bytes).await? }
+                    else { wire::handle_read(&connection,base+seq,&request,&mut read_buffer).await? };
+                    Ok(IoReply::Count(count))
+                }
+                Codec::NumericJson=>{
+                    let (name,body)=if writing { (OperationName::HandleWrite,json!({"handle":handle,"position":request.position,"data":&expected_bytes})) }
+                    else { (OperationName::HandleRead,json!({"handle":handle,"position":request.position,"length":BYTES})) };
+                    wire::success(&connection,base+seq,&request.drive_id,name,body).await.map(IoReply::Numeric)
+                }
+            }
+        }).await;
         match response {
-            Ok(Ok(v)) => {
-                let valid = if writing {
-                    valid_write(&v)
-                } else {
+            Ok(Ok(reply)) => {
+                if !writing {
                     payload_into(
                         &mut expected_bytes,
                         client,
                         expected[block].0,
                         expected[block].1,
                     );
-                    valid_read_content(&v, &expected_bytes)
+                }
+                let valid = match (reply, writing) {
+                    (IoReply::Count(count), true) => valid_write(count),
+                    (IoReply::Count(count), false) => valid_read(count)
+                        .and_then(|()| valid_read_content(&read_buffer, &expected_bytes)),
+                    (IoReply::Numeric(value), true) => valid_numeric_write(&value),
+                    (IoReply::Numeric(value), false) => valid_numeric_read(&value, &expected_bytes),
                 };
                 if let Err(e) = valid {
                     result.errors.push(e);
@@ -312,10 +360,12 @@ async fn lane(
                 }
             }
             Ok(Err(e)) => {
+                connection.close(1_u32.into(), b"I/O failed; never replayed");
                 result.errors.push(e);
                 break;
             }
             Err(_) => {
+                connection.close(1_u32.into(), b"request timeout; never replayed");
                 result.errors.push(timeout_message(writing).into());
                 break;
             }
@@ -331,6 +381,7 @@ async fn stage(
     depth: usize,
     blocks: usize,
     mode: Mode,
+    codec: Codec,
     seconds: usize,
     base: u64,
     timeout: Duration,
@@ -365,6 +416,7 @@ async fn stage(
                         depth,
                         blocks,
                         mode,
+                        codec,
                         deadline,
                         base + lane_id as u64 * 10_000_000,
                         timeout,
@@ -403,7 +455,7 @@ async fn stage(
         .expect("process resource profile unavailable")
         .delta(&resources_before)
         .expect("process resource counters invalid");
-    let report = json!({"mode":format!("{mode:?}"),"nominal_seconds":seconds,"start_unix_ms":start_unix_ms,"finish_unix_ms":SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis(),"clients":clients.len(),"active_clients":active_clients,"servers":server_count,"per_client_depth":depth,"total_queue_depth":active_clients*depth,"elapsed_seconds_including_drain":elapsed,"read":read.json(),"write":write.json(),"read_iops":read.count as f64/elapsed,"write_iops":write.count as f64/elapsed,"total_iops":iops,"payload_mib_per_second":iops*BYTES as f64/1048576.0,"reference_target_iops":100000,"target_attainment":iops/100000.0,"failures":errors.len(),"cache":"cache-warm randomized dataset; no cold-cache claim"});
+    let report = json!({"mode":format!("{mode:?}"),"codec":codec.label(),"nominal_seconds":seconds,"start_unix_ms":start_unix_ms,"finish_unix_ms":SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis(),"clients":clients.len(),"active_clients":active_clients,"servers":server_count,"per_client_depth":depth,"total_queue_depth":active_clients*depth,"elapsed_seconds_including_drain":elapsed,"read":read.json(),"write":write.json(),"read_iops":read.count as f64/elapsed,"write_iops":write.count as f64/elapsed,"total_iops":iops,"payload_mib_per_second":iops*BYTES as f64/1048576.0,"reference_target_iops":100000,"target_attainment":iops/100000.0,"failures":errors.len(),"cache":"cache-warm randomized dataset; no cold-cache claim"});
     #[cfg(all(feature = "resource-profiling", unix))]
     let report = {
         let mut report = report;
@@ -504,6 +556,9 @@ async fn packet() -> Result<(), String> {
     if std::env::var("MOUNT_RS_REMOTE_TIDB_SATURATION_MIXED").as_deref() == Ok("1") {
         modes.push(Mode::Mixed);
     }
+    let codec = Codec::parse(
+        &std::env::var("MOUNT_RS_REMOTE_SATURATION_CODEC").unwrap_or_else(|_| "binary".into()),
+    )?;
     let seconds = env_num("MOUNT_RS_REMOTE_TIDB_SATURATION_SECONDS", 5, 1, 30);
     let warmup = env_num("MOUNT_RS_REMOTE_TIDB_SATURATION_WARMUP_SECONDS", 1, 1, 10);
     let blocks = env_num("MOUNT_RS_REMOTE_TIDB_SATURATION_BLOCKS", 64, 32, 1024);
@@ -632,15 +687,8 @@ async fn packet() -> Result<(), String> {
                 for first in (0..blocks).step_by(256) {
                     let count = (blocks - first).min(256);
                     let data: Vec<u8> = (first..first+count).flat_map(|block| seeded_block(client, block)).collect();
-                    let written = wire::success(
-                        &connection,
-                        2 + first as u64,
-                        &drive,
-                        OperationName::HandleWrite,
-                        json!({"handle":handle,"position":first*BYTES,"data":data}),
-                    )
-                    .await?;
-                    if written != json!(count * BYTES) {
+                    let written=wire::handle_write(&connection,2+first as u64,&IoRequest{drive_id:drive.clone(),handle,position:Some((first*BYTES) as u64)},&data).await?;
+                    if written != count * BYTES {
                         return Err("short setup write".into());
                     }
                 }
@@ -705,6 +753,7 @@ async fn packet() -> Result<(), String> {
                         depth,
                         blocks,
                         *mode,
+                        codec,
                         duration,
                         phase * 1_000_000_000,
                         timeout,
@@ -829,7 +878,18 @@ async fn packet() -> Result<(), String> {
     };
     let snapshot_verification =
         std::env::var("MOUNT_RS_REMOTE_SATURATION_SNAPSHOT_VERIFY").as_deref() == Ok("1");
-    let artifact = json!({"separate_drives":separate,"drive_count":if separate {client_count} else {1},"driver_replicas":if separate {client_count*server_count} else {server_count},"verification_method":if separate {"all fresh driver files"} else if snapshot_verification {"all stored files plus fresh driver sample"} else {"all fresh driver files"},"fresh_driver_sample_limit":if separate {active_clients} else if snapshot_verification {64} else {active_clients},"schema":"mount-rs-provider-saturation-v2","inode_updates":std::env::var("MOUNT_RS_REMOTE_SATURATION_INODE_UPDATES").as_deref()==Ok("1"),"provider":backend.name,"provider_identity":backend.identity,"provider_version":backend.version,"volume_key":key,"clients":client_count,"active_clients":active_clients,"servers":server_count,"offline_empty_file_preseed":preseed,"setup_concurrency":setup_concurrency,"setup_seconds":setup_seconds,"driver_setup_seconds":driver_setup_seconds,"parallel_server_startup":separate,"drives_provisioned_before_startup":provision,"provisioning_seconds":provisioning_seconds,"dataset_bytes":active_clients*blocks*BYTES,"namespace_bytes":namespace_bytes,"topology":topology,"debug_assertions":cfg!(debug_assertions),"build_profile":if cfg!(debug_assertions){"debug"}else{"release"},"warmup_seconds":warmup,"nominal_stage_seconds":seconds,"configured_modes":modes.iter().map(|m|format!("{m:?}")).collect::<Vec<_>>(),"server_active_request_limit_per_connection":32,"audit_logging":"enabled; request audit cost included","latency_histogram":"power-of-two microsecond upper bounds","stages":reports,"failed_phase":failed_phase,"verification_status":verification_status,"verified_files":if verification_status=="passed"{active_clients}else{0},"work_error":work.as_ref().err(),"cleanup_error":cleanup.as_ref().err(),"verification_error":verification.as_ref().err()});
+    let mut artifact = json!({"separate_drives":separate,"drive_count":if separate {client_count} else {1},"driver_replicas":if separate {client_count*server_count} else {server_count},"verification_method":if separate {"all fresh driver files"} else if snapshot_verification {"all stored files plus fresh driver sample"} else {"all fresh driver files"},"fresh_driver_sample_limit":if separate {active_clients} else if snapshot_verification {64} else {active_clients},"schema":"mount-rs-provider-saturation-v2","inode_updates":std::env::var("MOUNT_RS_REMOTE_SATURATION_INODE_UPDATES").as_deref()==Ok("1"),"provider":backend.name,"provider_identity":backend.identity,"provider_version":backend.version,"volume_key":key,"clients":client_count,"active_clients":active_clients,"servers":server_count,"offline_empty_file_preseed":preseed,"setup_concurrency":setup_concurrency,"setup_seconds":setup_seconds,"driver_setup_seconds":driver_setup_seconds,"parallel_server_startup":separate,"drives_provisioned_before_startup":provision,"provisioning_seconds":provisioning_seconds,"dataset_bytes":active_clients*blocks*BYTES,"namespace_bytes":namespace_bytes,"topology":topology,"debug_assertions":cfg!(debug_assertions),"build_profile":if cfg!(debug_assertions){"debug"}else{"release"},"warmup_seconds":warmup,"nominal_stage_seconds":seconds,"configured_modes":modes.iter().map(|m|format!("{m:?}")).collect::<Vec<_>>(),"audit_logging":"enabled; request audit cost included","latency_histogram":"power-of-two microsecond upper bounds","stages":reports,"failed_phase":failed_phase,"verification_status":verification_status,"verified_files":if verification_status=="passed"{active_clients}else{0},"work_error":work.as_ref().err(),"cleanup_error":cleanup.as_ref().err(),"verification_error":verification.as_ref().err()});
+    artifact["wire_protocol_version"] = json!(2);
+    artifact["wire_io"] = json!(codec.label());
+    artifact["read_buffers"] = json!("binary lane reuses per-lane buffer");
+    artifact["codec_selection_env"] = json!("MOUNT_RS_REMOTE_SATURATION_CODEC");
+    artifact["numeric_diagnostic_scope"] =
+        json!("current v2 control envelope; no compatibility fallback");
+    artifact["encoding_timing"] = json!(
+        "request construction and serialization included; payload generation excluded equally"
+    );
+    let limits = mount_rs_service::server::RemoteTransferLimits::default();
+    artifact["server_admission"] = json!({"scope":"per server, shared across all connections","active_data_operations":limits.active_data_operations,"active_control_operations":limits.active_control_operations,"data_bytes_each_direction":limits.data_bytes,"reserved_control_bytes_each_direction":limits.control_bytes,"quic_bidi_streams_per_connection":40});
     if let Ok(path) = std::env::var("MOUNT_RS_REMOTE_TIDB_SATURATION_OUTPUT") {
         let path = std::path::PathBuf::from(path);
         let bytes = serde_json::to_vec_pretty(&artifact).unwrap();

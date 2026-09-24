@@ -7,7 +7,7 @@ reproducible diagnostic example; it does not change either production protocol.
 
 | Priority | Surface | Change | Expected benefit | Compatibility / cost |
 | --- | --- | --- | --- | --- |
-| 1 | Client/server | Typed I/O headers and raw byte payloads; remove numeric JSON arrays and `Value` intermediates | About 72% fewer application bytes for uniform 4 KiB data, much lower allocator churn | Negotiate a new codec/version; retain v1 and the same authorization checks |
+| 1 | Client/server | Typed I/O headers and raw byte payloads; remove numeric JSON arrays and `Value` intermediates | About 72% fewer application bytes for uniform 4 KiB data, much lower allocator churn | Negotiate a new codec/version; support only the latest client version and retain the same authorization checks |
 | 2 | Peer | Shared immutable payload buffers, separate header/payload writes, direct payload reads | Remove several complete payload copies without changing v1 bytes | Add shared-buffer internal APIs; retain existing `Vec` provider contract initially |
 | 3 | Both | Explicit connection windows plus server-wide in-flight byte budgets | Predictable memory under many active clients | Tune to RTT/throughput; overly small windows cause stalls |
 | 4 | Peer | Bounded concurrent placement; delayed hedged lookup | Avoid serial disk/peer latency and warm replicas faster | More instantaneous peer traffic; preserve total fanout, bytes and deadlines |
@@ -80,8 +80,8 @@ encode bytes as a byte string rather than a sequence of integer values, and
 must avoid preserving `Value` as an intermediate tree.
 
 The same codec can serve QUIC and binary WebSocket messages. Transport fallback
-must not replay an uncertain write. Negotiation should distinguish v1 and v2
-through ALPN/version and explicitly bind the selected codec; do not guess the
+must not replay an uncertain write. Negotiation should allow future versions
+through ALPN/version and explicitly bind the selected codec; today only v2 is supported; do not guess the
 codec after a parse error. A binary envelope with small JSON control metadata
 is a possible staged migration, but leaves control-object allocations.
 
@@ -230,7 +230,7 @@ unreliable datagram I/O as a shortcut to throughput.
    preserving v1 bytes. Retain negative trust, partition, corruption, truncated
    frame and cancellation tests.
 2. Add negotiated typed client I/O with raw payloads and direct caller-buffer
-   reads, preserving v1 and binary WebSocket transport compatibility. Assert
+   reads, retaining negotiation for future versions and a shared codec for future binary WebSocket transports. Assert
    exact round trips, length rejection before allocation, permissions, renewal,
    frame version binding and no write replay after uncertain completion.
 3. Add global transfer-byte admission and explicit transport windows, then

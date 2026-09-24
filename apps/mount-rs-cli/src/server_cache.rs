@@ -30,6 +30,21 @@ pub(crate) struct CacheServiceConfig {
     pub peer_query_limit: usize,
     #[serde(default = "default_maintenance")]
     pub maintenance_capacity: usize,
+    #[serde(default = "default_placement_concurrency")]
+    pub placement_concurrency: usize,
+    #[serde(default = "default_hedge_delay")]
+    pub hedge_delay_ms: u64,
+    #[serde(default = "default_peer_transfer_bytes")]
+    pub peer_transfer_bytes: usize,
+}
+fn default_placement_concurrency() -> usize {
+    4
+}
+fn default_hedge_delay() -> u64 {
+    25
+}
+fn default_peer_transfer_bytes() -> usize {
+    128 * 1024 * 1024
 }
 fn default_blob_size() -> usize {
     1024 * 1024
@@ -107,6 +122,11 @@ impl CacheServiceConfig {
             || self.peer_query_limit > 256
             || self.maintenance_capacity == 0
             || self.maintenance_capacity > 4096
+            || self.placement_concurrency == 0
+            || self.placement_concurrency > 32
+            || self.hedge_delay_ms > 30_000
+            || self.peer_transfer_bytes > 1024 * 1024 * 1024
+            || self.peer_transfer_bytes / 2 < 2 * (self.max_blob_bytes + 4121)
             || self.peers.len() > 256
             || (self.ram_bytes == 0 && self.disk_bytes == 0)
             || self.ram_bytes.checked_add(self.disk_bytes).is_none()
@@ -300,6 +320,7 @@ impl ServerCache {
                 roots: roots(&relative(path, &config.ca_certificate))?,
                 trusted,
                 max_blob_bytes: config.max_blob_bytes,
+                transfer_bytes: config.peer_transfer_bytes,
                 max_inflight: config.max_inflight,
                 deadline,
             },
@@ -373,6 +394,8 @@ impl ServerCache {
                 max_peer_queries: config.peer_query_limit,
                 deadline,
                 maintenance_capacity: config.maintenance_capacity,
+                placement_concurrency: config.placement_concurrency,
+                hedge_delay: Duration::from_millis(config.hedge_delay_ms),
                 max_inflight_misses: config.max_inflight,
             },
         )?;

@@ -4,3 +4,5 @@ pub mod auth;
 pub mod catalog;
 pub mod dispatch;
 pub mod server;
+
+mod transfer;

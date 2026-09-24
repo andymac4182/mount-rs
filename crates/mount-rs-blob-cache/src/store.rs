@@ -58,7 +58,7 @@ struct Advertisement {
     scope: Arc<CacheScope>,
     id: BlockId,
 }
-/// One bounded maintenance worker and miss budget for all server drives.
+/// Bounded placement workers and miss budget shared by all server drives.
 pub struct DistributedRuntime {
     discovery: Arc<dyn Discovery>,
     transport: Arc<dyn PeerTransport>,
@@ -82,6 +82,9 @@ impl DistributedRuntime {
     ) -> Result<Arc<Self>> {
         if config.maintenance_capacity == 0
             || config.maintenance_capacity > 4096
+            || config.placement_concurrency == 0
+            || config.placement_concurrency > 32
+            || config.hedge_delay > Duration::from_secs(30)
             || config.max_inflight_misses == 0
             || config.max_inflight_misses > 1024
             || config.max_peer_queries == 0
@@ -99,25 +102,41 @@ impl DistributedRuntime {
         let t = transport.clone();
         let p = local.clone();
         let deadline = config.deadline;
+        let placement_concurrency = config.placement_concurrency;
         let heartbeat_period = discovery
             .heartbeat_interval()
             .max(Duration::from_millis(100));
         let worker = tokio::spawn(async move {
+            let mut placements = tokio::task::JoinSet::new();
             let mut heartbeat = tokio::time::interval(heartbeat_period);
             heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {
                     _=stopped.changed()=>{break;}
-                    item=receiver.recv()=>{
+                    _=placements.join_next(), if !placements.is_empty()=>{}
+                    item=receiver.recv(), if placements.len()<placement_concurrency=>{
                         let Some(item)=item else {break};
-                        let _=timeout(deadline,async {
-                            let _=d.advertise(&item.scope,&item.id,&p).await;
-                            for target in distributed::unique(d.placement(&item.scope,&item.id),&p,2) {
-                                if t.put(&target,&item.scope,&item.id,&item.bytes).await.is_ok() {
-                                    let _=d.advertise(&item.scope,&item.id,&target).await;
-                                }
-                            }
-                        }).await;
+                        let d=d.clone(); let t=t.clone(); let p=p.clone();
+                        placements.spawn(async move {
+                            let _=timeout(deadline,async {
+                                let targets=distributed::unique(d.placement(&item.scope,&item.id),&p,2);
+                                let put=|target: PeerId| {
+                                    let d=d.clone(); let t=t.clone(); let scope=item.scope.clone();
+                                    let id=item.id.clone(); let bytes=item.bytes.clone();
+                                    async move {
+                                        if t.put_shared(&target,&scope,&id,bytes).await.is_ok() {
+                                            let _=d.advertise(&scope,&id,&target).await;
+                                        }
+                                    }
+                                };
+                                let mut targets=targets.into_iter();
+                                let first_target=targets.next(); let second_target=targets.next();
+                                let first=async {if let Some(target)=first_target{put(target).await;}};
+                                let second=async {if let Some(target)=second_target{put(target).await;}};
+                                let _=tokio::join!(first,second,d.advertise(&item.scope,&item.id,&p));
+                            }).await;
+                            drop(item);
+                        });
                     }
                     hint=hints.recv()=>{let Some(hint)=hint else{break};let _=timeout(deadline,d.advertise(&hint.scope,&hint.id,&p)).await;}
                     _=heartbeat.tick()=>{let _=timeout(deadline,d.heartbeat(&p)).await;}
@@ -431,17 +450,29 @@ impl CachedBlockStore {
         if let Some(d) = &self.distributed {
             let peer_result = timeout(d.config.deadline, async {
                 let peers = d.discovery.locate(scope, id).await?;
-                for peer in distributed::unique(peers, &d.local, d.config.max_peer_queries) {
-                    match d.transport.get(&peer, scope, id).await {
-                        Ok(Some(bytes))
-                            if bytes.len() <= self.cache.max_blob_bytes()
-                                && self.policy.verify(id, &bytes).is_ok() =>
-                        {
-                            return Ok(Some(bytes));
+                let mut peers=distributed::unique(peers,&d.local,d.config.max_peer_queries).into_iter();
+                let mut queries=tokio::task::JoinSet::new();
+                let start=|queries: &mut tokio::task::JoinSet<_>, peer: PeerId| {
+                    let transport=d.transport.clone(); let scope=scope.clone(); let id=id.clone();
+                    queries.spawn(async move {transport.get_shared(&peer,&scope,&id).await});
+                };
+                if let Some(peer)=peers.next(){start(&mut queries,peer);}
+                let hedge=tokio::time::sleep(d.config.hedge_delay.min(d.config.deadline/4));
+                tokio::pin!(hedge);
+                let mut hedged=false;
+                while !queries.is_empty() {
+                    tokio::select! {
+                        _=&mut hedge, if !hedged=>{
+                            hedged=true;
+                            if let Some(peer)=peers.next(){start(&mut queries,peer);}
                         }
-                        Ok(None) => {}
-                        _ => {
-                            self.metrics.cache_errors.fetch_add(1, Ordering::Relaxed);
+                        result=queries.join_next()=>{
+                            match result {
+                                Some(Ok(Ok(Some(bytes)))) if bytes.len()<=self.cache.max_blob_bytes() && self.policy.verify(id,&bytes).is_ok()=>return Ok(Some(bytes)),
+                                Some(Ok(Ok(None)))=>{},
+                                _=>{self.metrics.cache_errors.fetch_add(1,Ordering::Relaxed);}
+                            }
+                            if let Some(peer)=peers.next(){start(&mut queries,peer);}
                         }
                     }
                 }
@@ -453,15 +484,14 @@ impl CachedBlockStore {
                 self.metrics
                     .hit_bytes
                     .fetch_add(bytes.len() as u64, Ordering::Relaxed);
-                self.fill(scope, id, Arc::from(bytes.as_slice()), None)
-                    .await;
+                self.fill(scope, id, Arc::from(bytes.as_ref()), None).await;
                 d.touch(
                     &self.cache,
                     scope,
                     id,
                     &LocalCache::key_hashed(&LocalCache::scope_hash(scope), id),
                 );
-                return Ok(bytes);
+                return Ok(bytes.to_vec());
             }
         }
         self.metrics.backing_fetches.fetch_add(1, Ordering::Relaxed);
@@ -929,5 +959,147 @@ mod tests {
             b"bytes"
         );
         drop(held);
+    }
+    struct OrderedPeers;
+    #[async_trait]
+    impl Discovery for OrderedPeers {
+        async fn locate(&self, _: &CacheScope, _: &BlockId) -> Result<Vec<PeerId>> {
+            Ok(vec![PeerId("slow".into()), PeerId("fast".into())])
+        }
+        fn placement(&self, _: &CacheScope, _: &BlockId) -> Vec<PeerId> {
+            vec![PeerId("slow".into()), PeerId("fast".into())]
+        }
+        async fn advertise(&self, _: &CacheScope, _: &BlockId, _: &PeerId) -> Result<()> {
+            Ok(())
+        }
+        async fn withdraw(&self, _: &CacheScope, _: &BlockId, _: &PeerId) -> Result<()> {
+            Ok(())
+        }
+        async fn heartbeat(&self, _: &PeerId) -> Result<()> {
+            Ok(())
+        }
+    }
+    struct LatencyPeer {
+        bytes: Vec<u8>,
+        calls: AtomicU64,
+        active: AtomicU64,
+        peak: AtomicU64,
+        release: tokio::sync::Notify,
+    }
+    struct ActivePlacement<'a>(&'a AtomicU64);
+    impl Drop for ActivePlacement<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+    #[async_trait]
+    impl PeerTransport for LatencyPeer {
+        async fn get(&self, peer: &PeerId, _: &CacheScope, _: &BlockId) -> Result<Option<Vec<u8>>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            if peer.0 == "slow" {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            Ok(Some(self.bytes.clone()))
+        }
+        async fn put(&self, _: &PeerId, _: &CacheScope, _: &BlockId, _: &[u8]) -> Result<()> {
+            let active = self.active.fetch_add(1, Ordering::Relaxed) + 1;
+            self.peak.fetch_max(active, Ordering::Relaxed);
+            let _active = ActivePlacement(&self.active);
+            self.release.notified().await;
+            Ok(())
+        }
+    }
+    fn latency_peer() -> Arc<LatencyPeer> {
+        Arc::new(LatencyPeer {
+            bytes: b"original".to_vec(),
+            calls: AtomicU64::new(0),
+            active: AtomicU64::new(0),
+            peak: AtomicU64::new(0),
+            release: tokio::sync::Notify::new(),
+        })
+    }
+    #[tokio::test]
+    async fn slow_owner_does_not_hide_a_healthy_replica() {
+        let backing = Backing::new();
+        let id = backing.put(b"original").await.unwrap();
+        let (_dir, cache, _) = fixture(backing.clone());
+        let peer = latency_peer();
+        let runtime = DistributedRuntime::new(
+            Arc::new(OrderedPeers),
+            peer.clone(),
+            PeerId("self".into()),
+            DistributedConfig {
+                deadline: Duration::from_millis(200),
+                ..DistributedConfig::default()
+            },
+        )
+        .unwrap();
+        let store = CachedBlockStore::new(
+            backing.clone(),
+            cache,
+            ScopeIdentity {
+                cluster: "c".into(),
+                partition: "p".into(),
+                drive: "d".into(),
+            },
+            IntegrityPolicy::Sha256Prefixed,
+        )
+        .with_runtime(runtime.clone());
+        store.prepare_concurrent_backing().await.unwrap();
+        let started = std::time::Instant::now();
+        assert_eq!(store.get(&id).await.unwrap(), b"original");
+        assert_eq!(
+            backing.gets.load(Ordering::Relaxed),
+            0,
+            "healthy replica must beat origin fallback"
+        );
+        assert!(started.elapsed() < Duration::from_millis(150));
+        assert_eq!(peer.calls.load(Ordering::Relaxed), 2);
+        runtime.shutdown().await;
+    }
+    #[tokio::test]
+    async fn placement_tasks_overlap_with_a_fixed_upper_bound() {
+        let backing = Backing::new();
+        let (_dir, cache, _) = fixture(backing);
+        let peer = latency_peer();
+        let runtime = DistributedRuntime::new(
+            Arc::new(OrderedPeers),
+            peer.clone(),
+            PeerId("self".into()),
+            DistributedConfig::default(),
+        )
+        .unwrap();
+        let scope = Arc::new(CacheScope {
+            identity: ScopeIdentity {
+                cluster: "c".into(),
+                partition: "p".into(),
+                drive: "d".into(),
+            },
+            backing: ConcurrentBackingId::from_bytes([1; 16]).unwrap(),
+        });
+        let metrics = CacheMetrics::default();
+        for n in 0..16 {
+            runtime.enqueue(
+                &cache,
+                scope.clone(),
+                BlockId(n.to_string()),
+                Arc::from(b"bytes".as_slice()),
+                &metrics,
+            );
+        }
+        let overlap = timeout(Duration::from_millis(100), async {
+            while peer.active.load(Ordering::Relaxed) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(overlap.is_ok(), "placement must overlap blocked transfers");
+        assert!(
+            peer.peak.load(Ordering::Relaxed) <= 8,
+            "four tasks, at most two replicas each"
+        );
+        peer.release.notify_waiters();
+        runtime.shutdown().await;
+        assert_eq!(peer.active.load(Ordering::Relaxed), 0);
     }
 }

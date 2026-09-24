@@ -1,9 +1,7 @@
-#[cfg(feature = "io-profiling")]
-use mount_rs_core::diagnostics::profile::{Event, Span};
 use std::fmt;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::{MAX_FRAME_BYTES, Message};
+use crate::Message;
 
 #[derive(Debug)]
 pub enum FrameError {
@@ -36,62 +34,13 @@ impl From<serde_json::Error> for FrameError {
     }
 }
 
+/// Generic messages use the same bounded binary envelope as typed I/O.
 pub async fn write_frame<W: AsyncWrite + Unpin>(
     writer: &mut W,
     message: &Message,
 ) -> Result<(), FrameError> {
-    #[cfg(feature = "io-profiling")]
-    let mut profile = Span::new(Event::WireEncode);
-    let body = serde_json::to_vec(message)?;
-    #[cfg(feature = "io-profiling")]
-    {
-        profile.set_units(body.len() as u64);
-        drop(profile);
-    }
-    if !valid_frame_length(body.len()) {
-        return Err(FrameError::InvalidLength);
-    }
-    let length = u32::try_from(body.len()).map_err(|_| FrameError::InvalidLength)?;
-    writer.write_all(&length.to_be_bytes()).await?;
-    writer.write_all(&body).await?;
-    writer.flush().await?;
-    Ok(())
+    crate::binary::write_control(writer, message).await
 }
-
 pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Message, FrameError> {
-    let mut prefix = [0_u8; 4];
-    reader.read_exact(&mut prefix).await?;
-    let length = u32::from_be_bytes(prefix) as usize;
-    if !valid_frame_length(length) {
-        return Err(FrameError::InvalidLength);
-    }
-    let mut body = vec![0; length];
-    reader.read_exact(&mut body).await?;
-    #[cfg(feature = "io-profiling")]
-    let _profile = Span::new(Event::WireDecode).units(body.len() as u64);
-    Ok(serde_json::from_slice(&body)?)
-}
-
-// Shared by both directions before the reader allocates a body or writer emits it.
-fn valid_frame_length(length: usize) -> bool {
-    (1..=MAX_FRAME_BYTES).contains(&length)
-}
-
-#[cfg(kani)]
-mod proofs {
-    use super::*;
-
-    #[kani::proof]
-    fn remote_frame_lengths_are_bounded_before_io() {
-        let length: usize = kani::any();
-        let accepted = valid_frame_length(length);
-        assert_eq!(accepted, length > 0 && length <= 8 * 1024 * 1024);
-        if accepted {
-            assert!(u32::try_from(length).is_ok());
-        }
-        kani::cover!(accepted && length == MAX_FRAME_BYTES);
-        kani::cover!(!accepted && length == 0);
-        kani::cover!(!accepted && length == MAX_FRAME_BYTES + 1);
-        kani::cover!(!accepted && length == usize::MAX);
-    }
+    crate::binary::read_control(reader).await
 }

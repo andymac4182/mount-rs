@@ -1,5 +1,6 @@
 use crate::*;
 use async_trait::async_trait;
+use bytes::Bytes;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -11,6 +12,40 @@ use tokio::{
     sync::{Mutex, Semaphore},
     time::timeout,
 };
+const MAX_HEADER_BYTES: usize = 25 + 4 * 1024;
+fn peer_transfer_charge(max: usize) -> Result<u32> {
+    max.checked_add(MAX_HEADER_BYTES)
+        .and_then(|n| n.checked_mul(2))
+        .and_then(|n| u32::try_from(n).ok())
+        .ok_or_else(error)
+}
+struct ChargedPayload {
+    bytes: Bytes,
+    _charge: Arc<tokio::sync::OwnedSemaphorePermit>,
+}
+impl AsRef<[u8]> for ChargedPayload {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+enum PeerPayload<'a> {
+    Borrowed(&'a [u8]),
+    Shared(Bytes),
+}
+impl PeerPayload<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Borrowed(b) => b.len(),
+            Self::Shared(b) => b.len(),
+        }
+    }
+    fn owned(self) -> Bytes {
+        match self {
+            Self::Borrowed(b) => Bytes::copy_from_slice(b),
+            Self::Shared(b) => b,
+        }
+    }
+}
 #[derive(Clone, Debug)]
 pub struct PeerEndpoint {
     pub address: SocketAddr,
@@ -27,6 +62,8 @@ pub struct QuicPeerConfig {
     pub trusted: BTreeMap<PeerId, PeerEndpoint>,
     pub max_blob_bytes: usize,
     pub max_inflight: usize,
+    /// Total byte admission shared across peers, split between serving and requesting.
+    pub transfer_bytes: usize,
     pub deadline: Duration,
 }
 pub struct QuicPeerTransport {
@@ -37,6 +74,9 @@ pub struct QuicPeerTransport {
     permits: Arc<Semaphore>,
     inbound: Arc<Semaphore>,
     streams: Arc<Semaphore>,
+    receive_bytes: Arc<Semaphore>,
+    request_bytes: Arc<Semaphore>,
+    transfer_charge: u32,
     stop: tokio::sync::watch::Sender<bool>,
 }
 impl QuicPeerTransport {
@@ -49,6 +89,12 @@ impl QuicPeerTransport {
             || config.max_blob_bytes == 0
             || config.max_blob_bytes > usize::MAX - 8192
             || config.trusted.len() > 1024
+        {
+            return Err(error());
+        }
+        let transfer_charge = peer_transfer_charge(config.max_blob_bytes)?;
+        if config.transfer_bytes > 1024 * 1024 * 1024
+            || config.transfer_bytes / 2 < transfer_charge as usize
         {
             return Err(error());
         }
@@ -85,7 +131,14 @@ impl QuicPeerTransport {
         limits.max_idle_timeout(Some(
             Duration::from_secs(30).try_into().map_err(|_| error())?,
         ));
-        server.transport_config(Arc::new(limits));
+        limits.stream_receive_window(((config.max_blob_bytes + MAX_HEADER_BYTES) as u32).into());
+        limits.receive_window(
+            (u32::try_from(config.transfer_bytes / 2).map_err(|_| error())?).into(),
+        );
+        limits.send_window((config.transfer_bytes / 2).min(8 * 1024 * 1024) as u64);
+        let limits = Arc::new(limits);
+        let outbound_limits = limits.clone();
+        server.transport_config(limits);
         let mut endpoint = quinn::Endpoint::server(server, config.bind).map_err(|_| error())?;
         let mut client = rustls::ClientConfig::builder_with_provider(Arc::new(
             rustls::crypto::ring::default_provider(),
@@ -96,9 +149,11 @@ impl QuicPeerTransport {
         .with_client_auth_cert(config.certificates.clone(), config.private_key.clone_key())
         .map_err(|_| error())?;
         client.alpn_protocols = vec![b"mount-rs-blob-cache/1".to_vec()];
-        endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(
+        let mut client_config = quinn::ClientConfig::new(Arc::new(
             quinn::crypto::rustls::QuicClientConfig::try_from(client).map_err(|_| error())?,
-        )));
+        ));
+        client_config.transport_config(outbound_limits);
+        endpoint.set_default_client_config(client_config);
         let (stop, _) = tokio::sync::watch::channel(false);
         let connections = config
             .trusted
@@ -110,6 +165,9 @@ impl QuicPeerTransport {
             permits: Arc::new(Semaphore::new(config.max_inflight)),
             inbound: Arc::new(Semaphore::new(config.max_inflight)),
             streams: Arc::new(Semaphore::new(config.max_inflight)),
+            receive_bytes: Arc::new(Semaphore::new(config.transfer_bytes / 2)),
+            request_bytes: Arc::new(Semaphore::new(config.transfer_bytes / 2)),
+            transfer_charge,
             config,
             cache,
             connections,
@@ -203,8 +261,15 @@ impl QuicPeerTransport {
         send: &mut quinn::SendStream,
         recv: &mut quinn::RecvStream,
     ) -> Result<()> {
+        let charge = Arc::new(
+            self.receive_bytes
+                .clone()
+                .acquire_many_owned(self.transfer_charge)
+                .await
+                .map_err(|_| error())?,
+        );
         let data = recv
-            .read_to_end(self.config.max_blob_bytes + 8192)
+            .read_to_end(self.config.max_blob_bytes + MAX_HEADER_BYTES)
             .await
             .map_err(|_| error())?;
         let (op, scope, block, bytes) = decode(&data, self.config.max_blob_bytes)?;
@@ -214,26 +279,44 @@ impl QuicPeerTransport {
         }
         let policy = self.cache.scope_policy(&scope).ok_or_else(error)?;
         let response = if op == 0 {
-            if let Some(bytes) = self.cache.get_memory(&scope, &block, policy) {
-                Some(bytes)
+            let key = LocalCache::key_hashed(&LocalCache::scope_hash(&scope), &block);
+            if let Some(bytes) = self.cache.get_memory_shared_hashed(&key) {
+                Some(Bytes::from_owner(bytes))
             } else {
+                let disk_charge = charge.clone();
                 bounded_cache_work(self.cache.clone(), move |cache| {
-                    cache.get_disk(&scope, &block, policy)
+                    let _charge = disk_charge;
+                    cache.get_disk(&scope, &block, policy).map(Bytes::from)
                 })
                 .await?
             }
         } else {
+            let shared: Arc<[u8]> = Arc::from(bytes);
+            let disk_charge = charge.clone();
             bounded_cache_work(self.cache.clone(), move |cache| {
-                cache.insert(&scope, &block, &bytes, policy)
+                let _charge = disk_charge;
+                cache.insert_shared(&scope, &block, shared, policy)
             })
             .await??;
-            Some(Vec::new())
+            Some(Bytes::new())
         };
-        let mut frame = vec![u8::from(response.is_some())];
-        if let Some(bytes) = response {
-            frame.extend_from_slice(&bytes);
-        }
-        send.write_all(&frame).await.map_err(|_| error())?;
+        let status = if response.is_some() {
+            Bytes::from_static(&[1])
+        } else {
+            Bytes::from_static(&[0])
+        };
+        let status = Bytes::from_owner(ChargedPayload {
+            bytes: status,
+            _charge: charge.clone(),
+        });
+        let payload = Bytes::from_owner(ChargedPayload {
+            bytes: response.unwrap_or_default(),
+            _charge: charge,
+        });
+        let mut chunks = [status, payload];
+        send.write_all_chunks(&mut chunks)
+            .await
+            .map_err(|_| error())?;
         send.finish().map_err(|_| error())?;
         Ok(())
     }
@@ -242,8 +325,8 @@ impl QuicPeerTransport {
         peer: &PeerId,
         scope: &CacheScope,
         id: &BlockId,
-        bytes: Option<&[u8]>,
-    ) -> Result<Option<Vec<u8>>> {
+        bytes: Option<PeerPayload<'_>>,
+    ) -> Result<Option<Bytes>> {
         let p = self.config.trusted.get(peer).ok_or_else(error)?;
         if !p.partitions.contains(&scope.identity.partition) {
             return Err(error());
@@ -253,19 +336,58 @@ impl QuicPeerTransport {
             .clone()
             .try_acquire_owned()
             .map_err(|_| error())?;
+        if bytes
+            .as_ref()
+            .is_some_and(|b| b.len() > self.config.max_blob_bytes)
+        {
+            return Err(error());
+        }
         timeout(self.config.deadline, async {
+            let charge = Arc::new(
+                self.request_bytes
+                    .clone()
+                    .acquire_many_owned(self.transfer_charge)
+                    .await
+                    .map_err(|_| error())?,
+            );
             let connection = self.connection(peer).await?;
             let (mut send, mut recv) = connection.open_bi().await.map_err(|_| error())?;
-            let frame = encode(scope, id, bytes, self.config.max_blob_bytes)?;
-            send.write_all(&frame).await.map_err(|_| error())?;
-            send.finish().map_err(|_| error())?;
-            let response = recv
-                .read_to_end(self.config.max_blob_bytes + 1)
+            let header = encode_header(
+                scope,
+                id,
+                bytes.as_ref().map(PeerPayload::len),
+                self.config.max_blob_bytes,
+            )?;
+            let put = bytes.is_some();
+            let header = Bytes::from_owner(ChargedPayload {
+                bytes: Bytes::from(header),
+                _charge: charge.clone(),
+            });
+            let body = Bytes::from_owner(ChargedPayload {
+                bytes: bytes.map(PeerPayload::owned).unwrap_or_default(),
+                _charge: charge.clone(),
+            });
+            let mut chunks = [header, body];
+            send.write_all_chunks(&mut chunks)
                 .await
                 .map_err(|_| error())?;
-            match response.first() {
-                Some(0) if response.len() == 1 => Ok(None),
-                Some(1) => Ok(Some(response[1..].to_vec())),
+            send.finish().map_err(|_| error())?;
+            let mut status = [0];
+            recv.read_exact(&mut status).await.map_err(|_| error())?;
+            let body = recv
+                .read_to_end(if put || status[0] == 0 {
+                    0
+                } else {
+                    self.config.max_blob_bytes
+                })
+                .await
+                .map_err(|_| error())?;
+            match status[0] {
+                0 => Ok(None),
+                1 => Ok(Some(Bytes::from_owner(ChargedPayload {
+                    bytes: Bytes::from(body),
+                    _charge: charge,
+                }))),
                 _ => Err(error()),
             }
         })
@@ -294,40 +416,83 @@ impl Drop for QuicPeerTransport {
 #[async_trait]
 impl PeerTransport for QuicPeerTransport {
     async fn get(&self, p: &PeerId, s: &CacheScope, id: &BlockId) -> Result<Option<Vec<u8>>> {
+        Ok(self
+            .request(p, s, id, None)
+            .await?
+            .map(|bytes| bytes.to_vec()))
+    }
+    async fn get_shared(&self, p: &PeerId, s: &CacheScope, id: &BlockId) -> Result<Option<Bytes>> {
         self.request(p, s, id, None).await
     }
+    async fn put_shared(
+        &self,
+        p: &PeerId,
+        s: &CacheScope,
+        id: &BlockId,
+        b: Arc<[u8]>,
+    ) -> Result<()> {
+        if self
+            .request(p, s, id, Some(PeerPayload::Shared(Bytes::from_owner(b))))
+            .await?
+            .is_some()
+        {
+            Ok(())
+        } else {
+            Err(error())
+        }
+    }
     async fn put(&self, p: &PeerId, s: &CacheScope, id: &BlockId, b: &[u8]) -> Result<()> {
-        if self.request(p, s, id, Some(b)).await?.is_some() {
+        if self
+            .request(p, s, id, Some(PeerPayload::Borrowed(b)))
+            .await?
+            .is_some()
+        {
             Ok(())
         } else {
             Err(error())
         }
     }
 }
-fn encode(s: &CacheScope, id: &BlockId, b: Option<&[u8]>, max: usize) -> Result<Vec<u8>> {
-    if b.is_some_and(|b| b.len() > max) {
+fn encode_header(
+    s: &CacheScope,
+    id: &BlockId,
+    payload: Option<usize>,
+    max: usize,
+) -> Result<Vec<u8>> {
+    if payload.is_some_and(|length| length > max) {
         return Err(error());
     }
-    let mut out = vec![u8::from(b.is_some())];
-    for text in [
+    let texts = [
         &s.identity.cluster,
         &s.identity.partition,
         &s.identity.drive,
         &id.0,
-    ] {
-        if text.is_empty() || text.len() > 1024 {
-            return Err(error());
-        }
+    ];
+    if texts
+        .iter()
+        .any(|text| text.is_empty() || text.len() > 1024)
+    {
+        return Err(error());
+    }
+    let length = 25 + texts.iter().map(|t| t.len()).sum::<usize>();
+    let mut out = Vec::with_capacity(length);
+    out.push(u8::from(payload.is_some()));
+    for text in texts {
         out.extend_from_slice(&(text.len() as u16).to_be_bytes());
         out.extend_from_slice(text.as_bytes());
     }
     out.extend_from_slice(&s.backing.as_bytes());
-    if let Some(b) = b {
-        out.extend_from_slice(b);
+    Ok(out)
+}
+#[cfg(test)]
+fn encode(s: &CacheScope, id: &BlockId, payload: Option<&[u8]>, max: usize) -> Result<Vec<u8>> {
+    let mut out = encode_header(s, id, payload.map(<[u8]>::len), max)?;
+    if let Some(bytes) = payload {
+        out.extend_from_slice(bytes);
     }
     Ok(out)
 }
-fn decode(data: &[u8], max: usize) -> Result<(u8, CacheScope, BlockId, Vec<u8>)> {
+fn decode(data: &[u8], max: usize) -> Result<(u8, CacheScope, BlockId, &[u8])> {
     let mut cursor = 0;
     fn take<'a>(d: &'a [u8], c: &mut usize, n: usize) -> Result<&'a [u8]> {
         let end = c.checked_add(n).ok_or_else(error)?;
@@ -339,8 +504,8 @@ fn decode(data: &[u8], max: usize) -> Result<(u8, CacheScope, BlockId, Vec<u8>)>
     if op > 1 {
         return Err(error());
     }
-    let mut texts = Vec::new();
-    for _ in 0..4 {
+    let mut texts = [""; 4];
+    for text in &mut texts {
         let n = u16::from_be_bytes(
             take(data, &mut cursor, 2)?
                 .try_into()
@@ -349,22 +514,18 @@ fn decode(data: &[u8], max: usize) -> Result<(u8, CacheScope, BlockId, Vec<u8>)>
         if n == 0 || n > 1024 {
             return Err(error());
         }
-        texts.push(
-            std::str::from_utf8(take(data, &mut cursor, n)?)
-                .map_err(|_| error())?
-                .to_owned(),
-        );
+        *text = std::str::from_utf8(take(data, &mut cursor, n)?).map_err(|_| error())?;
     }
     let backing = ConcurrentBackingId::from_bytes(
         take(data, &mut cursor, 16)?
             .try_into()
             .map_err(|_| error())?,
     )?;
-    let bytes = data[cursor..].to_vec();
+    let bytes = &data[cursor..];
     if bytes.len() > max || (op == 0 && !bytes.is_empty()) {
         return Err(error());
     }
-    let mut t = texts.into_iter();
+    let mut t = texts.into_iter().map(str::to_owned);
     Ok((
         op,
         CacheScope {
@@ -416,6 +577,65 @@ mod tests {
             available, 7,
             "noncancellable disk work must retain its global slot after async cancellation"
         );
+    }
+    #[tokio::test]
+    async fn queued_payload_ownership_retains_its_transfer_charge() {
+        let budget = Arc::new(Semaphore::new(16));
+        let charge = Arc::new(budget.clone().acquire_many_owned(8).await.unwrap());
+        let bytes = Bytes::from_owner(ChargedPayload {
+            bytes: Bytes::from_static(b"payload"),
+            _charge: charge.clone(),
+        });
+        drop(charge);
+        let retained = bytes.clone();
+        drop(bytes);
+        assert_eq!(
+            budget.available_permits(),
+            8,
+            "queued QUIC ownership must retain byte charge"
+        );
+        drop(retained);
+        assert_eq!(budget.available_permits(), 16);
+        assert!(peer_transfer_charge(usize::MAX).is_err());
+    }
+    #[test]
+    fn peer_headers_keep_v1_bytes_and_decode_borrows_payload() {
+        let scope = CacheScope {
+            identity: ScopeIdentity {
+                cluster: "c".into(),
+                partition: "p".into(),
+                drive: "d".into(),
+            },
+            backing: ConcurrentBackingId::from_bytes([2; 16]).unwrap(),
+        };
+        let id = BlockId("opaque".into());
+        let frame = encode(&scope, &id, Some(b"payload"), 8).unwrap();
+        let header = encode_header(&scope, &id, Some(7), 8).unwrap();
+        assert_eq!(header.len(), 25 + 1 + 1 + 1 + 6);
+        assert_eq!(header.capacity(), header.len());
+        assert_eq!(&frame[..header.len()], header);
+        let decoded = decode(&frame, 8).unwrap();
+        assert_eq!(decoded.3.as_ptr(), frame[header.len()..].as_ptr());
+        let dir = tempfile::tempdir().unwrap();
+        let cache = LocalCache::new(LocalCacheConfig {
+            directory: dir.path().into(),
+            memory_bytes: 16,
+            disk_bytes: 0,
+            max_entries: 4,
+            max_blob_bytes: 16,
+        })
+        .unwrap();
+        let shared: Arc<[u8]> = Arc::from(b"payload".as_slice());
+        cache
+            .insert_memory_shared(&scope, &id, shared.clone(), IntegrityPolicy::Opaque)
+            .unwrap();
+        let first = cache
+            .get_memory_shared_hashed(&LocalCache::key_hashed(
+                &LocalCache::scope_hash(&scope),
+                &id,
+            ))
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &shared));
     }
     #[test]
     fn binary_frames_reject_oversize_truncation_and_unknown_operation() {
@@ -512,6 +732,7 @@ mod tests {
             trusted,
             max_blob_bytes: 1024,
             max_inflight: 128,
+            transfer_bytes: 128 * 1024 * 1024,
             deadline: Duration::from_secs(2),
         };
         let blackhole = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -683,6 +904,7 @@ mod tests {
                 trusted,
                 max_blob_bytes: 1024,
                 max_inflight: 4,
+                transfer_bytes: 128 * 1024 * 1024,
                 deadline: Duration::from_millis(500),
             };
             let a = QuicPeerTransport::bind(

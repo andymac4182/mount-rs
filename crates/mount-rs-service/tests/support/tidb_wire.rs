@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use mount_rs_core::FsDriver;
 
 struct WorkloadAuthenticator;
+use mount_rs_remote_protocol::binary::{self, IoRequest};
 use mount_rs_remote_protocol::{
     Message, Operation, OperationName, PROTOCOL_VERSION, read_frame, write_frame,
 };
@@ -124,7 +125,7 @@ async fn bind_dispatcher(
     .map_err(|_| "wire setup failed (redacted)")?
     .with_root_certificates(roots)
     .with_no_client_auth();
-    tls.alpn_protocols = vec![b"mount-rs/1".to_vec()];
+    tls.alpn_protocols = vec![b"mount-rs/2".to_vec()];
     let config = quinn::ClientConfig::new(Arc::new(
         quinn::crypto::rustls::QuicClientConfig::try_from(tls)
             .map_err(|_| "wire setup failed (redacted)")?,
@@ -313,4 +314,59 @@ pub async fn success(
     request(connection, id, drive, name, body)
         .await?
         .map_err(|e| format!("{drive} request {id}: {e}"))
+}
+
+/// One typed raw-I/O stream, with FIN and a validated empty reply trailer.
+/// Transport or protocol failures terminally close the connection; callers never replay.
+#[allow(dead_code)] // Shared fixture: only saturation targets exercise raw I/O.
+pub async fn handle_read(
+    connection: &quinn::Connection,
+    id: u64,
+    request: &IoRequest,
+    buffer: &mut [u8],
+) -> Result<usize, String> {
+    typed_io(connection, id, request, None, buffer).await
+}
+#[allow(dead_code)] // Shared fixture: only saturation targets exercise raw I/O.
+pub async fn handle_write(
+    connection: &quinn::Connection,
+    id: u64,
+    request: &IoRequest,
+    data: &[u8],
+) -> Result<usize, String> {
+    typed_io(connection, id, request, Some(data), &mut []).await
+}
+#[allow(dead_code)] // Reachable through raw-I/O helpers in saturation targets.
+async fn typed_io(
+    connection: &quinn::Connection,
+    id: u64,
+    request: &IoRequest,
+    data: Option<&[u8]>,
+    buffer: &mut [u8],
+) -> Result<usize, String> {
+    let result = async {
+        let (mut send, mut recv) = connection.open_bi().await.map_err(|e| e.to_string())?;
+        binary::write_request(&mut send, id, request, buffer.len(), data)
+            .await
+            .map_err(|e| e.to_string())?;
+        send.finish().map_err(|e| e.to_string())?;
+        let count = binary::read_result(
+            &mut recv,
+            id,
+            data.is_none(),
+            buffer,
+            data.map_or(0, <[u8]>::len),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        recv.read_to_end(0)
+            .await
+            .map_err(|_| "trailing or invalid response bytes".to_string())?;
+        count.map_err(|e| e.code)
+    }
+    .await;
+    if result.is_err() {
+        connection.close(1_u32.into(), b"typed I/O failed; never replayed");
+    }
+    result
 }

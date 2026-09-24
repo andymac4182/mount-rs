@@ -35,7 +35,7 @@ Every operation checks current authorization metadata. Revocation takes effect o
 
 Drive backends are opened at service startup. Adding or changing a Drive definition requires a service restart. An active service returns `ESTALE` when a registered definition changes; it never silently switches an existing mount to another backend. Startup opens every Drive before listener readiness and shutdown ends sessions before closing storage resources.
 
-QUIC uses TLS 1.3 and `mount-rs/1` ALPN. The application protocol and client transport interface permit a future WebSocket implementation; fallback is not implemented yet. Stream, session, frame, I/O and operation limits are enforced. Unknown mutation outcomes close the connection and are never replayed automatically.
+QUIC uses TLS 1.3 and `mount-rs/2` ALPN, currently the only supported version. ALPN negotiation and the hello version check remain for future protocol versions. The application protocol and client transport interface permit a future WebSocket implementation; fallback is not implemented yet. Stream, session, frame, I/O and operation limits are enforced. Unknown mutation outcomes close the connection and are never replayed automatically.
 
 ## Verification
 

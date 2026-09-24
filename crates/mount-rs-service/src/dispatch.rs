@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mount_rs_core::{FileHandle, FsDriver, MkdirOptions};
+use mount_rs_remote_protocol::binary::{IoRequest, IoResult};
 use mount_rs_remote_protocol::{Operation, OperationName, WireError};
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -144,6 +145,13 @@ impl SessionHandles {
     }
 }
 
+#[derive(Clone, Copy)]
+enum PayloadMode<'a> {
+    Json,
+    Read,
+    Write(&'a [u8]),
+}
+
 pub struct DriveDispatcher {
     catalog: Arc<dyn CatalogStore>,
     drives: BTreeMap<DriveKey, Arc<dyn FsDriver>>,
@@ -239,6 +247,64 @@ impl DriveDispatcher {
         operation: &Operation,
         handles: &SessionHandles,
         request_id: u64,
+    ) -> Result<Value, WireError> {
+        self.dispatch_mode(
+            identity,
+            drive_id,
+            operation,
+            handles,
+            request_id,
+            PayloadMode::Json,
+            &mut None,
+        )
+        .await
+    }
+
+    pub async fn dispatch_io(
+        &self,
+        identity: &SessionIdentity,
+        request: &IoRequest,
+        handles: &SessionHandles,
+        request_id: u64,
+        length: usize,
+        data: Option<&[u8]>,
+    ) -> Result<IoResult, WireError> {
+        let operation = Operation {
+            name: if data.is_some() {
+                OperationName::HandleWrite
+            } else {
+                OperationName::HandleRead
+            },
+            body: serde_json::json!({"handle":request.handle,"position":request.position,"length":length}),
+        };
+        let mut output = None;
+        let mode = match data {
+            Some(data) => PayloadMode::Write(data),
+            None => PayloadMode::Read,
+        };
+        self.dispatch_mode(
+            identity,
+            &request.drive_id,
+            &operation,
+            handles,
+            request_id,
+            mode,
+            &mut output,
+        )
+        .await?;
+        output.ok_or_else(|| error("EIO"))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn dispatch_mode(
+        &self,
+        identity: &SessionIdentity,
+        drive_id: &str,
+        operation: &Operation,
+        handles: &SessionHandles,
+        request_id: u64,
+        mode: PayloadMode<'_>,
+        raw_output: &mut Option<IoResult>,
     ) -> Result<Value, WireError> {
         let _dispatch_profile = Span::new(Event::Dispatch);
         let authorization_profile = Span::new(Event::Authorization);
@@ -415,14 +481,38 @@ impl DriveDispatcher {
                                 return Err(error("EIO"));
                             }
                             data.truncate(count);
-                            encode(data)
+                            // v2 returns the filesystem-owned raw buffer. Legacy
+                            // dispatch retains its exact JSON result representation.
+                            if matches!(mode, PayloadMode::Read) {
+                                *raw_output = Some(IoResult::Read(data));
+                                Ok(Value::Null)
+                            } else {
+                                encode(data)
+                            }
                         }
-                        OperationName::HandleWrite => encode(
-                            handle
-                                .write(&bytes(body)?, position(body)?)
-                                .await
-                                .map_err(fs_error)?,
-                        ),
+                        OperationName::HandleWrite => {
+                            if let PayloadMode::Write(data) = mode {
+                                if data.len() > 1024 * 1024 {
+                                    return Err(error("EINVAL"));
+                                }
+                                let count = handle
+                                    .write(data, position(body)?)
+                                    .await
+                                    .map_err(fs_error)?;
+                                if count > data.len() {
+                                    return Err(error("EIO"));
+                                }
+                                *raw_output = Some(IoResult::Write(count));
+                                Ok(Value::Null)
+                            } else {
+                                encode(
+                                    handle
+                                        .write(&bytes(body)?, position(body)?)
+                                        .await
+                                        .map_err(fs_error)?,
+                                )
+                            }
+                        }
                         OperationName::HandleStat => encode(handle.stat().await.map_err(fs_error)?),
                         OperationName::HandleTruncate => {
                             handle

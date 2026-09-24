@@ -164,6 +164,7 @@ async fn signed_oidc_multiple_drives_persistence_and_revocation() {
     )
     .await
     .unwrap();
+    assert_eq!(connection.protocol_version(), 2);
     let data = RemoteFsDriver::new(connection.clone(), "data".into())
         .await
         .unwrap();
@@ -175,6 +176,25 @@ async fn signed_oidc_multiple_drives_persistence_and_revocation() {
         logs.write_file("/denied", b"x").await.unwrap_err().code,
         mount_rs_core::ErrorCode::Eacces
     );
+    let writer = data.open("/binary", "w+", 0o644).await.unwrap();
+    let payload: Vec<u8> = (0..4096).map(|n| n as u8).collect();
+    assert_eq!(
+        writer.write(&payload, Some(0)).await.unwrap(),
+        payload.len()
+    );
+    let mut received = vec![0; payload.len()];
+    assert_eq!(
+        writer.read(&mut received, Some(0)).await.unwrap(),
+        payload.len()
+    );
+    assert_eq!(received, payload);
+    writer.close().await.unwrap();
+    let readonly = logs.open("/marker", "r", 0).await.unwrap();
+    assert_eq!(
+        readonly.write(b"denied", Some(0)).await.unwrap_err().code,
+        mount_rs_core::ErrorCode::Eacces
+    );
+    readonly.close().await.unwrap();
     data.write_file("/saved", b"persistent remote bytes")
         .await
         .unwrap();

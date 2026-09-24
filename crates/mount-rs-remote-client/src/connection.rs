@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use base64::Engine;
+use mount_rs_remote_protocol::binary::{self, IoRequest};
 use mount_rs_remote_protocol::{Message, Operation, PROTOCOL_VERSION, read_frame, write_frame};
 use quinn::crypto::rustls::QuicClientConfig;
 use serde_json::Value;
@@ -55,17 +56,40 @@ impl std::error::Error for ClientError {}
 
 #[async_trait]
 pub trait Transport: Send + Sync {
+    fn version(&self) -> u16 {
+        PROTOCOL_VERSION
+    }
     async fn exchange(&self, message: Message) -> Result<Message, ClientError>;
+    async fn read(
+        &self,
+        _id: u64,
+        _request: &IoRequest,
+        _buffer: &mut [u8],
+    ) -> Result<usize, ClientError> {
+        Err(ClientError::Protocol)
+    }
+    async fn write(
+        &self,
+        _id: u64,
+        _request: &IoRequest,
+        _data: &[u8],
+    ) -> Result<usize, ClientError> {
+        Err(ClientError::Protocol)
+    }
     fn close(&self) {}
 }
 
 struct QuicTransport {
     _endpoint: quinn::Endpoint,
     connection: quinn::Connection,
+    version: u16,
 }
 
 #[async_trait]
 impl Transport for QuicTransport {
+    fn version(&self) -> u16 {
+        self.version
+    }
     async fn exchange(&self, message: Message) -> Result<Message, ClientError> {
         let (mut send, mut recv) = self
             .connection
@@ -76,9 +100,55 @@ impl Transport for QuicTransport {
             .await
             .map_err(|_| ClientError::Transport)?;
         send.finish().map_err(|_| ClientError::Transport)?;
-        read_frame(&mut recv)
+        let response = read_frame(&mut recv)
             .await
-            .map_err(|_| ClientError::Transport)
+            .map_err(|_| ClientError::Protocol)?;
+        recv.read_to_end(0)
+            .await
+            .map_err(|_| ClientError::Protocol)?;
+        Ok(response)
+    }
+
+    async fn read(
+        &self,
+        id: u64,
+        request: &IoRequest,
+        buffer: &mut [u8],
+    ) -> Result<usize, ClientError> {
+        let (mut send, mut recv) = self
+            .connection
+            .open_bi()
+            .await
+            .map_err(|_| ClientError::Transport)?;
+        binary::write_request(&mut send, id, request, buffer.len(), None)
+            .await
+            .map_err(|_| ClientError::Protocol)?;
+        send.finish().map_err(|_| ClientError::Transport)?;
+        let result = binary::read_result(&mut recv, id, true, buffer, 0)
+            .await
+            .map_err(|_| ClientError::Protocol)?;
+        recv.read_to_end(0)
+            .await
+            .map_err(|_| ClientError::Protocol)?;
+        result.map_err(|e| ClientError::Remote(e.code))
+    }
+    async fn write(&self, id: u64, request: &IoRequest, data: &[u8]) -> Result<usize, ClientError> {
+        let (mut send, mut recv) = self
+            .connection
+            .open_bi()
+            .await
+            .map_err(|_| ClientError::Transport)?;
+        binary::write_request(&mut send, id, request, 0, Some(data))
+            .await
+            .map_err(|_| ClientError::Protocol)?;
+        send.finish().map_err(|_| ClientError::Transport)?;
+        let result = binary::read_result(&mut recv, id, false, &mut [], data.len())
+            .await
+            .map_err(|_| ClientError::Protocol)?;
+        recv.read_to_end(0)
+            .await
+            .map_err(|_| ClientError::Protocol)?;
+        result.map_err(|e| ClientError::Remote(e.code))
     }
 
     fn close(&self) {
@@ -103,6 +173,9 @@ impl Drop for RemoteConnection {
 }
 
 impl RemoteConnection {
+    pub fn protocol_version(&self) -> u16 {
+        self.transport.version()
+    }
     pub fn close(&self) {
         if !self.closed.swap(true, Ordering::AcqRel) {
             self.transport.close();
@@ -123,10 +196,19 @@ impl RemoteConnection {
         .map_err(|_| ClientError::Transport)?
         .with_root_certificates(roots)
         .with_no_client_auth();
-        tls.alpn_protocols = vec![b"mount-rs/1".to_vec()];
-        let config = quinn::ClientConfig::new(Arc::new(
+        tls.alpn_protocols = vec![b"mount-rs/2".to_vec()];
+        let mut config = quinn::ClientConfig::new(Arc::new(
             QuicClientConfig::try_from(tls).map_err(|_| ClientError::Transport)?,
         ));
+        // Modest per-connection queues still stream the full 8MiB generic
+        // control cap; application admission independently bounds allocations.
+        let mut windows = quinn::TransportConfig::default();
+        windows.stream_receive_window((512 * 1024_u32).into());
+        windows.receive_window((4 * 1024 * 1024_u32).into());
+        windows.send_window(1024 * 1024);
+        windows.max_concurrent_bidi_streams(0_u32.into());
+        windows.max_concurrent_uni_streams(0_u32.into());
+        config.transport_config(Arc::new(windows));
         let bind: SocketAddr = if address.is_ipv4() {
             "0.0.0.0:0"
         } else {
@@ -145,9 +227,18 @@ impl RemoteConnection {
         .await
         .map_err(|_| ClientError::Transport)?
         .map_err(|_| ClientError::Transport)?;
+        let handshake = connection
+            .handshake_data()
+            .ok_or(ClientError::Protocol)?
+            .downcast::<quinn::crypto::rustls::HandshakeData>()
+            .map_err(|_| ClientError::Protocol)?;
+        if handshake.protocol.as_deref() != Some(b"mount-rs/2") {
+            return Err(ClientError::Protocol);
+        }
         let transport: Arc<dyn Transport> = Arc::new(QuicTransport {
             _endpoint: endpoint,
             connection,
+            version: PROTOCOL_VERSION,
         });
         let token = credentials
             .token()
@@ -159,7 +250,7 @@ impl RemoteConnection {
             bearer: token.expose().to_owned(),
         };
         match tokio::time::timeout(REQUEST_TIMEOUT, transport.exchange(hello)).await {
-            Ok(Ok(Message::ServerHello { version, .. })) if version == PROTOCOL_VERSION => {}
+            Ok(Ok(Message::ServerHello { version, .. })) if version == transport.version() => {}
             _ => return Err(ClientError::Authentication),
         }
         Ok(Arc::new(Self {
@@ -226,6 +317,85 @@ impl RemoteConnection {
         result
     }
 
+    async fn io_id(&self) -> Result<u64, ClientError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(ClientError::Transport);
+        }
+        self.renew_if_needed().await?;
+        self.next_id
+            .fetch_add(1, Ordering::Relaxed)
+            .checked_add(1)
+            .ok_or(ClientError::Protocol)
+    }
+    pub async fn read(
+        &self,
+        drive_id: &str,
+        handle: u64,
+        position: Option<u64>,
+        buffer: &mut [u8],
+    ) -> Result<usize, ClientError> {
+        if buffer.len() > binary::MAX_IO_BYTES {
+            return Err(ClientError::Protocol);
+        }
+        let id = self.io_id().await?;
+        let request = IoRequest {
+            drive_id: drive_id.to_owned(),
+            handle,
+            position,
+        };
+        {
+            let limit = buffer.len();
+            self.finish_io(
+                tokio::time::timeout(REQUEST_TIMEOUT, self.transport.read(id, &request, buffer))
+                    .await,
+                limit,
+            )
+        }
+    }
+    pub async fn write(
+        &self,
+        drive_id: &str,
+        handle: u64,
+        position: Option<u64>,
+        data: &[u8],
+    ) -> Result<usize, ClientError> {
+        if data.len() > binary::MAX_IO_BYTES {
+            return Err(ClientError::Protocol);
+        }
+        let id = self.io_id().await?;
+        let request = IoRequest {
+            drive_id: drive_id.to_owned(),
+            handle,
+            position,
+        };
+        self.finish_io(
+            tokio::time::timeout(REQUEST_TIMEOUT, self.transport.write(id, &request, data)).await,
+            data.len(),
+        )
+    }
+    fn finish_io(
+        &self,
+        result: Result<Result<usize, ClientError>, tokio::time::error::Elapsed>,
+        limit: usize,
+    ) -> Result<usize, ClientError> {
+        match result {
+            Ok(Ok(count)) if count <= limit => Ok(count),
+            Ok(Ok(_)) => {
+                self.close();
+                Err(ClientError::Protocol)
+            }
+            Ok(Err(e @ ClientError::Remote(_))) => Err(e),
+            Ok(Err(e)) => {
+                self.close();
+                Err(e)
+            }
+            Err(_) => {
+                self.close();
+                Err(ClientError::Transport)
+            }
+        }
+    }
+
     async fn renew_if_needed(&self) -> Result<(), ClientError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(ClientError::Transport);
@@ -259,7 +429,7 @@ impl RemoteConnection {
             }
         };
         match response {
-            Message::ServerHello { version, .. } if version == PROTOCOL_VERSION => {
+            Message::ServerHello { version, .. } if version == self.transport.version() => {
                 self.expires_at.store(token_exp(&token), Ordering::Release);
                 Ok(())
             }

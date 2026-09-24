@@ -14,6 +14,7 @@ saturation-foundationdb = ["mount-rs-sdk/foundationdb"]
 [dependencies]
 mount-rs-sqlite = { path = "../../providers/mount-rs-sqlite", optional = true }
 async-trait = "0.1"
+bytes = "1"
 mount-rs-core = { path = "../.." }
 mount-rs-remote-protocol = { path = "../mount-rs-remote-protocol" }
 rusqlite = { version = "=0.39.0", features = ["bundled", "fallible_uint"] }

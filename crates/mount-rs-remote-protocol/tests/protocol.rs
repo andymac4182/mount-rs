@@ -23,16 +23,24 @@ async fn framed_request_round_trips() {
 async fn oversized_frame_is_rejected_before_allocation() {
     use tokio::io::AsyncWriteExt;
     let (mut writer, mut reader) = tokio::io::duplex(4096);
-    writer
-        .write_all(&((MAX_FRAME_BYTES as u32) + 1).to_be_bytes())
-        .await
-        .unwrap();
+    let mut header = mount_rs_remote_protocol::binary::Header::new(
+        mount_rs_remote_protocol::binary::Kind::Control,
+        0,
+        1,
+        0,
+        0,
+    )
+    .unwrap()
+    .encode()
+    .unwrap();
+    header[16..20].copy_from_slice(&((MAX_FRAME_BYTES as u32) + 1).to_be_bytes());
+    writer.write_all(&header).await.unwrap();
     assert!(read_frame(&mut reader).await.is_err());
 }
 
 #[test]
 fn version_and_mutation_classification_are_explicit() {
-    assert_eq!(PROTOCOL_VERSION, 1);
+    assert_eq!(PROTOCOL_VERSION, 2);
     assert_eq!(
         Operation {
             name: OperationName::Stat,

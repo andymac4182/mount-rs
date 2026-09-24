@@ -54,6 +54,9 @@ Add `cache` to the existing version-1 service JSON. All paths are resolved relat
     "deadline_ms": 500,
     "peer_query_limit": 3,
     "maintenance_capacity": 64,
+    "placement_concurrency": 4,
+    "hedge_delay_ms": 25,
+    "peer_transfer_bytes": 134217728,
     "peer_listen": "0.0.0.0:4434",
     "ca_certificate": "peer-ca.pem",
     "certificate": "node-1.pem",
@@ -102,3 +105,11 @@ The production `checked_buffer_reservation` arithmetic used by shared staging ad
 The isolated 4KiB RAM-hit allocator profile served **100,000 reads with zero backing GETs**. Both the uncached synthetic memory provider and warm cache perform **2 allocations/read** under the existing boxed-future/`Vec` contract. Separating the ready hit future from the cold-path future reduced cached allocated bytes from **4,656 to 4,200/read** (the provider baseline is 4,112). The extra 88 bytes are future/result representation, not another allocation. The final run observed about 2.27 million warm reads/s on this laptop (the preceding run was about 2.75 million); this is a component microbenchmark, excludes metadata/RPC/network/storage, and is not evidence of end-to-end 100,000 IOPS or production capacity. Run `cargo-shared run -p mount-rs-blob-cache --example cache_profile --release --offline --locked`.
 
 Run `CARGO_TARGET_DIR=/path/to/isolated-target scripts/test-cache-redis.py` for the explicit plain directory and TLS/auth tests. The script starts only isolated loopback Redis processes, generates fixture credentials, and terminates owned processes on success or failure. Standard Cargo tests ignore these two fixtures so development does not require Redis installed.
+
+## QUIC transfer and scheduling bounds
+
+Peer requests use separately owned headers and shared immutable payloads. Successful GET replies read the status separately and retain the received payload without a slicing copy. The ordinary block provider still returns a `Vec`, so it requires a caller copy. Deterministic ranking hashes the scope once and evaluates each peer once.
+
+Placement runs at most `placement_concurrency` jobs (default 4, maximum 32), with at most two replica PUTs per job. The maintenance queue and pending-byte reservation remain bounded. Reads start one peer query, then hedge after `hedge_delay_ms` (default 25 ms, clamped to one quarter of the overall deadline); at most two queries run simultaneously and `peer_query_limit` bounds total attempts. The first valid response wins and cancels outstanding queries. Directory hints and individual corrupt/missing replicas remain best effort.
+
+`peer_transfer_bytes` defaults to 128 MiB and is split equally between incoming and outgoing work. Each admitted transfer reserves twice the maximum blob plus header bound before allocating a body, and queued QUIC payload owners retain their charges. The budget must fit one such reservation in each half and cannot exceed 1 GiB. Cache RAM, staging, transport receive windows, provider buffers and bookkeeping are separate limits; this is not a whole-process RSS cap.

@@ -120,7 +120,7 @@ async fn setup_with_left(
     .unwrap()
     .with_root_certificates(roots)
     .with_no_client_auth();
-    tls.alpn_protocols = vec![b"mount-rs/1".to_vec()];
+    tls.alpn_protocols = vec![b"mount-rs/2".to_vec()];
     let config = quinn::ClientConfig::new(Arc::new(
         quinn::crypto::rustls::QuicClientConfig::try_from(tls).unwrap(),
     ));

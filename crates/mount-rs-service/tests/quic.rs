@@ -164,7 +164,7 @@ async fn quic_session_routes_authorized_drive_and_rejects_other_partition() {
     .unwrap()
     .with_root_certificates(roots)
     .with_no_client_auth();
-    tls.alpn_protocols = vec![b"mount-rs/1".to_vec()];
+    tls.alpn_protocols = vec![b"mount-rs/2".to_vec()];
     let client_config = quinn::ClientConfig::new(Arc::new(
         quinn::crypto::rustls::QuicClientConfig::try_from(tls).unwrap(),
     ));
@@ -208,6 +208,7 @@ async fn quic_session_routes_authorized_drive_and_rejects_other_partition() {
     )
     .await
     .unwrap();
+    send.finish().unwrap();
     assert!(matches!(
         read_frame(&mut recv).await.unwrap(),
         Message::Response {
@@ -229,6 +230,7 @@ async fn quic_session_routes_authorized_drive_and_rejects_other_partition() {
     )
     .await
     .unwrap();
+    send.finish().unwrap();
     assert!(matches!(
         read_frame(&mut recv).await.unwrap(),
         Message::Response {
@@ -250,6 +252,7 @@ async fn quic_session_routes_authorized_drive_and_rejects_other_partition() {
     )
     .await
     .unwrap();
+    send.finish().unwrap();
     assert!(matches!(
         read_frame(&mut recv).await.unwrap(),
         Message::Response {
@@ -266,6 +269,7 @@ async fn quic_session_routes_authorized_drive_and_rejects_other_partition() {
     )
     .await
     .unwrap();
+    send.finish().unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(2), connection.closed())
         .await
         .unwrap();
@@ -300,6 +304,7 @@ async fn quic_session_routes_authorized_drive_and_rejects_other_partition() {
     )
     .await
     .unwrap();
+    send.finish().unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(2), other.closed())
         .await
         .unwrap();

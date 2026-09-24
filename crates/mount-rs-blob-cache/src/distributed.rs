@@ -26,6 +26,23 @@ pub trait Discovery: Send + Sync {
 pub trait PeerTransport: Send + Sync {
     async fn get(&self, peer: &PeerId, scope: &CacheScope, id: &BlockId)
     -> Result<Option<Vec<u8>>>;
+    async fn get_shared(
+        &self,
+        peer: &PeerId,
+        scope: &CacheScope,
+        id: &BlockId,
+    ) -> Result<Option<bytes::Bytes>> {
+        Ok(self.get(peer, scope, id).await?.map(bytes::Bytes::from))
+    }
+    async fn put_shared(
+        &self,
+        peer: &PeerId,
+        scope: &CacheScope,
+        id: &BlockId,
+        bytes: Arc<[u8]>,
+    ) -> Result<()> {
+        self.put(peer, scope, id, &bytes).await
+    }
     async fn put(
         &self,
         peer: &PeerId,
@@ -39,6 +56,8 @@ pub struct DistributedConfig {
     pub max_peer_queries: usize,
     pub deadline: Duration,
     pub maintenance_capacity: usize,
+    pub placement_concurrency: usize,
+    pub hedge_delay: Duration,
     pub max_inflight_misses: usize,
 }
 impl Default for DistributedConfig {
@@ -47,6 +66,8 @@ impl Default for DistributedConfig {
             max_peer_queries: 3,
             deadline: Duration::from_millis(500),
             maintenance_capacity: 64,
+            placement_concurrency: 4,
+            hedge_delay: Duration::from_millis(25),
             max_inflight_misses: 64,
         }
     }
@@ -107,12 +128,9 @@ impl Discovery for FixedDiscovery {
     }
     fn placement(&self, scope: &CacheScope, id: &BlockId) -> Vec<PeerId> {
         let mut p = self.peers.clone();
-        p.sort_by_key(|peer| {
-            digest(&[
-                scope.digest().as_bytes(),
-                id.0.as_bytes(),
-                peer.0.as_bytes(),
-            ])
+        let scope_hash = scope.digest();
+        p.sort_by_cached_key(|peer| {
+            digest(&[scope_hash.as_bytes(), id.0.as_bytes(), peer.0.as_bytes()])
         });
         p.truncate(2);
         p

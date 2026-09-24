@@ -168,31 +168,31 @@ impl FileHandle for RemoteHandle {
     }
 
     async fn read(&self, buffer: &mut [u8], position: Option<u64>) -> mount_rs_core::Result<usize> {
-        let data: Vec<u8> = self
-            .call(
-                OperationName::HandleRead,
-                json!({"length":buffer.len().min(MAX_IO),"position":position}),
-            )
-            .await?;
-        if data.len() > buffer.len().min(MAX_IO) {
-            return Err(FsError::new(ErrorCode::Eproto));
+        let closed = self.closed.read().await;
+        if *closed {
+            return Err(FsError::new(ErrorCode::Ebadf));
         }
-        buffer[..data.len()].copy_from_slice(&data);
-        Ok(data.len())
+        let length = buffer.len().min(MAX_IO);
+        self.connection
+            .read(&self.drive_id, self.id, position, &mut buffer[..length])
+            .await
+            .map_err(fs_error)
     }
 
     async fn write(&self, buffer: &[u8], position: Option<u64>) -> mount_rs_core::Result<usize> {
-        let chunk = &buffer[..buffer.len().min(MAX_IO)];
-        let count: usize = self
-            .call(
-                OperationName::HandleWrite,
-                json!({"data":chunk,"position":position}),
-            )
-            .await?;
-        if count > chunk.len() {
-            return Err(FsError::new(ErrorCode::Eproto));
+        let closed = self.closed.read().await;
+        if *closed {
+            return Err(FsError::new(ErrorCode::Ebadf));
         }
-        Ok(count)
+        self.connection
+            .write(
+                &self.drive_id,
+                self.id,
+                position,
+                &buffer[..buffer.len().min(MAX_IO)],
+            )
+            .await
+            .map_err(fs_error)
     }
 
     async fn stat(&self) -> mount_rs_core::Result<Stats> {

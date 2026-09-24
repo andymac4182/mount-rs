@@ -49,8 +49,35 @@ impl Authenticator for TestAuthenticator {
 
 struct CommitThenWait {
     memory: MemoryFs,
-    commits: AtomicUsize,
-    committed: tokio::sync::Notify,
+    commits: Arc<AtomicUsize>,
+    committed: Arc<tokio::sync::Notify>,
+}
+
+struct CommitHandle {
+    handle: Arc<dyn FileHandle>,
+    commits: Arc<AtomicUsize>,
+    committed: Arc<tokio::sync::Notify>,
+}
+#[async_trait]
+impl FileHandle for CommitHandle {
+    async fn read(&self, buffer: &mut [u8], position: Option<u64>) -> FsResult<usize> {
+        self.handle.read(buffer, position).await
+    }
+    async fn stat(&self) -> FsResult<Stats> {
+        self.handle.stat().await
+    }
+    async fn truncate(&self, length: u64) -> FsResult<()> {
+        self.handle.truncate(length).await
+    }
+    async fn close(&self) -> FsResult<()> {
+        self.handle.close().await
+    }
+    async fn write(&self, data: &[u8], position: Option<u64>) -> FsResult<usize> {
+        self.handle.write(data, position).await?;
+        self.commits.fetch_add(1, Ordering::SeqCst);
+        self.committed.notify_one();
+        std::future::pending().await
+    }
 }
 
 #[async_trait]
@@ -65,7 +92,11 @@ impl FsDriver for CommitThenWait {
         self.memory.readdir(path).await
     }
     async fn open(&self, path: &str, flags: &str, mode: u32) -> FsResult<Arc<dyn FileHandle>> {
-        self.memory.open(path, flags, mode).await
+        Ok(Arc::new(CommitHandle {
+            handle: self.memory.open(path, flags, mode).await?,
+            commits: self.commits.clone(),
+            committed: self.committed.clone(),
+        }))
     }
     async fn write_file(&self, path: &str, data: &[u8]) -> FsResult<()> {
         self.memory.write_file(path, data).await?;
@@ -77,6 +108,13 @@ impl FsDriver for CommitThenWait {
 
 #[tokio::test]
 async fn quic_disconnect_after_backend_commit_does_not_replay_uncertain_write() {
+    uncertain_write(false).await;
+}
+#[tokio::test]
+async fn binary_disconnect_after_backend_commit_does_not_replay_uncertain_handle_write() {
+    uncertain_write(true).await;
+}
+async fn uncertain_write(binary: bool) {
     let directory = tempfile::tempdir().unwrap();
     let catalog = Arc::new(
         SqliteCatalog::open(directory.path().join("catalog.sqlite"))
@@ -112,8 +150,8 @@ async fn quic_disconnect_after_backend_commit_does_not_replay_uncertain_write() 
     catalog.compare_and_swap(0, snapshot).await.unwrap();
     let backend = Arc::new(CommitThenWait {
         memory: MemoryFs::new(MemoryOptions::default()),
-        commits: AtomicUsize::new(0),
-        committed: tokio::sync::Notify::new(),
+        commits: Arc::new(AtomicUsize::new(0)),
+        committed: Arc::new(tokio::sync::Notify::new()),
     });
     let mut dispatcher = DriveDispatcher::new(catalog);
     dispatcher
@@ -144,18 +182,44 @@ async fn quic_disconnect_after_backend_commit_does_not_replay_uncertain_write() 
     )
     .await
     .unwrap();
-    let request = tokio::spawn({
-        let connection = connection.clone();
-        async move {
+    assert_eq!(connection.protocol_version(), 2);
+    let handle = if binary {
+        Some(
             connection
                 .request(
                     "data",
                     Operation {
-                        name: OperationName::Write,
-                        body: json!({"path":"/once","data":[1,2,3]}),
+                        name: OperationName::Open,
+                        body: json!({"path":"/once","flags":"w+","mode":420}),
                     },
                 )
                 .await
+                .unwrap()
+                .as_u64()
+                .unwrap(),
+        )
+    } else {
+        None
+    };
+    let request = tokio::spawn({
+        let connection = connection.clone();
+        async move {
+            if let Some(handle) = handle {
+                connection
+                    .write("data", handle, Some(0), &[1, 2, 3])
+                    .await
+                    .map(|_| json!(null))
+            } else {
+                connection
+                    .request(
+                        "data",
+                        Operation {
+                            name: OperationName::Write,
+                            body: json!({"path":"/once","data":[1,2,3]}),
+                        },
+                    )
+                    .await
+            }
         }
     });
     tokio::time::timeout(Duration::from_secs(3), backend.committed.notified())
@@ -174,7 +238,7 @@ async fn quic_disconnect_after_backend_commit_does_not_replay_uncertain_write() 
             .await
             .unwrap()
             .unwrap(),
-        Err(ClientError::Transport)
+        Err(ClientError::Transport | ClientError::Protocol)
     ));
     assert_eq!(backend.commits.load(Ordering::SeqCst), 1);
     assert!(matches!(
