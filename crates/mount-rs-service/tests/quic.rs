@@ -186,6 +186,7 @@ async fn quic_session_routes_authorized_drive_and_rejects_other_partition() {
     )
     .await
     .unwrap();
+    send.finish().unwrap();
     assert!(matches!(
         read_frame(&mut recv).await.unwrap(),
         Message::ServerHello {
@@ -285,6 +286,7 @@ async fn quic_session_routes_authorized_drive_and_rejects_other_partition() {
     )
     .await
     .unwrap();
+    send.finish().unwrap();
     assert!(matches!(
         read_frame(&mut recv).await.unwrap(),
         Message::ServerHello { .. }

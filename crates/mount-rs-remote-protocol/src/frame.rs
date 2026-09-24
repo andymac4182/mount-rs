@@ -39,7 +39,7 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
     message: &Message,
 ) -> Result<(), FrameError> {
     let body = serde_json::to_vec(message)?;
-    if body.is_empty() || body.len() > MAX_FRAME_BYTES {
+    if !valid_frame_length(body.len()) {
         return Err(FrameError::InvalidLength);
     }
     let length = u32::try_from(body.len()).map_err(|_| FrameError::InvalidLength)?;
@@ -53,10 +53,34 @@ pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Message,
     let mut prefix = [0_u8; 4];
     reader.read_exact(&mut prefix).await?;
     let length = u32::from_be_bytes(prefix) as usize;
-    if length == 0 || length > MAX_FRAME_BYTES {
+    if !valid_frame_length(length) {
         return Err(FrameError::InvalidLength);
     }
     let mut body = vec![0; length];
     reader.read_exact(&mut body).await?;
     Ok(serde_json::from_slice(&body)?)
+}
+
+// Shared by both directions before the reader allocates a body or writer emits it.
+fn valid_frame_length(length: usize) -> bool {
+    (1..=MAX_FRAME_BYTES).contains(&length)
+}
+
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    #[kani::proof]
+    fn remote_frame_lengths_are_bounded_before_io() {
+        let length: usize = kani::any();
+        let accepted = valid_frame_length(length);
+        assert_eq!(accepted, length > 0 && length <= 8 * 1024 * 1024);
+        if accepted {
+            assert!(u32::try_from(length).is_ok());
+        }
+        kani::cover!(accepted && length == MAX_FRAME_BYTES);
+        kani::cover!(!accepted && length == 0);
+        kani::cover!(!accepted && length == MAX_FRAME_BYTES + 1);
+        kani::cover!(!accepted && length == usize::MAX);
+    }
 }

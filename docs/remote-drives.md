@@ -44,3 +44,5 @@ MOUNT_RS_REMOTE_NATIVE_NFS=1 ./scripts/cargo-shared test --locked -p mount-rs-re
 ```
 
 Native mounting requires platform NFS support and normal mount privileges. The Remote Drives CI workflow runs protocol tests on Linux and macOS and native NFS qualification on Linux. External issuer availability, cross-host networking, production storage durability and future WebSocket fallback need separate qualification.
+
+See [Remote verification](remote-verification.md) for load runners, failure tests, and bounded proof coverage.

@@ -112,12 +112,7 @@ impl Operation {
                     .body
                     .get("Open")
                     .and_then(|open| open.get("flags"))
-                    .is_some_and(|flags| {
-                        flags.get("read").and_then(Value::as_bool) == Some(true)
-                            && ["write", "create", "truncate", "append", "exclusive"]
-                                .iter()
-                                .all(|name| flags.get(name).and_then(Value::as_bool) == Some(false))
-                    }) =>
+                    .is_some_and(read_only_flags) =>
             {
                 Permission::Read
             }
@@ -204,10 +199,10 @@ impl OperationName {
 }
 
 fn read_only_flags(flags: &Value) -> bool {
-    flags.get("read").and_then(Value::as_bool) == Some(true)
-        && ["write", "create", "truncate", "append", "exclusive"]
-            .iter()
-            .all(|name| flags.get(name).and_then(Value::as_bool) == Some(false))
+    read_only_flag_values(
+        ["read", "write", "create", "truncate", "append", "exclusive"]
+            .map(|name| flags.get(name).and_then(Value::as_bool)),
+    )
 }
 
 impl std::fmt::Debug for Operation {
@@ -217,5 +212,39 @@ impl std::fmt::Debug for Operation {
             .field("name", &self.name)
             .field("body", &"<redacted>")
             .finish()
+    }
+}
+
+fn read_only_flag_values(flags: [Option<bool>; 6]) -> bool {
+    flags[0] == Some(true) && flags[1..].iter().all(|flag| *flag == Some(false))
+}
+
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    #[kani::proof]
+    #[kani::unwind(7)]
+    fn remote_readonly_flags_require_explicit_nonmutating_values() {
+        // Every flag independently is absent/invalid, false, or true (3^6 cases).
+        let flags: [Option<bool>; 6] = kani::any();
+        let accepted = read_only_flag_values(flags);
+        assert_eq!(
+            accepted,
+            flags
+                == [
+                    Some(true),
+                    Some(false),
+                    Some(false),
+                    Some(false),
+                    Some(false),
+                    Some(false)
+                ]
+        );
+        kani::cover!(accepted);
+        kani::cover!(!accepted && flags[0].is_none());
+        kani::cover!(!accepted && flags[1] == Some(true));
+        kani::cover!(!accepted && flags[3] == Some(true));
+        kani::cover!(!accepted && flags[5].is_none());
     }
 }

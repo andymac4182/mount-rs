@@ -25,3 +25,6 @@ tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
 mount-rs-memfs = { path = "../../filesystems/mount-rs-memfs" }
 rcgen = { version = "=0.14.8", default-features = false, features = ["crypto", "ring"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

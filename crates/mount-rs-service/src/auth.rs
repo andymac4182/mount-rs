@@ -464,15 +464,86 @@ pub fn authorize_drive(
     catalog
         .grants
         .values()
-        .filter(|grant| grant.policy_id == policy_id && grant.partition_id == partition_id)
         .filter(|grant| {
-            !grant.claim_conditions.is_empty()
-                && grant.claim_conditions.iter().all(|(path, expected)| {
-                    claims.pointer(path).and_then(Value::as_str) == Some(expected.as_str())
-                })
+            grant_matches(
+                &grant.partition_id,
+                partition_id,
+                &grant.policy_id,
+                policy_id,
+                grant.claim_conditions.iter().map(|(path, expected)| {
+                    (
+                        claims.pointer(path).and_then(Value::as_str),
+                        expected.as_str(),
+                    )
+                }),
+            )
         })
         .filter_map(|grant| grant.drives.get(drive_id).copied())
         .max_by_key(|permission| matches!(permission, Permission::Write))
+}
+
+// Inputs are claim strings resolved by the production JSON-pointer lookup above.
+// Missing and non-string claims both resolve to None and cannot satisfy a grant.
+fn grant_matches<'a>(
+    grant_partition: &str,
+    partition: &str,
+    grant_policy: &str,
+    policy: &str,
+    conditions: impl Iterator<Item = (Option<&'a str>, &'a str)>,
+) -> bool {
+    if grant_partition != partition || grant_policy != policy {
+        return false;
+    }
+    let mut any = false;
+    for (actual, expected) in conditions {
+        any = true;
+        if actual != Some(expected) {
+            return false;
+        }
+    }
+    any
+}
+
+#[cfg(kani)]
+mod proofs {
+    use super::grant_matches;
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn remote_grant_requires_exact_scope_and_all_claims() {
+        // Two one-byte identities; zero, one, or two resolved conditions.
+        let partition: bool = kani::any();
+        let policy: bool = kani::any();
+        let count: usize = kani::any();
+        kani::assume(count <= 2);
+        let present: [bool; 2] = kani::any();
+        let equal: [bool; 2] = kani::any();
+        let actual = [
+            present[0].then_some(if equal[0] { "a" } else { "b" }),
+            present[1].then_some(if equal[1] { "a" } else { "b" }),
+        ];
+        let conditions = [(actual[0], "a"), (actual[1], "a")];
+        let accepted = grant_matches(
+            "a",
+            if partition { "a" } else { "b" },
+            "a",
+            if policy { "a" } else { "b" },
+            conditions[..count].iter().copied(),
+        );
+        let expected = partition
+            && policy
+            && count != 0
+            && present[0]
+            && equal[0]
+            && (count == 1 || (present[1] && equal[1]));
+        assert_eq!(accepted, expected);
+        kani::cover!(accepted && count == 2);
+        kani::cover!(!accepted && !partition && policy);
+        kani::cover!(!accepted && partition && !policy);
+        kani::cover!(!accepted && count == 0);
+        kani::cover!(!accepted && count == 2 && present[0] && equal[0] && !present[1]);
+        kani::cover!(!accepted && count == 2 && present[0] && equal[0] && present[1] && !equal[1]);
+    }
 }
 
 /// Production authenticator. Only catalog-pinned policies are contacted.

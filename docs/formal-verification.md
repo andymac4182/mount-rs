@@ -109,3 +109,12 @@ Each future harness needs its own property, input assumptions, bound, and result
 | Full NFS XDR reader | Join the proved length/span decisions and admitted payload extraction into a bounded `var_opaque` proof of formatted errors, offsets, and rejection paths; extend array nesting separately. | A direct public-reader harness timed out through formatting/allocation and was removed. The 450-case reader matrix is finite; complete NFS frames and peers remain outside. |
 | WebDAV lock scope and state | Extend the proved four-path/two-lock canonical relation to bounded create/refresh/unlock transitions, then connect the state model to `DavLockTable` without unbounded HashMap allocation. | Arbitrary path normalization, lock-table storage, token parsing, and async session cancellation remain outside the current relation proof. |
 | Full protocol/parser and backend state | Connect the proved 9P/NFS/S3 numeric frame decisions to bounded body parsers, S3 chunk partitions/signatures, WebDAV lock schedules, listings, and provider restart schedules. | Network peers, allocation, cryptographic signatures, and remote backend behavior remain outside the current numeric harnesses. |
+
+## Remote provider decisions
+
+The remote provider has a separate six-harness runner,
+[`scripts/verify-remote-formal`](../scripts/verify-remote-formal). Its executed
+results, input domains, and limits are documented in
+[Remote verification](remote-verification.md). These decision proofs supplement
+the inventory above; they do not verify TLS, OIDC cryptography, or the complete
+asynchronous service state machine.

@@ -14,6 +14,10 @@ use ring::{
 use serde_json::json;
 
 fn signed_token(claims: serde_json::Value) -> (String, Jwk) {
+    signed_token_with_header(claims, json!({"alg":"ES256","kid":"test-key"}))
+}
+
+fn signed_token_with_header(claims: serde_json::Value, header: serde_json::Value) -> (String, Jwk) {
     let random = SystemRandom::new();
     let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &random).unwrap();
     let key = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &random)
@@ -24,7 +28,7 @@ fn signed_token(claims: serde_json::Value) -> (String, Jwk) {
         x: URL_SAFE_NO_PAD.encode(&point[1..33]),
         y: URL_SAFE_NO_PAD.encode(&point[33..65]),
     };
-    let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"ES256","kid":"test-key"}"#);
+    let header = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
     let body = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
     let signing_input = format!("{header}.{body}");
     let signature = key.sign(&random, signing_input.as_bytes()).unwrap();
@@ -393,4 +397,156 @@ async fn unknown_signing_key_refresh_is_throttled_then_rotation_is_accepted() {
     assert!(auth.authenticate(&new_token, "red").await.is_ok());
     assert_eq!(source.fetches.load(Ordering::SeqCst), 2);
     assert!(auth.authenticate(&old_token, "red").await.is_err());
+}
+
+#[test]
+fn signed_jwt_rejects_invalid_time_identity_and_critical_headers() {
+    let now = 1_700_000_000_i64;
+    let baseline = json!({"iss":"https://issuer.example.com","aud":"mount-rs","sub":"workload","iat":now,"exp":now+300});
+    let cases = [
+        ("future iat", "iat", json!(now + 61)),
+        ("future nbf", "nbf", json!(now + 61)),
+        ("expired", "exp", json!(now - 61)),
+        ("excess lifetime", "exp", json!(now + 43201)),
+        ("empty subject", "sub", json!("")),
+        ("numeric subject", "sub", json!(12)),
+        ("wrong audience array", "aud", json!(["other"])),
+        ("invalid expiry", "exp", json!("tomorrow")),
+    ];
+    for (name, field, value) in cases {
+        let mut claims = baseline.clone();
+        claims[field] = value;
+        let (token, key) = signed_token(claims);
+        let verifier = OidcVerifier::new(
+            "https://issuer.example.com",
+            &["mount-rs".into()],
+            vec![key],
+        )
+        .unwrap();
+        assert!(verifier.verify(&token, now).is_err(), "accepted {name}");
+    }
+    for header in [
+        json!({"alg":"none","kid":"test-key"}),
+        json!({"alg":"HS256","kid":"test-key"}),
+        json!({"alg":"ES256","kid":"test-key","crit":["custom"],"custom":true}),
+        json!({"alg":"ES256","kid":"test-key","b64":false}),
+    ] {
+        let (token, key) = signed_token_with_header(baseline.clone(), header.clone());
+        let verifier = OidcVerifier::new(
+            "https://issuer.example.com",
+            &["mount-rs".into()],
+            vec![key],
+        )
+        .unwrap();
+        assert!(
+            verifier.verify(&token, now).is_err(),
+            "accepted header {header}"
+        );
+    }
+    let mut claims = baseline;
+    claims["aud"] = json!(["other", "mount-rs"]);
+    let (token, key) = signed_token(claims);
+    assert!(
+        OidcVerifier::new(
+            "https://issuer.example.com",
+            &["mount-rs".into()],
+            vec![key]
+        )
+        .unwrap()
+        .verify(&token, now)
+        .is_ok()
+    );
+}
+
+#[test]
+fn jwt_malformed_inputs_and_duplicate_key_ids_fail_closed() {
+    let (_, key) = signed_token(json!({}));
+    assert!(
+        OidcVerifier::new(
+            "https://issuer.example.com",
+            &["mount-rs".into()],
+            vec![key.clone(), key.clone()]
+        )
+        .is_err()
+    );
+    let verifier = OidcVerifier::new(
+        "https://issuer.example.com",
+        &["mount-rs".into()],
+        vec![key],
+    )
+    .unwrap();
+    for token in ["", "a", "a.b", "a.b.c.d", "!.!.!", "e30.e30.AA"] {
+        assert!(verifier.verify(token, 1_700_000_000).is_err());
+    }
+    assert!(
+        verifier
+            .verify(&"a".repeat(16 * 1024 + 1), 1_700_000_000)
+            .is_err()
+    );
+}
+
+#[test]
+fn grant_conditions_are_conjunctive_typed_and_write_requires_a_matching_grant() {
+    let mut catalog = CatalogSnapshot::empty();
+    catalog.partitions.insert(
+        "p".into(),
+        PartitionDefinition {
+            drives: BTreeMap::from([("d".into(), DriveDefinition { driver: json!({}) })]),
+        },
+    );
+    let reader = GrantDefinition {
+        partition_id: "p".into(),
+        policy_id: "issuer".into(),
+        drives: BTreeMap::from([("d".into(), Permission::Read)]),
+        claim_conditions: BTreeMap::from([("/sub".into(), "s".into())]),
+    };
+    let mut writer = reader.clone();
+    writer.drives.insert("d".into(), Permission::Write);
+    writer
+        .claim_conditions
+        .insert("/nested/role".into(), "writer".into());
+    catalog.grants.insert("read".into(), reader);
+    catalog.grants.insert("write".into(), writer);
+    for role in [
+        json!(null),
+        json!(false),
+        json!(1),
+        json!(["writer"]),
+        json!("reader"),
+    ] {
+        assert_eq!(
+            authorize_drive(
+                &catalog,
+                "issuer",
+                &json!({"sub":"s","nested":{"role":role}}),
+                "p",
+                "d"
+            ),
+            Some(Permission::Read)
+        );
+    }
+    let claims = json!({"sub":"s","nested":{"role":"writer"}});
+    assert_eq!(
+        authorize_drive(&catalog, "issuer", &claims, "p", "d"),
+        Some(Permission::Write)
+    );
+    assert_eq!(authorize_drive(&catalog, "other", &claims, "p", "d"), None);
+    assert_eq!(
+        authorize_drive(&catalog, "issuer", &claims, "p", "missing"),
+        None
+    );
+    assert_eq!(
+        authorize_drive(
+            &catalog,
+            "issuer",
+            &json!({"nested":{"role":"writer"}}),
+            "p",
+            "d"
+        ),
+        None
+    );
+    for grant in catalog.grants.values_mut() {
+        grant.claim_conditions.clear();
+    }
+    assert_eq!(authorize_drive(&catalog, "issuer", &claims, "p", "d"), None);
 }

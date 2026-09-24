@@ -31,8 +31,57 @@ pub struct SessionHandles {
 #[derive(Default)]
 struct HandleState {
     next: u64,
+    closed: bool,
     revision: Option<u64>,
     entries: BTreeMap<u64, (String, u64, Arc<dyn FileHandle>)>,
+}
+
+fn handle_matches(
+    stored_drive: &str,
+    requested_drive: &str,
+    stored_revision: u64,
+    requested_revision: u64,
+) -> bool {
+    stored_drive == requested_drive && stored_revision == requested_revision
+}
+
+fn permission_allows(granted: Permission, required: mount_rs_remote_protocol::Permission) -> bool {
+    granted == Permission::Write || required == mount_rs_remote_protocol::Permission::Read
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HandleRejection {
+    Closed,
+    Stale,
+    Full,
+}
+impl HandleRejection {
+    fn code(self) -> &'static str {
+        match self {
+            Self::Closed => "EBADF",
+            Self::Stale => "ESTALE",
+            Self::Full => "EMFILE",
+        }
+    }
+}
+
+fn admit_handle(
+    closed: bool,
+    current: Option<u64>,
+    revision: u64,
+    count: usize,
+    next: u64,
+) -> Result<u64, HandleRejection> {
+    if closed {
+        return Err(HandleRejection::Closed);
+    }
+    if current != Some(revision) {
+        return Err(HandleRejection::Stale);
+    }
+    if count >= 1024 {
+        return Err(HandleRejection::Full);
+    }
+    next.checked_add(1).ok_or(HandleRejection::Full)
 }
 
 impl SessionHandles {
@@ -43,12 +92,21 @@ impl SessionHandles {
         handle: Arc<dyn FileHandle>,
     ) -> Result<u64, WireError> {
         let mut state = self.state.lock().await;
-        if state.entries.len() >= 1024 {
-            drop(state);
-            let _ = handle.close().await;
-            return Err(error("EMFILE"));
-        }
-        state.next = state.next.checked_add(1).ok_or_else(|| error("EMFILE"))?;
+        let next = match admit_handle(
+            state.closed,
+            state.revision,
+            revision,
+            state.entries.len(),
+            state.next,
+        ) {
+            Ok(next) => next,
+            Err(reason) => {
+                drop(state);
+                let _ = handle.close().await;
+                return Err(error(reason.code()));
+            }
+        };
+        state.next = next;
         let id = state.next;
         state
             .entries
@@ -58,7 +116,7 @@ impl SessionHandles {
 
     async fn refresh_revision(&self, revision: u64) {
         let mut state = self.state.lock().await;
-        if state.revision == Some(revision) {
+        if state.closed || state.revision.is_some_and(|current| current >= revision) {
             return;
         }
         state.revision = Some(revision);
@@ -69,8 +127,15 @@ impl SessionHandles {
         }
     }
 
+    pub(crate) async fn is_closed(&self) -> bool {
+        self.state.lock().await.closed
+    }
+
     pub async fn close_all(&self) {
-        let entries = std::mem::take(&mut self.state.lock().await.entries);
+        let mut state = self.state.lock().await;
+        state.closed = true;
+        let entries = std::mem::take(&mut state.entries);
+        drop(state);
         for (_, (_, _, handle)) in entries {
             let _ = handle.close().await;
         }
@@ -217,9 +282,7 @@ impl DriveDispatcher {
             drive_id,
         )
         .ok_or_else(|| error("EACCES"))?;
-        if operation.required_permission() == mount_rs_remote_protocol::Permission::Write
-            && permission != Permission::Write
-        {
+        if !permission_allows(permission, operation.required_permission()) {
             return Err(error("EACCES"));
         }
         let key = DriveKey {
@@ -322,7 +385,7 @@ impl DriveDispatcher {
                     let mut state = handles.state.lock().await;
                     let (drive, revision, handle) =
                         state.entries.get(&id).ok_or_else(|| error("EBADF"))?;
-                    if drive != drive_id || *revision != catalog.revision {
+                    if !handle_matches(drive, drive_id, *revision, catalog.revision) {
                         return Err(error("EBADF"));
                     }
                     let handle = Arc::clone(handle);
@@ -705,6 +768,61 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn in_flight_open_cannot_reinsert_after_revision_change_or_shutdown() {
+        let handles = SessionHandles::default();
+        let closed = Arc::new(AtomicUsize::new(0));
+        handles.refresh_revision(1).await;
+        handles.refresh_revision(2).await;
+        let result = handles
+            .insert("data", 1, Arc::new(CountedHandle(closed.clone())))
+            .await;
+        assert_eq!(result.unwrap_err().code, "ESTALE");
+        assert_eq!(closed.load(Ordering::SeqCst), 1);
+        handles.refresh_revision(1).await;
+        assert_eq!(handles.state.lock().await.revision, Some(2));
+        handles.close_all().await;
+        let result = handles
+            .insert("data", 2, Arc::new(CountedHandle(closed.clone())))
+            .await;
+        assert_eq!(result.unwrap_err().code, "EBADF");
+        assert_eq!(closed.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn handle_capacity_and_counter_exhaustion_close_rejected_handles() {
+        let handles = SessionHandles::default();
+        let closed = Arc::new(AtomicUsize::new(0));
+        handles.refresh_revision(1).await;
+        for _ in 0..1024 {
+            handles
+                .insert("data", 1, Arc::new(CountedHandle(closed.clone())))
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            handles
+                .insert("data", 1, Arc::new(CountedHandle(closed.clone())))
+                .await
+                .unwrap_err()
+                .code,
+            "EMFILE"
+        );
+        assert_eq!(closed.load(Ordering::SeqCst), 1);
+        handles.refresh_revision(2).await;
+        assert_eq!(closed.load(Ordering::SeqCst), 1025);
+        handles.state.lock().await.next = u64::MAX;
+        assert_eq!(
+            handles
+                .insert("data", 2, Arc::new(CountedHandle(closed.clone())))
+                .await
+                .unwrap_err()
+                .code,
+            "EMFILE"
+        );
+        assert_eq!(closed.load(Ordering::SeqCst), 1026);
+    }
+
+    #[tokio::test]
     async fn catalog_revision_closes_old_handles_and_releases_slots() {
         let handles = SessionHandles::default();
         let closed = Arc::new(AtomicUsize::new(0));
@@ -725,5 +843,79 @@ mod tests {
         assert_eq!(closed.load(Ordering::SeqCst), 1);
         handles.close_all().await;
         assert_eq!(closed.load(Ordering::SeqCst), 2);
+    }
+}
+
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn remote_handles_require_exact_drive_and_revision() {
+        let same_drive: bool = kani::any();
+        let stored_revision: u64 = kani::any();
+        let requested_revision: u64 = kani::any();
+        let accepted = handle_matches(
+            "a",
+            if same_drive { "a" } else { "b" },
+            stored_revision,
+            requested_revision,
+        );
+        assert_eq!(
+            accepted,
+            same_drive && stored_revision == requested_revision
+        );
+        kani::cover!(accepted);
+        kani::cover!(!accepted && !same_drive && stored_revision == requested_revision);
+        kani::cover!(!accepted && same_drive && stored_revision != requested_revision);
+    }
+
+    #[kani::proof]
+    fn remote_read_grants_cannot_authorize_mutations() {
+        let write_grant: bool = kani::any();
+        let mutation: bool = kani::any();
+        let granted = if write_grant {
+            Permission::Write
+        } else {
+            Permission::Read
+        };
+        let required = if mutation {
+            mount_rs_remote_protocol::Permission::Write
+        } else {
+            mount_rs_remote_protocol::Permission::Read
+        };
+        let allowed = permission_allows(granted, required);
+        assert_eq!(allowed, write_grant || !mutation);
+        assert!(!(allowed && mutation && !write_grant));
+        kani::cover!(allowed && mutation);
+        kani::cover!(allowed && !write_grant);
+        kani::cover!(!allowed);
+    }
+
+    #[kani::proof]
+    fn remote_handle_admission_is_fenced_and_bounded() {
+        let closed: bool = kani::any();
+        let present: bool = kani::any();
+        let current: u64 = kani::any();
+        let revision: u64 = kani::any();
+        let count: usize = kani::any();
+        let next: u64 = kani::any();
+        let result = admit_handle(
+            closed,
+            if present { Some(current) } else { None },
+            revision,
+            count,
+            next,
+        );
+        let allowed = !closed && present && current == revision && count < 1024 && next < u64::MAX;
+        assert_eq!(result.is_ok(), allowed);
+        if let Ok(id) = result {
+            assert!(id > next);
+            assert_eq!(id, next + 1);
+        }
+        kani::cover!(result.is_ok());
+        kani::cover!(result == Err(HandleRejection::Closed));
+        kani::cover!(result == Err(HandleRejection::Stale));
+        kani::cover!(result == Err(HandleRejection::Full));
     }
 }

@@ -104,3 +104,34 @@ fn read_only_open_variants_do_not_require_write_grants() {
         Permission::Write
     );
 }
+
+#[test]
+fn structured_open_flags_fail_closed_for_missing_or_wrong_types() {
+    for name in [OperationName::Open, OperationName::GuardedMutation] {
+        for field in ["read", "write", "create", "truncate", "append", "exclusive"] {
+            for value in [
+                None,
+                Some(serde_json::json!(null)),
+                Some(serde_json::json!("false")),
+                Some(serde_json::json!(0)),
+                Some(serde_json::json!(field != "read")),
+            ] {
+                let mut flags = serde_json::json!({"read":true,"write":false,"create":false,"truncate":false,"append":false,"exclusive":false});
+                if let Some(value) = value {
+                    flags[field] = value;
+                } else {
+                    flags.as_object_mut().unwrap().remove(field);
+                }
+                let body = if name == OperationName::Open {
+                    serde_json::json!({"flags":flags})
+                } else {
+                    serde_json::json!({"Open":{"flags":flags}})
+                };
+                assert_eq!(
+                    Operation { name, body }.required_permission(),
+                    Permission::Write
+                );
+            }
+        }
+    }
+}

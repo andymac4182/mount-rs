@@ -42,7 +42,9 @@ impl RemoteServer {
         let mut server_config =
             quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(tls)?));
         let transport = Arc::get_mut(&mut server_config.transport).expect("new transport config");
-        transport.max_concurrent_bidi_streams((MAX_STREAMS as u32).into());
+        // Reserve hello credit: QUIC credit replenishment can be batched.
+        // The request semaphore independently caps active operations at 32.
+        transport.max_concurrent_bidi_streams(((MAX_STREAMS + 1) as u32).into());
         transport.max_concurrent_uni_streams(0_u32.into());
         transport.max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into()?));
         transport.keep_alive_interval(Some(std::time::Duration::from_secs(15)));
@@ -122,6 +124,15 @@ async fn serve_connection(
         connection.close(1_u32.into(), b"authentication failed");
         return;
     }
+    // A hello occupies one complete stream: consume FIN so transport credit
+    // is returned, and reject any bytes after the framed message.
+    if !matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(10), recv.read_to_end(0)).await,
+        Ok(Ok(_))
+    ) {
+        connection.close(1_u32.into(), b"invalid handshake stream");
+        return;
+    }
     let response = Message::ServerHello {
         version: PROTOCOL_VERSION,
         session_id: session_id(),
@@ -129,6 +140,10 @@ async fn serve_connection(
     if write_frame(&mut send, &response).await.is_err() {
         return;
     }
+    // Release the hello stream's transport credit before admitting requests.
+    let _ = send.finish();
+    drop(send);
+    drop(recv);
     let identity = Arc::new(Mutex::new(identity));
     let handles = Arc::new(SessionHandles::default());
     let mut tasks = tokio::task::JoinSet::new();
@@ -176,6 +191,10 @@ async fn serve_stream(
     else {
         return;
     };
+    if handles.is_closed().await {
+        connection.close(1_u32.into(), b"session invalidated");
+        return;
+    }
     let response = match message {
         Message::Request {
             request_id,
@@ -224,6 +243,7 @@ async fn serve_stream(
                 return;
             };
             let mut current = identity.lock().await;
+
             if next.partition_id != current.partition_id
                 || next.policy_id != current.policy_id
                 || next.issuer != current.issuer
@@ -234,6 +254,10 @@ async fn serve_stream(
                 connection.close(1_u32.into(), b"identity changed");
                 denied()
             } else {
+                if handles.is_closed().await {
+                    connection.close(1_u32.into(), b"session invalidated");
+                    return;
+                }
                 *current = next;
                 Message::ServerHello {
                     version: PROTOCOL_VERSION,
