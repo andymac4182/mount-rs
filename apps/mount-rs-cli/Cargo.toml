@@ -28,6 +28,7 @@ path = "src/main.rs"
 async-trait = "0.1"
 mount-rs-auto = { path = "../../transports/mount-rs-auto" }
 mount-rs-core = { path = "../.." }
+mount-rs-blob-cache = { path = "../../crates/mount-rs-blob-cache" }
 mount-rs-foundationdb = { path = "../../providers/mount-rs-foundationdb", optional = true }
 mount-rs-http = { path = "../../transports/mount-rs-http" }
 mount-rs-observability = { path = "../../crates/mount-rs-observability", optional = true }

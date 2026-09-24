@@ -1400,6 +1400,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "mount-rs-blob-cache"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "libc",
+ "md-5 0.10.6",
+ "mount-rs-core",
+ "quinn",
+ "rcgen",
+ "rustls",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+]
+
+[[package]]
 name = "mount-rs-chunked"
 version = "0.1.0"
 dependencies = [
@@ -1420,6 +1437,7 @@ dependencies = [
  "async-trait",
  "libc",
  "mount-rs-auto",
+ "mount-rs-blob-cache",
  "mount-rs-core",
  "mount-rs-foundationdb",
  "mount-rs-http",

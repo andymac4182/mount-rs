@@ -10,7 +10,7 @@ pub mod options;
 mod providers;
 mod stores;
 
-pub use filesystem::{Filesystem, FilesystemKind};
+pub use filesystem::{BlockStoreDecorator, Filesystem, FilesystemKind};
 pub use mount_rs_auto::{
     AutoMount, AutoMountError, AutoMountOptions, AutoProbe, AutoTransport, Transport,
     TransportProbe, probe_transports,
@@ -31,6 +31,55 @@ pub use options::{FoundationDbLeaseAuthority, SplitOptions, StoreConfig};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn block_decorator_receives_original_config_and_is_used() {
+        struct Reject;
+        impl BlockStoreDecorator for Reject {
+            fn decorate(
+                &self,
+                config: &StoreConfig,
+                _store: std::sync::Arc<dyn mount_rs_core::storage::BlockStore>,
+            ) -> Result<std::sync::Arc<dyn mount_rs_core::storage::BlockStore>> {
+                assert!(matches!(config, StoreConfig::Memory));
+                Err(mount_rs_core::FsError::new(ErrorCode::Eacces)
+                    .with_message("decorator rejection"))
+            }
+        }
+        let error = Filesystem::split_with_block_decorator(
+            SplitOptions::memory("decorated", 4096),
+            &Reject,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(error.code, ErrorCode::Eacces);
+        assert!(error.to_string().contains("decorator rejection"));
+    }
+
+    #[tokio::test]
+    async fn decorated_filesystem_preserves_io_and_shutdown() {
+        struct PassThrough;
+        impl BlockStoreDecorator for PassThrough {
+            fn decorate(
+                &self,
+                _config: &StoreConfig,
+                store: std::sync::Arc<dyn mount_rs_core::storage::BlockStore>,
+            ) -> Result<std::sync::Arc<dyn mount_rs_core::storage::BlockStore>> {
+                Ok(store)
+            }
+        }
+        let filesystem = Filesystem::split_with_block_decorator(
+            SplitOptions::memory("decorated-io", 4),
+            &PassThrough,
+        )
+        .await
+        .unwrap();
+        let view = Loopback::from_arc(filesystem.driver());
+        view.write_file("/data", b"multiple chunks").await.unwrap();
+        assert_eq!(view.read_file("/data").await.unwrap(), b"multiple chunks");
+        filesystem.shutdown().await.unwrap();
+    }
 
     #[test]
     fn ownership_builders_preserve_legacy_defaults_and_select_writeback() {

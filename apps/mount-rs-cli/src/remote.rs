@@ -28,6 +28,8 @@ struct ServiceConfig {
     private_key: PathBuf,
     #[serde(default = "default_connection_limit")]
     max_connections: usize,
+    #[serde(default)]
+    cache: Option<crate::server_cache::CacheServiceConfig>,
 }
 fn default_connection_limit() -> usize {
     mount_rs_service::server::RemoteServerOptions::default().max_connections
@@ -169,6 +171,9 @@ pub(crate) async fn serve(path: &Path) -> Result<(), CliError> {
         max_connections: config.max_connections,
     };
     server_options.validate().map_err(CliError::usage)?;
+    if let Some(cache) = &config.cache {
+        cache.validate()?;
+    }
     let catalog = Arc::new(
         SqliteCatalog::open(relative(path, &config.catalog))
             .await
@@ -189,6 +194,11 @@ pub(crate) async fn serve(path: &Path) -> Result<(), CliError> {
         .map_err(|_| CliError::usage("invalid TLS private key"))?
         .ok_or_else(|| CliError::usage("missing TLS private key"))?;
     let (uid, gid) = effective_identity();
+    let cache = config
+        .cache
+        .as_ref()
+        .map(|cache| crate::server_cache::ServerCache::start(cache, path))
+        .transpose()?;
     let mut runtimes = Vec::new();
     let result = async {
         let mut dispatcher = mount_rs_service::dispatch::DriveDispatcher::new(catalog.clone());
@@ -198,7 +208,30 @@ pub(crate) async fn serve(path: &Path) -> Result<(), CliError> {
                     &serde_json::json!({"version":1,"driver":drive.driver}).to_string(),
                     path.parent().unwrap_or(Path::new(".")),
                 )?;
-                let runtime = DriverRuntime::open(&spec.to_options(), uid, gid).await?;
+                let options = spec.to_options();
+                let decorator = cache
+                    .as_ref()
+                    .map(|cache| cache.decorator(partition_id, drive_id));
+                if decorator.is_some()
+                    && options.driver == crate::DriverChoice::SplitStore
+                    && !options
+                        .storage
+                        .as_ref()
+                        .is_some_and(|storage| storage.concurrent_writes)
+                {
+                    return Err(CliError::usage(
+                        "server blob cache requires concurrent_writes for split-storage drives",
+                    ));
+                }
+                let runtime = DriverRuntime::open_with_block_decorator(
+                    &options,
+                    uid,
+                    gid,
+                    decorator
+                        .as_ref()
+                        .map(|d| d as &dyn mount_rs_sdk::BlockStoreDecorator),
+                )
+                .await?;
                 dispatcher
                     .register_definition(
                         partition_id,
@@ -230,10 +263,16 @@ pub(crate) async fn serve(path: &Path) -> Result<(), CliError> {
         result
     }
     .await;
+    let mut shutdown_error = None;
     for runtime in runtimes.iter().rev() {
-        runtime.shutdown().await?;
+        if let Err(error) = runtime.shutdown().await {
+            shutdown_error.get_or_insert_with(|| CliError::from(error));
+        }
     }
-    result
+    if let Some(cache) = cache {
+        cache.shutdown().await;
+    }
+    result.and(shutdown_error.map_or(Ok(()), Err))
 }
 
 pub(crate) async fn mount(path: &Path) -> Result<(), CliError> {
@@ -372,6 +411,23 @@ mod tests {
         value["max_connections"] = serde_json::json!(1024);
         let config: ServiceConfig = serde_json::from_value(value).unwrap();
         assert_eq!(config.max_connections, 1024);
+    }
+
+    #[test]
+    fn server_cache_configuration_selects_compiled_discovery() {
+        let value = serde_json::json!({
+            "version":1,"catalog":"catalog.sqlite","listen":"127.0.0.1:4433",
+            "certificate":"cert.pem","private_key":"key.pem",
+            "cache":{
+                "cluster":"production","node_id":"node-1","disk_path":"cache",
+                "ram_bytes":1048576,"disk_bytes":8388608,"max_entries":1024,
+                "peer_listen":"127.0.0.1:4434","ca_certificate":"ca.pem",
+                "certificate":"peer.pem","private_key":"peer-key.pem",
+                "discovery":"deterministic","peers":[]
+            }
+        });
+        let config: ServiceConfig = serde_json::from_value(value).unwrap();
+        assert!(config.cache.unwrap().validate().is_ok());
     }
 
     fn valid() -> serde_json::Value {

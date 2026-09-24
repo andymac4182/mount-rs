@@ -17,7 +17,7 @@ use mount_rs_memfs::{MemoryFs, MemoryOptions};
 use mount_rs_sqlite_fs::{SqliteFs, open_sqlite};
 
 use crate::options::{FoundationDbLeaseAuthority, SplitOptions, StoreConfig};
-use crate::providers::{StorageResources, open_storage};
+use crate::providers::{StorageResources, open_storage, open_storage_decorated};
 use crate::stores::{ErasedBlockStore, ErasedMetadataStore};
 #[cfg(feature = "observability")]
 use crate::{Telemetry, global_telemetry};
@@ -34,6 +34,16 @@ pub enum FilesystemKind {
 /// A Rust SDK filesystem and its provider cleanup lifecycle.
 pub struct Filesystem {
     inner: FilesystemInner,
+}
+
+/// Decorate an opened block provider while preserving its cleanup lifecycle.
+/// The decorator must preserve backing authority and flush barrier semantics.
+pub trait BlockStoreDecorator: Send + Sync {
+    fn decorate(
+        &self,
+        config: &StoreConfig,
+        store: Arc<dyn BlockStore>,
+    ) -> Result<Arc<dyn BlockStore>>;
 }
 
 enum FilesystemInner {
@@ -70,6 +80,21 @@ impl Filesystem {
 
     /// Open a filesystem composed from independent metadata and block stores.
     pub async fn split(options: SplitOptions) -> Result<Self> {
+        Self::split_impl(options, None).await
+    }
+
+    /// Open split storage with an application-owned block provider decorator.
+    pub async fn split_with_block_decorator(
+        options: SplitOptions,
+        decorator: &dyn BlockStoreDecorator,
+    ) -> Result<Self> {
+        Self::split_impl(options, Some(decorator)).await
+    }
+
+    async fn split_impl(
+        options: SplitOptions,
+        decorator: Option<&dyn BlockStoreDecorator>,
+    ) -> Result<Self> {
         if options.chunk_size_bytes == 0 {
             return Err(FsError::new(ErrorCode::Einval)
                 .with_message("chunk_size_bytes must be greater than zero"));
@@ -88,7 +113,7 @@ impl Filesystem {
                 chunk_options = chunk_options.with_checkout_path(path);
             }
         }
-        let opened = open_storage(&options.metadata, &options.blocks).await?;
+        let opened = open_storage_decorated(&options.metadata, &options.blocks, decorator).await?;
         let resources = opened.resources.clone();
         match ChunkedFs::open(opened.metadata, opened.blocks, chunk_options).await {
             Ok(driver) => Ok(Self {

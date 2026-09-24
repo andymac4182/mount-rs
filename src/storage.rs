@@ -75,6 +75,40 @@ impl ConcurrentBackingId {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BlockId(pub String);
 
+/// Reserve payload bytes and bookkeeping within a shared memory budget.
+/// Empty payloads still consume one byte so entry counts cannot grow for free.
+pub fn checked_buffer_reservation(
+    used: usize,
+    payload: usize,
+    overhead: usize,
+    limit: usize,
+) -> Option<usize> {
+    let payload = payload.max(1);
+    used.checked_add(payload)?
+        .checked_add(overhead)
+        .filter(|next| *next <= limit)
+}
+
+#[cfg(kani)]
+#[kani::proof]
+fn cache_reservations_never_wrap_or_exceed_budget() {
+    let used: usize = kani::any();
+    let payload: usize = kani::any();
+    let overhead: usize = kani::any();
+    let limit: usize = kani::any();
+    let mathematical = used as u128 + payload.max(1) as u128 + overhead as u128;
+    let result = checked_buffer_reservation(used, payload, overhead, limit);
+    assert_eq!(result.is_some(), mathematical <= limit as u128);
+    if let Some(next) = result {
+        assert!(next > used);
+        assert!(next <= limit);
+        assert_eq!(next as u128, mathematical);
+    }
+    kani::cover!(payload == 0 && result.is_some());
+    kani::cover!(mathematical > usize::MAX as u128);
+    kani::cover!(result == Some(limit));
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockExtent {
     pub file_offset: u64,
