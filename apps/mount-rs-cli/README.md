@@ -472,3 +472,53 @@ with a bounded deadline, verify that it is no longer mounted, remove only the
 empty mountpoint directories, and preserve the backing artifacts when any
 mount remains. Missing FUSE/FSKit capability is an unsupported result, never a
 fallback to NFS or a passing shared-visibility claim.
+
+Explicit `exclusive` and `shared` ownership modes are available for chunked split stores. Exclusive mode enables deferred publication with durable synchronization. Explicit shared mode uses MRC3 directory ownership and requires a `checkout_path` before the CLI exposes a native mount:
+
+```json
+{
+  "version": 1,
+  "driver": {
+    "kind": "splitstore",
+    "storage": {
+      "ownership_mode": "shared",
+      "checkout_path": "/project",
+      "metadata": { "kind": "sqlite", "path": "metadata.sqlite" },
+      "blocks": { "kind": "sqlite", "path": "blocks.sqlite" }
+    }
+  }
+}
+```
+
+`checkout_path` names a canonical absolute path inside the virtual filesystem,
+not a host mountpoint. It is valid only with explicit shared ownership. The SDK
+claims that subtree during filesystem opening, before the native transport starts;
+a conflicting claim fails the mount. This mode currently requires Linux FUSE; `auto` requires a usable FUSE client.
+NFS, 9p, multiple mountpoints, and the NFS SQLite profile are rejected until
+cache handoff is qualified. SQLite provider files must still live outside the
+mountpoint and remain subject to their same-host constraints.
+
+Omitted ownership modes preserve legacy behavior. In particular,
+`concurrent_writes: true` alone selects MRC2 optimistic revision CAS and retains
+its existing shared-provider and NFS policy. Supplying both options requires
+`concurrent_writes` to agree with the selected ownership mode. See
+[mount ownership contracts and configuration](../../docs/mount-ownership.md).
+
+Directory ownership has separate offline administration commands:
+
+```sh
+mount-rs enroll-directory-ownership --config shared.json --expected-revision 7
+mount-rs directory-ownership-status --config shared.json
+mount-rs recover-directory-ownership --config shared.json --root-inode 42 --expected-fence 9
+```
+
+Enrollment requires an initialized namespace at the exact expected revision.
+Stop all older mounts before enrollment and keep them stopped until every client
+supports MRC3. Status prints JSON with the persisted grants, including root inode IDs and
+fences, without mounting. Recovery retires the exact observed crashed owner's
+fence; take the root inode and fence from status. Unmount the old native view
+before recovery and remount afterwards to invalidate its kernel caches.
+These commands open provider administration handles without acquiring a subtree
+checkout or starting a native transport. Recovery does not synchronize another
+process's pending work. Legacy MRC2 migration commands do not accept explicit
+MRC3 shared configurations.

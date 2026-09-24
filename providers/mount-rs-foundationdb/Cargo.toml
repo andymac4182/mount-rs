@@ -55,3 +55,8 @@ required-features = ["foundationdb"]
 name = "block_preflight"
 path = "tests/block_preflight.rs"
 required-features = ["foundationdb"]
+
+[[test]]
+name = "delegation"
+path = "tests/delegation.rs"
+required-features = ["foundationdb"]

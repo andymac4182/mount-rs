@@ -49,9 +49,14 @@ impl FsDriver for CompletionGateDriver {
     {
         Box::pin(async move {
             if self.block_slow.load(Ordering::Acquire) && path.ends_with("/slow.txt") {
+                // Register before announcing readiness: notify_waiters does
+                // not retain a permit for a waiter created after release.
+                let released = self.release.notified();
+                tokio::pin!(released);
+                released.as_mut().enable();
                 self.entered_count.fetch_add(1, Ordering::AcqRel);
                 self.entered.notify_one();
-                self.release.notified().await;
+                released.await;
             }
             self.inner.stat(path).await
         })

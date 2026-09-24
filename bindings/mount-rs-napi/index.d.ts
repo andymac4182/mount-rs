@@ -46,6 +46,11 @@ export declare class Filesystem {
    * before relying on shutdown to permit removal of backing files.
    */
   shutdown(): Promise<void>
+  /** Claim a directory for this direct driver session. Native handoff requires unmount/remount. */
+  checkoutScope(path: string): Promise<JsDirectoryGrant>
+  /** Close application handles before releasing a directory. This does not revoke kernel caches. */
+  checkinScope(): Promise<void>
+  delegationStatus(): Promise<JsDirectoryGrant | null>
   /**
    * Reconcile aged, unreferenced blocks for a chunked provider. The grace
    * period is in milliseconds and must be positive. Providers without a
@@ -1300,6 +1305,14 @@ export interface JsChunkedOptions {
    * local SQLite metadata. SQLite metadata and blocks are same-host only.
    */
   concurrentWrites?: boolean
+  /**
+   * Explicit exclusive ownership enables writeback until sync or shutdown.
+   * Shared ownership uses fenced directory delegation; same-host SQLite constraints remain.
+   * Must agree with concurrentWrites when both options are supplied.
+   */
+  ownershipMode?: 'exclusive' | 'shared'
+  /** Directory to claim before exposing the filesystem. Requires explicit shared ownership. */
+  checkoutPath?: string
   /** Defaults to the current process uid, matching the memory driver. */
   uid?: number
   /** Defaults to the current process gid, matching the memory driver. */
@@ -1333,6 +1346,13 @@ export interface JsChunkedStoreOptions {
   region?: string
   accessKeyId?: string
   secretAccessKey?: string
+}
+
+/** Integer authority identifiers are decimal strings to preserve all 64 bits. */
+export interface JsDirectoryGrant {
+  root: string
+  owner: string
+  fence: string
 }
 
 export interface JsErrnoCodes {

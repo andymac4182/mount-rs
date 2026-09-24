@@ -488,11 +488,28 @@ function configDriver(driver, baseDirectory, resolveValue) {
       }
       const metadata = configStore(storage.metadata, "metadata", baseDirectory, resolveValue);
       const blocks = configStore(storage.blocks, "blocks", baseDirectory, resolveValue);
-      const concurrentWrites = configBoolean(
+      const ownershipMode = storage.ownership_mode;
+      if (ownershipMode !== undefined && ownershipMode !== "exclusive" && ownershipMode !== "shared") {
+        throw new CliConfigError("driver.storage.ownership_mode must be exclusive or shared");
+      }
+      if (storage.checkout_path !== undefined && ownershipMode !== "shared") {
+        throw new CliConfigError("driver.storage.checkout_path requires ownership_mode shared");
+      }
+      const checkoutPath = storage.checkout_path === undefined
+        ? undefined
+        : configString(storage.checkout_path, "driver.storage.checkout_path");
+      const legacyConcurrentWrites = configBoolean(
         storage.concurrent_writes,
         "driver.storage.concurrent_writes",
         false,
       );
+      if (ownershipMode !== undefined && storage.concurrent_writes !== undefined
+          && legacyConcurrentWrites !== (ownershipMode === "shared")) {
+        throw new CliConfigError("driver.storage.ownership_mode contradicts concurrent_writes");
+      }
+      const concurrentWrites = ownershipMode === undefined
+        ? legacyConcurrentWrites
+        : ownershipMode === "shared";
       if (concurrentWrites) {
         for (const role of ["metadata", "blocks"]) {
           const raw = storage[role];
@@ -524,6 +541,8 @@ function configDriver(driver, baseDirectory, resolveValue) {
           metadata,
           blocks,
           concurrentWrites,
+          ...(ownershipMode === undefined ? {} : { ownershipMode }),
+          ...(checkoutPath === undefined ? {} : { checkoutPath }),
           chunkSize: configPositiveInteger(
             storage.chunk_size_bytes,
             "driver.storage.chunk_size_bytes",
@@ -591,6 +610,18 @@ async function loadConfiguration(configuration, resolveValue) {
   }
   if (!TRANSPORTS.has(resolved.transport)) {
     throw new CliConfigError(`config.transport must be auto, fuse, 9p, or nfs`);
+  }
+  if (resolved.provider?.chunked?.ownershipMode === "shared" && !resolved.sdkSelfTest) {
+    if (resolved.transport !== "auto" && resolved.transport !== "fuse") {
+      throw new CliConfigError("shared directory ownership requires fuse and unmount/remount handoff");
+    }
+    resolved.transport = "fuse";
+    if (!resolved.check && process.platform !== "linux") {
+      throw new CliConfigError("shared directory ownership native mounting is qualified only on Linux FUSE");
+    }
+    if (resolved.provider.chunked.checkoutPath === undefined) {
+      throw new CliConfigError("shared directory ownership native mounting requires checkout_path");
+    }
   }
   if (!resolved.sdkSelfTest && !resolved.mountpoint) {
     throw new CliConfigError("config.mountpoint is required unless --sdk-self-test is used");
@@ -754,7 +785,7 @@ async function run(configuration) {
     const mountOptions = {
       ...(configuration.transport === "auto" ? {} : { transport: configuration.transport }),
       ...(configuration.readOnly === undefined ? {} : { readOnly: configuration.readOnly }),
-      ...(chunked?.concurrentWrites ? { nfsSharedView: true } : {}),
+      ...(chunked?.concurrentWrites && chunked.ownershipMode !== "shared" ? { nfsSharedView: true } : {}),
     };
     let mounted;
     try {

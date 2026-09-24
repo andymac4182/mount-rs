@@ -54,6 +54,25 @@ Build the local addon with
 `MOUNT_RS_NAPI_FEATURES=foundationdb pnpm --dir bindings/mount-rs-napi build:debug`
 before running that config.
 
+Structured storage accepts `driver.storage.ownership_mode: "exclusive"` or
+`"shared"`. Explicit exclusive ownership enables fenced writeback, drained on
+sync and orderly shutdown. Shared ownership enables the separate MRC3 directory
+delegation protocol; supply `driver.storage.checkout_path: "/database"` to
+claim the existing directory before mounting. Bootstrap database directories
+on a new volume through a direct driver session checked out at `/`, then check
+that root scope back in before assigning individual directories. A supplied
+`concurrent_writes` must agree with the mode (`false` for exclusive, `true` for
+shared). Omitting the mode preserves legacy write-through behavior and the
+MRC2 `concurrent_writes` protocol. Existing volumes require explicit offline
+MRC3 enrollment through the Rust SDK; a new empty store initializes directly.
+
+Explicit shared native mounting requires Linux FUSE: `auto` selects `fuse`,
+and `nfs`/`9p` are rejected. To hand off ownership, stop the SQLite application,
+close all connections, unmount and complete driver shutdown/checkin before
+creating a fresh mount. This CLI does not revoke caches on a live kernel mount.
+Keep the database and its WAL, shared-memory and journal sidecars inside the
+same owned directory. No timed takeover or distributed POSIX locks are implied.
+
 For two independent writable CLIs, set `driver.storage.concurrent_writes: true`.
 The example selects the NFS shared-view profile and accepts SQLite, PGlite,
 or FoundationDB `revision-cas` metadata. SQLite metadata and blocks require
@@ -120,3 +139,5 @@ R2/PGlite coverage.
 Build the local N-API addon first, or set `MOUNT_RS_NAPI_PACKAGE` to a package
 that exports the same public SDK. The temporary directory is preserved when a
 mount cannot be proven unmounted so it can be recovered manually.
+
+Explicit `exclusive` and `shared` ownership modes are available for chunked split stores. Exclusive mode enables deferred publication with durable synchronization; omitted modes preserve legacy behavior. See [mount ownership contracts and configuration](../../docs/mount-ownership.md).

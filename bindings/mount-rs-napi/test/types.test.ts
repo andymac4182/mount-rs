@@ -380,7 +380,23 @@ async function checkFactories(): Promise<void> {
     umask: 0o22,
     rootMode: 0o755,
     concurrentWrites: false,
+    ownershipMode: "exclusive",
   }
+  const sharedChunkedOptions: JsChunkedOptions = { ...chunkedOptions, ownershipMode: "shared" }
+  sharedChunkedOptions.checkoutPath = "/database"
+  void sharedChunkedOptions
+  const invalidOwnership: JsChunkedOptions = {
+    ...chunkedOptions,
+    // @ts-expect-error ownershipMode only accepts exclusive or shared.
+    ownershipMode: "invalid",
+  }
+  void invalidOwnership
+  const invalidCheckoutPath: JsChunkedOptions = {
+    ...sharedChunkedOptions,
+    // @ts-expect-error checkoutPath is a filesystem path string.
+    checkoutPath: 123,
+  }
+  void invalidCheckoutPath
   const chunkedFilesystem: Filesystem = await createChunkedDriver(chunkedOptions)
   const nativeFilesystem: Filesystem = createNodeFsDriver("/tmp", {
     readOnly: true,
@@ -393,6 +409,12 @@ async function checkFactories(): Promise<void> {
   }
   const rootMemoryFilesystem: Filesystem = createRootMemoryDriver(rootMemoryOptions)
 
+  const grant = await chunkedFilesystem.checkoutScope("/database")
+  const fence: string = grant.fence
+  const status = await chunkedFilesystem.delegationStatus()
+  void fence
+  void status
+  await chunkedFilesystem.checkinScope()
   await chunkedFilesystem.shutdown()
   await nativeFilesystem.shutdown()
   await rootMemoryFilesystem.shutdown()

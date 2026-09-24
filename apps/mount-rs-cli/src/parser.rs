@@ -183,6 +183,18 @@ pub enum Command {
     ServeHttp(PathBuf),
     Probe,
     ValidateConfig(PathBuf),
+    EnrollDirectoryOwnership {
+        config: PathBuf,
+        expected_revision: u64,
+    },
+    DirectoryOwnershipStatus {
+        config: PathBuf,
+    },
+    RecoverDirectoryOwnership {
+        config: PathBuf,
+        root: u64,
+        expected_fence: u64,
+    },
     MigrateConcurrentBacking {
         config: PathBuf,
         expected_revision: u64,
@@ -286,6 +298,94 @@ where
             return config_path
                 .map(Command::ValidateConfig)
                 .ok_or_else(|| ParseError::new("validate-config requires --config <path>"));
+        }
+        if first_argument
+            && matches!(
+                raw.as_str(),
+                "enroll-directory-ownership"
+                    | "directory-ownership-status"
+                    | "recover-directory-ownership"
+            )
+        {
+            let mut config = None;
+            let mut expected_revision = None;
+            let mut root = None;
+            let mut expected_fence = None;
+            while let Some(argument) = args.next() {
+                let argument = argument.to_string_lossy().into_owned();
+                let Some(name) = argument.strip_prefix("--") else {
+                    return Err(ParseError::new(format!("{raw} accepts only named options")));
+                };
+                let (name, inline) = match name.split_once('=') {
+                    Some((name, value)) => (name, Some(value.to_owned())),
+                    None => (name, None),
+                };
+                match name {
+                    "config" if config.is_none() => {
+                        config = Some(PathBuf::from(value(name, inline, &mut args)?))
+                    }
+                    "expected-revision"
+                        if raw == "enroll-directory-ownership" && expected_revision.is_none() =>
+                    {
+                        expected_revision = Some(
+                            value(name, inline, &mut args)?
+                                .parse::<u64>()
+                                .map_err(|_| {
+                                    ParseError::new(
+                                        "--expected-revision must be an unsigned 64-bit integer",
+                                    )
+                                })?,
+                        );
+                    }
+                    "root-inode" if raw == "recover-directory-ownership" && root.is_none() => {
+                        root = Some(value(name, inline, &mut args)?.parse::<u64>().map_err(
+                            |_| ParseError::new("--root-inode must be an unsigned 64-bit integer"),
+                        )?)
+                    }
+                    "expected-fence"
+                        if raw == "recover-directory-ownership" && expected_fence.is_none() =>
+                    {
+                        expected_fence = Some(
+                            value(name, inline, &mut args)?
+                                .parse::<u64>()
+                                .map_err(|_| {
+                                    ParseError::new(
+                                        "--expected-fence must be an unsigned 64-bit integer",
+                                    )
+                                })?,
+                        );
+                    }
+                    _ => {
+                        return Err(ParseError::new(format!(
+                            "unexpected or duplicate --{name} for {raw}"
+                        )));
+                    }
+                }
+            }
+            let config =
+                config.ok_or_else(|| ParseError::new(format!("{raw} requires --config <path>")))?;
+            return Ok(match raw.as_str() {
+                "enroll-directory-ownership" => Command::EnrollDirectoryOwnership {
+                    config,
+                    expected_revision: expected_revision.ok_or_else(|| {
+                        ParseError::new(
+                            "enroll-directory-ownership requires --expected-revision <u64>",
+                        )
+                    })?,
+                },
+                "directory-ownership-status" => Command::DirectoryOwnershipStatus { config },
+                _ => Command::RecoverDirectoryOwnership {
+                    config,
+                    root: root.ok_or_else(|| {
+                        ParseError::new("recover-directory-ownership requires --root-inode <u64>")
+                    })?,
+                    expected_fence: expected_fence.ok_or_else(|| {
+                        ParseError::new(
+                            "recover-directory-ownership requires --expected-fence <u64>",
+                        )
+                    })?,
+                },
+            });
         }
         if first_argument && raw == "migrate-concurrent-backing" {
             let mut config_path = None;
@@ -752,7 +852,7 @@ pub fn help_text(color: Color) -> String {
     let b = |text: &str| color.bold(text).to_string();
     let d = |text: &str| color.dim(text).to_string();
     let output = format!(
-        "\n{} {}\n\n{}  mount-rs [mountpoint] [options]\n       mount-rs mount [mountpoint] [options]\n       mount-rs serve-http --config <path>\n       mount-rs sdk-self-test [--config <path>] [--reopen]\n\n{}\n  -m, --mountpoint {}  where to mount {}\n      --also-mountpoint <path>  add another NFS view of this filesystem (repeatable)\n  -t, --transport {}   auto | fuse | 9p | nfs {}\n      --sqlite-single-host  use the single-host SQLite NFS profile (nfs or auto)\n  -q, --quiet              do not log filesystem requests\n  -v, --verbose            log metadata polls too {}\n  -r, --read-only          mount read-only\n      --empty              start without the memory README\n      --allow-other        let other users see the FUSE mount\n      --driver {}    memory | host | sqlite | splitstore {}\n      --root {}      host driver root {}\n      --database {}  SQLite state/metadata database\n      --blocks {}    splitstore block database\n      --probe              print transport availability without mounting\n  -h, --help               this\n  -V, --version            print the version\n\n{}\n{}\n",
+        "\n{} {}\n\n{}  mount-rs [mountpoint] [options]\n       mount-rs mount [mountpoint] [options]\n       mount-rs serve-http --config <path>\n       mount-rs sdk-self-test [--config <path>] [--reopen]\n       mount-rs enroll-directory-ownership --config <path> --expected-revision <u64>\n       mount-rs directory-ownership-status --config <path>\n       mount-rs recover-directory-ownership --config <path> --root-inode <u64> --expected-fence <u64>\n\n{}\n  -m, --mountpoint {}  where to mount {}\n      --also-mountpoint <path>  add another NFS view of this filesystem (repeatable)\n  -t, --transport {}   auto | fuse | 9p | nfs {}\n      --sqlite-single-host  use the single-host SQLite NFS profile (nfs or auto)\n  -q, --quiet              do not log filesystem requests\n  -v, --verbose            log metadata polls too {}\n  -r, --read-only          mount read-only\n      --empty              start without the memory README\n      --allow-other        let other users see the FUSE mount\n      --driver {}    memory | host | sqlite | splitstore {}\n      --root {}      host driver root {}\n      --database {}  SQLite state/metadata database\n      --blocks {}    splitstore block database\n      --probe              print transport availability without mounting\n  -h, --help               this\n  -V, --version            print the version\n\n{}\n{}\n",
         b("mount-rs"),
         d("— mount a selected filesystem driver and watch kernel requests"),
         b("Usage:"),
@@ -802,6 +902,77 @@ mod tests {
 
     fn parse(values: &[&str]) -> Command {
         parse_args(values.iter().copied()).unwrap()
+    }
+
+    #[test]
+    fn directory_ownership_offline_commands_require_exact_inputs() {
+        assert!(
+            parse_args([
+                "mount-rs",
+                "enroll-directory-ownership",
+                "--config",
+                "shared.json",
+                "--expected-revision",
+                "7"
+            ])
+            .is_ok()
+        );
+        assert!(
+            parse_args([
+                "mount-rs",
+                "directory-ownership-status",
+                "--config",
+                "shared.json"
+            ])
+            .is_ok()
+        );
+        assert!(
+            parse_args([
+                "mount-rs",
+                "recover-directory-ownership",
+                "--config",
+                "shared.json",
+                "--root-inode",
+                "7",
+                "--expected-fence",
+                "9"
+            ])
+            .is_ok()
+        );
+        for args in [
+            vec![
+                "mount-rs",
+                "enroll-directory-ownership",
+                "--config",
+                "shared.json",
+            ],
+            vec![
+                "mount-rs",
+                "recover-directory-ownership",
+                "--config",
+                "shared.json",
+                "--root-inode",
+                "7",
+            ],
+            vec![
+                "mount-rs",
+                "recover-directory-ownership",
+                "--config",
+                "shared.json",
+                "--expected-fence",
+                "9",
+            ],
+            vec![
+                "mount-rs",
+                "directory-ownership-status",
+                "--config",
+                "shared.json",
+                "--expected-fence",
+                "9",
+            ],
+        ] {
+            assert!(parse_args(args).is_err());
+        }
     }
 
     #[test]

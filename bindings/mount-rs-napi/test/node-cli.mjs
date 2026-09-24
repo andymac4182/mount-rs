@@ -198,6 +198,55 @@ export function createChunkedDriver(options) {
   await fs.rm(rustfsDefaultRoot, { recursive: true, force: true });
 }
 
+const ownershipConfigRoot = await fs.mkdtemp(join(temporaryRoot, "mount-rs-node-cli-ownership-"));
+try {
+  const configPath = join(ownershipConfigRoot, "config.json");
+  const baseStorage = {
+    metadata: { kind: "sqlite", path: ":memory:" },
+    blocks: { kind: "sqlite", path: "blocks.sqlite" },
+  };
+  for (const [mode, legacy, expectedCode, pattern] of [
+    ["invalid", undefined, 1, /ownership_mode/],
+    ["exclusive", true, 1, /contradicts/],
+    ["shared", false, 1, /contradicts/],
+    ["shared", undefined, 1, /durable local database file/],
+    ["exclusive", undefined, 0, undefined],
+    ["exclusive", false, 0, undefined],
+  ]) {
+    const storage = { ...baseStorage, ownership_mode: mode, concurrent_writes: legacy };
+    await fs.writeFile(configPath, JSON.stringify({ version: 1, driver: { kind: "splitstore", storage } }));
+    const checked = await runCli(["--config", configPath, "--mountpoint", join(ownershipConfigRoot, "mnt"), "--check"]);
+    assert.equal(checked.code, expectedCode, output(checked));
+    if (pattern) assert.match(checked.stderr, pattern);
+  }
+  for (const transport of ["nfs", "9p"]) {
+    const storage = { ...baseStorage, metadata: { kind: "sqlite", path: "metadata.sqlite" }, ownership_mode: "shared", checkout_path: "/database" };
+    await fs.writeFile(configPath, JSON.stringify({ version: 1, driver: { kind: "splitstore", storage } }));
+    const checked = await runCli(["--config", configPath, "--transport", transport, "--mountpoint", join(ownershipConfigRoot, "mnt"), "--check"]);
+    assert.equal(checked.code, 1, output(checked));
+    assert.match(checked.stderr, /shared.*fuse/);
+  }
+  const sharedStorage = { ...baseStorage, metadata: { kind: "sqlite", path: "metadata.sqlite" }, ownership_mode: "shared", checkout_path: "/database" };
+  await fs.writeFile(configPath, JSON.stringify({ version: 1, driver: { kind: "splitstore", storage: sharedStorage } }));
+  const sharedChecked = await runCli(["--config", configPath, "--mountpoint", join(ownershipConfigRoot, "mnt"), "--check"]);
+  assert.equal(sharedChecked.code, 0, output(sharedChecked));
+  assert.match(sharedChecked.stdout, /transport=fuse/);
+  delete sharedStorage.checkout_path;
+  await fs.writeFile(configPath, JSON.stringify({ version: 1, driver: { kind: "splitstore", storage: sharedStorage } }));
+  const missingCheckout = await runCli(["--config", configPath, "--mountpoint", join(ownershipConfigRoot, "mnt"), "--check"]);
+  assert.equal(missingCheckout.code, 1, output(missingCheckout));
+  assert.match(missingCheckout.stderr, /requires checkout_path/);
+  for (const ownership_mode of [undefined, "exclusive"]) {
+    const storage = { ...baseStorage, ownership_mode, checkout_path: "/" };
+    await fs.writeFile(configPath, JSON.stringify({ version: 1, driver: { kind: "splitstore", storage } }));
+    const checked = await runCli(["--config", configPath, "--mountpoint", join(ownershipConfigRoot, "mnt"), "--check"]);
+    assert.equal(checked.code, 1, output(checked));
+    assert.match(checked.stderr, /checkout_path.*shared/);
+  }
+} finally {
+  await fs.rm(ownershipConfigRoot, { recursive: true, force: true });
+}
+
 const concurrentConfigRoot = await fs.mkdtemp(join(temporaryRoot, "mount-rs-node-cli-concurrent-check-"));
 try {
   const concurrentConfig = join(concurrentConfigRoot, "config.json");

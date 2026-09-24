@@ -1331,8 +1331,11 @@ version = "0.1.0"
 dependencies = [
  "async-io",
  "async-trait",
+ "futures-lite",
  "mount-rs-core",
  "mount-rs-memory",
+ "mount-rs-sqlite",
+ "serde_json",
  "tokio",
 ]
 

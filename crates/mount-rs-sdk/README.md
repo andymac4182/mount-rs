@@ -91,3 +91,9 @@ mount-rs-sdk = { version = "0.1", features = ["observability"] }
 Call `driver_with_telemetry` with an application-owned handle, or install a
 handle with `set_global_telemetry` and call `observed_driver`. The default
 handle is disabled and exporter setup remains owned by the application.
+
+Explicit `exclusive` and `shared` ownership modes are available for chunked split stores. Exclusive mode enables deferred publication with durable synchronization; omitted modes preserve legacy behavior. See [mount ownership contracts and configuration](../../docs/mount-ownership.md).
+
+For directory ownership, use `.with_checkout_path("/tenant")` with durable supported metadata and shared blocks. This selects Shared and claims the directory before filesystem construction returns. Direct clients can instead open Shared without a path, then call `checkout_scope`, `delegation_status` and `checkin_scope`. File bytes require a grant, and checkin requires closed handles.
+
+Existing initialized volumes must stop all mounts before `Filesystem::enroll_directory_ownership(options, expected_revision)`. `directory_ownership_state` inspects persisted grants; `recover_directory_ownership(options, root_inode, expected_fence)` explicitly retires a crashed owner. A newer grant invalidates an older recovery fence. Native ownership transfer requires unmount/remount; initial qualification is Linux FUSE.

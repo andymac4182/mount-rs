@@ -8,8 +8,9 @@ use crate::Telemetry;
 use async_trait::async_trait;
 use mount_rs_core::Result;
 use mount_rs_core::storage::{
-    BlockId, BlockReconcileReport, BlockStore, ConcurrentBackingId, ConcurrentModeState,
-    LoadedMetadata, MetadataStore, Namespace, WriterLease,
+    BlockId, BlockReconcileReport, BlockStore, CheckoutRequest, ConcurrentBackingId,
+    ConcurrentModeState, DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState,
+    DirectoryGrant, LoadedMetadata, MetadataStore, Namespace, WriterLease,
 };
 use mount_rs_core::versioning::VolumeId;
 
@@ -34,6 +35,40 @@ impl ErasedMetadataStore {
 
 #[async_trait]
 impl MetadataStore for ErasedMetadataStore {
+    async fn delegation_state(&self) -> Result<Option<DelegationState>> {
+        self.inner.delegation_state().await
+    }
+
+    async fn prepare_delegated_mode(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        self.inner
+            .prepare_delegated_mode(backing, expected_revision)
+            .await
+    }
+
+    async fn checkout(&self, request: &CheckoutRequest) -> Result<DirectoryGrant> {
+        self.inner.checkout(request).await
+    }
+
+    async fn publish_delegated(
+        &self,
+        request: &DelegatedPublish,
+        namespace: Namespace,
+    ) -> Result<u64> {
+        self.inner.publish_delegated(request, namespace).await
+    }
+
+    async fn checkin(&self, request: &DelegatedCheckin) -> Result<()> {
+        self.inner.checkin(request).await
+    }
+
+    async fn recover(&self, request: &DelegatedRecovery) -> Result<()> {
+        self.inner.recover(request).await
+    }
+
     fn durable(&self) -> bool {
         self.inner.durable()
     }

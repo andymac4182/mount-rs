@@ -15,11 +15,16 @@ use crate::Result;
 use crate::types::{S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK, Stats};
 use crate::versioning::VolumeId;
 
+pub use crate::delegation::{
+    CheckoutRequest, DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState,
+    DirectoryGrant, GrantToken,
+};
+
 pub type InodeId = u64;
 
 /// Stable identity for the physical immutable-block authority shared by
 /// concurrent clients of a split store.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ConcurrentBackingId([u8; 16]);
 
 impl ConcurrentBackingId {
@@ -93,7 +98,7 @@ pub struct DirectoryEntry {
     pub inode: InodeId,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NodeData {
     /// Preserve insertion order to match the reference memory driver.
     Directory {
@@ -106,7 +111,7 @@ pub enum NodeData {
     Special,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeMetadata {
     pub stats: Stats,
     pub data: NodeData,
@@ -786,6 +791,42 @@ pub trait MetadataStore: Send + Sync {
     /// Enter MRC2 only when metadata can bind writes to the supplied backing.
     async fn prepare_bound_concurrent_mode(&self, _backing: ConcurrentBackingId) -> Result<()> {
         Err(FsError::new(ErrorCode::Enotsup).with_syscall("prepare bound concurrent metadata"))
+    }
+    /// MRC3 authority is separate from MRC1/MRC2; unsupported implementations fail closed.
+    async fn delegation_state(&self) -> Result<Option<DelegationState>> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Explicit offline enrollment. Bind the physical backing and unchanged initialized
+    /// namespace, and fence every legacy publication path in the same transaction.
+    async fn prepare_delegated_mode(
+        &self,
+        _backing: ConcurrentBackingId,
+        _expected_revision: u64,
+    ) -> Result<()> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Claims and releases must complete the provider durability barrier before success.
+    async fn checkout(&self, _request: &CheckoutRequest) -> Result<DirectoryGrant> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Validate backing, exact token, revision and complete old/new namespace delta
+    /// atomically. Flush immutable bytes before invoking this operation.
+    async fn publish_delegated(
+        &self,
+        _request: &DelegatedPublish,
+        _namespace: Namespace,
+    ) -> Result<u64> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// The caller must drain handles and flush before releasing. A provider rejects
+    /// retained orphan provenance; an ambiguous barrier must retain authority.
+    async fn checkin(&self, _request: &DelegatedCheckin) -> Result<()> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Explicit operator recovery fences the exact crashed grant and removes its
+    /// anonymous orphan nodes in the same transaction, incrementing revision if needed.
+    async fn recover(&self, _request: &DelegatedRecovery) -> Result<()> {
+        Err(FsError::new(ErrorCode::Enotsup))
     }
     async fn acquire_writer(&self, owner: &str, ttl: Duration) -> Result<WriterLease>;
     async fn renew_writer(&self, lease: &WriterLease, ttl: Duration) -> Result<WriterLease>;

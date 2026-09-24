@@ -181,3 +181,5 @@ To record credential-safe live service evidence for a review, run
 the caller's environment or local Keychain-backed wrapper. It performs only a
 read-only bucket probe and prints the R2 endpoint authority, bucket, repository
 revision, and dirty-entry count; it never prints credential values.
+
+Explicit `exclusive` and `shared` ownership modes are available for chunked split stores. Exclusive mode enables deferred publication with durable synchronization; omitted modes preserve legacy behavior. See [mount ownership contracts and configuration](docs/mount-ownership.md).

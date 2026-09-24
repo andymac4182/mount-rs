@@ -1,4 +1,8 @@
 use async_trait::async_trait;
+use mount_rs_core::delegation::{
+    CheckoutRequest, DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState,
+    DirectoryGrant,
+};
 use mount_rs_core::storage::{
     BlockId, BlockStore, ConcurrentBackingId, ConcurrentModeState, LoadedMetadata, MetadataStore,
     Namespace, WriterLease,
@@ -38,6 +42,7 @@ const METADATA_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_tidb_metadata
     expires BIGINT NOT NULL,
     write_mode VARBINARY(4) NULL,
     backing_id VARBINARY(32) NULL,
+    delegation LONGTEXT NULL,
     PRIMARY KEY (volume_key)
 )";
 
@@ -167,6 +172,7 @@ impl Database {
             // Additive upgrades retain the existing lease row and namespace.
             // New columns remain NULL until an explicit enrollment/migration.
             for statement in [
+                "ALTER TABLE mount_rs_tidb_metadata ADD COLUMN IF NOT EXISTS delegation LONGTEXT NULL",
                 "ALTER TABLE mount_rs_tidb_metadata ADD COLUMN IF NOT EXISTS write_mode VARBINARY(4) NULL",
                 "ALTER TABLE mount_rs_tidb_metadata ADD COLUMN IF NOT EXISTS backing_id VARBINARY(32) NULL",
             ] {
@@ -703,6 +709,194 @@ fn is_read_only_txn_mode(error: &MysqlError) -> bool {
             .contains("tidb_txn_mode")
 }
 
+fn delegation_legacy_enrollment_valid(backing: Option<&[u8]>, fence: i64) -> bool {
+    backing.is_none() && (0..CONCURRENT_FENCE_SENTINEL).contains(&fence)
+}
+fn decode_delegation_authority(
+    mode: Option<&[u8]>,
+    backing: Option<&[u8]>,
+    raw: Option<&[u8]>,
+) -> Result<Option<DelegationState>> {
+    if mode != Some(b"MRC3") {
+        return if raw.is_some() {
+            Err(stale())
+        } else {
+            Ok(None)
+        };
+    }
+    let backing = ConcurrentBackingId::from_bytes(
+        backing.ok_or_else(stale)?.try_into().map_err(|_| stale())?,
+    )
+    .map_err(|_| stale())?;
+    let state: DelegationState =
+        serde_json::from_slice(raw.ok_or_else(stale)?).map_err(backend_error)?;
+    if state.backing != backing {
+        return Err(stale());
+    }
+    Ok(Some(state))
+}
+
+#[derive(Clone)]
+enum DelegationCommand {
+    Inspect,
+    Prepare(ConcurrentBackingId, u64),
+    Checkout(CheckoutRequest),
+    Publish(DelegatedPublish, Namespace),
+    Checkin(DelegatedCheckin),
+    Recover(DelegatedRecovery),
+}
+struct DelegationResult {
+    state: Option<DelegationState>,
+    grant: Option<DirectoryGrant>,
+    revision: u64,
+}
+impl TidbMetadataStore {
+    async fn delegation_transaction(&self, command: DelegationCommand) -> Result<DelegationResult> {
+        let inspect = matches!(command, DelegationCommand::Inspect);
+        let mut conn = self
+            .0
+            .pool
+            .get_conn()
+            .await
+            .map_err(|e| db_error("connect TiDB delegation", e))?;
+        let mut tx = begin_pessimistic(&mut conn).await?;
+        #[allow(clippy::type_complexity)]
+        let row: Option<(i64,Option<String>,Option<Vec<u8>>,Option<Vec<u8>>,Option<Vec<u8>>,i64,i64,Option<String>)> = tx.exec_first(
+            "SELECT revision, namespace, write_mode, backing_id, owner, fence, expires, delegation FROM mount_rs_tidb_metadata WHERE volume_key=? FOR UPDATE",(&self.0.volume_key,)).await.map_err(|e| db_error("lock TiDB delegation",e))?;
+        let (revision, namespace, mode, backing, owner, fence, expires, raw) =
+            row.ok_or_else(|| backend_error("missing TiDB delegation row"))?;
+        let mut revision = nonnegative(revision, "delegation revision")?;
+        let backing_binary = backing
+            .as_deref()
+            .map(backing_from_bytes)
+            .transpose()?
+            .map(|b| b.as_bytes());
+        let mut state = decode_delegation_authority(
+            mode.as_deref(),
+            backing_binary.as_ref().map(|b| b.as_slice()),
+            raw.as_deref().map(str::as_bytes),
+        )?;
+        if matches!(command, DelegationCommand::Inspect) && state.is_none() {
+            commit(tx, "inspect delegation").await?;
+            return Ok(DelegationResult {
+                state: None,
+                grant: None,
+                revision,
+            });
+        }
+        let mut ns: Namespace = serde_json::from_str(&namespace.ok_or_else(|| {
+            FsError::new(ErrorCode::Ebusy)
+                .with_message("initialize namespace before delegation enrollment")
+        })?)
+        .map_err(backend_error)?;
+        ns.validate()?;
+        let mut grant = None;
+        let mut changed_ns = false;
+        if let DelegationCommand::Prepare(requested, expected) = command {
+            if revision != expected {
+                return Err(revision_conflict());
+            }
+            if owner.is_some() || expires != 0 {
+                return Err(FsError::new(ErrorCode::Ebusy));
+            }
+            if let Some(current) = &state {
+                if current.backing != requested || fence != CONCURRENT_FENCE_SENTINEL {
+                    return Err(stale());
+                }
+            } else {
+                let valid = match mode.as_deref() {
+                    None => delegation_legacy_enrollment_valid(backing.as_deref(), fence),
+                    Some(b"MRC2") => {
+                        backing_binary == Some(requested.as_bytes())
+                            && fence == CONCURRENT_FENCE_SENTINEL
+                    }
+                    _ => false,
+                };
+                if !valid {
+                    return Err(stale());
+                }
+                state = Some(DelegationState::new(requested));
+            }
+        } else {
+            let current = state
+                .as_mut()
+                .ok_or_else(|| FsError::new(ErrorCode::Enotsup))?;
+            if owner.is_some() || fence != CONCURRENT_FENCE_SENTINEL || expires != 0 {
+                return Err(stale());
+            }
+            current.validate(&ns)?;
+            let requested = match &command {
+                DelegationCommand::Checkout(r) => Some(r.backing),
+                DelegationCommand::Publish(r, _) => Some(r.backing),
+                DelegationCommand::Checkin(r) => Some(r.backing),
+                DelegationCommand::Recover(r) => Some(r.backing),
+                _ => None,
+            };
+            if requested.is_some_and(|b| b != current.backing) {
+                return Err(stale());
+            }
+            match command {
+                DelegationCommand::Checkout(r) => {
+                    grant = Some(current.checkout(&ns, r.root, &r.owner)?)
+                }
+                DelegationCommand::Publish(r, new) => {
+                    if current
+                        .grants
+                        .get(&r.token.root)
+                        .is_none_or(|g| g.token != r.token)
+                    {
+                        return Err(stale());
+                    }
+                    if revision != r.expected_revision {
+                        return Err(revision_conflict());
+                    }
+                    current.authorize_publish(&ns, &new, &r.token)?;
+                    ns = new;
+                    changed_ns = true;
+                }
+                DelegationCommand::Checkin(r) => {
+                    if !current.retired.contains(&r.token) && revision != r.expected_revision {
+                        return Err(revision_conflict());
+                    }
+                    current.checkin(&r.token, &ns)?;
+                }
+                DelegationCommand::Recover(r) => {
+                    let before = ns.clone();
+                    current.recover(r.root, r.expected_fence, &mut ns)?;
+                    changed_ns = before.nodes != ns.nodes;
+                }
+                DelegationCommand::Inspect => {}
+                DelegationCommand::Prepare(_, _) => unreachable!(),
+            }
+        }
+        let state = state.unwrap();
+        state.validate(&ns)?;
+        if changed_ns {
+            revision = revision
+                .checked_add(1)
+                .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        }
+        let json = serde_json::to_string(&ns).map_err(backend_error)?;
+        let authority = serde_json::to_string(&state).map_err(backend_error)?;
+        if json
+            .len()
+            .checked_add(authority.len())
+            .is_none_or(|n| n > self.0.max_namespace_bytes)
+        {
+            return Err(FsError::new(ErrorCode::Efbig));
+        }
+        if !inspect {
+            tx.exec_drop("UPDATE mount_rs_tidb_metadata SET revision=?,namespace=?,write_mode='MRC3',backing_id=?,owner=NULL,fence=?,expires=0,delegation=? WHERE volume_key=?",
+              (signed(revision,"delegation revision")?,json,state.backing.to_hex(),CONCURRENT_FENCE_SENTINEL,authority,&self.0.volume_key)).await.map_err(|e|db_error("write TiDB delegation",e))?;
+        }
+        commit(tx, "delegation").await?;
+        Ok(DelegationResult {
+            state: Some(state),
+            grant,
+            revision,
+        })
+    }
+}
 #[async_trait]
 impl MetadataStore for TidbMetadataStore {
     fn durable(&self) -> bool {
@@ -745,6 +939,47 @@ impl MetadataStore for TidbMetadataStore {
         })
     }
 
+    async fn delegation_state(&self) -> Result<Option<DelegationState>> {
+        Ok(self
+            .delegation_transaction(DelegationCommand::Inspect)
+            .await?
+            .state)
+    }
+    async fn prepare_delegated_mode(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        self.delegation_transaction(DelegationCommand::Prepare(backing, expected_revision))
+            .await?;
+        Ok(())
+    }
+    async fn checkout(&self, request: &CheckoutRequest) -> Result<DirectoryGrant> {
+        self.delegation_transaction(DelegationCommand::Checkout(request.clone()))
+            .await?
+            .grant
+            .ok_or_else(|| backend_error("missing grant"))
+    }
+    async fn publish_delegated(
+        &self,
+        request: &DelegatedPublish,
+        namespace: Namespace,
+    ) -> Result<u64> {
+        Ok(self
+            .delegation_transaction(DelegationCommand::Publish(request.clone(), namespace))
+            .await?
+            .revision)
+    }
+    async fn checkin(&self, request: &DelegatedCheckin) -> Result<()> {
+        self.delegation_transaction(DelegationCommand::Checkin(request.clone()))
+            .await?;
+        Ok(())
+    }
+    async fn recover(&self, request: &DelegatedRecovery) -> Result<()> {
+        self.delegation_transaction(DelegationCommand::Recover(request.clone()))
+            .await?;
+        Ok(())
+    }
     async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
         let mut connection = self
             .0
@@ -1391,6 +1626,44 @@ impl BlockStore for TidbBlockStore {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn delegated_enrollment_cannot_reset_an_exhausted_legacy_fence() {
+        assert!(!delegation_legacy_enrollment_valid(
+            None,
+            CONCURRENT_FENCE_SENTINEL
+        ));
+        assert!(!delegation_legacy_enrollment_valid(None, -1));
+        assert!(delegation_legacy_enrollment_valid(None, 17));
+        assert!(!delegation_legacy_enrollment_valid(Some(b"dangling"), 17));
+    }
+
+    #[test]
+    fn delegation_authority_rejects_old_protocols_and_partial_markers() {
+        let backing = ConcurrentBackingId::from_bytes([9; 16]).unwrap();
+        let state = mount_rs_core::delegation::DelegationState::new(backing);
+        let raw = serde_json::to_vec(&state).unwrap();
+        assert_eq!(
+            decode_delegation_authority(Some(b"MRC3"), Some(&backing.as_bytes()), Some(&raw))
+                .unwrap(),
+            Some(state)
+        );
+        assert!(
+            decode_delegation_authority(Some(b"MRC2"), Some(&backing.as_bytes()), Some(&raw))
+                .is_err()
+        );
+        assert!(decode_delegation_authority(Some(b"MRC3"), None, Some(&raw)).is_err());
+        assert!(decode_delegation_authority(Some(b"MRC3"), Some(&[8; 16]), Some(&raw)).is_err());
+        assert!(
+            decode_delegation_authority(Some(b"MRC3"), Some(&backing.as_bytes()), Some(b"{} "))
+                .is_err()
+        );
+        assert!(
+            decode_delegation_authority(None, None, None)
+                .unwrap()
+                .is_none()
+        );
+    }
+
     use super::*;
     use mysql_async::{DriverError, ServerError};
 

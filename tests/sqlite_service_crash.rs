@@ -133,6 +133,7 @@ struct CasePaths {
     mountpoint: PathBuf,
     metadata: PathBuf,
     blocks: PathBuf,
+    exclusive_writeback: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -240,7 +241,7 @@ async fn native_tools() -> NativeTools {
 }
 
 #[cfg(target_os = "linux")]
-fn new_case(journal: &str) -> CasePaths {
+fn new_case(journal: &str, exclusive_writeback: bool) -> CasePaths {
     let root = tempfile::tempdir()
         .expect("create acceptance temp root")
         .keep();
@@ -251,6 +252,7 @@ fn new_case(journal: &str) -> CasePaths {
         blocks: root.join("blocks.sqlite"),
         mountpoint,
         root,
+        exclusive_writeback,
     }
 }
 
@@ -335,6 +337,10 @@ async fn start_service(case: &CasePaths, owner: &str) -> Result<ServiceProcess, 
         .arg(owner)
         .arg(LEASE_TTL_MS)
         .env("MOUNT_RS_FUSE_MODE", "rootless")
+        .env(
+            "MOUNT_RS_SQLITE_EXCLUSIVE_WRITEBACK",
+            if case.exclusive_writeback { "1" } else { "0" },
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -467,7 +473,7 @@ async fn run_python(path: &Path, journal: &str, phase: &str, marker: &str) {
 
 #[cfg(target_os = "linux")]
 async fn graceful_case(journal: &str) {
-    let case = new_case(journal);
+    let case = new_case(journal, false);
     let first = start_service(&case, &format!("graceful-first-{journal}"))
         .await
         .unwrap_or_else(|failure| panic!("start graceful service: {failure}"));
@@ -497,8 +503,8 @@ async fn graceful_case(journal: &str) {
 }
 
 #[cfg(target_os = "linux")]
-async fn crash_case(journal: &str, tools: &NativeTools) {
-    let case = new_case(journal);
+async fn crash_case(journal: &str, tools: &NativeTools, exclusive_writeback: bool) {
+    let case = new_case(journal, exclusive_writeback);
     let first = start_service(&case, &format!("crash-first-{journal}"))
         .await
         .unwrap_or_else(|failure| panic!("start crash service: {failure}"));
@@ -583,7 +589,23 @@ async fn sqlite_service_sigkill_restart_reopens_committed_delete_and_wal_databas
         let _test_lock = native_fuse_test_lock().lock().await;
         let tools = native_tools().await;
         for journal in ["DELETE", "WAL"] {
-            crash_case(journal, &tools).await;
+            crash_case(journal, &tools, false).await;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires explicit Linux FUSE and tests mount-service SIGKILL, not power loss"]
+async fn exclusive_writeback_service_sigkill_preserves_synced_delete_and_wal() {
+    #[cfg(not(target_os = "linux"))]
+    panic!("Linux FUSE service acceptance is unsupported on macOS");
+
+    #[cfg(target_os = "linux")]
+    {
+        let _test_lock = native_fuse_test_lock().lock().await;
+        let tools = native_tools().await;
+        for journal in ["DELETE", "WAL"] {
+            crash_case(journal, &tools, true).await;
         }
     }
 }

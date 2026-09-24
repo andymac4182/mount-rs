@@ -4,6 +4,7 @@
 //! This crate defines the path/error/types, driver, and storage contracts.
 
 pub mod chunking;
+pub mod delegation;
 #[doc(hidden)]
 pub mod diagnostics;
 pub mod driver;

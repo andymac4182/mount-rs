@@ -20,6 +20,10 @@ use foundationdb::api::{FdbApiBuilder, NetworkAutoStop};
 use foundationdb::options::TransactionOption;
 use foundationdb::{Database, FdbError, TransactOption, Transaction};
 use mount_rs_core::chunking::{ChunkerConfig, from_config};
+use mount_rs_core::delegation::{
+    CheckoutRequest, DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState,
+    DirectoryGrant,
+};
 use mount_rs_core::storage::{
     BlockId, BlockStore, ConcurrentBackingId, ConcurrentModeState, LoadedMetadata, MetadataStore,
     Namespace, NodeData, WriterLease,
@@ -2291,6 +2295,68 @@ async fn flush_inner(inner: &Inner) -> Result<()> {
         .await
 }
 
+fn delegation_transaction_affected_bytes(
+    prefix: &[u8],
+    chunk_bytes: usize,
+    old_bytes: usize,
+    published: Option<usize>,
+) -> Result<usize> {
+    let reads = metadata_load_affected_bytes(prefix, chunk_bytes, old_bytes)?;
+    let writes = published
+        .map(|n| metadata_publication_affected_bytes(prefix, chunk_bytes, n))
+        .transpose()?
+        .unwrap_or(0);
+    // Reserve read/write values and conflict keys for authority, mode, backing,
+    // legacy fence and lease, in addition to the complete namespace read/write.
+    reads
+        .checked_add(writes)
+        .and_then(|n| n.checked_add(4 * FOUNDATIONDB_MAX_VALUE_BYTES + 24 * (prefix.len() + 64)))
+        .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))
+}
+fn delegation_legacy_enrollment_valid(backing: Option<&[u8]>, fence: Option<&[u8]>) -> bool {
+    backing.is_none() && fence.is_none_or(|f| decode_last_fence(f).is_ok())
+}
+fn decode_delegation_authority(
+    mode: Option<&[u8]>,
+    backing: Option<&[u8]>,
+    raw: Option<&[u8]>,
+) -> Result<Option<DelegationState>> {
+    if mode != Some(b"MRC3") {
+        return if raw.is_some() {
+            Err(stale_backing())
+        } else {
+            Ok(None)
+        };
+    }
+    let backing = ConcurrentBackingId::from_bytes(
+        backing
+            .ok_or_else(stale_backing)?
+            .try_into()
+            .map_err(|_| stale_backing())?,
+    )
+    .map_err(|_| stale_backing())?;
+    let state: DelegationState =
+        serde_json::from_slice(raw.ok_or_else(stale_backing)?).map_err(backend_error)?;
+    if state.backing != backing {
+        return Err(stale_backing());
+    }
+    Ok(Some(state))
+}
+
+#[derive(Clone)]
+enum DelegationCommand {
+    Inspect,
+    Prepare(ConcurrentBackingId, u64),
+    Checkout(CheckoutRequest),
+    Publish(DelegatedPublish, Namespace),
+    Checkin(DelegatedCheckin),
+    Recover(DelegatedRecovery),
+}
+struct DelegationResult {
+    state: Option<DelegationState>,
+    grant: Option<DirectoryGrant>,
+    revision: u64,
+}
 /// Metadata stored in FoundationDB, supporting fenced single-writer leases
 /// and opt-in concurrent revision-CAS publication.
 #[derive(Clone)]
@@ -2301,6 +2367,227 @@ impl FoundationDbMetadataStore {
         storage.metadata()
     }
 
+    async fn delegation_transaction(&self, command: DelegationCommand) -> Result<DelegationResult> {
+        let inner = Arc::clone(&self.0);
+        let prefix = inner.prefix.clone();
+        let limits = inner.limits;
+        inner
+            .transact_metadata((), move |trx, _| {
+                let prefix = prefix.clone();
+                let command = command.clone();
+                Box::pin(async move {
+                    configure_transaction(trx, limits)?;
+                    let keys = Keyspace::new(&prefix);
+                    let state_key = keys.key(b"meta/delegation");
+                    let mode = get_owned(trx, &keys.write_mode()).await?;
+                    let backing = get_owned(trx, &keys.metadata_backing()).await?;
+                    let lease = get_owned(trx, &keys.lease()).await?;
+                    let fence = get_owned(trx, &keys.fence()).await?;
+                    let raw = get_owned(trx, &state_key).await?;
+                    let mut state = decode_delegation_authority(
+                        mode.as_deref(),
+                        backing.as_deref(),
+                        raw.as_deref(),
+                    )
+                    .map_err(TxnError::Fs)?;
+                    let inspect = matches!(command, DelegationCommand::Inspect);
+                    if inspect && state.is_none() {
+                        return Ok(DelegationResult {
+                            state: None,
+                            grant: None,
+                            revision: 0,
+                        });
+                    }
+                    let loaded = load_metadata_if_changed(
+                        get_owned(trx, &keys.manifest()).await?,
+                        &prefix,
+                        limits,
+                        None,
+                        |index| {
+                            let key = metadata_chunk_key(&keys.chunks(), index);
+                            async move { get_owned(trx, &key).await }
+                        },
+                    )
+                    .await?
+                    .ok_or_else(|| TxnError::Fs(backend_error("missing delegated namespace")))?;
+                    let mut revision = loaded.revision;
+                    let old_bytes = serde_json::to_vec(&loaded.namespace)
+                        .map_err(|e| TxnError::Fs(backend_error(e)))?
+                        .len();
+                    let authority_affected = delegation_transaction_affected_bytes(
+                        &prefix,
+                        limits.metadata_chunk_bytes,
+                        old_bytes,
+                        None,
+                    )
+                    .map_err(TxnError::Fs)?;
+                    if authority_affected > FOUNDATIONDB_MAX_TRANSACTION_BYTES {
+                        return Err(TxnError::Fs(metadata_transaction_too_large(
+                            authority_affected,
+                        )));
+                    }
+                    let mut ns = loaded.namespace.ok_or_else(|| {
+                        TxnError::Fs(
+                            FsError::new(ErrorCode::Ebusy)
+                                .with_message("initialize namespace before delegation enrollment"),
+                        )
+                    })?;
+                    ns.validate().map_err(TxnError::Fs)?;
+                    let mut grant = None;
+                    let mut changed_ns = false;
+                    if let DelegationCommand::Prepare(requested, expected) = command {
+                        if revision != expected {
+                            return Err(TxnError::Fs(FsError::new(ErrorCode::Eagain)));
+                        }
+                        if lease.is_some() {
+                            return Err(TxnError::Fs(FsError::new(ErrorCode::Ebusy)));
+                        }
+                        if let Some(current) = &state {
+                            if current.backing != requested
+                                || fence.as_deref() != Some(CONCURRENT_FENCE_SENTINEL)
+                            {
+                                return Err(TxnError::Fs(stale_backing()));
+                            }
+                        } else {
+                            let valid = match mode.as_deref() {
+                                None => delegation_legacy_enrollment_valid(
+                                    backing.as_deref(),
+                                    fence.as_deref(),
+                                ),
+                                Some(b"MRC2") => {
+                                    backing.as_deref() == Some(&requested.as_bytes())
+                                        && fence.as_deref() == Some(CONCURRENT_FENCE_SENTINEL)
+                                }
+                                _ => false,
+                            };
+                            if !valid {
+                                return Err(TxnError::Fs(stale_backing()));
+                            }
+                            state = Some(DelegationState::new(requested));
+                        }
+                    } else {
+                        let current = state
+                            .as_mut()
+                            .ok_or_else(|| TxnError::Fs(FsError::new(ErrorCode::Enotsup)))?;
+                        if lease.is_some() || fence.as_deref() != Some(CONCURRENT_FENCE_SENTINEL) {
+                            return Err(TxnError::Fs(stale_backing()));
+                        }
+                        current.validate(&ns).map_err(TxnError::Fs)?;
+                        let requested = match &command {
+                            DelegationCommand::Checkout(r) => Some(r.backing),
+                            DelegationCommand::Publish(r, _) => Some(r.backing),
+                            DelegationCommand::Checkin(r) => Some(r.backing),
+                            DelegationCommand::Recover(r) => Some(r.backing),
+                            _ => None,
+                        };
+                        if requested.is_some_and(|b| b != current.backing) {
+                            return Err(TxnError::Fs(stale_backing()));
+                        }
+                        match command {
+                            DelegationCommand::Checkout(r) => {
+                                grant = Some(
+                                    current
+                                        .checkout(&ns, r.root, &r.owner)
+                                        .map_err(TxnError::Fs)?,
+                                )
+                            }
+                            DelegationCommand::Publish(r, new) => {
+                                if current
+                                    .grants
+                                    .get(&r.token.root)
+                                    .is_none_or(|g| g.token != r.token)
+                                {
+                                    return Err(TxnError::Fs(stale_backing()));
+                                }
+                                if revision != r.expected_revision {
+                                    return Err(TxnError::Fs(FsError::new(ErrorCode::Eagain)));
+                                }
+                                current
+                                    .authorize_publish(&ns, &new, &r.token)
+                                    .map_err(TxnError::Fs)?;
+                                ns = new;
+                                changed_ns = true;
+                            }
+                            DelegationCommand::Checkin(r) => {
+                                if !current.retired.contains(&r.token)
+                                    && revision != r.expected_revision
+                                {
+                                    return Err(TxnError::Fs(FsError::new(ErrorCode::Eagain)));
+                                }
+                                current.checkin(&r.token, &ns).map_err(TxnError::Fs)?;
+                            }
+                            DelegationCommand::Recover(r) => {
+                                let before = ns.clone();
+                                current
+                                    .recover(r.root, r.expected_fence, &mut ns)
+                                    .map_err(TxnError::Fs)?;
+                                changed_ns = before.nodes != ns.nodes;
+                            }
+                            DelegationCommand::Inspect => {}
+                            DelegationCommand::Prepare(_, _) => unreachable!(),
+                        }
+                    }
+                    let state = state.unwrap();
+                    state.validate(&ns).map_err(TxnError::Fs)?;
+                    let authority =
+                        serde_json::to_vec(&state).map_err(|e| TxnError::Fs(backend_error(e)))?;
+                    if authority.len() > FOUNDATIONDB_MAX_VALUE_BYTES {
+                        return Err(TxnError::Fs(FsError::new(ErrorCode::Efbig).with_message(
+                            "delegation authority exceeds FoundationDB value limit",
+                        )));
+                    }
+                    if !inspect {
+                        if changed_ns {
+                            revision = revision
+                                .checked_add(1)
+                                .ok_or_else(|| TxnError::Fs(FsError::new(ErrorCode::Eoverflow)))?;
+                            let payload = serde_json::to_vec(&ns)
+                                .map_err(|e| TxnError::Fs(backend_error(e)))?;
+                            if payload.len() > limits.max_metadata_bytes {
+                                return Err(TxnError::Fs(FsError::new(ErrorCode::Efbig)));
+                            }
+                            let total = delegation_transaction_affected_bytes(
+                                &prefix,
+                                limits.metadata_chunk_bytes,
+                                old_bytes,
+                                Some(payload.len()),
+                            )
+                            .map_err(TxnError::Fs)?;
+                            if total > FOUNDATIONDB_MAX_TRANSACTION_BYTES {
+                                return Err(TxnError::Fs(metadata_transaction_too_large(total)));
+                            }
+                            let chunks = keys.chunks();
+                            let end = range_end(&chunks).map_err(TxnError::Fs)?;
+                            trx.clear_range(&chunks, &end);
+                            let count = payload.len().div_ceil(limits.metadata_chunk_bytes);
+                            for (i, chunk) in
+                                payload.chunks(limits.metadata_chunk_bytes).enumerate()
+                            {
+                                trx.set(&metadata_chunk_key(&chunks, i as u32), chunk);
+                            }
+                            trx.set(
+                                &keys.manifest(),
+                                &encode_manifest(Manifest {
+                                    revision,
+                                    chunk_count: count as u32,
+                                    payload_len: payload.len() as u64,
+                                }),
+                            );
+                        }
+                        trx.set(&keys.write_mode(), b"MRC3");
+                        trx.set(&keys.metadata_backing(), &state.backing.as_bytes());
+                        trx.set(&keys.fence(), CONCURRENT_FENCE_SENTINEL);
+                        trx.set(&state_key, &authority);
+                    }
+                    Ok(DelegationResult {
+                        state: Some(state),
+                        grant,
+                        revision,
+                    })
+                })
+            })
+            .await
+    }
     async fn load_conditionally(
         &self,
         known_revision: Option<u64>,
@@ -2359,6 +2646,47 @@ impl MetadataStore for FoundationDbMetadataStore {
         self.load_conditionally(Some(known_revision)).await
     }
 
+    async fn delegation_state(&self) -> Result<Option<DelegationState>> {
+        Ok(self
+            .delegation_transaction(DelegationCommand::Inspect)
+            .await?
+            .state)
+    }
+    async fn prepare_delegated_mode(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        self.delegation_transaction(DelegationCommand::Prepare(backing, expected_revision))
+            .await?;
+        Ok(())
+    }
+    async fn checkout(&self, request: &CheckoutRequest) -> Result<DirectoryGrant> {
+        self.delegation_transaction(DelegationCommand::Checkout(request.clone()))
+            .await?
+            .grant
+            .ok_or_else(|| backend_error("missing grant"))
+    }
+    async fn publish_delegated(
+        &self,
+        request: &DelegatedPublish,
+        namespace: Namespace,
+    ) -> Result<u64> {
+        Ok(self
+            .delegation_transaction(DelegationCommand::Publish(request.clone(), namespace))
+            .await?
+            .revision)
+    }
+    async fn checkin(&self, request: &DelegatedCheckin) -> Result<()> {
+        self.delegation_transaction(DelegationCommand::Checkin(request.clone()))
+            .await?;
+        Ok(())
+    }
+    async fn recover(&self, request: &DelegatedRecovery) -> Result<()> {
+        self.delegation_transaction(DelegationCommand::Recover(request.clone()))
+            .await?;
+        Ok(())
+    }
     async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
         let inner = Arc::clone(&self.0);
         let keyspace = Keyspace::new(&inner.prefix);
@@ -3230,6 +3558,60 @@ impl BlockStore for FoundationDbBlockStore {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn delegation_budget_includes_full_reads_and_authority_even_without_publication() {
+        let prefix = b"volume";
+        let loaded = metadata_load_affected_bytes(prefix, 128, 4096).unwrap();
+        let claim = delegation_transaction_affected_bytes(prefix, 128, 4096, None).unwrap();
+        assert!(claim >= loaded + 4 * FOUNDATIONDB_MAX_VALUE_BYTES);
+        let published = metadata_publication_affected_bytes(prefix, 128, 8192).unwrap();
+        assert_eq!(
+            delegation_transaction_affected_bytes(prefix, 128, 4096, Some(8192)).unwrap(),
+            claim + published
+        );
+    }
+
+    #[test]
+    fn delegated_enrollment_cannot_reset_an_exhausted_legacy_fence() {
+        assert!(!delegation_legacy_enrollment_valid(
+            None,
+            Some(CONCURRENT_FENCE_SENTINEL)
+        ));
+        assert!(!delegation_legacy_enrollment_valid(None, Some(b"invalid")));
+        assert!(delegation_legacy_enrollment_valid(
+            None,
+            Some(&encode_last_fence(17))
+        ));
+        assert!(!delegation_legacy_enrollment_valid(Some(b"dangling"), None));
+    }
+
+    #[test]
+    fn delegation_authority_rejects_old_protocols_and_partial_markers() {
+        let backing = ConcurrentBackingId::from_bytes([9; 16]).unwrap();
+        let state = mount_rs_core::delegation::DelegationState::new(backing);
+        let raw = serde_json::to_vec(&state).unwrap();
+        assert_eq!(
+            decode_delegation_authority(Some(b"MRC3"), Some(&backing.as_bytes()), Some(&raw))
+                .unwrap(),
+            Some(state)
+        );
+        assert!(
+            decode_delegation_authority(Some(b"MRC2"), Some(&backing.as_bytes()), Some(&raw))
+                .is_err()
+        );
+        assert!(decode_delegation_authority(Some(b"MRC3"), None, Some(&raw)).is_err());
+        assert!(decode_delegation_authority(Some(b"MRC3"), Some(&[8; 16]), Some(&raw)).is_err());
+        assert!(
+            decode_delegation_authority(Some(b"MRC3"), Some(&backing.as_bytes()), Some(b"{} "))
+                .is_err()
+        );
+        assert!(
+            decode_delegation_authority(None, None, None)
+                .unwrap()
+                .is_none()
+        );
+    }
+
     use super::*;
     use mount_rs_core::storage::{ConcurrentBackingId, ConcurrentModeState};
     use std::io::{self, Write};

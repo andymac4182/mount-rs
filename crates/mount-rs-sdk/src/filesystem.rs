@@ -7,7 +7,9 @@ use std::sync::Arc;
 use mount_rs_chunked::{
     ChunkedFs, ChunkedOptions, migrate_mrc1_backing, migrate_trusted_unstamped_mrc1_backing,
 };
-use mount_rs_core::storage::ConcurrentBackingId;
+use mount_rs_core::storage::{
+    BlockStore, ConcurrentBackingId, DelegatedRecovery, DelegationState, MetadataStore,
+};
 use mount_rs_core::versioning::VolumeId;
 use mount_rs_core::{ErrorCode, FsDriver, FsError, Result};
 use mount_rs_host::{HostFs, HostFsOptions};
@@ -73,10 +75,18 @@ impl Filesystem {
                 .with_message("chunk_size_bytes must be greater than zero"));
         }
         validate_concurrent_split_options(&options)?;
-        let chunk_options = ChunkedOptions::fixed(options.owner, options.chunk_size_bytes)?
+        let mut chunk_options = ChunkedOptions::fixed(options.owner, options.chunk_size_bytes)?
             .with_lease_ttl(options.lease_ttl)
             .with_concurrent_writes(options.concurrent_writes)
+            .with_writeback(options.writeback)
             .with_identity(options.uid, options.gid, options.umask);
+        if options.delegated {
+            chunk_options =
+                chunk_options.with_ownership_mode(mount_rs_chunked::OwnershipMode::Shared);
+            if let Some(path) = options.checkout_path {
+                chunk_options = chunk_options.with_checkout_path(path);
+            }
+        }
         let opened = open_storage(&options.metadata, &options.blocks).await?;
         let resources = opened.resources.clone();
         match ChunkedFs::open(opened.metadata, opened.blocks, chunk_options).await {
@@ -107,6 +117,95 @@ impl Filesystem {
         let migration =
             migrate_mrc1_backing(&opened.metadata, &opened.blocks, expected_revision).await;
         complete_migration_after_teardown(migration, opened.close()).await
+    }
+
+    /// Enroll an initialized volume in directory ownership after all old mounts
+    /// have stopped. Expected revision protects against accidental migration races.
+    pub async fn enroll_directory_ownership(
+        options: SplitOptions,
+        expected_revision: u64,
+    ) -> Result<ConcurrentBackingId> {
+        if !options.delegated {
+            return Err(FsError::new(ErrorCode::Einval)
+                .with_message("directory enrollment requires shared ownership"));
+        }
+        validate_concurrent_split_options(&options)?;
+        let opened = open_storage(&options.metadata, &options.blocks).await?;
+        let enrollment = async {
+            let loaded = opened.metadata.load().await?;
+            loaded.validate()?;
+            if loaded.revision != expected_revision || loaded.namespace.is_none() {
+                return Err(FsError::new(ErrorCode::Eagain)
+                    .with_message("initialized namespace revision changed"));
+            }
+            let backing = opened.blocks.prepare_concurrent_backing().await?;
+            opened
+                .metadata
+                .prepare_delegated_mode(backing, expected_revision)
+                .await?;
+            opened.blocks.verify_concurrent_backing(backing).await?;
+            Ok(backing)
+        }
+        .await;
+        complete_migration_after_teardown(enrollment, opened.close()).await
+    }
+
+    /// Read persisted grants without mounting the filesystem.
+    pub async fn directory_ownership_state(
+        options: SplitOptions,
+    ) -> Result<Option<DelegationState>> {
+        validate_concurrent_split_options(&options)?;
+        let opened = open_storage(&options.metadata, &options.blocks).await?;
+        let state = async {
+            let state = opened.metadata.delegation_state().await?;
+            if let Some(state) = &state {
+                opened
+                    .blocks
+                    .verify_concurrent_backing(state.backing)
+                    .await?;
+            }
+            Ok(state)
+        }
+        .await;
+        let _ = opened.close().await;
+        state
+    }
+
+    /// Retire exactly the observed crashed-owner fence. Stop the owner's native
+    /// mount before recovery; kernel caches are invalidated by unmount/remount.
+    pub async fn recover_directory_ownership(
+        options: SplitOptions,
+        root: u64,
+        expected_fence: u64,
+    ) -> Result<()> {
+        if !options.delegated {
+            return Err(FsError::new(ErrorCode::Einval)
+                .with_message("directory recovery requires shared ownership"));
+        }
+        validate_concurrent_split_options(&options)?;
+        let opened = open_storage(&options.metadata, &options.blocks).await?;
+        let recovery = async {
+            let state = opened
+                .metadata
+                .delegation_state()
+                .await?
+                .ok_or_else(|| FsError::new(ErrorCode::Estale))?;
+            opened
+                .blocks
+                .verify_concurrent_backing(state.backing)
+                .await?;
+            opened
+                .metadata
+                .recover(&DelegatedRecovery {
+                    backing: state.backing,
+                    root,
+                    expected_fence,
+                })
+                .await
+        }
+        .await;
+        let _ = opened.close().await;
+        recovery
     }
 
     /// Explicit operator-authorized recovery for an old unstamped SQLite MRC1
@@ -143,6 +242,35 @@ impl Filesystem {
             FilesystemInner::Host(driver) => Arc::new(driver.clone()),
             FilesystemInner::Sqlite(driver) => Arc::new(driver.clone()),
             FilesystemInner::Split(driver, _) => Arc::new(driver.clone()),
+        }
+    }
+
+    /// Claim a directory for direct SDK access. Native transports must claim
+    /// before mounting and unmount before handing the directory to another client.
+    pub async fn checkout_scope(
+        &self,
+        path: &str,
+    ) -> Result<mount_rs_core::storage::DirectoryGrant> {
+        match &self.inner {
+            FilesystemInner::Split(driver, _) => driver.checkout_scope(path).await,
+            _ => Err(FsError::new(ErrorCode::Enotsup)),
+        }
+    }
+
+    /// Flush and release directory authority after all handles have closed.
+    pub async fn checkin_scope(&self) -> Result<()> {
+        match &self.inner {
+            FilesystemInner::Split(driver, _) => driver.checkin_scope().await,
+            _ => Err(FsError::new(ErrorCode::Enotsup)),
+        }
+    }
+
+    pub async fn delegation_status(
+        &self,
+    ) -> Result<Option<mount_rs_core::storage::DirectoryGrant>> {
+        match &self.inner {
+            FilesystemInner::Split(driver, _) => driver.delegation_status().await,
+            _ => Err(FsError::new(ErrorCode::Enotsup)),
         }
     }
 
@@ -208,6 +336,19 @@ async fn complete_migration_after_teardown(
 }
 
 fn validate_concurrent_split_options(options: &SplitOptions) -> Result<()> {
+    if options.delegated && (!options.concurrent_writes || options.writeback) {
+        return Err(FsError::new(ErrorCode::Einval)
+            .with_message("directory ownership requires shared mode without writeback"));
+    }
+    if options.checkout_path.is_some() && !options.delegated {
+        return Err(FsError::new(ErrorCode::Einval)
+            .with_message("checkout_path requires directory ownership"));
+    }
+    if options.concurrent_writes && options.writeback {
+        return Err(
+            FsError::new(ErrorCode::Einval).with_message("writeback requires exclusive ownership")
+        );
+    }
     if options.concurrent_writes {
         match &options.metadata {
             StoreConfig::FoundationDb {

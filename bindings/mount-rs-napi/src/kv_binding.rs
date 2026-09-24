@@ -696,5 +696,10 @@ pub fn create_unstorage_driver(
         driver: super::instrument_driver(Arc::new(filesystem)),
         shutdown: Some(shutdown),
         reconcile: Mutex::new(None),
+        delegation: Mutex::new(None),
+        delegated_ownership: false,
+        native_delegation_mounts: Arc::new(tokio::sync::Mutex::new(
+            super::DelegatedNativeState::default(),
+        )),
     })
 }

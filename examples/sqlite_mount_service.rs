@@ -6,7 +6,7 @@
 //! or wait out.  A line containing `quit` on stdin is the separate graceful
 //! shutdown path.
 
-use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
+use mount_rs_chunked::{ChunkedFs, ChunkedOptions, OwnershipMode};
 use mount_rs_fuse::mount::{MountMode, MountOptions, mount};
 use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
 use std::env;
@@ -105,8 +105,21 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let metadata = SqliteMetadataStore::open(&arguments.metadata)?;
     let blocks = SqliteBlockStore::open(&arguments.blocks)?;
-    let options =
+    let mut options =
         ChunkedOptions::fixed(arguments.owner, CHUNK_SIZE)?.with_lease_ttl(arguments.lease_ttl);
+    match env::var("MOUNT_RS_SQLITE_EXCLUSIVE_WRITEBACK").as_deref() {
+        Ok("1") => {
+            options = options
+                .with_ownership_mode(OwnershipMode::Exclusive)
+                .with_writeback(true);
+        }
+        Ok("0") | Err(env::VarError::NotPresent) => {}
+        _ => {
+            return Err(
+                io::Error::other("MOUNT_RS_SQLITE_EXCLUSIVE_WRITEBACK must be 0 or 1").into(),
+            );
+        }
+    }
     let filesystem = ChunkedFs::open(metadata, blocks, options).await?;
 
     let mount_options = MountOptions {

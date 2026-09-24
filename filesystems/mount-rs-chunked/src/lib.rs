@@ -20,9 +20,9 @@ use mount_rs_core::error::{ErrorCode, FsError, Result};
 use mount_rs_core::handle::OpenFlags;
 use mount_rs_core::path::{is_path_inside, normalize_path, split_path};
 use mount_rs_core::storage::{
-    BlockExtent, BlockReconcileReport, BlockStore, ConcurrentBackingId, ConcurrentModeState,
-    FileLayout, InodeId, MetadataStore, NAMESPACE_FORMAT_VERSION, Namespace, NodeData,
-    NodeMetadata, WriterLease,
+    BlockExtent, BlockReconcileReport, BlockStore, CheckoutRequest, ConcurrentBackingId,
+    ConcurrentModeState, DelegatedCheckin, DelegatedPublish, DirectoryGrant, FileLayout, InodeId,
+    MetadataStore, NAMESPACE_FORMAT_VERSION, Namespace, NodeData, NodeMetadata, WriterLease,
 };
 use mount_rs_core::types::{
     Capabilities, DirEntry, FileType, MkdirOptions, S_IFDIR, S_IFMT, S_IFREG, Stats, StatsFs,
@@ -101,6 +101,13 @@ mod verification {
 
 /// Runtime configuration for a newly-created namespace.
 ///
+/// Coordination policy for independently mounted clients.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OwnershipMode {
+    Exclusive,
+    Shared,
+}
+
 /// The chunker's serialized configuration is stored in the namespace and in
 /// every file layout. Existing files always use their persisted configuration;
 /// changing this value only affects a newly-created namespace.
@@ -109,6 +116,9 @@ pub struct ChunkedOptions {
     pub owner: String,
     pub lease_ttl: Duration,
     pub concurrent_writes: bool,
+    pub writeback: bool,
+    pub delegated: bool,
+    pub checkout_path: Option<String>,
     pub chunker: Arc<dyn Chunker>,
     pub uid: u32,
     pub gid: u32,
@@ -122,6 +132,9 @@ impl ChunkedOptions {
             owner: owner.into(),
             lease_ttl: DEFAULT_LEASE_TTL,
             concurrent_writes: false,
+            writeback: false,
+            delegated: false,
+            checkout_path: None,
             chunker,
             uid: 0,
             gid: 0,
@@ -144,6 +157,29 @@ impl ChunkedOptions {
 
     pub fn with_concurrent_writes(mut self, concurrent_writes: bool) -> Self {
         self.concurrent_writes = concurrent_writes;
+        self.delegated = false;
+        self.checkout_path = None;
+        self
+    }
+
+    pub fn with_writeback(mut self, writeback: bool) -> Self {
+        self.writeback = writeback;
+        self
+    }
+
+    pub fn with_ownership_mode(mut self, mode: OwnershipMode) -> Self {
+        self.concurrent_writes = mode == OwnershipMode::Shared;
+        self.writeback = mode == OwnershipMode::Exclusive;
+        self.delegated = mode == OwnershipMode::Shared;
+        if mode == OwnershipMode::Exclusive {
+            self.checkout_path = None;
+        }
+        self
+    }
+
+    pub fn with_checkout_path(mut self, path: impl Into<String>) -> Self {
+        self = self.with_ownership_mode(OwnershipMode::Shared);
+        self.checkout_path = Some(path.into());
         self
     }
 
@@ -193,7 +229,11 @@ impl AsyncGate {
 
 struct RuntimeState {
     namespace: Namespace,
+    /// Local operation generation, incremented for every staged mutation.
     revision: u64,
+    /// Provider CAS revision; local generations must never be used for fencing.
+    persisted_revision: u64,
+    pending_namespace: bool,
     next_fd: u64,
     open_refs: HashMap<InodeId, u64>,
     /// Read atime changes are visible immediately to this coordinator and are
@@ -473,6 +513,10 @@ where
     metadata: Arc<M>,
     blocks: Arc<B>,
     concurrent_backing: Option<ConcurrentBackingId>,
+    delegation: Mutex<Option<DirectoryGrant>>,
+    delegation_generation: std::sync::atomic::AtomicU64,
+    pending_checkout: Mutex<Option<CheckoutRequest>>,
+    delegation_draining: AtomicBool,
     options: ChunkedOptions,
     gate: AsyncGate,
     lifecycle: tokio::sync::RwLock<()>,
@@ -512,11 +556,434 @@ where
     M: MetadataStore + 'static,
     B: BlockStore + 'static,
 {
+    async fn open_delegated(metadata: M, blocks: B, options: ChunkedOptions) -> Result<Self> {
+        if !options.concurrent_writes || options.writeback {
+            return Err(FsError::new(ErrorCode::Einval)
+                .with_message("delegated ownership requires shared write-through mode"));
+        }
+        let mut delegated = metadata.delegation_state().await?;
+        let backing = if let Some(state) = &delegated {
+            blocks.verify_concurrent_backing(state.backing).await?;
+            state.backing
+        } else {
+            if metadata.concurrent_mode_state().await? != ConcurrentModeState::Legacy {
+                return Err(FsError::new(ErrorCode::Ebusy).with_message(
+                    "delegated ownership requires explicit offline protocol migration",
+                ));
+            }
+            let loaded = metadata.load().await?;
+            loaded.validate()?;
+            if loaded.revision != 0 || loaded.namespace.is_some() {
+                return Err(FsError::new(ErrorCode::Ebusy).with_message(
+                    "existing namespaces require explicit offline delegated enrollment",
+                ));
+            }
+            // Establish block-provider support before initializing metadata. The final
+            // delegated enrollment still follows durable Legacy root publication/release.
+            let backing = blocks.prepare_concurrent_backing().await?;
+            let lease = metadata
+                .acquire_writer(&options.owner, options.lease_ttl)
+                .await?;
+            let initialized = async {
+                let namespace = initial_namespace(&options)?;
+                blocks.flush().await?;
+                let revision = metadata.publish(0, &lease, namespace).await?;
+                if !metadata.publish_includes_flush_barrier() {
+                    metadata.flush().await?;
+                }
+                Ok::<_, FsError>(revision)
+            }
+            .await;
+            let released = metadata.release_writer(&lease).await;
+            let revision = initialized?;
+            released?;
+            metadata.prepare_delegated_mode(backing, revision).await?;
+            blocks.verify_concurrent_backing(backing).await?;
+            delegated = metadata.delegation_state().await?;
+            backing
+        };
+        let loaded = metadata.load().await?;
+        loaded.validate()?;
+        let namespace = loaded
+            .namespace
+            .ok_or_else(|| FsError::backend("delegated namespace missing"))?;
+        let authority = delegated.ok_or_else(|| FsError::backend("delegated authority missing"))?;
+        if authority.backing != backing {
+            return Err(FsError::new(ErrorCode::Estale));
+        }
+        authority.validate(&namespace)?;
+        let checkout = options.checkout_path.clone();
+        let fs = Self {
+            inner: Arc::new(ChunkedInner {
+                metadata: Arc::new(metadata),
+                blocks: Arc::new(blocks),
+                concurrent_backing: Some(backing),
+                delegation: Mutex::new(None),
+                delegation_generation: std::sync::atomic::AtomicU64::new(0),
+                pending_checkout: Mutex::new(None),
+                delegation_draining: AtomicBool::new(false),
+                options,
+                gate: AsyncGate::new(),
+                lifecycle: tokio::sync::RwLock::new(()),
+                state: Mutex::new(RuntimeState {
+                    namespace,
+                    revision: loaded.revision,
+                    persisted_revision: loaded.revision,
+                    pending_namespace: false,
+                    next_fd: 3,
+                    open_refs: HashMap::new(),
+                    pending_atime: HashMap::new(),
+                    orphans: HashMap::new(),
+                    failure: None,
+                    closed: false,
+                }),
+                lease: Mutex::new(None),
+                lease_gate: AsyncGate::new(),
+                lease_renewed: AtomicBool::new(false),
+                preparing_mutations: Arc::new(AtomicUsize::new(0)),
+                mutations: Mutex::new(MutationQueue::new()),
+            }),
+        };
+        if let Some(path) = checkout {
+            fs.checkout_scope(&path).await?;
+        }
+        Ok(fs)
+    }
+
+    fn local_grant(&self) -> Result<Option<DirectoryGrant>> {
+        self.inner
+            .delegation
+            .lock()
+            .map(|grant| grant.clone())
+            .map_err(|_| FsError::backend("directory authority lock poisoned"))
+    }
+
+    async fn refresh_delegation(&self) -> Result<()> {
+        let authority = self
+            .inner
+            .metadata
+            .delegation_state()
+            .await?
+            .ok_or_else(|| self.fail_closed(FsError::new(ErrorCode::Estale)))?;
+        if Some(authority.backing) != self.inner.concurrent_backing {
+            return Err(self.fail_closed(FsError::new(ErrorCode::Estale)));
+        }
+        if let Some(local) = self.local_grant()? {
+            let actual = authority
+                .grants
+                .get(&local.token.root)
+                .filter(|grant| grant.token == local.token)
+                .ok_or_else(|| {
+                    self.fail_closed(
+                        FsError::new(ErrorCode::Estale)
+                            .with_message("directory authority was retired"),
+                    )
+                })?;
+            *self
+                .inner
+                .delegation
+                .lock()
+                .map_err(|_| FsError::backend("directory authority lock poisoned"))? =
+                Some(actual.clone());
+        }
+        Ok(())
+    }
+
+    /// Inspect this coordinator's current authority. Shared without a grant permits namespace discovery only.
+    pub async fn delegation_status(&self) -> Result<Option<DirectoryGrant>> {
+        if !self.inner.options.delegated {
+            return Err(FsError::new(ErrorCode::Enotsup));
+        }
+        let _gate = self.inner.gate.lock().await;
+        self.refresh_concurrent_namespace().await?;
+        self.local_grant()
+    }
+
+    /// Acquire one directory for direct-driver access. Native mounts require unmount/remount at handoff.
+    pub async fn checkout_scope(&self, path: &str) -> Result<DirectoryGrant> {
+        validate_checkout_path(path)?;
+        if !self.inner.options.delegated {
+            return Err(FsError::new(ErrorCode::Enotsup));
+        }
+        let _lifecycle = self.inner.lifecycle.write().await;
+        let _gate = self.inner.gate.lock().await;
+        if self.local_grant()?.is_some() {
+            return Err(
+                FsError::new(ErrorCode::Ebusy).with_message("coordinator already owns a scope")
+            );
+        }
+        self.refresh_concurrent_namespace().await?;
+        let (namespace, _) = self.snapshot()?;
+        let root = resolve(&namespace, &normalize_path(path), true, "checkout")?;
+        let generation = self
+            .inner
+            .delegation_generation
+            .load(Ordering::SeqCst)
+            .checked_add(1)
+            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        static NEXT_SESSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let sequence = NEXT_SESSION.fetch_add(1, Ordering::SeqCst);
+        if sequence == u64::MAX {
+            return Err(FsError::new(ErrorCode::Eoverflow));
+        }
+        use std::hash::BuildHasher;
+        let nonce_a = std::collections::hash_map::RandomState::new().hash_one(sequence);
+        let nonce_b = std::collections::hash_map::RandomState::new().hash_one(sequence);
+        let owner = format!("{}-{nonce_a:016x}{nonce_b:016x}", self.inner.options.owner);
+        let request = {
+            let mut pending = self
+                .inner
+                .pending_checkout
+                .lock()
+                .map_err(|_| FsError::backend("checkout lock poisoned"))?;
+            if let Some(request) = &*pending {
+                if request.root != root {
+                    return Err(FsError::new(ErrorCode::Ebusy)
+                        .with_message("retry pending checkout with original scope"));
+                }
+                request.clone()
+            } else {
+                let request = CheckoutRequest {
+                    backing: self
+                        .inner
+                        .concurrent_backing
+                        .ok_or_else(|| FsError::new(ErrorCode::Estale))?,
+                    root,
+                    owner,
+                };
+                *pending = Some(request.clone());
+                request
+            }
+        };
+        let grant = match self.inner.metadata.checkout(&request).await {
+            Ok(grant) => grant,
+            Err(error) => {
+                // A physical-authority check can report ESTALE after a committed claim.
+                // Clear a denied request only after a fresh verified state proves it is inactive.
+                let verified_stale_denial = if error.code == ErrorCode::Estale {
+                    let verified = async {
+                        self.inner
+                            .blocks
+                            .verify_concurrent_backing(request.backing)
+                            .await?;
+                        let authority = self
+                            .inner
+                            .metadata
+                            .delegation_state()
+                            .await?
+                            .ok_or_else(|| FsError::new(ErrorCode::Estale))?;
+                        Ok::<_, FsError>(
+                            authority.backing == request.backing
+                                && !authority
+                                    .grants
+                                    .values()
+                                    .any(|grant| grant.token.owner == request.owner),
+                        )
+                    }
+                    .await;
+                    verified.unwrap_or(false)
+                } else {
+                    false
+                };
+                if verified_stale_denial
+                    || matches!(
+                        error.code,
+                        ErrorCode::Ebusy
+                            | ErrorCode::Einval
+                            | ErrorCode::Enoent
+                            | ErrorCode::Enotdir
+                            | ErrorCode::Eacces
+                            | ErrorCode::Enotsup
+                            | ErrorCode::Eoverflow
+                    )
+                {
+                    self.inner
+                        .pending_checkout
+                        .lock()
+                        .map_err(|_| FsError::backend("checkout lock poisoned"))?
+                        .take();
+                }
+                return Err(error);
+            }
+        };
+        self.inner
+            .pending_checkout
+            .lock()
+            .map_err(|_| FsError::backend("checkout lock poisoned"))?
+            .take();
+        *self
+            .inner
+            .delegation
+            .lock()
+            .map_err(|_| FsError::backend("directory authority lock poisoned"))? =
+            Some(grant.clone());
+        self.inner
+            .delegation_generation
+            .store(generation, Ordering::SeqCst);
+        // Always reload after the claim: a disjoint owner may have published while checkout was pending.
+        self.refresh_concurrent_namespace().await?;
+        Ok(grant)
+    }
+
+    /// Drain file operations, reject open handles, flush and release the exact provider grant.
+    pub async fn checkin_scope(&self) -> Result<()> {
+        if !self.inner.options.delegated {
+            return Err(FsError::new(ErrorCode::Enotsup));
+        }
+        let _lifecycle = self.inner.lifecycle.write().await;
+        let _gate = self.inner.gate.lock().await;
+        let Some(grant) = self.local_grant()? else {
+            return Ok(());
+        };
+        if !self.inner.delegation_draining.load(Ordering::SeqCst) {
+            self.refresh_concurrent_namespace().await?;
+        }
+        {
+            let state = self.lock_state()?;
+            if !state.open_refs.is_empty() {
+                return Err(
+                    FsError::new(ErrorCode::Ebusy).with_message("close handles before checkin")
+                );
+            }
+        }
+        let generation = self
+            .inner
+            .delegation_generation
+            .load(Ordering::SeqCst)
+            .checked_add(1)
+            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        self.inner.delegation_draining.store(true, Ordering::SeqCst);
+        let authority = self
+            .inner
+            .metadata
+            .delegation_state()
+            .await?
+            .ok_or_else(|| self.fail_closed(FsError::new(ErrorCode::Estale)))?;
+        let active = authority
+            .grants
+            .get(&grant.token.root)
+            .is_some_and(|actual| actual.token == grant.token);
+        if !active && !authority.retired.contains(&grant.token) {
+            return Err(self.fail_closed(FsError::new(ErrorCode::Estale)));
+        }
+        if active {
+            self.refresh_concurrent_namespace().await?;
+            // A canceled last-close may have released its reference before its reap publication.
+            // Complete that durable orphan cleanup before releasing authority.
+            for attempt in 0..MAX_CONCURRENT_CAS_RETRIES {
+                let (mut namespace, revision) = self.snapshot()?;
+                let current = self
+                    .local_grant()?
+                    .ok_or_else(|| FsError::new(ErrorCode::Estale))?;
+                let mut changed = false;
+                for inode in current.orphan_inodes {
+                    changed |= namespace.nodes.remove(&inode).is_some();
+                }
+                if !changed {
+                    break;
+                }
+                match self
+                    .publish_namespace_durable(revision, namespace, false)
+                    .await
+                {
+                    Ok(_) => break,
+                    Err(error)
+                        if error.code == ErrorCode::Eagain
+                            && attempt + 1 < MAX_CONCURRENT_CAS_RETRIES =>
+                    {
+                        self.refresh_concurrent_namespace().await?;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        self.inner.blocks.flush().await?;
+        self.inner.metadata.flush().await?;
+        let loaded = self.inner.metadata.load().await?;
+        loaded.validate()?;
+        let expected_revision = loaded.revision;
+        self.inner
+            .metadata
+            .checkin(&DelegatedCheckin {
+                backing: self
+                    .inner
+                    .concurrent_backing
+                    .ok_or_else(|| FsError::new(ErrorCode::Estale))?,
+                token: grant.token,
+                expected_revision,
+            })
+            .await?;
+        self.inner
+            .delegation_generation
+            .store(generation, Ordering::SeqCst);
+        *self
+            .inner
+            .delegation
+            .lock()
+            .map_err(|_| FsError::backend("directory authority lock poisoned"))? = None;
+        let mut state = self.lock_state()?;
+        state.orphans.clear();
+        state.pending_atime.clear();
+        state.namespace = loaded
+            .namespace
+            .ok_or_else(|| FsError::backend("delegated namespace missing"))?;
+        state.revision = expected_revision;
+        state.persisted_revision = expected_revision;
+        self.inner
+            .delegation_draining
+            .store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn require_inode_authority(&self, namespace: &Namespace, inode: InodeId) -> Result<()> {
+        if !self.inner.options.delegated {
+            return Ok(());
+        }
+        let grant = self.local_grant()?.ok_or_else(|| {
+            FsError::new(ErrorCode::Eacces).with_message("checkout required for file access")
+        })?;
+        if grant.orphan_inodes.contains(&inode) {
+            return Ok(());
+        }
+        let mut pending = vec![grant.token.root];
+        let mut seen = BTreeSet::new();
+        while let Some(current) = pending.pop() {
+            if !seen.insert(current) {
+                continue;
+            }
+            if current == inode {
+                return Ok(());
+            }
+            if let Some(NodeMetadata {
+                data: NodeData::Directory { entries },
+                ..
+            }) = namespace.nodes.get(&current)
+            {
+                pending.extend(entries.iter().map(|entry| entry.inode));
+            }
+        }
+        Err(FsError::new(ErrorCode::Eacces).with_message("inode is outside checked-out directory"))
+    }
+
     /// Open the current namespace. The default mode acquires a fenced writer
     /// lease; opt-in concurrent mode prepares the provider's revision-CAS
     /// protocol. An empty metadata store is initialized with an empty root
     /// directory through the selected publication path.
     pub async fn open(metadata: M, blocks: B, options: ChunkedOptions) -> Result<Self> {
+        if let Some(path) = &options.checkout_path {
+            validate_checkout_path(path)?;
+            if !options.delegated {
+                return Err(FsError::new(ErrorCode::Einval)
+                    .with_message("checkout path requires delegated ownership"));
+            }
+        }
+        if options.concurrent_writes && options.writeback {
+            return Err(FsError::new(ErrorCode::Einval)
+                .with_message("shared ownership cannot enable writeback"));
+        }
+        if options.delegated {
+            return Self::open_delegated(metadata, blocks, options).await;
+        }
         let metadata = Arc::new(metadata);
         let blocks = Arc::new(blocks);
         if options.concurrent_writes {
@@ -596,12 +1063,18 @@ where
                         metadata,
                         blocks,
                         concurrent_backing: Some(backing),
+                        delegation: Mutex::new(None),
+                        delegation_generation: std::sync::atomic::AtomicU64::new(0),
+                        pending_checkout: Mutex::new(None),
+                        delegation_draining: AtomicBool::new(false),
                         options,
                         gate: AsyncGate::new(),
                         lifecycle: tokio::sync::RwLock::new(()),
                         state: Mutex::new(RuntimeState {
                             namespace,
                             revision,
+                            persisted_revision: revision,
+                            pending_namespace: false,
                             next_fd: 3,
                             open_refs: HashMap::new(),
                             pending_atime: HashMap::new(),
@@ -668,12 +1141,18 @@ where
                 metadata,
                 blocks,
                 concurrent_backing: None,
+                delegation: Mutex::new(None),
+                delegation_generation: std::sync::atomic::AtomicU64::new(0),
+                pending_checkout: Mutex::new(None),
+                delegation_draining: AtomicBool::new(false),
                 options,
                 gate: AsyncGate::new(),
                 lifecycle: tokio::sync::RwLock::new(()),
                 state: Mutex::new(RuntimeState {
                     namespace: namespace.clone(),
                     revision: loaded.revision,
+                    persisted_revision: loaded.revision,
+                    pending_namespace: false,
                     next_fd: 3,
                     open_refs: HashMap::new(),
                     pending_atime: HashMap::new(),
@@ -691,7 +1170,7 @@ where
 
         if needs_initial_publish
             && let Err(error) = filesystem
-                .publish_namespace(loaded.revision, namespace, false)
+                .publish_namespace_durable(loaded.revision, namespace, false)
                 .await
         {
             // publish_namespace may have renewed the lease before the
@@ -709,6 +1188,11 @@ where
     /// Release the provider lease. Handles become unusable after shutdown;
     /// callers should close handles before shutting down the filesystem.
     pub async fn shutdown(&self) -> Result<()> {
+        if self.inner.options.delegated {
+            self.checkin_scope().await?;
+            self.lock_state()?.closed = true;
+            return Ok(());
+        }
         // Optimistic block I/O deliberately runs outside the operation gate.
         // Take the lifecycle write lock first so an in-flight write can
         // reacquire the operation gate and publish before shutdown fences and
@@ -727,6 +1211,7 @@ where
             (state.closed, state.failure.is_some())
         };
         if !already_closed && !failed {
+            self.drain_writeback().await?;
             self.flush_pending_atime().await?;
         }
         // Provider I/O can outlive the lease TTL (for example, a bounded
@@ -788,8 +1273,10 @@ where
                 .with_syscall("reconcile blocks")
                 .with_message("reconciliation grace period must be positive"));
         }
+        let _lifecycle = self.inner.lifecycle.write().await;
         let _gate = self.inner.gate.lock().await;
         self.validate_lease().await?;
+        self.drain_writeback().await?;
         let (namespace, _) = self.snapshot()?;
         let live = {
             let state = self.lock_state()?;
@@ -849,6 +1336,7 @@ where
         syscall: &str,
         path: &str,
     ) -> Result<(NodeMetadata, bool)> {
+        self.require_inode_authority(namespace, inode)?;
         if let Some(node) = namespace.nodes.get(&inode) {
             return Ok((node.clone(), false));
         }
@@ -862,6 +1350,7 @@ where
     }
 
     fn fail_closed(&self, error: FsError) -> FsError {
+        mount_rs_core::diagnostics::trace_failure("chunked", "fail_closed", &error);
         if let Ok(mut state) = self.inner.state.lock()
             && state.failure.is_none()
         {
@@ -875,6 +1364,9 @@ where
     /// local operations may finish between the remote load and state lock;
     /// never replace a newer locally acknowledged revision with an older one.
     async fn refresh_concurrent_namespace(&self) -> Result<()> {
+        if self.inner.options.delegated {
+            self.refresh_delegation().await?;
+        }
         let known_revision = {
             let state = self.lock_state()?;
             if let Some(error) = &state.failure {
@@ -921,6 +1413,7 @@ where
             retain_open_detached(&mut state, &namespace);
             state.namespace = namespace;
             state.revision = revision;
+            state.persisted_revision = revision;
             state.pending_atime.clear();
         }
         Ok(())
@@ -932,6 +1425,11 @@ where
     }
 
     async fn validate_lease(&self) -> Result<()> {
+        if self.inner.options.delegated && self.inner.delegation_draining.load(Ordering::SeqCst) {
+            return Err(
+                FsError::new(ErrorCode::Ebusy).with_message("directory checkin is draining")
+            );
+        }
         if self.inner.options.concurrent_writes {
             return self.refresh_concurrent_namespace().await;
         }
@@ -1040,7 +1538,7 @@ where
                         .with_syscall("lease-acquire")
                         .with_message("filesystem is closed"))
                 } else {
-                    Ok(state.revision)
+                    Ok(state.persisted_revision)
                 }
             }
             Err(error) => Err(error),
@@ -1072,10 +1570,22 @@ where
     }
 
     async fn ensure_operation_lease(&self) -> Result<()> {
+        if self.inner.options.delegated && self.inner.delegation_draining.load(Ordering::SeqCst) {
+            return Err(
+                FsError::new(ErrorCode::Ebusy).with_message("directory checkin is draining")
+            );
+        }
         if self.inner.options.concurrent_writes {
             return self.refresh_concurrent_namespace().await;
         }
         self.renew_lease().await.map(|_| ())
+    }
+
+    async fn flush_mutation_blocks(&self) -> Result<()> {
+        if self.inner.options.writeback {
+            return Ok(());
+        }
+        self.inner.blocks.flush().await
     }
 
     async fn publish_namespace(
@@ -1084,6 +1594,115 @@ where
         namespace: Namespace,
         blocks_flushed: bool,
     ) -> Result<u64> {
+        if !self.inner.options.writeback {
+            return self
+                .publish_namespace_durable(expected_revision, namespace, blocks_flushed)
+                .await;
+        }
+        let mut state = self.lock_state()?;
+        if let Some(error) = &state.failure {
+            return Err(error.clone());
+        }
+        if state.closed {
+            return Err(FsError::new(ErrorCode::Ebadf));
+        }
+        if expected_revision != state.revision {
+            return Err(FsError::new(ErrorCode::Eagain));
+        }
+        let generation = state.revision.checked_add(1).ok_or_else(|| {
+            FsError::new(ErrorCode::Eio).with_message("local namespace generation overflow")
+        })?;
+        retain_open_detached(&mut state, &namespace);
+        state.namespace = namespace;
+        state.revision = generation;
+        state.pending_namespace = true;
+        state.pending_atime.clear();
+        Ok(generation)
+    }
+
+    async fn drain_writeback(&self) -> Result<bool> {
+        if !self.inner.options.writeback {
+            return Ok(false);
+        }
+        let (namespace, generation) = self.snapshot()?;
+        let persisted = {
+            let state = self.lock_state()?;
+            if !state.pending_namespace && state.pending_atime.is_empty() {
+                return Ok(false);
+            }
+            state.persisted_revision
+        };
+        // Arm before block I/O: canceling a required barrier makes this owner unusable.
+        let mut barrier = PublicationGuard::new(&self.inner.state);
+        // Immutable block flushing does not publish references or require
+        // writer authority. The durable path forces a provider lease check
+        // after flushing, immediately before its fenced metadata publication.
+        self.publish_namespace_durable(persisted, namespace, false)
+            .await
+            .map_err(|error| self.fail_closed(error))?;
+        let mut state = self.lock_state()?;
+        state.revision = generation;
+        state.pending_namespace = false;
+        barrier.disarm();
+        Ok(true)
+    }
+
+    async fn publish_namespace_durable(
+        &self,
+        expected_revision: u64,
+        namespace: Namespace,
+        blocks_flushed: bool,
+    ) -> Result<u64> {
+        if self.inner.options.delegated {
+            let grant = self
+                .local_grant()?
+                .ok_or_else(|| FsError::new(ErrorCode::Eacces).with_message("checkout required"))?;
+            let mut authority = self
+                .inner
+                .metadata
+                .delegation_state()
+                .await?
+                .ok_or_else(|| self.fail_closed(FsError::new(ErrorCode::Estale)))?;
+            if authority
+                .grants
+                .get(&grant.token.root)
+                .is_none_or(|actual| actual.token != grant.token)
+            {
+                return Err(self.fail_closed(FsError::new(ErrorCode::Estale)));
+            }
+            // Orphan provenance changes with publication revision. Verify that the
+            // authority fetched above still corresponds to this candidate's revision,
+            // including publications by disjoint owners not yet loaded locally.
+            if let Some(latest) = self
+                .inner
+                .metadata
+                .load_if_changed(expected_revision)
+                .await?
+            {
+                latest.validate()?;
+                if latest.revision != expected_revision {
+                    return Err(FsError::new(ErrorCode::Eagain));
+                }
+            }
+            let (old, local_revision) = self.snapshot()?;
+            if local_revision != expected_revision {
+                // A concurrent discovery refresh advanced local state while immutable I/O was pending.
+                // Rebase the operation rather than classify a stale candidate as an outside edit.
+                return Err(FsError::new(ErrorCode::Eagain));
+            }
+            // Refuse invalid driver deltas before publication; the provider repeats this check atomically.
+            authority
+                .authorize_publish(&old, &namespace, &grant.token)
+                .map_err(|error| {
+                    mount_rs_core::diagnostics::trace_failure(
+                        "chunked",
+                        "delegated_delta_denied",
+                        &error,
+                    );
+                    FsError::new(ErrorCode::Eacces)
+                        .with_message(format!("delegated namespace change denied: {error}"))
+                })?;
+        }
         let mut trace = RequestTrace::new("chunked", "publish_namespace");
         trace.stage(
             "publication",
@@ -1135,11 +1754,27 @@ where
                 "cas_start",
                 format_args!("expected_revision={expected_revision}"),
             );
-            let result = self
-                .inner
-                .metadata
-                .publish_bound_if_revision(backing, expected_revision, namespace.clone())
-                .await;
+            let result = if self.inner.options.delegated {
+                let grant = self.local_grant()?.ok_or_else(|| {
+                    FsError::new(ErrorCode::Eacces).with_message("checkout required")
+                })?;
+                self.inner
+                    .metadata
+                    .publish_delegated(
+                        &DelegatedPublish {
+                            backing,
+                            token: grant.token,
+                            expected_revision,
+                        },
+                        namespace.clone(),
+                    )
+                    .await
+            } else {
+                self.inner
+                    .metadata
+                    .publish_bound_if_revision(backing, expected_revision, namespace.clone())
+                    .await
+            };
             trace.stage(
                 "cas_end",
                 format_args!(
@@ -1183,12 +1818,16 @@ where
                 retain_open_detached(&mut state, &namespace);
                 state.namespace = namespace;
                 state.revision = revision;
+                state.persisted_revision = revision;
                 state.pending_atime.clear();
             }
             publication.disarm();
             drop(state);
             trace.finish(format_args!("revision={revision}"));
             return Ok(revision);
+        }
+        if self.inner.options.writeback {
+            self.validate_lease().await?;
         }
         let lease = self.renew_lease().await?;
         let mut publication = PublicationGuard::new(&self.inner.state);
@@ -1210,7 +1849,10 @@ where
         }
         let mut state = self.lock_state()?;
         state.namespace = namespace;
-        state.revision = revision;
+        if !self.inner.options.writeback {
+            state.revision = revision;
+        }
+        state.persisted_revision = revision;
         state.pending_atime.clear();
         publication.disarm();
         drop(state);
@@ -1699,9 +2341,7 @@ where
             path,
         )
         .await?;
-        self.inner
-            .blocks
-            .flush()
+        self.flush_mutation_blocks()
             .await
             .map_err(|error| with_context(error, "block-flush", Some(path)))?;
 
@@ -1810,9 +2450,7 @@ where
                 path,
             )
             .await?;
-            self.inner
-                .blocks
-                .flush()
+            self.flush_mutation_blocks()
                 .await
                 .map_err(|error| with_context(error, "block-flush", Some(path)))?;
             if orphan {
@@ -1864,6 +2502,7 @@ where
         let (layout, original, inode, expected_revision, new_inode) = {
             let (namespace, revision) = self.snapshot()?;
             let entry = walk(&namespace, &normalized, true, "open", 0)?;
+            self.require_inode_authority(&namespace, entry.node.unwrap_or(entry.parent))?;
             if let Some(inode) = entry.node {
                 let node = namespace
                     .nodes
@@ -1930,9 +2569,7 @@ where
         // immutable layout after rebasing the path and inode metadata.
         let replay_layout = new_layout.clone();
         if !data.is_empty() {
-            self.inner
-                .blocks
-                .flush()
+            self.flush_mutation_blocks()
                 .await
                 .map_err(|error| with_context(error, "block-flush", Some(&normalized)))?;
         }
@@ -2022,6 +2659,7 @@ where
             self.ensure_operation_lease().await?;
             let (mut namespace, revision) = self.snapshot()?;
             let entry = walk(&namespace, path, true, "open", 0)?;
+            self.require_inode_authority(&namespace, entry.node.unwrap_or(entry.parent))?;
             let (inode, chunker, new_inode) = if let Some(inode) = entry.node {
                 let node = namespace
                     .nodes
@@ -2073,9 +2711,7 @@ where
                     )
                     .await?
                 };
-                self.inner
-                    .blocks
-                    .flush()
+                self.flush_mutation_blocks()
                     .await
                     .map_err(|error| with_context(error, "block-flush", Some(path)))?;
                 // Block preparation may have taken a remote round trip. Reload
@@ -2235,7 +2871,10 @@ where
                 if !state.open_refs.contains_key(&inode) {
                     state.orphans.remove(&inode);
                 }
-                if self.inner.options.concurrent_writes || state.failure.is_some() || state.closed {
+                if (self.inner.options.concurrent_writes && !self.inner.options.delegated)
+                    || state.failure.is_some()
+                    || state.closed
+                {
                     return Ok(());
                 }
                 state.namespace.nodes.get(&inode).is_some_and(|node| {
@@ -2245,9 +2884,14 @@ where
         if !should_reap {
             return Ok(());
         }
-        self.ensure_operation_lease().await?;
-        let (namespace, revision) =
-            {
+        let attempts = if self.inner.options.delegated {
+            MAX_CONCURRENT_CAS_RETRIES
+        } else {
+            1
+        };
+        for attempt in 0..attempts {
+            self.ensure_operation_lease().await?;
+            let (mut namespace, revision) = {
                 let state = self.lock_state()?;
                 if state.failure.is_some() || state.closed {
                     return Ok(());
@@ -2259,9 +2903,15 @@ where
                 }
                 (state.namespace.clone(), state.revision)
             };
-        let mut namespace = namespace;
-        namespace.nodes.remove(&inode);
-        self.publish_namespace(revision, namespace, false).await?;
+            namespace.nodes.remove(&inode);
+            match self.publish_namespace(revision, namespace, false).await {
+                Ok(_) => return Ok(()),
+                Err(error) if error.code == ErrorCode::Eagain && attempt + 1 < attempts => {
+                    concurrent_cas_backoff(attempt, &self.inner.options.owner).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
         Ok(())
     }
 
@@ -2291,6 +2941,21 @@ where
     /// POSIX unlink/rmdir lifetime without publishing an unreachable
     /// directory or a stale nlink graph.
     fn reap_detached(&self, namespace: &mut Namespace, inode: InodeId) -> Result<()> {
+        if self.inner.options.delegated {
+            if self.lock_state()?.open_refs.contains_key(&inode)
+                && namespace
+                    .nodes
+                    .get(&inode)
+                    .is_some_and(|node| matches!(node.data, NodeData::Directory { .. }))
+            {
+                return Err(FsError::new(ErrorCode::Enotsup)
+                    .with_message("open directory removal requires handle retirement"));
+            }
+            if !self.lock_state()?.open_refs.contains_key(&inode) {
+                namespace.nodes.remove(&inode);
+            }
+            return Ok(());
+        }
         if self.inner.options.concurrent_writes {
             if namespace
                 .nodes
@@ -2332,21 +2997,39 @@ where
     }
 
     async fn syncfs_with_syscall(&self, syscall: &str) -> Result<()> {
+        let _lifecycle = self.inner.lifecycle.write().await;
         let _gate = self.inner.gate.lock().await;
         self.ensure_operation_lease().await?;
         self.snapshot()?;
+        let mut barrier = self
+            .inner
+            .options
+            .writeback
+            .then(|| PublicationGuard::new(&self.inner.state));
+        if self.drain_writeback().await? {
+            if let Some(barrier) = &mut barrier {
+                barrier.disarm();
+            }
+            return Ok(());
+        }
         self.flush_pending_atime().await?;
-        self.inner
-            .blocks
-            .flush()
-            .await
-            .map_err(|error| with_context(error, syscall, None))?;
+        self.inner.blocks.flush().await.map_err(|error| {
+            let error = with_context(error, syscall, None);
+            if self.inner.options.writeback {
+                self.fail_closed(error)
+            } else {
+                error
+            }
+        })?;
         self.validate_lease().await?;
         self.inner
             .metadata
             .flush()
             .await
             .map_err(|error| self.fail_closed(with_context(error, syscall, None)))?;
+        if let Some(barrier) = &mut barrier {
+            barrier.disarm();
+        }
         Ok(())
     }
 
@@ -2482,6 +3165,10 @@ where
                     return Err(stale_guard(&normalized, "open"));
                 }
             }
+            if self.inner.options.delegated {
+                let required = entry.node.unwrap_or(entry.parent);
+                self.require_inode_authority(&namespace, required)?;
+            }
             let inode = if let Some(inode) = entry.node {
                 if flags.exclusive {
                     return Err(error_with_path(ErrorCode::Eexist, "open", &entry.path));
@@ -2591,6 +3278,7 @@ where
                     path: normalized,
                     fd,
                     flags,
+                    generation: self.inner.delegation_generation.load(Ordering::SeqCst),
                     state: Mutex::new(HandleState {
                         position: 0,
                         closed: false,
@@ -2625,6 +3313,7 @@ where
     path: String,
     fd: u64,
     flags: OpenFlags,
+    generation: u64,
     state: Mutex<HandleState>,
     gate: AsyncGate,
 }
@@ -2645,7 +3334,22 @@ where
             .map_err(|_| FsError::new(ErrorCode::Eio).with_message("handle state lock poisoned"))
     }
 
+    fn check_generation(&self, syscall: &str) -> Result<()> {
+        if self.filesystem.inner.options.delegated
+            && self.generation
+                != self
+                    .filesystem
+                    .inner
+                    .delegation_generation
+                    .load(Ordering::SeqCst)
+        {
+            return Err(error_with_path(ErrorCode::Estale, syscall, &self.path));
+        }
+        Ok(())
+    }
+
     fn check_open(&self, write: bool, syscall: &str) -> Result<u64> {
+        self.check_generation(syscall)?;
         let state = self.lock_state()?;
         if state.closed || (write && !self.flags.write) || (!write && !self.flags.read) {
             return Err(error_with_path(ErrorCode::Ebadf, syscall, &self.path));
@@ -2704,6 +3408,7 @@ where
     }
 
     async fn stat(&self) -> Result<Stats> {
+        self.check_generation("fstat")?;
         let closed = {
             let state = self.lock_state()?;
             state.closed
@@ -2725,6 +3430,7 @@ where
     }
 
     async fn sync(&self) -> Result<()> {
+        self.check_generation("fsync")?;
         let _gate = self.gate.lock().await;
         let closed = {
             let state = self.lock_state()?;
@@ -2737,6 +3443,7 @@ where
     }
 
     async fn datasync(&self) -> Result<()> {
+        self.check_generation("fdatasync")?;
         let _gate = self.gate.lock().await;
         let closed = {
             let state = self.lock_state()?;
@@ -3925,6 +4632,14 @@ where
     runtime.reap_detached(namespace, inode)
 }
 
+fn validate_checkout_path(path: &str) -> Result<()> {
+    if !path.starts_with('/') || path.contains('\0') {
+        return Err(FsError::new(ErrorCode::Einval)
+            .with_message("checkout path must be a nonempty absolute virtual path without NUL"));
+    }
+    Ok(())
+}
+
 fn initial_namespace(options: &ChunkedOptions) -> Result<Namespace> {
     // Capture the serialized configuration once. Besides avoiding needless
     // work, this makes validation and persistence one logical decision for a
@@ -4917,6 +5632,7 @@ mod tests {
     struct FaultBlockStore {
         inner: MemoryBlockStore,
         fail_put: Arc<AtomicBool>,
+        pause_flush: Arc<AtomicBool>,
         fail_flush: Arc<AtomicBool>,
         gets: Arc<AtomicUsize>,
         reconciled: Arc<Mutex<Option<BTreeSet<mount_rs_core::storage::BlockId>>>>,
@@ -4927,6 +5643,7 @@ mod tests {
             Self {
                 inner: MemoryBlockStore::new(),
                 fail_put: Arc::new(AtomicBool::new(false)),
+                pause_flush: Arc::new(AtomicBool::new(false)),
                 fail_flush: Arc::new(AtomicBool::new(false)),
                 gets: Arc::new(AtomicUsize::new(0)),
                 reconciled: Arc::new(Mutex::new(None)),
@@ -5682,6 +6399,10 @@ mod tests {
         }
 
         async fn flush(&self) -> Result<()> {
+            if self.pause_flush.load(Ordering::SeqCst) {
+                std::future::pending::<()>().await;
+            }
+
             if self.fail_flush.load(Ordering::SeqCst) {
                 return Err(
                     FsError::new(ErrorCode::Eio).with_message("injected block flush failure")
@@ -5826,6 +6547,270 @@ mod tests {
         ChunkedOptions::fixed(owner, 4)
             .unwrap()
             .with_lease_ttl(Duration::from_secs(10))
+    }
+
+    #[test]
+    fn exclusive_writeback_stages_until_sync_and_shutdown() {
+        let metadata = MemoryMetadataStore::new();
+        let blocks = MemoryBlockStore::new();
+        let fs = block_on(ChunkedFs::open(
+            metadata.clone(),
+            blocks.clone(),
+            options("writeback").with_ownership_mode(OwnershipMode::Exclusive),
+        ))
+        .unwrap();
+        let initial = block_on(metadata.load()).unwrap();
+        block_on(fs.write_file("/file", b"first")).unwrap();
+        block_on(fs.write_file("/file", b"second")).unwrap();
+        assert_eq!(
+            block_on(metadata.load()).unwrap().revision,
+            initial.revision
+        );
+        let handle = block_on(fs.open("/file", "r", 0)).unwrap();
+        let mut bytes = [0; 6];
+        block_on(handle.read(&mut bytes, Some(0))).unwrap();
+        assert_eq!(&bytes, b"second");
+        block_on(handle.close()).unwrap();
+        block_on(fs.syncfs()).unwrap();
+        assert_eq!(
+            block_on(metadata.load()).unwrap().revision,
+            initial.revision + 1
+        );
+        block_on(fs.write_file("/later", b"shutdown")).unwrap();
+        block_on(fs.shutdown()).unwrap();
+        let reopened = block_on(ChunkedFs::open(metadata, blocks, options("reopen"))).unwrap();
+        let handle = block_on(reopened.open("/later", "r", 0)).unwrap();
+        let mut bytes = [0; 8];
+        block_on(handle.read(&mut bytes, Some(0))).unwrap();
+        assert_eq!(&bytes, b"shutdown");
+        block_on(handle.close()).unwrap();
+        block_on(reopened.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn exclusive_writeback_barrier_failure_and_cancellation_fail_closed() {
+        for cancel in [false, true] {
+            let metadata = MemoryMetadataStore::new();
+            let blocks = FaultBlockStore::new();
+            let fs = block_on(ChunkedFs::open(
+                metadata.clone(),
+                blocks.clone(),
+                options("barrier").with_writeback(true),
+            ))
+            .unwrap();
+            let before = block_on(metadata.load()).unwrap().revision;
+            block_on(fs.write_file("/file", b"pending")).unwrap();
+            if cancel {
+                blocks.pause_flush.store(true, Ordering::SeqCst);
+                let mut sync = Box::pin(fs.syncfs());
+                let waker = Waker::noop();
+                let mut context = Context::from_waker(waker);
+                assert!(matches!(sync.as_mut().poll(&mut context), Poll::Pending));
+                drop(sync);
+            } else {
+                blocks.fail_flush.store(true, Ordering::SeqCst);
+                assert_eq!(block_on(fs.syncfs()).unwrap_err().code, ErrorCode::Eio);
+            }
+            assert!(fs.failed());
+            assert_eq!(block_on(metadata.load()).unwrap().revision, before);
+            assert!(block_on(fs.write_file("/later", b"denied")).is_err());
+            block_on(fs.shutdown()).unwrap();
+        }
+    }
+
+    #[test]
+    fn exclusive_writeback_gc_drains_and_generations_never_regress() {
+        let metadata = MemoryMetadataStore::new();
+        let blocks = FaultBlockStore::new();
+        let fs = block_on(ChunkedFs::open(
+            metadata.clone(),
+            blocks.clone(),
+            options("gc").with_writeback(true),
+        ))
+        .unwrap();
+        block_on(fs.write_file("/file", b"first")).unwrap();
+        block_on(fs.write_file("/file", b"second")).unwrap();
+        let generation = fs.snapshot().unwrap().1;
+        block_on(fs.reconcile_blocks(Duration::from_secs(60))).unwrap();
+        assert_eq!(fs.snapshot().unwrap().1, generation);
+        let namespace = block_on(metadata.load()).unwrap().namespace.unwrap();
+        let mut durable_roots = BTreeSet::new();
+        collect_block_roots(&namespace, &mut durable_roots);
+        assert!(durable_roots.is_subset(blocks.reconciled.lock().unwrap().as_ref().unwrap()));
+        block_on(fs.write_file("/file", b"third")).unwrap();
+        assert!(fs.snapshot().unwrap().1 > generation);
+        block_on(fs.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn exclusive_writeback_expiry_preserves_pending_state_and_takeover_fences_it() {
+        for takeover in [false, true] {
+            let clock = Arc::new(ManualClock::new(0));
+            let metadata = MemoryMetadataStore::with_clock(clock.clone());
+            let fs = block_on(ChunkedFs::open(
+                metadata.clone(),
+                MemoryBlockStore::new(),
+                options("old")
+                    .with_lease_ttl(Duration::from_secs(1))
+                    .with_writeback(true),
+            ))
+            .unwrap();
+            block_on(fs.write_file("/file", b"pending")).unwrap();
+            let before = block_on(metadata.load()).unwrap().revision;
+            assert!(clock.advance_ms(1_000));
+            if takeover {
+                let lease =
+                    block_on(metadata.acquire_writer("new", Duration::from_secs(10))).unwrap();
+                block_on(metadata.release_writer(&lease)).unwrap();
+                assert_eq!(block_on(fs.syncfs()).unwrap_err().code, ErrorCode::Estale);
+                assert!(fs.failed());
+                assert_eq!(block_on(metadata.load()).unwrap().revision, before);
+            } else {
+                block_on(fs.syncfs()).unwrap();
+                assert_eq!(block_on(metadata.load()).unwrap().revision, before + 1);
+                assert_eq!(block_on(fs.stat("/file")).unwrap().size, 7);
+                block_on(fs.shutdown()).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn exclusive_writeback_overlapping_whole_file_creates_and_namespace_ops() {
+        let metadata = MemoryMetadataStore::new();
+        let fs = block_on(ChunkedFs::open(
+            metadata.clone(),
+            MemoryBlockStore::new(),
+            options("overlap").with_writeback(true),
+        ))
+        .unwrap();
+        let before = block_on(metadata.load()).unwrap().revision;
+        let futures = (0..16)
+            .map(|index| {
+                let fs = fs.clone();
+                Box::pin(async move { fs.write_file(&format!("/file-{index}"), b"bytes").await })
+            })
+            .collect();
+        for result in block_on_all(futures) {
+            result.unwrap();
+        }
+        block_on(fs.rename("/file-0", "/renamed")).unwrap();
+        block_on(fs.unlink("/file-1")).unwrap();
+        assert_eq!(block_on(fs.stat("/renamed")).unwrap().size, 5);
+        assert!(block_on(fs.stat("/file-0")).is_err());
+        assert!(block_on(fs.stat("/file-1")).is_err());
+        assert_eq!(block_on(metadata.load()).unwrap().revision, before);
+        block_on(fs.syncfs()).unwrap();
+        assert_eq!(block_on(metadata.load()).unwrap().revision, before + 1);
+        block_on(fs.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn exclusive_writeback_overlapping_offsets_and_appends_preserve_all_writes() {
+        let fs = block_on(ChunkedFs::open(
+            MemoryMetadataStore::new(),
+            MemoryBlockStore::new(),
+            options("offsets").with_writeback(true),
+        ))
+        .unwrap();
+        block_on(fs.write_file("/file", &[0; 64])).unwrap();
+        let futures = (0..16)
+            .map(|index| {
+                let handle = block_on(fs.open("/file", "r+", 0)).unwrap();
+                Box::pin(async move {
+                    handle.write(&[index as u8 + 1; 4], Some(index * 4)).await?;
+                    handle.close().await
+                })
+            })
+            .collect();
+        for result in block_on_all(futures) {
+            result.unwrap();
+        }
+        let futures = (0..16)
+            .map(|_| {
+                let handle = block_on(fs.open("/file", "a", 0)).unwrap();
+                Box::pin(async move {
+                    handle.write(b"tail", None).await?;
+                    handle.close().await
+                })
+            })
+            .collect();
+        for result in block_on_all(futures) {
+            result.unwrap();
+        }
+        let handle = block_on(fs.open("/file", "r+", 0)).unwrap();
+        let mut bytes = [0; 128];
+        assert_eq!(block_on(handle.read(&mut bytes, Some(0))).unwrap(), 128);
+        for index in 0..16 {
+            assert_eq!(&bytes[index * 4..index * 4 + 4], &[index as u8 + 1; 4]);
+        }
+        assert!(bytes[64..].chunks_exact(4).all(|chunk| chunk == b"tail"));
+        block_on(handle.truncate(32)).unwrap();
+        block_on(handle.sync()).unwrap();
+        assert_eq!(block_on(handle.stat()).unwrap().size, 32);
+        block_on(handle.close()).unwrap();
+        block_on(fs.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn exclusive_writeback_metadata_barrier_failures_fail_closed() {
+        for publish_failure in [false, true] {
+            let metadata = TestMetadataStore {
+                inner: MemoryMetadataStore::new(),
+                loaded: None,
+                fail_publish: Arc::new(AtomicBool::new(false)),
+                fail_flush: Arc::new(AtomicBool::new(false)),
+                publish_includes_flush_barrier: false,
+            };
+            let fs = block_on(ChunkedFs::open(
+                metadata.clone(),
+                MemoryBlockStore::new(),
+                options("metadata-barrier").with_writeback(true),
+            ))
+            .unwrap();
+            block_on(fs.write_file("/pending", b"bytes")).unwrap();
+            if publish_failure {
+                metadata.fail_publish.store(true, Ordering::SeqCst);
+            } else {
+                metadata.fail_flush.store(true, Ordering::SeqCst);
+            }
+            assert_eq!(block_on(fs.syncfs()).unwrap_err().code, ErrorCode::Eio);
+            assert!(fs.failed());
+            assert!(block_on(fs.stat("/pending")).is_err());
+            block_on(fs.shutdown()).unwrap();
+        }
+    }
+
+    #[test]
+    fn exclusive_writeback_sync_uses_one_forced_provider_lease_check() {
+        let metadata = LeaseCountingMetadataStore {
+            inner: MemoryMetadataStore::new(),
+            active_renewals: Arc::new(AtomicUsize::new(0)),
+            max_active_renewals: Arc::new(AtomicUsize::new(0)),
+            renewals: Arc::new(AtomicUsize::new(0)),
+        };
+        let fs = block_on(ChunkedFs::open(
+            metadata.clone(),
+            MemoryBlockStore::new(),
+            options("one-check").with_writeback(true),
+        ))
+        .unwrap();
+        block_on(fs.write_file("/pending", b"bytes")).unwrap();
+        let before = metadata.renewals.load(Ordering::SeqCst);
+        block_on(fs.syncfs()).unwrap();
+        assert_eq!(metadata.renewals.load(Ordering::SeqCst), before + 1);
+        block_on(fs.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn shared_writeback_is_rejected() {
+        let result = block_on(ChunkedFs::open(
+            MemoryMetadataStore::new(),
+            MemoryBlockStore::new(),
+            options("invalid")
+                .with_concurrent_writes(true)
+                .with_writeback(true),
+        ));
+        assert_eq!(result.err().unwrap().code, ErrorCode::Einval);
     }
 
     #[test]
@@ -6769,5 +7754,151 @@ mod tests {
         drop(state);
         block_on(first.shutdown()).expect("shutdown first coordinator");
         block_on(second.shutdown()).expect("shutdown second coordinator");
+    }
+}
+
+#[cfg(test)]
+mod delegated_generation_tests {
+    use super::*;
+    use futures_lite::future::block_on;
+    use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
+
+    #[test]
+    fn generation_overflow_never_claims_or_releases_authority() {
+        block_on(async {
+            let path = std::env::temp_dir().join(format!(
+                "mount-rs-grant-generation-{}-{}",
+                std::process::id(),
+                now_ms()
+            ));
+            std::fs::create_dir(&path).unwrap();
+            let fs = ChunkedFs::open(
+                SqliteMetadataStore::open(path.join("metadata.db")).unwrap(),
+                SqliteBlockStore::open(path.join("blocks.db")).unwrap(),
+                ChunkedOptions::fixed("overflow", 4096)
+                    .unwrap()
+                    .with_checkout_path("/"),
+            )
+            .await
+            .unwrap();
+            let grant = fs.delegation_status().await.unwrap().unwrap();
+            fs.inner
+                .delegation_generation
+                .store(u64::MAX, Ordering::SeqCst);
+            assert_eq!(
+                fs.checkin_scope().await.unwrap_err().code,
+                ErrorCode::Eoverflow
+            );
+            assert_eq!(
+                fs.metadata_store()
+                    .delegation_state()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .grants[&grant.token.root],
+                grant
+            );
+            fs.inner.delegation_generation.store(1, Ordering::SeqCst);
+            fs.checkin_scope().await.unwrap();
+            fs.inner
+                .delegation_generation
+                .store(u64::MAX, Ordering::SeqCst);
+            assert_eq!(
+                fs.checkout_scope("/").await.unwrap_err().code,
+                ErrorCode::Eoverflow
+            );
+            assert!(
+                fs.metadata_store()
+                    .delegation_state()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .grants
+                    .is_empty()
+            );
+            fs.shutdown().await.unwrap();
+            drop(fs);
+            std::fs::remove_dir_all(path).unwrap();
+        });
+    }
+    #[test]
+    fn stale_local_candidate_rebases_instead_of_denied_outside_delta() {
+        block_on(async {
+            let path = std::env::temp_dir().join(format!(
+                "mount-rs-grant-rebase-{}-{}",
+                std::process::id(),
+                now_ms()
+            ));
+            std::fs::create_dir(&path).unwrap();
+            let metadata = SqliteMetadataStore::open(path.join("metadata.db")).unwrap();
+            let blocks = SqliteBlockStore::open(path.join("blocks.db")).unwrap();
+            let options = ChunkedOptions::fixed("bootstrap", 4096)
+                .unwrap()
+                .with_checkout_path("/");
+            let bootstrap = ChunkedFs::open(metadata.clone(), blocks.clone(), options)
+                .await
+                .unwrap();
+            bootstrap
+                .mkdir("/a", MkdirOptions::default())
+                .await
+                .unwrap();
+            bootstrap
+                .mkdir("/b", MkdirOptions::default())
+                .await
+                .unwrap();
+            bootstrap.checkin_scope().await.unwrap();
+            let a = ChunkedFs::open(
+                metadata.clone(),
+                blocks.clone(),
+                ChunkedOptions::fixed("a", 4096)
+                    .unwrap()
+                    .with_checkout_path("/a"),
+            )
+            .await
+            .unwrap();
+            let b = ChunkedFs::open(
+                metadata,
+                blocks,
+                ChunkedOptions::fixed("b", 4096)
+                    .unwrap()
+                    .with_checkout_path("/b"),
+            )
+            .await
+            .unwrap();
+            let (mut candidate, revision) = a.snapshot().unwrap();
+            let inode = resolve(&candidate, "/a", true, "test").unwrap();
+            candidate.nodes.get_mut(&inode).unwrap().stats.mtime_ms += 1;
+            b.write_file("/b/new", b"disjoint").await.unwrap();
+            a.refresh_concurrent_namespace().await.unwrap();
+            assert_eq!(
+                a.publish_namespace_durable(revision, candidate, false)
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Eagain
+            );
+            a.write_file("/a/own", b"still usable").await.unwrap();
+            let (mut candidate, revision) = a.snapshot().unwrap();
+            candidate.nodes.get_mut(&inode).unwrap().stats.mtime_ms += 1;
+            let handle = b.open("/b/new", "r+", 0).await.unwrap();
+            b.unlink("/b/new").await.unwrap();
+            // Authority now contains B's orphan but A has not loaded that namespace.
+            assert_eq!(
+                a.publish_namespace_durable(revision, candidate, false)
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Eagain
+            );
+            handle.close().await.unwrap();
+            a.write_file("/a/own", b"still usable").await.unwrap();
+            a.shutdown().await.unwrap();
+            b.shutdown().await.unwrap();
+            bootstrap.shutdown().await.unwrap();
+            drop(a);
+            drop(b);
+            drop(bootstrap);
+            std::fs::remove_dir_all(path).unwrap();
+        });
     }
 }

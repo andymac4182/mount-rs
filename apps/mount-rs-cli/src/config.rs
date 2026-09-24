@@ -202,6 +202,9 @@ pub struct SplitStorageConfig {
     pub chunk_size_bytes: usize,
     pub lease_ttl_ms: Option<u64>,
     pub concurrent_writes: bool,
+    pub writeback: bool,
+    pub delegated: bool,
+    pub checkout_path: Option<String>,
     pub owner: Option<String>,
 }
 
@@ -625,6 +628,8 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
             "chunk_size_bytes",
             "lease_ttl_ms",
             "concurrent_writes",
+            "ownership_mode",
+            "checkout_path",
             "owner",
         ],
         "config.driver.storage",
@@ -654,11 +659,63 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
         .get("lease_ttl_ms")
         .map(|value| positive_u64(value, "config.driver.storage.lease_ttl_ms"))
         .transpose()?;
-    let concurrent_writes = object
+    let legacy_concurrent = object
         .get("concurrent_writes")
         .map(|value| required_value_bool(value, "config.driver.storage.concurrent_writes"))
-        .transpose()?
-        .unwrap_or(false);
+        .transpose()?;
+    let ownership = object
+        .get("ownership_mode")
+        .map(|value| required_value_string(value, "config.driver.storage.ownership_mode"))
+        .transpose()?;
+    let (concurrent_writes, writeback) = match ownership.as_deref() {
+        Some("exclusive") => (false, true),
+        Some("shared") => (true, false),
+        None => (legacy_concurrent.unwrap_or(false), false),
+        Some(_) => {
+            return Err(ConfigError::at(
+                "config.driver.storage.ownership_mode",
+                "must be 'exclusive' or 'shared'",
+            ));
+        }
+    };
+    if ownership.is_some() && legacy_concurrent.is_some_and(|legacy| legacy != concurrent_writes) {
+        return Err(ConfigError::at(
+            "config.driver.storage.concurrent_writes",
+            "conflicts with ownership_mode",
+        ));
+    }
+    let delegated = ownership.as_deref() == Some("shared");
+    let checkout_path = object
+        .get("checkout_path")
+        .map(|value| required_value_string(value, "config.driver.storage.checkout_path"))
+        .transpose()?;
+    if delegated && checkout_path.is_none() {
+        return Err(ConfigError::at(
+            "config.driver.storage.checkout_path",
+            "is required with ownership_mode 'shared' to claim the subtree before mounting",
+        ));
+    }
+    if let Some(path) = &checkout_path {
+        if !delegated {
+            return Err(ConfigError::at(
+                "config.driver.storage.checkout_path",
+                "is only valid with ownership_mode 'shared'",
+            ));
+        }
+        if !path.starts_with('/')
+            || path.contains('\0')
+            || (path != "/"
+                && path
+                    .split('/')
+                    .skip(1)
+                    .any(|part| part.is_empty() || part == "." || part == ".."))
+        {
+            return Err(ConfigError::at(
+                "config.driver.storage.checkout_path",
+                "must be a canonical absolute virtual path",
+            ));
+        }
+    }
     if concurrent_writes {
         for role in ["metadata", "blocks"] {
             let raw = object.get(role).and_then(Value::as_object);
@@ -722,13 +779,15 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
             }
             _ => {}
         }
-    } else if matches!(
-        metadata,
-        StorageProvider::FoundationDb {
-            lease_authority: mount_rs_sdk::FoundationDbLeaseAuthority::RevisionCas,
-            ..
-        }
-    ) {
+    } else if !concurrent_writes
+        && matches!(
+            metadata,
+            StorageProvider::FoundationDb {
+                lease_authority: mount_rs_sdk::FoundationDbLeaseAuthority::RevisionCas,
+                ..
+            }
+        )
+    {
         return Err(ConfigError::at(
             "config.driver.storage.concurrent_writes",
             "must be true with FoundationDB lease_authority 'revision-cas'",
@@ -747,6 +806,9 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
         chunk_size_bytes,
         lease_ttl_ms,
         concurrent_writes,
+        writeback,
+        delegated,
+        checkout_path,
         owner,
     })
 }
@@ -1086,6 +1148,20 @@ fn apply_explicit_overrides(resolved: &mut CliOptions, raw: &CliOptions) {
 }
 
 pub(crate) fn validate_resolved_options(options: &CliOptions) -> Result<(), ConfigError> {
+    if options
+        .storage
+        .as_ref()
+        .is_some_and(|storage| storage.delegated)
+        && (matches!(
+            options.transport,
+            TransportChoice::Nfs | TransportChoice::P9
+        ) || !options.also_mountpoints.is_empty()
+            || options.sqlite_single_host)
+    {
+        return Err(ConfigError::new(
+            "shared directory ownership native mounts require FUSE; NFS, 9p, multiple mountpoints, and the NFS SQLite profile are not qualified for cache handoff",
+        ));
+    }
     match options.driver {
         DriverChoice::Memory
             if options.root.is_some()
@@ -2202,6 +2278,104 @@ mod tests {
             invalid_authority
                 .message()
                 .contains("persisted-single-authority")
+        );
+    }
+
+    #[test]
+    fn explicit_exclusive_ownership_is_accepted() {
+        let mut value: Value = serde_json::from_str(SPLIT_MEMORY).unwrap();
+        value["driver"]["storage"]["ownership_mode"] = serde_json::json!("exclusive");
+        let spec = parse_config_str(&value.to_string(), Path::new("/tmp")).unwrap();
+        assert!(!spec.storage.as_ref().unwrap().concurrent_writes);
+        assert!(spec.storage.as_ref().unwrap().writeback);
+    }
+
+    #[test]
+    fn explicit_shared_requires_a_checkout_path() {
+        let mut value: Value = serde_json::from_str(SPLIT_MEMORY).unwrap();
+        value["driver"]["storage"]["ownership_mode"] = serde_json::json!("shared");
+        let error = parse_config_str(&value.to_string(), Path::new("/tmp")).unwrap_err();
+        assert!(error.message().contains("checkout_path"));
+    }
+
+    #[test]
+    fn shared_checkout_requires_supported_providers_and_rejects_invalid_paths() {
+        let mut value: Value = serde_json::from_str(SPLIT_MEMORY).unwrap();
+        value["driver"]["storage"]["ownership_mode"] = serde_json::json!("shared");
+        value["driver"]["storage"]["checkout_path"] = serde_json::json!("/project");
+        assert!(parse_config_str(&value.to_string(), Path::new("/tmp")).is_err());
+        value["driver"]["storage"]["metadata"] =
+            serde_json::json!({"kind":"sqlite","path":"/tmp/shared-meta.sqlite"});
+        value["driver"]["storage"]["blocks"] =
+            serde_json::json!({"kind":"sqlite","path":"/tmp/shared-blocks.sqlite"});
+        assert!(parse_config_str(&value.to_string(), Path::new("/tmp")).is_ok());
+        for invalid in ["", "relative", "/project/../other", "/project//child"] {
+            value["driver"]["storage"]["checkout_path"] = serde_json::json!(invalid);
+            assert!(parse_config_str(&value.to_string(), Path::new("/tmp")).is_err());
+        }
+        value["driver"]["storage"]["checkout_path"] = serde_json::json!("/project");
+        value["driver"]["storage"]["ownership_mode"] = serde_json::json!("exclusive");
+        assert!(parse_config_str(&value.to_string(), Path::new("/tmp")).is_err());
+        value["driver"]["storage"]
+            .as_object_mut()
+            .unwrap()
+            .remove("ownership_mode");
+        assert!(parse_config_str(&value.to_string(), Path::new("/tmp")).is_err());
+    }
+
+    #[test]
+    fn ownership_mode_rejects_conflicting_legacy_option() {
+        let mut value: Value = serde_json::from_str(SPLIT_MEMORY).unwrap();
+        value["driver"]["storage"]["ownership_mode"] = serde_json::json!("exclusive");
+        value["driver"]["storage"]["concurrent_writes"] = serde_json::json!(true);
+        let error = parse_config_str(&value.to_string(), Path::new("/tmp")).unwrap_err();
+        assert!(error.message().contains("conflicts"));
+    }
+
+    #[test]
+    fn shared_ownership_accepts_supported_providers_and_agreeing_legacy_option() {
+        let mut value = serde_json::json!({"version": 1, "driver": {
+            "kind": "splitstore", "storage": {
+                "ownership_mode": "shared",
+                "checkout_path": "/project",
+                "metadata": {"kind": "sqlite", "path": "/tmp/meta.sqlite"},
+                "blocks": {"kind": "sqlite", "path": "/tmp/blocks.sqlite"}
+            }
+        }});
+        for legacy in [None, Some(true)] {
+            if let Some(legacy) = legacy {
+                value["driver"]["storage"]["concurrent_writes"] = serde_json::json!(legacy);
+            }
+            let spec = parse_config_str(&value.to_string(), Path::new("/tmp")).unwrap();
+            let storage = spec.storage.unwrap();
+            assert!(storage.concurrent_writes);
+            assert!(storage.delegated);
+            assert_eq!(storage.checkout_path.as_deref(), Some("/project"));
+            assert!(!storage.writeback);
+        }
+    }
+
+    #[test]
+    fn ownership_rejects_invalid_names_and_retains_legacy_write_through() {
+        let mut value: Value = serde_json::from_str(SPLIT_MEMORY).unwrap();
+        let legacy = parse_config_str(&value.to_string(), Path::new("/tmp")).unwrap();
+        assert!(!legacy.storage.unwrap().writeback);
+        for invalid in [
+            serde_json::json!("single-host"),
+            serde_json::json!(true),
+            serde_json::json!(null),
+        ] {
+            value["driver"]["storage"]["ownership_mode"] = invalid;
+            assert!(parse_config_str(&value.to_string(), Path::new("/tmp")).is_err());
+        }
+        value["driver"]["storage"]["ownership_mode"] = serde_json::json!("exclusive");
+        value["driver"]["storage"]["concurrent_writes"] = serde_json::json!(false);
+        assert!(
+            parse_config_str(&value.to_string(), Path::new("/tmp"))
+                .unwrap()
+                .storage
+                .unwrap()
+                .writeback
         );
     }
 
