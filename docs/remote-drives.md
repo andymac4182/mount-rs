@@ -15,6 +15,8 @@ mount-rs mount --config client.json
 
 `mount-remote --config client.json` is an equivalent explicit command. Remote mount options live in the config; additional mount CLI overrides are rejected. The bootstrap server config locates a dedicated SQLite service metadata catalog and its TLS listener. Drive definitions, issuer policies and explicit per-Drive grants reside in that catalog. The local `catalog-apply` command validates all backend definitions using the normal CLI parser and atomically updates the catalog only when `expected_revision` matches. It prints the new revision. Backend paths are resolved relative to the catalog document and stored as absolute paths. Storage secrets use the existing environment references or provider credentials chain.
 
+The bootstrap server config accepts `"max_connections": 1024` for a server expecting 1,000 clients. The compatible default is 128; supported values are 1 through 16,384. This controls connection admission, while the per-connection active request limit remains 32. Size this alongside datastore pools and memory; it is not a throughput guarantee.
+
 Token credentials are exactly one of:
 
 ```json

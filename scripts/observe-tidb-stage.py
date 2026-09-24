@@ -13,7 +13,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 LABEL = "mount-rs.tidb.run"
-SAMPLE = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+([-+0-9.eE]+)(?:\s|$)")
+SAMPLE = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+([-+0-9.eE]+|NaN|[-+]?Inf)(?:\s|$)")
 SAFE = re.compile(r"^[a-zA-Z0-9._-]+$")
 
 
@@ -85,9 +85,16 @@ def parse_proc_io(raw):
 
 
 def parse_memory_gauges(raw):
-    names = {'process_resident_memory_bytes', 'process_virtual_memory_bytes',
+    return parse_gauges(raw, {'process_resident_memory_bytes', 'process_virtual_memory_bytes',
              'go_memstats_heap_alloc_bytes', 'go_memstats_heap_inuse_bytes',
-             'tikv_allocator_allocated_bytes', 'tikv_allocator_resident_bytes'}
+             'tikv_allocator_allocated_bytes', 'tikv_allocator_resident_bytes'})
+
+
+def parse_session_gauges(raw):
+    return parse_gauges(raw, {'tidb_server_connections', 'tidb_server_internal_sessions'})
+
+
+def parse_gauges(raw, names):
     gauges = {line.split()[2] for line in raw.splitlines()
               if line.startswith('# TYPE ') and len(line.split()) == 4
               and line.split()[3] == 'gauge'}
@@ -101,7 +108,7 @@ def parse_memory_gauges(raw):
             continue
         number = float(value)
         if number != number or number < 0 or number == float('inf'):
-            raise ValueError('invalid backend memory gauge')
+            raise ValueError('invalid backend gauge')
         result[f'{name}{labels or ""}'] = number
     return result
 
@@ -162,6 +169,7 @@ def sample_source(args):
         "captured_at_monotonic_ns": time.monotonic_ns(),
         "metrics": metrics,
         "memory_gauges": parse_memory_gauges(raw),
+        "session_gauges": parse_session_gauges(raw),
         "metric_families": families,
         "available_metric_names": available,
         "proc_io": proc_io,
@@ -324,6 +332,11 @@ def main():
         "memory_by_source": {
             name: {'start': before['sources'][name].get('memory_gauges', {}),
                    'end': source.get('memory_gauges', {})}
+            for name, source in after['sources'].items()
+        },
+        "sessions_by_source": {
+            name: {'start': before['sources'][name].get('session_gauges', {}),
+                   'end': source.get('session_gauges', {})}
             for name, source in after['sources'].items()
         },
         "selected_sql_kv_rocksdb_counters": selected,

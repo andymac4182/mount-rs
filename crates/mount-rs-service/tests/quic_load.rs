@@ -100,6 +100,17 @@ async fn setup() -> (RemoteServer, quinn::Endpoint, tempfile::TempDir) {
 async fn setup_with_left(
     left: Arc<dyn FsDriver>,
 ) -> (RemoteServer, quinn::Endpoint, tempfile::TempDir) {
+    setup_with_left_and_options(
+        left,
+        mount_rs_service::server::RemoteServerOptions::default(),
+    )
+    .await
+}
+
+async fn setup_with_left_and_options(
+    left: Arc<dyn FsDriver>,
+    options: mount_rs_service::server::RemoteServerOptions,
+) -> (RemoteServer, quinn::Endpoint, tempfile::TempDir) {
     let directory = tempfile::tempdir().unwrap();
     let catalog = Arc::new(
         SqliteCatalog::open(directory.path().join("catalog.sqlite"))
@@ -155,12 +166,13 @@ async fn setup_with_left(
     let cert_der = certificate.cert.der().clone();
     let key_der =
         rustls::pki_types::PrivatePkcs8KeyDer::from(certificate.signing_key.serialize_der());
-    let server = RemoteServer::bind(
+    let server = RemoteServer::bind_with_options(
         "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
         vec![cert_der.clone()],
         key_der.into(),
         Arc::new(dispatcher),
         Arc::new(WorkloadAuthenticator),
+        options,
     )
     .await
     .unwrap();
@@ -561,25 +573,40 @@ async fn file_handle_cannot_cross_quic_sessions() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn connection_limit_refuses_129th_session_and_recovers_after_close() {
-    let (server, endpoint, _directory) = setup().await;
+    connection_admission(128).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn configured_connection_limit_refuses_overload_and_recovers_after_close() {
+    connection_admission(2).await;
+}
+
+async fn connection_admission(limit: usize) {
+    let (server, endpoint, _directory) = setup_with_left_and_options(
+        Arc::new(MemoryFs::new(MemoryOptions::default())),
+        mount_rs_service::server::RemoteServerOptions {
+            max_connections: limit,
+        },
+    )
+    .await;
     let address = server.local_addr();
-    let mut sessions = Vec::with_capacity(128);
+    let mut sessions = Vec::with_capacity(limit);
     tokio::time::timeout(Duration::from_secs(30), async {
-        for _ in 0..128 {
+        for _ in 0..limit {
             sessions.push(connect(&endpoint, address).await.expect("admitted session"));
         }
     })
     .await
-    .expect("admitting 128 sessions timed out");
+    .expect("admitting configured sessions timed out");
 
     // Every hello was answered, so each server session has passed handshake and
-    // retains one connection permit. A refused 129th must not disturb them.
+    // retains one connection permit. A refused extra connection must not disturb them.
     let extra = tokio::time::timeout(Duration::from_secs(5), connect(&endpoint, address))
         .await
-        .expect("129th connection did not resolve");
-    assert!(extra.is_err(), "129th connection was admitted");
+        .expect("extra connection did not resolve");
+    assert!(extra.is_err(), "extra connection was admitted");
     success(
-        &sessions[127],
+        &sessions[limit - 1],
         1,
         "left",
         OperationName::Stat,

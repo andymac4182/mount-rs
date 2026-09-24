@@ -95,8 +95,8 @@ use std::{
     collections::BTreeSet,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-const CLIENTS: usize = 100;
-const SERVERS: usize = 10;
+const DEFAULT_CLIENTS: usize = 100;
+const DEFAULT_SERVERS: usize = 10;
 const BYTES: usize = 4096;
 fn validate_depths(depths: &[usize]) -> Result<(), String> {
     if depths.is_empty()
@@ -223,6 +223,7 @@ struct LaneResult {
     errors: Vec<String>,
 }
 struct Client {
+    drive: String,
     connection: quinn::Connection,
     handles: Vec<u64>,
 }
@@ -239,6 +240,7 @@ fn env_num(name: &str, default: usize, min: usize, max: usize) -> usize {
 #[allow(clippy::too_many_arguments)] // Explicit worker inputs are test-only and immutable.
 async fn lane(
     connection: quinn::Connection,
+    drive: String,
     handle: u64,
     client: usize,
     lane: usize,
@@ -276,7 +278,7 @@ async fn lane(
         let start = Instant::now();
         let response = tokio::time::timeout(
             timeout,
-            wire::success(&connection, base + seq, "left", name, body),
+            wire::success(&connection, base + seq, &drive, name, body),
         )
         .await;
         match response {
@@ -324,6 +326,8 @@ async fn lane(
 #[allow(clippy::too_many_arguments)]
 async fn stage(
     clients: &[Client],
+    server_count: usize,
+    active_clients: usize,
     depth: usize,
     blocks: usize,
     mode: Mode,
@@ -342,9 +346,10 @@ async fn stage(
     let start = Instant::now();
     let deadline = start + Duration::from_secs(seconds as u64);
     let mut tasks = tokio::task::JoinSet::new();
-    for (client, c) in clients.iter().enumerate() {
+    for (client, c) in clients.iter().take(active_clients).enumerate() {
         for lane_id in 0..depth {
             let connection = c.connection.clone();
+            let drive = c.drive.clone();
             let handle = c.handles[lane_id];
             let expected = expected[client].clone();
             tasks.spawn(async move {
@@ -353,6 +358,7 @@ async fn stage(
                     lane_id,
                     lane(
                         connection,
+                        drive,
                         handle,
                         client,
                         lane_id,
@@ -397,7 +403,7 @@ async fn stage(
         .expect("process resource profile unavailable")
         .delta(&resources_before)
         .expect("process resource counters invalid");
-    let report = json!({"mode":format!("{mode:?}"),"nominal_seconds":seconds,"start_unix_ms":start_unix_ms,"finish_unix_ms":SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis(),"clients":CLIENTS,"servers":SERVERS,"per_client_depth":depth,"total_queue_depth":CLIENTS*depth,"elapsed_seconds_including_drain":elapsed,"read":read.json(),"write":write.json(),"read_iops":read.count as f64/elapsed,"write_iops":write.count as f64/elapsed,"total_iops":iops,"payload_mib_per_second":iops*BYTES as f64/1048576.0,"reference_target_iops":100000,"target_attainment":iops/100000.0,"failures":errors.len(),"cache":"cache-warm randomized dataset; no cold-cache claim"});
+    let report = json!({"mode":format!("{mode:?}"),"nominal_seconds":seconds,"start_unix_ms":start_unix_ms,"finish_unix_ms":SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis(),"clients":clients.len(),"active_clients":active_clients,"servers":server_count,"per_client_depth":depth,"total_queue_depth":active_clients*depth,"elapsed_seconds_including_drain":elapsed,"read":read.json(),"write":write.json(),"read_iops":read.count as f64/elapsed,"write_iops":write.count as f64/elapsed,"total_iops":iops,"payload_mib_per_second":iops*BYTES as f64/1048576.0,"reference_target_iops":100000,"target_attainment":iops/100000.0,"failures":errors.len(),"cache":"cache-warm randomized dataset; no cold-cache claim"});
     #[cfg(all(feature = "resource-profiling", unix))]
     let report = {
         let mut report = report;
@@ -421,6 +427,7 @@ async fn stage_observer(
     id: &str,
     successes: u64,
     failures: usize,
+    client_count: usize,
 ) -> Result<(), String> {
     let Ok(executable) = std::env::var("MOUNT_RS_DATASTORE_STAGE_OBSERVER") else {
         return Ok(());
@@ -431,7 +438,7 @@ async fn stage_observer(
     let args = vec![
         phase.to_owned(),
         format!("{mode:?}").to_lowercase(),
-        (CLIENTS * depth).to_string(),
+        (client_count * depth).to_string(),
         id.to_owned(),
         successes.to_string(),
         failures.to_string(),
@@ -465,6 +472,25 @@ async fn stage_observer(
     .map_err(|_| "datastore observer task failed".to_owned())?
 }
 async fn packet() -> Result<(), String> {
+    let client_count = env_num(
+        "MOUNT_RS_REMOTE_SATURATION_CLIENTS",
+        DEFAULT_CLIENTS,
+        1,
+        10_000,
+    );
+    let active_clients = env_num(
+        "MOUNT_RS_REMOTE_SATURATION_ACTIVE_CLIENTS",
+        client_count,
+        1,
+        client_count,
+    );
+    let setup_concurrency = env_num("MOUNT_RS_REMOTE_SATURATION_SETUP_CONCURRENCY", 100, 1, 100);
+    let server_count = env_num(
+        "MOUNT_RS_REMOTE_SATURATION_SERVERS",
+        DEFAULT_SERVERS,
+        1,
+        client_count,
+    );
     let depths: Vec<usize> = std::env::var("MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS")
         .unwrap_or("1,2,4,8".into())
         .split(',')
@@ -497,38 +523,108 @@ async fn packet() -> Result<(), String> {
             .as_nanos()
     );
     let backend = backend::Backend::from_environment(&key).await?;
+    let preseed = std::env::var("MOUNT_RS_REMOTE_SATURATION_PRESEED").as_deref() == Ok("1");
+    let separate =
+        std::env::var("MOUNT_RS_REMOTE_SATURATION_SEPARATE_DRIVES").as_deref() == Ok("1");
+    let mut drive_backends = vec![];
+    if separate {
+        for i in 0..client_count {
+            drive_backends.push(backend.child(i)?);
+        }
+    } else if preseed {
+        backend.preseed_empty_files(active_clients).await?;
+    }
+    let drive_backends = std::sync::Arc::new(drive_backends);
     let (mut servers, mut endpoints, mut dirs, mut providers) = (vec![], vec![], vec![], vec![]);
     let max_depth = *depths.iter().max().unwrap();
     let mut clients = vec![];
     let mut reports = vec![];
     let mut failed_phase = None;
     let mut namespace_bytes = None;
+    let mut setup_seconds = None;
+    let mut driver_setup_seconds = None;
+    let mut provisioning_seconds = None;
+    let provision = separate
+        && std::env::var("MOUNT_RS_REMOTE_SATURATION_PROVISION_DRIVES").as_deref() == Ok("1");
+    let driver_setup_started = Instant::now();
     let topology = &backend.topology;
     let mut expected: Vec<Vec<(usize, u64)>> =
-        vec![(0..blocks).map(|block| (0, block as u64 + 1)).collect(); CLIENTS];
+        vec![(0..blocks).map(|block| (0, block as u64 + 1)).collect(); client_count];
     let work = tokio::time::timeout(Duration::from_secs(1500), async {
-        for i in 0..SERVERS {
-            let fs = backend.open(i).await?;
-            let left = fs.driver();
-            providers.push(fs);
-            let (s, e, d) = wire::setup_with_left(left).await?;
-            servers.push(s);
-            endpoints.push(e);
-            dirs.push(d);
+        if provision {
+            let started = Instant::now();
+            for b in drive_backends.iter() {
+                let fs = b.open(0).await?;
+                fs.shutdown().await.map_err(|_| "drive provisioning shutdown failed")?;
+            }
+            provisioning_seconds = Some(started.elapsed().as_secs_f64());
+        }
+        if separate {
+            let mut starts = tokio::task::JoinSet::new();
+            for i in 0..server_count {
+                let backends = drive_backends.clone();
+                starts.spawn(async move {
+                    let mut opened = vec![];
+                    let result = async {
+                        let mut drivers = vec![];
+                        for b in backends.iter() {
+                            let fs = b.open(i).await?;
+                            drivers.push(fs.driver()); opened.push(fs);
+                        }
+                        wire::setup_with_drives(drivers).await
+                    }.await;
+                    (i,opened,result)
+                });
+            }
+            let mut prepared = vec![];
+            let mut errors = vec![];
+            while let Some(result) = starts.join_next().await {
+                match result {
+                    Ok((i,opened,result)) => {
+                        providers.extend(opened);
+                        match result {Ok(wire)=>prepared.push((i,wire)),Err(e)=>errors.push(e)}
+                    }
+                    Err(e)=>errors.push(format!("server setup task failed: {e}")),
+                }
+            }
+            prepared.sort_by_key(|(i,_)|*i);
+            for (_, (s,e,d)) in prepared {servers.push(s);endpoints.push(e);dirs.push(d);}
+            if !errors.is_empty() {return Err(format!("server setup failures: {errors:?}"));}
+        } else {
+            for i in 0..server_count {
+                let fs = backend.open(i).await?;
+                let left = fs.driver(); providers.push(fs);
+                let (s,e,d) = wire::setup_with_left(left).await?;
+                servers.push(s);endpoints.push(e);dirs.push(d);
+            }
         }
 
+        driver_setup_seconds = Some(driver_setup_started.elapsed().as_secs_f64());
         let mut setup_tasks = tokio::task::JoinSet::new();
-        for client in 0..CLIENTS {
-            let endpoint = endpoints[client / 10].clone();
-            let address = servers[client / 10].local_addr();
+        let setup_slots = std::sync::Arc::new(tokio::sync::Semaphore::new(setup_concurrency));
+        let setup_started = Instant::now();
+        for client in 0..client_count {
+            let endpoint = endpoints[client % server_count].clone();
+            let address = servers[client % server_count].local_addr();
+            let setup_slots = setup_slots.clone();
             setup_tasks.spawn(async move {
-                let connection = wire::connect(&endpoint, address).await?;
+                let _permit = setup_slots.acquire_owned().await.map_err(|_| "setup semaphore closed")?;
+                let drive = if separate {format!("sandbox-{client}")} else {"left".into()};
+                let connection = if separate {wire::connect_sandbox(&endpoint,address,client).await?} else {wire::connect(&endpoint, address).await?};
+                if separate && client_count > 1 {
+                    let denied = wire::request(&connection, 900_000, &format!("sandbox-{}", (client+1)%client_count), OperationName::Stat,json!({"path":"/"})).await?;
+                    if denied != Err("EACCES".into()) {return Err("cross-sandbox access was not denied".into());}
+                }
+                if client >= active_clients {
+                    if separate { wire::success(&connection, 1, &drive, OperationName::Stat, json!({"path":"/"})).await?; }
+                    return Ok((client, Client { drive, connection, handles: vec![] }));
+                }
                 let handle = wire::success(
                     &connection,
                     1,
-                    "left",
+                    &drive,
                     OperationName::Open,
-                    json!({"path":format!("/saturation-{client}"),"flags":"w+","mode":420}),
+                    json!({"path":format!("/saturation-{client}"),"flags":if preseed && !separate {"r+"} else {"w+"},"mode":420}),
                 )
                 .await?
                 .as_u64()
@@ -539,7 +635,7 @@ async fn packet() -> Result<(), String> {
                     let written = wire::success(
                         &connection,
                         2 + first as u64,
-                        "left",
+                        &drive,
                         OperationName::HandleWrite,
                         json!({"handle":handle,"position":first*BYTES,"data":data}),
                     )
@@ -553,7 +649,7 @@ async fn packet() -> Result<(), String> {
                     let extra = wire::success(
                         &connection,
                         10_000 + lane as u64,
-                        "left",
+                        &drive,
                         OperationName::Open,
                         json!({"path":format!("/saturation-{client}"),"flags":"r+","mode":420}),
                     )
@@ -565,6 +661,7 @@ async fn packet() -> Result<(), String> {
                 Ok::<_, String>((
                     client,
                     Client {
+                        drive,
                         connection,
                         handles,
                     },
@@ -585,8 +682,9 @@ async fn packet() -> Result<(), String> {
         }
         prepared.sort_by_key(|(client, _)| *client);
         clients.extend(prepared.into_iter().map(|(_, c)| c));
+        setup_seconds = Some(setup_started.elapsed().as_secs_f64());
         namespace_bytes =
-            tokio::time::timeout(Duration::from_secs(30), backend.namespace_bytes())
+            tokio::time::timeout(Duration::from_secs(30), if separate {drive_backends[0].namespace_bytes()} else {backend.namespace_bytes()})
                 .await
                 .map_err(|_| "namespace size probe deadline exceeded")??;
         let mut phase = 0u64;
@@ -595,13 +693,15 @@ async fn packet() -> Result<(), String> {
                 for (measured, duration) in [(false, warmup), (true, seconds)] {
                     phase += 1;
                     let stage_id = format!("{key}-{phase}");
-                    if measured { stage_observer("begin", *mode, depth, &stage_id, 0, 0).await?; }
+                    if measured { stage_observer("begin", *mode, depth, &stage_id, 0, 0, active_clients).await?; }
                     let profile_before = mount_rs_core::diagnostics::profile::snapshot();
                     let sqlite_before = if measured && backend.name == "sqlite" && mount_rs_core::diagnostics::profile::enabled() {
                         Some(mount_rs_sqlite::sqlite_io_diagnostics(true))
                     } else { None };
                     let (mut report, ledger, errors) = stage(
                         &clients,
+                        server_count,
+                        active_clients,
                         depth,
                         blocks,
                         *mode,
@@ -619,7 +719,7 @@ async fn packet() -> Result<(), String> {
                             report["sqlite_io_end"] = mount_rs_sqlite::sqlite_io_diagnostics(false);
                         }
                         stage_observer("end", *mode, depth, &stage_id,
-                            report["read"]["completed"].as_u64().unwrap_or(0) + report["write"]["completed"].as_u64().unwrap_or(0), errors.len()).await?;
+                            report["read"]["completed"].as_u64().unwrap_or(0) + report["write"]["completed"].as_u64().unwrap_or(0), errors.len(), active_clients).await?;
                     }
                     for (c, l, b, s) in ledger {
                         expected[c][b] = (l, s);
@@ -642,7 +742,7 @@ async fn packet() -> Result<(), String> {
                 wire::success(
                     &c.connection,
                     u64::MAX - 1 - lane as u64,
-                    "left",
+                    &c.drive,
                     OperationName::HandleClose,
                     json!({"handle":handle}),
                 )
@@ -687,7 +787,36 @@ async fn packet() -> Result<(), String> {
     drop(dirs);
     let verification_run = work.is_ok() && cleanup.is_ok();
     let verification = if verification_run {
-        verify(&backend, &expected).await
+        if separate {
+            async {
+                let mut result = Ok(());
+                for (client, b) in drive_backends.iter().take(active_clients).enumerate() {
+                    let fs = b.open(server_count).await?;
+                    let view = Loopback::from_arc(fs.driver());
+                    let actual = view
+                        .read_file(&format!("/saturation-{client}"))
+                        .await
+                        .map_err(|_| "separate fresh read failed")?;
+                    let want: Vec<u8> = expected[client]
+                        .iter()
+                        .flat_map(|(lane, seq)| payload(client, *lane, *seq))
+                        .collect();
+                    if actual != want {
+                        result = Err("separate drive content mismatch".into());
+                    }
+                    fs.shutdown()
+                        .await
+                        .map_err(|_| "separate fresh shutdown failed")?;
+                    if result.is_err() {
+                        break;
+                    }
+                }
+                result
+            }
+            .await
+        } else {
+            verify(&backend, server_count, &expected[..active_clients]).await
+        }
     } else {
         Ok(())
     };
@@ -698,7 +827,9 @@ async fn packet() -> Result<(), String> {
     } else {
         "failed"
     };
-    let artifact = json!({"schema":"mount-rs-provider-saturation-v2","inode_updates":std::env::var("MOUNT_RS_REMOTE_SATURATION_INODE_UPDATES").as_deref()==Ok("1"),"provider":backend.name,"provider_identity":backend.identity,"provider_version":backend.version,"volume_key":key,"dataset_bytes":CLIENTS*blocks*BYTES,"namespace_bytes":namespace_bytes,"topology":topology,"debug_assertions":cfg!(debug_assertions),"build_profile":if cfg!(debug_assertions){"debug"}else{"release"},"warmup_seconds":warmup,"nominal_stage_seconds":seconds,"configured_modes":modes.iter().map(|m|format!("{m:?}")).collect::<Vec<_>>(),"server_active_request_limit_per_connection":32,"audit_logging":"enabled; request audit cost included","latency_histogram":"power-of-two microsecond upper bounds","stages":reports,"failed_phase":failed_phase,"verification_status":verification_status,"verified_files":if verification_status=="passed"{CLIENTS}else{0},"work_error":work.as_ref().err(),"cleanup_error":cleanup.as_ref().err(),"verification_error":verification.as_ref().err()});
+    let snapshot_verification =
+        std::env::var("MOUNT_RS_REMOTE_SATURATION_SNAPSHOT_VERIFY").as_deref() == Ok("1");
+    let artifact = json!({"separate_drives":separate,"drive_count":if separate {client_count} else {1},"driver_replicas":if separate {client_count*server_count} else {server_count},"verification_method":if separate {"all fresh driver files"} else if snapshot_verification {"all stored files plus fresh driver sample"} else {"all fresh driver files"},"fresh_driver_sample_limit":if separate {active_clients} else if snapshot_verification {64} else {active_clients},"schema":"mount-rs-provider-saturation-v2","inode_updates":std::env::var("MOUNT_RS_REMOTE_SATURATION_INODE_UPDATES").as_deref()==Ok("1"),"provider":backend.name,"provider_identity":backend.identity,"provider_version":backend.version,"volume_key":key,"clients":client_count,"active_clients":active_clients,"servers":server_count,"offline_empty_file_preseed":preseed,"setup_concurrency":setup_concurrency,"setup_seconds":setup_seconds,"driver_setup_seconds":driver_setup_seconds,"parallel_server_startup":separate,"drives_provisioned_before_startup":provision,"provisioning_seconds":provisioning_seconds,"dataset_bytes":active_clients*blocks*BYTES,"namespace_bytes":namespace_bytes,"topology":topology,"debug_assertions":cfg!(debug_assertions),"build_profile":if cfg!(debug_assertions){"debug"}else{"release"},"warmup_seconds":warmup,"nominal_stage_seconds":seconds,"configured_modes":modes.iter().map(|m|format!("{m:?}")).collect::<Vec<_>>(),"server_active_request_limit_per_connection":32,"audit_logging":"enabled; request audit cost included","latency_histogram":"power-of-two microsecond upper bounds","stages":reports,"failed_phase":failed_phase,"verification_status":verification_status,"verified_files":if verification_status=="passed"{active_clients}else{0},"work_error":work.as_ref().err(),"cleanup_error":cleanup.as_ref().err(),"verification_error":verification.as_ref().err()});
     if let Ok(path) = std::env::var("MOUNT_RS_REMOTE_TIDB_SATURATION_OUTPUT") {
         let path = std::path::PathBuf::from(path);
         let bytes = serde_json::to_vec_pretty(&artifact).unwrap();
@@ -715,10 +846,17 @@ async fn packet() -> Result<(), String> {
     cleanup?;
     verification
 }
-async fn verify(backend: &backend::Backend, expected: &[Vec<(usize, u64)>]) -> Result<(), String> {
-    let fs = backend.open(SERVERS).await?;
+async fn verify(
+    backend: &backend::Backend,
+    server_count: usize,
+    expected: &[Vec<(usize, u64)>],
+) -> Result<(), String> {
+    let fs = backend.open(server_count).await?;
     let view = Loopback::from_arc(fs.driver());
-    let verified = tokio::time::timeout(Duration::from_secs(120), async {
+    let snapshot_verification =
+        std::env::var("MOUNT_RS_REMOTE_SATURATION_SNAPSHOT_VERIFY").as_deref() == Ok("1");
+    let verify_seconds = env_num("MOUNT_RS_REMOTE_SATURATION_VERIFY_SECONDS", 120, 1, 1200);
+    let verified = tokio::time::timeout(Duration::from_secs(verify_seconds as u64), async {
         let names: BTreeSet<String> = view
             .readdir("/")
             .await
@@ -726,11 +864,19 @@ async fn verify(backend: &backend::Backend, expected: &[Vec<(usize, u64)>]) -> R
             .into_iter()
             .map(|e| e.name)
             .collect();
-        let want: BTreeSet<String> = (0..CLIENTS).map(|c| format!("saturation-{c}")).collect();
+        let want: BTreeSet<String> = (0..expected.len())
+            .map(|c| format!("saturation-{c}"))
+            .collect();
         if names != want {
             return Err("fresh namespace mismatch".into());
         }
+        if snapshot_verification {
+            backend.verify_stored_files(expected).await?;
+        }
         for (client, blocks) in expected.iter().enumerate() {
+            if snapshot_verification && client % expected.len().div_ceil(64) != 0 {
+                continue;
+            }
             let actual = view
                 .read_file(&format!("/saturation-{client}"))
                 .await
@@ -770,10 +916,41 @@ fn seeded_block(client: usize, block: usize) -> Vec<u8> {
 }
 #[test]
 fn initial_dataset_has_100_times_64_distinct_blocks() {
-    let unique: BTreeSet<Vec<u8>> = (0..CLIENTS)
+    let unique: BTreeSet<Vec<u8>> = (0..DEFAULT_CLIENTS)
         .flat_map(|client| (0..64).map(move |block| seeded_block(client, block)))
         .collect();
-    assert_eq!(unique.len(), CLIENTS * 64);
+    assert_eq!(unique.len(), DEFAULT_CLIENTS * 64);
+}
+
+#[tokio::test]
+#[ignore = "requires owned TiDB and inode mode"]
+async fn snapshot_oracle_rejects_incorrect_byte_ledger() {
+    assert_eq!(
+        std::env::var("MOUNT_RS_REMOTE_SATURATION_INODE_UPDATES").as_deref(),
+        Ok("1")
+    );
+    let key = format!(
+        "snapshot-oracle-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let backend = backend::Backend::from_environment(&key).await.unwrap();
+    backend.preseed_empty_files(1).await.unwrap();
+    let fs = backend.open(0).await.unwrap();
+    Loopback::from_arc(fs.driver())
+        .write_file("/saturation-0", &payload(0, 0, 1))
+        .await
+        .unwrap();
+    fs.shutdown().await.unwrap();
+    backend.verify_stored_files(&[vec![(0, 1)]]).await.unwrap();
+    let error = backend
+        .verify_stored_files(&[vec![(0, 2)]])
+        .await
+        .unwrap_err();
+    assert!(error.contains("stored file mismatch"));
 }
 
 #[test]

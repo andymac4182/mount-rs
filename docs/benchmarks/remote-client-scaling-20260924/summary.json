@@ -1,0 +1,4055 @@
+{
+  "schema": "mount-rs-horizontal-scaling-v1",
+  "stages": [
+    {
+      "provider": "tidb",
+      "inode_updates": true,
+      "separate_drives": true,
+      "drive_count": 10,
+      "driver_replicas": 100,
+      "driver_setup_seconds": 3.398177667,
+      "provisioning_seconds": null,
+      "parallel_server_startup": false,
+      "drives_provisioned_before_startup": false,
+      "verification_method": "all fresh driver files",
+      "servers": 10,
+      "clients": 10,
+      "active_clients": 10,
+      "setup_seconds": 0.16660575,
+      "depth": 1,
+      "mode": "Read",
+      "operations": 28048,
+      "operations_per_second": 1869.3777776433683,
+      "p99_us_upper": 8192,
+      "cpu_us_per_operation": 971.8162792355961,
+      "cpu_cores": 1.8166917563550857,
+      "rss_end_bytes": 60506112,
+      "allocations_per_operation": 551.2231888191671,
+      "inode_cas_conflicts": 0,
+      "namespace_cas_conflicts": 0,
+      "verified_files": 10,
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-separate/tidb-10-10-10.json",
+      "profile_us_per_operation": {
+        "filesystem.gate_wait": 0.30729845265259553,
+        "service.dispatch": 4840.323740730177,
+        "service.authorization": 203.0528604178551,
+        "catalog.load": 197.63593421990873,
+        "catalog.pool_wait": 0.164250035653166,
+        "catalog.decode_validate_bytes": 16.09247379492299,
+        "provider.inode.load_if_changed": 3564.215791856817,
+        "provider.inode.publish_cas": 0.0
+      },
+      "catalog_document_bytes_per_operation": 2037.0,
+      "quic_network": {
+        "congestion_events": 0,
+        "lost_bytes": 0,
+        "lost_packets": 0,
+        "rx_bytes": 422122911,
+        "rx_datagrams": 314168,
+        "rx_ios": 314168,
+        "sent_packets": 116474,
+        "tx_bytes": 8758475,
+        "tx_datagrams": 116474,
+        "tx_ios": 116474
+      },
+      "datastore_sessions": null,
+      "datastore_window_seconds": 15.534131458,
+      "datastore_counter_resets": [],
+      "datastore_series_coverage_incomplete": true,
+      "datastore_cpu_seconds_per_operation": {
+        "pd": 0.0002720336565887051,
+        "tidb": 0.001283870507701084,
+        "tikv": 0.0006417569880205362
+      },
+      "datastore_vm_io_per_operation": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 4.235025670279521,
+            "wios": 0.001461779806046777
+          },
+          "net_dev": {
+            "rx_bytes": 271.54577866514546,
+            "rx_packets": 2.6006132344552197,
+            "tx_bytes": 283.77641899600684,
+            "tx_packets": 2.5582929264118652
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 106.9530804335425,
+            "read_bytes": 0.0,
+            "syscr": 4.746648602395893,
+            "syscw": 2.776098117512835,
+            "wchar": 140.36943810610381,
+            "write_bytes": 6.133485453508271
+          }
+        },
+        "tidb": {
+          "cgroup_io": {},
+          "net_dev": {
+            "rx_bytes": 15356.173987450085,
+            "rx_packets": 11.846334854535083,
+            "tx_bytes": 9237.868332857957,
+            "tx_packets": 13.153629492298917
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 14595.411437535653,
+            "read_bytes": 0.0,
+            "syscr": 19.303016257843698,
+            "syscw": 10.4312963491158,
+            "wchar": 8371.851932401598,
+            "write_bytes": 0.0
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 4.527096406160867,
+            "wios": 0.001461779806046777
+          },
+          "net_dev": {
+            "rx_bytes": 2912.1649315459213,
+            "rx_packets": 7.532622646891044,
+            "tx_bytes": 14463.811573017683,
+            "tx_packets": 5.269288362806617
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 95.72408014831717,
+            "read_bytes": 0.0,
+            "syscr": 4.173666571591557,
+            "syscw": 3.600256702795208,
+            "wchar": 112.05233884768967,
+            "write_bytes": 4.527096406160867
+          }
+        }
+      },
+      "datastore_sql_per_operation": 3.0
+    },
+    {
+      "provider": "tidb",
+      "inode_updates": true,
+      "separate_drives": true,
+      "drive_count": 10,
+      "driver_replicas": 100,
+      "driver_setup_seconds": 3.398177667,
+      "provisioning_seconds": null,
+      "parallel_server_startup": false,
+      "drives_provisioned_before_startup": false,
+      "verification_method": "all fresh driver files",
+      "servers": 10,
+      "clients": 10,
+      "active_clients": 10,
+      "setup_seconds": 0.16660575,
+      "depth": 1,
+      "mode": "Write",
+      "operations": 10250,
+      "operations_per_second": 682.7950935173793,
+      "p99_us_upper": 32768,
+      "cpu_us_per_operation": 1230.663024390244,
+      "cpu_cores": 0.8402906748269173,
+      "rss_end_bytes": 61931520,
+      "allocations_per_operation": 798.4423414634147,
+      "inode_cas_conflicts": 0,
+      "namespace_cas_conflicts": 0,
+      "verified_files": 10,
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-separate/tidb-10-10-10.json",
+      "profile_us_per_operation": {
+        "filesystem.gate_wait": 0.0,
+        "service.dispatch": 14185.601652975609,
+        "service.authorization": 195.8053122926829,
+        "catalog.load": 189.6177295609756,
+        "catalog.pool_wait": 0.20079668292682928,
+        "catalog.decode_validate_bytes": 18.223680097560976,
+        "provider.inode.load_if_changed": 1682.2955219512196,
+        "provider.inode.publish_cas": 7861.339975609756
+      },
+      "catalog_document_bytes_per_operation": 2037.0,
+      "quic_network": {
+        "congestion_events": 0,
+        "lost_bytes": 0,
+        "lost_packets": 0,
+        "rx_bytes": 2010724,
+        "rx_datagrams": 32982,
+        "rx_ios": 32982,
+        "sent_packets": 114799,
+        "tx_bytes": 155192467,
+        "tx_datagrams": 114799,
+        "tx_ios": 114799
+      },
+      "datastore_sessions": null,
+      "datastore_window_seconds": 15.49133875,
+      "datastore_counter_resets": [],
+      "datastore_series_coverage_incomplete": true,
+      "datastore_cpu_seconds_per_operation": {
+        "pd": 0.0008575609756097562,
+        "tidb": 0.0031121951219512194,
+        "tikv": 0.0017560975609756098
+      },
+      "datastore_vm_io_per_operation": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 17.982439024390246,
+            "wios": 0.005170731707317073
+          },
+          "net_dev": {
+            "rx_bytes": 1014.233756097561,
+            "rx_packets": 9.084390243902439,
+            "tx_bytes": 1010.362243902439,
+            "tx_packets": 8.902146341463414
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 435.34946341463416,
+            "read_bytes": 0.0,
+            "syscr": 16.23678048780488,
+            "syscw": 9.226048780487805,
+            "wchar": 501.0949268292683,
+            "write_bytes": 26.374243902439023
+          }
+        },
+        "tidb": {
+          "cgroup_io": {},
+          "net_dev": {
+            "rx_bytes": 21947.545365853657,
+            "rx_packets": 29.808975609756097,
+            "tx_bytes": 22079.135414634147,
+            "tx_packets": 31.752
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 20043.348292682927,
+            "read_bytes": 6.393756097560976,
+            "syscr": 49.829951219512196,
+            "syscw": 27.90848780487805,
+            "wchar": 19994.709073170732,
+            "write_bytes": 0.0
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 20998.693463414635,
+            "wios": 4.017073170731707
+          },
+          "net_dev": {
+            "rx_bytes": 13592.399219512195,
+            "rx_packets": 10.608682926829268,
+            "tx_bytes": 10985.622341463415,
+            "tx_packets": 9.848
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 235.19775609756098,
+            "read_bytes": 0.0,
+            "syscr": 8.055414634146342,
+            "syscw": 9.920487804878048,
+            "wchar": 13086.611609756097,
+            "write_bytes": 21000.69151219512
+          }
+        }
+      },
+      "datastore_sql_per_operation": 10.0
+    },
+    {
+      "provider": "tidb",
+      "inode_updates": true,
+      "separate_drives": true,
+      "drive_count": 25,
+      "driver_replicas": 250,
+      "driver_setup_seconds": 8.674934708,
+      "provisioning_seconds": null,
+      "parallel_server_startup": false,
+      "drives_provisioned_before_startup": false,
+      "verification_method": "all fresh driver files",
+      "servers": 10,
+      "clients": 25,
+      "active_clients": 25,
+      "setup_seconds": 0.521915916,
+      "depth": 1,
+      "mode": "Read",
+      "operations": 42514,
+      "operations_per_second": 2831.4969906936035,
+      "p99_us_upper": 16384,
+      "cpu_us_per_operation": 935.1135155478196,
+      "cpu_cores": 2.647771105230567,
+      "rss_end_bytes": 80969728,
+      "allocations_per_operation": 782.1383779460883,
+      "inode_cas_conflicts": 0,
+      "namespace_cas_conflicts": 0,
+      "verified_files": 25,
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-separate/tidb-10-25-25.json",
+      "profile_us_per_operation": {
+        "filesystem.gate_wait": 0.4016578068400998,
+        "service.dispatch": 8104.063562214799,
+        "service.authorization": 415.85561805522883,
+        "catalog.load": 407.69943877311005,
+        "catalog.pool_wait": 0.1402992661241003,
+        "catalog.decode_validate_bytes": 32.137758597167995,
+        "provider.inode.load_if_changed": 6000.240689067131,
+        "provider.inode.publish_cas": 0.0
+      },
+      "catalog_document_bytes_per_operation": 4932.0,
+      "quic_network": {
+        "congestion_events": 0,
+        "lost_bytes": 0,
+        "lost_packets": 0,
+        "rx_bytes": 639822980,
+        "rx_datagrams": 476219,
+        "rx_ios": 476219,
+        "sent_packets": 173676,
+        "tx_bytes": 12981826,
+        "tx_datagrams": 173676,
+        "tx_ios": 173676
+      },
+      "datastore_sessions": null,
+      "datastore_window_seconds": 15.550793,
+      "datastore_counter_resets": [],
+      "datastore_series_coverage_incomplete": true,
+      "datastore_cpu_seconds_per_operation": {
+        "pd": 0.0001557134120525004,
+        "tidb": 0.00121442348402879,
+        "tikv": 0.0005174765959448652
+      },
+      "datastore_vm_io_per_operation": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 1.5415157359928495,
+            "wios": 0.0005409982593969046
+          },
+          "net_dev": {
+            "rx_bytes": 160.64082419908735,
+            "rx_packets": 1.5086089288234463,
+            "tx_bytes": 168.77329820764925,
+            "tx_packets": 1.4876276050242274
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 65.69722914804535,
+            "read_bytes": 0.0,
+            "syscr": 2.7855059509808533,
+            "syscw": 1.6928541186432704,
+            "wchar": 86.76231359081714,
+            "write_bytes": 2.50496307098838
+          }
+        },
+        "tidb": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 0.0,
+            "wios": 0.0
+          },
+          "net_dev": {
+            "rx_bytes": 15314.708895893118,
+            "rx_packets": 10.458202004045726,
+            "tx_bytes": 9544.156136801994,
+            "tx_packets": 10.335348355835725
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 14638.815425506891,
+            "read_bytes": 0.0,
+            "syscr": 14.898104153925766,
+            "syscw": 8.269746436467987,
+            "wchar": 8863.782212918097,
+            "write_bytes": 0.0
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 29.770522651361905,
+            "wios": 0.0014583431340264384
+          },
+          "net_dev": {
+            "rx_bytes": 3340.3490379639647,
+            "rx_packets": 5.7909394552382745,
+            "tx_bytes": 14534.112856941243,
+            "tx_packets": 4.935127252199275
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 63.62998071223597,
+            "read_bytes": 0.0,
+            "syscr": 2.6499741261702026,
+            "syscw": 2.268640918285741,
+            "wchar": 75.38215646610529,
+            "write_bytes": 4.239168273980336
+          }
+        }
+      },
+      "datastore_sql_per_operation": 3.0
+    },
+    {
+      "provider": "tidb",
+      "inode_updates": true,
+      "separate_drives": true,
+      "drive_count": 25,
+      "driver_replicas": 250,
+      "driver_setup_seconds": 8.674934708,
+      "provisioning_seconds": null,
+      "parallel_server_startup": false,
+      "drives_provisioned_before_startup": false,
+      "verification_method": "all fresh driver files",
+      "servers": 10,
+      "clients": 25,
+      "active_clients": 25,
+      "setup_seconds": 0.521915916,
+      "depth": 1,
+      "mode": "Write",
+      "operations": 15939,
+      "operations_per_second": 1061.6917875804827,
+      "p99_us_upper": 65536,
+      "cpu_us_per_operation": 1405.1311249137336,
+      "cpu_cores": 1.4918161757946364,
+      "rss_end_bytes": 84131840,
+      "allocations_per_operation": 1031.126231256666,
+      "inode_cas_conflicts": 0,
+      "namespace_cas_conflicts": 0,
+      "verified_files": 25,
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-separate/tidb-10-25-25.json",
+      "profile_us_per_operation": {
+        "filesystem.gate_wait": 0.0,
+        "service.dispatch": 22913.55152186461,
+        "service.authorization": 244.2600846351716,
+        "catalog.load": 234.80967576384967,
+        "catalog.pool_wait": 0.1776342932429889,
+        "catalog.decode_validate_bytes": 36.29906204906205,
+        "provider.inode.load_if_changed": 2691.4205234958276,
+        "provider.inode.publish_cas": 12498.467625509757
+      },
+      "catalog_document_bytes_per_operation": 4932.0,
+      "quic_network": {
+        "congestion_events": 0,
+        "lost_bytes": 0,
+        "lost_packets": 0,
+        "rx_bytes": 3489020,
+        "rx_datagrams": 64940,
+        "rx_ios": 64940,
+        "sent_packets": 178558,
+        "tx_bytes": 241165065,
+        "tx_datagrams": 178558,
+        "tx_ios": 178558
+      },
+      "datastore_sessions": null,
+      "datastore_window_seconds": 15.507045833,
+      "datastore_counter_resets": [],
+      "datastore_series_coverage_incomplete": false,
+      "datastore_cpu_seconds_per_operation": {
+        "pd": 0.000481837003576134,
+        "tidb": 0.002848359370098501,
+        "tikv": 0.001443001443001443
+      },
+      "datastore_vm_io_per_operation": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 3.854696028609072,
+            "wios": 0.0013175230566534915
+          },
+          "net_dev": {
+            "rx_bytes": 504.311562833302,
+            "rx_packets": 4.682853378505553,
+            "tx_bytes": 530.2121839513144,
+            "tx_packets": 4.604680343810778
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 209.46715603237342,
+            "read_bytes": 0.0,
+            "syscr": 8.715038584603802,
+            "syscw": 5.257544387979171,
+            "wchar": 271.2823891084761,
+            "write_bytes": 6.681473116255725
+          }
+        },
+        "tidb": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 0.0,
+            "wios": 0.0
+          },
+          "net_dev": {
+            "rx_bytes": 21576.5165317774,
+            "rx_packets": 25.12654495263191,
+            "tx_bytes": 22188.754376058725,
+            "tx_packets": 26.400840705188532
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 19958.102578580838,
+            "read_bytes": 0.0,
+            "syscr": 39.78587113369722,
+            "syscw": 22.25403099316143,
+            "wchar": 20452.582847104586,
+            "write_bytes": 0.0
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 24330.84133258046,
+            "wios": 1.9215760085325302
+          },
+          "net_dev": {
+            "rx_bytes": 14242.218144174665,
+            "rx_packets": 9.619612271786185,
+            "tx_bytes": 11084.455925716795,
+            "tx_packets": 9.402158228245185
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 243.53579270970576,
+            "read_bytes": 0.0,
+            "syscr": 5.603551038333647,
+            "syscw": 6.3093042223477,
+            "wchar": 20626.00947361817,
+            "write_bytes": 24330.84133258046
+          }
+        }
+      },
+      "datastore_sql_per_operation": 10.0
+    },
+    {
+      "provider": "tidb",
+      "inode_updates": true,
+      "separate_drives": true,
+      "drive_count": 50,
+      "driver_replicas": 500,
+      "driver_setup_seconds": 17.393828667,
+      "provisioning_seconds": null,
+      "parallel_server_startup": false,
+      "drives_provisioned_before_startup": false,
+      "verification_method": "all fresh driver files",
+      "servers": 10,
+      "clients": 50,
+      "active_clients": 50,
+      "setup_seconds": 0.901625292,
+      "depth": 1,
+      "mode": "Read",
+      "operations": 48358,
+      "operations_per_second": 3221.651262523052,
+      "p99_us_upper": 32768,
+      "cpu_us_per_operation": 980.5809380040531,
+      "cpu_cores": 3.1590898169267962,
+      "rss_end_bytes": 119308288,
+      "allocations_per_operation": 1164.819368046652,
+      "inode_cas_conflicts": 0,
+      "namespace_cas_conflicts": 0,
+      "verified_files": 50,
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-separate/tidb-10-50-50.json",
+      "profile_us_per_operation": {
+        "filesystem.gate_wait": 0.49178177343976176,
+        "service.dispatch": 14422.667988585135,
+        "service.authorization": 1482.8341430787045,
+        "catalog.load": 1468.835232619215,
+        "catalog.pool_wait": 0.1521870217957732,
+        "catalog.decode_validate_bytes": 59.980070867281526,
+        "provider.inode.load_if_changed": 10226.577711381778,
+        "provider.inode.publish_cas": 0.0
+      },
+      "catalog_document_bytes_per_operation": 9757.0,
+      "quic_network": {
+        "congestion_events": 0,
+        "lost_bytes": 0,
+        "lost_packets": 0,
+        "rx_bytes": 727790363,
+        "rx_datagrams": 542535,
+        "rx_ios": 542535,
+        "sent_packets": 187739,
+        "tx_bytes": 14180003,
+        "tx_datagrams": 187739,
+        "tx_ios": 187739
+      },
+      "datastore_sessions": null,
+      "datastore_window_seconds": 15.536659834,
+      "datastore_counter_resets": [],
+      "datastore_series_coverage_incomplete": false,
+      "datastore_cpu_seconds_per_operation": {
+        "pd": 0.00011476901443401293,
+        "tidb": 0.0012798296042019937,
+        "tikv": 0.00043426113569626534
+      },
+      "datastore_vm_io_per_operation": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 1.3552256089995451,
+            "wios": 0.0004962984407957318
+          },
+          "net_dev": {
+            "rx_bytes": 117.49772529881302,
+            "rx_packets": 1.0867695107324538,
+            "tx_bytes": 123.78425493196576,
+            "tx_packets": 1.073845072170065
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 49.49803548533852,
+            "read_bytes": 0.0,
+            "syscr": 2.072811117085074,
+            "syscw": 1.275466313743331,
+            "wchar": 66.83212705240085,
+            "write_bytes": 2.4563464163116753
+          }
+        },
+        "tidb": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 0.0,
+            "wios": 0.0
+          },
+          "net_dev": {
+            "rx_bytes": 15283.793953430662,
+            "rx_packets": 9.336862566690103,
+            "tx_bytes": 10301.123061334216,
+            "tx_packets": 8.65232226312089
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 14679.677571446296,
+            "read_bytes": 0.0,
+            "syscr": 12.55463418669093,
+            "syscw": 7.013482774308284,
+            "wchar": 9731.315190868108,
+            "write_bytes": 0.0
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 3.4727656230613344,
+            "wios": 0.0013027834070887961
+          },
+          "net_dev": {
+            "rx_bytes": 4141.310724182142,
+            "rx_packets": 4.501840440051284,
+            "tx_bytes": 14545.625108565284,
+            "tx_packets": 4.197899003267298
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 53.57977997435791,
+            "read_bytes": 0.0,
+            "syscr": 1.9489639770048388,
+            "syscw": 1.6095785599073575,
+            "wchar": 63.10124488192233,
+            "write_bytes": 3.303362421936391
+          }
+        }
+      },
+      "datastore_sql_per_operation": 3.0
+    },
+    {
+      "provider": "tidb",
+      "inode_updates": true,
+      "separate_drives": true,
+      "drive_count": 50,
+      "driver_replicas": 500,
+      "driver_setup_seconds": 17.393828667,
+      "provisioning_seconds": null,
+      "parallel_server_startup": false,
+      "drives_provisioned_before_startup": false,
+      "verification_method": "all fresh driver files",
+      "servers": 10,
+      "clients": 50,
+      "active_clients": 50,
+      "setup_seconds": 0.901625292,
+      "depth": 1,
+      "mode": "Write",
+      "operations": 21511,
+      "operations_per_second": 1432.024281749628,
+      "p99_us_upper": 65536,
+      "cpu_us_per_operation": 1353.538189763377,
+      "cpu_cores": 1.9382995540165915,
+      "rss_end_bytes": 125665280,
+      "allocations_per_operation": 1414.144809632281,
+      "inode_cas_conflicts": 0,
+      "namespace_cas_conflicts": 0,
+      "verified_files": 50,
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-separate/tidb-10-50-50.json",
+      "profile_us_per_operation": {
+        "filesystem.gate_wait": 0.0,
+        "service.dispatch": 34119.58908307378,
+        "service.authorization": 479.6961437868997,
+        "catalog.load": 466.05805406536194,
+        "catalog.pool_wait": 0.16530946957370649,
+        "catalog.decode_validate_bytes": 63.253538282739065,
+        "provider.inode.load_if_changed": 4082.9217084282463,
+        "provider.inode.publish_cas": 18177.027326344658
+      },
+      "catalog_document_bytes_per_operation": 9757.0,
+      "quic_network": {
+        "congestion_events": 0,
+        "lost_bytes": 0,
+        "lost_packets": 0,
+        "rx_bytes": 4932202,
+        "rx_datagrams": 91370,
+        "rx_ios": 91370,
+        "sent_packets": 241051,
+        "tx_bytes": 325427346,
+        "tx_datagrams": 241051,
+        "tx_ios": 241051
+      },
+      "datastore_sessions": null,
+      "datastore_window_seconds": 15.500799709,
+      "datastore_counter_resets": [],
+      "datastore_series_coverage_incomplete": true,
+      "datastore_cpu_seconds_per_operation": {
+        "pd": 0.0002803216958765283,
+        "tidb": 0.002561945051369068,
+        "tikv": 0.0011621960857235833
+      },
+      "datastore_vm_io_per_operation": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 607.8021477383664,
+            "rios": 0.00306819766631026,
+            "wbytes": 2.856213100274278,
+            "wios": 0.00111570824229464
+          },
+          "net_dev": {
+            "rx_bytes": 303.037608665334,
+            "rx_packets": 2.7777881084096507,
+            "tx_bytes": 319.9199944214588,
+            "tx_packets": 2.7426432987773697
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 128.34968155827252,
+            "read_bytes": 0.9520710334247594,
+            "syscr": 5.262842266747246,
+            "syscw": 3.1938543070986936,
+            "wchar": 171.36102459206919,
+            "write_bytes": 6.854911440658268
+          }
+        },
+        "tidb": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 527.0665241039468,
+            "rios": 0.0024638557017339965,
+            "wbytes": 0.0,
+            "wios": 0.0
+          },
+          "net_dev": {
+            "rx_bytes": 21213.35321463437,
+            "rx_packets": 22.043373157919206,
+            "tx_bytes": 21833.087769048394,
+            "tx_packets": 22.723443819441215
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 19787.05029984659,
+            "read_bytes": 401.3931476918786,
+            "syscr": 33.71451815350286,
+            "syscw": 18.76472502440612,
+            "wchar": 20337.11161731207,
+            "write_bytes": 0.0
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 4364.674445632467,
+            "rios": 0.01603830598298545,
+            "wbytes": 27320.630375156896,
+            "wios": 0.9745246618009391
+          },
+          "net_dev": {
+            "rx_bytes": 14100.27562642369,
+            "rx_packets": 7.796011343033797,
+            "tx_bytes": 10916.381711682396,
+            "tx_packets": 7.974152759053507
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 23424.615452559156,
+            "read_bytes": 4085.5272186323277,
+            "syscr": 4.725256845334945,
+            "syscw": 4.181999907024313,
+            "wchar": 25530.13314118358,
+            "write_bytes": 27339.481381618705
+          }
+        }
+      },
+      "datastore_sql_per_operation": 10.0
+    },
+    {
+      "provider": "tidb",
+      "inode_updates": true,
+      "separate_drives": false,
+      "drive_count": 1,
+      "driver_replicas": 10,
+      "driver_setup_seconds": null,
+      "provisioning_seconds": null,
+      "parallel_server_startup": false,
+      "drives_provisioned_before_startup": false,
+      "verification_method": null,
+      "servers": 10,
+      "clients": 100,
+      "active_clients": 100,
+      "setup_seconds": 9.753546417,
+      "depth": 1,
+      "mode": "Read",
+      "operations": 35626,
+      "operations_per_second": 2369.8090281053205,
+      "p99_us_upper": 65536,
+      "cpu_us_per_operation": 974.2698590916747,
+      "cpu_cores": 2.3088335078863493,
+      "rss_end_bytes": 369655808,
+      "allocations_per_operation": 430.85796889911865,
+      "inode_cas_conflicts": 0,
+      "namespace_cas_conflicts": 0,
+      "verified_files": 100,
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb/tidb-10-100.json",
+      "profile_us_per_operation": {
+        "filesystem.gate_wait": 35985.90711258631,
+        "service.dispatch": 41625.16841949699,
+        "service.authorization": 263.0327892269691,
+        "catalog.load": 259.4983949082131,
+        "catalog.pool_wait": 3.3872664346263965,
+        "catalog.decode_validate_bytes": 9.028536013024196,
+        "provider.inode.load_if_changed": 4113.39704996351,
+        "provider.inode.publish_cas": 0.0
+      },
+      "catalog_document_bytes_per_operation": 474.0,
+      "quic_network": {
+        "congestion_events": 0,
+        "lost_bytes": 0,
+        "lost_packets": 0,
+        "rx_bytes": 537056337,
+        "rx_datagrams": 432492,
+        "rx_ios": 432492,
+        "sent_packets": 151407,
+        "tx_bytes": 10730523,
+        "tx_datagrams": 151407,
+        "tx_ios": 151407
+      },
+      "datastore_sessions": null,
+      "datastore_window_seconds": 15.589843875,
+      "datastore_counter_resets": [],
+      "datastore_series_coverage_incomplete": true,
+      "datastore_cpu_seconds_per_operation": {
+        "pd": 0.00021641497782518387,
+        "tidb": 0.0011850895413462077,
+        "tikv": 0.0005613877505192837
+      },
+      "datastore_vm_io_per_operation": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 2.0694998035142875,
+            "wios": 0.0008140122382529613
+          },
+          "net_dev": {
+            "rx_bytes": 231.49306686128108,
+            "rx_packets": 2.1987031942963005,
+            "tx_bytes": 242.65306237017907,
+            "tx_packets": 2.1649918598776177
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 92.19884354123393,
+            "read_bytes": 0.0,
+            "syscr": 3.9244372087801045,
+            "syscw": 2.3303766911805983,
+            "wchar": 120.03649020378376,
+            "write_bytes": 4.94380508617302
+          }
+        },
+        "tidb": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 0.0,
+            "wios": 0.0
+          },
+          "net_dev": {
+            "rx_bytes": 14890.817548981082,
+            "rx_packets": 11.522511648795824,
+            "tx_bytes": 9094.522427440634,
+            "tx_packets": 12.246729916353225
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 14147.340088699264,
+            "read_bytes": 0.0,
+            "syscr": 17.769831022287093,
+            "syscw": 9.727249761410206,
+            "wchar": 8288.261410206029,
+            "write_bytes": 0.0
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 2.414416437433335,
+            "wios": 0.0007298040756750688
+          },
+          "net_dev": {
+            "rx_bytes": 2817.1471397294113,
+            "rx_packets": 7.041851456801212,
+            "tx_bytes": 14068.712541402347,
+            "tx_packets": 5.331078425868747
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 78.66645146802897,
+            "read_bytes": 0.0,
+            "syscr": 3.546146073092685,
+            "syscw": 3.0820187503508674,
+            "wchar": 90.54844776286981,
+            "write_bytes": 2.5293886487396846
+          }
+        }
+      },
+      "datastore_sql_per_operation": 3.0
+    },
+    {
+      "provider": "tidb",
+      "inode_updates": true,
+      "separate_drives": false,
+      "drive_count": 1,
+      "driver_replicas": 10,
+      "driver_setup_seconds": null,
+      "provisioning_seconds": null,
+      "parallel_server_startup": false,
+      "drives_provisioned_before_startup": false,
+      "verification_method": null,
+      "servers": 10,
+      "clients": 100,
+      "active_clients": 100,
+      "setup_seconds": 9.753546417,
+      "depth": 1,
+      "mode": "Write",
+      "operations": 11637,
+      "operations_per_second": 766.0597965118186,
+      "p99_us_upper": 262144,
+      "cpu_us_per_operation": 1330.4286328091432,
+      "cpu_cores": 1.0191878877232694,
+      "rss_end_bytes": 376078336,
+      "allocations_per_operation": 674.7306866030764,
+      "inode_cas_conflicts": 0,
+      "namespace_cas_conflicts": 0,
+      "verified_files": 100,
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb/tidb-10-100.json",
+      "profile_us_per_operation": {
+        "filesystem.gate_wait": 0.0,
+        "service.dispatch": 128994.51859869383,
+        "service.authorization": 202.43629062473147,
+        "catalog.load": 197.37696717367018,
+        "catalog.pool_wait": 0.19205027068832176,
+        "catalog.decode_validate_bytes": 12.405236229268711,
+        "provider.inode.load_if_changed": 2263.4341038068233,
+        "provider.inode.publish_cas": 9530.447649222308
+      },
+      "catalog_document_bytes_per_operation": 474.0,
+      "quic_network": {
+        "congestion_events": 0,
+        "lost_bytes": 0,
+        "lost_packets": 0,
+        "rx_bytes": 2368811,
+        "rx_datagrams": 40183,
+        "rx_ios": 40183,
+        "sent_packets": 130679,
+        "tx_bytes": 175991645,
+        "tx_datagrams": 130679,
+        "tx_ios": 130679
+      },
+      "datastore_sessions": null,
+      "datastore_window_seconds": 15.765294291,
+      "datastore_counter_resets": [],
+      "datastore_series_coverage_incomplete": true,
+      "datastore_cpu_seconds_per_operation": {
+        "pd": 0.0007441780527627396,
+        "tidb": 0.0030385838274469366,
+        "tikv": 0.0018905216120993383
+      },
+      "datastore_vm_io_per_operation": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 13.375268540001718,
+            "wios": 0.0038669760247486465
+          },
+          "net_dev": {
+            "rx_bytes": 831.1322505800464,
+            "rx_packets": 7.388588124086964,
+            "tx_bytes": 828.6336684712555,
+            "tx_packets": 7.265360488098307
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 361.0377244994414,
+            "read_bytes": 0.0,
+            "syscr": 13.1420469193091,
+            "syscw": 7.618286499957033,
+            "wchar": 415.24860359199107,
+            "write_bytes": 19.358941307897226
+          }
+        },
+        "tidb": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 0.0,
+            "wios": 0.0
+          },
+          "net_dev": {
+            "rx_bytes": 21741.119704391167,
+            "rx_packets": 28.74864655839134,
+            "tx_bytes": 21803.07493340208,
+            "tx_packets": 29.728108619059896
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 19900.819712984445,
+            "read_bytes": 0.0,
+            "syscr": 45.97611068144711,
+            "syscw": 25.76970009452608,
+            "wchar": 19850.222565953423,
+            "write_bytes": 0.0
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 28936.689524791615,
+            "wios": 2.9530806908997165
+          },
+          "net_dev": {
+            "rx_bytes": 13513.014952307296,
+            "rx_packets": 10.350691759044427,
+            "tx_bytes": 10975.56707055083,
+            "tx_packets": 9.778637105783277
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 533.098736787832,
+            "read_bytes": 0.0,
+            "syscr": 7.2173240525908735,
+            "syscw": 8.405602818595858,
+            "wchar": 23055.151929191372,
+            "write_bytes": 28805.04872389791
+          }
+        }
+      },
+      "datastore_sql_per_operation": 10.004124774426398
+    },
+    {
+      "provider": "tidb",
+      "inode_updates": true,
+      "separate_drives": true,
+      "drive_count": 100,
+      "driver_replicas": 1000,
+      "driver_setup_seconds": 35.631889917,
+      "provisioning_seconds": null,
+      "parallel_server_startup": false,
+      "drives_provisioned_before_startup": false,
+      "verification_method": "all fresh driver files",
+      "servers": 10,
+      "clients": 100,
+      "active_clients": 100,
+      "setup_seconds": 1.783642916,
+      "depth": 1,
+      "mode": "Read",
+      "operations": 46169,
+      "operations_per_second": 3073.659529220852,
+      "p99_us_upper": 131072,
+      "cpu_us_per_operation": 1251.7965084797158,
+      "cpu_cores": 3.8475962669340698,
+      "rss_end_bytes": 218660864,
+      "allocations_per_operation": 1934.3198466503497,
+      "inode_cas_conflicts": 0,
+      "namespace_cas_conflicts": 0,
+      "verified_files": 100,
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-separate/tidb-10-100-100.json",
+      "profile_us_per_operation": {
+        "filesystem.gate_wait": 0.8151613203664796,
+        "service.dispatch": 30519.997652710696,
+        "service.authorization": 7687.126451883299,
+        "catalog.load": 7648.694059195564,
+        "catalog.pool_wait": 943.7101578764972,
+        "catalog.decode_validate_bytes": 121.01168140960385,
+        "provider.inode.load_if_changed": 18167.286417942774,
+        "provider.inode.publish_cas": 0.0
+      },
+      "catalog_document_bytes_per_operation": 19407.0,
+      "quic_network": {
+        "congestion_events": 0,
+        "lost_bytes": 0,
+        "lost_packets": 0,
+        "rx_bytes": 695493336,
+        "rx_datagrams": 540761,
+        "rx_ios": 540761,
+        "sent_packets": 172917,
+        "tx_bytes": 13311989,
+        "tx_datagrams": 172917,
+        "tx_ios": 172917
+      },
+      "datastore_sessions": {
+        "mount-rs-tidb-mount-rs-tidb-uWASMe-pd1": {
+          "end": {},
+          "start": {}
+        },
+        "mount-rs-tidb-mount-rs-tidb-uWASMe-tidb": {
+          "end": {
+            "tidb_server_connections{resource_group=\"default\"}": 3188.0,
+            "tidb_server_internal_sessions": 7.0
+          },
+          "start": {
+            "tidb_server_connections{resource_group=\"default\"}": 3188.0,
+            "tidb_server_internal_sessions": 7.0
+          }
+        },
+        "mount-rs-tidb-mount-rs-tidb-uWASMe-tikv1": {
+          "end": {},
+          "start": {}
+        }
+      },
+      "datastore_window_seconds": 15.589598458,
+      "datastore_counter_resets": [],
+      "datastore_series_coverage_incomplete": false,
+      "datastore_cpu_seconds_per_operation": {
+        "pd": 0.00010050033572310425,
+        "tidb": 0.001429530637440707,
+        "tikv": 0.0004331911022547597
+      },
+      "datastore_vm_io_per_operation": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 1.3307630661266217,
+            "wios": 0.0005198293227057116
+          },
+          "net_dev": {
+            "rx_bytes": 92.9122788017934,
+            "rx_packets": 0.8522385150209014,
+            "tx_bytes": 98.177521713704,
+            "tx_packets": 0.8446143516212177
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 39.81400940024692,
+            "read_bytes": 0.0,
+            "syscr": 1.667027659251879,
+            "syscw": 1.028850527410167,
+            "wchar": 56.262773722627735,
+            "write_bytes": 1.4194806038683965
+          }
+        },
+        "tidb": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 82.15243994888345,
+            "rios": 0.00045485065736749765,
+            "wbytes": 0.0,
+            "wios": 0.0
+          },
+          "net_dev": {
+            "rx_bytes": 14909.045853278174,
+            "rx_packets": 8.601680781476748,
+            "tx_bytes": 10227.298815222335,
+            "tx_packets": 7.733630791223549
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 14353.879269639801,
+            "read_bytes": 82.15243994888345,
+            "syscr": 11.264029976824276,
+            "syscw": 6.300288072082999,
+            "wchar": 9717.718144209319,
+            "write_bytes": 0.0
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 2.5728085945114687,
+            "wios": 0.0008447226493967814
+          },
+          "net_dev": {
+            "rx_bytes": 4086.333752084732,
+            "rx_packets": 3.747926097597955,
+            "tx_bytes": 14186.261084277328,
+            "tx_packets": 3.5424852173536356
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 54.67943858433148,
+            "read_bytes": 0.0,
+            "syscr": 1.6895752561242392,
+            "syscw": 1.3194351188026598,
+            "wchar": 63.37923715046893,
+            "write_bytes": 2.5728085945114687
+          }
+        }
+      },
+      "datastore_sql_per_operation": 3.0
+    },
+    {
+      "provider": "tidb",
+      "inode_updates": true,
+      "separate_drives": true,
+      "drive_count": 100,
+      "driver_replicas": 1000,
+      "driver_setup_seconds": 35.631889917,
+      "provisioning_seconds": null,
+      "parallel_server_startup": false,
+      "drives_provisioned_before_startup": false,
+      "verification_method": "all fresh driver files",
+      "servers": 10,
+      "clients": 100,
+      "active_clients": 100,
+      "setup_seconds": 1.783642916,
+      "depth": 1,
+      "mode": "Write",
+      "operations": 26197,
+      "operations_per_second": 1742.395404962101,
+      "p99_us_upper": 131072,
+      "cpu_us_per_operation": 1378.8053593922969,
+      "cpu_cores": 2.4024241225422567,
+      "rss_end_bytes": 238059520,
+      "allocations_per_operation": 2181.9847692483872,
+      "inode_cas_conflicts": 0,
+      "namespace_cas_conflicts": 0,
+      "verified_files": 100,
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-separate/tidb-10-100-100.json",
+      "profile_us_per_operation": {
+        "filesystem.gate_wait": 0.0,
+        "service.dispatch": 56167.432833835934,
+        "service.authorization": 1523.930911898309,
+        "catalog.load": 1500.2978405160895,
+        "catalog.pool_wait": 1.549078291407413,
+        "catalog.decode_validate_bytes": 120.31208229949995,
+        "provider.inode.load_if_changed": 7243.630598618162,
+        "provider.inode.publish_cas": 28902.40821884185
+      },
+      "catalog_document_bytes_per_operation": 19407.0,
+      "quic_network": {
+        "congestion_events": 0,
+        "lost_bytes": 0,
+        "lost_packets": 0,
+        "rx_bytes": 5961611,
+        "rx_datagrams": 108948,
+        "rx_ios": 108948,
+        "sent_packets": 293787,
+        "tx_bytes": 396328844,
+        "tx_datagrams": 293787,
+        "tx_ios": 293787
+      },
+      "datastore_sessions": {
+        "mount-rs-tidb-mount-rs-tidb-uWASMe-pd1": {
+          "end": {},
+          "start": {}
+        },
+        "mount-rs-tidb-mount-rs-tidb-uWASMe-tidb": {
+          "end": {
+            "tidb_server_connections{resource_group=\"default\"}": 3188.0,
+            "tidb_server_internal_sessions": 7.0
+          },
+          "start": {
+            "tidb_server_connections{resource_group=\"default\"}": 3188.0,
+            "tidb_server_internal_sessions": 7.0
+          }
+        },
+        "mount-rs-tidb-mount-rs-tidb-uWASMe-tikv1": {
+          "end": {},
+          "start": {}
+        }
+      },
+      "datastore_window_seconds": 15.526568208,
+      "datastore_counter_resets": [],
+      "datastore_series_coverage_incomplete": false,
+      "datastore_cpu_seconds_per_operation": {
+        "pd": 0.0001786464098942624,
+        "tidb": 0.0024758560140474106,
+        "tikv": 0.0009161354353551933
+      },
+      "datastore_vm_io_per_operation": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 4.534259648051304,
+            "wios": 0.0015268923922586556
+          },
+          "net_dev": {
+            "rx_bytes": 177.24750925678512,
+            "rx_packets": 1.6039622857579112,
+            "tx_bytes": 187.79367866549606,
+            "tx_packets": 1.589533152651067
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 77.23559949612552,
+            "read_bytes": 0.0,
+            "syscr": 3.1932282322403327,
+            "syscw": 1.9652631980761155,
+            "wchar": 108.96908042905676,
+            "write_bytes": 4.534259648051304
+          }
+        },
+        "tidb": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 2.5016604954765813,
+            "rios": 3.817230980646639e-05,
+            "wbytes": 0.0,
+            "wios": 0.0
+          },
+          "net_dev": {
+            "rx_bytes": 20999.53403061419,
+            "rx_packets": 20.406535099438866,
+            "tx_bytes": 21515.99851127992,
+            "tx_packets": 19.205634232927434
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 19674.97266862618,
+            "read_bytes": 2.5016604954765813,
+            "syscr": 28.673054166507615,
+            "syscw": 15.608886513722945,
+            "wchar": 20250.22861396343,
+            "write_bytes": 0.0
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 192.47150437072946,
+            "rios": 0.00549681261213116,
+            "wbytes": 23042.325762491888,
+            "wios": 0.5960224453181662
+          },
+          "net_dev": {
+            "rx_bytes": 13912.695423140054,
+            "rx_packets": 5.374432186891629,
+            "tx_bytes": 10723.220063366034,
+            "tx_packets": 5.8089475894186355
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 383.16982860632896,
+            "read_bytes": 192.47150437072946,
+            "syscr": 2.7843264495934648,
+            "syscw": 2.67721494827652,
+            "wchar": 21975.066419819064,
+            "write_bytes": 23041.543993587053
+          }
+        }
+      },
+      "datastore_sql_per_operation": 10.0
+    },
+    {
+      "provider": "tidb",
+      "inode_updates": true,
+      "separate_drives": false,
+      "drive_count": 1,
+      "driver_replicas": 10,
+      "driver_setup_seconds": null,
+      "provisioning_seconds": null,
+      "parallel_server_startup": false,
+      "drives_provisioned_before_startup": false,
+      "verification_method": null,
+      "servers": 10,
+      "clients": 250,
+      "active_clients": 250,
+      "setup_seconds": 42.225951209,
+      "depth": 1,
+      "mode": "Read",
+      "operations": 31087,
+      "operations_per_second": 2060.1873775762588,
+      "p99_us_upper": 262144,
+      "cpu_us_per_operation": 1014.9361469424518,
+      "cpu_cores": 2.0909586389767223,
+      "rss_end_bytes": 443203584,
+      "allocations_per_operation": 430.8678868980603,
+      "inode_cas_conflicts": 0,
+      "namespace_cas_conflicts": 0,
+      "verified_files": 250,
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-bounded/tidb-10-250-250.json",
+      "profile_us_per_operation": {
+        "filesystem.gate_wait": 113909.09955209574,
+        "service.dispatch": 120450.74995303503,
+        "service.authorization": 423.2373740470293,
+        "catalog.load": 419.3432182262682,
+        "catalog.pool_wait": 118.10150747901052,
+        "catalog.decode_validate_bytes": 10.754107762087045,
+        "provider.inode.load_if_changed": 4723.241595554412,
+        "provider.inode.publish_cas": 0.0
+      },
+      "catalog_document_bytes_per_operation": 474.0,
+      "quic_network": {
+        "congestion_events": 0,
+        "lost_bytes": 0,
+        "lost_packets": 0,
+        "rx_bytes": 468954110,
+        "rx_datagrams": 377688,
+        "rx_ios": 377688,
+        "sent_packets": 129438,
+        "tx_bytes": 9267478,
+        "tx_datagrams": 129438,
+        "tx_ios": 129438
+      },
+      "datastore_sessions": null,
+      "datastore_window_seconds": 15.616510166,
+      "datastore_counter_resets": [],
+      "datastore_series_coverage_incomplete": true,
+      "datastore_cpu_seconds_per_operation": {
+        "pd": 0.0002438318268086339,
+        "tidb": 0.0013240261202431885,
+        "tikv": 0.0007076913179142407
+      },
+      "datastore_vm_io_per_operation": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 2.635185125615209,
+            "wios": 0.0010293691896934409
+          },
+          "net_dev": {
+            "rx_bytes": 247.40270852768037,
+            "rx_packets": 2.3648792099591467,
+            "tx_bytes": 258.95274552063563,
+            "tx_packets": 2.3292694695531893
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 98.57281178627723,
+            "read_bytes": 0.0,
+            "syscr": 4.263003827966674,
+            "syscw": 2.586997780422685,
+            "wchar": 128.5431530864992,
+            "write_bytes": 4.875092482388136
+          }
+        },
+        "tidb": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 0.0,
+            "wios": 0.0
+          },
+          "net_dev": {
+            "rx_bytes": 15204.845272943674,
+            "rx_packets": 11.96056229291987,
+            "tx_bytes": 9126.664747322031,
+            "tx_packets": 12.618522211857046
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 14434.837520506964,
+            "read_bytes": 0.0,
+            "syscr": 18.227844436581208,
+            "syscw": 9.980120307524045,
+            "wchar": 8295.629394923923,
+            "write_bytes": 0.0
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 2.2399073567729277,
+            "wios": 0.0005468523820246406
+          },
+          "net_dev": {
+            "rx_bytes": 2829.4864412777047,
+            "rx_packets": 7.249911538585261,
+            "tx_bytes": 14363.286293305884,
+            "tx_packets": 5.554347476437096
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 100.03885868691093,
+            "read_bytes": 0.0,
+            "syscr": 3.855984816804452,
+            "syscw": 3.2693087142535466,
+            "wchar": 102.00347412101522,
+            "write_bytes": 2.108148100492167
+          }
+        }
+      },
+      "datastore_sql_per_operation": 3.0
+    },
+    {
+      "provider": "tidb",
+      "inode_updates": true,
+      "separate_drives": false,
+      "drive_count": 1,
+      "driver_replicas": 10,
+      "driver_setup_seconds": null,
+      "provisioning_seconds": null,
+      "parallel_server_startup": false,
+      "drives_provisioned_before_startup": false,
+      "verification_method": null,
+      "servers": 10,
+      "clients": 250,
+      "active_clients": 250,
+      "setup_seconds": 42.225951209,
+      "depth": 1,
+      "mode": "Write",
+      "operations": 10983,
+      "operations_per_second": 718.7258782575999,
+      "p99_us_upper": 524288,
+      "cpu_us_per_operation": 1425.738687061823,
+      "cpu_cores": 1.024715290024346,
+      "rss_end_bytes": 457752576,
+      "allocations_per_operation": 675.3163070199399,
+      "inode_cas_conflicts": 0,
+      "namespace_cas_conflicts": 0,
+      "verified_files": 250,
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-bounded/tidb-10-250-250.json",
+      "profile_us_per_operation": {
+        "filesystem.gate_wait": 0.0,
+        "service.dispatch": 343863.92017253937,
+        "service.authorization": 821.1442348174451,
+        "catalog.load": 815.9384864791041,
+        "catalog.pool_wait": 298.9960748429391,
+        "catalog.decode_validate_bytes": 13.574398980242194,
+        "provider.inode.load_if_changed": 2203.892007466084,
+        "provider.inode.publish_cas": 10414.1671625239
+      },
+      "catalog_document_bytes_per_operation": 474.0,
+      "quic_network": {
+        "congestion_events": 0,
+        "lost_bytes": 0,
+        "lost_packets": 0,
+        "rx_bytes": 2324200,
+        "rx_datagrams": 39924,
+        "rx_ios": 39924,
+        "sent_packets": 123299,
+        "tx_bytes": 166096075,
+        "tx_datagrams": 123299,
+        "tx_ios": 123299
+      },
+      "datastore_sessions": null,
+      "datastore_window_seconds": 15.697920542,
+      "datastore_counter_resets": [],
+      "datastore_series_coverage_incomplete": true,
+      "datastore_cpu_seconds_per_operation": {
+        "pd": 0.0007921332969134113,
+        "tidb": 0.0032841664390421566,
+        "tikv": 0.0019120458891013384
+      },
+      "datastore_vm_io_per_operation": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 14.17171993080215,
+            "wios": 0.005554038058818173
+          },
+          "net_dev": {
+            "rx_bytes": 797.3357916780479,
+            "rx_packets": 7.483292360921424,
+            "tx_bytes": 835.5342802512974,
+            "tx_packets": 7.346535554948557
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 321.7811162706,
+            "read_bytes": 0.0,
+            "syscr": 13.239369935354638,
+            "syscw": 7.70354183738505,
+            "wchar": 418.28735318219066,
+            "write_bytes": 26.851679868888283
+          }
+        },
+        "tidb": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 0.0,
+            "wios": 0.0
+          },
+          "net_dev": {
+            "rx_bytes": 21451.922243467176,
+            "rx_packets": 28.70518073386142,
+            "tx_bytes": 21731.386233269597,
+            "tx_packets": 29.92952745151598
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 19616.140034598924,
+            "read_bytes": 0.0,
+            "syscr": 46.21414913957935,
+            "syscw": 25.898479468269144,
+            "wchar": 19765.012746972596,
+            "write_bytes": 0.0
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 28298.687061822817,
+            "wios": 3.03459892561231
+          },
+          "net_dev": {
+            "rx_bytes": 13465.930346899755,
+            "rx_packets": 10.424656286988983,
+            "tx_bytes": 10686.644541564236,
+            "tx_packets": 9.786032960029136
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 698.2784303013749,
+            "read_bytes": 0.0,
+            "syscr": 7.266320677410544,
+            "syscw": 8.533916052080489,
+            "wchar": 22388.787853956113,
+            "write_bytes": 28293.092961850132
+          }
+        }
+      },
+      "datastore_sql_per_operation": 10.010197578075207
+    },
+    {
+      "provider": "tidb",
+      "inode_updates": true,
+      "separate_drives": true,
+      "drive_count": 250,
+      "driver_replicas": 2500,
+      "driver_setup_seconds": 27.139991208,
+      "provisioning_seconds": 13.62470875,
+      "parallel_server_startup": true,
+      "drives_provisioned_before_startup": true,
+      "verification_method": "all fresh driver files",
+      "servers": 10,
+      "clients": 250,
+      "active_clients": 10,
+      "setup_seconds": 0.421294167,
+      "depth": 1,
+      "mode": "Read",
+      "operations": 19868,
+      "operations_per_second": 1323.2108906107517,
+      "p99_us_upper": 16384,
+      "cpu_us_per_operation": 1369.2884034628548,
+      "cpu_cores": 1.8118573278490584,
+      "rss_end_bytes": 272891904,
+      "allocations_per_operation": 4233.734749345682,
+      "inode_cas_conflicts": 0,
+      "namespace_cas_conflicts": 0,
+      "verified_files": 10,
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-separate-idle-fresh/tidb-10-250-10.json",
+      "profile_us_per_operation": {
+        "filesystem.gate_wait": 0.3437860881820012,
+        "service.dispatch": 6825.8455309039655,
+        "service.authorization": 470.27386198912825,
+        "catalog.load": 428.82665401650894,
+        "catalog.pool_wait": 0.1598596235152003,
+        "catalog.decode_validate_bytes": 231.52339948661162,
+        "provider.inode.load_if_changed": 4771.717189198711,
+        "provider.inode.publish_cas": 0.0
+      },
+      "catalog_document_bytes_per_operation": 49107.0,
+      "quic_network": {
+        "congestion_events": 0,
+        "lost_bytes": 0,
+        "lost_packets": 0,
+        "rx_bytes": 299030273,
+        "rx_datagrams": 223013,
+        "rx_ios": 223013,
+        "sent_packets": 86880,
+        "tx_bytes": 6312338,
+        "tx_datagrams": 86880,
+        "tx_ios": 86880
+      },
+      "datastore_sessions": {
+        "mount-rs-tidb-mount-rs-tidb-X64y61-pd1": {
+          "end": {},
+          "start": {}
+        },
+        "mount-rs-tidb-mount-rs-tidb-X64y61-tidb": {
+          "end": {
+            "tidb_server_connections{resource_group=\"default\"}": 7510.0,
+            "tidb_server_internal_sessions": 7.0
+          },
+          "start": {
+            "tidb_server_connections{resource_group=\"default\"}": 7510.0,
+            "tidb_server_internal_sessions": 7.0
+          }
+        },
+        "mount-rs-tidb-mount-rs-tidb-X64y61-tikv1": {
+          "end": {},
+          "start": {}
+        }
+      },
+      "datastore_window_seconds": 15.73239675,
+      "datastore_counter_resets": [],
+      "datastore_series_coverage_incomplete": true,
+      "datastore_cpu_seconds_per_operation": {
+        "pd": 0.0002778337024360781,
+        "tidb": 0.0018305818401449566,
+        "tikv": 0.0006039863096436481
+      },
+      "datastore_vm_io_per_operation": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 3470.50855647272,
+            "rios": 0.15748943023958123,
+            "wbytes": 777.8441715321119,
+            "wios": 0.19025568753774916
+          },
+          "net_dev": {
+            "rx_bytes": 271.17359573183006,
+            "rx_packets": 2.3999396013690357,
+            "tx_bytes": 256.68708475941213,
+            "tx_packets": 2.362089792631367
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 119.28231326756594,
+            "read_bytes": 3081.2772297161264,
+            "syscr": 4.341805919065835,
+            "syscw": 2.5591403261526073,
+            "wchar": 136.01006643849405,
+            "write_bytes": 8.452587074692973
+          }
+        },
+        "tidb": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 24492.917253875577,
+            "rios": 4.938192067646467,
+            "wbytes": 24905.857056573383,
+            "wios": 6.080531507952486
+          },
+          "net_dev": {
+            "rx_bytes": 15381.201026776727,
+            "rx_packets": 12.39223877592108,
+            "tx_bytes": 9296.01283470908,
+            "tx_packets": 13.609573183007852
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 14592.60126837125,
+            "read_bytes": 23993.38997382726,
+            "syscr": 18.950573786994163,
+            "syscw": 10.11757600161063,
+            "wchar": 8399.789762432052,
+            "write_bytes": 0.0
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 4366.070465069459,
+            "rios": 0.058083350110730826,
+            "wbytes": 557.8707469297362,
+            "wios": 0.13645057378699416
+          },
+          "net_dev": {
+            "rx_bytes": 2907.9478558486007,
+            "rx_packets": 7.449919468492047,
+            "tx_bytes": 14468.391433460842,
+            "tx_packets": 5.275468089389974
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 122.86928729615462,
+            "read_bytes": 3728.2093819206766,
+            "syscr": 4.399285282866922,
+            "syscw": 3.5874773505133883,
+            "wchar": 147.28920877793436,
+            "write_bytes": 4.329373867525669
+          }
+        }
+      },
+      "datastore_sql_per_operation": 3.0
+    },
+    {
+      "provider": "tidb",
+      "inode_updates": true,
+      "separate_drives": true,
+      "drive_count": 250,
+      "driver_replicas": 2500,
+      "driver_setup_seconds": 27.139991208,
+      "provisioning_seconds": 13.62470875,
+      "parallel_server_startup": true,
+      "drives_provisioned_before_startup": true,
+      "verification_method": "all fresh driver files",
+      "servers": 10,
+      "clients": 250,
+      "active_clients": 10,
+      "setup_seconds": 0.421294167,
+      "depth": 1,
+      "mode": "Write",
+      "operations": 4719,
+      "operations_per_second": 314.17703043865055,
+      "p99_us_upper": 262144,
+      "cpu_us_per_operation": 1772.967365967366,
+      "cpu_cores": 0.5570256221042632,
+      "rss_end_bytes": 213172224,
+      "allocations_per_operation": 4481.631701631702,
+      "inode_cas_conflicts": 0,
+      "namespace_cas_conflicts": 0,
+      "verified_files": 10,
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-separate-idle-fresh/tidb-10-250-10.json",
+      "profile_us_per_operation": {
+        "filesystem.gate_wait": 0.0,
+        "service.dispatch": 31153.110685738506,
+        "service.authorization": 472.5580478915024,
+        "catalog.load": 432.08844712862896,
+        "catalog.pool_wait": 0.18522801440983258,
+        "catalog.decode_validate_bytes": 233.22946810764995,
+        "provider.inode.load_if_changed": 3754.083289680017,
+        "provider.inode.publish_cas": 17208.012141767325
+      },
+      "catalog_document_bytes_per_operation": 49107.0,
+      "quic_network": {
+        "congestion_events": 0,
+        "lost_bytes": 0,
+        "lost_packets": 0,
+        "rx_bytes": 990795,
+        "rx_datagrams": 17739,
+        "rx_ios": 17739,
+        "sent_packets": 53220,
+        "tx_bytes": 71413454,
+        "tx_datagrams": 53220,
+        "tx_ios": 53220
+      },
+      "datastore_sessions": {
+        "mount-rs-tidb-mount-rs-tidb-X64y61-pd1": {
+          "end": {},
+          "start": {}
+        },
+        "mount-rs-tidb-mount-rs-tidb-X64y61-tidb": {
+          "end": {
+            "tidb_server_connections{resource_group=\"default\"}": 7510.0,
+            "tidb_server_internal_sessions": 7.0
+          },
+          "start": {
+            "tidb_server_connections{resource_group=\"default\"}": 7510.0,
+            "tidb_server_internal_sessions": 7.0
+          }
+        },
+        "mount-rs-tidb-mount-rs-tidb-X64y61-tikv1": {
+          "end": {},
+          "start": {}
+        }
+      },
+      "datastore_window_seconds": 15.575975625,
+      "datastore_counter_resets": [],
+      "datastore_series_coverage_incomplete": true,
+      "datastore_cpu_seconds_per_operation": {
+        "pd": 0.0011040474676838308,
+        "tidb": 0.0053231616867980515,
+        "tikv": 0.0021190930281839372
+      },
+      "datastore_vm_io_per_operation": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 193.55965246874337,
+            "rios": 0.029667302394575122,
+            "wbytes": 32.1152786607332,
+            "wios": 0.01186692095783005
+          },
+          "net_dev": {
+            "rx_bytes": 1056.6726001271456,
+            "rx_packets": 10.12523839796567,
+            "tx_bytes": 1104.5361305361305,
+            "tx_packets": 9.942784488239033
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 412.841279932189,
+            "read_bytes": 105.89362152998517,
+            "syscr": 18.466412375503285,
+            "syscw": 10.61220597584234,
+            "wchar": 591.9173553719008,
+            "write_bytes": 32.98325916507735
+          }
+        },
+        "tidb": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 202483.36003390548,
+            "rios": 49.247298156389064,
+            "wbytes": 255814.68616232253,
+            "wios": 62.45475736384827
+          },
+          "net_dev": {
+            "rx_bytes": 22393.50900614537,
+            "rx_packets": 34.752066115702476,
+            "tx_bytes": 22846.10764992583,
+            "tx_packets": 36.08773045136682
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 20215.532739987284,
+            "read_bytes": 202665.63593981776,
+            "syscr": 51.77855477855478,
+            "syscw": 28.33100233100233,
+            "wchar": 20471.963551599914,
+            "write_bytes": 0.0
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 5843.244755244756,
+            "rios": 1.4176732358550541,
+            "wbytes": 35355.44988344988,
+            "wios": 7.6973935155753335
+          },
+          "net_dev": {
+            "rx_bytes": 13985.82326764145,
+            "rx_packets": 10.647806738715829,
+            "tx_bytes": 11084.599915236278,
+            "tx_packets": 10.02903157448612
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 432.89468107649924,
+            "read_bytes": 5792.901885992795,
+            "syscr": 9.956134774316592,
+            "syscw": 10.346895528713711,
+            "wchar": 13335.482305573214,
+            "write_bytes": 21652.641661368933
+          }
+        }
+      },
+      "datastore_sql_per_operation": 10.0
+    },
+    {
+      "provider": "tidb",
+      "inode_updates": true,
+      "separate_drives": true,
+      "drive_count": 250,
+      "driver_replicas": 2500,
+      "driver_setup_seconds": 26.41820275,
+      "provisioning_seconds": 12.912521417,
+      "parallel_server_startup": true,
+      "drives_provisioned_before_startup": true,
+      "verification_method": "all fresh driver files",
+      "servers": 10,
+      "clients": 250,
+      "active_clients": 250,
+      "setup_seconds": 4.7784805,
+      "depth": 1,
+      "mode": "Read",
+      "operations": 28475,
+      "operations_per_second": 1882.803717233099,
+      "p99_us_upper": 1048576,
+      "cpu_us_per_operation": 1746.7893239683933,
+      "cpu_cores": 3.288861432390783,
+      "rss_end_bytes": 360153088,
+      "allocations_per_operation": 4235.761545215101,
+      "inode_cas_conflicts": 0,
+      "namespace_cas_conflicts": 0,
+      "verified_files": 250,
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-separate-provisioned/tidb-10-250-250.json",
+      "profile_us_per_operation": {
+        "filesystem.gate_wait": 1.0348514486391571,
+        "service.dispatch": 126930.6814132748,
+        "service.authorization": 23887.303944899035,
+        "catalog.load": 23800.472695065848,
+        "catalog.pool_wait": 11369.626251308164,
+        "catalog.decode_validate_bytes": 286.35300737489024,
+        "provider.inode.load_if_changed": 79986.59765394205,
+        "provider.inode.publish_cas": 0.0
+      },
+      "catalog_document_bytes_per_operation": 49107.0,
+      "quic_network": {
+        "congestion_events": 0,
+        "lost_bytes": 0,
+        "lost_packets": 0,
+        "rx_bytes": 429483030,
+        "rx_datagrams": 344473,
+        "rx_ios": 344473,
+        "sent_packets": 107329,
+        "tx_bytes": 8257833,
+        "tx_datagrams": 107329,
+        "tx_ios": 107329
+      },
+      "datastore_sessions": {
+        "mount-rs-tidb-mount-rs-tidb-e1tKUg-pd1": {
+          "end": {},
+          "start": {}
+        },
+        "mount-rs-tidb-mount-rs-tidb-e1tKUg-tidb": {
+          "end": {
+            "tidb_server_connections{resource_group=\"default\"}": 7750.0,
+            "tidb_server_internal_sessions": 7.0
+          },
+          "start": {
+            "tidb_server_connections{resource_group=\"default\"}": 7750.0,
+            "tidb_server_internal_sessions": 7.0
+          }
+        },
+        "mount-rs-tidb-mount-rs-tidb-e1tKUg-tikv1": {
+          "end": {},
+          "start": {}
+        }
+      },
+      "datastore_window_seconds": 15.839606083,
+      "datastore_counter_resets": [],
+      "datastore_series_coverage_incomplete": true,
+      "datastore_cpu_seconds_per_operation": {
+        "pd": 0.00012396839332748017,
+        "tidb": 0.0017685689201053555,
+        "tikv": 0.000456540825285338
+      },
+      "datastore_vm_io_per_operation": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 1514.692888498683,
+            "rios": 0.03311676909569798,
+            "wbytes": 42.146725197541706,
+            "wios": 0.01064091308165057
+          },
+          "net_dev": {
+            "rx_bytes": 71.7020895522388,
+            "rx_packets": 0.6597366110623354,
+            "tx_bytes": 75.47982440737489,
+            "tx_packets": 0.6518349429323969
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 31.210605794556628,
+            "read_bytes": 1071.7926602282705,
+            "syscr": 1.319929762949956,
+            "syscw": 0.829640035118525,
+            "wchar": 54.52909569798069,
+            "write_bytes": 4.8907462686567165
+          }
+        },
+        "tidb": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 47095.72888498683,
+            "rios": 10.767164179104478,
+            "wbytes": 44171.49415276558,
+            "wios": 10.764986830553116
+          },
+          "net_dev": {
+            "rx_bytes": 14994.638770851625,
+            "rx_packets": 9.413731343283581,
+            "tx_bytes": 8784.74363476734,
+            "tx_packets": 7.929868305531167
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 14388.05078138718,
+            "read_bytes": 47088.82430201932,
+            "syscr": 10.070201931518875,
+            "syscw": 5.705109745390693,
+            "wchar": 8342.939455662861,
+            "write_bytes": 82.85499561018437
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 3654.5382265144863,
+            "rios": 0.3363301141352063,
+            "wbytes": 4440.366075504829,
+            "wios": 1.084214223002634
+          },
+          "net_dev": {
+            "rx_bytes": 2584.9882704126426,
+            "rx_packets": 3.123371378402107,
+            "tx_bytes": 14206.187462686567,
+            "tx_packets": 3.232449517120281
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 77.19820895522388,
+            "read_bytes": 3211.7818437225637,
+            "syscr": 1.824723441615452,
+            "syscw": 1.2597366110623354,
+            "wchar": 92.30918349429324,
+            "write_bytes": 2.733064091308165
+          }
+        }
+      },
+      "datastore_sql_per_operation": 3.0
+    },
+    {
+      "provider": "tidb",
+      "inode_updates": true,
+      "separate_drives": true,
+      "drive_count": 250,
+      "driver_replicas": 2500,
+      "driver_setup_seconds": 26.41820275,
+      "provisioning_seconds": 12.912521417,
+      "parallel_server_startup": true,
+      "drives_provisioned_before_startup": true,
+      "verification_method": "all fresh driver files",
+      "servers": 10,
+      "clients": 250,
+      "active_clients": 250,
+      "setup_seconds": 4.7784805,
+      "depth": 1,
+      "mode": "Write",
+      "operations": 21292,
+      "operations_per_second": 1407.1274836798416,
+      "p99_us_upper": 1048576,
+      "cpu_us_per_operation": 1829.0155927108774,
+      "cpu_cores": 2.5736581085824506,
+      "rss_end_bytes": 483278848,
+      "allocations_per_operation": 4481.605673492391,
+      "inode_cas_conflicts": 0,
+      "namespace_cas_conflicts": 0,
+      "verified_files": 250,
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-separate-provisioned/tidb-10-250-250.json",
+      "profile_us_per_operation": {
+        "filesystem.gate_wait": 0.0,
+        "service.dispatch": 173893.96651244597,
+        "service.authorization": 15903.258917668609,
+        "catalog.load": 15826.989800911142,
+        "catalog.pool_wait": 4316.746106143152,
+        "catalog.decode_validate_bytes": 281.0416073173023,
+        "provider.inode.load_if_changed": 23249.432494270146,
+        "provider.inode.publish_cas": 82719.56102982341
+      },
+      "catalog_document_bytes_per_operation": 49107.0,
+      "quic_network": {
+        "congestion_events": 0,
+        "lost_bytes": 0,
+        "lost_packets": 0,
+        "rx_bytes": 4699912,
+        "rx_datagrams": 83269,
+        "rx_ios": 83269,
+        "sent_packets": 239082,
+        "tx_bytes": 322140749,
+        "tx_datagrams": 239082,
+        "tx_ios": 239082
+      },
+      "datastore_sessions": {
+        "mount-rs-tidb-mount-rs-tidb-e1tKUg-pd1": {
+          "end": {},
+          "start": {}
+        },
+        "mount-rs-tidb-mount-rs-tidb-e1tKUg-tidb": {
+          "end": {
+            "tidb_server_connections{resource_group=\"default\"}": 7750.0,
+            "tidb_server_internal_sessions": 7.0
+          },
+          "start": {
+            "tidb_server_connections{resource_group=\"default\"}": 7750.0,
+            "tidb_server_internal_sessions": 7.0
+          }
+        },
+        "mount-rs-tidb-mount-rs-tidb-e1tKUg-tikv1": {
+          "end": {},
+          "start": {}
+        }
+      },
+      "datastore_window_seconds": 15.728014875,
+      "datastore_counter_resets": [],
+      "datastore_series_coverage_incomplete": true,
+      "datastore_cpu_seconds_per_operation": {
+        "pd": 0.00018598534660905507,
+        "tidb": 0.0028949840315611497,
+        "tikv": 0.0007984219425136201
+      },
+      "datastore_vm_io_per_operation": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 563.8444486191997,
+            "rios": 0.0061995115536351685,
+            "wbytes": 21.930490325004698,
+            "wios": 0.005776817584069134
+          },
+          "net_dev": {
+            "rx_bytes": 117.37291001315047,
+            "rx_packets": 1.0643434153672742,
+            "tx_bytes": 124.57218673680255,
+            "tx_packets": 1.0556547059928612
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 51.28832425324065,
+            "read_bytes": 478.8157054292692,
+            "syscr": 2.0998966748074395,
+            "syscw": 1.2939601728348675,
+            "wchar": 81.97956979147098,
+            "write_bytes": 2.88559083223746
+          }
+        },
+        "tidb": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 22070.537666729288,
+            "rios": 4.558143903813639,
+            "wbytes": 10464.306594025926,
+            "wios": 2.5547623520571108
+          },
+          "net_dev": {
+            "rx_bytes": 20953.373567537103,
+            "rx_packets": 21.954161187300393,
+            "tx_bytes": 20997.128545932745,
+            "tx_packets": 18.037666729287995
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 19505.71068946083,
+            "read_bytes": 21926.642870561715,
+            "syscr": 25.672975765545743,
+            "syscw": 13.794664662784145,
+            "wchar": 19808.554339658087,
+            "write_bytes": 0.384745444298328
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 3251.0990043208717,
+            "rios": 0.05574863798609807,
+            "wbytes": 31638.57974826226,
+            "wios": 3.6666823219988727
+          },
+          "net_dev": {
+            "rx_bytes": 13393.459656208905,
+            "rx_packets": 3.969002442231824,
+            "tx_bytes": 10497.30889535976,
+            "tx_packets": 4.61440916776254
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 505.5411891790344,
+            "read_bytes": 2607.612248731918,
+            "syscr": 2.3309224121735865,
+            "syscw": 1.9908416306594026,
+            "wchar": 17679.060586135638,
+            "write_bytes": 18472.590644373475
+          }
+        }
+      },
+      "datastore_sql_per_operation": 10.0
+    },
+    {
+      "provider": "tidb",
+      "inode_updates": true,
+      "separate_drives": false,
+      "drive_count": 1,
+      "driver_replicas": 10,
+      "driver_setup_seconds": null,
+      "provisioning_seconds": null,
+      "parallel_server_startup": false,
+      "drives_provisioned_before_startup": false,
+      "verification_method": null,
+      "servers": 10,
+      "clients": 500,
+      "active_clients": 500,
+      "setup_seconds": 147.641327458,
+      "depth": 1,
+      "mode": "Read",
+      "operations": 24688,
+      "operations_per_second": 1618.6113777056391,
+      "p99_us_upper": 524288,
+      "cpu_us_per_operation": 1151.5712491898898,
+      "cpu_cores": 1.8639463261774516,
+      "rss_end_bytes": 645513216,
+      "allocations_per_operation": 431.92709008425146,
+      "inode_cas_conflicts": 0,
+      "namespace_cas_conflicts": 0,
+      "verified_files": 500,
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-bounded/tidb-10-500-500.json",
+      "profile_us_per_operation": {
+        "filesystem.gate_wait": 296887.2946161293,
+        "service.dispatch": 306045.5362522683,
+        "service.authorization": 1652.4994924659754,
+        "catalog.load": 1647.8628442158135,
+        "catalog.pool_wait": 1037.5202606529488,
+        "catalog.decode_validate_bytes": 12.405417206740116,
+        "provider.inode.load_if_changed": 6040.364858190213,
+        "provider.inode.publish_cas": 0.0
+      },
+      "catalog_document_bytes_per_operation": 474.0,
+      "quic_network": {
+        "congestion_events": 0,
+        "lost_bytes": 0,
+        "lost_packets": 0,
+        "rx_bytes": 372431441,
+        "rx_datagrams": 299889,
+        "rx_ios": 299889,
+        "sent_packets": 103561,
+        "tx_bytes": 7392444,
+        "tx_datagrams": 103561,
+        "tx_ios": 103561
+      },
+      "datastore_sessions": null,
+      "datastore_window_seconds": 16.097208834,
+      "datastore_counter_resets": [],
+      "datastore_series_coverage_incomplete": false,
+      "datastore_cpu_seconds_per_operation": {
+        "pd": 0.00028353856124432923,
+        "tidb": 0.0016850291639663004,
+        "tikv": 0.0008911211924821776
+      },
+      "datastore_vm_io_per_operation": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 4.64549578742709,
+            "wios": 0.0017417368762151653
+          },
+          "net_dev": {
+            "rx_bytes": 279.7544556059624,
+            "rx_packets": 2.6879860661049904,
+            "tx_bytes": 292.68563674659754,
+            "tx_packets": 2.647359040829553
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 109.62520252754375,
+            "read_bytes": 0.0,
+            "syscr": 4.865845755022683,
+            "syscw": 2.9098752430330523,
+            "wchar": 146.5341056383668,
+            "write_bytes": 4.479585223590409
+          }
+        },
+        "tidb": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 13.272845106934543,
+            "rios": 0.00012151652624756967,
+            "wbytes": 0.0,
+            "wios": 0.0
+          },
+          "net_dev": {
+            "rx_bytes": 15321.770252754375,
+            "rx_packets": 12.577244005184705,
+            "tx_bytes": 10613.332347699286,
+            "tx_packets": 13.20896791963707
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 14516.199003564485,
+            "read_bytes": 13.272845106934543,
+            "syscr": 19.395819831497082,
+            "syscw": 10.539735904082955,
+            "wchar": 9743.636382047958,
+            "write_bytes": 0.0
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 3.4841218405703174,
+            "wios": 0.0010126377187297472
+          },
+          "net_dev": {
+            "rx_bytes": 4274.77944750486,
+            "rx_packets": 7.516323720025923,
+            "tx_bytes": 14446.02073882048,
+            "tx_packets": 5.846686649384316
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 6377.820155541153,
+            "read_bytes": 0.0,
+            "syscr": 4.724157485418017,
+            "syscw": 3.6312783538561244,
+            "wchar": 128.238212896954,
+            "write_bytes": 3.4841218405703174
+          }
+        }
+      },
+      "datastore_sql_per_operation": 3.0
+    },
+    {
+      "provider": "tidb",
+      "inode_updates": true,
+      "separate_drives": false,
+      "drive_count": 1,
+      "driver_replicas": 10,
+      "driver_setup_seconds": null,
+      "provisioning_seconds": null,
+      "parallel_server_startup": false,
+      "drives_provisioned_before_startup": false,
+      "verification_method": null,
+      "servers": 10,
+      "clients": 500,
+      "active_clients": 500,
+      "setup_seconds": 147.641327458,
+      "depth": 1,
+      "mode": "Write",
+      "operations": 10089,
+      "operations_per_second": 639.6656130020805,
+      "p99_us_upper": 1048576,
+      "cpu_us_per_operation": 1563.844583209436,
+      "cpu_cores": 1.000337603958647,
+      "rss_end_bytes": 670908416,
+      "allocations_per_operation": 675.51630488651,
+      "inode_cas_conflicts": 0,
+      "namespace_cas_conflicts": 0,
+      "verified_files": 500,
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-bounded/tidb-10-500-500.json",
+      "profile_us_per_operation": {
+        "filesystem.gate_wait": 0.0,
+        "service.dispatch": 761876.9791335117,
+        "service.authorization": 3162.741693230251,
+        "catalog.load": 3156.894320150659,
+        "catalog.pool_wait": 2038.4644687283178,
+        "catalog.decode_validate_bytes": 15.46326345524829,
+        "provider.inode.load_if_changed": 3013.5367911586877,
+        "provider.inode.publish_cas": 11175.23190722569
+      },
+      "catalog_document_bytes_per_operation": 474.0,
+      "quic_network": {
+        "congestion_events": 0,
+        "lost_bytes": 0,
+        "lost_packets": 0,
+        "rx_bytes": 2142624,
+        "rx_datagrams": 36873,
+        "rx_ios": 36873,
+        "sent_packets": 113565,
+        "tx_bytes": 152586609,
+        "tx_datagrams": 113565,
+        "tx_ios": 113565
+      },
+      "datastore_sessions": null,
+      "datastore_window_seconds": 16.29615625,
+      "datastore_counter_resets": [],
+      "datastore_series_coverage_incomplete": false,
+      "datastore_cpu_seconds_per_operation": {
+        "pd": 0.0008553870552086427,
+        "tidb": 0.0037615224501932787,
+        "tikv": 0.0023788284269997025
+      },
+      "datastore_vm_io_per_operation": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 12.585588264446427,
+            "wios": 0.004162949747249479
+          },
+          "net_dev": {
+            "rx_bytes": 836.1195361284567,
+            "rx_packets": 7.8732282684111405,
+            "tx_bytes": 873.084844880563,
+            "tx_packets": 7.719892952720785
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 336.8060263653484,
+            "read_bytes": 0.0,
+            "syscr": 14.018535038160373,
+            "syscw": 8.280305282981464,
+            "wchar": 438.07255426702346,
+            "write_bytes": 12.585588264446427
+          }
+        },
+        "tidb": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 772.9987114679353,
+            "rios": 0.0029735355337496285,
+            "wbytes": 2.0299335910397462,
+            "wios": 0.00019823570224997521
+          },
+          "net_dev": {
+            "rx_bytes": 21779.71919912776,
+            "rx_packets": 29.230944593121222,
+            "tx_bytes": 22497.036277133513,
+            "tx_packets": 30.423233224303697
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 19915.556546734068,
+            "read_bytes": 772.9987114679353,
+            "syscr": 46.92625631876301,
+            "syscw": 26.298939438992964,
+            "wchar": 20498.260382594905,
+            "write_bytes": 0.0
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.40598671820794924,
+            "rios": 9.911785112498761e-05,
+            "wbytes": 28140.969372584,
+            "wios": 3.2059668946377244
+          },
+          "net_dev": {
+            "rx_bytes": 14187.729903855685,
+            "rx_packets": 10.546139359698682,
+            "tx_bytes": 10980.661116067004,
+            "tx_packets": 9.95846962037863
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 20100.747447715334,
+            "read_bytes": 0.40598671820794924,
+            "syscr": 7.932104271979384,
+            "syscw": 8.856675587273267,
+            "wchar": 21861.773912181583,
+            "write_bytes": 28092.656953117257
+          }
+        }
+      },
+      "datastore_sql_per_operation": 10.002378828427
+    },
+    {
+      "provider": "tidb",
+      "inode_updates": true,
+      "separate_drives": false,
+      "drive_count": 1,
+      "driver_replicas": 10,
+      "driver_setup_seconds": null,
+      "provisioning_seconds": null,
+      "parallel_server_startup": false,
+      "drives_provisioned_before_startup": false,
+      "verification_method": null,
+      "servers": 10,
+      "clients": 1000,
+      "active_clients": 1000,
+      "setup_seconds": 22.596480958,
+      "depth": 1,
+      "mode": "Read",
+      "operations": 33330,
+      "operations_per_second": 2182.580111408993,
+      "p99_us_upper": 1048576,
+      "cpu_us_per_operation": 1073.9891389138913,
+      "cpu_cores": 2.34406733446273,
+      "rss_end_bytes": 305610752,
+      "allocations_per_operation": 432.3726672667267,
+      "inode_cas_conflicts": 0,
+      "namespace_cas_conflicts": 0,
+      "verified_files": 1000,
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-preseed/tidb-10-1000-1000.json",
+      "profile_us_per_operation": {
+        "filesystem.gate_wait": 444261.3488848485,
+        "service.dispatch": 453371.8706184218,
+        "service.authorization": 3247.9548783378336,
+        "catalog.load": 3243.8782221122115,
+        "catalog.pool_wait": 1920.9718882388238,
+        "catalog.decode_validate_bytes": 10.92577302730273,
+        "provider.inode.load_if_changed": 4458.649863546354,
+        "provider.inode.publish_cas": 0.0
+      },
+      "catalog_document_bytes_per_operation": 474.0,
+      "quic_network": {
+        "congestion_events": 0,
+        "lost_bytes": 0,
+        "lost_packets": 0,
+        "rx_bytes": 502748209,
+        "rx_datagrams": 404140,
+        "rx_ios": 404140,
+        "sent_packets": 139465,
+        "tx_bytes": 9967493,
+        "tx_datagrams": 139465,
+        "tx_ios": 139465
+      },
+      "datastore_sessions": null,
+      "datastore_window_seconds": 15.934777583,
+      "datastore_counter_resets": [],
+      "datastore_series_coverage_incomplete": true,
+      "datastore_cpu_seconds_per_operation": {
+        "pd": 0.00023042304230423046,
+        "tidb": 0.0012904290429042904,
+        "tikv": 0.00057005700570057
+      },
+      "datastore_vm_io_per_operation": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 5.653045304530453,
+            "wios": 0.0017101710171017102
+          },
+          "net_dev": {
+            "rx_bytes": 245.0052205220522,
+            "rx_packets": 2.192049204920492,
+            "tx_bytes": 240.43198319831984,
+            "tx_packets": 2.156975697569757
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 107.41878187818781,
+            "read_bytes": 0.0,
+            "syscr": 3.9967296729672968,
+            "syscw": 2.426102610261026,
+            "wchar": 122.92697269726973,
+            "write_bytes": 9.33981398139814
+          }
+        },
+        "tidb": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 0.0,
+            "wios": 0.0
+          },
+          "net_dev": {
+            "rx_bytes": 15263.691419141915,
+            "rx_packets": 11.555805580558056,
+            "tx_bytes": 9105.441224122413,
+            "tx_packets": 12.241824182418242
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 14519.443504350435,
+            "read_bytes": 0.0,
+            "syscr": 17.705340534053406,
+            "syscw": 9.708640864086409,
+            "wchar": 8299.298229822982,
+            "write_bytes": 0.0
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 1.9662766276627663,
+            "wios": 0.00048004800480048006
+          },
+          "net_dev": {
+            "rx_bytes": 2814.735793579358,
+            "rx_packets": 7.058925892589259,
+            "tx_bytes": 14444.188898889888,
+            "tx_packets": 5.363066306630663
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 10813.212091209121,
+            "read_bytes": 0.0,
+            "syscr": 3.793729372937294,
+            "syscw": 2.8786678667866785,
+            "wchar": 96.42322232223222,
+            "write_bytes": 1.9662766276627663
+          }
+        }
+      },
+      "datastore_sql_per_operation": 3.0
+    },
+    {
+      "provider": "tidb",
+      "inode_updates": true,
+      "separate_drives": false,
+      "drive_count": 1,
+      "driver_replicas": 10,
+      "driver_setup_seconds": null,
+      "provisioning_seconds": null,
+      "parallel_server_startup": false,
+      "drives_provisioned_before_startup": false,
+      "verification_method": null,
+      "servers": 10,
+      "clients": 1000,
+      "active_clients": 1000,
+      "setup_seconds": 22.596480958,
+      "depth": 1,
+      "mode": "Write",
+      "operations": 11894,
+      "operations_per_second": 730.0391280834277,
+      "p99_us_upper": 2097152,
+      "cpu_us_per_operation": 1532.0635614595594,
+      "cpu_cores": 1.1184663465763276,
+      "rss_end_bytes": 546783232,
+      "allocations_per_operation": 675.9191188834707,
+      "inode_cas_conflicts": 0,
+      "namespace_cas_conflicts": 0,
+      "verified_files": 1000,
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-preseed/tidb-10-1000-1000.json",
+      "profile_us_per_operation": {
+        "filesystem.gate_wait": 0.0,
+        "service.dispatch": 1310668.1386295613,
+        "service.authorization": 7937.602119808307,
+        "catalog.load": 7932.075616529342,
+        "catalog.pool_wait": 5906.9283426937955,
+        "catalog.decode_validate_bytes": 13.706846309063394,
+        "provider.inode.load_if_changed": 2529.7162584496386,
+        "provider.inode.publish_cas": 9855.627337901462
+      },
+      "catalog_document_bytes_per_operation": 474.0,
+      "quic_network": {
+        "congestion_events": 0,
+        "lost_bytes": 0,
+        "lost_packets": 0,
+        "rx_bytes": 2507889,
+        "rx_datagrams": 42991,
+        "rx_ios": 42991,
+        "sent_packets": 134103,
+        "tx_bytes": 179894273,
+        "tx_datagrams": 134103,
+        "tx_ios": 134103
+      },
+      "datastore_sessions": null,
+      "datastore_window_seconds": 16.9022605,
+      "datastore_counter_resets": [],
+      "datastore_series_coverage_incomplete": false,
+      "datastore_cpu_seconds_per_operation": {
+        "pd": 0.000795359004540104,
+        "tidb": 0.003318479905834876,
+        "tikv": 0.0018496721035816377
+      },
+      "datastore_vm_io_per_operation": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 6.887506305700353,
+            "wios": 0.0024382041365394315
+          },
+          "net_dev": {
+            "rx_bytes": 800.2778711955608,
+            "rx_packets": 7.513284008743905,
+            "tx_bytes": 838.581553724567,
+            "tx_packets": 7.3745586009752815
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 324.93332772826636,
+            "read_bytes": 0.0,
+            "syscr": 13.518748949049941,
+            "syscw": 7.99226500756684,
+            "wchar": 414.3880948377333,
+            "write_bytes": 12.053136034975617
+          }
+        },
+        "tidb": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 0.0,
+            "wios": 0.0
+          },
+          "net_dev": {
+            "rx_bytes": 21883.341180427105,
+            "rx_packets": 28.57440726416681,
+            "tx_bytes": 22424.904153354633,
+            "tx_packets": 29.87077518076341
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 20056.455271565494,
+            "read_bytes": 0.0,
+            "syscr": 46.10307718177232,
+            "syscw": 25.878594249201278,
+            "wchar": 20462.834033966705,
+            "write_bytes": 0.0
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 29818.081049268538,
+            "wios": 3.0244661173701024
+          },
+          "net_dev": {
+            "rx_bytes": 14164.384059189508,
+            "rx_packets": 10.343954935261477,
+            "tx_bytes": 11123.420380023541,
+            "tx_packets": 9.75508659828485
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 10268.009164284513,
+            "read_bytes": 0.0,
+            "syscr": 7.2740877753489155,
+            "syscw": 8.178325205986212,
+            "wchar": 23871.76534387086,
+            "write_bytes": 29774.689759542627
+          }
+        }
+      },
+      "datastore_sql_per_operation": 10.004708256263662
+    },
+    {
+      "provider": "tidb",
+      "inode_updates": true,
+      "separate_drives": false,
+      "drive_count": 1,
+      "driver_replicas": 10,
+      "driver_setup_seconds": null,
+      "provisioning_seconds": null,
+      "parallel_server_startup": false,
+      "drives_provisioned_before_startup": false,
+      "verification_method": "all stored files plus fresh driver sample",
+      "servers": 10,
+      "clients": 2500,
+      "active_clients": 2500,
+      "setup_seconds": 83.792515,
+      "depth": 1,
+      "mode": "Read",
+      "operations": 34946,
+      "operations_per_second": 2203.918466404517,
+      "p99_us_upper": 2097152,
+      "cpu_us_per_operation": 1124.7710181422767,
+      "cpu_cores": 2.4789036173603733,
+      "rss_end_bytes": 785301504,
+      "allocations_per_operation": 433.5907399988554,
+      "inode_cas_conflicts": 0,
+      "namespace_cas_conflicts": 0,
+      "verified_files": 2500,
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-oracle/tidb-10-2500-2500.json",
+      "profile_us_per_operation": {
+        "filesystem.gate_wait": 1075312.6900915985,
+        "service.dispatch": 1105341.077073399,
+        "service.authorization": 24291.057532078063,
+        "catalog.load": 24286.63010762319,
+        "catalog.pool_wait": 7652.232107794884,
+        "catalog.decode_validate_bytes": 9.92030793223831,
+        "provider.inode.load_if_changed": 4422.719934613404,
+        "provider.inode.publish_cas": 0.0
+      },
+      "catalog_document_bytes_per_operation": 474.0,
+      "quic_network": {
+        "congestion_events": 0,
+        "lost_bytes": 0,
+        "lost_packets": 0,
+        "rx_bytes": 526920850,
+        "rx_datagrams": 425004,
+        "rx_ios": 425004,
+        "sent_packets": 149530,
+        "tx_bytes": 10572176,
+        "tx_datagrams": 149530,
+        "tx_ios": 149530
+      },
+      "datastore_sessions": null,
+      "datastore_window_seconds": 16.430645708,
+      "datastore_counter_resets": [],
+      "datastore_series_coverage_incomplete": true,
+      "datastore_cpu_seconds_per_operation": {
+        "pd": 0.00022835231500028616,
+        "tidb": 0.0013678246437360494,
+        "tikv": 0.000629542723058433
+      },
+      "datastore_vm_io_per_operation": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 3.9851198992731645,
+            "wios": 0.0013449321810793796
+          },
+          "net_dev": {
+            "rx_bytes": 247.74134378755795,
+            "rx_packets": 2.3484518972128425,
+            "tx_bytes": 258.55871916671435,
+            "tx_packets": 2.3096205574314657
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 99.16994791964746,
+            "read_bytes": 0.0,
+            "syscr": 4.244405654438276,
+            "syscw": 2.533909460310193,
+            "wchar": 128.25590911692325,
+            "write_bytes": 5.743261031305443
+          }
+        },
+        "tidb": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 0.0,
+            "wios": 0.0
+          },
+          "net_dev": {
+            "rx_bytes": 15662.473301665426,
+            "rx_packets": 12.04675785497625,
+            "tx_bytes": 10540.934126938706,
+            "tx_packets": 12.610484747896756
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 14885.573055571453,
+            "read_bytes": 0.0,
+            "syscr": 18.33606135179992,
+            "syscw": 9.988897155611514,
+            "wchar": 9710.474675213187,
+            "write_bytes": 0.0
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 2.46139758484519,
+            "wios": 0.0007153894580209466
+          },
+          "net_dev": {
+            "rx_bytes": 4248.130973501974,
+            "rx_packets": 7.263435014021633,
+            "tx_bytes": 14823.857437188806,
+            "tx_packets": 5.687775424941338
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 15482.897527614034,
+            "read_bytes": 0.0,
+            "syscr": 4.3370915126194705,
+            "syscw": 3.2621186974188747,
+            "wchar": 96.04235105591484,
+            "write_bytes": 2.344188176043038
+          }
+        }
+      },
+      "datastore_sql_per_operation": 3.0
+    },
+    {
+      "provider": "tidb",
+      "inode_updates": true,
+      "separate_drives": false,
+      "drive_count": 1,
+      "driver_replicas": 10,
+      "driver_setup_seconds": null,
+      "provisioning_seconds": null,
+      "parallel_server_startup": false,
+      "drives_provisioned_before_startup": false,
+      "verification_method": "all stored files plus fresh driver sample",
+      "servers": 10,
+      "clients": 2500,
+      "active_clients": 2500,
+      "setup_seconds": 83.792515,
+      "depth": 1,
+      "mode": "Write",
+      "operations": 13840,
+      "operations_per_second": 789.1885446060991,
+      "p99_us_upper": 4194304,
+      "cpu_us_per_operation": 1626.5543352601155,
+      "cpu_cores": 1.2836580485666715,
+      "rss_end_bytes": 1234714624,
+      "allocations_per_operation": 679.6600433526012,
+      "inode_cas_conflicts": 0,
+      "namespace_cas_conflicts": 0,
+      "verified_files": 2500,
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-oracle/tidb-10-2500-2500.json",
+      "profile_us_per_operation": {
+        "filesystem.gate_wait": 0.0,
+        "service.dispatch": 2901737.523633309,
+        "service.authorization": 31433.58260187861,
+        "catalog.load": 31427.254602312136,
+        "catalog.pool_wait": 18769.23242984104,
+        "catalog.decode_validate_bytes": 12.18369299132948,
+        "provider.inode.load_if_changed": 2467.2528997109825,
+        "provider.inode.publish_cas": 8963.825239523121
+      },
+      "catalog_document_bytes_per_operation": 474.0,
+      "quic_network": {
+        "congestion_events": 1295,
+        "lost_bytes": 18263545,
+        "lost_packets": 13286,
+        "rx_bytes": 2983468,
+        "rx_datagrams": 51400,
+        "rx_ios": 51400,
+        "sent_packets": 173561,
+        "tx_bytes": 227724046,
+        "tx_datagrams": 173561,
+        "tx_ios": 173561
+      },
+      "datastore_sessions": null,
+      "datastore_window_seconds": 18.064228459,
+      "datastore_counter_resets": [],
+      "datastore_series_coverage_incomplete": true,
+      "datastore_cpu_seconds_per_operation": {
+        "pd": 0.0007210982658959536,
+        "tidb": 0.0030715317919075137,
+        "tikv": 0.0018063583815028901
+      },
+      "datastore_vm_io_per_operation": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 5.91907514450867,
+            "wios": 0.0023121387283236996
+          },
+          "net_dev": {
+            "rx_bytes": 792.2396676300579,
+            "rx_packets": 7.415895953757225,
+            "tx_bytes": 829.9518786127168,
+            "tx_packets": 7.272254335260116
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 321.2802023121387,
+            "read_bytes": 0.0,
+            "syscr": 13.25643063583815,
+            "syscw": 7.685476878612716,
+            "wchar": 404.7031791907514,
+            "write_bytes": 10.06242774566474
+          }
+        },
+        "tidb": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 0.0,
+            "wios": 0.0
+          },
+          "net_dev": {
+            "rx_bytes": 21870.463294797686,
+            "rx_packets": 28.397760115606935,
+            "tx_bytes": 22407.76112716763,
+            "tx_packets": 29.754624277456646
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 20050.533092485548,
+            "read_bytes": 0.0,
+            "syscr": 46.02384393063584,
+            "syscw": 25.839812138728323,
+            "wchar": 20453.429913294796,
+            "write_bytes": 0.0
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 29622.603468208094,
+            "wios": 2.983887283236994
+          },
+          "net_dev": {
+            "rx_bytes": 14167.042630057804,
+            "rx_packets": 10.334898843930636,
+            "tx_bytes": 11123.811705202312,
+            "tx_packets": 9.757080924855492
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 56021.98164739885,
+            "read_bytes": 0.0,
+            "syscr": 9.1246387283237,
+            "syscw": 8.425433526011561,
+            "wchar": 23777.727384393063,
+            "write_bytes": 29624.083236994218
+          }
+        }
+      },
+      "datastore_sql_per_operation": 10.002312138728323
+    },
+    {
+      "provider": "tidb",
+      "inode_updates": true,
+      "separate_drives": false,
+      "drive_count": 1,
+      "driver_replicas": 10,
+      "driver_setup_seconds": null,
+      "provisioning_seconds": null,
+      "parallel_server_startup": false,
+      "drives_provisioned_before_startup": false,
+      "verification_method": "all stored files plus fresh driver sample",
+      "servers": 10,
+      "clients": 5000,
+      "active_clients": 5000,
+      "setup_seconds": 282.056759167,
+      "depth": 1,
+      "mode": "Read",
+      "operations": 36019,
+      "operations_per_second": 2146.6671326251662,
+      "p99_us_upper": 4194304,
+      "cpu_us_per_operation": 1168.4083955690053,
+      "cpu_cores": 2.5081839002512876,
+      "rss_end_bytes": 1583857664,
+      "allocations_per_operation": 433.6641494766651,
+      "inode_cas_conflicts": 0,
+      "namespace_cas_conflicts": 0,
+      "verified_files": 5000,
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-oracle/tidb-10-5000-5000.json",
+      "profile_us_per_operation": {
+        "filesystem.gate_wait": 2151024.8093825206,
+        "service.dispatch": 2235998.2146016266,
+        "service.authorization": 79078.07975948804,
+        "catalog.load": 79071.84878133763,
+        "catalog.pool_wait": 12508.196789971958,
+        "catalog.decode_validate_bytes": 9.576702656931065,
+        "provider.inode.load_if_changed": 4530.377123296038,
+        "provider.inode.publish_cas": 0.0
+      },
+      "catalog_document_bytes_per_operation": 474.0,
+      "quic_network": {
+        "congestion_events": 0,
+        "lost_bytes": 0,
+        "lost_packets": 0,
+        "rx_bytes": 542920399,
+        "rx_datagrams": 436418,
+        "rx_ios": 436418,
+        "sent_packets": 153366,
+        "tx_bytes": 10887664,
+        "tx_datagrams": 153366,
+        "tx_ios": 153366
+      },
+      "datastore_sessions": null,
+      "datastore_window_seconds": 17.40526175,
+      "datastore_counter_resets": [],
+      "datastore_series_coverage_incomplete": false,
+      "datastore_cpu_seconds_per_operation": {
+        "pd": 0.00022793525639245937,
+        "tidb": 0.0014134206946333871,
+        "tikv": 0.000610788750381743
+      },
+      "datastore_vm_io_per_operation": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 4.207557122629723,
+            "wios": 0.001193814375746134
+          },
+          "net_dev": {
+            "rx_bytes": 248.4529276215331,
+            "rx_packets": 2.3613370721008358,
+            "tx_bytes": 259.3324634220828,
+            "tx_packets": 2.322551986451595
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 99.2459257614037,
+            "read_bytes": 0.0,
+            "syscr": 4.265026791415642,
+            "syscw": 2.5424359365890226,
+            "wchar": 128.2363197201477,
+            "write_bytes": 4.207557122629723
+          }
+        },
+        "tidb": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 0.0,
+            "wios": 0.0
+          },
+          "net_dev": {
+            "rx_bytes": 15669.684944057302,
+            "rx_packets": 12.096532385685332,
+            "tx_bytes": 10545.449318415282,
+            "tx_packets": 12.638885032899303
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 14890.221244343264,
+            "read_bytes": 0.0,
+            "syscr": 18.45314972653322,
+            "syscw": 10.06030150753769,
+            "wchar": 9713.389488880868,
+            "write_bytes": 0.0
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 10.575751686609845,
+            "rios": 0.0025264443765790276,
+            "wbytes": 2.5017907215636193,
+            "wios": 0.0006940781254337989
+          },
+          "net_dev": {
+            "rx_bytes": 4252.279963352675,
+            "rx_packets": 7.2788805907993,
+            "tx_bytes": 14829.563563674727,
+            "tx_packets": 5.715372442322108
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 5896.235986562648,
+            "read_bytes": 10.575751686609845,
+            "syscr": 4.704683639190427,
+            "syscw": 3.293539520808462,
+            "wchar": 94.99103251061939,
+            "write_bytes": 2.5017907215636193
+          }
+        }
+      },
+      "datastore_sql_per_operation": 3.0
+    },
+    {
+      "provider": "tidb",
+      "inode_updates": true,
+      "separate_drives": false,
+      "drive_count": 1,
+      "driver_replicas": 10,
+      "driver_setup_seconds": null,
+      "provisioning_seconds": null,
+      "parallel_server_startup": false,
+      "drives_provisioned_before_startup": false,
+      "verification_method": "all stored files plus fresh driver sample",
+      "servers": 10,
+      "clients": 5000,
+      "active_clients": 5000,
+      "setup_seconds": 282.056759167,
+      "depth": 1,
+      "mode": "Write",
+      "operations": 15031,
+      "operations_per_second": 731.5772254221355,
+      "p99_us_upper": 8388608,
+      "cpu_us_per_operation": 1863.5858558978111,
+      "cpu_cores": 1.363356969793656,
+      "rss_end_bytes": 2319237120,
+      "allocations_per_operation": 684.3373694364979,
+      "inode_cas_conflicts": 0,
+      "namespace_cas_conflicts": 0,
+      "verified_files": 5000,
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-oracle/tidb-10-5000-5000.json",
+      "profile_us_per_operation": {
+        "filesystem.gate_wait": 0.0,
+        "service.dispatch": 5780452.319462777,
+        "service.authorization": 52613.26407205109,
+        "catalog.load": 52607.268700884844,
+        "catalog.pool_wait": 30819.63308588916,
+        "catalog.decode_validate_bytes": 10.45924469429845,
+        "provider.inode.load_if_changed": 2654.1059379282815,
+        "provider.inode.publish_cas": 9819.032275630363
+      },
+      "catalog_document_bytes_per_operation": 474.0,
+      "quic_network": {
+        "congestion_events": 4353,
+        "lost_bytes": 61331017,
+        "lost_packets": 45192,
+        "rx_bytes": 3473683,
+        "rx_datagrams": 62797,
+        "rx_ios": 62797,
+        "sent_packets": 230839,
+        "tx_bytes": 289069881,
+        "tx_datagrams": 230839,
+        "tx_ios": 230839
+      },
+      "datastore_sessions": null,
+      "datastore_window_seconds": 21.09757175,
+      "datastore_counter_resets": [],
+      "datastore_series_coverage_incomplete": false,
+      "datastore_cpu_seconds_per_operation": {
+        "pd": 0.0007018827755970992,
+        "tidb": 0.002936597698090612,
+        "tikv": 0.0014636418069323399
+      },
+      "datastore_vm_io_per_operation": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 8.447608276229127,
+            "wios": 0.002594637748652784
+          },
+          "net_dev": {
+            "rx_bytes": 893.0898143836072,
+            "rx_packets": 8.444680992615261,
+            "tx_bytes": 933.1242764952432,
+            "tx_packets": 8.25979642073049
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 354.07311556117355,
+            "read_bytes": 0.0,
+            "syscr": 15.193001130995942,
+            "syscw": 8.581797618255605,
+            "wchar": 441.89288803140175,
+            "write_bytes": 8.447608276229127
+          }
+        },
+        "tidb": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 0.0,
+            "wios": 0.0
+          },
+          "net_dev": {
+            "rx_bytes": 21965.28101922693,
+            "rx_packets": 29.2522786241767,
+            "tx_bytes": 22489.015035593107,
+            "tx_packets": 30.568558312820173
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 20094.89415208569,
+            "read_bytes": 0.0,
+            "syscr": 47.76601689840995,
+            "syscw": 26.909852970527577,
+            "wchar": 20482.939591510876,
+            "write_bytes": 0.0
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.5450069855631694,
+            "rios": 0.00013305834608475815,
+            "wbytes": 24732.96201184219,
+            "wios": 1.8639478411283348
+          },
+          "net_dev": {
+            "rx_bytes": 14151.513472157541,
+            "rx_packets": 10.108575610405163,
+            "tx_bytes": 11110.904597165858,
+            "tx_packets": 9.566362850109773
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 2714.7432639212293,
+            "read_bytes": 0.5450069855631694,
+            "syscr": 7.130397179163063,
+            "syscw": 7.352538087951567,
+            "wchar": 21247.471159603487,
+            "write_bytes": 24815.530570155013
+          }
+        }
+      },
+      "datastore_sql_per_operation": 10.011709134455458
+    },
+    {
+      "provider": "tidb",
+      "inode_updates": true,
+      "separate_drives": false,
+      "drive_count": 1,
+      "driver_replicas": 10,
+      "driver_setup_seconds": null,
+      "provisioning_seconds": null,
+      "parallel_server_startup": false,
+      "drives_provisioned_before_startup": false,
+      "verification_method": "all stored files plus fresh driver sample",
+      "servers": 10,
+      "clients": 10000,
+      "active_clients": 100,
+      "setup_seconds": 3.80546525,
+      "depth": 1,
+      "mode": "Read",
+      "operations": 31739,
+      "operations_per_second": 2110.951546368357,
+      "p99_us_upper": 65536,
+      "cpu_us_per_operation": 1036.029175462365,
+      "cpu_cores": 2.187007390025013,
+      "rss_end_bytes": 875020288,
+      "allocations_per_operation": 433.84993225999557,
+      "inode_cas_conflicts": 0,
+      "namespace_cas_conflicts": 0,
+      "verified_files": 100,
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-oracle/tidb-10-10000-100.json",
+      "profile_us_per_operation": {
+        "filesystem.gate_wait": 40567.66497914238,
+        "service.dispatch": 46770.228776016884,
+        "service.authorization": 276.1982215885819,
+        "catalog.load": 272.32075717571445,
+        "catalog.pool_wait": 3.0162813573206466,
+        "catalog.decode_validate_bytes": 10.406268596994234,
+        "provider.inode.load_if_changed": 4626.6648872050155,
+        "provider.inode.publish_cas": 0.0
+      },
+      "catalog_document_bytes_per_operation": 474.0,
+      "quic_network": {
+        "congestion_events": 0,
+        "lost_bytes": 0,
+        "lost_packets": 0,
+        "rx_bytes": 478867470,
+        "rx_datagrams": 395241,
+        "rx_ios": 395241,
+        "sent_packets": 140339,
+        "tx_bytes": 9741264,
+        "tx_datagrams": 140339,
+        "tx_ios": 140339
+      },
+      "datastore_sessions": null,
+      "datastore_window_seconds": 15.576388292,
+      "datastore_counter_resets": [],
+      "datastore_series_coverage_incomplete": true,
+      "datastore_cpu_seconds_per_operation": {
+        "pd": 0.00023850782948423054,
+        "tidb": 0.0014594032578216054,
+        "tikv": 0.0006931535335076719
+      },
+      "datastore_vm_io_per_operation": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 4.129682724723526,
+            "wios": 0.0012287721730363276
+          },
+          "net_dev": {
+            "rx_bytes": 256.9173571946186,
+            "rx_packets": 2.447021015154857,
+            "tx_bytes": 267.88774063455054,
+            "tx_packets": 2.403919468162198
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 102.3581713349507,
+            "read_bytes": 0.0,
+            "syscr": 4.415072938655912,
+            "syscw": 2.6337628784775826,
+            "wchar": 133.5068527678881,
+            "write_bytes": 4.129682724723526
+          }
+        },
+        "tidb": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 0.0,
+            "wios": 0.0
+          },
+          "net_dev": {
+            "rx_bytes": 15614.321780774442,
+            "rx_packets": 12.207032357667224,
+            "tx_bytes": 10567.59441066196,
+            "tx_packets": 12.753646932795615
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 14828.001323293109,
+            "read_bytes": 0.0,
+            "syscr": 18.67034248085951,
+            "syscw": 10.17476921138032,
+            "wchar": 9728.131730678346,
+            "write_bytes": 0.0
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 19.35788777214153,
+            "rios": 0.0004095907243454425,
+            "wbytes": 3.6134723841330856,
+            "wios": 0.0011972651942405244
+          },
+          "net_dev": {
+            "rx_bytes": 4261.754655156117,
+            "rx_packets": 7.308012224707773,
+            "tx_bytes": 14766.758026402847,
+            "tx_packets": 5.758688049402942
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 2279.998361637103,
+            "read_bytes": 19.35788777214153,
+            "syscr": 4.244966760137371,
+            "syscw": 3.3576672232899587,
+            "wchar": 105.41381265950407,
+            "write_bytes": 3.4844197989854755
+          }
+        }
+      },
+      "datastore_sql_per_operation": 3.0
+    },
+    {
+      "provider": "tidb",
+      "inode_updates": true,
+      "separate_drives": false,
+      "drive_count": 1,
+      "driver_replicas": 10,
+      "driver_setup_seconds": null,
+      "provisioning_seconds": null,
+      "parallel_server_startup": false,
+      "drives_provisioned_before_startup": false,
+      "verification_method": "all stored files plus fresh driver sample",
+      "servers": 10,
+      "clients": 10000,
+      "active_clients": 100,
+      "setup_seconds": 3.80546525,
+      "depth": 1,
+      "mode": "Write",
+      "operations": 12061,
+      "operations_per_second": 797.1061475628165,
+      "p99_us_upper": 262144,
+      "cpu_us_per_operation": 1421.3847110521515,
+      "cpu_cores": 1.1329944912314678,
+      "rss_end_bytes": 901251072,
+      "allocations_per_operation": 680.2049581295083,
+      "inode_cas_conflicts": 0,
+      "namespace_cas_conflicts": 0,
+      "verified_files": 100,
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-oracle/tidb-10-10000-100.json",
+      "profile_us_per_operation": {
+        "filesystem.gate_wait": 0.0,
+        "service.dispatch": 124308.19649830031,
+        "service.authorization": 200.86380582041292,
+        "catalog.load": 195.68133065251638,
+        "catalog.pool_wait": 0.21784777381643314,
+        "catalog.decode_validate_bytes": 12.780558660144267,
+        "provider.inode.load_if_changed": 2297.110253793218,
+        "provider.inode.publish_cas": 9082.400038968577
+      },
+      "catalog_document_bytes_per_operation": 474.0,
+      "quic_network": {
+        "congestion_events": 0,
+        "lost_bytes": 0,
+        "lost_packets": 0,
+        "rx_bytes": 2876248,
+        "rx_datagrams": 52868,
+        "rx_ios": 52868,
+        "sent_packets": 145273,
+        "tx_bytes": 182747854,
+        "tx_datagrams": 145273,
+        "tx_ios": 145273
+      },
+      "datastore_sessions": null,
+      "datastore_window_seconds": 15.647677125,
+      "datastore_counter_resets": [],
+      "datastore_series_coverage_incomplete": false,
+      "datastore_cpu_seconds_per_operation": {
+        "pd": 0.0007221623414310571,
+        "tidb": 0.0031556255700190654,
+        "tikv": 0.0017411491584445734
+      },
+      "datastore_vm_io_per_operation": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.33960699776137965,
+            "rios": 8.291186468783683e-05,
+            "wbytes": 7.471353950750353,
+            "wios": 0.002404444075947268
+          },
+          "net_dev": {
+            "rx_bytes": 798.9224774065169,
+            "rx_packets": 7.498134483044524,
+            "tx_bytes": 836.026034325512,
+            "tx_packets": 7.346322858801094
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 322.92289196584034,
+            "read_bytes": 0.33960699776137965,
+            "syscr": 13.41812453362076,
+            "syscw": 7.773816433131581,
+            "wchar": 413.5150485034408,
+            "write_bytes": 8.490174944034491
+          }
+        },
+        "tidb": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 0.0,
+            "wios": 0.0
+          },
+          "net_dev": {
+            "rx_bytes": 21907.680208937898,
+            "rx_packets": 28.817345162092696,
+            "tx_bytes": 22436.925876792968,
+            "tx_packets": 29.88740568775392
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 20060.482547052485,
+            "read_bytes": 0.0,
+            "syscr": 46.23638172622502,
+            "syscw": 25.974463145676147,
+            "wchar": 20474.133736837743,
+            "write_bytes": 0.0
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 3.3960699776137964,
+            "rios": 0.0006632949175026946,
+            "wbytes": 18779.927369206533,
+            "wios": 3.037061603515463
+          },
+          "net_dev": {
+            "rx_bytes": 14179.66926457176,
+            "rx_packets": 10.401044689495066,
+            "tx_bytes": 11136.783185473842,
+            "tx_packets": 9.797695050161678
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 227.1084487190117,
+            "read_bytes": 3.3960699776137964,
+            "syscr": 7.153055302213747,
+            "syscw": 8.503109194925793,
+            "wchar": 12873.73949092115,
+            "write_bytes": 18809.473178011773
+          }
+        }
+      },
+      "datastore_sql_per_operation": 10.001326589835005
+    },
+    {
+      "provider": "tidb",
+      "inode_updates": true,
+      "separate_drives": false,
+      "drive_count": 1,
+      "driver_replicas": 10,
+      "driver_setup_seconds": null,
+      "provisioning_seconds": null,
+      "parallel_server_startup": false,
+      "drives_provisioned_before_startup": false,
+      "verification_method": "all stored files plus fresh driver sample",
+      "servers": 10,
+      "clients": 10000,
+      "active_clients": 10000,
+      "setup_seconds": 1046.066478,
+      "depth": 1,
+      "mode": "Read",
+      "operations": 38258,
+      "operations_per_second": 2073.119124141636,
+      "p99_us_upper": 8388608,
+      "cpu_us_per_operation": 1372.8842072246327,
+      "cpu_cores": 2.8461525052294143,
+      "rss_end_bytes": 2923692032,
+      "allocations_per_operation": 435.0125986721731,
+      "inode_cas_conflicts": 0,
+      "namespace_cas_conflicts": 0,
+      "verified_files": 10000,
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-oracle/tidb-10-10000-10000.json",
+      "profile_us_per_operation": {
+        "filesystem.gate_wait": 4102323.7891365467,
+        "service.dispatch": 4381290.955437529,
+        "service.authorization": 272823.2568948978,
+        "catalog.load": 272815.85961574054,
+        "catalog.pool_wait": 25060.530318678448,
+        "catalog.decode_validate_bytes": 10.039469653405824,
+        "provider.inode.load_if_changed": 4676.460237780334,
+        "provider.inode.publish_cas": 0.0
+      },
+      "catalog_document_bytes_per_operation": 474.0,
+      "quic_network": {
+        "congestion_events": 0,
+        "lost_bytes": 0,
+        "lost_packets": 0,
+        "rx_bytes": 576774958,
+        "rx_datagrams": 466775,
+        "rx_ios": 466775,
+        "sent_packets": 170975,
+        "tx_bytes": 11913294,
+        "tx_datagrams": 170975,
+        "tx_ios": 170975
+      },
+      "datastore_sessions": null,
+      "datastore_window_seconds": 19.168347917,
+      "datastore_counter_resets": [],
+      "datastore_series_coverage_incomplete": false,
+      "datastore_cpu_seconds_per_operation": {
+        "pd": 0.00023498353285587352,
+        "tidb": 0.0014556432641539038,
+        "tikv": 0.0006273197762559464
+      },
+      "datastore_vm_io_per_operation": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 44.75215641173088,
+            "rios": 0.00047048983219195986,
+            "wbytes": 3.854252705316535,
+            "wios": 0.001202362904490564
+          },
+          "net_dev": {
+            "rx_bytes": 255.132338334466,
+            "rx_packets": 2.4297924617073554,
+            "tx_bytes": 266.1453290814993,
+            "tx_packets": 2.388049558262324
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 101.51547388781431,
+            "read_bytes": 44.75215641173088,
+            "syscr": 4.3735689267604165,
+            "syscw": 2.6052851691149566,
+            "wchar": 129.9774949030268,
+            "write_bytes": 3.854252705316535
+          }
+        },
+        "tidb": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 3.426002404725809,
+            "rios": 7.84149720319933e-05,
+            "wbytes": 0.0,
+            "wios": 0.0
+          },
+          "net_dev": {
+            "rx_bytes": 15132.817659051701,
+            "rx_packets": 12.063986617178106,
+            "tx_bytes": 10557.417690417691,
+            "tx_packets": 12.6553923362434
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 14356.262794709603,
+            "read_bytes": 3.426002404725809,
+            "syscr": 18.463040409848922,
+            "syscw": 10.116524648439542,
+            "wchar": 9724.400831198704,
+            "write_bytes": 0.0
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 34.152961472110405,
+            "rios": 0.005619739662292854,
+            "wbytes": 2.7836269538397196,
+            "wios": 0.0008102880443305975
+          },
+          "net_dev": {
+            "rx_bytes": 4258.581760677505,
+            "rx_packets": 7.223090595431021,
+            "tx_bytes": 14285.83765486957,
+            "tx_packets": 5.617178106539809
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 15441.639055883737,
+            "read_bytes": 33.72471117151968,
+            "syscr": 5.367165037377803,
+            "syscw": 3.2288933033613887,
+            "wchar": 90.97221496157667,
+            "write_bytes": 2.8906895289874015
+          }
+        }
+      },
+      "datastore_sql_per_operation": 3.0004182131841706
+    },
+    {
+      "provider": "tidb",
+      "inode_updates": true,
+      "separate_drives": false,
+      "drive_count": 1,
+      "driver_replicas": 10,
+      "driver_setup_seconds": null,
+      "provisioning_seconds": null,
+      "parallel_server_startup": false,
+      "drives_provisioned_before_startup": false,
+      "verification_method": "all stored files plus fresh driver sample",
+      "servers": 10,
+      "clients": 10000,
+      "active_clients": 10000,
+      "setup_seconds": 1046.066478,
+      "depth": 1,
+      "mode": "Write",
+      "operations": 19418,
+      "operations_per_second": 750.8724196121875,
+      "p99_us_upper": 16777216,
+      "cpu_us_per_operation": 1905.8440622103203,
+      "cpu_cores": 1.4310457423953835,
+      "rss_end_bytes": 3386982400,
+      "allocations_per_operation": 693.0601503759399,
+      "inode_cas_conflicts": 0,
+      "namespace_cas_conflicts": 0,
+      "verified_files": 10000,
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-oracle/tidb-10-10000-10000.json",
+      "profile_us_per_operation": {
+        "filesystem.gate_wait": 0.0,
+        "service.dispatch": 10145572.225514315,
+        "service.authorization": 4814.99401591307,
+        "catalog.load": 4810.980953754249,
+        "catalog.pool_wait": 646.2970267277783,
+        "catalog.decode_validate_bytes": 9.542318982387476,
+        "provider.inode.load_if_changed": 3406.3878232567718,
+        "provider.inode.publish_cas": 8558.7347370481
+      },
+      "catalog_document_bytes_per_operation": 474.0,
+      "quic_network": {
+        "congestion_events": 12734,
+        "lost_bytes": 167831984,
+        "lost_packets": 131098,
+        "rx_bytes": 5431605,
+        "rx_datagrams": 106367,
+        "rx_ios": 106367,
+        "sent_packets": 399496,
+        "tx_bytes": 462991325,
+        "tx_datagrams": 399496,
+        "tx_ios": 399496
+      },
+      "datastore_sessions": null,
+      "datastore_window_seconds": 26.525492583,
+      "datastore_counter_resets": [],
+      "datastore_series_coverage_incomplete": true,
+      "datastore_cpu_seconds_per_operation": {
+        "pd": 0.0006993511175198262,
+        "tidb": 0.0030770419198681634,
+        "tikv": 0.001699454114738902
+      },
+      "datastore_vm_io_per_operation": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.210938304665774,
+            "rios": 5.1498609537542483e-05,
+            "wbytes": 9.070347100628283,
+            "wios": 0.003089916572252549
+          },
+          "net_dev": {
+            "rx_bytes": 797.0362550211145,
+            "rx_packets": 7.48156349778556,
+            "tx_bytes": 833.5499536512514,
+            "tx_packets": 7.3245442373055925
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 320.47363271191676,
+            "read_bytes": 0.210938304665774,
+            "syscr": 13.316664950046349,
+            "syscw": 7.636471315274488,
+            "wchar": 397.01900298691936,
+            "write_bytes": 9.49222370995983
+          }
+        },
+        "tidb": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.210938304665774,
+            "rios": 5.1498609537542483e-05,
+            "wbytes": 0.0,
+            "wios": 0.0
+          },
+          "net_dev": {
+            "rx_bytes": 21378.736584612216,
+            "rx_packets": 28.070553095066433,
+            "tx_bytes": 22370.82279328458,
+            "tx_packets": 29.36651560407869
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 19583.448140900196,
+            "read_bytes": 0.210938304665774,
+            "syscr": 45.53882995159131,
+            "syscw": 25.549747656813267,
+            "wchar": 20442.645329076116,
+            "write_bytes": 0.0
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 2724.901019672469,
+            "rios": 0.02677927695952209,
+            "wbytes": 25187.93202183541,
+            "wios": 2.9455659697188175
+          },
+          "net_dev": {
+            "rx_bytes": 14146.636316819446,
+            "rx_packets": 9.887012050674631,
+            "tx_bytes": 10635.217427129468,
+            "tx_packets": 9.47255124111649
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 31870.20166855495,
+            "read_bytes": 2715.8306725718408,
+            "syscr": 9.096765887321043,
+            "syscw": 8.052322587290144,
+            "wchar": 19424.280306931712,
+            "write_bytes": 25244.88536409517
+          }
+        }
+      },
+      "datastore_sql_per_operation": 10.0
+    }
+  ],
+  "unqualified_workloads": [
+    {
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-separate-diagnostic/tidb-10-500-500.json",
+      "reason": "unqualified workload: docs/benchmarks/remote-client-scaling-20260924/tidb-separate-diagnostic/tidb-10-500-500.json",
+      "work_error": "server setup failures: [\"benchmark TiDB provider open failed: TiDB connect to TiDB: Input/output error: Input/output error: connection closed\", \"benchmark TiDB provider open failed: TiDB connect to TiDB: Input/output error: Input/output error: connection closed\", \"benchmark TiDB provider open failed: TiDB connect to TiDB: Input/output error: Input/output error: connection closed\", \"benchmark TiDB provider open failed: TiDB connect to TiDB: Input/output error: Input/output error: connection closed\", \"benchmark TiDB provider open failed: TiDB connect to TiDB: Input/output error: Input/output error: connection closed\", \"benchmark TiDB provider open failed: TiDB connect to TiDB: Input/output error: Input/output error: connection closed\", \"benchmark TiDB provider open failed: TiDB load TiDB inode snapshot: Input/output error: Input/output error: connection closed\", \"benchmark TiDB provider open failed: TiDB load TiDB inode snapshot: Input/output error: Input/output error: connection closed\", \"benchmark TiDB provider open failed: TiDB load TiDB inode snapshot: Input/output error: Input/output error: connection closed\", \"benchmark TiDB provider open failed: TiDB load TiDB inode snapshot: Input/output error: Input/output error: connection closed\"]",
+      "verification_error": null,
+      "cleanup_error": null
+    },
+    {
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-separate-parallel/tidb-10-250-250.json",
+      "reason": "unqualified workload: docs/benchmarks/remote-client-scaling-20260924/tidb-separate-parallel/tidb-10-250-250.json",
+      "work_error": "server setup failures: [\"benchmark provider open failed (redacted)\", \"benchmark provider open failed (redacted)\", \"benchmark provider open failed (redacted)\", \"benchmark provider open failed (redacted)\", \"benchmark provider open failed (redacted)\", \"benchmark provider open failed (redacted)\", \"benchmark provider open failed (redacted)\", \"benchmark provider open failed (redacted)\", \"benchmark provider open failed (redacted)\"]",
+      "verification_error": null,
+      "cleanup_error": null
+    },
+    {
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-startup-repeat/tidb-10-500-500.json",
+      "reason": "unqualified workload: docs/benchmarks/remote-client-scaling-20260924/tidb-startup-repeat/tidb-10-500-500.json",
+      "work_error": "server setup failures: [\"benchmark TiDB provider open failed: TiDB load TiDB inode snapshot: Input/output error: Input/output error: connection closed\", \"benchmark TiDB provider open failed: TiDB load TiDB inode snapshot: Input/output error: Input/output error: connection closed\", \"benchmark TiDB provider open failed: TiDB connect to TiDB: Input/output error: Input/output error: connection closed\", \"benchmark TiDB provider open failed: TiDB load TiDB inode snapshot: Input/output error: Input/output error: connection closed\", \"benchmark TiDB provider open failed: TiDB load TiDB inode snapshot: Input/output error: Input/output error: connection closed\", \"benchmark TiDB provider open failed: TiDB load TiDB inode snapshot: Input/output error: Input/output error: connection closed\", \"benchmark TiDB provider open failed: TiDB connect to TiDB: Input/output error: Input/output error: connection closed\", \"benchmark TiDB provider open failed: TiDB connect to TiDB: Input/output error: Input/output error: connection closed\", \"benchmark TiDB provider open failed: TiDB connect to TiDB: Input/output error: Input/output error: connection closed\", \"benchmark TiDB provider open failed: TiDB load TiDB inode snapshot: Input/output error: Input/output error: connection closed\"]",
+      "verification_error": null,
+      "cleanup_error": null
+    },
+    {
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb/tidb-10-250.json",
+      "reason": "unqualified workload: docs/benchmarks/remote-client-scaling-20260924/tidb/tidb-10-250.json",
+      "work_error": "setup failures: count=36 samples=[\"remote stream I/O failed\", \"remote stream I/O failed\", \"remote stream I/O failed\", \"remote stream I/O failed\", \"remote stream I/O failed\", \"remote stream I/O failed\", \"remote stream I/O failed\", \"remote stream I/O failed\"]",
+      "verification_error": null,
+      "cleanup_error": null
+    },
+    {
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-preseed/tidb-10-2500-2500.json",
+      "reason": "unqualified workload: docs/benchmarks/remote-client-scaling-20260924/tidb-preseed/tidb-10-2500-2500.json",
+      "work_error": null,
+      "verification_error": "verification deadline exceeded",
+      "cleanup_error": null
+    },
+    {
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-separate-provisioned/tidb-10-500-500.json",
+      "reason": "unqualified workload: docs/benchmarks/remote-client-scaling-20260924/tidb-separate-provisioned/tidb-10-500-500.json",
+      "work_error": "server setup failures: [\"benchmark provider open failed: Eio (details redacted)\", \"benchmark provider open failed: Eio (details redacted)\", \"benchmark provider open failed: Eio (details redacted)\", \"benchmark provider open failed: Eio (details redacted)\", \"benchmark provider open failed: Eio (details redacted)\", \"benchmark provider open failed: Eio (details redacted)\", \"benchmark provider open failed: Eio (details redacted)\", \"benchmark provider open failed: Eio (details redacted)\", \"benchmark provider open failed: Eio (details redacted)\", \"benchmark provider open failed: Eio (details redacted)\"]",
+      "verification_error": null,
+      "cleanup_error": null
+    },
+    {
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-separate-virgin/tidb-10-10-10.json",
+      "reason": "unqualified workload: docs/benchmarks/remote-client-scaling-20260924/tidb-separate-virgin/tidb-10-10-10.json",
+      "work_error": "server setup failures: [\"benchmark provider open failed: Estale (details redacted)\", \"benchmark provider open failed: Estale (details redacted)\", \"benchmark provider open failed: Estale (details redacted)\", \"benchmark provider open failed: Estale (details redacted)\", \"benchmark provider open failed: Estale (details redacted)\", \"benchmark provider open failed: Estale (details redacted)\", \"benchmark provider open failed: Estale (details redacted)\", \"benchmark provider open failed: Estale (details redacted)\", \"benchmark provider open failed: Estale (details redacted)\"]",
+      "verification_error": null,
+      "cleanup_error": null
+    },
+    {
+      "artifact": "docs/benchmarks/remote-client-scaling-20260924/tidb-separate-idle/tidb-10-250-100.json",
+      "reason": "unqualified workload: docs/benchmarks/remote-client-scaling-20260924/tidb-separate-idle/tidb-10-250-100.json",
+      "work_error": "benchmark TiDB provider open failed: TiDB read TiDB concurrent mode: Input/output error: Input/output error: connection closed",
+      "verification_error": null,
+      "cleanup_error": null
+    }
+  ]
+}

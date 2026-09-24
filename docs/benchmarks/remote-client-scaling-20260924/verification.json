@@ -1,0 +1,55 @@
+{
+  "base_commit": "c19eeee626e8a60fb6199bc6cfdddc35a2e21633",
+  "workspace_tests": {
+    "command": "./scripts/cargo-shared test --offline --locked --workspace --all-targets",
+    "exit_code": 0,
+    "targets": 155,
+    "passed": 1256,
+    "failed": 0,
+    "ignored": 104
+  },
+  "workspace_clippy": {
+    "command": "./scripts/cargo-shared clippy --offline --locked --workspace --all-targets -- -D warnings",
+    "exit_code": 0
+  },
+  "profiled_touched_clippy": {
+    "command": "./scripts/cargo-shared clippy --offline --locked -p mount-rs-service -p mount-rs-cli --all-targets --features allocation-profiling -- -D warnings",
+    "exit_code": 0
+  },
+  "format": {
+    "command": "./scripts/cargo-shared fmt --all -- --check",
+    "exit_code": 0
+  },
+  "datastore_observer_tests": {
+    "command": "python3 scripts/test-datastore-stage-observers.py",
+    "exit_code": 0,
+    "passed": 6
+  },
+  "shell_syntax": {
+    "command": "sh -n scripts/bench-remote-scaling.sh scripts/test-foundationdb.sh",
+    "exit_code": 0
+  },
+  "actual_tidb_oracle_negative_test": {
+    "test": "snapshot_oracle_rejects_incorrect_byte_ledger",
+    "passed": 1,
+    "failed": 0,
+    "topology": "single"
+  },
+  "actual_tidb_idle_fixture_final": {
+    "test": "actual_tidb_100_clients_10_servers_saturation",
+    "clients": 250,
+    "active_clients": 10,
+    "servers": 10,
+    "separate_drives": true,
+    "passed": 1,
+    "failed": 0,
+    "terminal_ambiguous_commit_tests_passed": 2,
+    "topology": "single"
+  },
+  "limits": [
+    "No fresh formal verification of new harness or admission options; existing inode proof surfaces unchanged.",
+    "No native Linux/FDB scaling qualification in this change.",
+    "Concurrent first-time inode enrollment fails ESTALE; provisioned 500-Drive startup fails with closed storage connections.",
+    "10,000 separate Drives not qualified."
+  ]
+}

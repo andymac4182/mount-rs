@@ -14,6 +14,28 @@ use crate::dispatch::{DriveDispatcher, SessionHandles, SessionIdentity};
 const ALPN: &[u8] = b"mount-rs/1";
 const MAX_STREAMS: usize = 32;
 
+#[derive(Clone, Copy, Debug)]
+pub struct RemoteServerOptions {
+    pub max_connections: usize,
+}
+
+impl Default for RemoteServerOptions {
+    fn default() -> Self {
+        Self {
+            max_connections: 128,
+        }
+    }
+}
+
+impl RemoteServerOptions {
+    pub fn validate(self) -> Result<(), &'static str> {
+        if !(1..=16_384).contains(&self.max_connections) {
+            return Err("max_connections must be in 1..=16384");
+        }
+        Ok(())
+    }
+}
+
 #[async_trait]
 pub trait Authenticator: Send + Sync {
     async fn authenticate(&self, token: &str, partition_id: &str) -> Result<SessionIdentity, ()>;
@@ -32,6 +54,26 @@ impl RemoteServer {
         dispatcher: Arc<DriveDispatcher>,
         authenticator: Arc<dyn Authenticator>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Self::bind_with_options(
+            address,
+            certs,
+            key,
+            dispatcher,
+            authenticator,
+            RemoteServerOptions::default(),
+        )
+        .await
+    }
+
+    pub async fn bind_with_options(
+        address: SocketAddr,
+        certs: Vec<CertificateDer<'static>>,
+        key: PrivateKeyDer<'static>,
+        dispatcher: Arc<DriveDispatcher>,
+        authenticator: Arc<dyn Authenticator>,
+        options: RemoteServerOptions,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        options.validate()?;
         let mut tls = rustls::ServerConfig::builder_with_provider(Arc::new(
             rustls::crypto::ring::default_provider(),
         ))
@@ -50,7 +92,7 @@ impl RemoteServer {
         transport.keep_alive_interval(Some(std::time::Duration::from_secs(15)));
         let endpoint = quinn::Endpoint::server(server_config, address)?;
         let accept_endpoint = endpoint.clone();
-        let connections = Arc::new(Semaphore::new(128));
+        let connections = Arc::new(Semaphore::new(options.max_connections));
         let task = tokio::spawn(async move {
             let mut sessions = tokio::task::JoinSet::new();
             while let Some(incoming) = accept_endpoint.accept().await {
@@ -291,4 +333,33 @@ fn session_id() -> String {
         return String::new();
     }
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RemoteServerOptions;
+
+    #[test]
+    fn connection_admission_options_preserve_default_and_bound_capacity() {
+        assert_eq!(RemoteServerOptions::default().max_connections, 128);
+        assert!(
+            RemoteServerOptions {
+                max_connections: 1_024
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            RemoteServerOptions { max_connections: 0 }
+                .validate()
+                .is_err()
+        );
+        assert!(
+            RemoteServerOptions {
+                max_connections: 16_385
+            }
+            .validate()
+            .is_err()
+        );
+    }
 }

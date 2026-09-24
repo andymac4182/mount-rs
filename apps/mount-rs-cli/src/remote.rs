@@ -26,6 +26,11 @@ struct ServiceConfig {
     listen: SocketAddr,
     certificate: PathBuf,
     private_key: PathBuf,
+    #[serde(default = "default_connection_limit")]
+    max_connections: usize,
+}
+fn default_connection_limit() -> usize {
+    mount_rs_service::server::RemoteServerOptions::default().max_connections
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -160,6 +165,10 @@ pub(crate) async fn apply(path: &Path) -> Result<(), CliError> {
 pub(crate) async fn serve(path: &Path) -> Result<(), CliError> {
     let config: ServiceConfig = read(path)?;
     version(config.version)?;
+    let server_options = mount_rs_service::server::RemoteServerOptions {
+        max_connections: config.max_connections,
+    };
+    server_options.validate().map_err(CliError::usage)?;
     let catalog = Arc::new(
         SqliteCatalog::open(relative(path, &config.catalog))
             .await
@@ -205,12 +214,13 @@ pub(crate) async fn serve(path: &Path) -> Result<(), CliError> {
             catalog.clone(),
         ));
         let mut signal = CtrlCHandler::install().await?;
-        let server = mount_rs_service::server::RemoteServer::bind(
+        let server = mount_rs_service::server::RemoteServer::bind_with_options(
             config.listen,
             certs,
             key,
             Arc::new(dispatcher),
             authenticator,
+            server_options,
         )
         .await
         .map_err(|_| CliError::runtime("cannot start remote service"))?;
@@ -354,6 +364,16 @@ pub(crate) fn validate(path: &Path) -> Result<(), CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn server_connection_capacity_is_explicit_with_compatible_default() {
+        let mut value = serde_json::json!({"version":1,"catalog":"catalog.sqlite","listen":"127.0.0.1:4433","certificate":"cert.pem","private_key":"key.pem"});
+        let config: ServiceConfig = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(config.max_connections, 128);
+        value["max_connections"] = serde_json::json!(1024);
+        let config: ServiceConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(config.max_connections, 1024);
+    }
+
     fn valid() -> serde_json::Value {
         serde_json::json!({"version":1,"driver":{"kind":"remote","endpoint":"127.0.0.1:4433","server_name":"localhost","partition":"red","credentials":{"file":"token.jwt"},"mounts":[{"drive":"data","mountpoint":"mnt"}]}})
     }

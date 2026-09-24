@@ -497,6 +497,8 @@ if [ "$run_service_benchmark" -eq 1 ]; then
     test_command="${test_command} && MOUNT_RS_FOUNDATIONDB_DIRECT_OUTPUT=/artifacts/foundationdb-direct-block.json cargo test --release --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test block_datastore_saturation -- --ignored --nocapture --test-threads=1"
   elif [ "$benchmark_prepare_only" -eq 1 ]; then
     test_command="${test_command} && cargo test --release --locked -p mount-rs-service --features $benchmark_service_features --test quic_tidb_saturation --no-run"
+  elif [ -n "${MOUNT_RS_REMOTE_SCALING_SERVERS:-}" ]; then
+    test_command="${test_command} && sh scripts/bench-remote-scaling.sh foundationdb /artifacts/scaling"
   else
     test_command="${test_command} && MOUNT_RS_REMOTE_TIDB_SATURATION_MODES=read MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS=${MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS:-1,2,4,8,16} MOUNT_RS_REMOTE_TIDB_SATURATION_OUTPUT=/artifacts/foundationdb-read.json cargo test --release --locked -p mount-rs-service --features $benchmark_service_features --test quic_tidb_saturation -- --ignored --nocapture --test-threads=1"
     if [ "$benchmark_read_only" -eq 0 ]; then
@@ -665,6 +667,12 @@ if [ "$run_service_benchmark" -eq 1 ]; then
     --workdir /workspace \
     --env MOUNT_RS_REMOTE_SATURATION_PROVIDER=foundationdb \
     --env "MOUNT_RS_REMOTE_SATURATION_INODE_UPDATES=${MOUNT_RS_REMOTE_SATURATION_INODE_UPDATES:-0}" \
+    --env "MOUNT_RS_REMOTE_SCALING_SERVERS=${MOUNT_RS_REMOTE_SCALING_SERVERS:-}" \
+    --env "MOUNT_RS_REMOTE_SCALING_CLIENTS=${MOUNT_RS_REMOTE_SCALING_CLIENTS:-100}" \
+    --env MOUNT_RS_REMOTE_SATURATION_ACTIVE_CLIENTS \
+    --env "MOUNT_RS_REMOTE_SATURATION_CONNECTION_LIMIT=${MOUNT_RS_REMOTE_SATURATION_CONNECTION_LIMIT:-128}" \
+    --env "MOUNT_RS_REMOTE_SATURATION_SETUP_CONCURRENCY=${MOUNT_RS_REMOTE_SATURATION_SETUP_CONCURRENCY:-100}" \
+    --env "MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS=${MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS:-1}" \
     --env MOUNT_RS_PROFILE_IO=1 \
     --env "MOUNT_RS_RESOURCE_PROFILE=${MOUNT_RS_RESOURCE_PROFILE:-0}" \
     --env "MOUNT_RS_TRACE_ALLOCATIONS=${MOUNT_RS_TRACE_ALLOCATIONS:-0}" \

@@ -196,7 +196,7 @@ pub struct Snapshot {
     allocated_bytes: u64,
     freed_bytes: u64,
     live_bytes: u64,
-    network: [Network; super::CLIENTS],
+    network: Vec<Network>,
 }
 
 fn sqlite_heap() -> Result<(u64, u64), &'static str> {
@@ -265,10 +265,13 @@ fn resident_bytes() -> Option<u64> {
 
 impl Snapshot {
     pub fn capture(clients: &[super::Client]) -> Result<Self, &'static str> {
-        if clients.len() != super::CLIENTS {
-            return Err("resource profile requires all clients");
+        if clients.is_empty() {
+            return Err("resource profile requires clients");
         }
-        let network = std::array::from_fn(|i| Network::capture(&clients[i].connection));
+        let network = clients
+            .iter()
+            .map(|client| Network::capture(&client.connection))
+            .collect();
         let resident_bytes = resident_bytes();
         let (sqlite_heap_bytes, sqlite_heap_peak_bytes) = sqlite_heap()?;
         let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
@@ -329,8 +332,11 @@ impl Snapshot {
                     .ok_or("process counter reset")?
             };
         }
+        if self.network.len() != before.network.len() {
+            return Err("resource profile client count changed");
+        }
         let mut network = Network::default();
-        for (after, before) in self.network.iter().zip(before.network) {
+        for (after, before) in self.network.iter().zip(before.network.iter().copied()) {
             network.add(after.checked_delta(before)?);
         }
         let allocation_profile = cfg!(feature = "allocation-profiling");

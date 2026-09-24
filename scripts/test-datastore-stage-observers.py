@@ -10,6 +10,19 @@ TIDB = runpy.run_path(str(ROOT / 'observe-tidb-stage.py'))
 FDB = runpy.run_path(str(ROOT / 'foundationdb-counter-deltas.py'))
 
 class CounterTests(unittest.TestCase):
+    def test_session_counts_are_gauges_and_invalid_samples_fail(self):
+        raw = '''# TYPE tidb_server_connections gauge
+tidb_server_connections{resource_group="default"} 2000
+# TYPE tidb_server_internal_sessions gauge
+tidb_server_internal_sessions 12
+'''
+        gauges = TIDB['parse_session_gauges'](raw)
+        self.assertEqual(gauges['tidb_server_connections{resource_group="default"}'], 2000)
+        self.assertEqual(gauges['tidb_server_internal_sessions'], 12)
+        self.assertNotIn('tidb_server_connections{resource_group="default"}', TIDB['parse_metrics'](raw)[0])
+        with self.assertRaises(ValueError):
+            TIDB['parse_session_gauges'](raw.replace('2000', 'NaN'))
+
     def test_memory_gauges_remain_gauges(self):
         raw = '''# TYPE process_resident_memory_bytes gauge
 process_resident_memory_bytes 4096

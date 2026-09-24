@@ -21,7 +21,13 @@ use serde_json::{Value, json};
 #[async_trait]
 impl Authenticator for WorkloadAuthenticator {
     async fn authenticate(&self, token: &str, partition_id: &str) -> Result<SessionIdentity, ()> {
-        if token != "load-token" || !["load", "isolated"].contains(&partition_id) {
+        if (token != "load-token"
+            && token
+                .strip_prefix("load-token-")
+                .and_then(|s| s.parse::<usize>().ok())
+                .is_none())
+            || !["load", "isolated"].contains(&partition_id)
+        {
             return Err(());
         }
         Ok(SessionIdentity {
@@ -30,7 +36,7 @@ impl Authenticator for WorkloadAuthenticator {
             issuer: "https://load.example.com".into(),
             subject: "load-client".into(),
             signing_algorithm: "ES256".into(),
-            claims: json!({"aud":"mount-rs","repository_id":"load-repo"}),
+            claims: json!({"aud":"mount-rs","repository_id":"load-repo","sandbox_id":token.strip_prefix("load-token-").unwrap_or("shared")}),
             expires_at: i64::MAX,
         })
     }
@@ -95,6 +101,13 @@ pub async fn setup_with_left(
     dispatcher
         .register("isolated", "left", left)
         .map_err(|_| "wire setup failed (redacted)")?;
+    bind_dispatcher(dispatcher, directory).await
+}
+
+async fn bind_dispatcher(
+    dispatcher: DriveDispatcher,
+    directory: tempfile::TempDir,
+) -> Result<(RemoteServer, quinn::Endpoint, tempfile::TempDir), String> {
     let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()])
         .map_err(|_| "wire setup failed (redacted)")?;
     let cert_der = certificate.cert.der().clone();
@@ -123,7 +136,10 @@ pub async fn setup_with_left(
     )
     .map_err(|_| "wire setup failed (redacted)")?;
     endpoint.set_default_client_config(config);
-    let server = RemoteServer::bind(
+    let max_connections = std::env::var("MOUNT_RS_REMOTE_SATURATION_CONNECTION_LIMIT")
+        .map(|value| value.parse().map_err(|_| "invalid connection limit"))
+        .unwrap_or(Ok(128))?;
+    let server = RemoteServer::bind_with_options(
         "127.0.0.1:0"
             .parse::<SocketAddr>()
             .map_err(|_| "wire setup failed (redacted)")?,
@@ -131,10 +147,68 @@ pub async fn setup_with_left(
         key_der.into(),
         Arc::new(dispatcher),
         Arc::new(WorkloadAuthenticator),
+        mount_rs_service::server::RemoteServerOptions { max_connections },
     )
     .await
     .map_err(|_| "wire setup failed (redacted)")?;
     Ok((server, endpoint, directory))
+}
+
+pub async fn setup_with_drives(
+    drivers: Vec<Arc<dyn FsDriver>>,
+) -> Result<(RemoteServer, quinn::Endpoint, tempfile::TempDir), String> {
+    let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let catalog = Arc::new(
+        SqliteCatalog::open(directory.path().join("catalog.sqlite"))
+            .await
+            .map_err(|_| "catalog open failed")?,
+    );
+    let mut snapshot = CatalogSnapshot::empty();
+    snapshot.issuer_policies.insert(
+        "load-policy".into(),
+        json!({"issuer":"https://load.example.com","audiences":["mount-rs"]}),
+    );
+    let mut drives = BTreeMap::new();
+    for i in 0..drivers.len() {
+        let name = format!("sandbox-{i}");
+        drives.insert(
+            name.clone(),
+            DriveDefinition {
+                driver: json!({"kind":"tidb-test","sandbox":i}),
+            },
+        );
+        snapshot.grants.insert(
+            name.clone(),
+            GrantDefinition {
+                partition_id: "load".into(),
+                policy_id: "load-policy".into(),
+                drives: BTreeMap::from([(name, Permission::Write)]),
+                claim_conditions: BTreeMap::from([("/sandbox_id".into(), i.to_string())]),
+            },
+        );
+    }
+    snapshot
+        .partitions
+        .insert("load".into(), PartitionDefinition { drives });
+    catalog
+        .compare_and_swap(0, snapshot)
+        .await
+        .map_err(|_| "catalog publication failed")?;
+    let mut dispatcher = DriveDispatcher::new(catalog);
+    for (i, driver) in drivers.into_iter().enumerate() {
+        dispatcher
+            .register("load", &format!("sandbox-{i}"), driver)
+            .map_err(|_| "drive registration failed")?;
+    }
+    bind_dispatcher(dispatcher, directory).await
+}
+
+pub async fn connect_sandbox(
+    endpoint: &quinn::Endpoint,
+    address: SocketAddr,
+    sandbox: usize,
+) -> Result<quinn::Connection, String> {
+    connect_token(endpoint, address, "load", &format!("load-token-{sandbox}")).await
 }
 
 pub async fn connect(
@@ -149,6 +223,15 @@ async fn connect_partition(
     address: SocketAddr,
     partition: &str,
 ) -> Result<quinn::Connection, String> {
+    connect_token(endpoint, address, partition, "load-token").await
+}
+
+async fn connect_token(
+    endpoint: &quinn::Endpoint,
+    address: SocketAddr,
+    partition: &str,
+    token: &str,
+) -> Result<quinn::Connection, String> {
     let connection = endpoint
         .connect(address, "localhost")
         .map_err(|e| e.to_string())?
@@ -160,7 +243,7 @@ async fn connect_partition(
         &Message::ClientHello {
             version: PROTOCOL_VERSION,
             partition_id: partition.into(),
-            bearer: "load-token".into(),
+            bearer: token.into(),
         },
     )
     .await
@@ -185,7 +268,7 @@ async fn connect_partition(
     }
 }
 
-async fn request(
+pub async fn request(
     connection: &quinn::Connection,
     id: u64,
     drive: &str,
