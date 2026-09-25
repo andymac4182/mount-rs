@@ -46,7 +46,11 @@ The macOS native NFS end-to-end gate passed all three transport tests with `MOUN
 
 Independent spec and quality re-review approved the implementation. Strict touched-surface Clippy and formatting passed. These results precede the storage changes; final branch validation must run again after integration.
 
-## Acceptance still required
+## Original acceptance checklist
+
+Subsequent sections record the completed bounded gates and their limits.
+The ten-server production ramp and final branch delivery gates remain open.
+
 - Deterministic startup regressions, bounded shared-pool lifetime and isolation tests, actual TiDB rerun, and controlled provider comparisons.
 - Real authenticated QUIC cache peers with backing counters, peer loss/restart, stale discovery, corruption, disk pressure, and commit-before-placement.
 - Ten-server ramps toward 10,000 concurrent clients, 10,000 Drives across 5,000 Partitions, and 1,000 files per Drive with varied read/write patterns, in mostly idle and all-active modes, with byte verification, explicit resource limits, and a signed OIDC authentication mode distinguished from synthetic data-path measurements.
@@ -56,7 +60,7 @@ Independent spec and quality re-review approved the implementation. Strict touch
 
 The requested production workload has 10,000 clients using distinct Drives across 5,000 Partitions, with 1,000 files per Drive. A balanced fixture therefore uses two Drives per Partition and ten million files. Each connection remains bound to one Partition and one client's granted Drive; qualification must check denial of both other Partitions and the ungranted sibling Drive. The user confirmed 990 files of 4 KiB, nine of 128 KiB, and one of 1 MiB per Drive: 62.83 GB of unique logical payload across 10,000 Drives before metadata, logs, and replicas.
 
-The existing single-Partition, one-file-per-Drive baseline does not establish this target. Further runs must declare file counts and sizes, distinguish namespace and payload setup from steady I/O, and exercise random/sequential reads and overwrites, mixed traffic, hot-file skew, append/truncate, and namespace churn. Current catalog validation also limits Partitions to 1,024, so it cannot admit the requested 5,000-Partition fixture without a tested bounded capacity change.
+The existing single-Partition, one-file-per-Drive baseline does not establish this target. Further runs must declare file counts and sizes, distinguish namespace and payload setup from steady I/O, and exercise random/sequential reads and overwrites, mixed traffic, hot-file skew, append/truncate, and namespace churn. The original catalog baseline limited Partitions to 1,024. The bounded capacity change now admits 5,000 Partitions, 10,000 Drives and 10,000 grants; the accepted catalog shape tests below do not establish full workload capacity.
 
 ## Pre-change local provider diagnostic
 
