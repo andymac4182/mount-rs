@@ -612,3 +612,30 @@ actual recovery tests. The related upstream
 is corroborating context, not a substitute for these local controls.
 Independent review accepted the bounded evidence and stop decision; recovery
 remains failed.
+
+
+### Bounded population controls: source qualification
+
+Reviewed fixture support preserves the ten-Drive/Open1 default and permits
+10 or 25 Drives with one or four outstanding namespace chains per Drive.
+Payload depth remains one and the fresh oracle remains serial. At 25 Drives,
+13 Partitions include one final singleton; all 250 server/Drive routes are
+required, with 24 applicable sibling denials and 25 cross-Partition denials.
+Every Drive retains 1,000 mixed-size files (157,081,600 bytes in total at 25).
+Open creation still publishes directly; concurrency is not coalescing.
+
+Exact per-slot identities, acknowledgment prefixes, uncertainty counts,
+request IDs and admission bounds are tested. A retained phase owner survives
+the enclosing timeout, captures partial network/chain observations before
+connection closure, and consumes evidence once. Shared production deadline
+and finalizer regressions cover normal, returned-error and cancelled paths;
+removing timeout extraction makes the same test fail. These use fake workers
+and traffic, not a live QUIC cancellation claim. The two earlier freezes
+failed review gates and are retained as superseded evidence.
+
+Forty-two helper tests passed; four actual workload tests remained ignored.
+Default and profiling strict four-crate Clippy, touched formatting and the
+actual test's no-run build passed. Independent SPEC/QUALITY review passed.
+[Source qualification artifact](benchmarks/remote-production-qualification-20260925/task4-population-support-source.json)
+retains exact hashes and scopes. Same-binary Open1/Open4 measurements and the
+25-Drive actual workload remain pending; no capacity acceptance follows.
