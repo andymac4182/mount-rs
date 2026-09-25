@@ -915,8 +915,8 @@ impl MetadataStore for PgliteMetadataStore {
 
     async fn inode_mode_state(&self) -> Result<Option<InodeModeState>> {
         let client = self.0.lock_client().await?;
-        let row = client.as_ref().ok_or_else(connection_closed)?.query_one(
-            "SELECT write_mode, backing_id, owner, fence, expires, revision FROM mount_rs_metadata WHERE volume_key=$1", &[&self.0.volume_key]
+        let row = client.as_ref().ok_or_else(connection_closed)?.query_typed_one(
+            "SELECT write_mode, backing_id, owner, fence, expires, revision FROM mount_rs_metadata WHERE volume_key=$1", &[(&self.0.volume_key, Type::TEXT)]
         ).await.map_err(postgres_error)?;
         if row.get::<_, Option<String>>(0).as_deref() != Some("MRC4") {
             return Ok(None);
@@ -946,7 +946,7 @@ impl MetadataStore for PgliteMetadataStore {
             .transaction()
             .await
             .map_err(postgres_error)?;
-        let row = tx.query_one("SELECT write_mode, backing_id, owner, fence, expires, revision, namespace FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE", &[&self.0.volume_key]).await.map_err(postgres_error)?;
+        let row = tx.query_typed_one("SELECT write_mode, backing_id, owner, fence, expires, revision, namespace FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE", &[(&self.0.volume_key, Type::TEXT)]).await.map_err(postgres_error)?;
         if row.get::<_, Option<String>>(0).as_deref() != Some("MRC2")
             || row.get::<_, Option<String>>(1).as_deref() != Some(backing.to_hex().as_str())
             || row.get::<_, Option<String>>(2).is_some()
@@ -966,9 +966,9 @@ impl MetadataStore for PgliteMetadataStore {
                 .map_err(backend_error)?;
         namespace.validate()?;
         let guards = tx
-            .query(
+            .query_typed(
                 "SELECT inode FROM mount_rs_inode_guards WHERE volume_key=$1 FOR UPDATE",
-                &[&self.0.volume_key],
+                &[(&self.0.volume_key, Type::TEXT)],
             )
             .await
             .map_err(postgres_error)?;
@@ -977,14 +977,14 @@ impl MetadataStore for PgliteMetadataStore {
         }
         for (inode, node) in &namespace.nodes {
             let node = encode_inode_node(node)?;
-            tx.execute("INSERT INTO mount_rs_inode_guards(volume_key,inode,generation,revision,node) VALUES($1,$2,$3,0,$4)", &[&self.0.volume_key, &inode_signed(*inode)?, &generation, &node]).await.map_err(postgres_error)?;
+            tx.execute_typed("INSERT INTO mount_rs_inode_guards(volume_key,inode,generation,revision,node) VALUES($1,$2,$3,0,$4)", &[(&self.0.volume_key, Type::TEXT), (&inode_signed(*inode)?, Type::INT8), (&generation, Type::INT8), (&node, Type::TEXT)]).await.map_err(postgres_error)?;
         }
         let encoded =
             String::from_utf8(encode_inode_namespace(&namespace)?).map_err(backend_error)?;
         profile::add(Event::NamespaceSerialized, encoded.len() as u64);
-        tx.execute(
+        tx.execute_typed(
             "UPDATE mount_rs_metadata SET write_mode='MRC4',revision=$2,namespace=$3 WHERE volume_key=$1",
-            &[&self.0.volume_key, &generation, &encoded],
+            &[(&self.0.volume_key, Type::TEXT), (&generation, Type::INT8), (&encoded, Type::TEXT)],
         )
         .await
         .map_err(postgres_error)?;
@@ -997,8 +997,8 @@ impl MetadataStore for PgliteMetadataStore {
     ) -> Result<InodeMetadataSnapshot> {
         let client = self.0.lock_client().await?;
         // One statement snapshot supplies the root and every authoritative guard.
-        let rows = client.as_ref().ok_or_else(connection_closed)?.query(
-            "SELECT m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.revision,m.namespace,g.inode,g.generation,g.revision,g.node FROM mount_rs_metadata m LEFT JOIN mount_rs_inode_guards g ON g.volume_key=m.volume_key WHERE m.volume_key=$1 ORDER BY g.inode", &[&self.0.volume_key]
+        let rows = client.as_ref().ok_or_else(connection_closed)?.query_typed(
+            "SELECT m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.revision,m.namespace,g.inode,g.generation,g.revision,g.node FROM mount_rs_metadata m LEFT JOIN mount_rs_inode_guards g ON g.volume_key=m.volume_key WHERE m.volume_key=$1 ORDER BY g.inode", &[(&self.0.volume_key, Type::TEXT)]
         ).await.map_err(postgres_error)?;
         let first = rows.first().ok_or_else(stale)?;
         let generation = inode_authority(first, backing)?;
@@ -1060,8 +1060,8 @@ impl MetadataStore for PgliteMetadataStore {
             .and_then(|v| i64::try_from(v.inode_revision).ok())
             .unwrap_or(-1);
         let client = self.0.lock_client().await?;
-        let row = client.as_ref().ok_or_else(connection_closed)?.query_opt(
-            "SELECT m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.revision,g.generation,g.revision,CASE WHEN m.revision=$3 AND g.generation=$3 AND g.revision=$4 THEN NULL ELSE g.node END FROM mount_rs_metadata m JOIN mount_rs_inode_guards g ON g.volume_key=m.volume_key WHERE m.volume_key=$1 AND g.inode=$2", &[&self.0.volume_key,&inode_sql,&known_gen,&known_rev]
+        let row = client.as_ref().ok_or_else(connection_closed)?.query_typed_opt(
+            "SELECT m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.revision,g.generation,g.revision,CASE WHEN m.revision=$3 AND g.generation=$3 AND g.revision=$4 THEN NULL ELSE g.node END FROM mount_rs_metadata m JOIN mount_rs_inode_guards g ON g.volume_key=m.volume_key WHERE m.volume_key=$1 AND g.inode=$2", &[(&self.0.volume_key, Type::TEXT), (&inode_sql, Type::INT8), (&known_gen, Type::INT8), (&known_rev, Type::INT8)]
         ).await.map_err(postgres_error)?.ok_or_else(stale)?;
         let generation = inode_authority(&row, backing)?;
         if nonnegative(row.get(6), "guard generation")? != generation {
@@ -1100,8 +1100,8 @@ impl MetadataStore for PgliteMetadataStore {
             .map_err(postgres_error)?;
         // Lock only this guard first. A structural writer locks all guards before
         // replacing them; a waiting publisher must reread fresh root authority.
-        let guard = tx.query_opt("SELECT generation,revision,node FROM mount_rs_inode_guards WHERE volume_key=$1 AND inode=$2 FOR UPDATE", &[&self.0.volume_key,&inode_sql]).await.map_err(postgres_error)?;
-        let root = tx.query_one("SELECT write_mode,backing_id,owner,fence,expires,revision FROM mount_rs_metadata WHERE volume_key=$1", &[&self.0.volume_key]).await.map_err(postgres_error)?;
+        let guard = tx.query_typed_opt("SELECT generation,revision,node FROM mount_rs_inode_guards WHERE volume_key=$1 AND inode=$2 FOR UPDATE", &[(&self.0.volume_key, Type::TEXT), (&inode_sql, Type::INT8)]).await.map_err(postgres_error)?;
+        let root = tx.query_typed_one("SELECT write_mode,backing_id,owner,fence,expires,revision FROM mount_rs_metadata WHERE volume_key=$1", &[(&self.0.volume_key, Type::TEXT)]).await.map_err(postgres_error)?;
         let generation = inode_authority(&root, backing)?;
         if generation != expected.structural_generation {
             return Err(inode_conflict());
@@ -1113,7 +1113,7 @@ impl MetadataStore for PgliteMetadataStore {
         let original = decode_inode_node(inode, &guard.get::<_, String>(2))?;
         validate_inode_publication(inode, &original, &node)?;
         let json = encode_inode_node(&node)?;
-        let changed = tx.execute("UPDATE mount_rs_inode_guards SET revision=$3,node=$4 WHERE volume_key=$1 AND inode=$2 AND generation=$5 AND revision=$6", &[&self.0.volume_key,&inode_sql,&next,&json,&expected_gen,&expected_rev]).await.map_err(postgres_error)?;
+        let changed = tx.execute_typed("UPDATE mount_rs_inode_guards SET revision=$3,node=$4 WHERE volume_key=$1 AND inode=$2 AND generation=$5 AND revision=$6", &[(&self.0.volume_key, Type::TEXT), (&inode_sql, Type::INT8), (&next, Type::INT8), (&json, Type::TEXT), (&expected_gen, Type::INT8), (&expected_rev, Type::INT8)]).await.map_err(postgres_error)?;
         if changed != 1 {
             return Err(stale());
         }
@@ -1143,11 +1143,11 @@ impl MetadataStore for PgliteMetadataStore {
             .transaction()
             .await
             .map_err(postgres_error)?;
-        let root = tx.query_one("SELECT write_mode,backing_id,owner,fence,expires,revision,namespace FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE", &[&self.0.volume_key]).await.map_err(postgres_error)?;
+        let root = tx.query_typed_one("SELECT write_mode,backing_id,owner,fence,expires,revision,namespace FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE", &[(&self.0.volume_key, Type::TEXT)]).await.map_err(postgres_error)?;
         if inode_authority(&root, backing)? != expected_generation {
             return Err(inode_conflict());
         }
-        let rows = tx.query("SELECT inode,generation,revision,node FROM mount_rs_inode_guards WHERE volume_key=$1 ORDER BY inode FOR UPDATE", &[&self.0.volume_key]).await.map_err(postgres_error)?;
+        let rows = tx.query_typed("SELECT inode,generation,revision,node FROM mount_rs_inode_guards WHERE volume_key=$1 ORDER BY inode FOR UPDATE", &[(&self.0.volume_key, Type::TEXT)]).await.map_err(postgres_error)?;
         let mut actual = BTreeMap::new();
         let mut nodes = BTreeMap::new();
         for row in rows {
@@ -1174,19 +1174,23 @@ impl MetadataStore for PgliteMetadataStore {
         }
         let json = String::from_utf8(encode_inode_namespace(&namespace)?).map_err(backend_error)?;
         profile::add(Event::NamespaceSerialized, json.len() as u64);
-        tx.execute(
+        tx.execute_typed(
             "DELETE FROM mount_rs_inode_guards WHERE volume_key=$1",
-            &[&self.0.volume_key],
+            &[(&self.0.volume_key, Type::TEXT)],
         )
         .await
         .map_err(postgres_error)?;
         for (inode, node) in &namespace.nodes {
             let node = encode_inode_node(node)?;
-            tx.execute("INSERT INTO mount_rs_inode_guards(volume_key,inode,generation,revision,node) VALUES($1,$2,$3,0,$4)", &[&self.0.volume_key,&inode_signed(*inode)?,&next,&node]).await.map_err(postgres_error)?;
+            tx.execute_typed("INSERT INTO mount_rs_inode_guards(volume_key,inode,generation,revision,node) VALUES($1,$2,$3,0,$4)", &[(&self.0.volume_key, Type::TEXT), (&inode_signed(*inode)?, Type::INT8), (&next, Type::INT8), (&node, Type::TEXT)]).await.map_err(postgres_error)?;
         }
-        tx.execute(
+        tx.execute_typed(
             "UPDATE mount_rs_metadata SET revision=$2,namespace=$3 WHERE volume_key=$1",
-            &[&self.0.volume_key, &next, &json],
+            &[
+                (&self.0.volume_key, Type::TEXT),
+                (&next, Type::INT8),
+                (&json, Type::TEXT),
+            ],
         )
         .await
         .map_err(postgres_error)?;
@@ -3453,7 +3457,7 @@ mod tests {
         second.await.unwrap().unwrap();
     }
 
-    async fn namespace(block: BlockId) -> Namespace {
+    pub(super) async fn namespace(block: BlockId) -> Namespace {
         let stats = MemoryFs::empty().stat("/").await.unwrap();
         let root = stats.ino;
         let root_stats = mount_rs_core::Stats { nlink: 2, ..stats };
@@ -3517,12 +3521,13 @@ mod tests {
             .build()
             .unwrap();
         runtime.block_on(async {
+            let volume = format!("inode-guards-{}", uuid::Uuid::new_v4());
             let metadata =
-                PgliteMetadataStore::connect_with_key(connection_string, "inode-guards")
+                PgliteMetadataStore::connect_with_key(connection_string, &volume)
                     .await
                     .unwrap();
             let blocks =
-                PgliteBlockStore::connect_with_key(connection_string, "inode-guards")
+                PgliteBlockStore::connect_with_key(connection_string, &volume)
                     .await
                     .unwrap();
             let backing = blocks.prepare_concurrent_backing().await.unwrap();
@@ -3633,7 +3638,7 @@ mod tests {
             );
             metadata.close().await.unwrap();
             let reopened =
-                PgliteMetadataStore::connect_with_key(connection_string, "inode-guards")
+                PgliteMetadataStore::connect_with_key(connection_string, &volume)
                     .await
                     .unwrap();
             assert_eq!(
@@ -5428,3 +5433,7 @@ mod tests {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "inode_wire_tests.rs"]
+mod inode_wire_tests;
