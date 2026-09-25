@@ -21,6 +21,11 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
 const MAX_DOCUMENT_BYTES: usize = 8 * 1024 * 1024;
+// Bounded catalog shape for the balanced production qualification target.
+// The independent serialized document bound still applies at publication/load.
+const MAX_PARTITIONS: usize = 5_000;
+const MAX_DRIVES: usize = 10_000;
+const MAX_GRANTS: usize = 10_000;
 #[cfg(unix)]
 const CONNECTION_POOL_SIZE: usize = 8;
 
@@ -134,15 +139,15 @@ impl CatalogSnapshot {
     }
 
     pub fn validate(&self) -> Result<(), CatalogError> {
-        if self.partitions.len() > 1024
+        if self.partitions.len() > MAX_PARTITIONS
             || self.issuer_policies.len() > 64
-            || self.grants.len() > 4096
+            || self.grants.len() > MAX_GRANTS
             || self
                 .partitions
                 .values()
                 .map(|p| p.drives.len())
                 .sum::<usize>()
-                > 4096
+                > MAX_DRIVES
         {
             return Err(CatalogError::Invalid("catalog count limit exceeded"));
         }

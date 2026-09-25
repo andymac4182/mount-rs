@@ -265,13 +265,19 @@ fn resident_bytes() -> Option<u64> {
 
 impl Snapshot {
     pub fn capture(clients: &[super::Client]) -> Result<Self, &'static str> {
-        if clients.is_empty() {
-            return Err("resource profile requires clients");
-        }
         let network = clients
             .iter()
             .map(|client| Network::capture(&client.connection))
             .collect();
+        Self::capture_network(network)
+    }
+
+    /// Observe namespace/population/setup before any protocol clients exist.
+    pub fn capture_process() -> Result<Self, &'static str> {
+        Self::capture_network(Vec::new())
+    }
+
+    fn capture_network(network: Vec<Network>) -> Result<Self, &'static str> {
         let resident_bytes = resident_bytes();
         let (sqlite_heap_bytes, sqlite_heap_peak_bytes) = sqlite_heap()?;
         let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
@@ -391,4 +397,12 @@ fn allocation_churn_reconciles_live_bytes_through_shrink_and_growth() {
     assert_eq!(counters.allocs.load(Ordering::Relaxed), 1);
     assert_eq!(counters.frees.load(Ordering::Relaxed), 1);
     assert_eq!(counters.reallocs.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn process_resources_are_available_before_client_connections_exist() {
+    let before = Snapshot::capture(&[]).expect("setup process snapshot unavailable");
+    let after = Snapshot::capture_process().expect("setup process snapshot unavailable");
+    let delta = after.delta(&before).expect("setup process delta invalid");
+    assert!(delta["cpu_user_us"].is_number());
 }

@@ -1070,3 +1070,6 @@ fn timeout_message(writing: bool) -> &'static str {
         "read request timeout; never replayed"
     }
 }
+
+#[path = "support/production_scale.rs"]
+mod production_scale;
