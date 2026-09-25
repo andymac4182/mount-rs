@@ -168,7 +168,6 @@ impl CredentialSource {
 mod tests {
     use super::*;
     use std::ffi::OsString;
-    use std::time::Duration;
 
     const JWT: &str = "e30.e30.e30";
 
@@ -235,7 +234,9 @@ mod tests {
     async fn command_timeout_is_bounded() {
         let source =
             CredentialSource::Command(vec![OsString::from("/bin/sleep"), OsString::from("2")]);
-        let result = source.token_with_timeout(Duration::from_millis(20)).await;
+        let result = source
+            .token_with_timeout(std::time::Duration::from_millis(20))
+            .await;
         assert!(matches!(result, Err(CredentialError::Timeout)));
     }
 
