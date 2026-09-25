@@ -11,15 +11,17 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    future::{Future, poll_fn},
     net::SocketAddr,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    task::Poll,
     time::Duration,
 };
 use tokio::{
-    sync::{Barrier, Semaphore},
+    sync::Semaphore,
     time::{Instant, timeout},
 };
 const BOUND: Duration = Duration::from_secs(15);
@@ -129,15 +131,29 @@ impl BlockStore for Backing {
         Ok(())
     }
 }
+struct ResponseGate {
+    arrived: Semaphore,
+    release: tokio::sync::watch::Sender<bool>,
+}
 struct CountPeer {
     peer: Arc<QuicPeerTransport>,
     gets: AtomicU64,
+    gate: Mutex<Option<Arc<ResponseGate>>>,
 }
 #[async_trait]
 impl PeerTransport for CountPeer {
     async fn get(&self, p: &PeerId, s: &CacheScope, id: &BlockId) -> Result<Option<Vec<u8>>> {
         self.gets.fetch_add(1, Ordering::SeqCst);
-        self.peer.get(p, s, id).await
+        let result = self.peer.get(p, s, id).await;
+        let gate = self.gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            let mut release = gate.release.subscribe();
+            gate.arrived.add_permits(1);
+            while !*release.borrow_and_update() {
+                release.changed().await.unwrap();
+            }
+        }
+        result
     }
     async fn put(&self, p: &PeerId, s: &CacheScope, id: &BlockId, b: &[u8]) -> Result<()> {
         self.peer.put(p, s, id, b).await
@@ -291,6 +307,7 @@ impl Pair {
         let counted = Arc::new(CountPeer {
             peer: b.clone(),
             gets: AtomicU64::new(0),
+            gate: Mutex::new(None),
         });
         Self {
             cleaned: false,
@@ -313,6 +330,7 @@ impl Pair {
             self.counted.clone(),
             PeerId("b".into()),
             DistributedConfig {
+                max_inflight_misses: 128,
                 deadline: Duration::from_millis(600),
                 hedge_delay: Duration::from_millis(300),
                 ..Default::default()
@@ -455,21 +473,42 @@ async fn authenticated_hierarchy_saves_reads_and_reconnects_to_persisted_peer() 
         );
         let attempts = pair.counted.gets.load(Ordering::SeqCst);
         let peers = store.metrics().snapshot().peer_hits;
-        let barrier = Arc::new(Barrier::new(101));
+        let (release, _) = tokio::sync::watch::channel(false);
+        let gate = Arc::new(ResponseGate { arrived: Semaphore::new(0), release });
+        *pair.counted.gate.lock().unwrap() = Some(gate.clone());
+        let entered = Arc::new(AtomicU64::new(0));
         let mut readers = tokio::task::JoinSet::new();
         for _ in 0..100 {
             let store = store.clone();
             let id = id.clone();
-            let barrier = barrier.clone();
+            let entered = entered.clone();
             readers.spawn(async move {
-                barrier.wait().await;
-                store.get(&id).await.unwrap()
+                let mut read = std::pin::pin!(store.get(&id));
+                let mut first = true;
+                poll_fn(|cx| {
+                    let state = read.as_mut().poll(cx);
+                    if first {
+                        assert!(matches!(state,Poll::Pending),"reader must enter a cold miss while peer response is held");
+                        first = false;
+                        entered.fetch_add(1,Ordering::SeqCst);
+                    }
+                    state
+                }).await.unwrap()
             });
         }
-        barrier.wait().await;
-        while let Some(read) = readers.join_next().await {
-            assert_eq!(read.unwrap(), bytes);
-        }
+        // All100 have actually polled the cold path, with128 miss permits, before
+        // any peer response can admit bytes. Holding a real response avoids warm-hit
+        // launch races; the no-flight-lock mutation must fail the exact-one oracle.
+        eventually(async || entered.load(Ordering::SeqCst)==100).await;
+        gate.arrived.acquire().await.unwrap().forget();
+        assert!(readers.try_join_next().is_none(),"no reader may complete before response release");
+        assert_eq!(pair.b_cache.usage().2,0);
+        assert_eq!(store.metrics().snapshot().peer_hits,peers);
+        assert_eq!(backing.reads(),1);
+        assert_eq!(pair.counted.gets.load(Ordering::SeqCst)-attempts,1,"only the miss owner may query the real peer while all100 are cold");
+        gate.release.send(true).unwrap();
+        while let Some(read) = readers.join_next().await {assert_eq!(read.unwrap(),bytes);}
+        *pair.counted.gate.lock().unwrap()=None;
         assert_eq!(pair.counted.gets.load(Ordering::SeqCst) - attempts, 1);
         assert_eq!(store.metrics().snapshot().peer_hits - peers, 1);
         assert_eq!(backing.reads(), 1);

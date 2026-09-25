@@ -121,7 +121,9 @@ Placement runs at most `placement_concurrency` jobs (default 4, maximum 32), wit
 `crates/mount-rs-blob-cache/tests/distributed_failure.rs` composes real pinned
 mTLS QUIC peers, `CachedBlockStore`, bounded RAM/disk, and a counted backing
 store. It checks exact binary bytes through cold, RAM, disk-only, peer, and
-100 simultaneous miss paths; stops and restarts a peer at the same socket
+100 simultaneous miss paths; the real peer response is held until every cold
+reader has entered, and disabling the miss lock makes the exact-one peer-request
+oracle fail with 100 requests. The suite stops and restarts a peer at the same socket
 with persisted disk entries; and forces stale hints, checksum corruption and
 budget eviction. The repeated 28-byte fixture performs 125 logical reads
 with two backing GETs (56 bytes), including the forced outage fallback.
