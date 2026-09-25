@@ -538,6 +538,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_slatedb_is_rejected_before_opening_backing() {
+        let mut options =
+            SplitOptions::memory("unqualified-slate", 4096).with_concurrent_writes(true);
+        options.metadata = StoreConfig::SlateDb {
+            endpoint: "http://127.0.0.1:1".into(),
+            bucket: "metadata".into(),
+            region: "us-east-1".into(),
+            path: "metadata".into(),
+            access_key_id: "test-key".into(),
+            secret_access_key: "test-secret".into(),
+            durable: false,
+        };
+        let error = Filesystem::split(options)
+            .await
+            .err()
+            .expect("single-writer metadata must be rejected before connecting");
+        assert_eq!(error.code, ErrorCode::Einval);
+        assert!(error.to_string().contains("revision-CAS metadata"));
+    }
+
+    #[tokio::test]
     async fn migrate_requires_concurrent_writes_before_opening_backing() {
         let options = SplitOptions::memory("sdk-migration-disabled", 4096);
         let error = Filesystem::migrate_concurrent_backing(options, 0)

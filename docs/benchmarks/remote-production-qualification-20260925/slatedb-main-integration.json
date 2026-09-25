@@ -1,0 +1,65 @@
+{
+  "base": "4080d90d8a087b758c3e508ed14988d1f512f655",
+  "main": "e7833c220481d1b09e9033b12b4af42dc9e7a367",
+  "patch_sha256": "9becdbcc67402b0833b74aa0ab060221f2081ee5b4b562b4fb9bc5394deb56f5",
+  "files": {
+    "Cargo.lock": {
+      "sha256": "cb4dce0735c9d66f3daefa17cccc67c60f3c78f0391608aaacb1264194c5dde6",
+      "bytes": 117959
+    },
+    "apps/mount-rs-cli/src/server_cache.rs": {
+      "sha256": "1d5270e16c1be363e3d30dcd75cc41ded26c32cf0d939460e2b2636b1675dcf9",
+      "bytes": 22642
+    },
+    "crates/mount-rs-sdk/src/filesystem.rs": {
+      "sha256": "4ea9fcc87a2c1da3d4a68e8f07083562bcae819997772b6402b1d41597f58658",
+      "bytes": 24955
+    }
+  },
+  "scope": "One-line lock resolution and explicit metadata-only cache rejection plus SDK pre-I/O regression; other policies unchanged; no SlateDB qualification",
+  "validation": {
+    "protocol_four_crate_tests": {
+      "exit": 0,
+      "passed": 271,
+      "ignored": 23
+    },
+    "cli_cache_tests": {
+      "exit": 0,
+      "passed": 3
+    },
+    "sdk_pre_io_test": {
+      "exit": 0,
+      "passed": 1
+    },
+    "default_sdk_plus_four_crate_strict_clippy": {
+      "exit": 0
+    },
+    "resource_profile_sdk_plus_four_crate_strict_clippy": {
+      "exit": 0
+    },
+    "touched_rustfmt_and_diff_check": {
+      "exit": 0
+    },
+    "behavioral_red": {
+      "exit": 101,
+      "tests_run": 1,
+      "mutation": "temporarily map metadata-only SlateDb to Opaque; rejection assertion fails"
+    },
+    "limits": [
+      "Focused test counts overlap the full protocol suite; do not sum",
+      "Preliminary suffix-only exact filter ran zero tests and is excluded",
+      "Current GitHub full CI/native/formal/final branch review remain separate gates",
+      "This preserves metadata-only rejection, not SlateDB concurrent qualification"
+    ]
+  },
+  "evidence": {
+    "/private/tmp/mount-rs-rebased-protocol-full-test.log": "162de3476902e538c9a6ebc94da55f01f3695eae0035c5c71fa9d23d7c704207",
+    "/private/tmp/mount-rs-rebased-default-strict-clippy.log": "ae9c640c9b804e94881550c25b7a60e9007a4625f2c23f1628f14298591859eb",
+    "/private/tmp/mount-rs-rebased-profile-strict-clippy.log": "91713b99a91c63c8302739449179fffe991203f5c9cd92725b26397936311b8f",
+    "/private/tmp/mount-rs-slate-cache-rejection-red-exact.log": "a78cddbc500f2d0a5ecf480aa90849c2d2c8d13b1b808613691e59345f98a1be",
+    "/private/tmp/mount-rs-slate-cache-rejection-green.log": "a290413371e4b2e60d51dcc1ad889a89670e85850609f2a0f383dc115d40cb0c",
+    "/private/tmp/mount-rs-slate-sdk-rejection-green.log": "20971e6a1cea4ed4142f369f8e5ecd21162a1018be5bc4eba7d54bd82c016af0",
+    "/private/tmp/mount-rs-slate-main-integration-review.md": "805ca6d21d52f21dadaade1baf69275e6e37eb91a2d8c4e8adbe57db2071a62f",
+    "/private/tmp/mount-rs-rebased-lock-refresh-online.log": "58f0b3bf2de0ed8be88f53592adb54ce05566a8050f5e03b96884d3498c84e1a"
+  }
+}

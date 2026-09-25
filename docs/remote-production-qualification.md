@@ -637,5 +637,47 @@ Forty-two helper tests passed; four actual workload tests remained ignored.
 Default and profiling strict four-crate Clippy, touched formatting and the
 actual test's no-run build passed. Independent SPEC/QUALITY review passed.
 [Source qualification artifact](benchmarks/remote-production-qualification-20260925/task4-population-support-source.json)
-retains exact hashes and scopes. Same-binary Open1/Open4 measurements and the
-25-Drive actual workload remain pending; no capacity acceptance follows.
+retains exact hashes and scopes. The same-binary controls and failed 25-Drive point below retain their original
+source and executable; no full-target capacity acceptance follows.
+
+### Population controls: actual results
+
+Each ten-Drive control verified all 10,000 files / 62,832,640 bytes through a
+fresh backend, all 100 server/Drive routes, exact sibling and cross-Partition
+denials, and cleanup with SQL sessions draining from 20 to zero. The actual
+chain peaks were 10 and 40, with one and four chains per Drive respectively.
+
+| Namespace preparation | Open1 | Open4 | Change |
+| --- | ---: | ---: | ---: |
+| Elapsed seconds | 286.070 | 296.104 | +3.5% |
+| Main process CPU seconds | 623.965 | 628.734 | +0.8% |
+| Namespace peak RSS bytes | 244,858,880 | 254,410,752 | +3.9% |
+| SQL executor statements | 323,350 | 323,350 | unchanged |
+| Inode serialization calls | 5,015,000 | 5,015,000 | unchanged |
+| Observed MutationBatch calls | 0 | 0 | unchanged |
+
+This single debug pair gives no evidence of an Open concurrency gain.
+Serialized byte totals differ slightly between controls. Open4's namespace
+window has a newly appearing replica-selector counter family, so broader
+series coverage is incomplete; SQL statement series are complete. Allocation
+instrumentation was disabled. Host counters include background traffic and
+VM counters are not physical datastore SSD IOPS. The TiDB VM remains below
+its qualification memory floor.
+
+The 25-client / 25-Drive / 13-Partition point registered 250 empty replicas
+and passed 24 sibling denials, 25 cross-Partition denials and the final
+singleton case. Its namespace phase exceeded the unchanged 600-second budget
+after 22,782 acknowledged Open/Close chains. Uncertainty and cleanup errors
+were zero, and owned SQL sessions drained from 58 to zero. Payload,
+fresh full-file oracle, refreshed replicas and all-route probes were not
+reached. This point **failed** population qualification. Its returned-error
+boundary retained complete observations of admitted chains; the observation's
+`partial=false` does not mean the configured population completed.
+
+[Open1 evidence](benchmarks/remote-production-qualification-20260925/task4-ten-drive-open1.json),
+[Open4 evidence](benchmarks/remote-production-qualification-20260925/task4-ten-drive-open4.json),
+[comparison](benchmarks/remote-production-qualification-20260925/task4-ten-drive-open1-open4-comparison.json), and
+[failed 25-Drive evidence](benchmarks/remote-production-qualification-20260925/task4-twentyfive-drive-open1-failed.json)
+retain launch/configuration, raw hashes, exact counters and independent reviews.
+The rebase onto SlateDB main follows these fixed-binary runs; their evidence
+continues to identify the original source.
