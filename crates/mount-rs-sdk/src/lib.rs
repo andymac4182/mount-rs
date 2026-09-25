@@ -184,6 +184,57 @@ mod tests {
         filesystem.shutdown().await.unwrap();
     }
 
+    #[cfg(not(unix))]
+    #[tokio::test]
+    async fn sqlite_directory_enrollment_rejects_unsupported_platform_without_publication() {
+        use mount_rs_core::storage::MetadataStore;
+        let temp = std::env::temp_dir().join(format!(
+            "mount-sdk-unsupported-delegation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp).unwrap();
+        let metadata_path = temp.join("metadata.sqlite");
+        let mut options = SplitOptions::memory("sdk-owner", 4096);
+        options.metadata = StoreConfig::Sqlite {
+            path: metadata_path.clone(),
+        };
+        options.blocks = StoreConfig::Sqlite {
+            path: temp.join("blocks.sqlite"),
+        };
+        let bootstrap = Filesystem::split(options.clone()).await.unwrap();
+        bootstrap.shutdown().await.unwrap();
+        let metadata = mount_rs_sqlite::SqliteMetadataStore::open(&metadata_path).unwrap();
+        let before = metadata.load().await.unwrap();
+        let error = Filesystem::enroll_directory_ownership(
+            options.with_ownership_mode(OwnershipMode::Shared),
+            before.revision,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.is(mount_rs_core::ErrorCode::Enotsup));
+        let after = metadata.load().await.unwrap();
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(
+            after.namespace.as_ref().map(|namespace| (
+                &namespace.nodes,
+                namespace.root,
+                namespace.next_inode
+            )),
+            before.namespace.as_ref().map(|namespace| (
+                &namespace.nodes,
+                namespace.root,
+                namespace.next_inode
+            ))
+        );
+        drop(metadata);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn sqlite_sdk_directory_handoff_and_expected_fence_recovery() {
         use mount_rs_core::storage::MetadataStore;
