@@ -1222,26 +1222,23 @@ fn decode_inode(row: InodeSqlRow, generation: u64) -> Result<(InodeId, LoadedIno
     ))
 }
 
+#[path = "inode_batch.rs"]
+mod inode_batch;
+
 async fn replace_inode_guards(
     tx: &mut Transaction<'_>,
     volume: &str,
     generation: u64,
     namespace: &Namespace,
 ) -> Result<()> {
+    let budget = inode_batch::budget(tx).await?;
     tx.exec_drop(
         "DELETE FROM mount_rs_tidb_inodes WHERE volume_key=?",
         (volume,),
     )
     .await
     .map_err(|e| db_error("replace TiDB inode guards", e))?;
-    for (&inode, node) in &namespace.nodes {
-        let json = serde_json::to_string(node).map_err(backend_error)?;
-        profile::add(Event::InodeSerialized, json.len() as u64);
-        tx.exec_drop("INSERT INTO mount_rs_tidb_inodes (volume_key,inode,generation,revision,node) VALUES (?,?,?,0,?)",
-            (volume, signed(inode,"inode ID")?, signed(generation,"inode generation")?, json)).await
-            .map_err(|e| db_error("insert TiDB inode guard",e))?;
-    }
-    Ok(())
+    inode_batch::insert(tx, volume, generation, namespace, budget).await
 }
 
 #[async_trait]

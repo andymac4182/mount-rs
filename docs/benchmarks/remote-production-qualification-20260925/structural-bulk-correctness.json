@@ -1,0 +1,252 @@
+{
+  "schema": "mount-rs-structural-bulk-correctness-v1",
+  "status": "Frozen for independent review; matched performance pending",
+  "report": {
+    "path": "/private/tmp/mount-rs-structural-bulk-implementation.md",
+    "sha256": "d9da8a66e03bfe235cc6d3b01cc9ef368f633e60b829ee22f6fc757bfe680234"
+  },
+  "freeze": {
+    "schema": "mount-rs-structural-bulk-freeze-v1",
+    "base": "8d9e783a859e9c4b22a3c5c23c9e7504e943908b",
+    "excluded_root_owned": [
+      "crates/mount-rs-service/tests/support/saturation_backend.rs"
+    ],
+    "source": {
+      "crates/mount-rs-sdk/tests/structural_bulk.rs": "65b9fc3c2f023119525e172bde7149f9df8c4b82f47e959f922a9d414715d493",
+      "providers/mount-rs-pglite/src/inode_batch.rs": "38c39c3dd6a809a3adc366b856f1a60c8ebe8800e87997e9490def79ad1a0fa4",
+      "providers/mount-rs-pglite/src/inode_batch_tests.rs": "c67dc3e012d65d3f5526f3310655df0fb14a2deb75bae86ead1f3b5d4bd581c8",
+      "providers/mount-rs-pglite/src/inode_wire_tests.rs": "9024d70c5ad66cdbf4725649d17c7a834cadd3611e18362d9e636ba8f5d845a5",
+      "providers/mount-rs-pglite/src/storage.rs": "3783e55de7959ebe91155395ecc90b731afb904fd024630ee598dcea92a3f90e",
+      "providers/mount-rs-tidb/src/inode_batch.rs": "ce324da4d60db54cc256824d610f4926fff9653245d78a571d8eb5120f0a9b36",
+      "providers/mount-rs-tidb/src/inode_batch_size.rs": "ee928f8ad3d0fb5178959481edd9a7da1cfb0c8e62c1df9bd7f948b980dc2fa3",
+      "providers/mount-rs-tidb/src/inode_batch_tests.rs": "039260031db58da0375594e6f0a3ad65dcc03321c8021e94769cef91b13064fe",
+      "providers/mount-rs-tidb/src/storage.rs": "13814e55543b2224ec2f07f646f916b1b6e27741725b9a200eac5ee90edddff6",
+      "providers/mount-rs-tidb/tests/guard_batches.rs": "f1d1090b16d205ea8ded8f40de21d377d47fa400588d1585b8a7e2a622c8b9ea",
+      "providers/mount-rs-tidb/tests/support/guard_fixture.rs": "3c225e22a01a12a32d417c77151057f95c2a03b1d2f2d266694985f73eb69446",
+      "providers/mount-rs-tidb/tests/support/guard_proxy.rs": "c0fc42b4bc8bd720cb579f29b000aa74a5a5e5bcc8bce30bfdb2c7eacce1cfd4"
+    },
+    "patch_sha256": "cb6321845bfd1df393dcb47be09874c212ea163c145ef803b1c6ac7e56ba0f28",
+    "artifacts": {
+      "add-tests.py": "0344b61a631804b0608cda45f008d0af420a29b213e86927be03bcf4a2898584",
+      "add_fault_tests.py": "c393f0ae5858c1deed885e742d49c48ecb657e28855c8a30b9d17795309b7913",
+      "add_size_tests.py": "b5336e5ca4a12574f2b249809903a1f4ecd9f67a0b92aa7fc01e6de936b5646c",
+      "batch-actual-final.log": "1c694beef23e92e8a7d6aa5f0608a01641d8b89b648ea9335bd37d2f57fbc556",
+      "extract-test-bodies.py": "8c88e1b33d36a23db747c29fddd64a8dac74e332435016b8a2572a93c4e1d464",
+      "final-gates-rerun.log": "dece4261c4f546443c5e122e56fe02a3b3664edcd602891a56c93a894f6fc1a7",
+      "final-gates.log": "e181b14081a88abd9619c3438e3950d30ecf73e52f7ce59c36adde373966f1f7",
+      "final-gates.py": "a3c5d1483dd2a280febf416e597638ee97f97cebd65853fe5a5b05e5531646ca",
+      "format-tests.py": "2109d43ba18a7905738ec9d49d04eeed367be19832e8503c1aaabe60416b0605",
+      "late-overflow-final.log": "606be7fd84b7c7ece84589b778c28c9028e2886c8be4858261812b58f1a6f4f6",
+      "late-overflow-first.log": "2e54f652d85a5019504db019856d9092d64d913f0500f307a54e64f763f363f2",
+      "pglite-authority-final.log": "7974e485704f42999f166bc753caf77e4079ae77c55076e90c415df56bc8d8d1",
+      "pglite-direct-singleton-control.log": "95e40978a204f95344b85bd15fd8283ca913b90fb0a6a12e3ca010e2626776f5",
+      "pglite-fault-first.log": "f5952086c3afe7e01a87f4339b251fc5b77a666b4827a5eb21c379b7d7f085ed",
+      "pglite-fault-race-final.log": "0510d17faf50c9519ea943f38203968d69c90f41d39283ceadea03d9b3cbb7e8",
+      "pglite-first-green.log": "0855450ab8660dcdb653b6ed78b420cb925fe722b0ceebe7328f184240b1de54",
+      "pglite-lost-ack.log": "17ecad84db574e6e307b9f5728b12d7d390001d5614e38fadd036eeccf0b43c5",
+      "pglite-red-env-corrected.log": "6cadd032403d607d229937dd66dbab65b245a79345d6edfc964fa09b93a68491",
+      "pglite-red.log": "b0f74ee1db1e240dda3fe0e09dd44161195478c8d987b219e02a470d2942d25a",
+      "pglite-singleton-error-control.log": "f84fe0b65ff80c80379fae81a17a5ea6b25e9ebbf1e9077dda779b81f00e4c06",
+      "pglite-size-first.log": "1417efcab112fd84705da873fc15f788f986bde6e2fc6f0cc74fffeabd72f172",
+      "pglite-wire-final.log": "3bce80a33791102baa2fc8f9240aed0a9cc68c309eba9c607e8befeecfcd51fa",
+      "pglite-wire-suite-final.log": "6139730eadf87ec921cd071f802fd25d5a7d0ee2f3eed61caa9e264812b29d3a",
+      "pinned-pglite-0.5.8-source.ts": "b15e65f9f066095fdccbe95316f32c285ae6ba4c635d29e1241514b30b1fedd8",
+      "pinned-pglite-socket-0.2.11-source.ts": "de23b27f5b021cd8caadd0b0993c9f51160a6dc9f5069ac26d9fa7f1fad2a34f",
+      "provider-unit-final.log": "75bafc911427c69b325d7507e6a747f2a093100fae95fcb6899a2cb3094801bc",
+      "root-clippy-gates.py": "0f1d4c1d246673a3ba26a7375b06ae5d479257490cdf370c8ae70e425d4e6e50",
+      "run-gate.py": "dc416057f4929f7c1a171c64f81a58806816c3756193402fa158762f5d7603b5",
+      "run-sdk.py": "fc4573990f3c8b5d6335ce072d397b2b4d93309f425a4e57f6dd6191db7be6ea",
+      "sdk-cleanup-1790330912705870000.tsv": "da96649f60e1ac0c5691fd63d1a73c98e7e64621b0104d5df4292781c8608a5d",
+      "sdk-compile.log": "dfdafcfbd38fb27a4a0117b6f14a9e91bea80b5cbffa583afcf86d1eb4436474",
+      "sdk-public-oracle.log": "3468c888890a7201477826ad7d246676bb1c9d892cb7390f07dc8ed0e51a1026",
+      "strict-clippy-final-green.log": "1fc4ea35899befe57eb6f939c2e9c83cf615861c31f352905d8b1f16674ea40c",
+      "strict-clippy-final.log": "e4d3d06eaff993fb95d50467ff107bc54cc360a5f64be659a51ba543a340fff8",
+      "strict-clippy-first.log": "67bc05256e43f7ad9a504e387d268efda556a95e8ae8269899e5ef53bc60ed29",
+      "strict-clippy-frozen.log": "e3d6c478d67217cece68c095d15fba6e96b3ed2d5aa6a70c87bf1c03d3bed723",
+      "tidb-authority-final.log": "c9dc0a9def95a9087a2e0fe60336b27f06aec90f3ec1bb44b37fa2efb09bb938",
+      "tidb-fault-first.log": "cfa09823b0f49bc0a30be5a4859e755cd3a1613065b00119765742bcd529101f",
+      "tidb-first-green.log": "651745f3fb6a376e4b3bcce319c0940f086815c3c49b501279b18ac5183ebff9",
+      "tidb-low-cap-wire-final.log": "0ab1ff7dee9447eaa254968e5d42dbee04b8969e178d0b9145f8cf86e336c380",
+      "tidb-low-cap-wire.log": "352de3802a0f05d0b819798d6796e27d72c0a3fcfffdd8b61e471feee22dae10",
+      "tidb-packet-cap-final.log": "831a2d044253a8692b1420b83e8db720ff1628f43f3af9ed8b7801866da176ec",
+      "tidb-race-gate.log": "d96c6b878cd9cce49523daa88c608d54f1b8137621f301a8d404e661fb8d2389",
+      "tidb-red-corrected-label.log": "d5a9475cd904b5939bfdc3267184cd5de33273e580616ffa3f62771471fd0e7d",
+      "tidb-red.log": "01bc9922a0fa62e19b5e0125fb407c2fa933ea8d99cd2f0c3415612035ddf08c",
+      "tidb-size-first.log": "6d59304fbdd09a9a8a4ee5fc16250fb33a3f087b085f08d2c69fed107570d57f",
+      "tidb-wire-and-lost-ack.log": "f574bc165e987a41fed89b48ad8790d303aee0a359e853764570d830d14929ac",
+      "tidb-wire-final.log": "3fbd760e5b21d6eb97acbb1b6c56a6e58af2350c840b80ec3ec2c672e2c6e15a",
+      "touched-fmt-final.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "results": {
+    "providers": [
+      "tidb",
+      "pglite"
+    ],
+    "old_guard_insert_executions_per_131_node_window": 131,
+    "new_guard_insert_rows_per_window": [
+      64,
+      64,
+      3
+    ],
+    "windows": [
+      "enrollment",
+      "first_structure",
+      "second_structure"
+    ],
+    "exact_namespace_membership_revisions_oracle": true,
+    "provider_block_oracle_bytes": 4160,
+    "provider_file_slices_verified": 130,
+    "public_sdk_per_provider": {
+      "nodes": 131,
+      "files": 130,
+      "verified_bytes": 532480,
+      "eof_checks": 130,
+      "unlinks": 130,
+      "contexts_closed": 2,
+      "owned_row_cleanup_zero": true
+    },
+    "row_boundaries": [
+      1,
+      63,
+      64,
+      65,
+      131
+    ],
+    "byte_boundary_exact_and_one_over": true,
+    "oversized_singleton_before_middle_after": true,
+    "late_overflow_rollback": true,
+    "clean_cancellation_and_reuse": true,
+    "structural_vs_stale_selected_conflict": true,
+    "lost_commit_ack_one_commit_no_replay": true,
+    "tidb_explicit_65536_cap_utf8_rows": [
+      45,
+      47,
+      39
+    ],
+    "fmt_passed": true,
+    "strict_touched_clippy_passed": true
+  },
+  "failed_gates": [
+    {
+      "provider": "pglite",
+      "gate": "same-client reuse after real SQL error",
+      "status": "FAILED / unqualified",
+      "control": "Reproduces on preexisting typed singleton path directly and through observer; duplicate23505, two ReadyForQuery(E), fresh exact old-state rollback oracle passes",
+      "clean_cancellation_reuse_is_separate": true
+    }
+  ],
+  "limits": [
+    "No schema/representation/pool/queue/admission change",
+    "Whole guard rows, root publication and serialization remain",
+    "No zero-allocation claim",
+    "No matched throughput/physical SSD IO/capacity proof",
+    "No actual low server cap or pristine upstream socket control",
+    "Default ignored tests not implicitly qualified",
+    "No FDB/source change in this slice"
+  ],
+  "supplementary_required_regressions": {
+    "frozen_source_manifest_sha256": "9f0e849fe3f3265d8c5b22c5b9939dbf577a5d941b041d35e8e162f039f1641e",
+    "results": [
+      {
+        "name": "tidb-controls",
+        "args": [
+          "test",
+          "-p",
+          "mount-rs-tidb",
+          "--test",
+          "ambiguous_commit",
+          "--locked",
+          "--offline"
+        ],
+        "exit": 0,
+        "log": "/private/tmp/mount-rs-structural-bulk-regressions/tidb-controls.log",
+        "sha256": "e7a4617b7f439233de5c2c450f766a040d5807eab21b45e6ea4f237763b09e09",
+        "summaries": [
+          "test result: ok. 3 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+        ]
+      },
+      {
+        "name": "tidb-actual",
+        "args": [
+          "test",
+          "-p",
+          "mount-rs-tidb",
+          "--test",
+          "ambiguous_commit",
+          "--locked",
+          "--offline",
+          "--",
+          "--ignored",
+          "--test-threads=1"
+        ],
+        "exit": 0,
+        "log": "/private/tmp/mount-rs-structural-bulk-regressions/tidb-actual.log",
+        "sha256": "aa0f5481bfec05b0a6a1fab89f36d9054b80f2e45a8a8309cf5e81b3a573c8c0",
+        "summaries": [
+          "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.11s"
+        ]
+      },
+      {
+        "name": "core-inodes",
+        "args": [
+          "test",
+          "-p",
+          "mount-rs-chunked",
+          "--test",
+          "concurrent_inodes",
+          "--locked",
+          "--offline"
+        ],
+        "exit": 0,
+        "log": "/private/tmp/mount-rs-structural-bulk-regressions/core-inodes.log",
+        "sha256": "af372469d844bed7b171e103c760ecbaf6b1e79a8194f908b82d434e1ff2c18f",
+        "summaries": [
+          "test result: ok. 13 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.41s"
+        ]
+      },
+      {
+        "name": "core-cas",
+        "args": [
+          "test",
+          "-p",
+          "mount-rs-chunked",
+          "--test",
+          "concurrent_cas",
+          "--locked",
+          "--offline"
+        ],
+        "exit": 0,
+        "log": "/private/tmp/mount-rs-structural-bulk-regressions/core-cas.log",
+        "sha256": "495224c3f37869d934fa274403575dc80e2f3663d162c786b83c781550576ea6",
+        "summaries": [
+          "test result: ok. 44 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.52s"
+        ]
+      },
+      {
+        "name": "core-delegated",
+        "args": [
+          "test",
+          "-p",
+          "mount-rs-chunked",
+          "--test",
+          "delegated",
+          "--locked",
+          "--offline"
+        ],
+        "exit": 0,
+        "log": "/private/tmp/mount-rs-structural-bulk-regressions/core-delegated.log",
+        "sha256": "885312f4c313dd57d3c7dc67814081502fdeeccb8742108620478b370a719c12",
+        "summaries": [
+          "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.88s"
+        ]
+      }
+    ],
+    "scope": "Existing generic/bound uncertain-COMMIT and proxy controls, concurrent inode/CAS and delegated orphan regressions. Additional unexecuted design variations and PGlite SQL-error reuse remain open."
+  },
+  "independent_review": {
+    "path": "/private/tmp/mount-rs-structural-bulk-source-review.md",
+    "sha256": "427f54c3c76ba655c448a453f371231bd201ea888953be428a9ede3f68ac3655",
+    "verdict": "SPEC/QUALITY PASS; required supplementary omission resolved; additional matrix and PGlite recovery remain unqualified"
+  }
+}

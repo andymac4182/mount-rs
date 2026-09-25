@@ -817,6 +817,9 @@ fn decode_inode_node(inode: InodeId, json: &str) -> Result<NodeMetadata> {
     Ok(node)
 }
 
+#[path = "inode_batch.rs"]
+mod inode_batch;
+
 fn encode_inode_node(node: &NodeMetadata) -> Result<String> {
     let json = serde_json::to_string(node).map_err(backend_error)?;
     profile::add(Event::InodeSerialized, json.len() as u64);
@@ -975,10 +978,7 @@ impl MetadataStore for PgliteMetadataStore {
         if !guards.is_empty() {
             return Err(stale());
         }
-        for (inode, node) in &namespace.nodes {
-            let node = encode_inode_node(node)?;
-            tx.execute_typed("INSERT INTO mount_rs_inode_guards(volume_key,inode,generation,revision,node) VALUES($1,$2,$3,0,$4)", &[(&self.0.volume_key, Type::TEXT), (&inode_signed(*inode)?, Type::INT8), (&generation, Type::INT8), (&node, Type::TEXT)]).await.map_err(postgres_error)?;
-        }
+        inode_batch::insert(&tx, &self.0.volume_key, generation, &namespace).await?;
         let encoded =
             String::from_utf8(encode_inode_namespace(&namespace)?).map_err(backend_error)?;
         profile::add(Event::NamespaceSerialized, encoded.len() as u64);
@@ -1200,10 +1200,7 @@ impl MetadataStore for PgliteMetadataStore {
         )
         .await
         .map_err(postgres_error)?;
-        for (inode, node) in &namespace.nodes {
-            let node = encode_inode_node(node)?;
-            tx.execute_typed("INSERT INTO mount_rs_inode_guards(volume_key,inode,generation,revision,node) VALUES($1,$2,$3,0,$4)", &[(&self.0.volume_key, Type::TEXT), (&inode_signed(*inode)?, Type::INT8), (&next, Type::INT8), (&node, Type::TEXT)]).await.map_err(postgres_error)?;
-        }
+        inode_batch::insert(&tx, &self.0.volume_key, next, &namespace).await?;
         tx.execute_typed(
             "UPDATE mount_rs_metadata SET revision=$2,namespace=$3 WHERE volume_key=$1",
             &[

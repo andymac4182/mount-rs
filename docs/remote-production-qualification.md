@@ -500,3 +500,43 @@ their correction are retained as test-harness failures.
 
 [Prerequisite artifact](benchmarks/remote-production-qualification-20260925/structural-packet-cap-prerequisite.json)
 records source identity, observations and hashes of the retained raw evidence.
+
+### Bounded structural INSERT batching correctness
+
+The frozen TiDB and PGlite implementations replace singleton guard inserts
+with at most 64 rows per statement under a conservative 256 KiB encoded
+command budget. TiDB also respects the transaction's session and configured
+client packet caps. Oversized rows select the existing singleton statement
+before sending. Locks, complete membership/version checks, full replacement,
+root publication and one final commit remain; a sent batch is never replayed
+as smaller writes.
+
+Actual behavioral regressions passed the complete namespace/revision/block
+oracle before failing at 131 singleton INSERTs. The changed implementation
+uses `[64, 64, 3]` in enrollment and two structural windows on both providers,
+with the same persisted result. Row/byte boundaries, UTF-8 keys, oversized
+singleton placement, late overflow, rollback, clean cancellation/reuse,
+stale selected-write conflict and multi-batch lost-commit-ack controls passed
+their scoped assertions. Independent public SDK reopen tests verified 130
+files / 532,480 bytes and 130 EOF checks per provider, followed by public
+unlinks, context closure and zero residual owned rows. Touched formatting and
+strict Clippy passed. Independent source review found no material defect.
+The supplemental actual TiDB ambiguity controls (2), proxy/pure controls (3),
+concurrent inode cases (13), CAS cases (44) and delegated cases (9) passed
+on the unchanged frozen source. One inode test remained ignored. Additional
+design interleavings and matched timing remain unqualified; these counts
+do not imply complete execution of the planned matrix.
+
+**PGlite SQL-error same-client recovery failed.** A real duplicate-key error
+on batch two preserves old state on fresh reopen, but the original connection
+cannot perform its next read. The preexisting typed singleton path reproduces
+the failure directly and through the observer, with two `ReadyForQuery(E)`
+responses to one exchange. Passing diagnostic assertions establish this
+failure; they do not qualify reuse. Clean cancellation/reuse is a separate
+passing case. A pristine upstream server control and a separately reviewed
+protocol-server remedy remain open; this patch introduces no workaround.
+
+[Frozen correctness artifact](benchmarks/remote-production-qualification-20260925/structural-bulk-correctness.json)
+retains exact source/raw hashes and the failed gate. Fewer INSERT executions
+do not establish lower physical SSD IOPS, throughput, zero allocations or
+full production capacity. The full guard-row and root costs remain.
