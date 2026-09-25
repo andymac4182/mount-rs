@@ -257,3 +257,23 @@ CAS activity on other connections. Pager-write units do not establish writes
 by the forty-read workload. Raw artifacts are retained; document-byte units
 and process resource deltas have their stated measurement window. A future
 matched warm profile must drain every connection and report cold setup separately.
+
+### FoundationDB split-store correction and diagnostic performance
+
+Commit `dba9629a` binds the block-authority policy atomically at first metadata
+binding. Same-keyspace stores retain transactional marker verification; split
+and external stores verify the actual configured block provider at existing
+open/publication boundaries. External verification and metadata publication are
+not one atomic cross-store transaction. Missing policy remains conservative.
+The actual native SDK and public Node tests pass same-prefix, split-prefix and
+external RustFS cases; canonical Cloudflare R2 remains runtime-unqualified.
+Independent review of this fix is pending.
+
+The corrected split-prefix public Node provider completed both 400-iteration,
+64-worker, 4KiB runs with 400 complete-byte checks, zero errors and namespace
+cleanup/driver shutdown. Steady overwrite/read measured 70.49 logical operations
+per second; create/read/delete measured 45.87. These are single short native
+single-node diagnostic trials. Earlier split-prefix inode trials failed before
+opening, so no before/after throughput improvement ratio is available. Neither
+logical operation rate establishes physical SSD IOPS or production capacity.
+Raw results are retained in `fdb-split-inode-after.json`.

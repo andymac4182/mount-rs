@@ -1,0 +1,71 @@
+{
+  "schema": "mount-rs-fdb-split-inode-after-v1",
+  "source": "dba9629afe1159d4292584759149022feb5526e2",
+  "addon_sha256": "1264ed546e3e6ace7106bf8fb0c328e3df6febc5af7e4d2d510d5dbb6a837c1f",
+  "scope": "Native public NAPI; split FDB prefixes; single-node diagnostic; 400 iterations, 64 workers, 4KiB complete-byte oracles. No QUIC, mounted-filesystem, physical IOPS or production capacity measurement.",
+  "limitations": [
+    "Earlier identical split-prefix inode runs failed opening ESTALE with zero oracles; there is no successful prior throughput denominator.",
+    "Each workload is one short trial; setup excluded from workload time. Namespace removal and driver shutdown do not delete retained immutable block data.",
+    "Policy fix independently reviewed separately; these results do not establish canonical Cloudflare R2 qualification."
+  ],
+  "runs": [
+    {
+      "schema": "mount-rs-local-provider-probe-v1",
+      "run": "qualification-54542-117d9ae0-9768-49f2-87d3-fee93abdf8b9",
+      "source": "dba9629a",
+      "addon": "/private/tmp/mount-rs-fdb-split-policy.node",
+      "layout": "inode",
+      "workload": "steady",
+      "scope": "public NAPI split stores; local blob providers; no QUIC/OIDC/native mounting",
+      "payloadBytes": 4096,
+      "oracle": "full-byte comparison; unique unsigned 64-bit generation i+1; setup generation zero",
+      "iterations": 400,
+      "concurrency": 64,
+      "results": [
+        {
+          "provider": "foundationdb",
+          "durability": "single-node-diagnostic",
+          "attempted": 400,
+          "successful": 400,
+          "verifiedReads": 400,
+          "errors": 0,
+          "cleanup": "passed",
+          "phase": "complete",
+          "setupSeconds": 0.12774295900000002,
+          "elapsedSeconds": 11.348824791,
+          "logicalOperations": 800,
+          "iops": 70.4918804134175
+        }
+      ]
+    },
+    {
+      "schema": "mount-rs-local-provider-probe-v1",
+      "run": "qualification-54735-4587159b-9985-40f9-b5e5-e28dd0870bdd",
+      "source": "dba9629a",
+      "addon": "/private/tmp/mount-rs-fdb-split-policy.node",
+      "layout": "inode",
+      "workload": "lifecycle",
+      "scope": "public NAPI split stores; local blob providers; no QUIC/OIDC/native mounting",
+      "payloadBytes": 4096,
+      "oracle": "full-byte comparison; unique unsigned 64-bit generation i+1; setup generation zero",
+      "iterations": 400,
+      "concurrency": 64,
+      "results": [
+        {
+          "provider": "foundationdb",
+          "durability": "single-node-diagnostic",
+          "attempted": 400,
+          "successful": 400,
+          "verifiedReads": 400,
+          "errors": 0,
+          "cleanup": "passed",
+          "phase": "complete",
+          "setupSeconds": 0.12085204199999998,
+          "elapsedSeconds": 26.162607959000002,
+          "logicalOperations": 1200,
+          "iops": 45.86698703281211
+        }
+      ]
+    }
+  ]
+}
