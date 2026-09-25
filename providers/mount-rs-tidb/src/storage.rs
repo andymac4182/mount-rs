@@ -246,6 +246,7 @@ async fn initialize_schema(
             .query_drop(INODE_SCHEMA)
             .await
             .map_err(|error| db_error("initialize TiDB inode schema", error))?;
+        compact::initialize(connection).await?;
         // Additive upgrades retain the existing lease row and namespace.
         // New columns remain NULL until an explicit enrollment/migration.
         for statement in [
@@ -497,7 +498,7 @@ impl ConcurrentRow {
             (Some(mode), _) if mode == BOUND_CONCURRENT_WRITE_MODE.as_bytes() => Err(stale()),
             // MRC4 fences this legacy protocol before any legacy publication.
             // Exact inode authority is verified separately by inode_mode_state.
-            (Some(b"MRC4"), _) => Err(stale()),
+            (Some(b"MRC4" | b"MRC5"), _) => Err(stale()),
             _ => Err(backend_error(
                 "TiDB concurrent mode, backing ID, and fence disagree",
             )),
@@ -1222,6 +1223,8 @@ fn decode_inode(row: InodeSqlRow, generation: u64) -> Result<(InodeId, LoadedIno
     ))
 }
 
+#[path = "compact.rs"]
+mod compact;
 #[path = "inode_batch.rs"]
 mod inode_batch;
 
@@ -1243,6 +1246,46 @@ async fn replace_inode_guards(
 
 #[async_trait]
 impl MetadataStore for TidbMetadataStore {
+    fn compact_inode_capability(&self) -> mount_rs_core::storage::compact::CompactInodeCapability {
+        mount_rs_core::storage::compact::CompactInodeCapability::V1
+    }
+    async fn prepare_compact_inode_mode(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        self.compact_prepare(backing, expected_revision).await
+    }
+    async fn load_compact_snapshot(
+        &self,
+        backing: ConcurrentBackingId,
+    ) -> Result<mount_rs_core::storage::compact::CompactSnapshot> {
+        self.compact_snapshot(backing).await
+    }
+    async fn load_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+    ) -> Result<mount_rs_core::storage::compact::LoadedCompactInode> {
+        self.compact_load(backing, inode).await
+    }
+    async fn publish_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+        generation: u64,
+        expected: mount_rs_core::storage::compact::PhysicalInodeIdentity,
+        node: NodeMetadata,
+    ) -> Result<mount_rs_core::storage::compact::LoadedCompactInode> {
+        self.compact_publish_inode(backing, inode, generation, expected, node)
+            .await
+    }
+    async fn publish_compact_structure(
+        &self,
+        delta: &mount_rs_core::storage::compact::CompactStructuralDelta,
+    ) -> Result<mount_rs_core::storage::compact::CompactPublication> {
+        self.compact_publish_structure(delta).await
+    }
     fn durable(&self) -> bool {
         self.0.durable
     }
@@ -1273,7 +1316,7 @@ impl MetadataStore for TidbMetadataStore {
         let Some((revision, namespace, mode)) = row else {
             return Err(backend_error("TiDB metadata row is missing"));
         };
-        if mode.as_deref() == Some(b"MRC4") {
+        if matches!(mode.as_deref(), Some(b"MRC4" | b"MRC5")) {
             return Err(stale());
         }
         let revision = nonnegative(revision, "metadata revision")?;
@@ -1732,7 +1775,7 @@ impl MetadataStore for TidbMetadataStore {
             return Err(backend_error("TiDB metadata row is missing"));
         };
         let revision = nonnegative(revision, "metadata revision")?;
-        if mode.as_deref() == Some(b"MRC4") {
+        if matches!(mode.as_deref(), Some(b"MRC4" | b"MRC5")) {
             return Err(stale());
         }
         if revision == known_revision as u64 {
