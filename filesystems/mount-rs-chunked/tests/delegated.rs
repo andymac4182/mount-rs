@@ -1,4 +1,6 @@
 //! Durable two-coordinator directory authority; no native kernel handoff claim.
+// Physical SQLite backing authority is currently supported on Unix only.
+#![cfg(unix)]
 use futures_lite::future::block_on;
 use mount_rs_chunked::{ChunkedFs, ChunkedOptions, OwnershipMode};
 use mount_rs_core::storage::{DelegatedRecovery, MetadataStore};

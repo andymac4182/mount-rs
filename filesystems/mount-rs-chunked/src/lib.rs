@@ -8917,7 +8917,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod delegated_generation_tests {
     use super::*;
     use futures_lite::future::block_on;

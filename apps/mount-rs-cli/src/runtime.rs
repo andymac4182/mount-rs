@@ -2211,6 +2211,7 @@ mod tests {
         assert_eq!(split.lease_ttl, Duration::from_millis(120_000));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn offline_directory_commands_enroll_report_and_recover_exact_sqlite_fences() {
         use mount_rs_core::storage::MetadataStore;

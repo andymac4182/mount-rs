@@ -1,4 +1,6 @@
 //! Independent inode revisions over durable SQLite metadata and blocks.
+// Physical SQLite backing authority is currently supported on Unix only.
+#![cfg(unix)]
 use futures_lite::future::block_on;
 use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
 use mount_rs_core::storage::MetadataStore;
