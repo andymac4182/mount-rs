@@ -207,6 +207,8 @@ mod tests {
         };
         let bootstrap = Filesystem::split(options.clone()).await.unwrap();
         bootstrap.shutdown().await.unwrap();
+        // SQLite on Windows does not share deletion while its handles are open.
+        drop(bootstrap);
         let metadata = mount_rs_sqlite::SqliteMetadataStore::open(&metadata_path).unwrap();
         let before = metadata.load().await.unwrap();
         let error = Filesystem::enroll_directory_ownership(
