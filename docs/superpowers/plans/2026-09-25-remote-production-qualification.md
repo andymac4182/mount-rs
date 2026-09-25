@@ -53,10 +53,12 @@ Files: crates/mount-rs-blob-cache/{src/{store.rs,local.rs,peer.rs},tests/distrib
 Consumes Discovery, PeerTransport, CachedBlockStore, LocalCache and actual QUIC peer API.
 Produces failure qualification and measured backing-read savings, plus fixes demonstrated by failing tests.
 
-- [ ] Inventory existing tests, avoiding duplication; select missing end-to-end failure seams.
-- [ ] Run real peer reads/writes and assert bytes plus backing counters under cold/warm/local/peer conditions and concurrent misses.
-- [ ] Inject peer loss/restart, stale hint, corrupt cache, and disk pressure; verify isolation, bounded fallback, durable writes, cleanup.
-- [ ] Fix only reproduced gaps, run focused/live tests and touched Clippy, retain evidence, commit and independently review.
+- [x] Inventory existing tests, avoiding duplication; select missing end-to-end failure seams.
+- [x] Run real peer reads/writes and assert bytes plus backing counters under cold/warm/local/peer conditions and concurrent misses.
+- [x] Inject peer loss/restart, stale hint, corrupt cache, and disk pressure; verify isolation, bounded fallback, durable writes, cleanup.
+- [x] Fix only reproduced gaps, run focused/live tests and touched Clippy, retain evidence, commit and independently review.
+
+Accepted bounded failure qualification: commits `396b7471` and `97cef0ad`, independent specification and quality review passed. The fixture covers real QUIC peers, backing counters, cancellation and quota pressure; quota pressure is not an OS ENOSPC test. Ten-server cache capacity, composed deployment failures and production workload profiles remain in Task 4.
 
 ## Task 4: Ten-server scaling and final delivery
 

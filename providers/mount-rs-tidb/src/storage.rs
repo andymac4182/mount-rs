@@ -1363,6 +1363,26 @@ impl MetadataStore for TidbMetadataStore {
         commit(tx, "enroll inode mode").await
     }
 
+    async fn load_inode_snapshot_if_changed(
+        &self,
+        backing: ConcurrentBackingId,
+        known: Option<u64>,
+    ) -> Result<Option<InodeMetadataSnapshot>> {
+        // The compact probe validates authority atomically. A changed response
+        // comes from a separately coherent, fully validated snapshot.
+        let state = self.inode_mode_state().await?.ok_or_else(stale)?;
+        if state.backing != backing
+            || state.structural_generation == 0
+            || known.is_some_and(|generation| generation > state.structural_generation)
+        {
+            return Err(stale());
+        }
+        if known == Some(state.structural_generation) {
+            return Ok(None);
+        }
+        Ok(Some(self.load_inode_snapshot(backing).await?))
+    }
+
     async fn load_inode_snapshot(
         &self,
         backing: ConcurrentBackingId,
@@ -2526,6 +2546,82 @@ mod tests {
         assert!(store.load_if_changed(1).await.is_err());
         assert!(store.concurrent_mode_state().await.is_err());
         let stale_snapshot = store.load_inode_snapshot(backing).await.unwrap();
+        // Dedicated volume: restore every authority field after each negative.
+        for (assignment, restore) in [
+            ("write_mode='MRC2'", "write_mode='MRC4'"),
+            ("owner='unexpected'", "owner=NULL"),
+            ("fence=1", "fence=9223372036854775807"),
+            ("expires=1", "expires=0"),
+            ("revision=0", "revision=2"),
+        ] {
+            let mut connection = store.0.pool.get_conn().await.unwrap();
+            connection
+                .exec_drop(
+                    format!("UPDATE mount_rs_tidb_metadata SET {assignment} WHERE volume_key=?"),
+                    (&key,),
+                )
+                .await
+                .unwrap();
+            drop(connection);
+            assert!(
+                store
+                    .load_inode_snapshot_if_changed(backing, Some(2))
+                    .await
+                    .is_err(),
+                "{assignment}"
+            );
+            let mut connection = store.0.pool.get_conn().await.unwrap();
+            connection
+                .exec_drop(
+                    format!("UPDATE mount_rs_tidb_metadata SET {restore} WHERE volume_key=?"),
+                    (&key,),
+                )
+                .await
+                .unwrap();
+        }
+
+        assert!(
+            store
+                .load_inode_snapshot_if_changed(backing, Some(stale_snapshot.structural_generation))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .load_inode_snapshot_if_changed(backing, None)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .load_inode_snapshot_if_changed(backing, Some(0))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .load_inode_snapshot_if_changed(
+                    backing,
+                    Some(stale_snapshot.structural_generation + 1)
+                )
+                .await
+                .is_err()
+        );
+        let wrong_backing =
+            mount_rs_core::storage::ConcurrentBackingId::from_bytes([0xe7; 16]).unwrap();
+        assert!(
+            store
+                .load_inode_snapshot_if_changed(
+                    wrong_backing,
+                    Some(stale_snapshot.structural_generation)
+                )
+                .await
+                .is_err()
+        );
+
         let first = store.load_inode(backing, root + 1).await.unwrap();
         let second = other.load_inode(backing, root + 2).await.unwrap();
         let mut first_node = first.node.clone();
@@ -2585,6 +2681,16 @@ mod tests {
             }
         );
         let before_unlink = store.load_inode_snapshot(backing).await.unwrap();
+        assert_eq!(
+            store
+                .load_inode_snapshot_if_changed(backing, Some(2))
+                .await
+                .unwrap()
+                .unwrap()
+                .structural_generation,
+            3
+        );
+
         let removed = store.load_inode(backing, root + 2).await.unwrap();
         let mut unlinked = before_unlink.namespace;
         unlinked.nodes.remove(&(root + 2));

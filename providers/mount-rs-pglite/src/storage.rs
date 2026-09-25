@@ -991,6 +991,26 @@ impl MetadataStore for PgliteMetadataStore {
         tx.commit().await.map_err(postgres_error)
     }
 
+    async fn load_inode_snapshot_if_changed(
+        &self,
+        backing: ConcurrentBackingId,
+        known: Option<u64>,
+    ) -> Result<Option<InodeMetadataSnapshot>> {
+        // The compact probe validates authority atomically. A changed response
+        // comes from a separately coherent, fully validated snapshot.
+        let state = self.inode_mode_state().await?.ok_or_else(stale)?;
+        if state.backing != backing
+            || state.structural_generation == 0
+            || known.is_some_and(|generation| generation > state.structural_generation)
+        {
+            return Err(stale());
+        }
+        if known == Some(state.structural_generation) {
+            return Ok(None);
+        }
+        Ok(Some(self.load_inode_snapshot(backing).await?))
+    }
+
     async fn load_inode_snapshot(
         &self,
         backing: ConcurrentBackingId,
@@ -3567,7 +3587,25 @@ mod tests {
                 assert!(serde_json::from_str::<Namespace>(&payload).is_err());
             }
             let initial = metadata.load_inode_snapshot(backing).await.unwrap();
+        assert!(metadata.load_inode_snapshot_if_changed(backing, Some(initial.structural_generation)).await.unwrap().is_none());
+        assert!(metadata.load_inode_snapshot_if_changed(backing, None).await.unwrap().is_some());
+        assert!(metadata.load_inode_snapshot_if_changed(backing, Some(0)).await.unwrap().is_some());
+        assert!(metadata.load_inode_snapshot_if_changed(backing, Some(initial.structural_generation + 1)).await.is_err());
+        let wrong_backing = mount_rs_core::storage::ConcurrentBackingId::from_bytes([0xe7; 16]).unwrap();
+        assert!(metadata.load_inode_snapshot_if_changed(wrong_backing, Some(initial.structural_generation)).await.is_err());
+
             assert_eq!(initial.structural_generation, 2);
+            for assignment in ["write_mode='MRC2'", "owner='unexpected'", "fence=1", "expires=1", "revision=0", "backing_id=NULL"] {
+                {
+                    let client = metadata.0.lock_client().await.unwrap();
+                    let client = client.as_ref().unwrap();
+                    client.batch_execute("BEGIN").await.unwrap();
+                    client.execute(&format!("UPDATE mount_rs_metadata SET {assignment} WHERE volume_key=$1"), &[&volume]).await.unwrap();
+                }
+                assert!(metadata.load_inode_snapshot_if_changed(backing, Some(2)).await.is_err(), "{assignment}");
+                metadata.0.lock_client().await.unwrap().as_ref().unwrap().batch_execute("ROLLBACK").await.unwrap();
+            }
+
             assert_eq!(
                 initial.inode_revisions,
                 BTreeMap::from([(ns.root, 0), (inode, 0)])
@@ -3628,6 +3666,8 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(generation, 3);
+            assert_eq!(metadata.load_inode_snapshot_if_changed(backing, Some(2)).await.unwrap().unwrap().structural_generation, 3);
+
             assert_eq!(
                 metadata
                     .publish_inode_if_version(backing, inode, version, changed.clone())

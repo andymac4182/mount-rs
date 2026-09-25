@@ -3260,6 +3260,26 @@ impl MetadataStore for FoundationDbMetadataStore {
             .await?;
         Ok(())
     }
+    async fn load_inode_snapshot_if_changed(
+        &self,
+        backing: ConcurrentBackingId,
+        known: Option<u64>,
+    ) -> Result<Option<InodeMetadataSnapshot>> {
+        // The compact probe validates authority atomically. A changed response
+        // comes from a separately coherent, fully validated snapshot.
+        let state = self.inode_mode_state().await?.ok_or_else(stale_backing)?;
+        if state.backing != backing
+            || state.structural_generation == 0
+            || known.is_some_and(|generation| generation > state.structural_generation)
+        {
+            return Err(stale_backing());
+        }
+        if known == Some(state.structural_generation) {
+            return Ok(None);
+        }
+        Ok(Some(self.load_inode_snapshot(backing).await?))
+    }
+
     async fn load_inode_snapshot(
         &self,
         backing: ConcurrentBackingId,

@@ -80,6 +80,29 @@ impl MetadataStore for ErasedMetadataStore {
         result
     }
 
+    async fn load_inode_snapshot_if_changed(
+        &self,
+        backing: ConcurrentBackingId,
+        known: Option<u64>,
+    ) -> Result<Option<InodeMetadataSnapshot>> {
+        #[cfg(feature = "observability")]
+        let result = self
+            .telemetry
+            .observe_fs(
+                "provider.metadata",
+                "inode.snapshot_if_changed",
+                None,
+                self.inner.load_inode_snapshot_if_changed(backing, known),
+            )
+            .await;
+        #[cfg(not(feature = "observability"))]
+        let result = self
+            .inner
+            .load_inode_snapshot_if_changed(backing, known)
+            .await;
+        result
+    }
+
     async fn load_inode_snapshot(
         &self,
         backing: ConcurrentBackingId,
@@ -814,6 +837,15 @@ mod tests {
             assert_eq!(revision, 7);
             Err(FsError::new(ErrorCode::Eio))
         }
+        async fn load_inode_snapshot_if_changed(
+            &self,
+            backing: ConcurrentBackingId,
+            known: Option<u64>,
+        ) -> Result<Option<InodeMetadataSnapshot>> {
+            assert_eq!(backing, self.0);
+            assert_eq!(known, Some(5));
+            Ok(None)
+        }
         async fn load_inode_snapshot(
             &self,
             backing: ConcurrentBackingId,
@@ -1118,6 +1150,13 @@ mod tests {
         assert_eq!(
             erased.prepare_inode_mode(id, 7).await.unwrap_err().code,
             ErrorCode::Eio
+        );
+        assert!(
+            erased
+                .load_inode_snapshot_if_changed(id, Some(5))
+                .await
+                .unwrap()
+                .is_none()
         );
         assert_eq!(
             erased.load_inode_snapshot(id).await.unwrap_err().code,

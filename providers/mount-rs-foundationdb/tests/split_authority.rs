@@ -104,6 +104,10 @@ async fn rejects_inode_authority(
             .await
             .err(),
         metadata.load_inode_snapshot(backing).await.err(),
+        metadata
+            .load_inode_snapshot_if_changed(backing, Some(snapshot.structural_generation))
+            .await
+            .err(),
         metadata.load_inode(backing, root).await.err(),
         metadata
             .load_inode_if_changed(backing, root, Some(version))

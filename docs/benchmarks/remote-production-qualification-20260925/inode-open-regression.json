@@ -1,0 +1,58 @@
+{
+  "kind": "conditional-inode-existing-path-count-regression",
+  "production_red_base": "b92d828068c8ae3e13fb98a558a1bad3a05eeb62",
+  "candidate_head_before_commit": "ba2de4be57459cddc719e92a191ab170d236561a",
+  "candidate_patch_sha256": "9ed07e6b4c69e1bcf3c75dcc5f8e5e1402410985a092c7b4aaa9db178ce1705a",
+  "files_per_drive": 128,
+  "full_byte_and_eof_oracles": 12,
+  "measured_window": "12 existing open/stat/fstat/read/EOF/close operations over three repeated targets; excludes initial coherent load, creation and cleanup",
+  "before": {
+    "full_snapshots": 36,
+    "returned_snapshot_nodes": 4644,
+    "namespace_clone_calls": 24,
+    "cloned_nodes": 3096,
+    "selected_checks": null,
+    "selected_bodies": null,
+    "test_exit": 101,
+    "failure": "behavioral amplification assertion after byte oracles passed"
+  },
+  "after": {
+    "full_snapshots": 0,
+    "returned_snapshot_nodes": 0,
+    "namespace_clone_calls": 0,
+    "cloned_nodes": 0,
+    "selected_checks": 108,
+    "selected_bodies": 3,
+    "test_exit": 0
+  },
+  "source_files_sha256": {
+    "src/storage.rs": "00600181679a042387811774755b5a412183778c7589d87ada1146d9d992eccd",
+    "src/diagnostics/profile.rs": "7e80b4a4e53636973388328f42a5442a3a6a6ca0fb1f5e6dbb5834219efe4d86",
+    "filesystems/mount-rs-chunked/src/lib.rs": "dff4af6a55232f27b286d5b8bbf92bd032876d3ca67d36f84dc3841213d8dddf",
+    "filesystems/mount-rs-chunked/tests/concurrent_inodes.rs": "e853722b5d4f2cfb51707d10cc8ec03eb8c8656ad2526c91d27379a1be9bf7f1",
+    "providers/mount-rs-sqlite/src/storage.rs": "2870b213715e06e8a6928fd63598fc06b58457384ea5379bbbb2e2958148cfb1",
+    "providers/mount-rs-pglite/src/storage.rs": "7fb093ec9a58d077020fe42075c0f5b5d3e02d9231e3c03409e7374c9adab497",
+    "providers/mount-rs-tidb/src/storage.rs": "f738e2dc0ebc473aeacb8dae577ed4ee56732a0b2186d90839f5cc6bf4238540",
+    "providers/mount-rs-foundationdb/src/lib.rs": "7c69ce299969c711aad4ab82a9a92591b9619c52e487d67dff9ee35509996986",
+    "providers/mount-rs-foundationdb/tests/inode.rs": "b837f0ab8e53cbe3ab8376d4bad74382c70f77482492c3185cc6942a3deadd72",
+    "providers/mount-rs-foundationdb/tests/split_authority.rs": "ece97724d68e5fcd81738fc2c0938dd72398ce1e35b414cf63a17953a08f824d",
+    "crates/mount-rs-sdk/src/stores.rs": "b2bef13c7b4c500c789dd55e8099e1ae745c94d39eb2a755adbf0b77e8c65976",
+    "bindings/mount-rs-napi/src/lib.rs": "a64b8c25b2ad2ec6049d7fcf75472bd9f7c652327d38f43182b606c4987ab457"
+  },
+  "retained_artifacts_sha256": {
+    "/private/tmp/mount-rs-inode-open.node": "80a04ea45690fbc69ef87d7b026c95bf7fe53f43c92f67daf8e5f05cc4da0b5d",
+    "/private/tmp/mount-rs-inode-open-amplification-red.log": "4edfe9cd2ed5bebc03d37dcd733a687a484fda01d5d8ed285baa134956b6fcb5",
+    "/private/tmp/mount-rs-inode-open-amplification-final.log": "eaefbb276e1d109820183fd8c6b347d5a5c945b47273492c2b8f2f63512de4cd",
+    "/private/tmp/mount-rs-inode-read-clippy-freeze.log": "be5bef6cd58ddb96ba733b126992d94196e71f78e074c9521bab2f5c6435300d"
+  },
+  "report_sha256": "24af6aeef908dfe1b396034ef549203b56c430a4263040766d39a7e4c88cc518",
+  "reproduce": "MOUNT_RS_PROFILE_IO=1 ./scripts/cargo-shared test -p mount-rs-chunked --test concurrent_inodes existing_inode_paths_do_not_reload_or_clone_the_whole_namespace --locked -- --exact --ignored --nocapture --test-threads=1",
+  "limits": [
+    "count regression, not timed throughput or allocation profile",
+    "selected checks were not instrumented in original RED",
+    "original before-test binary was not separately preserved",
+    "conditional hits trust correctly advanced authority/version tokens; same-token body audit deferred",
+    "linear directory lookup remains",
+    "actual ten-Drive matched run and full production target remain unqualified"
+  ]
+}

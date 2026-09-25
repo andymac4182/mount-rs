@@ -1007,6 +1007,23 @@ pub trait MetadataStore: Send + Sync {
     ) -> Result<InodeMetadataSnapshot> {
         Err(FsError::new(ErrorCode::Enotsup))
     }
+    /// Reuse a coherent MRC4 structural snapshot only after a fresh authority
+    /// check against `backing` and an exact positive generation match. `None`
+    /// means unchanged structure, not unchanged file contents: selected inode
+    /// revisions must still be checked. Missing or invalid authority is an error.
+    /// `known=None` forces a full, independently validated snapshot.
+    ///
+    /// Like selected conditional reads, a hit does not audit body edits that
+    /// preserve generation/version tokens, or corruption in untouched guards.
+    /// Unconditional snapshots and reopen retain the full validation path.
+    /// The default deliberately loads everything for custom providers.
+    async fn load_inode_snapshot_if_changed(
+        &self,
+        backing: ConcurrentBackingId,
+        _known: Option<u64>,
+    ) -> Result<Option<InodeMetadataSnapshot>> {
+        Ok(Some(self.load_inode_snapshot(backing).await?))
+    }
     /// Read authority, structural generation and complete inode guard atomically.
     /// Missing guards and malformed records must never fall back to stale base nodes.
     async fn load_inode(

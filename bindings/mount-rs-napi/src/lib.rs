@@ -1485,6 +1485,23 @@ impl MetadataStore for DynMetadataStore {
     {
         self.0.prepare_inode_mode(backing, expected_revision)
     }
+    fn load_inode_snapshot_if_changed<'a, 'async_trait>(
+        &'a self,
+        backing: ConcurrentBackingId,
+        known: Option<u64>,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = CoreResult<Option<mount_rs_core::storage::InodeMetadataSnapshot>>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.load_inode_snapshot_if_changed(backing, known)
+    }
     fn load_inode_snapshot<'a, 'async_trait>(
         &'a self,
         backing: ConcurrentBackingId,
@@ -4837,6 +4854,21 @@ mod tests {
             fs.write_file("/file", b"initial").await.unwrap();
             let backing = metadata.inode_mode_state().await.unwrap().unwrap().backing;
             let snapshot = metadata.load_inode_snapshot(backing).await.unwrap();
+            assert!(
+                metadata
+                    .load_inode_snapshot_if_changed(backing, Some(snapshot.structural_generation))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                metadata
+                    .load_inode_snapshot_if_changed(backing, None)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+
             let handle = fs.open("/file", "r+", 0).await.unwrap();
             handle.write(b"updated", Some(0)).await.unwrap();
             let mut bytes = [0; 7];

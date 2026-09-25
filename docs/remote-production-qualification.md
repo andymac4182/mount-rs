@@ -375,3 +375,38 @@ strict Clippy. The cancellation test now counts actual future polling. The
 initial RED was a missing-helper compilation failure, not behavioral proof of
 the original lifecycle defect. This source acceptance does not qualify the
 failed baseline or replace a corrected live run.
+
+## Conditional inode read and path refresh
+
+The frozen candidate adds an inode-specific conditional snapshot API and
+forwards it through all four metadata providers, SDK erased stores and NAPI.
+An unchanged result requires a fresh check of the exact MRC4 authority and
+positive structural generation. Selected inode versions still require checks.
+Existing nontruncating opens use the shared namespace view; structural
+publication, directory enumeration and aggregate statistics retain full
+snapshot refresh. Retry chains are bounded, changed structural identity forces
+path resolution again, and selected metadata feeds file statistics.
+
+The behavioral regression uses 128 existing files and twelve complete byte and
+EOF oracles. Before the change, the correct reads required 36 full snapshots,
+4,644 returned snapshot nodes, 24 namespace clones and 3,096 cloned nodes.
+The frozen candidate passes those same oracles with zero repeated full
+snapshots or namespace clones, 108 selected checks and three selected bodies.
+Setup and the initial coherent load are outside this measured window. These
+counts do not establish zero total allocations or constant directory lookup
+CPU: the existing directory entry lookup remains linear.
+
+Conditional hits trust correctly advanced generation and inode revision
+versions. They do not audit payload tampering that preserves those tokens or
+untouched corrupt records. Full snapshots and reopen retain full validation.
+Actual block backing verification remains at the existing open/publication
+boundaries; this change adds no metadata-local marker requirement for an
+external block store.
+
+Candidate source freeze SHA256:
+`9ed07e6b4c69e1bcf3c75dcc5f8e5e1402410985a092c7b4aaa9db178ce1705a`.
+Final provider, filesystem, SDK and NAPI checks and strict touched all-target
+Clippy passed. Independent specification and quality review passed for the frozen source.
+The matched ten-Drive measurement remains pending. The earlier incomplete serial oracle
+cannot supply a whole-oracle speedup denominator, and structural create/write
+amplification remains a separate measured issue.

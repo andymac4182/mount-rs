@@ -23,8 +23,8 @@ use mount_rs_core::path::{is_path_inside, normalize_path, split_path};
 use mount_rs_core::storage::{
     BlockExtent, BlockReconcileReport, BlockStore, CheckoutRequest, ConcurrentBackingId,
     ConcurrentModeState, DelegatedCheckin, DelegatedPublish, DirectoryGrant, FileLayout, InodeId,
-    InodeVersion, MetadataStore, NAMESPACE_FORMAT_VERSION, Namespace, NodeData, NodeMetadata,
-    WriterLease,
+    InodeMetadataSnapshot, InodeVersion, MetadataStore, NAMESPACE_FORMAT_VERSION, Namespace,
+    NodeData, NodeMetadata, WriterLease,
 };
 use mount_rs_core::types::{
     Capabilities, DirEntry, FileType, MkdirOptions, S_IFDIR, S_IFMT, S_IFREG, Stats, StatsFs,
@@ -1616,32 +1616,31 @@ where
         Ok(())
     }
 
-    async fn refresh_selected_inode(&self, inode: InodeId) -> Result<()> {
+    /// One selected check only. A false result asks the caller to discard its
+    /// captured path/identity and retry; there is no recursive refresh chain.
+    async fn refresh_inode_once(&self, inode: InodeId, base_is_usable: bool) -> Result<bool> {
         self.check_inode_runtime()?;
         let backing = self
             .inner
             .concurrent_backing
             .ok_or_else(|| FsError::new(ErrorCode::Eio))?;
-        // Match the existing concurrent read contract: metadata freshness
-        // surrounds block I/O. Backing verification belongs to open and
-        // publication; actual block reads use the existing provider path.
-        // Avoid adding a block-authority transaction at each freshness check.
-        let known = {
+        let (known, generation, local_revision) = {
             let state = self.lock_state()?;
             if state.orphans.contains_key(&inode) {
-                return Ok(());
+                return Ok(true);
             }
-            if state.selected_inodes.contains_key(&inode) {
-                state
-                    .inode_revisions
-                    .get(&inode)
-                    .map(|revision| InodeVersion {
-                        structural_generation: state.persisted_revision,
-                        inode_revision: *revision,
-                    })
-            } else {
-                None
-            }
+            let known = (base_is_usable || state.selected_inodes.contains_key(&inode))
+                .then(|| {
+                    state
+                        .inode_revisions
+                        .get(&inode)
+                        .map(|revision| InodeVersion {
+                            structural_generation: state.persisted_revision,
+                            inode_revision: *revision,
+                        })
+                })
+                .flatten();
+            (known, state.persisted_revision, state.revision)
         };
         let loaded = match self
             .inner
@@ -1652,21 +1651,48 @@ where
             Ok(loaded) => loaded,
             Err(error) if error.code == ErrorCode::Estale || error.code == ErrorCode::Enoent => {
                 self.refresh_concurrent_namespace().await?;
-                if self.lock_state()?.orphans.contains_key(&inode) {
-                    return Ok(());
+                if self.lock_state()?.persisted_revision != generation {
+                    return Ok(false);
                 }
-                return Err(error);
+                if self.lock_state()?.orphans.contains_key(&inode) {
+                    return Ok(true);
+                }
+                return Err(self.fail_closed(error));
             }
             Err(error) => return Err(self.fail_closed(error)),
         };
         self.check_inode_runtime()?;
         if let Some(loaded) = loaded {
-            if loaded.version.structural_generation != self.lock_state()?.persisted_revision {
+            if loaded.version.structural_generation < generation {
+                return Err(self.fail_closed(stale_inode_structure()));
+            }
+            if loaded.version.structural_generation != generation {
                 self.refresh_concurrent_namespace().await?;
-                // The structural snapshot may have crossed another inode write.
-                return Box::pin(self.refresh_selected_inode(inode)).await;
+                return Ok(false);
             }
             let mut state = self.lock_state()?;
+            if state.revision != local_revision {
+                return Ok(false);
+            }
+            let Some(original) = state.namespace.nodes.get(&inode) else {
+                drop(state);
+                return Err(self.fail_closed(stale_inode_structure()));
+            };
+            let validation = validate_cached_inode(inode, original, &loaded.node).and_then(|()| {
+                if state.inode_revisions.get(&inode).is_some_and(|revision| {
+                    loaded.version.inode_revision < *revision
+                        || (!matches!(original.data, NodeData::File(_))
+                            && loaded.version.inode_revision != *revision)
+                }) {
+                    Err(stale_inode_structure())
+                } else {
+                    Ok(())
+                }
+            });
+            if let Err(error) = validation {
+                drop(state);
+                return Err(self.fail_closed(error));
+            }
             if state.inode_revisions.get(&inode) != Some(&loaded.version.inode_revision) {
                 state.revision = state
                     .revision
@@ -1677,8 +1703,185 @@ where
                 .inode_revisions
                 .insert(inode, loaded.version.inode_revision);
             state.selected_inodes.insert(inode, Arc::new(loaded.node));
+        } else {
+            let state = self.lock_state()?;
+            if known.is_none() {
+                drop(state);
+                return Err(self.fail_closed(stale_inode_structure()));
+            }
+            if state.revision != local_revision {
+                return Ok(false);
+            }
         }
+        Ok(true)
+    }
+
+    async fn refresh_selected_inode(&self, inode: InodeId) -> Result<()> {
+        // Metadata checks still surround handle block I/O. Actual block backing
+        // verification stays at open/publication, not every selected check.
+        for _ in 0..MAX_CONCURRENT_CAS_RETRIES {
+            if self.refresh_inode_once(inode, false).await? {
+                return Ok(());
+            }
+        }
+        Err(FsError::new(ErrorCode::Eagain).with_message("inode structure repeatedly changed"))
+    }
+
+    fn install_inode_snapshot(&self, snapshot: InodeMetadataSnapshot) -> Result<()> {
+        snapshot
+            .validate()
+            .map_err(|error| self.fail_closed(error))?;
+        self.check_inode_runtime()?;
+        let mut state = self.lock_state()?;
+        if snapshot.structural_generation < state.persisted_revision {
+            return Err(FsError::new(ErrorCode::Eagain));
+        }
+        // A conservative conditional provider can return a full snapshot at an
+        // equal generation. Compare BEFORE replacing the cached topology.
+        if snapshot.structural_generation == state.persisted_revision {
+            let checked = validate_cached_namespace(&state.namespace, &snapshot.namespace)
+                .and_then(|()| {
+                    for (inode, revision) in &state.inode_revisions {
+                        let next = snapshot
+                            .inode_revisions
+                            .get(inode)
+                            .ok_or_else(stale_inode_structure)?;
+                        if next < revision
+                            || (!matches!(state.namespace.nodes[inode].data, NodeData::File(_))
+                                && next != revision)
+                        {
+                            return Err(stale_inode_structure());
+                        }
+                    }
+                    Ok(())
+                });
+            if let Err(error) = checked {
+                drop(state);
+                return Err(self.fail_closed(error));
+            }
+        }
+        retain_open_detached(&mut state, &snapshot.namespace);
+        state.namespace = Arc::new(snapshot.namespace);
+        if state.persisted_revision != snapshot.structural_generation
+            || state.inode_revisions != snapshot.inode_revisions
+            || !state.selected_inodes.is_empty()
+        {
+            state.revision = state
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        }
+        state.persisted_revision = snapshot.structural_generation;
+        state.inode_revisions = snapshot.inode_revisions;
+        state.selected_inodes.clear();
         Ok(())
+    }
+
+    async fn refresh_inode_structure_for_read(&self) -> Result<bool> {
+        self.check_inode_runtime()?;
+        let backing = self
+            .inner
+            .concurrent_backing
+            .ok_or_else(|| FsError::new(ErrorCode::Eio))?;
+        let (known, local_revision) = {
+            let state = self.lock_state()?;
+            (
+                (state.inode_revisions.len() == state.namespace.nodes.len())
+                    .then_some(state.persisted_revision),
+                state.revision,
+            )
+        };
+        self.inner
+            .blocks
+            .verify_concurrent_backing(backing)
+            .await
+            .map_err(|error| self.fail_closed(error))?;
+        let loaded = {
+            let _profile = Span::new(Event::InodeSnapshotConditional);
+            self.inner
+                .metadata
+                .load_inode_snapshot_if_changed(backing, known)
+                .await
+                .map_err(|error| self.fail_closed(error))?
+        };
+        self.check_inode_runtime()?;
+        if self.lock_state()?.revision != local_revision {
+            return Ok(false);
+        }
+        if let Some(snapshot) = loaded {
+            profile::add(
+                Event::InodeSnapshotReturned,
+                snapshot.namespace.nodes.len() as u64,
+            );
+            self.install_inode_snapshot(snapshot)?;
+        } else {
+            if known.is_none() {
+                return Err(self.fail_closed(stale_inode_structure()));
+            }
+            profile::add(Event::InodeSnapshotHit, 1);
+        }
+        Ok(true)
+    }
+
+    async fn refresh_inode_stat(&self, inode: InodeId) -> Result<()> {
+        for _ in 0..MAX_CONCURRENT_CAS_RETRIES {
+            if self.refresh_inode_structure_for_read().await?
+                && self.refresh_inode_once(inode, false).await?
+            {
+                return Ok(());
+            }
+        }
+        Err(FsError::new(ErrorCode::Eagain).with_message("inode stat structure repeatedly changed"))
+    }
+
+    /// Caller holds the local operation gate. Structural mutations/aggregates
+    /// use the unconditional path instead: selected writes do not change this
+    /// generation. Token hits do not audit out-of-band equal-token body edits.
+    async fn inode_path_view(
+        &self,
+        path: &str,
+        follow: bool,
+        syscall: &str,
+        extra_path: Option<&str>,
+    ) -> Result<(Arc<Namespace>, Entry)> {
+        for _ in 0..MAX_CONCURRENT_CAS_RETRIES {
+            if !self.refresh_inode_structure_for_read().await? {
+                continue;
+            }
+            let (namespace, generation) = {
+                let state = self.lock_state()?;
+                (Arc::clone(&state.namespace), state.persisted_revision)
+            };
+            let mut traversed = Vec::new();
+            let entry = walk_traced(&namespace, path, follow, syscall, 0, Some(&mut traversed));
+            let extra = extra_path.map(|extra| {
+                walk_traced(&namespace, extra, false, syscall, 0, Some(&mut traversed))
+            });
+
+            let mut retry = false;
+            for inode in traversed {
+                let _profile = Span::new(Event::InodePathGuard);
+                let base_is_usable = namespace
+                    .nodes
+                    .get(&inode)
+                    .is_some_and(|node| !matches!(node.data, NodeData::File(_)));
+                if !self.refresh_inode_once(inode, base_is_usable).await?
+                    || self.lock_state()?.persisted_revision != generation
+                {
+                    retry = true;
+                    break;
+                }
+            }
+            if retry {
+                continue;
+            }
+            self.check_inode_runtime()?;
+            if let Some(extra) = extra {
+                extra?;
+            }
+            return Ok((namespace, entry?));
+        }
+        Err(FsError::new(ErrorCode::Eagain).with_message("path structure repeatedly changed"))
     }
 
     async fn publish_inode_structure(
@@ -2163,27 +2366,7 @@ where
                 .load_inode_snapshot(backing)
                 .await
                 .map_err(|error| self.fail_closed(error))?;
-            snapshot
-                .validate()
-                .map_err(|error| self.fail_closed(error))?;
-            self.check_inode_runtime()?;
-            let mut state = self.lock_state()?;
-            if snapshot.structural_generation >= state.persisted_revision {
-                retain_open_detached(&mut state, &snapshot.namespace);
-                state.namespace = Arc::new(snapshot.namespace);
-                if state.persisted_revision != snapshot.structural_generation
-                    || state.inode_revisions != snapshot.inode_revisions
-                    || !state.selected_inodes.is_empty()
-                {
-                    state.revision = state
-                        .revision
-                        .checked_add(1)
-                        .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-                }
-                state.persisted_revision = snapshot.structural_generation;
-                state.inode_revisions = snapshot.inode_revisions;
-                state.selected_inodes.clear();
-            }
+            self.install_inode_snapshot(snapshot)?;
             return Ok(());
         }
         if self.inner.options.delegated {
@@ -3884,9 +4067,10 @@ where
             return Err(FsError::new(ErrorCode::Ebadf).with_message("filesystem is closed"));
         }
         let mut stats = state
-            .namespace
-            .nodes
+            .selected_inodes
             .get(&inode)
+            .map(Arc::as_ref)
+            .or_else(|| state.namespace.nodes.get(&inode))
             .or_else(|| state.orphans.get(&inode))
             .map(|node| node.stats.clone())
             .ok_or_else(|| error_with_path(ErrorCode::Estale, syscall, path))?;
@@ -4045,6 +4229,31 @@ where
         .await
     }
 
+    fn open_inode_handle(
+        &self,
+        inode: InodeId,
+        normalized: String,
+        flags: OpenFlags,
+    ) -> Result<(Arc<dyn FileHandle>, PathIdentity)> {
+        let fd = self.allocate_fd(inode)?;
+        Ok((
+            Arc::new(ChunkedHandle {
+                filesystem: self.clone(),
+                inode,
+                path: normalized,
+                fd,
+                flags,
+                generation: self.inner.delegation_generation.load(Ordering::SeqCst),
+                state: Mutex::new(HandleState {
+                    position: 0,
+                    closed: false,
+                }),
+                gate: AsyncGate::new(),
+            }),
+            PathIdentity { dev: 0, ino: inode },
+        ))
+    }
+
     async fn open_flags_inner(
         &self,
         path: &str,
@@ -4072,6 +4281,35 @@ where
         let _gate = self.inner.gate.lock().await;
         drop(gate_profile);
         trace.stage("gate_acquired", format_args!("path={normalized:?}"));
+        if self.inner.options.inode_updates && !flags.truncate {
+            let (namespace, entry) = self
+                .inode_path_view(
+                    &normalized,
+                    !(flags.create && flags.exclusive),
+                    "open",
+                    guard.map(|(parent, _, _)| parent.path.as_str()),
+                )
+                .await?;
+            validate_open_guard(&namespace, &normalized, &entry, flags, guard)?;
+            if let Some(inode) = entry.node {
+                if flags.exclusive {
+                    return Err(error_with_path(ErrorCode::Eexist, "open", &entry.path));
+                }
+                let kind = FileType::from_mode(self.stat_inode(inode, "open", &entry.path)?.mode);
+                if kind == FileType::Directory && flags.write {
+                    return Err(error_with_path(ErrorCode::Eisdir, "open", &entry.path));
+                }
+                if kind.is_special() {
+                    return Err(error_with_path(ErrorCode::Enxio, "open", &entry.path));
+                }
+                trace.finish(format_args!("inode={inode} existing=true"));
+                return self.open_inode_handle(inode, normalized, flags);
+            }
+            if !flags.create {
+                return Err(error_with_path(ErrorCode::Enoent, "open", &entry.path));
+            }
+            // Missing creation still needs a complete fresh structural candidate.
+        }
         let attempts = if self.inner.options.concurrent_writes {
             MAX_CONCURRENT_CAS_RETRIES
         } else {
@@ -4102,33 +4340,7 @@ where
                 "open",
                 0,
             )?;
-            if let Some((parent_guard, name, observed)) = guard {
-                let original =
-                    guarded_child_entry(&namespace, parent_guard, name, observed, "open")?;
-                if original.path != normalized || entry.parent != original.parent {
-                    return Err(stale_guard(&parent_guard.path, "open"));
-                }
-                if original.node.is_some_and(|inode| {
-                    namespace
-                        .nodes
-                        .get(&inode)
-                        .is_some_and(|node| matches!(node.data, NodeData::Symlink { .. }))
-                }) {
-                    // Regular-file CREATE must not follow a final symlink to
-                    // an unobserved target, even when it stays in this parent.
-                    return Err(error_with_path(ErrorCode::Eexist, "open", &normalized));
-                }
-                if entry.node != original.node {
-                    return Err(stale_guard(&normalized, "open"));
-                }
-                if flags.truncate
-                    && !flags.exclusive
-                    && original.node.is_some()
-                    && !matches!(observed, ObservedEntry::Identity(_))
-                {
-                    return Err(stale_guard(&normalized, "open"));
-                }
-            }
+            validate_open_guard(&namespace, &normalized, &entry, flags, guard)?;
             if self.inner.options.delegated {
                 let required = entry.node.unwrap_or(entry.parent);
                 self.require_inode_authority(&namespace, required)?;
@@ -4262,24 +4474,8 @@ where
                     }
                 }
             }
-            let fd = self.allocate_fd(inode)?;
-            trace.finish(format_args!("attempt={attempt} inode={inode} fd={fd}"));
-            return Ok((
-                Arc::new(ChunkedHandle {
-                    filesystem: self.clone(),
-                    inode,
-                    path: normalized,
-                    fd,
-                    flags,
-                    generation: self.inner.delegation_generation.load(Ordering::SeqCst),
-                    state: Mutex::new(HandleState {
-                        position: 0,
-                        closed: false,
-                    }),
-                    gate: AsyncGate::new(),
-                }),
-                PathIdentity { dev: 0, ino: inode },
-            ));
+            trace.finish(format_args!("attempt={attempt} inode={inode}"));
+            return self.open_inode_handle(inode, normalized, flags);
         }
         Err(FsError::new(ErrorCode::Eagain)
             .with_syscall("open")
@@ -4410,7 +4606,11 @@ where
             return Err(error_with_path(ErrorCode::Ebadf, "fstat", &self.path));
         }
         let _gate = self.filesystem.inner.gate.lock().await;
-        self.filesystem.validate_lease().await?;
+        if self.filesystem.inner.options.inode_updates {
+            self.filesystem.refresh_inode_stat(self.inode).await?;
+        } else {
+            self.filesystem.validate_lease().await?;
+        }
         self.filesystem.stat_inode(self.inode, "fstat", &self.path)
     }
 
@@ -4486,16 +4686,38 @@ where
         let gate_profile = Span::new(Event::GateWait);
         let _gate = self.inner.gate.lock().await;
         drop(gate_profile);
-        self.ensure_operation_lease().await?;
-        let (namespace, _) = self.snapshot()?;
+        let namespace = if self.inner.options.inode_updates
+            && !matches!(&request, GuardedRead::Readdir { .. })
+        {
+            let (path, extra) = match &request {
+                GuardedRead::Stat { target } | GuardedRead::Readlink { target } => {
+                    (target.path.clone(), None)
+                }
+                GuardedRead::Lookup { parent, name } => {
+                    let path = match name.as_str() {
+                        "." => parent.path.clone(),
+                        ".." => normalize_path(&format!("{}/..", parent.path)),
+                        _ => guarded_child_path(parent, name, "guarded lookup")?,
+                    };
+                    (path, Some(parent.path.as_str()))
+                }
+                GuardedRead::Readdir { .. } => unreachable!(),
+            };
+            self.inode_path_view(&path, false, "guarded read", extra)
+                .await?
+                .0
+        } else {
+            self.ensure_operation_lease().await?;
+            Arc::new(self.snapshot()?.0)
+        };
         match request {
             GuardedRead::Stat { target } => {
                 let inode = check_path_guard(&namespace, &target, "guarded stat")?;
-                let node = namespace
-                    .nodes
-                    .get(&inode)
-                    .ok_or_else(|| stale_guard(&target.path, "guarded stat"))?;
-                Ok(GuardedReadResult::Stat(node.stats.clone()))
+                Ok(GuardedReadResult::Stat(self.stat_inode(
+                    inode,
+                    "guarded stat",
+                    &target.path,
+                )?))
             }
             GuardedRead::Lookup { parent, name } => {
                 let inode = check_path_guard(&namespace, &parent, "guarded lookup")?;
@@ -4528,12 +4750,9 @@ where
                             })?
                     }
                 };
-                let child_node = namespace.nodes.get(&child).ok_or_else(|| {
-                    stale_guard(&format!("{}/{name}", parent.path), "guarded lookup")
-                })?;
                 Ok(GuardedReadResult::Lookup {
-                    parent: node.stats.clone(),
-                    child: child_node.stats.clone(),
+                    parent: self.stat_inode(inode, "guarded lookup", &parent.path)?,
+                    child: self.stat_inode(child, "guarded lookup", &parent.path)?,
                 })
             }
             GuardedRead::Readdir {
@@ -4805,6 +5024,13 @@ where
         let gate_profile = Span::new(Event::GateWait);
         let _gate = self.inner.gate.lock().await;
         drop(gate_profile);
+        if self.inner.options.inode_updates {
+            let (_, entry) = self.inode_path_view(path, true, "stat", None).await?;
+            let inode = entry
+                .node
+                .ok_or_else(|| error_with_path(ErrorCode::Enoent, "stat", path))?;
+            return self.stat_inode(inode, "stat", &normalize_path(path));
+        }
         self.validate_lease().await?;
         let (namespace, _) = self.snapshot()?;
         let inode = resolve(&namespace, path, true, "stat")?;
@@ -4815,6 +5041,13 @@ where
         let gate_profile = Span::new(Event::GateWait);
         let _gate = self.inner.gate.lock().await;
         drop(gate_profile);
+        if self.inner.options.inode_updates {
+            let (_, entry) = self.inode_path_view(path, false, "lstat", None).await?;
+            let inode = entry
+                .node
+                .ok_or_else(|| error_with_path(ErrorCode::Enoent, "lstat", path))?;
+            return self.stat_inode(inode, "lstat", &normalize_path(path));
+        }
         self.validate_lease().await?;
         let (namespace, _) = self.snapshot()?;
         let inode = resolve(&namespace, path, false, "lstat")?;
@@ -5990,6 +6223,75 @@ fn apply_guarded_setattr(
     Ok(())
 }
 
+fn validate_open_guard(
+    namespace: &Namespace,
+    normalized: &str,
+    entry: &Entry,
+    flags: OpenFlags,
+    guard: Option<(&PathGuard, &str, ObservedEntry)>,
+) -> Result<()> {
+    if let Some((parent_guard, name, observed)) = guard {
+        let original = guarded_child_entry(namespace, parent_guard, name, observed, "open")?;
+        if original.path != normalized || entry.parent != original.parent {
+            return Err(stale_guard(&parent_guard.path, "open"));
+        }
+        if original.node.is_some_and(|inode| {
+            namespace
+                .nodes
+                .get(&inode)
+                .is_some_and(|node| matches!(node.data, NodeData::Symlink { .. }))
+        }) {
+            // Regular-file CREATE must not follow a final symlink to
+            // an unobserved target, even when it stays in this parent.
+            return Err(error_with_path(ErrorCode::Eexist, "open", normalized));
+        }
+        if entry.node != original.node {
+            return Err(stale_guard(normalized, "open"));
+        }
+        if flags.truncate
+            && !flags.exclusive
+            && original.node.is_some()
+            && !matches!(observed, ObservedEntry::Identity(_))
+        {
+            return Err(stale_guard(normalized, "open"));
+        }
+    }
+    Ok(())
+}
+
+fn stale_inode_structure() -> FsError {
+    FsError::new(ErrorCode::Estale).with_message("inode structure changed without its generation")
+}
+
+fn validate_cached_inode(inode: InodeId, old: &NodeMetadata, next: &NodeMetadata) -> Result<()> {
+    if matches!(old.data, NodeData::File(_)) {
+        mount_rs_core::storage::validate_inode_publication(inode, old, next)
+            .map_err(|_| stale_inode_structure())
+    } else if old == next {
+        Ok(())
+    } else {
+        Err(stale_inode_structure())
+    }
+}
+
+fn validate_cached_namespace(old: &Namespace, next: &Namespace) -> Result<()> {
+    if old.format_version != next.format_version
+        || old.root != next.root
+        || old.next_inode != next.next_inode
+        || old.default_uid != next.default_uid
+        || old.default_gid != next.default_gid
+        || old.umask != next.umask
+        || old.default_chunker != next.default_chunker
+        || !old.nodes.keys().eq(next.nodes.keys())
+    {
+        return Err(stale_inode_structure());
+    }
+    for (inode, node) in &old.nodes {
+        validate_cached_inode(*inode, node, &next.nodes[inode])?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 struct Entry {
     parent: InodeId,
@@ -6005,12 +6307,28 @@ fn walk(
     syscall: &str,
     depth: usize,
 ) -> Result<Entry> {
+    walk_traced(namespace, path, follow_final, syscall, depth, None)
+}
+
+fn walk_traced(
+    namespace: &Namespace,
+    path: &str,
+    follow_final: bool,
+    syscall: &str,
+    depth: usize,
+    mut traversed: Option<&mut Vec<InodeId>>,
+) -> Result<Entry> {
     if depth > MAX_SYMLINK_DEPTH {
         return Err(error_with_path(
             ErrorCode::Eloop,
             syscall,
             &normalize_path(path),
         ));
+    }
+    if let Some(nodes) = traversed.as_mut()
+        && !nodes.contains(&namespace.root)
+    {
+        nodes.push(namespace.root);
     }
     let normalized = normalize_path(path);
     if normalized == "/" {
@@ -6047,6 +6365,11 @@ fn walk(
             }
             return Err(error_with_path(ErrorCode::Enoent, syscall, &normalized));
         };
+        if let Some(nodes) = traversed.as_mut()
+            && !nodes.contains(&child)
+        {
+            nodes.push(child);
+        }
         let child_node = namespace
             .nodes
             .get(&child)
@@ -6074,7 +6397,14 @@ fn walk(
                 rewritten.push('/');
                 rewritten.push_str(&segments[index + 1..].join("/"));
             }
-            return walk(namespace, &rewritten, follow_final, syscall, depth + 1);
+            return walk_traced(
+                namespace,
+                &rewritten,
+                follow_final,
+                syscall,
+                depth + 1,
+                traversed,
+            );
         }
         if last {
             return Ok(Entry {

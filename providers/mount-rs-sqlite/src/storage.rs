@@ -2284,6 +2284,29 @@ impl MetadataStore for SqliteMetadataStore {
         }
     }
 
+    async fn load_inode_snapshot_if_changed(
+        &self,
+        backing: ConcurrentBackingId,
+        known: Option<u64>,
+    ) -> Result<Option<InodeMetadataSnapshot>> {
+        // The compact probe validates authority atomically. A changed response
+        // comes from a separately coherent, fully validated snapshot.
+        let state = self
+            .inode_mode_state()
+            .await?
+            .ok_or_else(|| FsError::new(ErrorCode::Estale))?;
+        if state.backing != backing
+            || state.structural_generation == 0
+            || known.is_some_and(|generation| generation > state.structural_generation)
+        {
+            return Err(FsError::new(ErrorCode::Estale));
+        }
+        if known == Some(state.structural_generation) {
+            return Ok(None);
+        }
+        Ok(Some(self.load_inode_snapshot(backing).await?))
+    }
+
     async fn load_inode_snapshot(
         &self,
         backing: ConcurrentBackingId,
@@ -4690,11 +4713,114 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn conditional_inode_snapshot_checks_authority_but_defers_equal_token_body_audit() {
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        let backing = prepare_inode_metadata(&store);
+        let snapshot = run(store.load_inode_snapshot(backing)).unwrap();
+        let known = Some(snapshot.structural_generation);
+        for assignment in [
+            "write_mode='MRC2'",
+            "owner='unexpected'",
+            "fence=1",
+            "expires=1",
+            "revision=0",
+            "backing_id=NULL",
+        ] {
+            let connection = store.0.lock().unwrap();
+            connection
+                .execute(
+                    &format!("UPDATE mount_rs_metadata SET {assignment} WHERE id=1"),
+                    [],
+                )
+                .unwrap();
+            drop(connection);
+            assert!(
+                run(store.load_inode_snapshot_if_changed(backing, known)).is_err(),
+                "{assignment}"
+            );
+            store.0.lock().unwrap().execute(
+                "UPDATE mount_rs_metadata SET write_mode='MRC4',owner=NULL,fence=?1,expires=0,revision=?2,backing_id=?3 WHERE id=1",
+                params![CONCURRENT_FENCE_SENTINEL, snapshot.structural_generation, backing.to_hex()],
+            ).unwrap();
+            assert!(
+                run(store.load_inode_snapshot_if_changed(backing, known))
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        // Deliberately violate the trusted versioned-storage contract: no token
+        // advances. A conditional hit isn't a whole-Drive payload audit.
+        store
+            .0
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE mount_rs_inode_guards SET node='{}' WHERE inode=?",
+                [snapshot.namespace.root.to_string()],
+            )
+            .unwrap();
+        assert!(
+            run(store.load_inode_snapshot_if_changed(backing, known))
+                .unwrap()
+                .is_none()
+        );
+        assert!(run(store.load_inode_snapshot(backing)).is_err());
+        assert!(run(store.load_inode_snapshot_if_changed(backing, None)).is_err());
+        store
+            .0
+            .lock()
+            .unwrap()
+            .execute(
+                "DELETE FROM mount_rs_inode_guards WHERE inode=?",
+                [snapshot.namespace.root.to_string()],
+            )
+            .unwrap();
+        let token = InodeVersion {
+            structural_generation: snapshot.structural_generation,
+            inode_revision: snapshot.inode_revisions[&snapshot.namespace.root],
+        };
+        assert!(
+            run(store.load_inode_if_changed(backing, snapshot.namespace.root, Some(token)))
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn inode_structure_fences_content_and_reopen_preserves_guard_payload() {
         let path = super::super::tests::unique_database_path();
         let store = SqliteMetadataStore::open(&path).unwrap();
         let backing = prepare_inode_metadata(&store);
         let before = run(store.load_inode_snapshot(backing)).unwrap();
+        assert!(
+            run(store.load_inode_snapshot_if_changed(backing, Some(before.structural_generation)))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            run(store.load_inode_snapshot_if_changed(backing, None))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            run(store.load_inode_snapshot_if_changed(backing, Some(0)))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            run(store
+                .load_inode_snapshot_if_changed(backing, Some(before.structural_generation + 1)))
+            .is_err()
+        );
+        let wrong_backing =
+            mount_rs_core::storage::ConcurrentBackingId::from_bytes([0xe7; 16]).unwrap();
+        assert!(
+            run(store
+                .load_inode_snapshot_if_changed(wrong_backing, Some(before.structural_generation)))
+            .is_err()
+        );
+
         let inode = before.namespace.root + 1;
         let loaded = run(store.load_inode(backing, inode)).unwrap();
         let mut node = loaded.node.clone();
