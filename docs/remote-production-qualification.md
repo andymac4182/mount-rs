@@ -267,7 +267,8 @@ open/publication boundaries. External verification and metadata publication are
 not one atomic cross-store transaction. Missing policy remains conservative.
 The actual native SDK and public Node tests pass same-prefix, split-prefix and
 external RustFS cases; canonical Cloudflare R2 remains runtime-unqualified.
-Independent review of this fix is pending.
+Independent review accepted this bounded fix with no material code findings;
+that approval does not extend to full production capacity or canonical R2.
 
 The corrected split-prefix public Node provider completed both 400-iteration,
 64-worker, 4KiB runs with 400 complete-byte checks, zero errors and namespace
