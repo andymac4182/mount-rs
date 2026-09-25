@@ -32,6 +32,7 @@ use mount_rs_memory::{MemoryBlockStore, MemoryMetadataStore};
 use mount_rs_pglite::{PgliteBlockStore, PgliteMetadataStore, PgliteStorageOptions};
 use mount_rs_r2::{R2BlockStore, R2Config};
 use mount_rs_rustfs::{RustFsBlockStore, RustFsConfig};
+use mount_rs_slatedb::{SlateDbMetadataStore, rustfs_object_store};
 use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
 use mount_rs_tidb::{TidbBlockStore, TidbMetadataStore, TidbStorageOptions};
 
@@ -54,6 +55,7 @@ enum ProviderResource {
     PgliteBlocks(PgliteBlockStore),
     TidbMetadata(TidbMetadataStore),
     TidbBlocks(TidbBlockStore),
+    SlateDbMetadata(SlateDbMetadataStore),
     #[cfg(all(
         feature = "foundationdb",
         any(
@@ -73,6 +75,7 @@ impl ProviderResource {
             Self::PgliteBlocks(store) => store.close().await,
             Self::TidbMetadata(store) => store.close().await,
             Self::TidbBlocks(store) => store.close().await,
+            Self::SlateDbMetadata(store) => store.close().await,
             #[cfg(all(
                 feature = "foundationdb",
                 any(
@@ -224,6 +227,29 @@ async fn open_metadata(
                 vec![ProviderResource::TidbMetadata(store)],
             ))
         }
+        StoreConfig::SlateDb {
+            endpoint,
+            bucket,
+            region,
+            path,
+            access_key_id,
+            secret_access_key,
+            durable,
+        } => {
+            let config = RustFsConfig {
+                endpoint: endpoint.clone(),
+                bucket: bucket.clone(),
+                region: region.clone(),
+                access_key_id: access_key_id.clone(),
+                secret_access_key: secret_access_key.clone(),
+            };
+            let objects = rustfs_object_store(&config)?;
+            let store = SlateDbMetadataStore::open_with_durable(path, objects, *durable).await?;
+            Ok((
+                Arc::new(store.clone()),
+                vec![ProviderResource::SlateDbMetadata(store)],
+            ))
+        }
         StoreConfig::FoundationDb {
             cluster_file,
             volume_key,
@@ -277,6 +303,9 @@ async fn open_blocks(
 ) -> Result<(Arc<dyn BlockStore>, Vec<ProviderResource>)> {
     match provider {
         StoreConfig::Memory => Ok((Arc::new(MemoryBlockStore::new()), Vec::new())),
+        StoreConfig::SlateDb { .. } => Err(mount_rs_core::FsError::enotsup(
+            "SlateDB is a metadata provider; use RustFS for immutable blocks",
+        )),
         StoreConfig::Sqlite { path } => Ok((Arc::new(SqliteBlockStore::open(path)?), Vec::new())),
         StoreConfig::Pglite {
             connection,

@@ -139,6 +139,19 @@ mod tests {
             secret_access_key: "rustfs-secret-value".to_owned(),
             durable: true,
         };
+        let slatedb = StoreConfig::SlateDb {
+            endpoint: "http://127.0.0.1:9878/private-path".to_owned(),
+            bucket: "bucket".to_owned(),
+            region: "us-east-1".to_owned(),
+            path: "metadata".to_owned(),
+            access_key_id: "slatedb-access-key".to_owned(),
+            secret_access_key: "slatedb-secret".to_owned(),
+            durable: false,
+        };
+        let slatedb_debug = format!("{slatedb:?}");
+        assert!(!slatedb_debug.contains("private-path"));
+        assert!(!slatedb_debug.contains("slatedb-access-key"));
+        assert!(!slatedb_debug.contains("slatedb-secret"));
 
         let r2_debug = format!("{r2:?}");
         let pglite_debug = format!("{pglite:?}");
@@ -237,6 +250,54 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[tokio::test]
+    async fn slatedb_rustfs_sdk_reopens() {
+        let Ok(prefix) = std::env::var("RUSTFS_COMBO_PREFIX") else {
+            return;
+        };
+        let required = |name: &str| std::env::var(name).unwrap();
+        let endpoint = required("RUSTFS_ENDPOINT");
+        let bucket = required("RUSTFS_BUCKET");
+        let region = required("RUSTFS_REGION");
+        let access_key_id = required("RUSTFS_ACCESS_KEY_ID");
+        let secret_access_key = required("RUSTFS_SECRET_ACCESS_KEY");
+        let mut options = SplitOptions::memory("slatedb-sdk-first", 65536);
+        options.metadata = StoreConfig::SlateDb {
+            endpoint: endpoint.clone(),
+            bucket: bucket.clone(),
+            region: region.clone(),
+            path: format!("{prefix}/sdk-metadata"),
+            access_key_id: access_key_id.clone(),
+            secret_access_key: secret_access_key.clone(),
+            durable: false,
+        };
+        options.blocks = StoreConfig::RustFs {
+            endpoint,
+            bucket,
+            region,
+            prefix: format!("{prefix}/sdk-blocks"),
+            access_key_id,
+            secret_access_key,
+            durable: false,
+        };
+        let filesystem = Filesystem::split(options.clone()).await.unwrap();
+        let view = Loopback::from_arc(filesystem.driver());
+        view.write_file("/sdk-slate.txt", b"SlateDB on RustFS")
+            .await
+            .unwrap();
+        filesystem.shutdown().await.unwrap();
+        drop(view);
+
+        options.owner = "slatedb-sdk-reopen".to_owned();
+        let reopened = Filesystem::split(options).await.unwrap();
+        let view = Loopback::from_arc(reopened.driver());
+        assert_eq!(
+            view.read_file("/sdk-slate.txt").await.unwrap(),
+            b"SlateDB on RustFS"
+        );
+        reopened.shutdown().await.unwrap();
+    }
+
     #[tokio::test]
     async fn sqlite_sdk_directory_handoff_and_expected_fence_recovery() {
         use mount_rs_core::storage::MetadataStore;

@@ -25,6 +25,29 @@ export type ProviderSpec = {
 }
 
 export const providerSpecs = {
+  slatedb: {
+    slug: 'slatedb',
+    name: 'SlateDB',
+    eyebrow: 'Provider / object-store database',
+    maturity: 'Experimental',
+    maturityNote: 'Local adapter and reopen tests plus a single-node RustFS release benchmark pass; deployment qualification remains open.',
+    summary: <>SlateDB runs on object storage. The Rust crate exposes a flat <code>KeyValueStore</code> for <code>KeyValueFs</code> and a single-writer metadata provider for <code>ChunkedFs</code>.</>,
+    metadata: <>The split provider stores a namespace snapshot, revision, and monotonic lease fence in one SlateDB key. SlateDB fences its database writer on reopen.</>,
+    blocks: <>Pair SlateDB metadata with independent immutable blocks, such as the RustFS block provider. The key-value role stores file values inside SlateDB itself.</>,
+    layout: <>Use separate object prefixes for the SlateDB database and RustFS blocks. The key-value role maps filesystem keys into SlateDB byte keys.</>,
+    consistency: <>Each adapter write waits for SlateDB's object-store durability handle. The metadata provider supports the exclusive writer path; concurrent MRC2 and delegation remain unsupported.</>,
+    inspectLabel: 'Inspect a SlateDB-backed volume',
+    inspectCode: `// Rust SDK: SlateDB metadata plus RustFS immutable blocks.
+options.metadata = StoreConfig::SlateDb { /* endpoint, bucket, path, credentials, durable */ };
+options.blocks = StoreConfig::RustFs { /* separate prefix and credentials */ };`,
+    cleanup: <>Shut down the filesystem and close the SlateDB provider. Remove only the run-owned database and block prefixes when deleting a disposable volume.</>,
+    limitations: <>The key-value filesystem keeps some POSIX attributes in process. The metadata role has one writer, no MRC2 or delegated mode, and no production durability claim from a single-node RustFS benchmark.</>,
+    evidence: <>The crate tests cover durable key-value reopen and split metadata reopen. The release benchmark runner records raw write, read, and delete samples against pinned RustFS.</>,
+    sources: [
+      { label: 'SlateDB provider', href: 'https://github.com/andymac4182/mount-rs/tree/main/providers/mount-rs-slatedb' },
+      { label: 'RustFS benchmark', href: 'https://github.com/andymac4182/mount-rs/tree/main/benchmarks/slatedb-rustfs' },
+    ],
+  },
   memory: {
     slug: 'memory',
     name: 'Memory metadata + blocks',
