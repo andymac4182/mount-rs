@@ -109,6 +109,21 @@ async fn bind_dispatcher(
     dispatcher: DriveDispatcher,
     directory: tempfile::TempDir,
 ) -> Result<(RemoteServer, quinn::Endpoint, tempfile::TempDir), String> {
+    bind_authenticated_dispatcher(
+        dispatcher,
+        Arc::new(WorkloadAuthenticator),
+        directory,
+        mount_rs_service::server::RemoteTransferLimits::default(),
+    )
+    .await
+}
+
+pub(crate) async fn bind_authenticated_dispatcher(
+    dispatcher: DriveDispatcher,
+    authenticator: Arc<dyn Authenticator>,
+    directory: tempfile::TempDir,
+    limits: mount_rs_service::server::RemoteTransferLimits,
+) -> Result<(RemoteServer, quinn::Endpoint, tempfile::TempDir), String> {
     let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()])
         .map_err(|_| "wire setup failed (redacted)")?;
     let cert_der = certificate.cert.der().clone();
@@ -140,15 +155,16 @@ async fn bind_dispatcher(
     let max_connections = std::env::var("MOUNT_RS_REMOTE_SATURATION_CONNECTION_LIMIT")
         .map(|value| value.parse().map_err(|_| "invalid connection limit"))
         .unwrap_or(Ok(128))?;
-    let server = RemoteServer::bind_with_options(
+    let server = RemoteServer::bind_with_transfer_limits(
         "127.0.0.1:0"
             .parse::<SocketAddr>()
             .map_err(|_| "wire setup failed (redacted)")?,
         vec![cert_der.clone()],
         key_der.into(),
         Arc::new(dispatcher),
-        Arc::new(WorkloadAuthenticator),
+        authenticator,
         mount_rs_service::server::RemoteServerOptions { max_connections },
+        limits,
     )
     .await
     .map_err(|_| "wire setup failed (redacted)")?;
@@ -227,7 +243,7 @@ async fn connect_partition(
     connect_token(endpoint, address, partition, "load-token").await
 }
 
-async fn connect_token(
+pub(crate) async fn connect_token(
     endpoint: &quinn::Endpoint,
     address: SocketAddr,
     partition: &str,

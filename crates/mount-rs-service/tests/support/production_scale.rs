@@ -309,3 +309,267 @@ fn verify_block(
 ) -> bool {
     data == oracle_block(partition, drive, file, block, generation)
 }
+
+struct SignedTokens {
+    key: ring::signature::EcdsaKeyPair,
+    jwk: mount_rs_service::auth::Jwk,
+    issued_at: u64,
+}
+impl SignedTokens {
+    fn new() -> Self {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
+        let key = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng)
+            .unwrap();
+        let point = key.public_key().as_ref();
+        let jwk = mount_rs_service::auth::Jwk::EcP256 {
+            kid: "qualification".into(),
+            x: URL_SAFE_NO_PAD.encode(&point[1..33]),
+            y: URL_SAFE_NO_PAD.encode(&point[33..65]),
+        };
+        Self {
+            key,
+            jwk,
+            issued_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        }
+    }
+    fn token(&self, client: usize, lifetime: u64) -> String {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"ES256","kid":"qualification"}"#);
+        let claims = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&json!({"iss":"https://load.example.com","aud":"mount-rs","sub":format!("client-{client}"),"sandbox_id":client.to_string(),"iat":self.issued_at,"exp":self.issued_at+lifetime})).unwrap());
+        let input = format!("{header}.{claims}");
+        let signature = self
+            .key
+            .sign(&ring::rand::SystemRandom::new(), input.as_bytes())
+            .unwrap();
+        format!("{input}.{}", URL_SAFE_NO_PAD.encode(signature))
+    }
+}
+
+async fn start_balanced_fixture(
+    catalog: std::sync::Arc<mount_rs_service::catalog::SqliteCatalog>,
+    drivers: Vec<std::sync::Arc<dyn mount_rs_core::FsDriver>>,
+    tokens: &SignedTokens,
+) -> Result<
+    (
+        mount_rs_service::server::RemoteServer,
+        quinn::Endpoint,
+        tempfile::TempDir,
+    ),
+    String,
+> {
+    struct Keys(mount_rs_service::auth::Jwk);
+    #[async_trait::async_trait]
+    impl mount_rs_service::auth::OidcKeySource for Keys {
+        async fn fetch(
+            &self,
+            issuer: &str,
+            audiences: &[String],
+        ) -> Result<mount_rs_service::auth::OidcVerifier, mount_rs_service::auth::AuthError>
+        {
+            mount_rs_service::auth::OidcVerifier::new(issuer, audiences, vec![self.0.clone()])
+        }
+    }
+    let snapshot = catalog
+        .load_shared_current()
+        .await
+        .map_err(|_| "catalog load failed")?;
+    let mut dispatcher = mount_rs_service::dispatch::DriveDispatcher::new(catalog.clone());
+    for (client, driver) in drivers.into_iter().enumerate() {
+        let partition = format!("partition-{}", client / 2);
+        let drive = format!("sandbox-{client}");
+        let definition = snapshot.partitions[&partition].drives[&drive]
+            .driver
+            .clone();
+        dispatcher
+            .register_definition(&partition, &drive, definition, driver)
+            .map_err(|_| "Drive registration failed")?;
+    }
+    let authenticator = std::sync::Arc::new(
+        mount_rs_service::auth::CatalogAuthenticator::with_key_source(
+            catalog,
+            std::sync::Arc::new(Keys(tokens.jwk.clone())),
+        ),
+    );
+    super::wire::bind_authenticated_dispatcher(
+        dispatcher,
+        authenticator,
+        tempfile::tempdir().map_err(|_| "fixture directory failed")?,
+        mount_rs_service::server::RemoteTransferLimits::default(),
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ten_server_signed_oidc_balanced_scope_smoke() {
+    use mount_rs_remote_protocol::OperationName;
+    use std::sync::Arc;
+    let directory = tempfile::tempdir().unwrap();
+    let catalog = Arc::new(
+        mount_rs_service::catalog::SqliteCatalog::open(directory.path().join("catalog.sqlite"))
+            .await
+            .unwrap(),
+    );
+    catalog
+        .compare_and_swap(0, target_catalog(10))
+        .await
+        .unwrap();
+    let tokens = SignedTokens::new();
+    let drivers: Vec<Arc<dyn mount_rs_core::FsDriver>> = (0..10)
+        .map(|_| Arc::new(mount_rs_memfs::MemoryFs::empty()) as Arc<dyn mount_rs_core::FsDriver>)
+        .collect();
+    let mut servers = Vec::new();
+    for _ in 0..10 {
+        servers.push(
+            start_balanced_fixture(catalog.clone(), drivers.clone(), &tokens)
+                .await
+                .unwrap(),
+        );
+    }
+    let mut connections = Vec::new();
+    let mut attempted = 0;
+    let mut sibling_denials = 0;
+    let mut partition_denials = 0;
+    let mut verified = 0;
+    let work: Result<(), String> = async {
+        for (client, (server, endpoint, _)) in servers.iter().enumerate() {
+            attempted += 1;
+            let token = tokens.token(client, 300);
+            let partition = format!("partition-{}", client / 2);
+            let drive = format!("sandbox-{client}");
+            let connection =
+                super::wire::connect_token(endpoint, server.local_addr(), &partition, &token)
+                    .await?;
+            let sibling = super::wire::request(
+                &connection,
+                1,
+                &format!("sandbox-{}", client ^ 1),
+                OperationName::Stat,
+                json!({"path":"/"}),
+            )
+            .await?;
+            if sibling != Err("EACCES".into()) {
+                return Err("ungranted sibling Drive accepted".into());
+            }
+            sibling_denials += 1;
+            let other_partition = format!("partition-{}", ((client + 2) % 10) / 2);
+            expect_authentication_denial(endpoint, server.local_addr(), &other_partition, &token)
+                .await?;
+            partition_denials += 1;
+            let handle = super::wire::success(
+                &connection,
+                2,
+                &drive,
+                OperationName::Open,
+                json!({"path":"/oracle","flags":"w+","mode":420}),
+            )
+            .await?
+            .as_u64()
+            .ok_or("invalid handle")?;
+            let request = mount_rs_remote_protocol::binary::IoRequest {
+                drive_id: drive.clone(),
+                handle,
+                position: Some(0),
+            };
+            let payload = oracle_block((client / 2) as u64, client as u64, 0, 0, 0);
+            if super::wire::handle_write(&connection, 3, &request, &payload).await? != 4096 {
+                return Err("short smoke write".into());
+            }
+            let mut actual = [0; 4096];
+            if super::wire::handle_read(&connection, 4, &request, &mut actual).await? != 4096
+                || !verify_block(&actual, (client / 2) as u64, client as u64, 0, 0, 0)
+            {
+                return Err("smoke byte oracle mismatch".into());
+            }
+            super::wire::success(
+                &connection,
+                5,
+                &drive,
+                OperationName::HandleClose,
+                json!({"handle":handle}),
+            )
+            .await?;
+            verified += 1;
+            connections.push(connection);
+        }
+        Ok(())
+    }
+    .await;
+    let concurrent_connections = connections.len();
+    for connection in connections {
+        connection.close(0u32.into(), b"smoke complete");
+    }
+    for (server, endpoint, _directory) in servers {
+        endpoint.close(0u32.into(), b"fixture complete");
+        server.close().await;
+        endpoint.wait_idle().await;
+    }
+    if let Ok(output) = std::env::var("MOUNT_RS_PRODUCTION_AUTH_SMOKE_OUTPUT") {
+        let artifact = json!({"schema":"mount-rs-production-auth-smoke-v1","servers":10,"configured_clients":10,"attempted_clients":attempted,"concurrent_connections":concurrent_connections,"sibling_denials":sibling_denials,"partition_denials":partition_denials,"verified_files":verified,"verified_bytes":verified*4096,"files_per_drive":1,"auth":"real ES256 JWT signature validation; owned static JWK source; discovery/JWKS network fetching excluded","token_lifetime_seconds":300,"scope":"one process/runtime on loopback; ten listeners; ten shared volatile MemoryFs Drives; auth/transport correctness only","cleanup":"all owned endpoints and listeners closed/idle","work_error":work.as_ref().err()});
+        std::fs::write(output, serde_json::to_vec_pretty(&artifact).unwrap()).unwrap();
+    }
+    work.unwrap();
+    assert_eq!(
+        (
+            attempted,
+            concurrent_connections,
+            sibling_denials,
+            partition_denials,
+            verified
+        ),
+        (10, 10, 10, 10, 10)
+    );
+}
+
+async fn expect_authentication_denial(
+    endpoint: &quinn::Endpoint,
+    address: std::net::SocketAddr,
+    partition: &str,
+    token: &str,
+) -> Result<(), String> {
+    use mount_rs_remote_protocol::{Message, PROTOCOL_VERSION, read_frame, write_frame};
+    let connection = endpoint
+        .connect(address, "localhost")
+        .map_err(|_| "negative probe TLS setup failed")?
+        .await
+        .map_err(|_| "negative probe TLS handshake failed")?;
+    let (mut send, mut recv) = connection
+        .open_bi()
+        .await
+        .map_err(|_| "negative probe stream open failed")?;
+    write_frame(
+        &mut send,
+        &Message::ClientHello {
+            version: PROTOCOL_VERSION,
+            partition_id: partition.into(),
+            bearer: token.into(),
+        },
+    )
+    .await
+    .map_err(|_| "negative probe hello write failed")?;
+    send.finish().map_err(|_| "negative probe FIN failed")?;
+    let response = tokio::time::timeout(std::time::Duration::from_secs(10), read_frame(&mut recv))
+        .await
+        .map_err(|_| "negative probe hello timed out")?;
+    if response.is_ok() {
+        connection.close(0u32.into(), b"unexpected negative probe hello");
+        return Err("cross-Partition hello was not rejected".into());
+    }
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(1), connection.closed())
+        .await
+        .map_err(|_| "negative probe missing authentication close")?;
+    match closed {
+        quinn::ConnectionError::ApplicationClosed(close)
+            if close.error_code == quinn::VarInt::from_u32(1)
+                && close.reason.as_ref() == b"authentication failed" =>
+        {
+            Ok(())
+        }
+        _ => Err("negative probe failed without explicit authentication denial".into()),
+    }
+}
