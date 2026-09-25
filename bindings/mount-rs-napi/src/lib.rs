@@ -5037,7 +5037,7 @@ mod tests {
     #[cfg(not(unix))]
     fn dynamic_metadata_preserves_platform_unsupported_compact_capability() {
         use mount_rs_core::storage::compact::CompactInodeCapability;
-        futures_lite::future::block_on(async {
+        block_on(async {
             let path = std::env::temp_dir().join(format!(
                 "mount-rs-napi-compact-unsupported-{}-{}",
                 std::process::id(),
