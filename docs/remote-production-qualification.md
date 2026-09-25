@@ -524,7 +524,7 @@ strict Clippy passed. Independent source review found no material defect.
 The supplemental actual TiDB ambiguity controls (2), proxy/pure controls (3),
 concurrent inode cases (13), CAS cases (44) and delegated cases (9) passed
 on the unchanged frozen source. One inode test remained ignored. Additional
-design interleavings and matched timing remain unqualified; these counts
+design interleavings remain unqualified; these counts
 do not imply complete execution of the planned matrix.
 
 **PGlite SQL-error same-client recovery failed.** A real duplicate-key error
@@ -540,3 +540,46 @@ protocol-server remedy remain open; this patch introduces no workaround.
 retains exact source/raw hashes and the failed gate. Fewer INSERT executions
 do not establish lower physical SSD IOPS, throughput, zero allocations or
 full production capacity. The full guard-row and root costs remain.
+
+
+### Matched structural batching measurement
+
+Attempt C at `d502e51c` completed the same ten-server, ten-Drive/five-Partition
+checkpoint as accepted B: 10,000 online creations, 62,832,640 acknowledged
+payload bytes, all 10,000 files verified through a fresh backend, 100 routes,
+scoped denials, and zero cleanup errors or unresolved listener drains.
+
+| Namespace population measure | B: singleton guards | C: bounded guard batches |
+| --- | ---: | ---: |
+| Elapsed seconds | 554.32 | 288.76 |
+| TiDB SQL executions | 5,245,000 | 323,350 |
+| Main-process CPU seconds | 865.62 | 631.27 |
+| TiDB CPU seconds | 652.50 | 223.16 |
+| TiKV CPU seconds | 515.00 | 470.00 |
+| Namespace peak RSS bytes | 144,195,584 | 242,368,512 |
+| Returned guard rows | 15,025,000 | 15,025,000 |
+| Returned guard bytes | 5,426,533,270 | 5,426,533,270 |
+| TiKV transmitted bytes | 14,536,741,730 | 14,644,030,885 |
+| TiKV VM write operations | 216,071 | 179,668 |
+| TiKV VM written bytes | 12,153,192,448 | 11,956,387,840 |
+| TiKV VM read operations | 17,239 | 55,850 |
+| TiKV VM read bytes | 848,674,816 | 2,095,304,704 |
+
+Creation elapsed time decreased 47.9% and SQL executions decreased 93.8%
+in this pair. Whole-root/guard serialization and returned rows are unchanged;
+network bytes and VM written bytes barely changed. Namespace RSS increased
+68.1%; whole-run RSS increased from 261,128,192 to 341,671,936 bytes. Rust
+allocation profiling was disabled, so allocation counts remain unknown.
+Payload population took 29.85 versus 30.51 seconds. These observations support
+SQL execution savings and expose the remaining full structural rewrite costs.
+
+The VM read increase is retained rather than attributed to batching without
+controlled engine-cache/background experiments. The single pair uses debug
+binaries, one process/loopback and a TiDB VM below the 10 GiB qualification
+floor. Host and VM counters are not physical, datastore-attributed SSD IOPS;
+no production capacity or variance-controlled throughput claim follows.
+
+[Matched C artifact](benchmarks/remote-production-qualification-20260925/task4-ten-drive-population-bulk.json)
+retains the executable/source identity, 43 raw hashes, ten datastore windows,
+closed host observer, value/cleanup results and exact B/C arithmetic.
+Independent evidence review passed for this bounded point and comparison.
