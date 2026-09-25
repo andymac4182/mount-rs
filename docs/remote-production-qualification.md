@@ -583,3 +583,32 @@ no production capacity or variance-controlled throughput claim follows.
 retains the executable/source identity, 43 raw hashes, ten datastore windows,
 closed host observer, value/cleanup results and exact B/C arithmetic.
 Independent evidence review passed for this bounded point and comparison.
+
+
+### PGlite pristine recovery prerequisite: failed
+
+Pristine PGlite 0.5.8 / socket 0.2.11 reproduced the typed singleton SQL-error
+recovery failure in a separate process without the repository server shim.
+Direct raw-engine calls also emitted two ReadyForQuery responses for one
+failing Parse/Bind/Describe/Execute/Sync exchange, even as one concatenated
+call. A failing Execute plus Flush, with no Sync sent, emitted a premature
+ReadyForQuery. A successful Flush followed by Sync was a passing control.
+These results rule out socket grouping alone as the recovery remedy.
+
+Three independent/raw-engine full 4,096-byte comparisons passed, preserving
+the data-coherence evidence separately from the failed protocol gate. Nine
+fake buffer/budget/barrier checks passed but do not qualify a production
+adapter. Post-error skipped-command controls were not executed after the
+earlier stop. The pristine child's shutdown exited nonzero; its detailed
+error was unavailable, so no cleanup RCA is claimed. All tracked commands
+and child exits were observed, three raw databases closed, and four exact
+owned data directories removed; the shared fixture was untouched.
+
+[Prerequisite evidence](benchmarks/remote-production-qualification-20260925/pglite-protocol-prerequisite.json)
+retains source/package/raw hashes, exact response sequences and the failed
+gate. An engine-level remedy needs separately reviewed source evidence and
+actual recovery tests. The related upstream
+[premature ReadyForQuery issue](https://github.com/electric-sql/pglite/issues/958)
+is corroborating context, not a substitute for these local controls.
+Independent review accepted the bounded evidence and stop decision; recovery
+remains failed.
