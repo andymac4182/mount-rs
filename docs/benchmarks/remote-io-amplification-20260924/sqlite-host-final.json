@@ -1,0 +1,162 @@
+{
+  "remote-saturation-53276-1790239772707743000-2-begin.json": {
+    "captured_monotonic_ns": 127813110120375,
+    "capture_started_ns": 127813078020875,
+    "unix_ns": 1790239779059351000,
+    "devices": {
+      "4294970330": {
+        "Operations (Read)": 0,
+        "Operations (Write)": 0,
+        "Bytes (Read)": 0,
+        "Bytes (Write)": 0
+      },
+      "4294972757": {
+        "Operations (Read)": 0,
+        "Operations (Write)": 0,
+        "Bytes (Read)": 0,
+        "Bytes (Write)": 0
+      },
+      "4294970374": {
+        "Operations (Read)": 1826169879,
+        "Operations (Write)": 76010995,
+        "Bytes (Read)": 9190619373568,
+        "Bytes (Write)": 1631450492928
+      }
+    },
+    "mode": "read",
+    "total_queue_depth": 100,
+    "successes": 0,
+    "failures": 0
+  },
+  "remote-saturation-53276-1790239772707743000-2-delta.json": {
+    "counter_interval_seconds": 15.174385583,
+    "deltas": {
+      "Operations (Read)": 151588,
+      "Operations (Write)": 1048,
+      "Bytes (Read)": 710709248,
+      "Bytes (Write)": 28663808
+    },
+    "rates_per_second": {
+      "Operations (Read)": 9989.729018737034,
+      "Operations (Write)": 69.0637518249229,
+      "Bytes (Read)": 46836113.667509146,
+      "Bytes (Write)": 1888960.0401424044
+    },
+    "schema": "mount-rs-host-driver-io-v1",
+    "mode": "read",
+    "stage_id": "remote-saturation-53276-1790239772707743000-2",
+    "total_queue_depth": 100,
+    "successful_drive_operations": 96906,
+    "failed_drive_operations": 0,
+    "scope": "all host IOBlockStorageDriver operations; includes other apps, Docker VM, OS caching/coalescing; not provider-exclusive or NAND IO"
+  },
+  "remote-saturation-53276-1790239772707743000-2-end.json": {
+    "captured_monotonic_ns": 127828284505958,
+    "capture_started_ns": 127828254017375,
+    "unix_ns": 1790239794233754000,
+    "devices": {
+      "4294970330": {
+        "Operations (Read)": 0,
+        "Operations (Write)": 0,
+        "Bytes (Read)": 0,
+        "Bytes (Write)": 0
+      },
+      "4294972757": {
+        "Operations (Read)": 0,
+        "Operations (Write)": 0,
+        "Bytes (Read)": 0,
+        "Bytes (Write)": 0
+      },
+      "4294970374": {
+        "Operations (Read)": 1826321467,
+        "Operations (Write)": 76012043,
+        "Bytes (Read)": 9191330082816,
+        "Bytes (Write)": 1631479156736
+      }
+    },
+    "mode": "read",
+    "total_queue_depth": 100,
+    "successes": 96906,
+    "failures": 0
+  },
+  "remote-saturation-53276-1790239772707743000-4-begin.json": {
+    "captured_monotonic_ns": 127831800478541,
+    "capture_started_ns": 127831768040208,
+    "unix_ns": 1790239797749731000,
+    "devices": {
+      "4294970330": {
+        "Operations (Read)": 0,
+        "Operations (Write)": 0,
+        "Bytes (Read)": 0,
+        "Bytes (Write)": 0
+      },
+      "4294972757": {
+        "Operations (Read)": 0,
+        "Operations (Write)": 0,
+        "Bytes (Read)": 0,
+        "Bytes (Write)": 0
+      },
+      "4294970374": {
+        "Operations (Read)": 1826386111,
+        "Operations (Write)": 76035664,
+        "Bytes (Read)": 9191597215744,
+        "Bytes (Write)": 1631730634752
+      }
+    },
+    "mode": "write",
+    "total_queue_depth": 100,
+    "successes": 0,
+    "failures": 0
+  },
+  "remote-saturation-53276-1790239772707743000-4-delta.json": {
+    "counter_interval_seconds": 15.494292209,
+    "deltas": {
+      "Operations (Read)": 320679,
+      "Operations (Write)": 100434,
+      "Bytes (Read)": 1468088320,
+      "Bytes (Write)": 1089191936
+    },
+    "rates_per_second": {
+      "Operations (Read)": 20696.589148727344,
+      "Operations (Write)": 6481.999864547669,
+      "Bytes (Read)": 94750266.7561186,
+      "Bytes (Write)": 70296333.72780547
+    },
+    "schema": "mount-rs-host-driver-io-v1",
+    "mode": "write",
+    "stage_id": "remote-saturation-53276-1790239772707743000-4",
+    "total_queue_depth": 100,
+    "successful_drive_operations": 4532,
+    "failed_drive_operations": 0,
+    "scope": "all host IOBlockStorageDriver operations; includes other apps, Docker VM, OS caching/coalescing; not provider-exclusive or NAND IO"
+  },
+  "remote-saturation-53276-1790239772707743000-4-end.json": {
+    "captured_monotonic_ns": 127847294770750,
+    "capture_started_ns": 127847263610875,
+    "unix_ns": 1790239813244042000,
+    "devices": {
+      "4294970330": {
+        "Operations (Read)": 0,
+        "Operations (Write)": 0,
+        "Bytes (Read)": 0,
+        "Bytes (Write)": 0
+      },
+      "4294972757": {
+        "Operations (Read)": 0,
+        "Operations (Write)": 0,
+        "Bytes (Read)": 0,
+        "Bytes (Write)": 0
+      },
+      "4294970374": {
+        "Operations (Read)": 1826706790,
+        "Operations (Write)": 76136098,
+        "Bytes (Read)": 9193065304064,
+        "Bytes (Write)": 1632819826688
+      }
+    },
+    "mode": "write",
+    "total_queue_depth": 100,
+    "successes": 4532,
+    "failures": 0
+  }
+}

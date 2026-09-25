@@ -6,6 +6,9 @@
 //! `MOUNT_RS_TRACE_FAILURES=1` independently enables bounded exceptional
 //! records at instrumented error boundaries, without request phase tracing.
 
+#[doc(hidden)]
+pub mod profile;
+
 use std::fmt;
 use std::io::{self, Write};
 use std::sync::OnceLock;

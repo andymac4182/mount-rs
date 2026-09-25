@@ -1,0 +1,183 @@
+{
+  "audit_logging": "enabled; request audit cost included",
+  "build_profile": "release",
+  "cleanup_error": null,
+  "configured_modes": [
+    "Read"
+  ],
+  "dataset_bytes": 13107200,
+  "debug_assertions": false,
+  "failed_phase": null,
+  "latency_histogram": "power-of-two microsecond upper bounds",
+  "namespace_bytes": null,
+  "nominal_stage_seconds": 15,
+  "provider": "foundationdb",
+  "provider_identity": "{\"data_storage\":\"owned-run-labeled-docker-volume\",\"image\":\"foundationdb/foundationdb:7.4.7@sha256:25d9e2456ca923e70829fc07a15132c1a0c061474cd89826cdc4bbb45de870de\",\"readiness\":\"committed-set-get-clear\",\"redundancy_mode\":\"single\",\"schema\":\"mount-rs-foundationdb-benchmark-identity-v1\",\"server_versions\":[\"7.4.7\"],\"storage_engine\":\"ssd-2\",\"topology\":\"single\"}",
+  "provider_version": "see native harness identity",
+  "schema": "mount-rs-provider-saturation-v2",
+  "server_active_request_limit_per_connection": 32,
+  "stages": [
+    {
+      "cache": "cache-warm randomized dataset; no cold-cache claim",
+      "clients": 100,
+      "elapsed_seconds_including_drain": 15.013957257,
+      "failures": 0,
+      "finish_unix_ms": 1790235524731,
+      "mode": "Read",
+      "nominal_seconds": 15,
+      "payload_mib_per_second": 19.065072758652253,
+      "per_client_depth": 1,
+      "read": {
+        "completed": 73278,
+        "p50_us_upper": 32768,
+        "p95_us_upper": 32768,
+        "p99_us_upper": 32768
+      },
+      "read_iops": 4880.658626214977,
+      "reference_target_iops": 100000,
+      "servers": 10,
+      "start_unix_ms": 1790235509717,
+      "target_attainment": 0.048806586262149766,
+      "total_iops": 4880.658626214977,
+      "total_queue_depth": 100,
+      "write": {
+        "completed": 0,
+        "p50_us_upper": 0,
+        "p95_us_upper": 0,
+        "p99_us_upper": 0
+      },
+      "write_iops": 0.0
+    },
+    {
+      "cache": "cache-warm randomized dataset; no cold-cache claim",
+      "clients": 100,
+      "elapsed_seconds_including_drain": 15.03208484,
+      "failures": 0,
+      "finish_unix_ms": 1790235542799,
+      "mode": "Read",
+      "nominal_seconds": 15,
+      "payload_mib_per_second": 18.2300166056008,
+      "per_client_depth": 2,
+      "read": {
+        "completed": 70153,
+        "p50_us_upper": 65536,
+        "p95_us_upper": 65536,
+        "p99_us_upper": 65536
+      },
+      "read_iops": 4666.8842510338045,
+      "reference_target_iops": 100000,
+      "servers": 10,
+      "start_unix_ms": 1790235527767,
+      "target_attainment": 0.046668842510338045,
+      "total_iops": 4666.8842510338045,
+      "total_queue_depth": 200,
+      "write": {
+        "completed": 0,
+        "p50_us_upper": 0,
+        "p95_us_upper": 0,
+        "p99_us_upper": 0
+      },
+      "write_iops": 0.0
+    },
+    {
+      "cache": "cache-warm randomized dataset; no cold-cache claim",
+      "clients": 100,
+      "elapsed_seconds_including_drain": 15.054221007,
+      "failures": 0,
+      "finish_unix_ms": 1790235560912,
+      "mode": "Read",
+      "nominal_seconds": 15,
+      "payload_mib_per_second": 18.377580355792368,
+      "per_client_depth": 4,
+      "read": {
+        "completed": 70825,
+        "p50_us_upper": 131072,
+        "p95_us_upper": 131072,
+        "p99_us_upper": 131072
+      },
+      "read_iops": 4704.660571082846,
+      "reference_target_iops": 100000,
+      "servers": 10,
+      "start_unix_ms": 1790235545858,
+      "target_attainment": 0.047046605710828464,
+      "total_iops": 4704.660571082846,
+      "total_queue_depth": 400,
+      "write": {
+        "completed": 0,
+        "p50_us_upper": 0,
+        "p95_us_upper": 0,
+        "p99_us_upper": 0
+      },
+      "write_iops": 0.0
+    },
+    {
+      "cache": "cache-warm randomized dataset; no cold-cache claim",
+      "clients": 100,
+      "elapsed_seconds_including_drain": 15.117933965,
+      "failures": 0,
+      "finish_unix_ms": 1790235579142,
+      "mode": "Read",
+      "nominal_seconds": 15,
+      "payload_mib_per_second": 17.81617452646414,
+      "per_client_depth": 8,
+      "read": {
+        "completed": 68952,
+        "p50_us_upper": 262144,
+        "p95_us_upper": 262144,
+        "p99_us_upper": 262144
+      },
+      "read_iops": 4560.940678774819,
+      "reference_target_iops": 100000,
+      "servers": 10,
+      "start_unix_ms": 1790235564025,
+      "target_attainment": 0.04560940678774819,
+      "total_iops": 4560.940678774819,
+      "total_queue_depth": 800,
+      "write": {
+        "completed": 0,
+        "p50_us_upper": 0,
+        "p95_us_upper": 0,
+        "p99_us_upper": 0
+      },
+      "write_iops": 0.0
+    },
+    {
+      "cache": "cache-warm randomized dataset; no cold-cache claim",
+      "clients": 100,
+      "elapsed_seconds_including_drain": 15.238055465,
+      "failures": 0,
+      "finish_unix_ms": 1790235597629,
+      "mode": "Read",
+      "nominal_seconds": 15,
+      "payload_mib_per_second": 17.450655899683063,
+      "per_client_depth": 16,
+      "read": {
+        "completed": 68074,
+        "p50_us_upper": 524288,
+        "p95_us_upper": 524288,
+        "p99_us_upper": 524288
+      },
+      "read_iops": 4467.367910318864,
+      "reference_target_iops": 100000,
+      "servers": 10,
+      "start_unix_ms": 1790235582391,
+      "target_attainment": 0.04467367910318864,
+      "total_iops": 4467.367910318864,
+      "total_queue_depth": 1600,
+      "write": {
+        "completed": 0,
+        "p50_us_upper": 0,
+        "p95_us_upper": 0,
+        "p99_us_upper": 0
+      },
+      "write_iops": 0.0
+    }
+  ],
+  "topology": "single",
+  "verification_error": null,
+  "verification_status": "passed",
+  "verified_files": 100,
+  "volume_key": "remote-saturation-157-1790235504711708212",
+  "warmup_seconds": 3,
+  "work_error": null
+}

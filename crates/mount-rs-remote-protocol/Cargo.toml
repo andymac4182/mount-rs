@@ -1,0 +1,21 @@
+[package]
+name = "mount-rs-remote-protocol"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+
+[features]
+io-profiling = ["dep:mount-rs-core"]
+
+[dependencies]
+mount-rs-core = { path = "../..", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["io-util"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

@@ -1,0 +1,7 @@
+{
+  "scope": "only owned QUIC saturation process",
+  "parent_pid": 60351,
+  "returncode": 2,
+  "stdout": "Starting recording with the CPU Counters template. Attaching to: quic_tidb_saturation-8a647023cdf0f35d (60351). Time limit: 5.0 s\nCtrl-C to stop the recording\nReached specified time limit, ending recording...\nRecording failed with errors. Saving output file...\nOutput file saved as: remote-saturation-60351-1790240993629797000-4.trace\n",
+  "stderr": "Run issues were detected (trace is still ready to be viewed):\n* [Warning] No configuration information received, will have to guess.  Data may be misleading.\n\n* [Error] Failed to start the recording: _lockKPerf: could not lock kperf. Likely another session just started.\n\n"
+}

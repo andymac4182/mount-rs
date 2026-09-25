@@ -522,3 +522,7 @@ These commands open provider administration handles without acquiring a subtree
 checkout or starting a native transport. Recovery does not synchronize another
 process's pending work. Legacy MRC2 migration commands do not accept explicit
 MRC3 shared configurations.
+
+## Remote Drive provider
+
+`mount-rs mount --config <path>` accepts a remote provider that selects one Partition and mounts several granted Drives through the existing native adapters. `serve-remote --config <path>` starts the authenticated QUIC service; `catalog-apply --config <path>` updates its persistent metadata definitions and grants using a revision check. Tokens come from a file or an argv command. See [Remote Drives](../../docs/remote-drives.md) for setup, examples and qualification boundaries.

@@ -3,16 +3,20 @@ use mount_rs_core::delegation::{
     CheckoutRequest, DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState,
     DirectoryGrant,
 };
+use mount_rs_core::diagnostics::profile::{self, Event};
 use mount_rs_core::storage::{
-    BlockId, BlockStore, ConcurrentBackingId, ConcurrentModeState, LoadedMetadata, MetadataStore,
-    Namespace, WriterLease,
+    BlockId, BlockStore, ConcurrentBackingId, ConcurrentModeState, InodeId, InodeMetadataSnapshot,
+    InodeModeState, InodeVersion, LoadedInode, LoadedMetadata, MetadataStore, Namespace,
+    NodeMetadata, WriterLease, decode_inode_namespace, encode_inode_namespace,
+    validate_inode_publication, validate_node_kind,
 };
 use mount_rs_core::{ErrorCode, FsError, Result, backend_error};
 use mysql_async::prelude::Queryable;
 use mysql_async::{
-    Conn, Error as MysqlError, Opts, OptsBuilder, Params, Pool, Transaction, TxOpts,
+    Conn, Error as MysqlError, IsolationLevel, Opts, OptsBuilder, Params, Pool, Transaction, TxOpts,
 };
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 /// A conservative default below TiDB's default single-entry and packet
@@ -32,6 +36,16 @@ const BOUND_CONCURRENT_WRITE_MODE: &str = "MRC2";
 // Older clients cannot acquire a signed BIGINT fence beyond this value. The
 // marker and exhausted fence are published in the same atomic statement.
 const CONCURRENT_FENCE_SENTINEL: i64 = i64::MAX;
+const REVISION_PROBE_SQL: &str = "SELECT revision,write_mode FROM mount_rs_tidb_metadata \
+    USE INDEX (idx_mount_rs_volume_revision_mode) WHERE volume_key=?";
+
+const INODE_AUTHORITY_SQL: &str = "SELECT revision,write_mode,backing_id,owner,fence,expires
+    FROM mount_rs_tidb_metadata USE INDEX (idx_mount_rs_inode_authority) WHERE volume_key=?";
+const INODE_READ_SQL: &str = "SELECT m.revision,m.write_mode,m.backing_id,m.owner,m.fence,m.expires,
+    i.inode,i.generation,i.revision,CASE WHEN i.generation=? AND i.revision=? THEN NULL ELSE i.node END
+    FROM mount_rs_tidb_metadata m USE INDEX (idx_mount_rs_inode_authority)
+    LEFT JOIN mount_rs_tidb_inodes i ON i.volume_key=m.volume_key AND i.inode=?
+    WHERE m.volume_key=?";
 
 const METADATA_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_tidb_metadata (
     volume_key VARBINARY(1020) NOT NULL,
@@ -44,6 +58,15 @@ const METADATA_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_tidb_metadata
     backing_id VARBINARY(32) NULL,
     delegation LONGTEXT NULL,
     PRIMARY KEY (volume_key)
+)";
+
+const INODE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_tidb_inodes (
+    volume_key VARBINARY(1020) NOT NULL,
+    inode BIGINT NOT NULL,
+    generation BIGINT NOT NULL,
+    revision BIGINT NOT NULL,
+    node LONGTEXT NOT NULL,
+    PRIMARY KEY (volume_key, inode)
 )";
 
 const BLOCK_AUTHORITY_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_tidb_block_authority (
@@ -169,12 +192,19 @@ impl Database {
             .await
             .map_err(|error| db_error("initialize TiDB schema", error))?;
         if ensure_metadata_row {
+            connection
+                .query_drop(INODE_SCHEMA)
+                .await
+                .map_err(|error| db_error("initialize TiDB inode schema", error))?;
             // Additive upgrades retain the existing lease row and namespace.
             // New columns remain NULL until an explicit enrollment/migration.
             for statement in [
                 "ALTER TABLE mount_rs_tidb_metadata ADD COLUMN IF NOT EXISTS delegation LONGTEXT NULL",
                 "ALTER TABLE mount_rs_tidb_metadata ADD COLUMN IF NOT EXISTS write_mode VARBINARY(4) NULL",
                 "ALTER TABLE mount_rs_tidb_metadata ADD COLUMN IF NOT EXISTS backing_id VARBINARY(32) NULL",
+                "ALTER TABLE mount_rs_tidb_metadata ADD INDEX IF NOT EXISTS idx_mount_rs_volume_revision (volume_key, revision)",
+                "ALTER TABLE mount_rs_tidb_metadata ADD INDEX IF NOT EXISTS idx_mount_rs_volume_revision_mode (volume_key, revision, write_mode)",
+                "ALTER TABLE mount_rs_tidb_metadata ADD INDEX IF NOT EXISTS idx_mount_rs_inode_authority (volume_key, revision, write_mode, backing_id, owner, fence, expires)",
             ] {
                 connection
                     .query_drop(statement)
@@ -784,11 +814,12 @@ impl TidbMetadataStore {
                 revision,
             });
         }
-        let mut ns: Namespace = serde_json::from_str(&namespace.ok_or_else(|| {
+        let namespace = namespace.ok_or_else(|| {
             FsError::new(ErrorCode::Ebusy)
                 .with_message("initialize namespace before delegation enrollment")
-        })?)
-        .map_err(backend_error)?;
+        })?;
+        profile::add(Event::NamespaceReturned, namespace.len() as u64);
+        let mut ns: Namespace = serde_json::from_str(&namespace).map_err(backend_error)?;
         ns.validate()?;
         let mut grant = None;
         let mut changed_ns = false;
@@ -877,6 +908,7 @@ impl TidbMetadataStore {
                 .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
         }
         let json = serde_json::to_string(&ns).map_err(backend_error)?;
+        profile::add(Event::NamespaceSerialized, json.len() as u64);
         let authority = serde_json::to_string(&state).map_err(backend_error)?;
         if json
             .len()
@@ -897,6 +929,128 @@ impl TidbMetadataStore {
         })
     }
 }
+
+async fn begin_inode_write(connection: &mut Conn) -> Result<Transaction<'_>> {
+    // Locking reads may wait across another structural commit. TiDB must then
+    // read root authority from a fresh statement snapshot, not start_ts.
+    let mut options = TxOpts::default();
+    options.with_isolation_level(IsolationLevel::ReadCommitted);
+    connection
+        .start_transaction(options)
+        .await
+        .map_err(|e| db_error("begin TiDB inode publication", e))
+}
+
+fn inode_authority(
+    row: &ConcurrentRow,
+    expected: Option<ConcurrentBackingId>,
+) -> Result<InodeModeState> {
+    if row.mode.as_deref() != Some(b"MRC4")
+        || row.owner.is_some()
+        || row.fence != CONCURRENT_FENCE_SENTINEL
+        || row.expires != 0
+        || row.namespace_empty
+        || row.revision == 0
+    {
+        return Err(stale());
+    }
+    let backing = backing_from_bytes(row.backing.as_deref().ok_or_else(stale)?)?;
+    if expected.is_some_and(|id| id != backing) {
+        return Err(stale());
+    }
+    Ok(InodeModeState {
+        backing,
+        structural_generation: row.revision,
+    })
+}
+
+type InodeAuthoritySqlRow = (
+    i64,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    i64,
+    i64,
+);
+fn compact_inode_authority(
+    row: InodeAuthoritySqlRow,
+    backing: Option<ConcurrentBackingId>,
+) -> Result<InodeModeState> {
+    let (revision, mode, actual_backing, owner, fence, expires) = row;
+    // MRC4 enrollment atomically guarantees initialized namespace membership.
+    // Hot reads audit compact authority and selected guards; complete snapshots
+    // additionally audit namespace presence and cross-inode structure.
+    inode_authority(
+        &ConcurrentRow {
+            revision: nonnegative(revision, "metadata revision")?,
+            namespace_empty: false,
+            mode,
+            backing: actual_backing,
+            owner,
+            fence,
+            expires,
+        },
+        backing,
+    )
+}
+async fn compact_inode_authority_row<C: Queryable>(
+    conn: &mut C,
+    volume: &str,
+    backing: ConcurrentBackingId,
+) -> Result<InodeModeState> {
+    let row: Option<InodeAuthoritySqlRow> =
+        conn.exec_first(INODE_AUTHORITY_SQL, (volume,))
+            .await
+            .map_err(|e| db_error("read compact TiDB inode authority", e))?;
+    compact_inode_authority(row.ok_or_else(stale)?, Some(backing))
+}
+
+type InodeSqlRow = (i64, i64, i64, String);
+fn decode_inode(row: InodeSqlRow, generation: u64) -> Result<(InodeId, LoadedInode)> {
+    let (inode, actual_generation, revision, json) = row;
+    let inode = nonnegative(inode, "inode ID")?;
+    if inode == 0 || nonnegative(actual_generation, "inode generation")? != generation {
+        return Err(stale());
+    }
+    let node: NodeMetadata = serde_json::from_str(&json).map_err(backend_error)?;
+    validate_node_kind(&node)?;
+    if node.stats.ino != inode {
+        return Err(backend_error("TiDB inode identity disagrees"));
+    }
+    Ok((
+        inode,
+        LoadedInode {
+            version: InodeVersion {
+                structural_generation: generation,
+                inode_revision: nonnegative(revision, "inode revision")?,
+            },
+            node,
+        },
+    ))
+}
+
+async fn replace_inode_guards(
+    tx: &mut Transaction<'_>,
+    volume: &str,
+    generation: u64,
+    namespace: &Namespace,
+) -> Result<()> {
+    tx.exec_drop(
+        "DELETE FROM mount_rs_tidb_inodes WHERE volume_key=?",
+        (volume,),
+    )
+    .await
+    .map_err(|e| db_error("replace TiDB inode guards", e))?;
+    for (&inode, node) in &namespace.nodes {
+        let json = serde_json::to_string(node).map_err(backend_error)?;
+        profile::add(Event::InodeSerialized, json.len() as u64);
+        tx.exec_drop("INSERT INTO mount_rs_tidb_inodes (volume_key,inode,generation,revision,node) VALUES (?,?,?,0,?)",
+            (volume, signed(inode,"inode ID")?, signed(generation,"inode generation")?, json)).await
+            .map_err(|e| db_error("insert TiDB inode guard",e))?;
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl MetadataStore for TidbMetadataStore {
     fn durable(&self) -> bool {
@@ -917,26 +1071,386 @@ impl MetadataStore for TidbMetadataStore {
             .get_conn()
             .await
             .map_err(|error| db_error("load TiDB metadata", error))?;
-        let row: Option<(i64, Option<String>)> = connection
+        let row: Option<(i64, Option<String>, Option<Vec<u8>>)> = connection
             .exec_first(
-                "SELECT revision, namespace
+                "SELECT revision, namespace, write_mode
                  FROM mount_rs_tidb_metadata
                  WHERE volume_key=?",
                 (&self.0.volume_key,),
             )
             .await
             .map_err(|error| db_error("load TiDB metadata", error))?;
-        let Some((revision, namespace)) = row else {
+        let Some((revision, namespace, mode)) = row else {
             return Err(backend_error("TiDB metadata row is missing"));
         };
+        if mode.as_deref() == Some(b"MRC4") {
+            return Err(stale());
+        }
         let revision = nonnegative(revision, "metadata revision")?;
         let namespace = namespace
-            .map(|json| serde_json::from_str(&json).map_err(backend_error))
+            .map(|json| {
+                profile::add(Event::NamespaceReturned, json.len() as u64);
+                serde_json::from_str(&json).map_err(backend_error)
+            })
             .transpose()?;
         Ok(LoadedMetadata {
             revision,
             namespace,
         })
+    }
+
+    async fn inode_mode_state(&self) -> Result<Option<InodeModeState>> {
+        let mut conn = self
+            .0
+            .pool
+            .get_conn()
+            .await
+            .map_err(|e| db_error("read TiDB inode mode", e))?;
+        let row: Option<InodeAuthoritySqlRow> = conn
+            .exec_first(INODE_AUTHORITY_SQL, (&self.0.volume_key,))
+            .await
+            .map_err(|e| db_error("read TiDB inode mode", e))?;
+        let row = row.ok_or_else(stale)?;
+        if row.1.as_deref() != Some(b"MRC4") {
+            return Ok(None);
+        }
+        compact_inode_authority(row, None).map(Some)
+    }
+
+    async fn prepare_inode_mode(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        signed(expected_revision, "metadata revision")?;
+        let generation = expected_revision
+            .checked_add(1)
+            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        let generation_sql = signed(generation, "structural generation")?;
+        let mut conn = self
+            .0
+            .pool
+            .get_conn()
+            .await
+            .map_err(|e| db_error("prepare TiDB inode mode", e))?;
+        let mut tx = begin_inode_write(&mut conn).await?;
+        locked_lease_row(&mut tx, &self.0.volume_key)
+            .await?
+            .ok_or_else(stale)?;
+        let row = concurrent_row(&mut tx, &self.0.volume_key).await?;
+        if row.revision != expected_revision
+            || row.revision == 0
+            || row.namespace_empty
+            || row.mode_state()? != ConcurrentModeState::Mrc2(backing)
+        {
+            return rollback_and(tx, stale()).await;
+        }
+        let json: String = tx
+            .exec_first(
+                "SELECT namespace FROM mount_rs_tidb_metadata WHERE volume_key=?",
+                (&self.0.volume_key,),
+            )
+            .await
+            .map_err(|e| db_error("read TiDB inode enrollment namespace", e))?
+            .ok_or_else(stale)?;
+        let namespace: Namespace = serde_json::from_str(&json).map_err(backend_error)?;
+        namespace.validate()?;
+        let wrapped = encode_inode_namespace(&namespace)?;
+        profile::add(Event::NamespaceSerialized, wrapped.len() as u64);
+        if wrapped.len() > self.0.max_namespace_bytes {
+            return rollback_and(tx, FsError::new(ErrorCode::Efbig)).await;
+        }
+        replace_inode_guards(&mut tx, &self.0.volume_key, generation, &namespace).await?;
+        tx.exec_drop(
+            "UPDATE mount_rs_tidb_metadata SET write_mode='MRC4',revision=?,namespace=? WHERE volume_key=?",
+            (generation_sql,wrapped,&self.0.volume_key),
+        )
+        .await
+        .map_err(|e| db_error("enroll TiDB inode mode", e))?;
+        commit(tx, "enroll inode mode").await
+    }
+
+    async fn load_inode_snapshot(
+        &self,
+        backing: ConcurrentBackingId,
+    ) -> Result<InodeMetadataSnapshot> {
+        let mut conn = self
+            .0
+            .pool
+            .get_conn()
+            .await
+            .map_err(|e| db_error("load TiDB inode snapshot", e))?;
+        let mut tx = begin_pessimistic(&mut conn).await?;
+        let mode = inode_authority(
+            &concurrent_row(&mut tx, &self.0.volume_key).await?,
+            Some(backing),
+        )?;
+        let json: String = tx
+            .exec_first(
+                "SELECT namespace FROM mount_rs_tidb_metadata WHERE volume_key=?",
+                (&self.0.volume_key,),
+            )
+            .await
+            .map_err(|e| db_error("load TiDB inode snapshot", e))?
+            .ok_or_else(stale)?;
+        let mut namespace = decode_inode_namespace(json.as_bytes())?;
+        let rows: Vec<InodeSqlRow> = tx.exec("SELECT inode,generation,revision,node FROM mount_rs_tidb_inodes WHERE volume_key=? ORDER BY inode",(&self.0.volume_key,)).await
+            .map_err(|e| db_error("load TiDB inode guards",e))?;
+        let mut inode_revisions = BTreeMap::new();
+        for row in rows {
+            profile::add(Event::InodeReturned, row.3.len() as u64);
+            let (inode, loaded) = decode_inode(row, mode.structural_generation)?;
+            if !namespace.nodes.contains_key(&inode) {
+                return Err(stale());
+            }
+            namespace.nodes.insert(inode, loaded.node);
+            inode_revisions.insert(inode, loaded.version.inode_revision);
+        }
+        let snapshot = InodeMetadataSnapshot {
+            structural_generation: mode.structural_generation,
+            namespace,
+            inode_revisions,
+        };
+        snapshot.validate()?;
+        tx.rollback()
+            .await
+            .map_err(|e| db_error("finish TiDB inode snapshot", e))?;
+        Ok(snapshot)
+    }
+
+    async fn load_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+    ) -> Result<LoadedInode> {
+        self.load_inode_if_changed(backing, inode, None)
+            .await?
+            .ok_or_else(stale)
+    }
+
+    async fn load_inode_if_changed(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+        known: Option<InodeVersion>,
+    ) -> Result<Option<LoadedInode>> {
+        let inode_sql = signed(inode, "inode ID")?;
+        let (known_generation, known_revision) = known
+            .and_then(|version| {
+                Some((
+                    i64::try_from(version.structural_generation).ok()?,
+                    i64::try_from(version.inode_revision).ok()?,
+                ))
+            })
+            .unwrap_or((-1, -1));
+        let mut conn = self
+            .0
+            .pool
+            .get_conn()
+            .await
+            .map_err(|e| db_error("load TiDB inode", e))?;
+        type ReadRow = (
+            i64,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+            i64,
+            i64,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+        );
+        // One statement snapshot checks compact authority and the selected
+        // guard. CASE suppresses unchanged JSON on the MySQL wire entirely.
+        let row: Option<ReadRow> = conn
+            .exec_first(
+                INODE_READ_SQL,
+                (
+                    known_generation,
+                    known_revision,
+                    inode_sql,
+                    &self.0.volume_key,
+                ),
+            )
+            .await
+            .map_err(|e| db_error("load TiDB inode", e))?;
+        let (
+            revision,
+            mode,
+            actual_backing,
+            owner,
+            fence,
+            expires,
+            actual_inode,
+            generation,
+            inode_revision,
+            json,
+        ) = row.ok_or_else(stale)?;
+        let authority = compact_inode_authority(
+            (revision, mode, actual_backing, owner, fence, expires),
+            Some(backing),
+        )?;
+        let actual_inode = actual_inode.ok_or_else(stale)?;
+        let generation = generation.ok_or_else(stale)?;
+        let inode_revision = inode_revision.ok_or_else(stale)?;
+        if actual_inode != inode_sql
+            || nonnegative(generation, "inode generation")? != authority.structural_generation
+        {
+            return Err(stale());
+        }
+        let version = InodeVersion {
+            structural_generation: authority.structural_generation,
+            inode_revision: nonnegative(inode_revision, "inode revision")?,
+        };
+        if known == Some(version) {
+            return Ok(None);
+        }
+        let json = json.ok_or_else(stale)?;
+        profile::add(Event::InodeReturned, json.len() as u64);
+        let (_, loaded) = decode_inode(
+            (actual_inode, generation, inode_revision, json),
+            authority.structural_generation,
+        )?;
+        Ok(Some(loaded))
+    }
+
+    async fn publish_inode_if_version(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+        expected: InodeVersion,
+        node: NodeMetadata,
+    ) -> Result<InodeVersion> {
+        let inode_sql = signed(inode, "inode ID")?;
+        signed(expected.structural_generation, "structural generation")?;
+        signed(expected.inode_revision, "inode revision")?;
+        let next = expected
+            .inode_revision
+            .checked_add(1)
+            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        let next_sql = signed(next, "inode revision")?;
+        let json = serde_json::to_string(&node).map_err(backend_error)?;
+        profile::add(Event::InodeSerialized, json.len() as u64);
+        if json.len() > self.0.max_namespace_bytes {
+            return Err(FsError::new(ErrorCode::Efbig));
+        }
+        let mut conn = self
+            .0
+            .pool
+            .get_conn()
+            .await
+            .map_err(|e| db_error("publish TiDB inode", e))?;
+        // READ COMMITTED makes the nonlocking root read fresh after waiting for
+        // the selected guard. File writers never lock or write the root key.
+        let mut tx = begin_inode_write(&mut conn).await?;
+        let row: Option<InodeSqlRow> = tx.exec_first("SELECT inode,generation,revision,node FROM mount_rs_tidb_inodes WHERE volume_key=? AND inode=? FOR UPDATE",(&self.0.volume_key,inode_sql)).await
+            .map_err(|e| db_error("lock TiDB inode guard",e))?;
+        let mode = compact_inode_authority_row(&mut tx, &self.0.volume_key, backing).await?;
+        // A structural unlink may have removed the guard while the caller
+        // flushed blocks. Its older generation is a proven no-commit conflict.
+        // A missing guard under the same generation remains corruption.
+        if mode.structural_generation != expected.structural_generation {
+            return rollback_and(tx, FsError::new(ErrorCode::Eagain)).await;
+        }
+        let row = row.ok_or_else(stale)?;
+        profile::add(Event::InodeReturned, row.3.len() as u64);
+        let (_, original) = decode_inode(row, mode.structural_generation)?;
+        if original.version != expected {
+            return rollback_and(tx, FsError::new(ErrorCode::Eagain)).await;
+        }
+        validate_inode_publication(inode, &original.node, &node)?;
+        tx.exec_drop(
+            "UPDATE mount_rs_tidb_inodes SET revision=?,node=? WHERE volume_key=? AND inode=?",
+            (next_sql, json, &self.0.volume_key, inode_sql),
+        )
+        .await
+        .map_err(|e| db_error("publish TiDB inode guard", e))?;
+        commit(tx, "publish inode").await?;
+        Ok(InodeVersion {
+            inode_revision: next,
+            ..expected
+        })
+    }
+
+    async fn publish_structure_if_versions(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_generation: u64,
+        expected_inode_revisions: &BTreeMap<InodeId, u64>,
+        namespace: Namespace,
+    ) -> Result<u64> {
+        namespace.validate()?;
+        signed(expected_generation, "structural generation")?;
+        for (&inode, &revision) in expected_inode_revisions {
+            signed(inode, "inode ID")?;
+            signed(revision, "inode revision")?;
+        }
+        let next = expected_generation
+            .checked_add(1)
+            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        let next_sql = signed(next, "structural generation")?;
+        let json = encode_inode_namespace(&namespace)?;
+        profile::add(Event::NamespaceSerialized, json.len() as u64);
+        if json.len() > self.0.max_namespace_bytes {
+            return Err(FsError::new(ErrorCode::Efbig));
+        }
+        let mut conn = self
+            .0
+            .pool
+            .get_conn()
+            .await
+            .map_err(|e| db_error("publish TiDB structure", e))?;
+        let mut tx = begin_inode_write(&mut conn).await?;
+        locked_lease_row(&mut tx, &self.0.volume_key)
+            .await?
+            .ok_or_else(stale)?;
+        // Every existing inode is locked, including guards for deleted inodes.
+        // Thus no earlier or later file publication can be folded away.
+        let rows: Vec<InodeSqlRow> = tx.exec("SELECT inode,generation,revision,node FROM mount_rs_tidb_inodes WHERE volume_key=? ORDER BY inode FOR UPDATE",(&self.0.volume_key,)).await
+            .map_err(|e| db_error("lock TiDB structural guards",e))?;
+        let mode = inode_authority(
+            &concurrent_row(&mut tx, &self.0.volume_key).await?,
+            Some(backing),
+        )?;
+        if mode.structural_generation != expected_generation {
+            return rollback_and(tx, FsError::new(ErrorCode::Eagain)).await;
+        }
+        let mut actual = BTreeMap::new();
+        let mut authoritative_nodes = BTreeMap::new();
+        for row in rows {
+            profile::add(Event::InodeReturned, row.3.len() as u64);
+            let (inode, loaded) = decode_inode(row, expected_generation)?;
+            actual.insert(inode, loaded.version.inode_revision);
+            authoritative_nodes.insert(inode, loaded.node);
+        }
+        if &actual != expected_inode_revisions {
+            return rollback_and(tx, FsError::new(ErrorCode::Eagain)).await;
+        }
+        // Detect missing known guards against the old structural membership.
+        let old_json: String = tx
+            .exec_first(
+                "SELECT namespace FROM mount_rs_tidb_metadata WHERE volume_key=?",
+                (&self.0.volume_key,),
+            )
+            .await
+            .map_err(|e| db_error("read TiDB structural membership", e))?
+            .ok_or_else(stale)?;
+        let mut old = decode_inode_namespace(old_json.as_bytes())?;
+        if !old.nodes.keys().eq(actual.keys()) {
+            return rollback_and(tx, stale()).await;
+        }
+        old.nodes = authoritative_nodes;
+        old.validate()?;
+        replace_inode_guards(&mut tx, &self.0.volume_key, next, &namespace).await?;
+        tx.exec_drop(
+            "UPDATE mount_rs_tidb_metadata SET revision=?,namespace=? WHERE volume_key=?",
+            (next_sql, json, &self.0.volume_key),
+        )
+        .await
+        .map_err(|e| db_error("publish TiDB structure", e))?;
+        commit(tx, "publish structure").await?;
+        Ok(next)
     }
 
     async fn delegation_state(&self) -> Result<Option<DelegationState>> {
@@ -980,6 +1494,44 @@ impl MetadataStore for TidbMetadataStore {
             .await?;
         Ok(())
     }
+
+    async fn load_if_changed(&self, known_revision: u64) -> Result<Option<LoadedMetadata>> {
+        // A zero revision is uninitialized, not a validated namespace. TiDB
+        // revisions are signed BIGINTs; an unrepresentable caller revision
+        // cannot match and must conservatively load the current namespace.
+        let Ok(known_revision) = i64::try_from(known_revision) else {
+            return self.load().await.map(Some);
+        };
+        if known_revision == 0 {
+            return self.load().await.map(Some);
+        }
+        let mut connection = self
+            .0
+            .pool
+            .get_conn()
+            .await
+            .map_err(|error| db_error("conditionally load TiDB metadata", error))?;
+        // The secondary index covers this header query without fetching the
+        // primary row's large namespace value from TiKV. A changed revision
+        // goes through the existing validated full load on a fresh snapshot.
+        let revision: Option<(i64, Option<Vec<u8>>)> = connection
+            .exec_first(REVISION_PROBE_SQL, (&self.0.volume_key,))
+            .await
+            .map_err(|error| db_error("conditionally load TiDB metadata", error))?;
+        let Some((revision, mode)) = revision else {
+            return Err(backend_error("TiDB metadata row is missing"));
+        };
+        let revision = nonnegative(revision, "metadata revision")?;
+        if mode.as_deref() == Some(b"MRC4") {
+            return Err(stale());
+        }
+        if revision == known_revision as u64 {
+            return Ok(None);
+        }
+        drop(connection);
+        self.load().await.map(Some)
+    }
+
     async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
         let mut connection = self
             .0
@@ -1260,6 +1812,7 @@ impl MetadataStore for TidbMetadataStore {
             .checked_add(1)
             .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
         let namespace = serde_json::to_string(&namespace).map_err(backend_error)?;
+        profile::add(Event::NamespaceSerialized, namespace.len() as u64);
         if namespace.len() > self.0.max_namespace_bytes {
             return Err(FsError::new(ErrorCode::Efbig)
                 .with_syscall("TiDB publish metadata")
@@ -1338,6 +1891,7 @@ impl MetadataStore for TidbMetadataStore {
             .checked_add(1)
             .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
         let namespace = serde_json::to_string(&namespace).map_err(backend_error)?;
+        profile::add(Event::NamespaceSerialized, namespace.len() as u64);
         if namespace.len() > self.0.max_namespace_bytes {
             return Err(FsError::new(ErrorCode::Efbig)
                 .with_syscall("TiDB publish bound metadata")
@@ -1666,6 +2220,347 @@ mod tests {
 
     use super::*;
     use mysql_async::{DriverError, ServerError};
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "requires an actual TiDB service and MOUNT_RS_TIDB_URL"]
+    async fn actual_tidb_inode_versions_preserve_unrelated_writes_and_fence_structure() {
+        use mount_rs_core::{
+            FsDriver,
+            chunking::{Chunker, FixedSizeChunker},
+            storage::{DirectoryEntry, FileLayout, NodeData},
+        };
+        let url = std::env::var("MOUNT_RS_TIDB_URL").expect("actual TiDB URL required");
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let key = format!("inode-cas-{}-{stamp}", std::process::id());
+        let store = TidbMetadataStore::connect_with_options(&url, TidbStorageOptions::new(&key))
+            .await
+            .unwrap();
+        let other = TidbMetadataStore::connect_with_options(&url, TidbStorageOptions::new(&key))
+            .await
+            .unwrap();
+        let backing = ConcurrentBackingId::from_bytes([9; 16]).unwrap();
+        store.prepare_bound_concurrent_mode(backing).await.unwrap();
+        let stats = mount_rs_memfs::MemoryFs::empty().stat("/").await.unwrap();
+        let root = stats.ino;
+        let chunker = FixedSizeChunker::new(4096).unwrap().config();
+        let mut ns = Namespace {
+            format_version: 1,
+            root,
+            next_inode: root + 3,
+            default_uid: 0,
+            default_gid: 0,
+            umask: 0o022,
+            default_chunker: chunker.clone(),
+            nodes: BTreeMap::from([(
+                root,
+                NodeMetadata {
+                    stats,
+                    data: NodeData::Directory { entries: vec![] },
+                },
+            )]),
+        };
+        for inode in [root + 1, root + 2] {
+            let mut stats = ns.nodes[&root].stats.clone();
+            stats.ino = inode;
+            stats.mode = mount_rs_core::S_IFREG | 0o644;
+            stats.nlink = 1;
+            stats.size = 0;
+            stats.blocks = 0;
+            ns.nodes.insert(
+                inode,
+                NodeMetadata {
+                    stats,
+                    data: NodeData::File(FileLayout {
+                        chunker: chunker.clone(),
+                        extents: vec![],
+                    }),
+                },
+            );
+            let NodeData::Directory { entries } = &mut ns.nodes.get_mut(&root).unwrap().data else {
+                unreachable!()
+            };
+            entries.push(DirectoryEntry {
+                name: format!("file-{inode}"),
+                inode,
+            });
+        }
+        ns.validate().unwrap();
+        store
+            .publish_bound_if_revision(backing, 0, ns)
+            .await
+            .unwrap();
+        store.prepare_inode_mode(backing, 1).await.unwrap();
+        let mut connection = store.0.pool.get_conn().await.unwrap();
+        // Exact historical mode-blind revision probe must invalidate old G=1.
+        let old_probe: i64 = connection.exec_first("SELECT revision FROM mount_rs_tidb_metadata USE INDEX (idx_mount_rs_volume_revision) WHERE volume_key=?",(&key,)).await.unwrap().unwrap();
+        assert_ne!(old_probe, 1);
+        let old_payload: String = connection
+            .exec_first(
+                "SELECT namespace FROM mount_rs_tidb_metadata WHERE volume_key=?",
+                (&key,),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(serde_json::from_str::<Namespace>(&old_payload).is_err());
+        let plan: Vec<mysql_async::Row> = connection
+            .exec(format!("EXPLAIN {INODE_AUTHORITY_SQL}"), (&key,))
+            .await
+            .unwrap();
+        let operators: Vec<String> = plan
+            .iter()
+            .map(|row| row.get::<String, _>("id").unwrap())
+            .collect();
+        assert!(
+            operators
+                .iter()
+                .any(|operator| operator.starts_with("IndexReader")),
+            "compact authority must be covered: {operators:?}"
+        );
+        assert!(
+            !operators
+                .iter()
+                .any(|operator| operator.starts_with("TableReader")
+                    || operator.starts_with("IndexLookUp")),
+            "compact authority must not fetch namespace row: {operators:?}"
+        );
+        drop(connection);
+        assert!(store.load().await.is_err());
+        assert!(store.load_if_changed(1).await.is_err());
+        assert!(store.concurrent_mode_state().await.is_err());
+        let stale_snapshot = store.load_inode_snapshot(backing).await.unwrap();
+        let first = store.load_inode(backing, root + 1).await.unwrap();
+        let second = other.load_inode(backing, root + 2).await.unwrap();
+        let mut first_node = first.node.clone();
+        first_node.stats.mtime_ms += 1;
+        let mut second_node = second.node.clone();
+        second_node.stats.mtime_ms += 2;
+        let (a, b) = tokio::join!(
+            store.publish_inode_if_version(backing, root + 1, first.version, first_node.clone()),
+            other.publish_inode_if_version(backing, root + 2, second.version, second_node.clone())
+        );
+        let a = a.unwrap();
+        let b = b.unwrap();
+        assert_eq!(a.structural_generation, 2);
+        assert_eq!(b.structural_generation, 2);
+        assert_eq!(a.inode_revision, 1);
+        assert_eq!(b.inode_revision, 1);
+        assert!(
+            store
+                .load_inode_if_changed(backing, root + 1, Some(a))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .publish_structure_if_versions(
+                    backing,
+                    2,
+                    &stale_snapshot.inode_revisions,
+                    stale_snapshot.namespace
+                )
+                .await
+                .unwrap_err()
+                .is(ErrorCode::Eagain)
+        );
+        let current = store.load_inode_snapshot(backing).await.unwrap();
+        assert_eq!(current.namespace.nodes[&(root + 1)], first_node);
+        assert_eq!(current.namespace.nodes[&(root + 2)], second_node);
+        let generation = store
+            .publish_structure_if_versions(backing, 2, &current.inode_revisions, current.namespace)
+            .await
+            .unwrap();
+        assert_eq!(generation, 3);
+        assert!(
+            store
+                .publish_inode_if_version(backing, root + 1, a, first_node)
+                .await
+                .unwrap_err()
+                .is(ErrorCode::Eagain)
+        );
+        let next = store.load_inode(backing, root + 1).await.unwrap();
+        assert_eq!(
+            next.version,
+            InodeVersion {
+                structural_generation: 3,
+                inode_revision: 0
+            }
+        );
+        let before_unlink = store.load_inode_snapshot(backing).await.unwrap();
+        let removed = store.load_inode(backing, root + 2).await.unwrap();
+        let mut unlinked = before_unlink.namespace;
+        unlinked.nodes.remove(&(root + 2));
+        let NodeData::Directory { entries } = &mut unlinked.nodes.get_mut(&root).unwrap().data
+        else {
+            unreachable!()
+        };
+        entries.retain(|entry| entry.inode != root + 2);
+        store
+            .publish_structure_if_versions(backing, 3, &before_unlink.inode_revisions, unlinked)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .publish_inode_if_version(backing, root + 2, removed.version, removed.node)
+                .await
+                .unwrap_err()
+                .is(ErrorCode::Eagain)
+        );
+        let before_corruption = store.load_inode_snapshot(backing).await.unwrap();
+        let good_root = serde_json::to_string(&before_corruption.namespace.nodes[&root]).unwrap();
+        let mut corrupt_root = before_corruption.namespace.nodes[&root].clone();
+        let NodeData::Directory { entries } = &mut corrupt_root.data else {
+            unreachable!()
+        };
+        entries.push(DirectoryEntry {
+            name: "dangling".to_owned(),
+            inode: root + 99,
+        });
+        let corrupt_json = serde_json::to_string(&corrupt_root).unwrap();
+        let mut connection = store.0.pool.get_conn().await.unwrap();
+        connection
+            .exec_drop(
+                "UPDATE mount_rs_tidb_inodes SET node=? WHERE volume_key=? AND inode=?",
+                (&corrupt_json, &key, signed(root, "inode ID").unwrap()),
+            )
+            .await
+            .unwrap();
+        drop(connection);
+        assert!(
+            store
+                .publish_structure_if_versions(
+                    backing,
+                    4,
+                    &before_corruption.inode_revisions,
+                    before_corruption.namespace
+                )
+                .await
+                .is_err()
+        );
+        let mut connection = store.0.pool.get_conn().await.unwrap();
+        let preserved: String = connection
+            .exec_first(
+                "SELECT node FROM mount_rs_tidb_inodes WHERE volume_key=? AND inode=?",
+                (&key, signed(root, "inode ID").unwrap()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(preserved, corrupt_json);
+        connection
+            .exec_drop(
+                "UPDATE mount_rs_tidb_inodes SET node=? WHERE volume_key=? AND inode=?",
+                (&good_root, &key, signed(root, "inode ID").unwrap()),
+            )
+            .await
+            .unwrap();
+        drop(connection);
+        let known = store.load_inode(backing, root + 1).await.unwrap();
+        let mut connection = store.0.pool.get_conn().await.unwrap();
+        connection
+            .exec_drop(
+                "DELETE FROM mount_rs_tidb_inodes WHERE volume_key=? AND inode=?",
+                (&key, signed(root + 1, "inode ID").unwrap()),
+            )
+            .await
+            .unwrap();
+        drop(connection);
+        let missing = store
+            .publish_inode_if_version(backing, root + 1, known.version, known.node)
+            .await
+            .unwrap_err();
+        assert!(missing.is(ErrorCode::Estale) || missing.is(ErrorCode::Eio));
+        store.close().await.unwrap();
+        other.close().await.unwrap();
+    }
+
+    #[test]
+    fn inode_authority_requires_exact_mode_backing_and_fence() {
+        let backing = ConcurrentBackingId::from_bytes([4; 16]).unwrap();
+        let mut row = ConcurrentRow {
+            revision: 7,
+            namespace_empty: false,
+            mode: Some(b"MRC4".to_vec()),
+            backing: Some(backing.to_hex().into_bytes()),
+            owner: None,
+            fence: CONCURRENT_FENCE_SENTINEL,
+            expires: 0,
+        };
+        let mode = inode_authority(&row, Some(backing)).unwrap();
+        assert_eq!(mode.structural_generation, 7);
+        assert!(row.mode_state().is_err());
+        assert!(
+            inode_authority(
+                &row,
+                Some(ConcurrentBackingId::from_bytes([5; 16]).unwrap())
+            )
+            .is_err()
+        );
+        row.owner = Some(b"old".to_vec());
+        assert!(inode_authority(&row, Some(backing)).is_err());
+        row.owner = None;
+        row.fence = 1;
+        assert!(inode_authority(&row, Some(backing)).is_err());
+        row.fence = CONCURRENT_FENCE_SENTINEL;
+        row.namespace_empty = true;
+        assert!(inode_authority(&row, Some(backing)).is_err());
+        row.namespace_empty = false;
+        row.revision = 0;
+        assert!(inode_authority(&row, Some(backing)).is_err());
+        row.revision = 7;
+        row.mode = Some(b"MRC2".to_vec());
+        assert!(inode_authority(&row, Some(backing)).is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an actual TiDB service and MOUNT_RS_TIDB_URL"]
+    async fn actual_tidb_unchanged_revision_uses_covering_index() {
+        let url = std::env::var("MOUNT_RS_TIDB_URL").expect("actual TiDB URL required");
+        let pool = Pool::from_url(&url).unwrap();
+        let mut connection = pool.get_conn().await.unwrap();
+        let version: String = connection
+            .query_first("SELECT VERSION()")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(version.to_ascii_lowercase().contains("tidb"));
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let key = format!("tidb-index-plan-{}-{stamp}", std::process::id());
+        let metadata = TidbMetadataStore::connect_with_options(&url, TidbStorageOptions::new(&key))
+            .await
+            .expect("connect metadata and migrate the covering revision index");
+        let plan: Vec<mysql_async::Row> = connection
+            .exec(format!("EXPLAIN {REVISION_PROBE_SQL}"), (&key,))
+            .await
+            .expect("explain the exact production revision probe");
+        let operators: Vec<String> = plan
+            .iter()
+            .map(|row| row.get::<String, _>("id").expect("EXPLAIN operator id"))
+            .collect();
+        assert!(
+            operators
+                .iter()
+                .any(|operator| operator.starts_with("IndexReader")),
+            "revision probe must use TiDB IndexReader, got {operators:?}"
+        );
+        assert!(
+            !operators
+                .iter()
+                .any(|operator| operator.starts_with("TableReader")),
+            "revision probe must not fetch the namespace table row, got {operators:?}"
+        );
+        metadata.close().await.unwrap();
+        drop(connection);
+        pool.disconnect().await.unwrap();
+    }
 
     fn pristine_concurrent_row() -> ConcurrentRow {
         ConcurrentRow {

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+# This is the production shared staging-budget decision, not a network proof.
+./scripts/cargo-shared kani -p mount-rs-core --harness cache_reservations_never_wrap_or_exceed_budget

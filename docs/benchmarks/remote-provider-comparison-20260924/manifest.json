@@ -1,0 +1,60 @@
+{
+  "schema": "mount-rs-provider-comparison-evidence-v1",
+  "rebased_head": "2b1bdb40ff3aa1ed252baefcc871f96fdb137dc3",
+  "origin_main_base": "e9eb233fbc40345ed0316658016bce1c5defa160",
+  "includes_uncommitted_conditional_load_and_benchmark_changes": true,
+  "source_sha256": {
+    "providers/mount-rs-sqlite/src/storage.rs": "acd1a2b7daaf7d5a747ca1d71069f16e3137c350f1302dc702a650f6bef2531f",
+    "providers/mount-rs-pglite/src/storage.rs": "a730ae018b2db10f9a99ac0613e179a121199b64b245dcfd64b25c05f00f5350",
+    "providers/mount-rs-tidb/src/storage.rs": "949e1409095a66a025aeef0a948182055158656d92ca26f14506205820d9e17a",
+    "providers/mount-rs-foundationdb/src/lib.rs": "aafac6ff4e0e4cc5c0c602c301dc729fde8a2d06532ec43ada8e06e965e8c3b4",
+    "filesystems/mount-rs-chunked/src/lib.rs": "2045a6315fbfbb0478578265f0fa3ad2a7ce81d5595ad7f88eb5e86dd52defec",
+    "crates/mount-rs-service/tests/quic_tidb_saturation.rs": "62ad161fb6ea4224973586c1f3b129bb996d71863aa8b56411ee9945fbabf141",
+    "crates/mount-rs-service/tests/support/saturation_backend.rs": "86d6217ff9ea4ce129178b2fa3e32681d097b8723f0b7a4fc08ea8cdd3a4d063"
+  },
+  "host": "Apple M4 Pro, 14 cores, 48 GB RAM, macOS",
+  "docker": "desktop-linux, 14 CPUs, 8318976000 bytes RAM",
+  "measurement_windows": {
+    "tidb-read.json": {
+      "start_utc": "2026-09-24T07:24:19.489000+00:00",
+      "finish_utc": "2026-09-24T07:25:48.427000+00:00"
+    },
+    "tidb-read-write.json": {
+      "start_utc": "2026-09-24T07:25:58.771000+00:00",
+      "finish_utc": "2026-09-24T07:27:17.719000+00:00"
+    },
+    "sqlite-read.json": {
+      "start_utc": "2026-09-24T07:12:53.381000+00:00",
+      "finish_utc": "2026-09-24T07:14:21.299000+00:00"
+    },
+    "sqlite-extra-depths.json": {
+      "start_utc": "2026-09-24T07:14:28.745000+00:00",
+      "finish_utc": "2026-09-24T07:17:02.509000+00:00"
+    },
+    "sqlite-read-write.json": {
+      "start_utc": "2026-09-24T07:17:13.030000+00:00",
+      "finish_utc": "2026-09-24T07:18:27.240000+00:00"
+    },
+    "foundationdb-read.json": {
+      "start_utc": "2026-09-24T07:38:29.717000+00:00",
+      "finish_utc": "2026-09-24T07:39:57.629000+00:00"
+    },
+    "foundationdb-read-write.json": {
+      "start_utc": "2026-09-24T07:40:04.386000+00:00",
+      "finish_utc": "2026-09-24T07:40:38.513000+00:00"
+    },
+    "sqlite-profile.json": {
+      "start_utc": "2026-09-24T07:42:41.264000+00:00",
+      "finish_utc": "2026-09-24T07:43:14.979000+00:00"
+    }
+  },
+  "comparison_limits": [
+    "cache-warm logical service operations, not physical SSD IOPS",
+    "ten coordinators in one service process",
+    "single-node database smoke, not replicated durability acceptance",
+    "short stages without repeated-run confidence intervals",
+    "native macOS SQLite/PGlite clients; macOS-to-Linux TiDB; FoundationDB Linux native client",
+    "deterministic unique payloads have periodic patterns and may compress differently by backend",
+    "SQLite CPU-sampled invocation is diagnostic and excluded from common ranking"
+  ]
+}

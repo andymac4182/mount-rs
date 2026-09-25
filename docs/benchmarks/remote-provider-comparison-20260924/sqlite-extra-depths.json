@@ -1,0 +1,277 @@
+{
+  "audit_logging": "enabled; request audit cost included",
+  "build_profile": "release",
+  "cleanup_error": null,
+  "configured_modes": [
+    "Read",
+    "Write"
+  ],
+  "dataset_bytes": 13107200,
+  "debug_assertions": false,
+  "failed_phase": null,
+  "latency_histogram": "power-of-two microsecond upper bounds",
+  "namespace_bytes": null,
+  "nominal_stage_seconds": 15,
+  "provider": "sqlite",
+  "provider_identity": "embedded SQLite, local filesystem",
+  "provider_version": "3.51.3",
+  "schema": "mount-rs-provider-saturation-v2",
+  "server_active_request_limit_per_connection": 32,
+  "stages": [
+    {
+      "cache": "cache-warm randomized dataset; no cold-cache claim",
+      "clients": 100,
+      "elapsed_seconds_including_drain": 15.014786334,
+      "failures": 0,
+      "finish_unix_ms": 1790234083760,
+      "mode": "Read",
+      "nominal_seconds": 15,
+      "payload_mib_per_second": 18.14695528720269,
+      "per_client_depth": 1,
+      "read": {
+        "completed": 69753,
+        "p50_us_upper": 32768,
+        "p95_us_upper": 32768,
+        "p99_us_upper": 65536
+      },
+      "read_iops": 4645.620553523889,
+      "reference_target_iops": 100000,
+      "servers": 10,
+      "start_unix_ms": 1790234068745,
+      "target_attainment": 0.04645620553523889,
+      "total_iops": 4645.620553523889,
+      "total_queue_depth": 100,
+      "write": {
+        "completed": 0,
+        "p50_us_upper": 0,
+        "p95_us_upper": 0,
+        "p99_us_upper": 0
+      },
+      "write_iops": 0.0
+    },
+    {
+      "cache": "cache-warm randomized dataset; no cold-cache claim",
+      "clients": 100,
+      "elapsed_seconds_including_drain": 15.303997292,
+      "failures": 0,
+      "finish_unix_ms": 1790234102344,
+      "mode": "Write",
+      "nominal_seconds": 15,
+      "payload_mib_per_second": 1.1641668454367367,
+      "per_client_depth": 1,
+      "read": {
+        "completed": 0,
+        "p50_us_upper": 0,
+        "p95_us_upper": 0,
+        "p99_us_upper": 0
+      },
+      "read_iops": 0.0,
+      "reference_target_iops": 100000,
+      "servers": 10,
+      "start_unix_ms": 1790234087040,
+      "target_attainment": 0.002980267124318046,
+      "total_iops": 298.0267124318046,
+      "total_queue_depth": 100,
+      "write": {
+        "completed": 4561,
+        "p50_us_upper": 262144,
+        "p95_us_upper": 2097152,
+        "p99_us_upper": 2097152
+      },
+      "write_iops": 298.0267124318046
+    },
+    {
+      "cache": "cache-warm randomized dataset; no cold-cache claim",
+      "clients": 100,
+      "elapsed_seconds_including_drain": 15.030041083,
+      "failures": 0,
+      "finish_unix_ms": 1790234120404,
+      "mode": "Read",
+      "nominal_seconds": 15,
+      "payload_mib_per_second": 17.94816908751626,
+      "per_client_depth": 2,
+      "read": {
+        "completed": 69059,
+        "p50_us_upper": 65536,
+        "p95_us_upper": 65536,
+        "p99_us_upper": 131072
+      },
+      "read_iops": 4594.731286404162,
+      "reference_target_iops": 100000,
+      "servers": 10,
+      "start_unix_ms": 1790234105374,
+      "target_attainment": 0.04594731286404162,
+      "total_iops": 4594.731286404162,
+      "total_queue_depth": 200,
+      "write": {
+        "completed": 0,
+        "p50_us_upper": 0,
+        "p95_us_upper": 0,
+        "p99_us_upper": 0
+      },
+      "write_iops": 0.0
+    },
+    {
+      "cache": "cache-warm randomized dataset; no cold-cache claim",
+      "clients": 100,
+      "elapsed_seconds_including_drain": 15.757697791,
+      "failures": 0,
+      "finish_unix_ms": 1790234139946,
+      "mode": "Write",
+      "nominal_seconds": 15,
+      "payload_mib_per_second": 0.8914293944654063,
+      "per_client_depth": 2,
+      "read": {
+        "completed": 0,
+        "p50_us_upper": 0,
+        "p95_us_upper": 0,
+        "p99_us_upper": 0
+      },
+      "read_iops": 0.0,
+      "reference_target_iops": 100000,
+      "servers": 10,
+      "start_unix_ms": 1790234124188,
+      "target_attainment": 0.00228205924983144,
+      "total_iops": 228.205924983144,
+      "total_queue_depth": 200,
+      "write": {
+        "completed": 3596,
+        "p50_us_upper": 1048576,
+        "p95_us_upper": 2097152,
+        "p99_us_upper": 4194304
+      },
+      "write_iops": 228.205924983144
+    },
+    {
+      "cache": "cache-warm randomized dataset; no cold-cache claim",
+      "clients": 100,
+      "elapsed_seconds_including_drain": 15.056216708,
+      "failures": 0,
+      "finish_unix_ms": 1790234158060,
+      "mode": "Read",
+      "nominal_seconds": 15,
+      "payload_mib_per_second": 12.302331063126992,
+      "per_client_depth": 4,
+      "read": {
+        "completed": 47418,
+        "p50_us_upper": 131072,
+        "p95_us_upper": 131072,
+        "p99_us_upper": 524288
+      },
+      "read_iops": 3149.39675216051,
+      "reference_target_iops": 100000,
+      "servers": 10,
+      "start_unix_ms": 1790234143004,
+      "target_attainment": 0.0314939675216051,
+      "total_iops": 3149.39675216051,
+      "total_queue_depth": 400,
+      "write": {
+        "completed": 0,
+        "p50_us_upper": 0,
+        "p95_us_upper": 0,
+        "p99_us_upper": 0
+      },
+      "write_iops": 0.0
+    },
+    {
+      "cache": "cache-warm randomized dataset; no cold-cache claim",
+      "clients": 100,
+      "elapsed_seconds_including_drain": 16.6435765,
+      "failures": 0,
+      "finish_unix_ms": 1790234179173,
+      "mode": "Write",
+      "nominal_seconds": 15,
+      "payload_mib_per_second": 0.4128375743038162,
+      "per_client_depth": 4,
+      "read": {
+        "completed": 0,
+        "p50_us_upper": 0,
+        "p95_us_upper": 0,
+        "p99_us_upper": 0
+      },
+      "read_iops": 0.0,
+      "reference_target_iops": 100000,
+      "servers": 10,
+      "start_unix_ms": 1790234162529,
+      "target_attainment": 0.0010568641902177695,
+      "total_iops": 105.68641902177694,
+      "total_queue_depth": 400,
+      "write": {
+        "completed": 1759,
+        "p50_us_upper": 4194304,
+        "p95_us_upper": 16777216,
+        "p99_us_upper": 16777216
+      },
+      "write_iops": 105.68641902177694
+    },
+    {
+      "cache": "cache-warm randomized dataset; no cold-cache claim",
+      "clients": 100,
+      "elapsed_seconds_including_drain": 15.110716875,
+      "failures": 0,
+      "finish_unix_ms": 1790234197418,
+      "mode": "Read",
+      "nominal_seconds": 15,
+      "payload_mib_per_second": 17.252604287842566,
+      "per_client_depth": 8,
+      "read": {
+        "completed": 66739,
+        "p50_us_upper": 262144,
+        "p95_us_upper": 524288,
+        "p99_us_upper": 524288
+      },
+      "read_iops": 4416.666697687697,
+      "reference_target_iops": 100000,
+      "servers": 10,
+      "start_unix_ms": 1790234182308,
+      "target_attainment": 0.04416666697687697,
+      "total_iops": 4416.666697687697,
+      "total_queue_depth": 800,
+      "write": {
+        "completed": 0,
+        "p50_us_upper": 0,
+        "p95_us_upper": 0,
+        "p99_us_upper": 0
+      },
+      "write_iops": 0.0
+    },
+    {
+      "cache": "cache-warm randomized dataset; no cold-cache claim",
+      "clients": 100,
+      "elapsed_seconds_including_drain": 19.302425084,
+      "failures": 0,
+      "finish_unix_ms": 1790234222509,
+      "mode": "Write",
+      "nominal_seconds": 15,
+      "payload_mib_per_second": 0.40676559892509306,
+      "per_client_depth": 8,
+      "read": {
+        "completed": 0,
+        "p50_us_upper": 0,
+        "p95_us_upper": 0,
+        "p99_us_upper": 0
+      },
+      "read_iops": 0.0,
+      "reference_target_iops": 100000,
+      "servers": 10,
+      "start_unix_ms": 1790234203207,
+      "target_attainment": 0.0010413199332482382,
+      "total_iops": 104.13199332482382,
+      "total_queue_depth": 800,
+      "write": {
+        "completed": 2010,
+        "p50_us_upper": 8388608,
+        "p95_us_upper": 16777216,
+        "p99_us_upper": 16777216
+      },
+      "write_iops": 104.13199332482382
+    }
+  ],
+  "topology": "local-file",
+  "verification_error": null,
+  "verification_status": "passed",
+  "verified_files": 100,
+  "volume_key": "remote-saturation-16507-1790234063292652000",
+  "warmup_seconds": 3,
+  "work_error": null
+}

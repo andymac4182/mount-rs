@@ -1,6 +1,8 @@
 //! SQLite-backed filesystem integration.
 
+mod io_diagnostics;
 mod storage;
+pub use io_diagnostics::{connection_page_diagnostics, sqlite_io_diagnostics};
 pub use storage::{SqliteBlockStore, SqliteMetadataStore};
 
 use std::path::Path;

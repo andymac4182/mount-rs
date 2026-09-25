@@ -1,0 +1,12 @@
+{
+  "schema": "mount-rs-foundationdb-benchmark-identity-v1",
+  "image": "foundationdb/foundationdb:7.4.7@sha256:25d9e2456ca923e70829fc07a15132c1a0c061474cd89826cdc4bbb45de870de",
+  "topology": "single",
+  "storage_engine": "ssd-2",
+  "redundancy_mode": "single",
+  "server_versions": [
+    "7.4.7"
+  ],
+  "readiness": "committed-set-get-clear",
+  "data_storage": "owned-run-labeled-docker-volume"
+}

@@ -1,0 +1,153 @@
+{
+  "audit_logging": "enabled; request audit cost included",
+  "build_profile": "release",
+  "cleanup_error": null,
+  "configured_modes": [
+    "Read",
+    "Write"
+  ],
+  "dataset_bytes": 13107200,
+  "debug_assertions": false,
+  "failed_phase": null,
+  "latency_histogram": "power-of-two microsecond upper bounds",
+  "namespace_bytes": 450917,
+  "nominal_stage_seconds": 15,
+  "provider": "tidb",
+  "provider_identity": "Release Version: v8.5.7\nEdition: Community\nGit Commit Hash: 202b7f47286a1109b5c957401d34c9358d130ae0\nGit Branch: HEAD\nUTC Build Time: 2026-08-19 04:15:17\nGoVersion: go1.25.10\nRace Enabled: false\nCheck Table Before Drop: false\nStore: tikv",
+  "provider_version": "8.0.11-TiDB-v8.5.7",
+  "schema": "mount-rs-provider-saturation-v2",
+  "server_active_request_limit_per_connection": 32,
+  "stages": [
+    {
+      "cache": "cache-warm randomized dataset; no cold-cache claim",
+      "clients": 100,
+      "elapsed_seconds_including_drain": 15.034851625,
+      "failures": 0,
+      "finish_unix_ms": 1790234773806,
+      "mode": "Read",
+      "nominal_seconds": 15,
+      "payload_mib_per_second": 6.515070946036023,
+      "per_client_depth": 1,
+      "read": {
+        "completed": 25076,
+        "p50_us_upper": 65536,
+        "p95_us_upper": 131072,
+        "p99_us_upper": 131072
+      },
+      "read_iops": 1667.858162185222,
+      "reference_target_iops": 100000,
+      "servers": 10,
+      "start_unix_ms": 1790234758771,
+      "target_attainment": 0.01667858162185222,
+      "total_iops": 1667.858162185222,
+      "total_queue_depth": 100,
+      "write": {
+        "completed": 0,
+        "p50_us_upper": 0,
+        "p95_us_upper": 0,
+        "p99_us_upper": 0
+      },
+      "write_iops": 0.0
+    },
+    {
+      "cache": "cache-warm randomized dataset; no cold-cache claim",
+      "clients": 100,
+      "elapsed_seconds_including_drain": 16.44004075,
+      "failures": 0,
+      "finish_unix_ms": 1790234794521,
+      "mode": "Write",
+      "nominal_seconds": 15,
+      "payload_mib_per_second": 0.22810162438313905,
+      "per_client_depth": 1,
+      "read": {
+        "completed": 0,
+        "p50_us_upper": 0,
+        "p95_us_upper": 0,
+        "p99_us_upper": 0
+      },
+      "read_iops": 0.0,
+      "reference_target_iops": 100000,
+      "servers": 10,
+      "start_unix_ms": 1790234778081,
+      "target_attainment": 0.0005839401584208359,
+      "total_iops": 58.3940158420836,
+      "total_queue_depth": 100,
+      "write": {
+        "completed": 960,
+        "p50_us_upper": 262144,
+        "p95_us_upper": 16777216,
+        "p99_us_upper": 16777216
+      },
+      "write_iops": 58.3940158420836
+    },
+    {
+      "cache": "cache-warm randomized dataset; no cold-cache claim",
+      "clients": 100,
+      "elapsed_seconds_including_drain": 15.06995225,
+      "failures": 0,
+      "finish_unix_ms": 1790234812670,
+      "mode": "Read",
+      "nominal_seconds": 15,
+      "payload_mib_per_second": 6.519595972840591,
+      "per_client_depth": 2,
+      "read": {
+        "completed": 25152,
+        "p50_us_upper": 131072,
+        "p95_us_upper": 262144,
+        "p99_us_upper": 262144
+      },
+      "read_iops": 1669.0165690471913,
+      "reference_target_iops": 100000,
+      "servers": 10,
+      "start_unix_ms": 1790234797600,
+      "target_attainment": 0.016690165690471912,
+      "total_iops": 1669.0165690471913,
+      "total_queue_depth": 200,
+      "write": {
+        "completed": 0,
+        "p50_us_upper": 0,
+        "p95_us_upper": 0,
+        "p99_us_upper": 0
+      },
+      "write_iops": 0.0
+    },
+    {
+      "cache": "cache-warm randomized dataset; no cold-cache claim",
+      "clients": 100,
+      "elapsed_seconds_including_drain": 18.640328291,
+      "failures": 0,
+      "finish_unix_ms": 1790234837719,
+      "mode": "Write",
+      "nominal_seconds": 15,
+      "payload_mib_per_second": 0.17644874321167608,
+      "per_client_depth": 2,
+      "read": {
+        "completed": 0,
+        "p50_us_upper": 0,
+        "p95_us_upper": 0,
+        "p99_us_upper": 0
+      },
+      "read_iops": 0.0,
+      "reference_target_iops": 100000,
+      "servers": 10,
+      "start_unix_ms": 1790234819078,
+      "target_attainment": 0.0004517087826218908,
+      "total_iops": 45.17087826218908,
+      "total_queue_depth": 200,
+      "write": {
+        "completed": 842,
+        "p50_us_upper": 4194304,
+        "p95_us_upper": 8388608,
+        "p99_us_upper": 16777216
+      },
+      "write_iops": 45.17087826218908
+    }
+  ],
+  "topology": "single",
+  "verification_error": null,
+  "verification_status": "passed",
+  "verified_files": 100,
+  "volume_key": "remote-saturation-19485-1790234752781590000",
+  "warmup_seconds": 3,
+  "work_error": null
+}

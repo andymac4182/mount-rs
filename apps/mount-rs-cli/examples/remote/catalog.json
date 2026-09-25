@@ -1,0 +1,22 @@
+{
+  "revision": 0,
+  "partitions": {
+    "sandbox-project": {
+      "drives": {
+        "workspace": {"driver": {"kind": "sqlite", "database": "workspace.sqlite"}},
+        "scratch": {"driver": {"kind": "memory"}}
+      }
+    }
+  },
+  "issuer_policies": {
+    "ci": {"issuer": "https://issuer.example.com", "audiences": ["mount-rs"], "algorithms": ["RS256"]}
+  },
+  "grants": {
+    "ci-workspace": {
+      "partition_id": "sandbox-project",
+      "policy_id": "ci",
+      "claim_conditions": {"/repository_id": "replace-with-exact-repository-id"},
+      "drives": {"workspace": "write", "scratch": "read"}
+    }
+  }
+}

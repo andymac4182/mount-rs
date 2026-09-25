@@ -1,0 +1,153 @@
+{
+  "audit_logging": "enabled; request audit cost included",
+  "build_profile": "release",
+  "cleanup_error": null,
+  "configured_modes": [
+    "Read",
+    "Write"
+  ],
+  "dataset_bytes": 13107200,
+  "debug_assertions": false,
+  "failed_phase": null,
+  "latency_histogram": "power-of-two microsecond upper bounds",
+  "namespace_bytes": null,
+  "nominal_stage_seconds": 15,
+  "provider": "sqlite",
+  "provider_identity": "embedded SQLite, local filesystem",
+  "provider_version": "3.51.3",
+  "schema": "mount-rs-provider-saturation-v2",
+  "server_active_request_limit_per_connection": 32,
+  "stages": [
+    {
+      "cache": "cache-warm randomized dataset; no cold-cache claim",
+      "clients": 100,
+      "elapsed_seconds_including_drain": 15.014628667,
+      "failures": 0,
+      "finish_unix_ms": 1790234248045,
+      "mode": "Read",
+      "nominal_seconds": 15,
+      "payload_mib_per_second": 16.066622781700794,
+      "per_client_depth": 1,
+      "read": {
+        "completed": 61756,
+        "p50_us_upper": 32768,
+        "p95_us_upper": 65536,
+        "p99_us_upper": 65536
+      },
+      "read_iops": 4113.055432115403,
+      "reference_target_iops": 100000,
+      "servers": 10,
+      "start_unix_ms": 1790234233030,
+      "target_attainment": 0.041130554321154034,
+      "total_iops": 4113.055432115403,
+      "total_queue_depth": 100,
+      "write": {
+        "completed": 0,
+        "p50_us_upper": 0,
+        "p95_us_upper": 0,
+        "p99_us_upper": 0
+      },
+      "write_iops": 0.0
+    },
+    {
+      "cache": "cache-warm randomized dataset; no cold-cache claim",
+      "clients": 100,
+      "elapsed_seconds_including_drain": 15.311676791,
+      "failures": 0,
+      "finish_unix_ms": 1790234267108,
+      "mode": "Write",
+      "nominal_seconds": 15,
+      "payload_mib_per_second": 0.774021203671579,
+      "per_client_depth": 1,
+      "read": {
+        "completed": 0,
+        "p50_us_upper": 0,
+        "p95_us_upper": 0,
+        "p99_us_upper": 0
+      },
+      "read_iops": 0.0,
+      "reference_target_iops": 100000,
+      "servers": 10,
+      "start_unix_ms": 1790234251797,
+      "target_attainment": 0.0019814942813992423,
+      "total_iops": 198.14942813992423,
+      "total_queue_depth": 100,
+      "write": {
+        "completed": 3034,
+        "p50_us_upper": 262144,
+        "p95_us_upper": 4194304,
+        "p99_us_upper": 4194304
+      },
+      "write_iops": 198.14942813992423
+    },
+    {
+      "cache": "cache-warm randomized dataset; no cold-cache claim",
+      "clients": 100,
+      "elapsed_seconds_including_drain": 15.027622375,
+      "failures": 0,
+      "finish_unix_ms": 1790234285165,
+      "mode": "Read",
+      "nominal_seconds": 15,
+      "payload_mib_per_second": 17.754804675147422,
+      "per_client_depth": 2,
+      "read": {
+        "completed": 68304,
+        "p50_us_upper": 65536,
+        "p95_us_upper": 65536,
+        "p99_us_upper": 131072
+      },
+      "read_iops": 4545.22999683774,
+      "reference_target_iops": 100000,
+      "servers": 10,
+      "start_unix_ms": 1790234270137,
+      "target_attainment": 0.0454522999683774,
+      "total_iops": 4545.22999683774,
+      "total_queue_depth": 200,
+      "write": {
+        "completed": 0,
+        "p50_us_upper": 0,
+        "p95_us_upper": 0,
+        "p99_us_upper": 0
+      },
+      "write_iops": 0.0
+    },
+    {
+      "cache": "cache-warm randomized dataset; no cold-cache claim",
+      "clients": 100,
+      "elapsed_seconds_including_drain": 17.121609625,
+      "failures": 0,
+      "finish_unix_ms": 1790234307240,
+      "mode": "Write",
+      "nominal_seconds": 15,
+      "payload_mib_per_second": 0.6128038034858536,
+      "per_client_depth": 2,
+      "read": {
+        "completed": 0,
+        "p50_us_upper": 0,
+        "p95_us_upper": 0,
+        "p99_us_upper": 0
+      },
+      "read_iops": 0.0,
+      "reference_target_iops": 100000,
+      "servers": 10,
+      "start_unix_ms": 1790234290118,
+      "target_attainment": 0.0015687777369237852,
+      "total_iops": 156.87777369237853,
+      "total_queue_depth": 200,
+      "write": {
+        "completed": 2686,
+        "p50_us_upper": 1048576,
+        "p95_us_upper": 8388608,
+        "p99_us_upper": 8388608
+      },
+      "write_iops": 156.87777369237853
+    }
+  ],
+  "topology": "local-file",
+  "verification_error": null,
+  "verification_status": "passed",
+  "verified_files": 100,
+  "volume_key": "remote-saturation-17021-1790234223996175000",
+  "warmup_seconds": 3,
+  "work_error": null
+}

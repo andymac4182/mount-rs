@@ -1,0 +1,87 @@
+Analysis of sampling quic_tidb_saturation-e7c5b8ca9a8f2d1e (pid 23598) every 10 milliseconds
+Process:         quic_tidb_saturation-e7c5b8ca9a8f2d1e [23598]
+Path:            /private/tmp/*/quic_tidb_saturation-e7c5b8ca9a8f2d1e
+Load Address:    0x102ba8000
+Identifier:      quic_tidb_saturation-e7c5b8ca9a8f2d1e
+Version:         0
+Code Type:       ARM64
+Platform:        macOS
+Parent Process:  Python [23581]
+Target Type:     live task
+
+Date/Time:       2026-09-24 17:43:01.779 +1000
+Launch Time:     2026-09-24 17:42:35.935 +1000
+OS Version:      macOS 26.6.2 (25G83)
+Report Version:  7
+Analysis Tool:   /usr/bin/sample
+
+Physical footprint:         388.0M
+Physical footprint (peak):  388.0M
+Idle exit:                  untracked
+----
+
+Selected call graph frames (excerpt, not exhaustive):
+    +           243 tokio::runtime::blocking::pool::Inner::run::h5026e6bde3f28dc0  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 400  [0x10350dc68]
+    +                       ! :                   5 _$LT$mount_rs_sdk..stores..ErasedMetadataStore$u20$as$u20$mount_rs_core..storage..MetadataStore$GT$::publish_bound_if_revision::_$u7b$$u7b$closure$u7d$$u7d$::hcc553d25dffad2ef  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 224  [0x102d3b050]
+    +                       ! :                     3 _$LT$mount_rs_sqlite..storage..SqliteMetadataStore$u20$as$u20$mount_rs_core..storage..MetadataStore$GT$::publish_bound_if_revision::_$u7b$$u7b$closure$u7d$$u7d$::haafddcbbd51dad83  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 1072  [0x103066210]
+    +                       ! :                     1 _$LT$mount_rs_sqlite..storage..SqliteMetadataStore$u20$as$u20$mount_rs_core..storage..MetadataStore$GT$::publish_bound_if_revision::_$u7b$$u7b$closure$u7d$$u7d$::haafddcbbd51dad83  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 1440  [0x103066380]
+    +                       ! :                     1 _$LT$mount_rs_sqlite..storage..SqliteMetadataStore$u20$as$u20$mount_rs_core..storage..MetadataStore$GT$::publish_bound_if_revision::_$u7b$$u7b$closure$u7d$$u7d$::haafddcbbd51dad83  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 1772  [0x1030664cc]
+    +                       !               |     32 _$LT$mount_rs_sdk..stores..ErasedMetadataStore$u20$as$u20$mount_rs_core..storage..MetadataStore$GT$::publish_bound_if_revision::_$u7b$$u7b$closure$u7d$$u7d$::hcc553d25dffad2ef  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 224  [0x102d3b050]
+    +                       !               |       29 _$LT$mount_rs_sqlite..storage..SqliteMetadataStore$u20$as$u20$mount_rs_core..storage..MetadataStore$GT$::publish_bound_if_revision::_$u7b$$u7b$closure$u7d$$u7d$::haafddcbbd51dad83  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 1072  [0x103066210]
+    +                       !               |       1 _$LT$mount_rs_sqlite..storage..SqliteMetadataStore$u20$as$u20$mount_rs_core..storage..MetadataStore$GT$::publish_bound_if_revision::_$u7b$$u7b$closure$u7d$$u7d$::haafddcbbd51dad83  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 1772  [0x1030664cc]
+    +                       !               |       1 _$LT$mount_rs_sqlite..storage..SqliteMetadataStore$u20$as$u20$mount_rs_core..storage..MetadataStore$GT$::publish_bound_if_revision::_$u7b$$u7b$closure$u7d$$u7d$::haafddcbbd51dad83  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 3584  [0x103066be0]
+    +                       !               |       1 _$LT$mount_rs_sqlite..storage..SqliteMetadataStore$u20$as$u20$mount_rs_core..storage..MetadataStore$GT$::publish_bound_if_revision::_$u7b$$u7b$closure$u7d$$u7d$::haafddcbbd51dad83  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 3708  [0x103066c5c]
+    +                       !               |                       1 sqlite3PagerCommitPhaseOne  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 452  [0x103341f5c]
+    +                       !               |                           1 unixSync  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 72  [0x10335b260]
+    +                       !               |     1 _$LT$mount_rs_sdk..stores..ErasedMetadataStore$u20$as$u20$mount_rs_core..storage..MetadataStore$GT$::publish_bound_if_revision::_$u7b$$u7b$closure$u7d$$u7d$::hcc553d25dffad2ef  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 224  [0x102d3b050]
+    +                       !               |       1 _$LT$mount_rs_sqlite..storage..SqliteMetadataStore$u20$as$u20$mount_rs_core..storage..MetadataStore$GT$::publish_bound_if_revision::_$u7b$$u7b$closure$u7d$$u7d$::haafddcbbd51dad83  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 456  [0x103065fa8]
+    +                       !               |                       1 serde_json::ser::format_escaped_str::hacfc314211037187  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 476  [0x10309e54c]
+    +                       !                 1 mount_rs_chunked::ChunkedFs$LT$M$C$B$GT$::snapshot::hf88e167c9eb59ab0  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 516  [0x102d0b888]
+    +                       ! :             |     7 _$LT$mount_rs_sdk..stores..ErasedMetadataStore$u20$as$u20$mount_rs_core..storage..MetadataStore$GT$::publish_bound_if_revision::_$u7b$$u7b$closure$u7d$$u7d$::hcc553d25dffad2ef  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 224  [0x102d3b050]
+    +                       ! :             |       4 _$LT$mount_rs_sqlite..storage..SqliteMetadataStore$u20$as$u20$mount_rs_core..storage..MetadataStore$GT$::publish_bound_if_revision::_$u7b$$u7b$closure$u7d$$u7d$::haafddcbbd51dad83  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 1072  [0x103066210]
+    +                       ! :             |       2 _$LT$mount_rs_sqlite..storage..SqliteMetadataStore$u20$as$u20$mount_rs_core..storage..MetadataStore$GT$::publish_bound_if_revision::_$u7b$$u7b$closure$u7d$$u7d$::haafddcbbd51dad83  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 456  [0x103065fa8]
+    +                       ! :             |       +       !     1 serde_json::ser::format_escaped_str::hacfc314211037187  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 436  [0x10309e524]
+    +                       ! :             |       +             1 serde_json::ser::format_escaped_str::hacfc314211037187  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 540  [0x10309e58c]
+    +                       ! :             |       1 _$LT$mount_rs_sqlite..storage..SqliteMetadataStore$u20$as$u20$mount_rs_core..storage..MetadataStore$GT$::publish_bound_if_revision::_$u7b$$u7b$closure$u7d$$u7d$::haafddcbbd51dad83  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 112  [0x103065e50]
+    +                       ! :               1 mount_rs_chunked::ChunkedFs$LT$M$C$B$GT$::snapshot::hf88e167c9eb59ab0  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 516  [0x102d0b888]
+    +           243 tokio::runtime::blocking::pool::Inner::run::h5026e6bde3f28dc0  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 400  [0x10350dc68]
+    +                       ! :         |   +   ! 12 _$LT$mount_rs_sdk..stores..ErasedMetadataStore$u20$as$u20$mount_rs_core..storage..MetadataStore$GT$::publish_bound_if_revision::_$u7b$$u7b$closure$u7d$$u7d$::hcc553d25dffad2ef  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 224  [0x102d3b050]
+    +                       ! :         |   +   !   10 _$LT$mount_rs_sqlite..storage..SqliteMetadataStore$u20$as$u20$mount_rs_core..storage..MetadataStore$GT$::publish_bound_if_revision::_$u7b$$u7b$closure$u7d$$u7d$::haafddcbbd51dad83  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 1072  [0x103066210]
+    +                       ! :         |   +   !   1 _$LT$mount_rs_sqlite..storage..SqliteMetadataStore$u20$as$u20$mount_rs_core..storage..MetadataStore$GT$::publish_bound_if_revision::_$u7b$$u7b$closure$u7d$$u7d$::haafddcbbd51dad83  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 3584  [0x103066be0]
+    +                       ! :         |   +   !   1 _$LT$mount_rs_sqlite..storage..SqliteMetadataStore$u20$as$u20$mount_rs_core..storage..MetadataStore$GT$::publish_bound_if_revision::_$u7b$$u7b$closure$u7d$$u7d$::haafddcbbd51dad83  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 3708  [0x103066c5c]
+    +                       ! :         |   +     9 _$LT$mount_rs_sdk..stores..ErasedMetadataStore$u20$as$u20$mount_rs_core..storage..MetadataStore$GT$::publish_bound_if_revision::_$u7b$$u7b$closure$u7d$$u7d$::hcc553d25dffad2ef  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 224  [0x102d3b050]
+    +                       ! :         |   +       7 _$LT$mount_rs_sqlite..storage..SqliteMetadataStore$u20$as$u20$mount_rs_core..storage..MetadataStore$GT$::publish_bound_if_revision::_$u7b$$u7b$closure$u7d$$u7d$::haafddcbbd51dad83  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 1072  [0x103066210]
+    +                       ! :         |   +       1 _$LT$mount_rs_sqlite..storage..SqliteMetadataStore$u20$as$u20$mount_rs_core..storage..MetadataStore$GT$::publish_bound_if_revision::_$u7b$$u7b$closure$u7d$$u7d$::haafddcbbd51dad83  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 1440  [0x103066380]
+    +                       ! :         |   +       1 _$LT$mount_rs_sqlite..storage..SqliteMetadataStore$u20$as$u20$mount_rs_core..storage..MetadataStore$GT$::publish_bound_if_revision::_$u7b$$u7b$closure$u7d$$u7d$::haafddcbbd51dad83  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 3708  [0x103066c5c]
+    +                       ! :         |   +                       1 sqlite3PagerCommitPhaseOne  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 452  [0x103341f5c]
+    +                       ! :         |   +                           1 unixSync  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 72  [0x10335b260]
+    +                       ! :         |   + 1 mount_rs_chunked::ChunkedFs$LT$M$C$B$GT$::snapshot::hf88e167c9eb59ab0  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 516  [0x102d0b888]
+    +                       ! :         |     1 mount_rs_chunked::ChunkedFs$LT$M$C$B$GT$::snapshot::hf88e167c9eb59ab0  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 516  [0x102d0b888]
+    +                       ! :                       1 serde_json::ser::format_escaped_str::hef590fae4ce96fde  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 300  [0x10353d76c]
+    +                       !               |   + 22 _$LT$mount_rs_sdk..stores..ErasedMetadataStore$u20$as$u20$mount_rs_core..storage..MetadataStore$GT$::publish_bound_if_revision::_$u7b$$u7b$closure$u7d$$u7d$::hcc553d25dffad2ef  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 224  [0x102d3b050]
+    +                       !               |   +   18 _$LT$mount_rs_sqlite..storage..SqliteMetadataStore$u20$as$u20$mount_rs_core..storage..MetadataStore$GT$::publish_bound_if_revision::_$u7b$$u7b$closure$u7d$$u7d$::haafddcbbd51dad83  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 1072  [0x103066210]
+    +                       !               |   +   2 _$LT$mount_rs_sqlite..storage..SqliteMetadataStore$u20$as$u20$mount_rs_core..storage..MetadataStore$GT$::publish_bound_if_revision::_$u7b$$u7b$closure$u7d$$u7d$::haafddcbbd51dad83  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 3584  [0x103066be0]
+
+Sort by top of stack, same collapsed (when >= 5):
+        __psynch_cvwait  (in libsystem_kernel.dylib)        25775
+        __semwait_signal  (in libsystem_kernel.dylib)        1850
+        kevent  (in libsystem_kernel.dylib)        467
+        semaphore_wait_trap  (in libsystem_kernel.dylib)        243
+        __psynch_mutexwait  (in libsystem_kernel.dylib)        123
+        __open  (in libsystem_kernel.dylib)        51
+        pread  (in libsystem_kernel.dylib)        50
+        stat  (in libsystem_kernel.dylib)        49
+        fsync  (in libsystem_kernel.dylib)        39
+        __unlink  (in libsystem_kernel.dylib)        21
+        serde_json::ser::format_escaped_str::hacfc314211037187  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e)        21
+        __fcntl  (in libsystem_kernel.dylib)        13
+        __sendmsg  (in libsystem_kernel.dylib)        13
+        _xzm_free  (in libsystem_malloc.dylib)        13
+        write  (in libsystem_kernel.dylib)        13
+        _platform_memmove  (in libsystem_platform.dylib)        11
+        pwrite  (in libsystem_kernel.dylib)        11
+        close  (in libsystem_kernel.dylib)        7
+        <deduplicated_symbol>  (in libsystem_malloc.dylib)        5
+        _$LT$u64$u20$as$u20$itoa..Unsigned$GT$::fmt::hc2faaa5056ac809a  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e)        5
+        __recvmsg  (in libsystem_kernel.dylib)        5
+        _malloc_zone_malloc  (in libsystem_malloc.dylib)        5

@@ -33,6 +33,15 @@ if [ "$ready" -ne 1 ]; then
   exit 1
 fi
 
+# Focused per-inode CAS fixture; avoids the broad pgwire client fanout tests.
+if [ "${MOUNT_RS_PGLITE_TEST_SCOPE:-}" = "inode" ]; then
+  PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
+    "$repo_dir/scripts/cargo-shared" test --offline --locked -p mount-rs-pglite \
+      --lib storage::tests::inode_guards_cas_fold_and_reopen \
+      -- --ignored --exact --nocapture
+  exit 0
+fi
+
 if [ "${MOUNT_RS_PGLITE_TEST_SCOPE:-}" = "benchmark" ]; then
   benchmark_providers="mount-rs-pglite,mount-rs-split-pglite"
   if [ "${MOUNT_RS_PGLITE_R2_BENCHMARK:-0}" = "1" ]; then

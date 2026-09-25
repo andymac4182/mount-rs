@@ -1,0 +1,5877 @@
+{
+  "schema": "mount-rs-foundationdb-counter-stages-v1",
+  "inode_updates": true,
+  "stages": [
+    {
+      "schema": "mount-rs-foundationdb-counter-deltas-v1",
+      "stage": "remote-saturation-1675-1790245493321359303-2",
+      "observation_seconds": 15.056310285,
+      "application": {
+        "mode": "read",
+        "total_queue_depth": 100,
+        "successes": 70131,
+        "failures": 0
+      },
+      "fdb_process_device_counters": {
+        "20b08758ce39ade3eb287e4e29448270": {
+          "reads": {
+            "delta": 11,
+            "per_second": 0.7305906820317631,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 1158,
+            "per_second": 76.91127361752561,
+            "counter_reset": false
+          }
+        }
+      },
+      "logical_datastore_counters": {
+        "cluster.workload.bytes.read": {
+          "delta": 523326388,
+          "per_second": 34757943.88492174,
+          "counter_reset": false,
+          "per_successful_application_op": 7462.126420555817
+        },
+        "cluster.workload.bytes.written": {
+          "delta": 20061062,
+          "per_second": 1332402.2698964986,
+          "counter_reset": false,
+          "per_successful_application_op": 286.0512754701915
+        },
+        "cluster.workload.keys.read": {
+          "delta": 1301362,
+          "per_second": 86432.99555911084,
+          "counter_reset": false,
+          "per_successful_application_op": 18.55615918780568
+        },
+        "cluster.workload.operations.location_requests": {
+          "delta": 70,
+          "per_second": 4.64921343111122,
+          "counter_reset": false,
+          "per_successful_application_op": 0.000998132067131511
+        },
+        "cluster.workload.operations.low_priority_reads": {
+          "delta": 0,
+          "per_second": 0.0,
+          "counter_reset": false,
+          "per_successful_application_op": 0.0
+        },
+        "cluster.workload.operations.memory_errors": {
+          "delta": 0,
+          "per_second": 0.0,
+          "counter_reset": false,
+          "per_successful_application_op": 0.0
+        },
+        "cluster.workload.operations.read_requests": {
+          "delta": 1352477,
+          "per_second": 89827.917623843,
+          "counter_reset": false,
+          "per_successful_application_op": 19.285009482254637
+        },
+        "cluster.workload.operations.reads": {
+          "delta": 1352477,
+          "per_second": 89827.917623843,
+          "counter_reset": false,
+          "per_successful_application_op": 19.285009482254637
+        },
+        "cluster.workload.operations.writes": {
+          "delta": 24706,
+          "per_second": 1640.90667184334,
+          "counter_reset": false,
+          "per_successful_application_op": 0.3522835835793016
+        },
+        "cluster.workload.transactions.committed": {
+          "delta": 3407,
+          "per_second": 226.2838594256561,
+          "counter_reset": false,
+          "per_successful_application_op": 0.04858051361024369
+        },
+        "cluster.workload.transactions.conflicted": {
+          "delta": 198,
+          "per_second": 13.150632276571736,
+          "counter_reset": false,
+          "per_successful_application_op": 0.002823287847029131
+        },
+        "cluster.workload.transactions.rejected_for_queued_too_long": {
+          "delta": 0,
+          "per_second": 0.0,
+          "counter_reset": false,
+          "per_successful_application_op": 0.0
+        },
+        "cluster.workload.transactions.started": {
+          "delta": 289715,
+          "per_second": 19242.098131348386,
+          "counter_reset": false,
+          "per_successful_application_op": 4.131054740414368
+        },
+        "cluster.workload.transactions.started_batch_priority": {
+          "delta": 1,
+          "per_second": 0.06641733473016029,
+          "counter_reset": false,
+          "per_successful_application_op": 1.4259029530450158e-05
+        },
+        "cluster.workload.transactions.started_default_priority": {
+          "delta": 289650,
+          "per_second": 19237.781004590925,
+          "counter_reset": false,
+          "per_successful_application_op": 4.130127903494889
+        },
+        "cluster.workload.transactions.started_immediate_priority": {
+          "delta": 64,
+          "per_second": 4.250709422730258,
+          "counter_reset": false,
+          "per_successful_application_op": 0.0009125778899488101
+        }
+      },
+      "resource_gauges_begin": {
+        "processes": {
+          "20b08758ce39ade3eb287e4e29448270": {
+            "cpu": {
+              "available": true,
+              "sample": {
+                "usage_cores": 0.14581000000000002
+              }
+            },
+            "memory": {
+              "available": true,
+              "sample": {
+                "available_bytes": 7199117312,
+                "limit_bytes": 8589934592,
+                "rss_bytes": 202502144,
+                "unused_allocated_memory": 0,
+                "used_bytes": 334061568
+              }
+            },
+            "network": {
+              "available": true,
+              "sample": {
+                "connection_errors": {
+                  "hz": 0
+                },
+                "connections_closed": {
+                  "hz": 0
+                },
+                "connections_established": {
+                  "hz": 0.199999
+                },
+                "current_connections": 1,
+                "megabits_received": {
+                  "hz": 95.4626
+                },
+                "megabits_sent": {
+                  "hz": 262.482
+                },
+                "tls_policy_failures": {
+                  "hz": 0
+                }
+              }
+            }
+          }
+        },
+        "machines": {
+          "fdb1": {
+            "cpu": {
+              "available": true,
+              "sample": {
+                "logical_core_utilization": 0.110315
+              }
+            },
+            "memory": {
+              "available": true,
+              "sample": {
+                "committed_bytes": 1322360832,
+                "free_bytes": 6996615168,
+                "total_bytes": 8318976000
+              }
+            },
+            "network": {
+              "available": true,
+              "sample": {
+                "megabits_received": {
+                  "hz": 97.0407
+                },
+                "megabits_sent": {
+                  "hz": 263.897
+                },
+                "tcp_segments_retransmitted": {
+                  "hz": 0
+                }
+              }
+            }
+          }
+        }
+      },
+      "resource_gauges_end": {
+        "processes": {
+          "20b08758ce39ade3eb287e4e29448270": {
+            "cpu": {
+              "available": true,
+              "sample": {
+                "usage_cores": 0.435473
+              }
+            },
+            "memory": {
+              "available": true,
+              "sample": {
+                "available_bytes": 7212826624,
+                "limit_bytes": 8589934592,
+                "rss_bytes": 322834432,
+                "unused_allocated_memory": 2752000,
+                "used_bytes": 504193024
+              }
+            },
+            "network": {
+              "available": true,
+              "sample": {
+                "connection_errors": {
+                  "hz": 0
+                },
+                "connections_closed": {
+                  "hz": 0
+                },
+                "connections_established": {
+                  "hz": 0
+                },
+                "current_connections": 1,
+                "megabits_received": {
+                  "hz": 205.95
+                },
+                "megabits_sent": {
+                  "hz": 247.217
+                },
+                "tls_policy_failures": {
+                  "hz": 0
+                }
+              }
+            }
+          }
+        },
+        "machines": {
+          "fdb1": {
+            "cpu": {
+              "available": true,
+              "sample": {
+                "logical_core_utilization": 0.287698
+              }
+            },
+            "memory": {
+              "available": true,
+              "sample": {
+                "committed_bytes": 1428983808,
+                "free_bytes": 6889992192,
+                "total_bytes": 8318976000
+              }
+            },
+            "network": {
+              "available": true,
+              "sample": {
+                "megabits_received": {
+                  "hz": 209.261
+                },
+                "megabits_sent": {
+                  "hz": 250.073
+                },
+                "tcp_segments_retransmitted": {
+                  "hz": 0
+                }
+              }
+            }
+          }
+        }
+      },
+      "resource_gauge_scope": "FDB exported process/machine samples; cpu usage_cores in cores, memory *_bytes in bytes, network megabits *.hz in megabits/sec. Rates and gauges are neither counter deltas nor stage averages.",
+      "latency_probe_seconds_begin": {
+        "batch_priority_transaction_start_seconds": 2.09808e-05,
+        "commit_seconds": 0.0025022,
+        "immediate_priority_transaction_start_seconds": 0.000798225,
+        "read_seconds": 3.0040700000000002e-05,
+        "transaction_start_seconds": 0.00240421
+      },
+      "latency_probe_seconds_end": {
+        "batch_priority_transaction_start_seconds": 2.43187e-05,
+        "commit_seconds": 0.00145555,
+        "immediate_priority_transaction_start_seconds": 0.00046896899999999996,
+        "read_seconds": 2.6464500000000007e-05,
+        "transaction_start_seconds": 0.00167656
+      },
+      "linux_vm_block_devices": {
+        "loop0": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "loop1": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "loop2": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "loop3": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "loop4": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "loop5": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "loop6": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "loop7": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd0": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd1": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd10": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd11": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd12": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd13": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd14": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd15": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd2": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd3": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd4": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd5": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd6": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd7": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd8": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd9": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram0": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram1": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram10": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram11": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram12": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram13": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram14": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram15": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram2": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram3": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram4": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram5": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram6": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram7": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram8": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram9": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "vda": {
+          "io_ms": {
+            "delta": 85,
+            "per_second": 5.645473452063624,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 136,
+            "per_second": 9.032757523301798,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 2,
+            "per_second": 0.13283466946032058,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 1079,
+            "per_second": 71.66430417384295,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 115928,
+            "per_second": 7699.628780598021,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 1064,
+            "per_second": 70.66804415289054,
+            "counter_reset": false
+          }
+        },
+        "vda1": {
+          "io_ms": {
+            "delta": 89,
+            "per_second": 5.9111427909842655,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 1,
+            "per_second": 0.06641733473016029,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 136,
+            "per_second": 9.032757523301798,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 2,
+            "per_second": 0.13283466946032058,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 1079,
+            "per_second": 71.66430417384295,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 115928,
+            "per_second": 7699.628780598021,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 1064,
+            "per_second": 70.66804415289054,
+            "counter_reset": false
+          }
+        },
+        "vdb": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        }
+      },
+      "client_process_io": {
+        "available": true,
+        "scope": "owned native integration-test Linux process",
+        "counters": {
+          "cancelled_write_bytes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "rchar": {
+            "delta": 25940,
+            "per_second": 1722.8656629003578,
+            "counter_reset": false
+          },
+          "read_bytes": {
+            "delta": 614400,
+            "per_second": 40806.81045821048,
+            "counter_reset": false
+          },
+          "syscr": {
+            "delta": 99,
+            "per_second": 6.575316138285868,
+            "counter_reset": false
+          },
+          "syscw": {
+            "delta": 211565,
+            "per_second": 14051.58342218636,
+            "counter_reset": false
+          },
+          "wchar": {
+            "delta": 11401406,
+            "per_second": 757250.9986964578,
+            "counter_reset": false
+          },
+          "write_bytes": {
+            "delta": 30790,
+            "per_second": 2044.989736341635,
+            "counter_reset": false
+          }
+        },
+        "syscw_per_successful_application_op": 3.0167115826096875
+      },
+      "limitations": [
+        "FDB status counters are cluster-wide exported snapshots and include probes/background traffic.",
+        "Status export lag means interval counts are diagnostic, not exact application attribution.",
+        "Latency probes sample internal transactions; they are not application latency percentiles.",
+        "Linux /proc/diskstats covers shared Docker VM block devices, not physical macOS SSD or one container.",
+        "Do not sum parent devices and partitions; device mapping may overlap.",
+        "Logical operations, commits, and block-device IOPS are different measurement units."
+      ],
+      "availability": {
+        "rust_system_allocator": {
+          "available": true
+        },
+        "foreign_foundationdb_c_allocator": {
+          "available": false,
+          "reason": "Rust System allocation tracing excludes native FDB C allocations"
+        },
+        "fdb_cpu_rss_network_gauge_snapshots": {
+          "available": true
+        },
+        "fdb_cpu_rss_network_stage_averages": {
+          "available": false,
+          "reason": "Exported boundary gauges are not integrated stage averages"
+        },
+        "physical_macos_ssd_iops": {
+          "available": false,
+          "reason": "Block device counters cover shared Linux Docker VM"
+        }
+      }
+    },
+    {
+      "schema": "mount-rs-foundationdb-counter-deltas-v1",
+      "stage": "remote-saturation-1763-1790245515322234549-2",
+      "observation_seconds": 15.05639016,
+      "application": {
+        "mode": "read",
+        "total_queue_depth": 100,
+        "successes": 68577,
+        "failures": 0
+      },
+      "fdb_process_device_counters": {
+        "20b08758ce39ade3eb287e4e29448270": {
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 1196,
+            "per_second": 79.43471092940912,
+            "counter_reset": false
+          }
+        }
+      },
+      "logical_datastore_counters": {
+        "cluster.workload.bytes.read": {
+          "delta": 299319262,
+          "per_second": 19879882.15098167,
+          "counter_reset": false,
+          "per_successful_application_op": 4364.717937500912
+        },
+        "cluster.workload.bytes.written": {
+          "delta": 70,
+          "per_second": 4.649188766771437,
+          "counter_reset": false,
+          "per_successful_application_op": 0.0010207503973635476
+        },
+        "cluster.workload.keys.read": {
+          "delta": 909152,
+          "per_second": 60383.13236696837,
+          "counter_reset": false,
+          "per_successful_application_op": 13.257389503769485
+        },
+        "cluster.workload.operations.location_requests": {
+          "delta": 0,
+          "per_second": 0.0,
+          "counter_reset": false,
+          "per_successful_application_op": 0.0
+        },
+        "cluster.workload.operations.low_priority_reads": {
+          "delta": 0,
+          "per_second": 0.0,
+          "counter_reset": false,
+          "per_successful_application_op": 0.0
+        },
+        "cluster.workload.operations.memory_errors": {
+          "delta": 0,
+          "per_second": 0.0,
+          "counter_reset": false,
+          "per_successful_application_op": 0.0
+        },
+        "cluster.workload.operations.read_requests": {
+          "delta": 1049109,
+          "per_second": 69678.6539702688,
+          "counter_reset": false,
+          "per_successful_application_op": 15.298263266109629
+        },
+        "cluster.workload.operations.reads": {
+          "delta": 1049109,
+          "per_second": 69678.6539702688,
+          "counter_reset": false,
+          "per_successful_application_op": 15.298263266109629
+        },
+        "cluster.workload.operations.writes": {
+          "delta": 2,
+          "per_second": 0.1328339647648982,
+          "counter_reset": false,
+          "per_successful_application_op": 2.916429706752993e-05
+        },
+        "cluster.workload.transactions.committed": {
+          "delta": 2,
+          "per_second": 0.1328339647648982,
+          "counter_reset": false,
+          "per_successful_application_op": 2.916429706752993e-05
+        },
+        "cluster.workload.transactions.conflicted": {
+          "delta": 0,
+          "per_second": 0.0,
+          "counter_reset": false,
+          "per_successful_application_op": 0.0
+        },
+        "cluster.workload.transactions.rejected_for_queued_too_long": {
+          "delta": 0,
+          "per_second": 0.0,
+          "counter_reset": false,
+          "per_successful_application_op": 0.0
+        },
+        "cluster.workload.transactions.started": {
+          "delta": 209874,
+          "per_second": 13939.197760534124,
+          "counter_reset": false,
+          "per_successful_application_op": 3.060413841375388
+        },
+        "cluster.workload.transactions.started_batch_priority": {
+          "delta": 1,
+          "per_second": 0.0664169823824491,
+          "counter_reset": false,
+          "per_successful_application_op": 1.4582148533764964e-05
+        },
+        "cluster.workload.transactions.started_default_priority": {
+          "delta": 209822,
+          "per_second": 13935.744077450236,
+          "counter_reset": false,
+          "per_successful_application_op": 3.0596555696516323
+        },
+        "cluster.workload.transactions.started_immediate_priority": {
+          "delta": 51,
+          "per_second": 3.3872661015049044,
+          "counter_reset": false,
+          "per_successful_application_op": 0.0007436895752220132
+        }
+      },
+      "resource_gauges_begin": {
+        "processes": {
+          "20b08758ce39ade3eb287e4e29448270": {
+            "cpu": {
+              "available": true,
+              "sample": {
+                "usage_cores": 0.343465
+              }
+            },
+            "memory": {
+              "available": true,
+              "sample": {
+                "available_bytes": 6996885504,
+                "limit_bytes": 8589934592,
+                "rss_bytes": 280682496,
+                "unused_allocated_memory": 524288,
+                "used_bytes": 551247872
+              }
+            },
+            "network": {
+              "available": true,
+              "sample": {
+                "connection_errors": {
+                  "hz": 0
+                },
+                "connections_closed": {
+                  "hz": 0.199995
+                },
+                "connections_established": {
+                  "hz": 0.199995
+                },
+                "current_connections": 1,
+                "megabits_received": {
+                  "hz": 233.771
+                },
+                "megabits_sent": {
+                  "hz": 421.13
+                },
+                "tls_policy_failures": {
+                  "hz": 0
+                }
+              }
+            }
+          }
+        },
+        "machines": {
+          "fdb1": {
+            "cpu": {
+              "available": true,
+              "sample": {
+                "logical_core_utilization": 0.25544900000000004
+              }
+            },
+            "memory": {
+              "available": true,
+              "sample": {
+                "committed_bytes": 1602772992,
+                "free_bytes": 6716203008,
+                "total_bytes": 8318976000
+              }
+            },
+            "network": {
+              "available": true,
+              "sample": {
+                "megabits_received": {
+                  "hz": 237.582
+                },
+                "megabits_sent": {
+                  "hz": 424.505
+                },
+                "tcp_segments_retransmitted": {
+                  "hz": 0
+                }
+              }
+            }
+          }
+        }
+      },
+      "resource_gauges_end": {
+        "processes": {
+          "20b08758ce39ade3eb287e4e29448270": {
+            "cpu": {
+              "available": true,
+              "sample": {
+                "usage_cores": 0.455042
+              }
+            },
+            "memory": {
+              "available": true,
+              "sample": {
+                "available_bytes": 7024099328,
+                "limit_bytes": 8589934592,
+                "rss_bytes": 366415872,
+                "unused_allocated_memory": 2882976,
+                "used_bytes": 552820736
+              }
+            },
+            "network": {
+              "available": true,
+              "sample": {
+                "connection_errors": {
+                  "hz": 0
+                },
+                "connections_closed": {
+                  "hz": 0
+                },
+                "connections_established": {
+                  "hz": 0
+                },
+                "current_connections": 1,
+                "megabits_received": {
+                  "hz": 195.212
+                },
+                "megabits_sent": {
+                  "hz": 234.324
+                },
+                "tls_policy_failures": {
+                  "hz": 0
+                }
+              }
+            }
+          }
+        },
+        "machines": {
+          "fdb1": {
+            "cpu": {
+              "available": true,
+              "sample": {
+                "logical_core_utilization": 0.282227
+              }
+            },
+            "memory": {
+              "available": true,
+              "sample": {
+                "committed_bytes": 1661292544,
+                "free_bytes": 6657683456,
+                "total_bytes": 8318976000
+              }
+            },
+            "network": {
+              "available": true,
+              "sample": {
+                "megabits_received": {
+                  "hz": 198.343
+                },
+                "megabits_sent": {
+                  "hz": 237.028
+                },
+                "tcp_segments_retransmitted": {
+                  "hz": 0
+                }
+              }
+            }
+          }
+        }
+      },
+      "resource_gauge_scope": "FDB exported process/machine samples; cpu usage_cores in cores, memory *_bytes in bytes, network megabits *.hz in megabits/sec. Rates and gauges are neither counter deltas nor stage averages.",
+      "latency_probe_seconds_begin": {
+        "batch_priority_transaction_start_seconds": 1.716610000000001e-05,
+        "commit_seconds": 0.00153327,
+        "immediate_priority_transaction_start_seconds": 0.00030851399999999997,
+        "read_seconds": 1.4782e-05,
+        "transaction_start_seconds": 0.00125384
+      },
+      "latency_probe_seconds_end": {
+        "batch_priority_transaction_start_seconds": 2.622600000000001e-05,
+        "commit_seconds": 0.00181532,
+        "immediate_priority_transaction_start_seconds": 4.172330000000001e-05,
+        "read_seconds": 1.4782e-05,
+        "transaction_start_seconds": 0.000953436
+      },
+      "linux_vm_block_devices": {
+        "loop0": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "loop1": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "loop2": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "loop3": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "loop4": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "loop5": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "loop6": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "loop7": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd0": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd1": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd10": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd11": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd12": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd13": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd14": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd15": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd2": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd3": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd4": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd5": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd6": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd7": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd8": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd9": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram0": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram1": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram10": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram11": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram12": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram13": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram14": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram15": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram2": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram3": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram4": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram5": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram6": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram7": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram8": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram9": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "vda": {
+          "io_ms": {
+            "delta": 53,
+            "per_second": 3.5201000662698023,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 1322,
+            "per_second": 87.80325070959772,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 82864,
+            "per_second": 5503.576828139263,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 1199,
+            "per_second": 79.63396187655647,
+            "counter_reset": false
+          }
+        },
+        "vda1": {
+          "io_ms": {
+            "delta": 59,
+            "per_second": 3.918601960564497,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 1322,
+            "per_second": 87.80325070959772,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 82864,
+            "per_second": 5503.576828139263,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 1199,
+            "per_second": 79.63396187655647,
+            "counter_reset": false
+          }
+        },
+        "vdb": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        }
+      },
+      "client_process_io": {
+        "available": true,
+        "scope": "owned native integration-test Linux process",
+        "counters": {
+          "cancelled_write_bytes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "rchar": {
+            "delta": 25942,
+            "per_second": 1722.9893569654946,
+            "counter_reset": false
+          },
+          "read_bytes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "syscr": {
+            "delta": 100,
+            "per_second": 6.641698238244911,
+            "counter_reset": false
+          },
+          "syscw": {
+            "delta": 213398,
+            "per_second": 14173.251206449873,
+            "counter_reset": false
+          },
+          "wchar": {
+            "delta": 11202791,
+            "per_second": 744055.5724812594,
+            "counter_reset": false
+          },
+          "write_bytes": {
+            "delta": 31963,
+            "per_second": 2122.8860078902208,
+            "counter_reset": false
+          }
+        },
+        "syscw_per_successful_application_op": 3.111801332808376
+      },
+      "limitations": [
+        "FDB status counters are cluster-wide exported snapshots and include probes/background traffic.",
+        "Status export lag means interval counts are diagnostic, not exact application attribution.",
+        "Latency probes sample internal transactions; they are not application latency percentiles.",
+        "Linux /proc/diskstats covers shared Docker VM block devices, not physical macOS SSD or one container.",
+        "Do not sum parent devices and partitions; device mapping may overlap.",
+        "Logical operations, commits, and block-device IOPS are different measurement units."
+      ],
+      "availability": {
+        "rust_system_allocator": {
+          "available": true
+        },
+        "foreign_foundationdb_c_allocator": {
+          "available": false,
+          "reason": "Rust System allocation tracing excludes native FDB C allocations"
+        },
+        "fdb_cpu_rss_network_gauge_snapshots": {
+          "available": true
+        },
+        "fdb_cpu_rss_network_stage_averages": {
+          "available": false,
+          "reason": "Exported boundary gauges are not integrated stage averages"
+        },
+        "physical_macos_ssd_iops": {
+          "available": false,
+          "reason": "Block device counters cover shared Linux Docker VM"
+        }
+      }
+    },
+    {
+      "schema": "mount-rs-foundationdb-counter-deltas-v1",
+      "stage": "remote-saturation-1763-1790245515322234549-4",
+      "observation_seconds": 15.078291007,
+      "application": {
+        "mode": "write",
+        "total_queue_depth": 100,
+        "successes": 30985,
+        "failures": 0
+      },
+      "fdb_process_device_counters": {
+        "20b08758ce39ade3eb287e4e29448270": {
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 72958,
+            "per_second": 4838.612012868681,
+            "counter_reset": false
+          }
+        }
+      },
+      "logical_datastore_counters": {
+        "cluster.workload.bytes.read": {
+          "delta": 148798582,
+          "per_second": 9868398.343746066,
+          "counter_reset": false,
+          "per_successful_application_op": 4802.277940939164
+        },
+        "cluster.workload.bytes.written": {
+          "delta": 275944833,
+          "per_second": 18300802.98038381,
+          "counter_reset": false,
+          "per_successful_application_op": 8905.755462320478
+        },
+        "cluster.workload.keys.read": {
+          "delta": 427421,
+          "per_second": 28346.780135863708,
+          "counter_reset": false,
+          "per_successful_application_op": 13.794448926900113
+        },
+        "cluster.workload.operations.location_requests": {
+          "delta": 0,
+          "per_second": 0.0,
+          "counter_reset": false,
+          "per_successful_application_op": 0.0
+        },
+        "cluster.workload.operations.low_priority_reads": {
+          "delta": 0,
+          "per_second": 0.0,
+          "counter_reset": false,
+          "per_successful_application_op": 0.0
+        },
+        "cluster.workload.operations.memory_errors": {
+          "delta": 0,
+          "per_second": 0.0,
+          "counter_reset": false,
+          "per_successful_application_op": 0.0
+        },
+        "cluster.workload.operations.read_requests": {
+          "delta": 549543,
+          "per_second": 36445.973866990505,
+          "counter_reset": false,
+          "per_successful_application_op": 17.73577537518154
+        },
+        "cluster.workload.operations.reads": {
+          "delta": 549543,
+          "per_second": 36445.973866990505,
+          "counter_reset": false,
+          "per_successful_application_op": 17.73577537518154
+        },
+        "cluster.workload.operations.writes": {
+          "delta": 91610,
+          "per_second": 6075.622227842044,
+          "counter_reset": false,
+          "per_successful_application_op": 2.9565918993061158
+        },
+        "cluster.workload.transactions.committed": {
+          "delta": 61048,
+          "per_second": 4048.734698889871,
+          "counter_reset": false,
+          "per_successful_application_op": 1.9702436662901404
+        },
+        "cluster.workload.transactions.conflicted": {
+          "delta": 1,
+          "per_second": 0.06632051334834672,
+          "counter_reset": false,
+          "per_successful_application_op": 3.227368081329676e-05
+        },
+        "cluster.workload.transactions.rejected_for_queued_too_long": {
+          "delta": 0,
+          "per_second": 0.0,
+          "counter_reset": false,
+          "per_successful_application_op": 0.0
+        },
+        "cluster.workload.transactions.started": {
+          "delta": 152689,
+          "per_second": 10126.412862645713,
+          "counter_reset": false,
+          "per_successful_application_op": 4.927836049701469
+        },
+        "cluster.workload.transactions.started_batch_priority": {
+          "delta": 1,
+          "per_second": 0.06632051334834672,
+          "counter_reset": false,
+          "per_successful_application_op": 3.227368081329676e-05
+        },
+        "cluster.workload.transactions.started_default_priority": {
+          "delta": 152611,
+          "per_second": 10121.239862604543,
+          "counter_reset": false,
+          "per_successful_application_op": 4.925318702598031
+        },
+        "cluster.workload.transactions.started_immediate_priority": {
+          "delta": 77,
+          "per_second": 5.106679527822698,
+          "counter_reset": false,
+          "per_successful_application_op": 0.0024850734226238504
+        }
+      },
+      "resource_gauges_begin": {
+        "processes": {
+          "20b08758ce39ade3eb287e4e29448270": {
+            "cpu": {
+              "available": true,
+              "sample": {
+                "usage_cores": 0.455042
+              }
+            },
+            "memory": {
+              "available": true,
+              "sample": {
+                "available_bytes": 7024099328,
+                "limit_bytes": 8589934592,
+                "rss_bytes": 366415872,
+                "unused_allocated_memory": 2882976,
+                "used_bytes": 552820736
+              }
+            },
+            "network": {
+              "available": true,
+              "sample": {
+                "connection_errors": {
+                  "hz": 0
+                },
+                "connections_closed": {
+                  "hz": 0
+                },
+                "connections_established": {
+                  "hz": 0
+                },
+                "current_connections": 1,
+                "megabits_received": {
+                  "hz": 195.212
+                },
+                "megabits_sent": {
+                  "hz": 234.324
+                },
+                "tls_policy_failures": {
+                  "hz": 0
+                }
+              }
+            }
+          }
+        },
+        "machines": {
+          "fdb1": {
+            "cpu": {
+              "available": true,
+              "sample": {
+                "logical_core_utilization": 0.282227
+              }
+            },
+            "memory": {
+              "available": true,
+              "sample": {
+                "committed_bytes": 1661292544,
+                "free_bytes": 6657683456,
+                "total_bytes": 8318976000
+              }
+            },
+            "network": {
+              "available": true,
+              "sample": {
+                "megabits_received": {
+                  "hz": 198.343
+                },
+                "megabits_sent": {
+                  "hz": 237.028
+                },
+                "tcp_segments_retransmitted": {
+                  "hz": 0
+                }
+              }
+            }
+          }
+        }
+      },
+      "resource_gauges_end": {
+        "processes": {
+          "20b08758ce39ade3eb287e4e29448270": {
+            "cpu": {
+              "available": true,
+              "sample": {
+                "usage_cores": 0.7257669999999999
+              }
+            },
+            "memory": {
+              "available": true,
+              "sample": {
+                "available_bytes": 7031021568,
+                "limit_bytes": 8589934592,
+                "rss_bytes": 894070784,
+                "unused_allocated_memory": 1179488,
+                "used_bytes": 1276731392
+              }
+            },
+            "network": {
+              "available": true,
+              "sample": {
+                "connection_errors": {
+                  "hz": 0
+                },
+                "connections_closed": {
+                  "hz": 0
+                },
+                "connections_established": {
+                  "hz": 0
+                },
+                "current_connections": 1,
+                "megabits_received": {
+                  "hz": 272.866
+                },
+                "megabits_sent": {
+                  "hz": 124.693
+                },
+                "tls_policy_failures": {
+                  "hz": 0
+                }
+              }
+            }
+          }
+        },
+        "machines": {
+          "fdb1": {
+            "cpu": {
+              "available": true,
+              "sample": {
+                "logical_core_utilization": 0.204792
+              }
+            },
+            "memory": {
+              "available": true,
+              "sample": {
+                "committed_bytes": 2182025216,
+                "free_bytes": 6136950784,
+                "total_bytes": 8318976000
+              }
+            },
+            "network": {
+              "available": true,
+              "sample": {
+                "megabits_received": {
+                  "hz": 277.191
+                },
+                "megabits_sent": {
+                  "hz": 128.664
+                },
+                "tcp_segments_retransmitted": {
+                  "hz": 0
+                }
+              }
+            }
+          }
+        }
+      },
+      "resource_gauge_scope": "FDB exported process/machine samples; cpu usage_cores in cores, memory *_bytes in bytes, network megabits *.hz in megabits/sec. Rates and gauges are neither counter deltas nor stage averages.",
+      "latency_probe_seconds_begin": {
+        "batch_priority_transaction_start_seconds": 6.604190000000001e-05,
+        "commit_seconds": 0.00135207,
+        "immediate_priority_transaction_start_seconds": 2.3841900000000003e-05,
+        "read_seconds": 1.33514e-05,
+        "transaction_start_seconds": 0.000715256
+      },
+      "latency_probe_seconds_end": {
+        "batch_priority_transaction_start_seconds": 5.865100000000001e-05,
+        "commit_seconds": 0.00115061,
+        "immediate_priority_transaction_start_seconds": 2.6464500000000007e-05,
+        "read_seconds": 1.2874600000000004e-05,
+        "transaction_start_seconds": 0.000447989
+      },
+      "linux_vm_block_devices": {
+        "loop0": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "loop1": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "loop2": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "loop3": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "loop4": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "loop5": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "loop6": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "loop7": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd0": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd1": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd10": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd11": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd12": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd13": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd14": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd15": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd2": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd3": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd4": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd5": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd6": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd7": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd8": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "nbd9": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram0": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram1": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram10": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram11": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram12": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram13": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram14": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram15": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram2": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram3": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram4": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram5": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram6": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram7": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram8": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "ram9": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        },
+        "vda": {
+          "io_ms": {
+            "delta": 7545,
+            "per_second": 500.3882732132761,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 151259,
+            "per_second": 10031.574528557578,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 2552376,
+            "per_second": 169274.88657799983,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 86678,
+            "per_second": 5748.529456007997,
+            "counter_reset": false
+          }
+        },
+        "vda1": {
+          "io_ms": {
+            "delta": 7701,
+            "per_second": 510.73427329561815,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 151259,
+            "per_second": 10031.574528557578,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 2552376,
+            "per_second": 169274.88657799983,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 86678,
+            "per_second": 5748.529456007997,
+            "counter_reset": false
+          }
+        },
+        "vdb": {
+          "io_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "read_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "reads": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_ms": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "write_sectors": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "writes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          }
+        }
+      },
+      "client_process_io": {
+        "available": true,
+        "scope": "owned native integration-test Linux process",
+        "counters": {
+          "cancelled_write_bytes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "rchar": {
+            "delta": 25944,
+            "per_second": 1720.6193983095075,
+            "counter_reset": false
+          },
+          "read_bytes": {
+            "delta": 0,
+            "per_second": 0.0,
+            "counter_reset": false
+          },
+          "syscr": {
+            "delta": 100,
+            "per_second": 6.632051334834673,
+            "counter_reset": false
+          },
+          "syscw": {
+            "delta": 87447,
+            "per_second": 5799.5299307728765,
+            "counter_reset": false
+          },
+          "wchar": {
+            "delta": 5039200,
+            "per_second": 334202.33086498885,
+            "counter_reset": false
+          },
+          "write_bytes": {
+            "delta": 32691,
+            "per_second": 2168.083901870803,
+            "counter_reset": false
+          }
+        },
+        "syscw_per_successful_application_op": 2.8222365660803614
+      },
+      "limitations": [
+        "FDB status counters are cluster-wide exported snapshots and include probes/background traffic.",
+        "Status export lag means interval counts are diagnostic, not exact application attribution.",
+        "Latency probes sample internal transactions; they are not application latency percentiles.",
+        "Linux /proc/diskstats covers shared Docker VM block devices, not physical macOS SSD or one container.",
+        "Do not sum parent devices and partitions; device mapping may overlap.",
+        "Logical operations, commits, and block-device IOPS are different measurement units."
+      ],
+      "availability": {
+        "rust_system_allocator": {
+          "available": true
+        },
+        "foreign_foundationdb_c_allocator": {
+          "available": false,
+          "reason": "Rust System allocation tracing excludes native FDB C allocations"
+        },
+        "fdb_cpu_rss_network_gauge_snapshots": {
+          "available": true
+        },
+        "fdb_cpu_rss_network_stage_averages": {
+          "available": false,
+          "reason": "Exported boundary gauges are not integrated stage averages"
+        },
+        "physical_macos_ssd_iops": {
+          "available": false,
+          "reason": "Block device counters cover shared Linux Docker VM"
+        }
+      }
+    }
+  ]
+}

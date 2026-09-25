@@ -237,6 +237,8 @@ pub struct SplitOptions {
     /// Persisted, opt-in concurrent metadata mode; the provider must support
     /// revision CAS and fence legacy lease clients on the same volume.
     pub concurrent_writes: bool,
+    /// Explicitly enroll and use per-inode metadata publication (MRC4).
+    pub inode_updates: bool,
     /// Defer exclusive namespace publication until synchronization.
     pub writeback: bool,
     /// Persisted directory checkout authority (MRC3), distinct from legacy CAS.
@@ -258,6 +260,7 @@ impl SplitOptions {
             owner: owner.into(),
             lease_ttl: Duration::from_secs(30),
             concurrent_writes: false,
+            inode_updates: false,
             writeback: false,
             delegated: false,
             checkout_path: None,
@@ -281,6 +284,17 @@ impl SplitOptions {
         self.concurrent_writes = concurrent_writes;
         self.delegated = false;
         self.checkout_path = None;
+        self
+    }
+
+    /// Opt in to the persisted MRC4 format and per-inode publication.
+    /// Enabling this also enables concurrent writes; disabling it preserves
+    /// the selected concurrency and ownership settings.
+    pub fn with_inode_updates(mut self, inode_updates: bool) -> Self {
+        self.inode_updates = inode_updates;
+        if inode_updates {
+            self.concurrent_writes = true;
+        }
         self
     }
 

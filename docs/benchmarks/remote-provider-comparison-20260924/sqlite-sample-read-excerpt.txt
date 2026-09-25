@@ -1,0 +1,112 @@
+Analysis of sampling quic_tidb_saturation-e7c5b8ca9a8f2d1e (pid 23598) every 10 milliseconds
+Process:         quic_tidb_saturation-e7c5b8ca9a8f2d1e [23598]
+Path:            /private/tmp/*/quic_tidb_saturation-e7c5b8ca9a8f2d1e
+Load Address:    0x102ba8000
+Identifier:      quic_tidb_saturation-e7c5b8ca9a8f2d1e
+Version:         0
+Code Type:       ARM64
+Platform:        macOS
+Parent Process:  Python [23581]
+Target Type:     live task
+
+Date/Time:       2026-09-24 17:42:43.531 +1000
+Launch Time:     2026-09-24 17:42:35.935 +1000
+OS Version:      macOS 26.6.2 (25G83)
+Report Version:  7
+Analysis Tool:   /usr/bin/sample
+
+Physical footprint:         375.0M
+Physical footprint (peak):  375.0M
+Idle exit:                  untracked
+----
+
+Selected call graph frames (excerpt, not exhaustive):
+    + !         213 tokio::runtime::blocking::pool::Inner::run::h5026e6bde3f28dc0  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 400  [0x10350dc68]
+    + !                     : | +     ! :         + 3 serde_json::ser::format_escaped_str::hef590fae4ce96fde  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 276  [0x10353d754]
+    + !                     : | +     ! :         + 1 serde_json::ser::format_escaped_str::hef590fae4ce96fde  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 64  [0x10353d680]
+    + !                     : | +     ! :         +   1 serde_json::ser::format_escaped_str::hef590fae4ce96fde  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 276  [0x10353d754]
+    + !                     : | +     ! :         +   1 serde_json::ser::format_escaped_str::hef590fae4ce96fde  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 300  [0x10353d76c]
+    + !                     : | +     ! :           1 serde_json::ser::format_escaped_str::hef590fae4ce96fde  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 300  [0x10353d76c]
+    + !                     : | +     !     | 3 mount_rs_chunked::ChunkedFs$LT$M$C$B$GT$::snapshot::hf88e167c9eb59ab0  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 516  [0x102d0b888]
+    + !                     :   +     ! :   |     + 1 serde_json::ser::format_escaped_str::hef590fae4ce96fde  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 300  [0x10353d76c]
+    + !                     :   +     ! :   | 6 mount_rs_chunked::ChunkedFs$LT$M$C$B$GT$::snapshot::hf88e167c9eb59ab0  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 516  [0x102d0b888]
+    + !                     :   +     !     1 tokio::runtime::blocking::pool::spawn_blocking::h57993bff9f9be00f  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 144  [0x103120bc4]
+    + !                     :   +     !       1 tokio::runtime::blocking::pool::Spawner::spawn_task::hcf38692a8cfdbd1d  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 332  [0x10350e4fc]
+    + !                     : | +                   1 serde_json::ser::format_escaped_str::hef590fae4ce96fde  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 276  [0x10353d754]
+    +           214 tokio::runtime::blocking::pool::Inner::run::h5026e6bde3f28dc0  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 400  [0x10350dc68]
+    +                       ! : |     + !       | + 2 serde_json::ser::format_escaped_str::hef590fae4ce96fde  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 300  [0x10353d76c]
+    +                       ! : |     + !       | + 1 serde_json::ser::format_escaped_str::hef590fae4ce96fde  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 64  [0x10353d680]
+    +                       ! : |     + !       | + 1 serde_json::ser::format_escaped_str::hef590fae4ce96fde  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 64  [0x10353d680]
+    +                       ! : |     + !       | + 1 serde_json::ser::format_escaped_str::hef590fae4ce96fde  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 276  [0x10353d754]
+    +                       ! : |     +     : 3 mount_rs_chunked::ChunkedFs$LT$M$C$B$GT$::snapshot::hf88e167c9eb59ab0  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 516  [0x102d0b888]
+    +                       !   |     + !       | + 2 serde_json::ser::format_escaped_str::hef590fae4ce96fde  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 64  [0x10353d680]
+    +                       !   |     + !       | + 1 serde_json::ser::format_escaped_str::hef590fae4ce96fde  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 276  [0x10353d754]
+    +                       !   |     + !       |   1 serde_json::ser::format_escaped_str::hef590fae4ce96fde  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 64  [0x10353d680]
+    +                       !   |     + !   : 2 mount_rs_chunked::ChunkedFs$LT$M$C$B$GT$::snapshot::hf88e167c9eb59ab0  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 516  [0x102d0b888]
+    +           214 tokio::runtime::blocking::pool::Inner::run::h5026e6bde3f28dc0  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 400  [0x10350dc68]
+    +                       ! : |     + !         | 2 serde_json::ser::format_escaped_str::hef590fae4ce96fde  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 276  [0x10353d754]
+    +                       ! : |     + !         | 2 serde_json::ser::format_escaped_str::hef590fae4ce96fde  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 300  [0x10353d76c]
+    +                       ! : |     + !         | 1 serde_json::ser::format_escaped_str::hef590fae4ce96fde  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 64  [0x10353d680]
+    +                       ! : |     + !         | 2 serde_json::ser::format_escaped_str::hef590fae4ce96fde  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 300  [0x10353d76c]
+    +                       ! : |     + !         | 1 serde_json::ser::format_escaped_str::hef590fae4ce96fde  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 64  [0x10353d680]
+    +                       ! : |     + !         | 1 serde_json::ser::format_escaped_str::hef590fae4ce96fde  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 276  [0x10353d754]
+    +                       ! : |     + !             1 serde_json::ser::format_escaped_str::hef590fae4ce96fde  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 300  [0x10353d76c]
+    +                       ! : |     +     : 5 mount_rs_chunked::ChunkedFs$LT$M$C$B$GT$::snapshot::hf88e167c9eb59ab0  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 516  [0x102d0b888]
+    +                       ! : |           ! 6 mount_rs_chunked::ChunkedFs$LT$M$C$B$GT$::snapshot::hf88e167c9eb59ab0  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 516  [0x102d0b888]
+    +                         : |       +   ! 1 mount_rs_chunked::ChunkedFs$LT$M$C$B$GT$::snapshot::hf88e167c9eb59ab0  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 516  [0x102d0b888]
+    +           214 tokio::runtime::blocking::pool::Inner::run::h5026e6bde3f28dc0  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 400  [0x10350dc68]
+    +                       ! : |     + !       | + 3 serde_json::ser::format_escaped_str::hef590fae4ce96fde  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 64  [0x10353d680]
+    +                       ! : |     + !       | + 1 serde_json::ser::format_escaped_str::hef590fae4ce96fde  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 276  [0x10353d754]
+    +                       ! : |     + !       | + 1 serde_json::ser::format_escaped_str::hef590fae4ce96fde  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 300  [0x10353d76c]
+    +                       ! : |     + !       |   2 serde_json::ser::format_escaped_str::hef590fae4ce96fde  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 64  [0x10353d680]
+    +                       ! : |     +     : 2 mount_rs_chunked::ChunkedFs$LT$M$C$B$GT$::snapshot::hf88e167c9eb59ab0  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 516  [0x102d0b888]
+    +                       !   |       +         : 1 serde_json::ser::format_escaped_str::hef590fae4ce96fde  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e) + 276  [0x10353d754]
+
+Sort by top of stack, same collapsed (when >= 5):
+        __psynch_cvwait  (in libsystem_kernel.dylib)        16038
+        __psynch_mutexwait  (in libsystem_kernel.dylib)        6736
+        kevent  (in libsystem_kernel.dylib)        332
+        __sendmsg  (in libsystem_kernel.dylib)        291
+        __semwait_signal  (in libsystem_kernel.dylib)        260
+        __open  (in libsystem_kernel.dylib)        229
+        semaphore_wait_trap  (in libsystem_kernel.dylib)        214
+        write  (in libsystem_kernel.dylib)        176
+        __recvmsg  (in libsystem_kernel.dylib)        97
+        readlink  (in libsystem_kernel.dylib)        89
+        __psynch_mutexdrop  (in libsystem_kernel.dylib)        87
+        __fcntl  (in libsystem_kernel.dylib)        84
+        _xzm_free  (in libsystem_malloc.dylib)        49
+        _xzm_xzone_malloc_tiny  (in libsystem_malloc.dylib)        48
+        pwrite  (in libsystem_kernel.dylib)        44
+        stat  (in libsystem_kernel.dylib)        42
+        ftruncate  (in libsystem_kernel.dylib)        41
+        __unlink  (in libsystem_kernel.dylib)        40
+        close  (in libsystem_kernel.dylib)        27
+        pread  (in libsystem_kernel.dylib)        26
+        _$LT$$RF$mut$u20$serde_json..de..Deserializer$LT$R$GT$$u20$as$u20$serde_core..de..Deserializer$GT$::deserialize_any::hb44912c76d4c2dea  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e)        21
+        _platform_memmove  (in libsystem_platform.dylib)        21
+        _$LT$serde..private..de..content..ContentDeserializer$LT$E$GT$$u20$as$u20$serde_core..de..Deserializer$GT$::deserialize_any::h9689ad1334169fb1  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e)        19
+        _malloc_zone_malloc  (in libsystem_malloc.dylib)        19
+        fstat  (in libsystem_kernel.dylib)        17
+        <deduplicated_symbol>  (in libsystem_malloc.dylib)        15
+        __psynch_cvsignal  (in libsystem_kernel.dylib)        15
+        core::ptr::drop_in_place$LT$serde_json..value..Value$GT$::h227d31164fa91d0e  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e)        15
+        mach_absolute_time  (in libsystem_kernel.dylib)        14
+        _free  (in libsystem_malloc.dylib)        13
+        _RNvXs4_NtCs1OjIl8oxbrv_5alloc6stringNtB5_6StringNtNtCsl8K0bEFm1U0_4core5clone5Clone5clone  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e)        12
+        lstat  (in libsystem_kernel.dylib)        12
+        __mmap  (in libsystem_kernel.dylib)        11
+        _xzm_xzone_malloc  (in libsystem_malloc.dylib)        9
+        serde_json::value::ser::_$LT$impl$u20$serde_core..ser..Serialize$u20$for$u20$serde_json..value..Value$GT$::serialize::h4443fbb10a3782c9  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e)        9
+        DYLD-STUB$$_platform_bzero  (in libsystem_malloc.dylib)        8
+        _$LT$serde_json..value..Value$u20$as$u20$core..cmp..PartialEq$GT$::eq::hacb895ba270afcd2  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e)        8
+        serde_core::ser::Serializer::collect_seq::h31d1ea7346d20071  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e)        8
+        _platform_memset  (in libsystem_platform.dylib)        7
+        pthread_mutex_lock  (in libsystem_pthread.dylib)        7
+        serde_json::de::Deserializer$LT$R$GT$::parse_number::h21c7901322f7cd77  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e)        7
+        quic_tidb_saturation::stage::_$u7b$$u7b$closure$u7d$$u7d$::_$u7b$$u7b$closure$u7d$$u7d$::h2acf3658b6c413be  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e)        6
+        serde_json::de::Deserializer$LT$R$GT$::parse_integer::hea23456c3e68dc68  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e)        6
+        sqlite3FindFunction  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e)        6
+        _$LT$u64$u20$as$u20$itoa..Unsigned$GT$::fmt::hc2faaa5056ac809a  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e)        5
+        _RNvCsfLfy6EI15iL_7___rustc11___rdl_alloc  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e)        5
+        ring_core_0_17_14__aes_gcm_enc_kernel  (in quic_tidb_saturation-e7c5b8ca9a8f2d1e)        5

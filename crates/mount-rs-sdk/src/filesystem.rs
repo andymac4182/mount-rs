@@ -17,7 +17,7 @@ use mount_rs_memfs::{MemoryFs, MemoryOptions};
 use mount_rs_sqlite_fs::{SqliteFs, open_sqlite};
 
 use crate::options::{FoundationDbLeaseAuthority, SplitOptions, StoreConfig};
-use crate::providers::{StorageResources, open_storage};
+use crate::providers::{StorageResources, open_storage, open_storage_decorated};
 use crate::stores::{ErasedBlockStore, ErasedMetadataStore};
 #[cfg(feature = "observability")]
 use crate::{Telemetry, global_telemetry};
@@ -34,6 +34,16 @@ pub enum FilesystemKind {
 /// A Rust SDK filesystem and its provider cleanup lifecycle.
 pub struct Filesystem {
     inner: FilesystemInner,
+}
+
+/// Decorate an opened block provider while preserving its cleanup lifecycle.
+/// The decorator must preserve backing authority and flush barrier semantics.
+pub trait BlockStoreDecorator: Send + Sync {
+    fn decorate(
+        &self,
+        config: &StoreConfig,
+        store: Arc<dyn BlockStore>,
+    ) -> Result<Arc<dyn BlockStore>>;
 }
 
 enum FilesystemInner {
@@ -70,6 +80,21 @@ impl Filesystem {
 
     /// Open a filesystem composed from independent metadata and block stores.
     pub async fn split(options: SplitOptions) -> Result<Self> {
+        Self::split_impl(options, None).await
+    }
+
+    /// Open split storage with an application-owned block provider decorator.
+    pub async fn split_with_block_decorator(
+        options: SplitOptions,
+        decorator: &dyn BlockStoreDecorator,
+    ) -> Result<Self> {
+        Self::split_impl(options, Some(decorator)).await
+    }
+
+    async fn split_impl(
+        options: SplitOptions,
+        decorator: Option<&dyn BlockStoreDecorator>,
+    ) -> Result<Self> {
         if options.chunk_size_bytes == 0 {
             return Err(FsError::new(ErrorCode::Einval)
                 .with_message("chunk_size_bytes must be greater than zero"));
@@ -78,6 +103,7 @@ impl Filesystem {
         let mut chunk_options = ChunkedOptions::fixed(options.owner, options.chunk_size_bytes)?
             .with_lease_ttl(options.lease_ttl)
             .with_concurrent_writes(options.concurrent_writes)
+            .with_inode_updates(options.inode_updates)
             .with_writeback(options.writeback)
             .with_identity(options.uid, options.gid, options.umask);
         if options.delegated {
@@ -87,7 +113,7 @@ impl Filesystem {
                 chunk_options = chunk_options.with_checkout_path(path);
             }
         }
-        let opened = open_storage(&options.metadata, &options.blocks).await?;
+        let opened = open_storage_decorated(&options.metadata, &options.blocks, decorator).await?;
         let resources = opened.resources.clone();
         match ChunkedFs::open(opened.metadata, opened.blocks, chunk_options).await {
             Ok(driver) => Ok(Self {
@@ -336,6 +362,13 @@ async fn complete_migration_after_teardown(
 }
 
 fn validate_concurrent_split_options(options: &SplitOptions) -> Result<()> {
+    if options.inode_updates
+        && (!options.concurrent_writes || options.delegated || options.writeback)
+    {
+        return Err(FsError::new(ErrorCode::Einval).with_message(
+            "inode_updates requires concurrent writes without directory ownership or writeback",
+        ));
+    }
     if options.delegated && (!options.concurrent_writes || options.writeback) {
         return Err(FsError::new(ErrorCode::Einval)
             .with_message("directory ownership requires shared mode without writeback"));
@@ -416,6 +449,44 @@ impl Clone for Filesystem {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn inode_options_reject_incompatible_modes_before_opening_storage() {
+        let base = SplitOptions {
+            metadata: StoreConfig::Tidb {
+                connection: "mysql://root@127.0.0.1:1/test".into(),
+                volume_key: "inode-validation".into(),
+                durable: true,
+            },
+            blocks: StoreConfig::Tidb {
+                connection: "mysql://root@127.0.0.1:1/test".into(),
+                volume_key: "inode-validation".into(),
+                durable: true,
+            },
+            ..SplitOptions::memory("inode-validation", 4096).with_inode_updates(true)
+        };
+        for options in [
+            base.clone().with_writeback(true),
+            base.clone()
+                .with_ownership_mode(mount_rs_chunked::OwnershipMode::Shared),
+            base.clone().with_concurrent_writes(false),
+        ] {
+            let error = Filesystem::split(options).await.err().unwrap();
+            assert_eq!(error.code, ErrorCode::Einval);
+            assert!(error.to_string().contains("inode_updates"));
+        }
+        let error = Filesystem::split(
+            SplitOptions::memory("inode-validation", 4096).with_inode_updates(true),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(error.code, ErrorCode::Einval);
+        assert!(error.to_string().contains("concurrent_writes requires"));
+        assert!(base.clone().with_inode_updates(false).concurrent_writes);
+        assert!(base.clone().with_concurrent_writes(true).inode_updates);
+        assert!(base.with_inode_updates(true).concurrent_writes);
+    }
 
     #[tokio::test]
     async fn concurrent_tidb_validates_shared_pairing_before_connecting() {

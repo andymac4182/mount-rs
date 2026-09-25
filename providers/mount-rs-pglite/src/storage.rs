@@ -10,16 +10,21 @@
 
 use async_trait::async_trait;
 use md5::{Digest, Md5};
+use mount_rs_core::diagnostics::profile::{self, Event};
+use mount_rs_core::storage::InodeId;
 use mount_rs_core::storage::{
     BlockId, BlockStore, CheckoutRequest, ConcurrentBackingId, ConcurrentModeState,
     DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState, DirectoryGrant,
-    GrantToken, LoadedMetadata, MetadataStore, Namespace, WriterLease,
+    GrantToken, InodeMetadataSnapshot, InodeModeState, InodeVersion, LoadedInode, LoadedMetadata,
+    MetadataStore, Namespace, NodeMetadata, WriterLease, decode_inode_namespace,
+    encode_inode_namespace, validate_inode_publication, validate_node_kind,
 };
 use mount_rs_core::versioning::{
     PublicationId, ReadLease, ReadLeaseRequest, VersionHead, VersionId, VersionInfo, VersionKind,
     VersionPublication, VersionedMetadataStore, VolumeId,
 };
 use mount_rs_core::{ErrorCode, FsError, Result, backend_error};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, MutexGuard};
@@ -54,6 +59,11 @@ ALTER TABLE mount_rs_metadata ADD COLUMN IF NOT EXISTS volume_id TEXT;
 ALTER TABLE mount_rs_metadata ADD COLUMN IF NOT EXISTS write_mode TEXT;
 ALTER TABLE mount_rs_metadata ADD COLUMN IF NOT EXISTS backing_id TEXT;
 ALTER TABLE mount_rs_metadata ADD COLUMN IF NOT EXISTS delegation TEXT;
+CREATE TABLE IF NOT EXISTS mount_rs_inode_guards (
+ volume_key TEXT NOT NULL, inode BIGINT NOT NULL CHECK(inode>0),
+ generation BIGINT NOT NULL CHECK(generation>0),
+ revision BIGINT NOT NULL CHECK(revision>=0), node TEXT NOT NULL,
+ PRIMARY KEY(volume_key,inode));
 ";
 
 const BLOCK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_blocks (
@@ -781,6 +791,45 @@ const VERSION_SELECT: &str = "SELECT id, volume_key, volume_id, sequence,
  parent_id, restored_from, forked_from, namespace, block_store_id, kind,
  created_at_ms, durable FROM mount_rs_versions";
 
+fn inode_authority(row: &tokio_postgres::Row, backing: ConcurrentBackingId) -> Result<u64> {
+    if row.get::<_, Option<String>>(0).as_deref() != Some("MRC4")
+        || row.get::<_, Option<String>>(1).as_deref() != Some(backing.to_hex().as_str())
+        || row.get::<_, Option<String>>(2).is_some()
+        || row.get::<_, i64>(3) != CONCURRENT_FENCE_SENTINEL
+        || row.get::<_, i64>(4) != 0
+    {
+        return Err(stale());
+    }
+    let generation = nonnegative(row.get(5), "inode structural generation")?;
+    if generation == 0 {
+        return Err(stale());
+    }
+    Ok(generation)
+}
+
+fn decode_inode_node(inode: InodeId, json: &str) -> Result<NodeMetadata> {
+    profile::add(Event::InodeReturned, json.len() as u64);
+    let node: NodeMetadata = serde_json::from_str(json).map_err(backend_error)?;
+    if inode == 0 || node.stats.ino != inode {
+        return Err(stale());
+    }
+    validate_node_kind(&node)?;
+    Ok(node)
+}
+
+fn encode_inode_node(node: &NodeMetadata) -> Result<String> {
+    let json = serde_json::to_string(node).map_err(backend_error)?;
+    profile::add(Event::InodeSerialized, json.len() as u64);
+    Ok(json)
+}
+
+fn inode_conflict() -> FsError {
+    FsError::new(ErrorCode::Eagain).with_syscall("publish inode metadata")
+}
+fn inode_signed(value: u64) -> Result<i64> {
+    i64::try_from(value).map_err(|_| FsError::new(ErrorCode::Eoverflow))
+}
+
 #[async_trait]
 impl MetadataStore for PgliteMetadataStore {
     fn durable(&self) -> bool {
@@ -800,22 +849,349 @@ impl MetadataStore for PgliteMetadataStore {
             .as_ref()
             .ok_or_else(connection_closed)?
             .query_typed_opt(
-                "SELECT revision, namespace FROM mount_rs_metadata WHERE volume_key = $1",
+                "SELECT revision, namespace, write_mode FROM mount_rs_metadata WHERE volume_key = $1",
                 &[(&self.0.volume_key, Type::TEXT)],
             )
             .await
             .map_err(postgres_error)?
             .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
+        if row.get::<_, Option<String>>(2).as_deref() == Some("MRC4") {
+            return Err(stale());
+        }
         let revision = nonnegative(row.get::<_, i64>(0), "metadata revision")?;
         let namespace = row
             .get::<_, Option<String>>(1)
-            .map(|json| serde_json::from_str(&json))
+            .map(|json| {
+                profile::add(Event::NamespaceReturned, json.len() as u64);
+                serde_json::from_str(&json)
+            })
             .transpose()
             .map_err(backend_error)?;
         Ok(LoadedMetadata {
             revision,
             namespace,
         })
+    }
+
+    async fn load_if_changed(&self, known_revision: u64) -> Result<Option<LoadedMetadata>> {
+        // An out-of-range caller revision cannot match the signed provider
+        // revision. Zero forces a full payload read, including initialization.
+        let known = i64::try_from(known_revision).unwrap_or(0);
+        let client = self.0.lock_client().await?;
+        let row = client
+            .as_ref()
+            .ok_or_else(connection_closed)?
+            .query_typed_opt(
+                "SELECT revision,
+                        CASE WHEN revision > 0 AND revision = $2 THEN NULL ELSE namespace END, write_mode
+                 FROM mount_rs_metadata WHERE volume_key = $1",
+                &[(&self.0.volume_key, Type::TEXT), (&known, Type::INT8)],
+            )
+            .await
+            .map_err(postgres_error)?
+            .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
+        if row.get::<_, Option<String>>(2).as_deref() == Some("MRC4") {
+            return Err(stale());
+        }
+        let revision = nonnegative(row.get::<_, i64>(0), "metadata revision")?;
+        if revision != 0 && revision == known_revision {
+            return Ok(None);
+        }
+        // A single statement snapshot supplies both revision and payload. The
+        // CASE projection suppresses unchanged namespace bytes before the wire.
+        let namespace = row
+            .get::<_, Option<String>>(1)
+            .map(|json| {
+                profile::add(Event::NamespaceReturned, json.len() as u64);
+                serde_json::from_str(&json)
+            })
+            .transpose()
+            .map_err(backend_error)?;
+        Ok(Some(LoadedMetadata {
+            revision,
+            namespace,
+        }))
+    }
+
+    async fn inode_mode_state(&self) -> Result<Option<InodeModeState>> {
+        let client = self.0.lock_client().await?;
+        let row = client.as_ref().ok_or_else(connection_closed)?.query_one(
+            "SELECT write_mode, backing_id, owner, fence, expires, revision FROM mount_rs_metadata WHERE volume_key=$1", &[&self.0.volume_key]
+        ).await.map_err(postgres_error)?;
+        if row.get::<_, Option<String>>(0).as_deref() != Some("MRC4") {
+            return Ok(None);
+        }
+        let backing =
+            ConcurrentBackingId::from_hex(&row.get::<_, Option<String>>(1).ok_or_else(stale)?)
+                .map_err(|_| stale())?;
+        Ok(Some(InodeModeState {
+            backing,
+            structural_generation: inode_authority(&row, backing)?,
+        }))
+    }
+
+    async fn prepare_inode_mode(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        let expected = inode_signed(expected_revision)?;
+        let generation = expected
+            .checked_add(1)
+            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        let mut client = self.0.lock_client().await?;
+        let tx = client
+            .as_mut()
+            .ok_or_else(connection_closed)?
+            .transaction()
+            .await
+            .map_err(postgres_error)?;
+        let row = tx.query_one("SELECT write_mode, backing_id, owner, fence, expires, revision, namespace FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE", &[&self.0.volume_key]).await.map_err(postgres_error)?;
+        if row.get::<_, Option<String>>(0).as_deref() != Some("MRC2")
+            || row.get::<_, Option<String>>(1).as_deref() != Some(backing.to_hex().as_str())
+            || row.get::<_, Option<String>>(2).is_some()
+            || row.get::<_, i64>(3) != CONCURRENT_FENCE_SENTINEL
+            || row.get::<_, i64>(4) != 0
+        {
+            return Err(stale());
+        }
+        if row.get::<_, i64>(5) != expected {
+            return Err(inode_conflict());
+        }
+        if expected == 0 {
+            return Err(FsError::new(ErrorCode::Ebusy));
+        }
+        let namespace: Namespace =
+            serde_json::from_str(&row.get::<_, Option<String>>(6).ok_or_else(stale)?)
+                .map_err(backend_error)?;
+        namespace.validate()?;
+        let guards = tx
+            .query(
+                "SELECT inode FROM mount_rs_inode_guards WHERE volume_key=$1 FOR UPDATE",
+                &[&self.0.volume_key],
+            )
+            .await
+            .map_err(postgres_error)?;
+        if !guards.is_empty() {
+            return Err(stale());
+        }
+        for (inode, node) in &namespace.nodes {
+            let node = encode_inode_node(node)?;
+            tx.execute("INSERT INTO mount_rs_inode_guards(volume_key,inode,generation,revision,node) VALUES($1,$2,$3,0,$4)", &[&self.0.volume_key, &inode_signed(*inode)?, &generation, &node]).await.map_err(postgres_error)?;
+        }
+        let encoded =
+            String::from_utf8(encode_inode_namespace(&namespace)?).map_err(backend_error)?;
+        profile::add(Event::NamespaceSerialized, encoded.len() as u64);
+        tx.execute(
+            "UPDATE mount_rs_metadata SET write_mode='MRC4',revision=$2,namespace=$3 WHERE volume_key=$1",
+            &[&self.0.volume_key, &generation, &encoded],
+        )
+        .await
+        .map_err(postgres_error)?;
+        tx.commit().await.map_err(postgres_error)
+    }
+
+    async fn load_inode_snapshot(
+        &self,
+        backing: ConcurrentBackingId,
+    ) -> Result<InodeMetadataSnapshot> {
+        let client = self.0.lock_client().await?;
+        // One statement snapshot supplies the root and every authoritative guard.
+        let rows = client.as_ref().ok_or_else(connection_closed)?.query(
+            "SELECT m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.revision,m.namespace,g.inode,g.generation,g.revision,g.node FROM mount_rs_metadata m LEFT JOIN mount_rs_inode_guards g ON g.volume_key=m.volume_key WHERE m.volume_key=$1 ORDER BY g.inode", &[&self.0.volume_key]
+        ).await.map_err(postgres_error)?;
+        let first = rows.first().ok_or_else(stale)?;
+        let generation = inode_authority(first, backing)?;
+        let mut namespace = decode_inode_namespace(
+            first
+                .get::<_, Option<String>>(6)
+                .ok_or_else(stale)?
+                .as_bytes(),
+        )?;
+        let base_keys: Vec<_> = namespace.nodes.keys().copied().collect();
+        namespace.nodes.clear();
+        let mut revisions = BTreeMap::new();
+        for row in rows {
+            let inode = nonnegative(row.get::<_, Option<i64>>(7).ok_or_else(stale)?, "inode")?;
+            if nonnegative(row.get(8), "guard generation")? != generation {
+                return Err(stale());
+            }
+            let node = decode_inode_node(inode, &row.get::<_, String>(10))?;
+            namespace.nodes.insert(inode, node);
+            revisions.insert(inode, nonnegative(row.get(9), "inode revision")?);
+        }
+        if !base_keys
+            .iter()
+            .copied()
+            .eq(namespace.nodes.keys().copied())
+        {
+            return Err(stale());
+        }
+        let snapshot = InodeMetadataSnapshot {
+            structural_generation: generation,
+            namespace,
+            inode_revisions: revisions,
+        };
+        snapshot.validate()?;
+        Ok(snapshot)
+    }
+
+    async fn load_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+    ) -> Result<LoadedInode> {
+        self.load_inode_if_changed(backing, inode, None)
+            .await?
+            .ok_or_else(stale)
+    }
+
+    async fn load_inode_if_changed(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+        known: Option<InodeVersion>,
+    ) -> Result<Option<LoadedInode>> {
+        let inode_sql = inode_signed(inode)?;
+        let known_gen = known
+            .and_then(|v| i64::try_from(v.structural_generation).ok())
+            .unwrap_or(-1);
+        let known_rev = known
+            .and_then(|v| i64::try_from(v.inode_revision).ok())
+            .unwrap_or(-1);
+        let client = self.0.lock_client().await?;
+        let row = client.as_ref().ok_or_else(connection_closed)?.query_opt(
+            "SELECT m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.revision,g.generation,g.revision,CASE WHEN m.revision=$3 AND g.generation=$3 AND g.revision=$4 THEN NULL ELSE g.node END FROM mount_rs_metadata m JOIN mount_rs_inode_guards g ON g.volume_key=m.volume_key WHERE m.volume_key=$1 AND g.inode=$2", &[&self.0.volume_key,&inode_sql,&known_gen,&known_rev]
+        ).await.map_err(postgres_error)?.ok_or_else(stale)?;
+        let generation = inode_authority(&row, backing)?;
+        if nonnegative(row.get(6), "guard generation")? != generation {
+            return Err(stale());
+        }
+        let version = InodeVersion {
+            structural_generation: generation,
+            inode_revision: nonnegative(row.get(7), "inode revision")?,
+        };
+        if known == Some(version) {
+            return Ok(None);
+        }
+        let node = decode_inode_node(inode, &row.get::<_, Option<String>>(8).ok_or_else(stale)?)?;
+        Ok(Some(LoadedInode { version, node }))
+    }
+
+    async fn publish_inode_if_version(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+        expected: InodeVersion,
+        node: NodeMetadata,
+    ) -> Result<InodeVersion> {
+        let inode_sql = inode_signed(inode)?;
+        let expected_gen = inode_signed(expected.structural_generation)?;
+        let expected_rev = inode_signed(expected.inode_revision)?;
+        let next = expected_rev
+            .checked_add(1)
+            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        let mut client = self.0.lock_client().await?;
+        let tx = client
+            .as_mut()
+            .ok_or_else(connection_closed)?
+            .transaction()
+            .await
+            .map_err(postgres_error)?;
+        // Lock only this guard first. A structural writer locks all guards before
+        // replacing them; a waiting publisher must reread fresh root authority.
+        let guard = tx.query_opt("SELECT generation,revision,node FROM mount_rs_inode_guards WHERE volume_key=$1 AND inode=$2 FOR UPDATE", &[&self.0.volume_key,&inode_sql]).await.map_err(postgres_error)?;
+        let root = tx.query_one("SELECT write_mode,backing_id,owner,fence,expires,revision FROM mount_rs_metadata WHERE volume_key=$1", &[&self.0.volume_key]).await.map_err(postgres_error)?;
+        let generation = inode_authority(&root, backing)?;
+        if generation != expected.structural_generation {
+            return Err(inode_conflict());
+        }
+        let guard = guard.ok_or_else(stale)?;
+        if guard.get::<_, i64>(0) != expected_gen || guard.get::<_, i64>(1) != expected_rev {
+            return Err(inode_conflict());
+        }
+        let original = decode_inode_node(inode, &guard.get::<_, String>(2))?;
+        validate_inode_publication(inode, &original, &node)?;
+        let json = encode_inode_node(&node)?;
+        let changed = tx.execute("UPDATE mount_rs_inode_guards SET revision=$3,node=$4 WHERE volume_key=$1 AND inode=$2 AND generation=$5 AND revision=$6", &[&self.0.volume_key,&inode_sql,&next,&json,&expected_gen,&expected_rev]).await.map_err(postgres_error)?;
+        if changed != 1 {
+            return Err(stale());
+        }
+        tx.commit().await.map_err(postgres_error)?;
+        Ok(InodeVersion {
+            structural_generation: generation,
+            inode_revision: next as u64,
+        })
+    }
+
+    async fn publish_structure_if_versions(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_generation: u64,
+        expected_inode_revisions: &BTreeMap<InodeId, u64>,
+        namespace: Namespace,
+    ) -> Result<u64> {
+        namespace.validate()?;
+        let expected = inode_signed(expected_generation)?;
+        let next = expected
+            .checked_add(1)
+            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        let mut client = self.0.lock_client().await?;
+        let tx = client
+            .as_mut()
+            .ok_or_else(connection_closed)?
+            .transaction()
+            .await
+            .map_err(postgres_error)?;
+        let root = tx.query_one("SELECT write_mode,backing_id,owner,fence,expires,revision,namespace FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE", &[&self.0.volume_key]).await.map_err(postgres_error)?;
+        if inode_authority(&root, backing)? != expected_generation {
+            return Err(inode_conflict());
+        }
+        let rows = tx.query("SELECT inode,generation,revision,node FROM mount_rs_inode_guards WHERE volume_key=$1 ORDER BY inode FOR UPDATE", &[&self.0.volume_key]).await.map_err(postgres_error)?;
+        let mut actual = BTreeMap::new();
+        let mut nodes = BTreeMap::new();
+        for row in rows {
+            if row.get::<_, i64>(1) != expected {
+                return Err(stale());
+            }
+            let inode = nonnegative(row.get(0), "inode")?;
+            let node = decode_inode_node(inode, &row.get::<_, String>(3))?;
+            nodes.insert(inode, node);
+            actual.insert(inode, nonnegative(row.get(2), "inode revision")?);
+        }
+        let mut base = decode_inode_namespace(
+            root.get::<_, Option<String>>(6)
+                .ok_or_else(stale)?
+                .as_bytes(),
+        )?;
+        if !actual.keys().eq(base.nodes.keys()) {
+            return Err(stale());
+        }
+        base.nodes = nodes;
+        base.validate()?;
+        if &actual != expected_inode_revisions {
+            return Err(inode_conflict());
+        }
+        let json = String::from_utf8(encode_inode_namespace(&namespace)?).map_err(backend_error)?;
+        profile::add(Event::NamespaceSerialized, json.len() as u64);
+        tx.execute(
+            "DELETE FROM mount_rs_inode_guards WHERE volume_key=$1",
+            &[&self.0.volume_key],
+        )
+        .await
+        .map_err(postgres_error)?;
+        for (inode, node) in &namespace.nodes {
+            let node = encode_inode_node(node)?;
+            tx.execute("INSERT INTO mount_rs_inode_guards(volume_key,inode,generation,revision,node) VALUES($1,$2,$3,0,$4)", &[&self.0.volume_key,&inode_signed(*inode)?,&next,&node]).await.map_err(postgres_error)?;
+        }
+        tx.execute(
+            "UPDATE mount_rs_metadata SET revision=$2,namespace=$3 WHERE volume_key=$1",
+            &[&self.0.volume_key, &next, &json],
+        )
+        .await
+        .map_err(postgres_error)?;
+        tx.commit().await.map_err(postgres_error)?;
+        Ok(next as u64)
     }
 
     async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
@@ -850,7 +1226,9 @@ impl MetadataStore for PgliteMetadataStore {
                     ConcurrentBackingId::from_hex(id).map_err(|_| stale())?,
                 ))
             }
-            (Some(BOUND_CONCURRENT_WRITE_MODE), _) | (Some("MRC3"), _) => Err(stale()),
+            (Some(BOUND_CONCURRENT_WRITE_MODE), _) | (Some("MRC3"), _) | (Some("MRC4"), _) => {
+                Err(stale())
+            }
             _ => Err(backend_error(
                 "PGlite concurrent mode, backing ID, and fence disagree",
             )),
@@ -1148,6 +1526,7 @@ impl MetadataStore for PgliteMetadataStore {
             .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
         let (fence, expires) = lease_numbers(lease)?;
         let namespace = serde_json::to_string(&namespace).map_err(backend_error)?;
+        profile::add(Event::NamespaceSerialized, namespace.len() as u64);
 
         let mut client = self.0.lock_client().await?;
         let client = client.as_mut().ok_or_else(connection_closed)?;
@@ -1238,6 +1617,7 @@ impl MetadataStore for PgliteMetadataStore {
             .checked_add(1)
             .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
         let namespace = serde_json::to_string(&namespace).map_err(backend_error)?;
+        profile::add(Event::NamespaceSerialized, namespace.len() as u64);
         let backing_text = backing.to_hex();
         let client = self.0.lock_client().await?;
         // A failed acknowledgement may follow a committed update. Preserve
@@ -3122,6 +3502,338 @@ mod tests {
         };
         namespace.validate().unwrap();
         namespace
+    }
+
+    #[test]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
+    fn inode_guards_cas_fold_and_reopen() {
+        let configured_url = std::env::var("PGLITE_DATABASE_URL").ok();
+        let server = configured_url.is_none().then(PgliteServer::start);
+        let connection_string = configured_url
+            .as_deref()
+            .unwrap_or_else(|| server.as_ref().unwrap().connection_string());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let metadata =
+                PgliteMetadataStore::connect_with_key(connection_string, "inode-guards")
+                    .await
+                    .unwrap();
+            let blocks =
+                PgliteBlockStore::connect_with_key(connection_string, "inode-guards")
+                    .await
+                    .unwrap();
+            let backing = blocks.prepare_concurrent_backing().await.unwrap();
+            metadata
+                .prepare_bound_concurrent_mode(backing)
+                .await
+                .unwrap();
+            let block = blocks.put(b"abc").await.unwrap();
+            let ns = namespace(block).await;
+            let inode = ns.root + 1;
+            metadata
+                .publish_bound_if_revision(backing, 0, ns.clone())
+                .await
+                .unwrap();
+            assert!(metadata.prepare_inode_mode(backing, 0).await.is_err());
+            metadata.prepare_inode_mode(backing, 1).await.unwrap();
+            assert!(metadata.load().await.is_err());
+            assert!(metadata.load_if_changed(1).await.is_err());
+            assert!(metadata.concurrent_mode_state().await.is_err());
+            assert!(
+                metadata
+                    .publish_bound_if_revision(backing, 1, ns.clone())
+                    .await
+                    .is_err()
+            );
+            // This is the exact conditional projection used by pre-MRC4 readers.
+            // Enrollment must force a changed payload which their decoder rejects.
+            {
+                let client = metadata.0.lock_client().await.unwrap();
+                let old_revision: i64 = 1;
+                let row = client.as_ref().unwrap().query_one(
+                    "SELECT revision, CASE WHEN revision > 0 AND revision = $2 THEN NULL ELSE namespace END FROM mount_rs_metadata WHERE volume_key = $1",
+                    &[&metadata.0.volume_key, &old_revision]
+                ).await.unwrap();
+                assert_eq!(row.get::<_, i64>(0), 2);
+                let payload = row.get::<_, Option<String>>(1).unwrap();
+                assert!(serde_json::from_str::<Namespace>(&payload).is_err());
+            }
+            let initial = metadata.load_inode_snapshot(backing).await.unwrap();
+            assert_eq!(initial.structural_generation, 2);
+            assert_eq!(
+                initial.inode_revisions,
+                BTreeMap::from([(ns.root, 0), (inode, 0)])
+            );
+            let file = metadata.load_inode(backing, inode).await.unwrap();
+            assert!(
+                metadata
+                    .load_inode_if_changed(backing, inode, Some(file.version))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let mut changed = file.node.clone();
+            changed.stats.mtime_ms += 1;
+            let version = metadata
+                .publish_inode_if_version(backing, inode, file.version, changed.clone())
+                .await
+                .unwrap();
+            assert_eq!(version.inode_revision, 1);
+            assert_eq!(
+                metadata
+                    .publish_inode_if_version(backing, inode, file.version, changed.clone())
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Eagain
+            );
+            assert_eq!(
+                metadata
+                    .publish_structure_if_versions(backing, 2, &initial.inode_revisions, ns.clone())
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Eagain
+            );
+            let latest = metadata.load_inode_snapshot(backing).await.unwrap();
+            assert_eq!(latest.namespace.nodes[&inode], changed);
+            assert_eq!(
+                metadata
+                    .publish_structure_if_versions(
+                        backing,
+                        2,
+                        &BTreeMap::from([(inode, 1)]),
+                        latest.namespace.clone()
+                    )
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Eagain
+            );
+            let generation = metadata
+                .publish_structure_if_versions(
+                    backing,
+                    2,
+                    &latest.inode_revisions,
+                    latest.namespace,
+                )
+                .await
+                .unwrap();
+            assert_eq!(generation, 3);
+            assert_eq!(
+                metadata
+                    .publish_inode_if_version(backing, inode, version, changed.clone())
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Eagain
+            );
+            metadata.close().await.unwrap();
+            let reopened =
+                PgliteMetadataStore::connect_with_key(connection_string, "inode-guards")
+                    .await
+                    .unwrap();
+            assert_eq!(
+                reopened
+                    .inode_mode_state()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .structural_generation,
+                3
+            );
+            let file = reopened.load_inode(backing, inode).await.unwrap();
+            assert_eq!(
+                file.version,
+                InodeVersion {
+                    structural_generation: 3,
+                    inode_revision: 0
+                }
+            );
+            assert_eq!(file.node, changed);
+            let root = ns.root;
+            assert!(
+                reopened
+                    .publish_inode_if_version(backing, root, file.version, ns.nodes[&root].clone())
+                    .await
+                    .is_err()
+            );
+            let mut malformed_kind = changed.clone();
+            malformed_kind.stats.mode = mount_rs_core::S_IFDIR | 0o644;
+            let mut malformed_extent = changed.clone();
+            if let NodeData::File(layout) = &mut malformed_extent.data {
+                layout.extents[0].length = changed.stats.size + 1;
+            }
+            for malformed in [malformed_kind, malformed_extent] {
+                let json = serde_json::to_string(&malformed).unwrap();
+                {
+                    let client = reopened.0.lock_client().await.unwrap();
+                    client.as_ref().unwrap().execute(
+                        "UPDATE mount_rs_inode_guards SET revision=1,node=$3 WHERE volume_key=$1 AND inode=$2",
+                        &[&reopened.0.volume_key,&inode_signed(inode).unwrap(),&json]
+                    ).await.unwrap();
+                }
+                assert!(reopened.load_inode(backing, inode).await.is_err());
+                assert!(reopened.load_inode_if_changed(backing, inode, Some(file.version)).await.is_err());
+                assert!(reopened.load_inode_snapshot(backing).await.is_err());
+                let malformed_version = InodeVersion { structural_generation: 3, inode_revision: 1 };
+                assert!(reopened.publish_inode_if_version(backing, inode, malformed_version, changed.clone()).await.is_err());
+                assert!(reopened.publish_structure_if_versions(backing, 3, &BTreeMap::from([(ns.root,0),(inode,1)]), ns.clone()).await.is_err());
+            }
+            reopened.close().await.unwrap();
+            blocks.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
+    fn conditional_load_omits_only_fresh_nonzero_matches() {
+        let server = PgliteServer::start();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let metadata = PgliteMetadataStore::connect_with_key(
+                server.connection_string(),
+                "conditional-load",
+            )
+            .await
+            .unwrap();
+            let blocks =
+                PgliteBlockStore::connect_with_key(server.connection_string(), "conditional-load")
+                    .await
+                    .unwrap();
+            assert_eq!(
+                metadata.load_if_changed(0).await.unwrap().unwrap().revision,
+                0
+            );
+            let lease = metadata
+                .acquire_writer("conditional-reader", Duration::from_secs(60))
+                .await
+                .unwrap();
+            let block = blocks.put(b"abc").await.unwrap();
+            let payload = namespace(block).await;
+            metadata.publish(0, &lease, payload.clone()).await.unwrap();
+            assert!(metadata.load_if_changed(1).await.unwrap().is_none());
+            assert_eq!(
+                serde_json::to_string(
+                    &metadata
+                        .load_if_changed(0)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .namespace
+                )
+                .unwrap(),
+                serde_json::to_string(&Some(payload.clone())).unwrap(),
+            );
+            assert_eq!(
+                metadata
+                    .load_if_changed(u64::MAX)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .revision,
+                1
+            );
+            metadata.publish(1, &lease, payload).await.unwrap();
+            assert_eq!(
+                metadata.load_if_changed(1).await.unwrap().unwrap().revision,
+                2
+            );
+            {
+                let client = metadata.0.lock_client().await.unwrap();
+                client.as_ref().unwrap().execute_typed(
+                    "UPDATE mount_rs_metadata SET namespace='malformed-json' WHERE volume_key=$1",
+                    &[(&metadata.0.volume_key, Type::TEXT)],
+                ).await.unwrap();
+            }
+            // An unchanged revision is not an audit of out-of-band payload edits.
+            assert!(metadata.load_if_changed(2).await.unwrap().is_none());
+            assert!(metadata.load().await.is_err());
+            assert!(metadata.load_if_changed(1).await.is_err());
+            {
+                let client = metadata.0.lock_client().await.unwrap();
+                client.as_ref().unwrap().batch_execute(
+                    "ALTER TABLE mount_rs_metadata DROP CONSTRAINT mount_rs_metadata_revision_check;
+                     UPDATE mount_rs_metadata SET revision=-1;",
+                ).await.unwrap();
+            }
+            assert!(metadata.load_if_changed(u64::MAX).await.is_err());
+            {
+                let client = metadata.0.lock_client().await.unwrap();
+                client
+                    .as_ref()
+                    .unwrap()
+                    .execute_typed(
+                        "DELETE FROM mount_rs_metadata WHERE volume_key=$1",
+                        &[(&metadata.0.volume_key, Type::TEXT)],
+                    )
+                    .await
+                    .unwrap();
+            }
+            assert!(metadata.load_if_changed(2).await.is_err());
+            metadata.close().await.unwrap();
+            assert!(metadata.load_if_changed(2).await.is_err());
+            blocks.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
+    fn conditional_load_revision_and_payload_share_one_committed_snapshot() {
+        let server = PgliteServer::start();
+        let url = server.connection_string();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let options = PgliteStorageOptions::new("conditional-load-snapshot");
+            let writer = PgliteMetadataStore::connect_with_options(url, options.clone())
+                .await
+                .unwrap();
+            let blocks = PgliteBlockStore::connect_with_options(url, options.clone())
+                .await
+                .unwrap();
+            let block = blocks.put(b"abc").await.unwrap();
+            let first = namespace(block.clone()).await;
+            let mut second = namespace(block).await;
+            second.umask = 0o077;
+            let lease = writer
+                .acquire_writer("snapshot-writer", Duration::from_secs(60))
+                .await
+                .unwrap();
+            writer.publish(0, &lease, first.clone()).await.unwrap();
+            let mut proxy = wire_pause::QueryPause::new(url, "mount_rs_metadata");
+            let reader =
+                PgliteMetadataStore::connect_with_options(&proxy.connection_string, options)
+                    .await
+                    .unwrap();
+            proxy.arm();
+            let reading = tokio::spawn(async move {
+                let loaded = reader.load_if_changed(0).await;
+                reader.close().await.unwrap();
+                loaded
+            });
+            proxy.wait_until_paused().await;
+            writer.publish(1, &lease, second).await.unwrap();
+            proxy.release();
+            let observed = reading.await.unwrap().unwrap().unwrap();
+            proxy.finish();
+            assert_eq!(observed.revision, 1);
+            assert_eq!(observed.namespace.unwrap().umask, first.umask);
+            let current = writer.load_if_changed(1).await.unwrap().unwrap();
+            assert_eq!(current.revision, 2);
+            assert_eq!(current.namespace.unwrap().umask, 0o077);
+            writer.release_writer(&lease).await.unwrap();
+            writer.close().await.unwrap();
+            blocks.close().await.unwrap();
+        });
     }
 
     // Only the offline migration tests create an MRC1 volume. Normal

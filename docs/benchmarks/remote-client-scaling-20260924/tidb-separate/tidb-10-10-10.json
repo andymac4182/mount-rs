@@ -1,0 +1,430 @@
+{
+  "active_clients": 10,
+  "audit_logging": "enabled; request audit cost included",
+  "build_profile": "release",
+  "cleanup_error": null,
+  "clients": 10,
+  "configured_modes": [
+    "Read",
+    "Write"
+  ],
+  "dataset_bytes": 1310720,
+  "debug_assertions": false,
+  "drive_count": 10,
+  "driver_replicas": 100,
+  "driver_setup_seconds": 3.398177667,
+  "failed_phase": null,
+  "fresh_driver_sample_limit": 10,
+  "inode_updates": true,
+  "latency_histogram": "power-of-two microsecond upper bounds",
+  "namespace_bytes": 839,
+  "nominal_stage_seconds": 15,
+  "offline_empty_file_preseed": false,
+  "provider": "tidb",
+  "provider_identity": "Release Version: v8.5.7\nEdition: Community\nGit Commit Hash: 202b7f47286a1109b5c957401d34c9358d130ae0\nGit Branch: HEAD\nUTC Build Time: 2026-08-19 04:15:17\nGoVersion: go1.25.10\nRace Enabled: false\nCheck Table Before Drop: false\nStore: tikv",
+  "provider_version": "8.0.11-TiDB-v8.5.7",
+  "schema": "mount-rs-provider-saturation-v2",
+  "separate_drives": true,
+  "server_active_request_limit_per_connection": 32,
+  "servers": 10,
+  "setup_concurrency": 10,
+  "setup_seconds": 0.16660575,
+  "stages": [
+    {
+      "active_clients": 10,
+      "cache": "cache-warm randomized dataset; no cold-cache claim",
+      "clients": 10,
+      "elapsed_seconds_including_drain": 15.003922875,
+      "failures": 0,
+      "finish_unix_ms": 1790250113571,
+      "io_profile": {
+        "entries": [
+          {
+            "calls": 56096,
+            "elapsed_ns": 768224091,
+            "name": "wire.json_encode_bytes",
+            "units": 416096113
+          },
+          {
+            "calls": 56096,
+            "elapsed_ns": 1989388181,
+            "name": "wire.json_decode_bytes",
+            "units": 416096113
+          },
+          {
+            "calls": 28048,
+            "elapsed_ns": 5543292683,
+            "name": "catalog.load",
+            "units": 0
+          },
+          {
+            "calls": 28048,
+            "elapsed_ns": 379295937,
+            "name": "catalog.queue_wait",
+            "units": 0
+          },
+          {
+            "calls": 28048,
+            "elapsed_ns": 4606885,
+            "name": "catalog.pool_wait",
+            "units": 0
+          },
+          {
+            "calls": 56096,
+            "elapsed_ns": 3546425482,
+            "name": "catalog.backing_verify",
+            "units": 0
+          },
+          {
+            "calls": 28048,
+            "elapsed_ns": 687427435,
+            "name": "catalog.query_document_bytes",
+            "units": 57133776
+          },
+          {
+            "calls": 28048,
+            "elapsed_ns": 451361705,
+            "name": "catalog.decode_validate_bytes",
+            "units": 57133776
+          },
+          {
+            "calls": 28048,
+            "elapsed_ns": 0,
+            "name": "catalog.pager_hits",
+            "units": 56096
+          },
+          {
+            "calls": 28048,
+            "elapsed_ns": 0,
+            "name": "catalog.pager_misses",
+            "units": 0
+          },
+          {
+            "calls": 28048,
+            "elapsed_ns": 0,
+            "name": "catalog.pager_writes",
+            "units": 0
+          },
+          {
+            "calls": 28048,
+            "elapsed_ns": 135761400280,
+            "name": "service.dispatch",
+            "units": 0
+          },
+          {
+            "calls": 28048,
+            "elapsed_ns": 5695226629,
+            "name": "service.authorization",
+            "units": 0
+          },
+          {
+            "calls": 28048,
+            "elapsed_ns": 1937141,
+            "name": "service.handle_lock_wait",
+            "units": 0
+          },
+          {
+            "calls": 28048,
+            "elapsed_ns": 446335123,
+            "name": "service.audit",
+            "units": 0
+          },
+          {
+            "calls": 56096,
+            "elapsed_ns": 8619107,
+            "name": "filesystem.gate_wait",
+            "units": 0
+          },
+          {
+            "calls": 28048,
+            "elapsed_ns": 29124880542,
+            "name": "provider.blocks.get_bytes",
+            "units": 114884608
+          },
+          {
+            "calls": 56096,
+            "elapsed_ns": 99969124530,
+            "name": "provider.inode.load_if_changed",
+            "units": 0
+          }
+        ]
+      },
+      "mode": "Read",
+      "nominal_seconds": 15,
+      "payload_mib_per_second": 7.302256943919407,
+      "per_client_depth": 1,
+      "read": {
+        "completed": 28048,
+        "p50_us_upper": 8192,
+        "p95_us_upper": 8192,
+        "p99_us_upper": 8192
+      },
+      "read_iops": 1869.3777776433683,
+      "reference_target_iops": 100000,
+      "resources": {
+        "block_inputs": 0,
+        "block_outputs": 0,
+        "cpu_system_us": 18159189,
+        "cpu_user_us": 9098314,
+        "involuntary_context_switches": 626847,
+        "lifetime_peak_rss_bytes": 106135552,
+        "major_faults": 0,
+        "minor_faults": 22,
+        "quic_client_side": {
+          "congestion_events": 0,
+          "lost_bytes": 0,
+          "lost_packets": 0,
+          "rx_bytes": 422122911,
+          "rx_datagrams": 314168,
+          "rx_ios": 314168,
+          "sent_packets": 116474,
+          "tx_bytes": 8758475,
+          "tx_datagrams": 116474,
+          "tx_ios": 116474
+        },
+        "rss_end_bytes": 60506112,
+        "rss_start_bytes": 72728576,
+        "rust_allocated_bytes": 22501949656,
+        "rust_allocations": 15460708,
+        "rust_allocator_instrumented": true,
+        "rust_deallocations": 15460687,
+        "rust_freed_bytes": 22501885129,
+        "rust_live_end_bytes": 12135951,
+        "rust_live_start_bytes": 12071424,
+        "rust_reallocations": 1093890,
+        "schema": "mount-rs-process-resource-v1",
+        "scope": "one process includes clients, servers, verification and background; System Rust allocations exclude foreign C allocators; QUIC UDP bytes exclude IP/UDP headers; atomic allocator instrumentation affects throughput",
+        "sqlite_heap_end_bytes": 6242400,
+        "sqlite_heap_lifetime_peak_bytes": 6254688,
+        "sqlite_heap_start_bytes": 6242400,
+        "voluntary_context_switches": 3
+      },
+      "servers": 10,
+      "start_unix_ms": 1790250098567,
+      "target_attainment": 0.018693777776433683,
+      "total_iops": 1869.3777776433683,
+      "total_queue_depth": 10,
+      "write": {
+        "completed": 0,
+        "p50_us_upper": 0,
+        "p95_us_upper": 0,
+        "p99_us_upper": 0
+      },
+      "write_iops": 0.0
+    },
+    {
+      "active_clients": 10,
+      "cache": "cache-warm randomized dataset; no cold-cache claim",
+      "clients": 10,
+      "elapsed_seconds_including_drain": 15.011824334,
+      "failures": 0,
+      "finish_unix_ms": 1790250132563,
+      "io_profile": {
+        "entries": [
+          {
+            "calls": 20500,
+            "elapsed_ns": 279945233,
+            "name": "wire.json_encode_bytes",
+            "units": 152002343
+          },
+          {
+            "calls": 20500,
+            "elapsed_ns": 706699360,
+            "name": "wire.json_decode_bytes",
+            "units": 152002343
+          },
+          {
+            "calls": 10250,
+            "elapsed_ns": 1943581728,
+            "name": "catalog.load",
+            "units": 0
+          },
+          {
+            "calls": 10250,
+            "elapsed_ns": 98185645,
+            "name": "catalog.queue_wait",
+            "units": 0
+          },
+          {
+            "calls": 10250,
+            "elapsed_ns": 2058166,
+            "name": "catalog.pool_wait",
+            "units": 0
+          },
+          {
+            "calls": 20500,
+            "elapsed_ns": 1167746114,
+            "name": "catalog.backing_verify",
+            "units": 0
+          },
+          {
+            "calls": 10250,
+            "elapsed_ns": 312290480,
+            "name": "catalog.query_document_bytes",
+            "units": 20879250
+          },
+          {
+            "calls": 10250,
+            "elapsed_ns": 186792721,
+            "name": "catalog.decode_validate_bytes",
+            "units": 20879250
+          },
+          {
+            "calls": 10250,
+            "elapsed_ns": 0,
+            "name": "catalog.pager_hits",
+            "units": 20500
+          },
+          {
+            "calls": 10250,
+            "elapsed_ns": 0,
+            "name": "catalog.pager_misses",
+            "units": 0
+          },
+          {
+            "calls": 10250,
+            "elapsed_ns": 0,
+            "name": "catalog.pager_writes",
+            "units": 0
+          },
+          {
+            "calls": 10250,
+            "elapsed_ns": 145402416943,
+            "name": "service.dispatch",
+            "units": 0
+          },
+          {
+            "calls": 10250,
+            "elapsed_ns": 2007004451,
+            "name": "service.authorization",
+            "units": 0
+          },
+          {
+            "calls": 10250,
+            "elapsed_ns": 857524,
+            "name": "service.handle_lock_wait",
+            "units": 0
+          },
+          {
+            "calls": 10250,
+            "elapsed_ns": 165108727,
+            "name": "service.audit",
+            "units": 0
+          },
+          {
+            "calls": 10250,
+            "elapsed_ns": 28999112031,
+            "name": "provider.blocks.put_bytes",
+            "units": 41984000
+          },
+          {
+            "calls": 10250,
+            "elapsed_ns": 6693960411,
+            "name": "provider.blocks.flush",
+            "units": 0
+          },
+          {
+            "calls": 10250,
+            "elapsed_ns": 9394660679,
+            "name": "provider.blocks.verify_authority",
+            "units": 0
+          },
+          {
+            "calls": 10250,
+            "elapsed_ns": 17243529100,
+            "name": "provider.inode.load_if_changed",
+            "units": 0
+          },
+          {
+            "calls": 10250,
+            "elapsed_ns": 80578734750,
+            "name": "provider.inode.publish_cas",
+            "units": 0
+          },
+          {
+            "calls": 10250,
+            "elapsed_ns": 0,
+            "name": "provider.inode_returned_bytes",
+            "units": 45735500
+          },
+          {
+            "calls": 10250,
+            "elapsed_ns": 0,
+            "name": "provider.inode_serialized_bytes",
+            "units": 45735500
+          }
+        ]
+      },
+      "mode": "Write",
+      "nominal_seconds": 15,
+      "payload_mib_per_second": 2.667168334052263,
+      "per_client_depth": 1,
+      "read": {
+        "completed": 0,
+        "p50_us_upper": 0,
+        "p95_us_upper": 0,
+        "p99_us_upper": 0
+      },
+      "read_iops": 0.0,
+      "reference_target_iops": 100000,
+      "resources": {
+        "block_inputs": 0,
+        "block_outputs": 0,
+        "cpu_system_us": 8072864,
+        "cpu_user_us": 4541432,
+        "involuntary_context_switches": 351107,
+        "lifetime_peak_rss_bytes": 106135552,
+        "major_faults": 0,
+        "minor_faults": 6,
+        "quic_client_side": {
+          "congestion_events": 0,
+          "lost_bytes": 0,
+          "lost_packets": 0,
+          "rx_bytes": 2010724,
+          "rx_datagrams": 32982,
+          "rx_ios": 32982,
+          "sent_packets": 114799,
+          "tx_bytes": 155192467,
+          "tx_datagrams": 114799,
+          "tx_ios": 114799
+        },
+        "rss_end_bytes": 61931520,
+        "rss_start_bytes": 61833216,
+        "rust_allocated_bytes": 9015806457,
+        "rust_allocations": 8184034,
+        "rust_allocator_instrumented": true,
+        "rust_deallocations": 8183988,
+        "rust_freed_bytes": 9015778349,
+        "rust_live_end_bytes": 12625304,
+        "rust_live_start_bytes": 12597196,
+        "rust_reallocations": 594548,
+        "schema": "mount-rs-process-resource-v1",
+        "scope": "one process includes clients, servers, verification and background; System Rust allocations exclude foreign C allocators; QUIC UDP bytes exclude IP/UDP headers; atomic allocator instrumentation affects throughput",
+        "sqlite_heap_end_bytes": 6242400,
+        "sqlite_heap_lifetime_peak_bytes": 6254688,
+        "sqlite_heap_start_bytes": 6242400,
+        "voluntary_context_switches": 0
+      },
+      "servers": 10,
+      "start_unix_ms": 1790250117551,
+      "target_attainment": 0.006827950935173793,
+      "total_iops": 682.7950935173793,
+      "total_queue_depth": 10,
+      "write": {
+        "completed": 10250,
+        "p50_us_upper": 16384,
+        "p95_us_upper": 32768,
+        "p99_us_upper": 32768
+      },
+      "write_iops": 682.7950935173793
+    }
+  ],
+  "topology": "single",
+  "verification_error": null,
+  "verification_method": "all fresh driver files",
+  "verification_status": "passed",
+  "verified_files": 10,
+  "volume_key": "remote-saturation-36692-1790250091434253000",
+  "warmup_seconds": 3,
+  "work_error": null
+}

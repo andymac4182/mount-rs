@@ -17,6 +17,7 @@ use mysql_async::Pool;
 use mysql_async::prelude::Queryable;
 use std::collections::{BTreeMap, HashSet};
 use std::io::{Error, ErrorKind, Result as IoResult};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -37,7 +38,21 @@ fn unique_volume_key() -> String {
         .duration_since(UNIX_EPOCH)
         .expect("system clock must be after Unix epoch")
         .as_nanos();
-    format!("mount-rs-tidb-ambiguous-{}-{timestamp}", std::process::id())
+    volume_key_at(timestamp)
+}
+
+static VOLUME_KEY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn volume_key_at(timestamp: u128) -> String {
+    let sequence = VOLUME_KEY_SEQUENCE
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |previous| {
+            previous.checked_add(1)
+        })
+        .expect("test volume key sequence exhausted");
+    format!(
+        "mount-rs-tidb-ambiguous-{}-{timestamp}-{sequence}",
+        std::process::id()
+    )
 }
 
 fn options(volume_key: &str) -> TidbStorageOptions {
@@ -509,4 +524,15 @@ async fn actual_tidb_bound_commit_outcome_is_ambiguous_and_not_replayed() {
     via_proxy.close().await.expect("close proxy pool");
     direct.close().await.expect("close direct pool");
     delete_metadata_row(&direct_url, &volume_key).await;
+}
+
+#[test]
+fn volume_keys_remain_distinct_when_clock_is_frozen() {
+    let timestamp = 1790231988902407000;
+    let first = volume_key_at(timestamp);
+    let second = volume_key_at(timestamp);
+    assert_ne!(
+        first, second,
+        "parallel tests must not share a volume with equal clock values"
+    );
 }

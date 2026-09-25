@@ -1,0 +1,26 @@
+{
+  "kind": "tidb_revision_index_write_cost",
+  "stages": [
+    {
+      "elapsed_seconds": 1.17302725,
+      "namespace_bytes": 448000,
+      "ops_per_second": 170.49902293403667,
+      "stage": "no-index-a",
+      "successes": 200
+    },
+    {
+      "elapsed_seconds": 1.3116346669999999,
+      "namespace_bytes": 448000,
+      "ops_per_second": 152.48148362641595,
+      "stage": "with-index",
+      "successes": 200
+    },
+    {
+      "elapsed_seconds": 1.265814333,
+      "namespace_bytes": 448000,
+      "ops_per_second": 158.0010549619839,
+      "stage": "no-index-b",
+      "successes": 200
+    }
+  ]
+}

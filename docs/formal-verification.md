@@ -1,5 +1,7 @@
 # Formal verification and regression coverage
 
+The new `inode_publication_preserves_structural_attributes` harness passed with **0 of 197 failed checks and 4 of 4 covers** using Kani 0.68.0 / CBMC 6.11.0 on 2026-09-24. It calls the pure production `inode_publication_attributes_allowed` decision used by `validate_inode_publication`, with arbitrary full-range fields in both `Stats`, a nonzero inode ID, and symbolic file-data-kind flags. Eligibility must exactly match regular-file kinds, matching inode identity, and equality of every immutable stats field: dev, ino, mode, nlink, uid, gid, rdev, blksize, atime, and birthtime. Size, blocks, mtime, and ctime remain arbitrary. Covers request an eligible content update and rejected mode, link count, and non-file changes. Unwind is 24. The earlier full-validator attempt was stopped without a result after expensive heap/error paths; this narrower harness excludes node construction, chunker/layout validation, errors, and provider transactions. Existing extent proofs and ordinary validator tests cover separate slices. The successful helper proof does not establish the excluded properties.
+
 This inventory records the input domain and property of each locally executed proof. A passing bounded proof applies to its stated harness, not to the whole workspace. The full local runner passed all 43 harnesses with Kani 0.68.0 and CBMC 6.11.0 on 64-bit aarch64 macOS; each reported zero failed checks, all stated covers satisfied, and `VERIFICATION:- SUCCESSFUL` in its own invocation.
 
 | Harness | Production code and input domain | Proved property | Bound and limits |
@@ -109,3 +111,14 @@ Each future harness needs its own property, input assumptions, bound, and result
 | Full NFS XDR reader | Join the proved length/span decisions and admitted payload extraction into a bounded `var_opaque` proof of formatted errors, offsets, and rejection paths; extend array nesting separately. | A direct public-reader harness timed out through formatting/allocation and was removed. The 450-case reader matrix is finite; complete NFS frames and peers remain outside. |
 | WebDAV lock scope and state | Extend the proved four-path/two-lock canonical relation to bounded create/refresh/unlock transitions, then connect the state model to `DavLockTable` without unbounded HashMap allocation. | Arbitrary path normalization, lock-table storage, token parsing, and async session cancellation remain outside the current relation proof. |
 | Full protocol/parser and backend state | Connect the proved 9P/NFS/S3 numeric frame decisions to bounded body parsers, S3 chunk partitions/signatures, WebDAV lock schedules, listings, and provider restart schedules. | Network peers, allocation, cryptographic signatures, and remote backend behavior remain outside the current numeric harnesses. |
+
+## Remote provider decisions
+
+MRC4 enrollment advances the persisted structural generation and stores the base namespace inside an exact `{"format":"MRC4","namespace":...}` envelope. Both changes must commit with the mode marker and complete inode guards. Already running MRC2 readers that check only the global revision therefore invalidate their cached namespace and fail plain `Namespace` decoding. The envelope remains mandatory on every structural publication; new MRC4 readers use the shared strict codec. This fences old metadata decoding in addition to the separate mode checks that fence old writes. It is a compatibility contract and unit-test slice, not a proof of provider transaction atomicity.
+
+The remote provider has a separate six-harness runner,
+[`scripts/verify-remote-formal`](../scripts/verify-remote-formal). Its executed
+results, input domains, and limits are documented in
+[Remote verification](remote-verification.md). These decision proofs supplement
+the inventory above; they do not verify TLS, OIDC cryptography, or the complete
+asynchronous service state machine.

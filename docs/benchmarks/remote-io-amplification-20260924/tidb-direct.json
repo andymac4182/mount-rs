@@ -1,0 +1,56 @@
+{
+  "kind": "actual_tidb_direct_baseline",
+  "stages": [
+    {
+      "blocks_per_client": 32,
+      "clients": 100,
+      "counted_bytes": 13107200,
+      "elapsed_seconds": 0.297795584,
+      "errors": 0,
+      "io_profile": {
+        "entries": []
+      },
+      "ops_per_second": 10745.626100352112,
+      "p50_us": 7245,
+      "p95_us": 10792,
+      "p99_us": 60750,
+      "payload_bytes": 4096,
+      "stage": "direct_block_put",
+      "successes": 3200
+    },
+    {
+      "blocks_per_client": 32,
+      "clients": 100,
+      "counted_bytes": 13107200,
+      "elapsed_seconds": 0.170283625,
+      "errors": 0,
+      "io_profile": {
+        "entries": []
+      },
+      "ops_per_second": 18792.176875492285,
+      "p50_us": 3868,
+      "p95_us": 7198,
+      "p99_us": 37903,
+      "payload_bytes": 4096,
+      "stage": "direct_block_get",
+      "successes": 3200
+    },
+    {
+      "blocks_per_client": 32,
+      "clients": 100,
+      "counted_bytes": 0,
+      "elapsed_seconds": 0.175789667,
+      "errors": 0,
+      "io_profile": {
+        "entries": []
+      },
+      "ops_per_second": 18203.572795891352,
+      "p50_us": 3171,
+      "p95_us": 6561,
+      "p99_us": 59312,
+      "payload_bytes": 4096,
+      "stage": "direct_fresh_revision_load",
+      "successes": 3200
+    }
+  ]
+}

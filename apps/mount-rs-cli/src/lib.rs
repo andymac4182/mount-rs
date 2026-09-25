@@ -9,7 +9,9 @@
 pub mod color;
 pub mod config;
 pub mod parser;
+mod remote;
 pub mod runtime;
+mod server_cache;
 mod stale;
 pub mod watch;
 

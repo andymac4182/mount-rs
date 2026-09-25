@@ -8,6 +8,7 @@ cd "$(dirname "$0")/.."
 ./scripts/cargo-shared kani -p mount-rs-core --harness single_extent_validation
 ./scripts/cargo-shared kani -p mount-rs-core --harness two_extent_validation
 ./scripts/cargo-shared kani -p mount-rs-core --harness three_extent_validation
+./scripts/cargo-shared kani -p mount-rs-core --harness inode_publication_preserves_structural_attributes
 ./scripts/cargo-shared kani -p mount-rs-core --harness directory_link_count_boundaries
 ./scripts/cargo-shared kani -p mount-rs-core --harness namespace_path_boundaries
 ./scripts/cargo-shared kani -p mount-rs-core --harness decoded_truncation_requires_write

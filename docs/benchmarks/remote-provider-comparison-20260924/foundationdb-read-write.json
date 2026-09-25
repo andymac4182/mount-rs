@@ -1,0 +1,136 @@
+{
+  "audit_logging": "enabled; request audit cost included",
+  "build_profile": "release",
+  "cleanup_error": null,
+  "configured_modes": [
+    "Read",
+    "Write"
+  ],
+  "dataset_bytes": 13107200,
+  "debug_assertions": false,
+  "failed_phase": {
+    "error_samples": [
+      "left request 4000000001: EAGAIN",
+      "left request 4000000001: EAGAIN",
+      "left request 4000000001: EAGAIN",
+      "left request 4000000001: EAGAIN",
+      "left request 4000000001: EAGAIN",
+      "left request 4000000001: EAGAIN",
+      "left request 4000000001: EAGAIN",
+      "left request 4000000001: EAGAIN"
+    ],
+    "failure_count": 27,
+    "measured": true,
+    "report": {
+      "cache": "cache-warm randomized dataset; no cold-cache claim",
+      "clients": 100,
+      "elapsed_seconds_including_drain": 15.497401882,
+      "failures": 27,
+      "finish_unix_ms": 1790235638513,
+      "mode": "Write",
+      "nominal_seconds": 15,
+      "payload_mib_per_second": 0.8486805627255656,
+      "per_client_depth": 1,
+      "read": {
+        "completed": 0,
+        "p50_us_upper": 0,
+        "p95_us_upper": 0,
+        "p99_us_upper": 0
+      },
+      "read_iops": 0.0,
+      "reference_target_iops": 100000,
+      "servers": 10,
+      "start_unix_ms": 1790235623016,
+      "target_attainment": 0.002172622240577448,
+      "total_iops": 217.2622240577448,
+      "total_queue_depth": 100,
+      "write": {
+        "completed": 3367,
+        "p50_us_upper": 65536,
+        "p95_us_upper": 131072,
+        "p99_us_upper": 16777216
+      },
+      "write_iops": 217.2622240577448
+    },
+    "timeout_failures": 0
+  },
+  "latency_histogram": "power-of-two microsecond upper bounds",
+  "namespace_bytes": null,
+  "nominal_stage_seconds": 15,
+  "provider": "foundationdb",
+  "provider_identity": "{\"data_storage\":\"owned-run-labeled-docker-volume\",\"image\":\"foundationdb/foundationdb:7.4.7@sha256:25d9e2456ca923e70829fc07a15132c1a0c061474cd89826cdc4bbb45de870de\",\"readiness\":\"committed-set-get-clear\",\"redundancy_mode\":\"single\",\"schema\":\"mount-rs-foundationdb-benchmark-identity-v1\",\"server_versions\":[\"7.4.7\"],\"storage_engine\":\"ssd-2\",\"topology\":\"single\"}",
+  "provider_version": "see native harness identity",
+  "schema": "mount-rs-provider-saturation-v2",
+  "server_active_request_limit_per_connection": 32,
+  "stages": [
+    {
+      "cache": "cache-warm randomized dataset; no cold-cache claim",
+      "clients": 100,
+      "elapsed_seconds_including_drain": 15.018606216,
+      "failures": 0,
+      "finish_unix_ms": 1790235619405,
+      "mode": "Read",
+      "nominal_seconds": 15,
+      "payload_mib_per_second": 15.301332506819353,
+      "per_client_depth": 1,
+      "read": {
+        "completed": 58830,
+        "p50_us_upper": 32768,
+        "p95_us_upper": 65536,
+        "p99_us_upper": 65536
+      },
+      "read_iops": 3917.1411217457544,
+      "reference_target_iops": 100000,
+      "servers": 10,
+      "start_unix_ms": 1790235604386,
+      "target_attainment": 0.03917141121745754,
+      "total_iops": 3917.1411217457544,
+      "total_queue_depth": 100,
+      "write": {
+        "completed": 0,
+        "p50_us_upper": 0,
+        "p95_us_upper": 0,
+        "p99_us_upper": 0
+      },
+      "write_iops": 0.0
+    },
+    {
+      "cache": "cache-warm randomized dataset; no cold-cache claim",
+      "clients": 100,
+      "elapsed_seconds_including_drain": 15.497401882,
+      "failures": 27,
+      "finish_unix_ms": 1790235638513,
+      "mode": "Write",
+      "nominal_seconds": 15,
+      "payload_mib_per_second": 0.8486805627255656,
+      "per_client_depth": 1,
+      "read": {
+        "completed": 0,
+        "p50_us_upper": 0,
+        "p95_us_upper": 0,
+        "p99_us_upper": 0
+      },
+      "read_iops": 0.0,
+      "reference_target_iops": 100000,
+      "servers": 10,
+      "start_unix_ms": 1790235623016,
+      "target_attainment": 0.002172622240577448,
+      "total_iops": 217.2622240577448,
+      "total_queue_depth": 100,
+      "write": {
+        "completed": 3367,
+        "p50_us_upper": 65536,
+        "p95_us_upper": 131072,
+        "p99_us_upper": 16777216
+      },
+      "write_iops": 217.2622240577448
+    }
+  ],
+  "topology": "single",
+  "verification_error": null,
+  "verification_status": "skipped",
+  "verified_files": 0,
+  "volume_key": "remote-saturation-699-1790235599904432297",
+  "warmup_seconds": 3,
+  "work_error": "stage failures: count=27 samples=[\"left request 4000000001: EAGAIN\", \"left request 4000000001: EAGAIN\", \"left request 4000000001: EAGAIN\", \"left request 4000000001: EAGAIN\", \"left request 4000000001: EAGAIN\", \"left request 4000000001: EAGAIN\", \"left request 4000000001: EAGAIN\", \"left request 4000000001: EAGAIN\"]"
+}

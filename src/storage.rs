@@ -75,6 +75,40 @@ impl ConcurrentBackingId {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BlockId(pub String);
 
+/// Reserve payload bytes and bookkeeping within a shared memory budget.
+/// Empty payloads still consume one byte so entry counts cannot grow for free.
+pub fn checked_buffer_reservation(
+    used: usize,
+    payload: usize,
+    overhead: usize,
+    limit: usize,
+) -> Option<usize> {
+    let payload = payload.max(1);
+    used.checked_add(payload)?
+        .checked_add(overhead)
+        .filter(|next| *next <= limit)
+}
+
+#[cfg(kani)]
+#[kani::proof]
+fn cache_reservations_never_wrap_or_exceed_budget() {
+    let used: usize = kani::any();
+    let payload: usize = kani::any();
+    let overhead: usize = kani::any();
+    let limit: usize = kani::any();
+    let mathematical = used as u128 + payload.max(1) as u128 + overhead as u128;
+    let result = checked_buffer_reservation(used, payload, overhead, limit);
+    assert_eq!(result.is_some(), mathematical <= limit as u128);
+    if let Some(next) = result {
+        assert!(next > used);
+        assert!(next <= limit);
+        assert_eq!(next as u128, mathematical);
+    }
+    kani::cover!(payload == 0 && result.is_some());
+    kani::cover!(mathematical > usize::MAX as u128);
+    kani::cover!(result == Some(limit));
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockExtent {
     pub file_offset: u64,
@@ -134,6 +168,37 @@ pub struct Namespace {
 
 /// The only namespace representation currently understood by core.
 pub const NAMESPACE_FORMAT_VERSION: u32 = 1;
+
+/// MRC4 payloads deliberately cannot deserialize as a legacy plain namespace.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InodeNamespaceEnvelope {
+    format: String,
+    namespace: Namespace,
+}
+
+/// Encode the fenced MRC4 namespace representation after validating its content.
+pub fn encode_inode_namespace(namespace: &Namespace) -> Result<Vec<u8>> {
+    namespace.validate()?;
+    serde_json::to_vec(&InodeNamespaceEnvelope {
+        format: "MRC4".to_owned(),
+        namespace: namespace.clone(),
+    })
+    .map_err(crate::backend_error)
+}
+
+/// Decode only an exact MRC4 envelope, rejecting plain namespaces and future formats.
+pub fn decode_inode_namespace(bytes: &[u8]) -> Result<Namespace> {
+    let envelope: InodeNamespaceEnvelope =
+        serde_json::from_slice(bytes).map_err(crate::backend_error)?;
+    if envelope.format != "MRC4" {
+        return Err(crate::backend_error(
+            "invalid MRC4 namespace envelope format",
+        ));
+    }
+    envelope.namespace.validate()?;
+    Ok(envelope.namespace)
+}
 
 impl Namespace {
     /// Validate namespace structure without consulting a block store.
@@ -328,7 +393,8 @@ fn validate_format_version(version: u32) -> Result<()> {
     Ok(())
 }
 
-fn validate_node_kind(node: &NodeMetadata) -> Result<()> {
+/// Validate a complete node's type and file layout without namespace traversal.
+pub fn validate_node_kind(node: &NodeMetadata) -> Result<()> {
     let mode_type = node.stats.mode & S_IFMT;
     let valid = match &node.data {
         NodeData::Directory { .. } => mode_type == S_IFDIR,
@@ -392,6 +458,67 @@ fn validate_file_extents(extents: &[BlockExtent], file_size: u64) -> Result<()> 
 #[cfg(kani)]
 mod verification {
     use super::*;
+
+    fn arbitrary_inode_stats() -> Stats {
+        Stats {
+            dev: kani::any(),
+            ino: kani::any(),
+            mode: kani::any(),
+            nlink: kani::any(),
+            uid: kani::any(),
+            gid: kani::any(),
+            rdev: kani::any(),
+            size: kani::any(),
+            blksize: kani::any(),
+            blocks: kani::any(),
+            atime_ms: kani::any(),
+            mtime_ms: kani::any(),
+            ctime_ms: kani::any(),
+            birthtime_ms: kani::any(),
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(24)]
+    fn inode_publication_preserves_structural_attributes() {
+        let inode: u64 = kani::any();
+        kani::assume(inode != 0);
+        let original_stats = arbitrary_inode_stats();
+        let next_stats = arbitrary_inode_stats();
+        let original_file: bool = kani::any();
+        let next_file: bool = kani::any();
+        let accepted = inode_publication_attributes_allowed(
+            inode,
+            &original_stats,
+            &next_stats,
+            original_file,
+            next_file,
+        );
+        let old = &original_stats;
+        let new = &next_stats;
+        let immutable_equal = old.dev == new.dev
+            && old.ino == new.ino
+            && old.mode == new.mode
+            && old.nlink == new.nlink
+            && old.uid == new.uid
+            && old.gid == new.gid
+            && old.rdev == new.rdev
+            && old.blksize == new.blksize
+            && old.atime_ms == new.atime_ms
+            && old.birthtime_ms == new.birthtime_ms;
+        let expected = original_file
+            && next_file
+            && old.ino == inode
+            && new.ino == inode
+            && old.mode & S_IFMT == S_IFREG
+            && new.mode & S_IFMT == S_IFREG
+            && immutable_equal;
+        assert_eq!(accepted, expected);
+        kani::cover!(accepted && old.size != new.size && old.mtime_ms != new.mtime_ms);
+        kani::cover!(!accepted && old.mode != new.mode);
+        kani::cover!(!accepted && old.nlink != new.nlink);
+        kani::cover!(!accepted && (!original_file || !next_file));
+    }
 
     #[kani::proof]
     #[kani::unwind(16)]
@@ -725,6 +852,100 @@ pub struct LoadedMetadata {
     pub namespace: Option<Namespace>,
 }
 
+/// Exact CAS identity for one inode in the explicitly fenced MRC4 mode.
+/// Inode revisions may restart at zero only when structural generation advances.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InodeVersion {
+    pub structural_generation: u64,
+    pub inode_revision: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct LoadedInode {
+    pub version: InodeVersion,
+    pub node: NodeMetadata,
+}
+
+/// A coherent materialization of every authoritative inode guard and namespace.
+#[derive(Debug, Clone)]
+pub struct InodeMetadataSnapshot {
+    pub structural_generation: u64,
+    pub namespace: Namespace,
+    pub inode_revisions: BTreeMap<InodeId, u64>,
+}
+
+impl InodeMetadataSnapshot {
+    pub fn validate(&self) -> Result<()> {
+        if self.structural_generation == 0 {
+            return Err(invalid_namespace(
+                "inode structural generation must be nonzero",
+            ));
+        }
+        self.namespace.validate()?;
+        if !self.inode_revisions.keys().eq(self.namespace.nodes.keys()) {
+            return Err(invalid_namespace(
+                "inode revision keys must match namespace nodes",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InodeModeState {
+    pub backing: ConcurrentBackingId,
+    pub structural_generation: u64,
+}
+
+/// Ordinary inode publication changes regular-file content metadata only.
+/// All identity, permissions, links, and other structural attributes are retained.
+pub fn validate_inode_publication(
+    inode: InodeId,
+    original: &NodeMetadata,
+    next: &NodeMetadata,
+) -> Result<()> {
+    validate_node_kind(original)?;
+    validate_node_kind(next)?;
+    if !inode_publication_attributes_allowed(
+        inode,
+        &original.stats,
+        &next.stats,
+        matches!(original.data, NodeData::File(_)),
+        matches!(next.data, NodeData::File(_)),
+    ) {
+        return Err(invalid_namespace(
+            "inode publication changes structural attributes",
+        ));
+    }
+    Ok(())
+}
+
+/// Production eligibility decision; layout validation is performed separately.
+fn inode_publication_attributes_allowed(
+    inode: InodeId,
+    original: &Stats,
+    next: &Stats,
+    original_file: bool,
+    next_file: bool,
+) -> bool {
+    inode != 0
+        && original_file
+        && next_file
+        && original.ino == inode
+        && next.ino == inode
+        && original.mode & S_IFMT == S_IFREG
+        && next.mode & S_IFMT == S_IFREG
+        && original.dev == next.dev
+        && original.mode == next.mode
+        && original.nlink == next.nlink
+        && original.uid == next.uid
+        && original.gid == next.gid
+        && original.rdev == next.rdev
+        && original.blksize == next.blksize
+        && original.atime_ms == next.atime_ms
+        && original.birthtime_ms == next.birthtime_ms
+}
+
 /// Persisted concurrent mode and, for MRC2, its physical backing authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConcurrentModeState {
@@ -764,6 +985,77 @@ pub trait MetadataStore: Send + Sync {
     /// False for volatile stores; never advertise durable commits for memfs.
     fn durable(&self) -> bool;
     async fn load(&self) -> Result<LoadedMetadata>;
+    /// Inspect MRC4 separately so existing concurrent-mode consumers remain compatible.
+    async fn inode_mode_state(&self) -> Result<Option<InodeModeState>> {
+        Ok(None)
+    }
+    /// Explicit offline enrollment of initialized same-backing MRC2 metadata.
+    /// Atomically fence old publishers and create a complete node guard for every inode.
+    /// Advance structural generation and store `encode_inode_namespace`'s envelope
+    /// together: cached old readers must observe a changed revision and fail decoding.
+    async fn prepare_inode_mode(
+        &self,
+        _backing: ConcurrentBackingId,
+        _expected_revision: u64,
+    ) -> Result<()> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Fresh coherent authority, namespace and complete guard-version read.
+    async fn load_inode_snapshot(
+        &self,
+        _backing: ConcurrentBackingId,
+    ) -> Result<InodeMetadataSnapshot> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Read authority, structural generation and complete inode guard atomically.
+    /// Missing guards and malformed records must never fall back to stale base nodes.
+    async fn load_inode(
+        &self,
+        _backing: ConcurrentBackingId,
+        _inode: InodeId,
+    ) -> Result<LoadedInode> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Omit payload only after a fresh exact version and authority check.
+    /// This token check does not audit out-of-band payload edits that leave the
+    /// version unchanged; unconditional `load_inode` remains the full read path.
+    async fn load_inode_if_changed(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+        _known: Option<InodeVersion>,
+    ) -> Result<Option<LoadedInode>> {
+        Ok(Some(self.load_inode(backing, inode).await?))
+    }
+    /// Atomically validate exact MRC4 mode/backing and inode version, then update
+    /// only that complete inode guard. Structural publication must conflict with
+    /// this transaction; unrelated inode publications must not share a write key.
+    /// Validate the old/new node with `validate_inode_publication`; flush immutable
+    /// bytes first. EAGAIN denotes only a proven conflict with no commit.
+    async fn publish_inode_if_version(
+        &self,
+        _backing: ConcurrentBackingId,
+        _inode: InodeId,
+        _expected: InodeVersion,
+        _node: NodeMetadata,
+    ) -> Result<InodeVersion> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Validate exact authority, generation and complete old inode-version map
+    /// in one transaction, including guard membership/phantoms. Publish a valid
+    /// namespace and reset all complete inode guards to revision zero under the
+    /// next generation atomically. Lock/conflict protection must prevent an inode
+    /// write from being folded away. Reject overflow and ambiguous commits.
+    /// Always store the base namespace using `encode_inode_namespace`.
+    async fn publish_structure_if_versions(
+        &self,
+        _backing: ConcurrentBackingId,
+        _expected_generation: u64,
+        _expected_inode_revisions: &BTreeMap<InodeId, u64>,
+        _namespace: Namespace,
+    ) -> Result<u64> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
     /// Read the current metadata, omitting its payload only when an exact,
     /// nonzero revision match proves the caller's validated namespace is current.
     /// Every namespace publication must increment the revision monotonically;
@@ -1044,6 +1336,81 @@ mod tests {
                 ),
             ]),
         }
+    }
+
+    #[test]
+    fn inode_snapshot_requires_complete_versions_and_nonzero_generation() {
+        let mut snapshot = InodeMetadataSnapshot {
+            structural_generation: 1,
+            namespace: valid_namespace(),
+            inode_revisions: BTreeMap::from([(1, 0), (2, 7)]),
+        };
+        snapshot.validate().unwrap();
+        snapshot.inode_revisions.remove(&2);
+        assert!(snapshot.validate().is_err());
+        snapshot.inode_revisions.insert(3, 0);
+        assert!(snapshot.validate().is_err());
+        snapshot.inode_revisions = BTreeMap::from([(1, 0), (2, 7)]);
+        snapshot.structural_generation = 0;
+        assert!(snapshot.validate().is_err());
+    }
+
+    #[test]
+    fn inode_namespace_envelope_fences_plain_namespace_readers() {
+        let namespace = valid_namespace();
+        let encoded = encode_inode_namespace(&namespace).unwrap();
+        let decoded = decode_inode_namespace(&encoded).unwrap();
+        assert_eq!(decoded.nodes, namespace.nodes);
+        assert_eq!(decoded.root, namespace.root);
+        assert_eq!(decoded.next_inode, namespace.next_inode);
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap(),
+            serde_json::to_value(&namespace).unwrap()
+        );
+        assert!(serde_json::from_slice::<Namespace>(&encoded).is_err());
+        assert!(decode_inode_namespace(&serde_json::to_vec(&namespace).unwrap()).is_err());
+        let mut malformed: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        malformed["format"] = serde_json::json!("MRC5");
+        assert!(decode_inode_namespace(&serde_json::to_vec(&malformed).unwrap()).is_err());
+        malformed["format"] = serde_json::json!("MRC4");
+        malformed["unknown"] = serde_json::json!(true);
+        assert!(decode_inode_namespace(&serde_json::to_vec(&malformed).unwrap()).is_err());
+        malformed.as_object_mut().unwrap().remove("unknown");
+        malformed["namespace"]["root"] = serde_json::json!(0);
+        assert!(decode_inode_namespace(&serde_json::to_vec(&malformed).unwrap()).is_err());
+    }
+
+    #[test]
+    fn inode_publication_accepts_content_and_rejects_structural_changes() {
+        let original = valid_namespace().nodes.remove(&2).unwrap();
+        let mut next = original.clone();
+        next.stats.size = 8;
+        next.stats.blocks = 2;
+        next.stats.mtime_ms = 3;
+        next.stats.ctime_ms = 4;
+        validate_inode_publication(2, &original, &next).unwrap();
+        for field in 0..11 {
+            let mut hostile = next.clone();
+            match field {
+                0 => hostile.stats.dev += 1,
+                1 => hostile.stats.ino += 1,
+                2 => hostile.stats.mode ^= 0o100,
+                3 => hostile.stats.nlink += 1,
+                4 => hostile.stats.uid += 1,
+                5 => hostile.stats.gid += 1,
+                6 => hostile.stats.rdev += 1,
+                7 => hostile.stats.blksize += 1,
+                8 => hostile.stats.atime_ms += 1,
+                9 => hostile.stats.birthtime_ms += 1,
+                _ => hostile.stats.mode = S_IFDIR | 0o755,
+            }
+            assert!(validate_inode_publication(2, &original, &hostile).is_err());
+        }
+        let directory = valid_namespace().nodes.remove(&1).unwrap();
+        assert!(validate_inode_publication(1, &directory, &directory).is_err());
+        next.stats.size = 1;
+        assert!(validate_inode_publication(2, &original, &next).is_err());
+        assert!(validate_inode_publication(0, &original, &original).is_err());
     }
 
     fn assert_error_code<T>(result: Result<T>, expected: ErrorCode) {

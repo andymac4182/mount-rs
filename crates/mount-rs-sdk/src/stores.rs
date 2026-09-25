@@ -1,5 +1,6 @@
 //! Type-erased provider adapters and optional operation telemetry.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,10 +8,13 @@ use std::time::Duration;
 use crate::Telemetry;
 use async_trait::async_trait;
 use mount_rs_core::Result;
+use mount_rs_core::diagnostics::profile::{Event, Span, add};
+use mount_rs_core::storage::InodeId;
 use mount_rs_core::storage::{
     BlockId, BlockReconcileReport, BlockStore, CheckoutRequest, ConcurrentBackingId,
     ConcurrentModeState, DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState,
-    DirectoryGrant, LoadedMetadata, MetadataStore, Namespace, WriterLease,
+    DirectoryGrant, InodeMetadataSnapshot, InodeModeState, InodeVersion, LoadedInode,
+    LoadedMetadata, MetadataStore, Namespace, NodeMetadata, WriterLease,
 };
 use mount_rs_core::versioning::VolumeId;
 
@@ -35,6 +39,188 @@ impl ErasedMetadataStore {
 
 #[async_trait]
 impl MetadataStore for ErasedMetadataStore {
+    async fn inode_mode_state(&self) -> Result<Option<InodeModeState>> {
+        let _profile = Span::new(Event::MetadataConditional);
+        #[cfg(feature = "observability")]
+        let result = self
+            .telemetry
+            .observe_fs(
+                "provider.metadata",
+                "inode.mode",
+                None,
+                self.inner.inode_mode_state(),
+            )
+            .await;
+        #[cfg(not(feature = "observability"))]
+        let result = self.inner.inode_mode_state().await;
+        result
+    }
+
+    async fn prepare_inode_mode(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        let _profile = Span::new(Event::MetadataConditional);
+        #[cfg(feature = "observability")]
+        let result = self
+            .telemetry
+            .observe_fs(
+                "provider.metadata",
+                "inode.prepare",
+                None,
+                self.inner.prepare_inode_mode(backing, expected_revision),
+            )
+            .await;
+        #[cfg(not(feature = "observability"))]
+        let result = self
+            .inner
+            .prepare_inode_mode(backing, expected_revision)
+            .await;
+        result
+    }
+
+    async fn load_inode_snapshot(
+        &self,
+        backing: ConcurrentBackingId,
+    ) -> Result<InodeMetadataSnapshot> {
+        let _profile = Span::new(Event::MetadataLoad);
+        #[cfg(feature = "observability")]
+        let result = self
+            .telemetry
+            .observe_fs(
+                "provider.metadata",
+                "inode.snapshot",
+                None,
+                self.inner.load_inode_snapshot(backing),
+            )
+            .await;
+        #[cfg(not(feature = "observability"))]
+        let result = self.inner.load_inode_snapshot(backing).await;
+        result
+    }
+
+    async fn load_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+    ) -> Result<LoadedInode> {
+        let _profile = Span::new(Event::InodeLoad);
+        #[cfg(feature = "observability")]
+        let result = self
+            .telemetry
+            .observe_fs(
+                "provider.metadata",
+                "inode.load",
+                None,
+                self.inner.load_inode(backing, inode),
+            )
+            .await;
+        #[cfg(not(feature = "observability"))]
+        let result = self.inner.load_inode(backing, inode).await;
+        result
+    }
+
+    async fn load_inode_if_changed(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+        known: Option<InodeVersion>,
+    ) -> Result<Option<LoadedInode>> {
+        let _profile = Span::new(Event::InodeConditional);
+        #[cfg(feature = "observability")]
+        let result = self
+            .telemetry
+            .observe_fs(
+                "provider.metadata",
+                "inode.load_if_changed",
+                None,
+                self.inner.load_inode_if_changed(backing, inode, known),
+            )
+            .await;
+        #[cfg(not(feature = "observability"))]
+        let result = self
+            .inner
+            .load_inode_if_changed(backing, inode, known)
+            .await;
+        result
+    }
+
+    async fn publish_inode_if_version(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+        expected: InodeVersion,
+        node: NodeMetadata,
+    ) -> Result<InodeVersion> {
+        let _profile = Span::new(Event::InodePublication);
+        #[cfg(feature = "observability")]
+        let result = self
+            .telemetry
+            .observe_fs(
+                "provider.metadata",
+                "inode.publish",
+                None,
+                self.inner
+                    .publish_inode_if_version(backing, inode, expected, node),
+            )
+            .await;
+        #[cfg(not(feature = "observability"))]
+        let result = self
+            .inner
+            .publish_inode_if_version(backing, inode, expected, node)
+            .await;
+        if result
+            .as_ref()
+            .is_err_and(|error| error.code == mount_rs_core::ErrorCode::Eagain)
+        {
+            add(Event::InodeConflict, 1);
+        }
+        result
+    }
+
+    async fn publish_structure_if_versions(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_generation: u64,
+        expected_inode_revisions: &BTreeMap<InodeId, u64>,
+        namespace: Namespace,
+    ) -> Result<u64> {
+        let _profile = Span::new(Event::Publication).units(namespace.nodes.len() as u64);
+        #[cfg(feature = "observability")]
+        let result = self
+            .telemetry
+            .observe_fs(
+                "provider.metadata",
+                "inode.publish_structure",
+                None,
+                self.inner.publish_structure_if_versions(
+                    backing,
+                    expected_generation,
+                    expected_inode_revisions,
+                    namespace,
+                ),
+            )
+            .await;
+        #[cfg(not(feature = "observability"))]
+        let result = self
+            .inner
+            .publish_structure_if_versions(
+                backing,
+                expected_generation,
+                expected_inode_revisions,
+                namespace,
+            )
+            .await;
+        if result
+            .as_ref()
+            .is_err_and(|error| error.code == mount_rs_core::ErrorCode::Eagain)
+        {
+            add(Event::PublishConflict, 1);
+        }
+        result
+    }
+
     async fn delegation_state(&self) -> Result<Option<DelegationState>> {
         self.inner.delegation_state().await
     }
@@ -78,6 +264,7 @@ impl MetadataStore for ErasedMetadataStore {
     }
 
     async fn load(&self) -> Result<LoadedMetadata> {
+        let _profile = Span::new(Event::MetadataLoad);
         #[cfg(feature = "observability")]
         {
             return self
@@ -90,6 +277,7 @@ impl MetadataStore for ErasedMetadataStore {
     }
 
     async fn load_if_changed(&self, known_revision: u64) -> Result<Option<LoadedMetadata>> {
+        let _profile = Span::new(Event::MetadataConditional);
         #[cfg(feature = "observability")]
         {
             return self
@@ -238,6 +426,7 @@ impl MetadataStore for ErasedMetadataStore {
         expected_revision: u64,
         namespace: Namespace,
     ) -> Result<u64> {
+        let _profile = Span::new(Event::Publication).units(namespace.nodes.len() as u64);
         #[cfg(feature = "observability")]
         {
             return self
@@ -408,6 +597,7 @@ impl BlockStore for ErasedBlockStore {
     }
 
     async fn verify_concurrent_backing(&self, expected: ConcurrentBackingId) -> Result<()> {
+        let _profile = Span::new(Event::BackingVerify);
         #[cfg(feature = "observability")]
         {
             return self
@@ -442,6 +632,7 @@ impl BlockStore for ErasedBlockStore {
     }
 
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
+        let _profile = Span::new(Event::BlockPut).units(bytes.len() as u64);
         #[cfg(feature = "observability")]
         {
             let count = bytes.len() as u64;
@@ -457,20 +648,29 @@ impl BlockStore for ErasedBlockStore {
     }
 
     async fn get(&self, id: &BlockId) -> Result<Vec<u8>> {
+        let mut profile = Span::new(Event::BlockGet);
         #[cfg(feature = "observability")]
         {
             let result = self
                 .telemetry
                 .observe_fs("provider.blocks", "get", None, self.inner.get(id))
                 .await?;
+            profile.set_units(result.len() as u64);
             self.telemetry.record_bytes("read", result.len() as u64);
             return Ok(result);
         }
         #[cfg(not(feature = "observability"))]
-        self.inner.get(id).await
+        {
+            let result = self.inner.get(id).await;
+            if let Ok(bytes) = &result {
+                profile.set_units(bytes.len() as u64);
+            }
+            result
+        }
     }
 
     async fn flush(&self) -> Result<()> {
+        let _profile = Span::new(Event::BlockFlush);
         #[cfg(feature = "observability")]
         {
             return self
@@ -599,6 +799,87 @@ mod tests {
 
     #[async_trait]
     impl MetadataStore for IdentityProbeMetadataStore {
+        async fn inode_mode_state(&self) -> Result<Option<InodeModeState>> {
+            Ok(Some(InodeModeState {
+                backing: self.0,
+                structural_generation: 5,
+            }))
+        }
+        async fn prepare_inode_mode(
+            &self,
+            backing: ConcurrentBackingId,
+            revision: u64,
+        ) -> Result<()> {
+            assert_eq!(backing, self.0);
+            assert_eq!(revision, 7);
+            Err(FsError::new(ErrorCode::Eio))
+        }
+        async fn load_inode_snapshot(
+            &self,
+            backing: ConcurrentBackingId,
+        ) -> Result<InodeMetadataSnapshot> {
+            assert_eq!(backing, self.0);
+            Err(FsError::new(ErrorCode::Eio))
+        }
+        async fn load_inode(
+            &self,
+            backing: ConcurrentBackingId,
+            inode: InodeId,
+        ) -> Result<LoadedInode> {
+            assert_eq!(backing, self.0);
+            assert_eq!(inode, 2);
+            Err(FsError::new(ErrorCode::Eio))
+        }
+        async fn load_inode_if_changed(
+            &self,
+            backing: ConcurrentBackingId,
+            inode: InodeId,
+            known: Option<InodeVersion>,
+        ) -> Result<Option<LoadedInode>> {
+            assert_eq!(backing, self.0);
+            assert_eq!(inode, 2);
+            assert_eq!(
+                known,
+                Some(InodeVersion {
+                    structural_generation: 5,
+                    inode_revision: 7
+                })
+            );
+            Ok(None)
+        }
+        async fn publish_inode_if_version(
+            &self,
+            backing: ConcurrentBackingId,
+            inode: InodeId,
+            expected: InodeVersion,
+            node: NodeMetadata,
+        ) -> Result<InodeVersion> {
+            assert_eq!(backing, self.0);
+            assert_eq!(inode, 2);
+            assert_eq!(node.stats.ino, 2);
+            assert_eq!(
+                expected,
+                InodeVersion {
+                    structural_generation: 5,
+                    inode_revision: 7
+                }
+            );
+            Err(FsError::new(ErrorCode::Eio))
+        }
+        async fn publish_structure_if_versions(
+            &self,
+            backing: ConcurrentBackingId,
+            generation: u64,
+            revisions: &BTreeMap<InodeId, u64>,
+            namespace: Namespace,
+        ) -> Result<u64> {
+            assert_eq!(backing, self.0);
+            assert_eq!(generation, 5);
+            assert_eq!(revisions, &BTreeMap::from([(2, 7)]));
+            assert_eq!(namespace.root, 1);
+            Err(FsError::new(ErrorCode::Eio))
+        }
+
         fn durable(&self) -> bool {
             true
         }
@@ -817,11 +1098,76 @@ mod tests {
         );
         assert_eq!(
             erased
-                .publish_bound_if_revision(other, 7, namespace)
+                .publish_bound_if_revision(other, 7, namespace.clone())
                 .await
                 .unwrap_err()
                 .code,
             ErrorCode::Estale
+        );
+        let version = InodeVersion {
+            structural_generation: 5,
+            inode_revision: 7,
+        };
+        assert_eq!(
+            erased.inode_mode_state().await.unwrap(),
+            Some(InodeModeState {
+                backing: id,
+                structural_generation: 5
+            })
+        );
+        assert_eq!(
+            erased.prepare_inode_mode(id, 7).await.unwrap_err().code,
+            ErrorCode::Eio
+        );
+        assert_eq!(
+            erased.load_inode_snapshot(id).await.unwrap_err().code,
+            ErrorCode::Eio
+        );
+        assert_eq!(
+            erased.load_inode(id, 2).await.unwrap_err().code,
+            ErrorCode::Eio
+        );
+        assert!(
+            erased
+                .load_inode_if_changed(id, 2, Some(version))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let node = NodeMetadata {
+            stats: mount_rs_core::types::Stats {
+                dev: 0,
+                ino: 2,
+                mode: 0,
+                nlink: 1,
+                uid: 0,
+                gid: 0,
+                rdev: 0,
+                size: 0,
+                blksize: 4096,
+                blocks: 0,
+                atime_ms: 0,
+                mtime_ms: 0,
+                ctime_ms: 0,
+                birthtime_ms: 0,
+            },
+            data: mount_rs_core::storage::NodeData::Special,
+        };
+        assert_eq!(
+            erased
+                .publish_inode_if_version(id, 2, version, node)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Eio
+        );
+        assert_eq!(
+            erased
+                .publish_structure_if_versions(id, 5, &BTreeMap::from([(2, 7)]), namespace)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Eio
         );
         erased.migrate_mrc1_to_bound_mode(id, 7).await.unwrap();
         assert_eq!(

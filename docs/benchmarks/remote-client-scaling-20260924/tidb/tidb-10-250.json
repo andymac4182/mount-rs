@@ -1,0 +1,33 @@
+{
+  "audit_logging": "enabled; request audit cost included",
+  "build_profile": "release",
+  "cleanup_error": null,
+  "clients": 250,
+  "configured_modes": [
+    "Read",
+    "Write"
+  ],
+  "dataset_bytes": 32768000,
+  "debug_assertions": false,
+  "failed_phase": null,
+  "inode_updates": true,
+  "latency_histogram": "power-of-two microsecond upper bounds",
+  "namespace_bytes": null,
+  "nominal_stage_seconds": 15,
+  "provider": "tidb",
+  "provider_identity": "Release Version: v8.5.7\nEdition: Community\nGit Commit Hash: 202b7f47286a1109b5c957401d34c9358d130ae0\nGit Branch: HEAD\nUTC Build Time: 2026-08-19 04:15:17\nGoVersion: go1.25.10\nRace Enabled: false\nCheck Table Before Drop: false\nStore: tikv",
+  "provider_version": "8.0.11-TiDB-v8.5.7",
+  "schema": "mount-rs-provider-saturation-v2",
+  "server_active_request_limit_per_connection": 32,
+  "servers": 10,
+  "setup_concurrency": 100,
+  "setup_seconds": null,
+  "stages": [],
+  "topology": "single",
+  "verification_error": null,
+  "verification_status": "skipped",
+  "verified_files": 0,
+  "volume_key": "remote-saturation-23916-1790246824626476000",
+  "warmup_seconds": 3,
+  "work_error": "setup failures: count=36 samples=[\"remote stream I/O failed\", \"remote stream I/O failed\", \"remote stream I/O failed\", \"remote stream I/O failed\", \"remote stream I/O failed\", \"remote stream I/O failed\", \"remote stream I/O failed\", \"remote stream I/O failed\"]"
+}

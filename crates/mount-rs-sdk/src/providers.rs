@@ -130,6 +130,15 @@ pub(crate) async fn open_storage(
     metadata: &StoreConfig,
     blocks: &StoreConfig,
 ) -> Result<OpenStorage> {
+    open_storage_decorated(metadata, blocks, None).await
+}
+
+pub(crate) async fn open_storage_decorated(
+    metadata: &StoreConfig,
+    blocks: &StoreConfig,
+    decorator: Option<&dyn crate::filesystem::BlockStoreDecorator>,
+) -> Result<OpenStorage> {
+    let block_config = blocks;
     let (metadata, mut metadata_resources) = open_metadata(metadata).await?;
     let (blocks, mut block_resources) = match open_blocks(blocks).await {
         Ok(opened) => opened,
@@ -142,6 +151,19 @@ pub(crate) async fn open_storage(
         }
     };
     metadata_resources.append(&mut block_resources);
+    let blocks = match decorator {
+        Some(decorator) => match decorator.decorate(block_config, blocks) {
+            Ok(blocks) => blocks,
+            Err(error) => {
+                let resources = StorageResources {
+                    resources: metadata_resources,
+                };
+                let _ = resources.close().await;
+                return Err(error);
+            }
+        },
+        None => blocks,
+    };
     #[cfg(feature = "observability")]
     let (metadata, blocks) = {
         let telemetry = mount_rs_observability::global();

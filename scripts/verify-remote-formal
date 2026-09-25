@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+# Each invocation reports the checks and covers of one production decision.
+./scripts/cargo-shared kani -p mount-rs-service --harness remote_grant_requires_exact_scope_and_all_claims
+./scripts/cargo-shared kani -p mount-rs-service --harness remote_handle_admission_is_fenced_and_bounded
+./scripts/cargo-shared kani -p mount-rs-remote-protocol --harness binary_io_lengths_bounded_before_allocation
+./scripts/cargo-shared kani -p mount-rs-service --harness generic_control_charge_cannot_wrap_or_exceed_default_admission
+./scripts/cargo-shared kani -p mount-rs-remote-protocol --harness remote_readonly_flags_require_explicit_nonmutating_values
+./scripts/cargo-shared kani -p mount-rs-service --harness remote_read_grants_cannot_authorize_mutations
+./scripts/cargo-shared kani -p mount-rs-service --harness remote_handles_require_exact_drive_and_revision

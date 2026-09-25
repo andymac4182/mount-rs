@@ -1,0 +1,28 @@
+[package]
+name = "mount-rs-remote-client"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+
+[dependencies]
+async-trait = "0.1"
+mount-rs-core = { path = "../.." }
+mount-rs-remote-protocol = { path = "../mount-rs-remote-protocol" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+quinn = { version = "=0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+webpki-roots = "1"
+tokio = { version = "1", features = ["fs", "io-util", "net", "process", "rt", "sync", "time"] }
+
+[dev-dependencies]
+ring = "0.17"
+mount-rs-auto = { path = "../../transports/mount-rs-auto" }
+mount-rs-sdk = { path = "../mount-rs-sdk" }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+mount-rs-service = { path = "../mount-rs-service" }
+mount-rs-memfs = { path = "../../filesystems/mount-rs-memfs" }
+rcgen = { version = "=0.14.8", default-features = false, features = ["crypto", "ring"] }
