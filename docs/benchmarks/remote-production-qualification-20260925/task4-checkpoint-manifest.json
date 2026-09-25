@@ -1,0 +1,30 @@
+{
+  "schema": "mount-rs-task4-checkpoint-manifest-v1",
+  "qualification_status": "model, catalog and signed-authentication correctness only; capacity ramp incomplete",
+  "artifacts": [
+    {
+      "file": "task4-catalog-shape-resource.json",
+      "fixture_checkpoint": "d4935e1b",
+      "scope": "debug resource profile; source label retained in raw artifact"
+    },
+    {
+      "file": "task4-catalog-shape-allocation.json",
+      "fixture_checkpoint": "d4935e1b",
+      "scope": "debug instrumented Rust allocator profile; foreign SQLite heap separate"
+    },
+    {
+      "file": "task4-catalog-shape-release.json",
+      "fixture_checkpoint": "d4935e1b",
+      "scope": "release catalog shape profile; 40 authoritative reads per shape"
+    },
+    {
+      "file": "task4-signed-oidc-auth-smoke.json",
+      "fixture_checkpoint": "bd5af8a6",
+      "scope": "ten retained connections; sequential one-file MemoryFs oracle; static JWK ES256 verification"
+    }
+  ],
+  "review_checkpoints": [
+    "d4935e1b: no material findings, bounded counts/oracle/resource claims",
+    "bd5af8a6: no material findings, signed auth and binder; not simultaneous I/O/capacity approval"
+  ]
+}
