@@ -15,6 +15,7 @@
     )
 ))]
 
+mod compact;
 use async_trait::async_trait;
 use foundationdb::api::{FdbApiBuilder, NetworkAutoStop};
 use foundationdb::options::TransactionOption;
@@ -25,6 +26,7 @@ use mount_rs_core::delegation::{
     CheckoutRequest, DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState,
     DirectoryGrant,
 };
+use mount_rs_core::storage::compact::*;
 use mount_rs_core::storage::{
     BlockId, BlockStore, ConcurrentBackingId, ConcurrentModeState, InodeId, InodeMetadataSnapshot,
     InodeModeState, InodeVersion, LoadedInode, LoadedMetadata, MetadataStore, Namespace, NodeData,
@@ -1155,6 +1157,10 @@ impl FoundationDbStorage {
                 #[cfg(test)]
                 metadata_test_fault: Mutex::new(None),
                 #[cfg(test)]
+                compact_trace: Mutex::new(Vec::new()),
+                #[cfg(test)]
+                compact_control: Mutex::new(None),
+                #[cfg(test)]
                 metadata_test_attempts: Arc::new(AtomicU64::new(0)),
                 limits,
                 oracle,
@@ -1221,6 +1227,10 @@ enum MetadataTestFault {
 struct Inner {
     #[cfg(test)]
     metadata_test_fault: Mutex<Option<MetadataTestFault>>,
+    #[cfg(test)]
+    compact_trace: Mutex<Vec<(&'static str, Vec<u8>, usize)>>,
+    #[cfg(test)]
+    compact_control: Mutex<Option<compact_tests::Control>>,
     #[cfg(test)]
     metadata_test_attempts: Arc<AtomicU64>,
     db: Arc<Database>,
@@ -2663,6 +2673,9 @@ impl FoundationDbMetadataStore {
                         version: None,
                         generation: 0,
                     };
+                    if mode.as_deref() == Some(b"MRC5") {
+                        return Err(TxnError::Fs(stale_backing()));
+                    }
                     if matches!(command, InodeCommand::Inspect) && mode.as_deref() != Some(b"MRC4")
                     {
                         return Ok(result);
@@ -3200,11 +3213,12 @@ impl FoundationDbMetadataStore {
                 let metadata_prefix = metadata_prefix.clone();
                 Box::pin(async move {
                     configure_transaction(trx, limits)?;
-                    if get_owned(trx, &Keyspace::new(&metadata_prefix).write_mode())
-                        .await?
-                        .as_deref()
-                        == Some(b"MRC4")
-                    {
+                    if matches!(
+                        get_owned(trx, &Keyspace::new(&metadata_prefix).write_mode())
+                            .await?
+                            .as_deref(),
+                        Some(b"MRC4" | b"MRC5")
+                    ) {
                         return Err(TxnError::Fs(stale_backing()));
                     }
                     let raw_manifest = get_owned(trx, &manifest_key).await?;
@@ -3227,6 +3241,75 @@ impl FoundationDbMetadataStore {
 
 #[async_trait]
 impl MetadataStore for FoundationDbMetadataStore {
+    fn compact_inode_capability(&self) -> CompactInodeCapability {
+        CompactInodeCapability::V1
+    }
+    async fn prepare_compact_inode_mode(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        match self
+            .compact_transaction(compact::Command::Prepare(backing, expected_revision))
+            .await?
+        {
+            compact::Output::Prepared => Ok(()),
+            _ => unreachable!(),
+        }
+    }
+    async fn load_compact_snapshot(&self, backing: ConcurrentBackingId) -> Result<CompactSnapshot> {
+        match self
+            .compact_transaction(compact::Command::Snapshot(backing))
+            .await?
+        {
+            compact::Output::Snapshot(value) => Ok(value),
+            _ => unreachable!(),
+        }
+    }
+    async fn load_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+    ) -> Result<LoadedCompactInode> {
+        match self
+            .compact_transaction(compact::Command::Load(backing, inode))
+            .await?
+        {
+            compact::Output::Inode(value) => Ok(value),
+            _ => unreachable!(),
+        }
+    }
+    async fn publish_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+        generation: u64,
+        expected: PhysicalInodeIdentity,
+        node: NodeMetadata,
+    ) -> Result<LoadedCompactInode> {
+        match self
+            .compact_transaction(compact::Command::Publish(
+                backing, inode, generation, expected, node,
+            ))
+            .await?
+        {
+            compact::Output::Inode(value) => Ok(value),
+            _ => unreachable!(),
+        }
+    }
+    async fn publish_compact_structure(
+        &self,
+        delta: &CompactStructuralDelta,
+    ) -> Result<CompactPublication> {
+        match self
+            .compact_transaction(compact::Command::Structure(delta.clone()))
+            .await?
+        {
+            compact::Output::Structure(value) => Ok(value),
+            _ => unreachable!(),
+        }
+    }
+
     fn durable(&self) -> bool {
         self.0.durable
     }
@@ -5385,3 +5468,6 @@ mod tests {
 
 #[cfg(test)]
 mod authority_fault_tests;
+
+#[cfg(test)]
+mod compact_tests;
