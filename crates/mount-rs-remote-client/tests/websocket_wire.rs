@@ -66,6 +66,9 @@ impl Fixture {
         Self::with_limits(RemoteTransferLimits::default()).await
     }
     async fn with_limits(limits: RemoteTransferLimits) -> Self {
+        Self::with_driver(limits, None).await
+    }
+    async fn with_driver(limits: RemoteTransferLimits, driver: Option<Arc<dyn FsDriver>>) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let catalog = Arc::new(
             SqliteCatalog::open(directory.path().join("catalog.sqlite"))
@@ -101,7 +104,9 @@ impl Fixture {
         let memory = Arc::new(MemoryFs::new(MemoryOptions::default()));
         memory.write_file("/file", b"old").await.unwrap();
         let mut dispatcher = DriveDispatcher::new(catalog);
-        dispatcher.register("red", "data", memory.clone()).unwrap();
+        dispatcher
+            .register("red", "data", driver.unwrap_or_else(|| memory.clone()))
+            .unwrap();
         let dispatcher = Arc::new(dispatcher);
         let auth_calls = Arc::new(AtomicUsize::new(0));
         let auth = Arc::new(Auth(auth_calls.clone()));
@@ -178,7 +183,11 @@ impl Fixture {
         self.quic.close().await;
     }
 }
-async fn send(socket: &mut Socket, message: &Message, terminator: bool) {
+async fn send<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    socket: &mut WebSocketStream<S>,
+    message: &Message,
+    terminator: bool,
+) {
     let mut bytes = Vec::new();
     binary::write_control(&mut bytes, message).await.unwrap();
     socket
@@ -198,7 +207,9 @@ async fn send(socket: &mut Socket, message: &Message, terminator: bool) {
             .unwrap();
     }
 }
-async fn next_binary(socket: &mut Socket) -> Vec<u8> {
+async fn next_binary<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    socket: &mut WebSocketStream<S>,
+) -> Vec<u8> {
     loop {
         match tokio::time::timeout(Duration::from_secs(3), socket.next())
             .await
@@ -212,7 +223,9 @@ async fn next_binary(socket: &mut Socket) -> Vec<u8> {
         }
     }
 }
-async fn control_body(socket: &mut Socket) -> Message {
+async fn control_body<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    socket: &mut WebSocketStream<S>,
+) -> Message {
     let mut bytes = next_binary(socket).await;
     let header = Header::decode(bytes.as_slice().try_into().unwrap()).unwrap();
     while bytes.len() < 32 + header.control_len {
@@ -220,7 +233,9 @@ async fn control_body(socket: &mut Socket) -> Message {
     }
     binary::read_control(&mut bytes.as_slice()).await.unwrap()
 }
-async fn control(socket: &mut Socket) -> Message {
+async fn control<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    socket: &mut WebSocketStream<S>,
+) -> Message {
     let message = control_body(socket).await;
     assert!(next_binary(socket).await.is_empty());
     message
@@ -590,4 +605,422 @@ async fn data_admission_before_body_preserves_other_connection_hello_and_release
     ));
     drop(next);
     f.close().await;
+}
+
+#[tokio::test]
+async fn progressed_quic_tls_stall_never_contacts_websocket_fallback() {
+    let certificate = rcgen::generate_simple_self_signed(
+        std::iter::once("localhost".to_owned())
+            .chain((0..300).map(|n| format!("host-{n}.example.test")))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let cert = certificate.cert.der().clone();
+    let key: rustls::pki_types::PrivateKeyDer<'static> =
+        rustls::pki_types::PrivatePkcs8KeyDer::from(certificate.signing_key.serialize_der()).into();
+    let mut tls = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(vec![cert.clone()], key)
+    .unwrap();
+    tls.alpn_protocols = vec![b"mount-rs/2".to_vec()];
+    let server = quinn::Endpoint::server(
+        quinn::ServerConfig::with_crypto(Arc::new(
+            quinn::crypto::rustls::QuicServerConfig::try_from(tls).unwrap(),
+        )),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .unwrap();
+    let downstream = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let upstream = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let proxy_address = downstream.local_addr().unwrap();
+    let server_address = server.local_addr().unwrap();
+    let delivered = Arc::new(tokio::sync::Notify::new());
+    let proxy = tokio::spawn({
+        let delivered = delivered.clone();
+        async move {
+            let mut client = None;
+            let mut response_delivered = false;
+            let mut client_bytes = vec![0; 65536];
+            let mut server_bytes = vec![0; 65536];
+            loop {
+                tokio::select! {
+                    result=downstream.recv_from(&mut client_bytes)=>{let(count,address)=result.unwrap();client=Some(address);upstream.send_to(&client_bytes[..count],server_address).await.unwrap();},
+                    result=upstream.recv_from(&mut server_bytes)=>{let(count,_)=result.unwrap();if !response_delivered {assert!(count>200,"actual QUIC TLS server flight");downstream.send_to(&server_bytes[..count],client.unwrap()).await.unwrap();response_delivered=true;delivered.notify_one();}},
+                }
+            }
+        }
+    });
+    let handshake = tokio::spawn({
+        let server = server.clone();
+        async move {
+            let incoming = server.accept().await.unwrap();
+            let mut connecting = incoming.accept().unwrap();
+            let negotiation = connecting
+                .handshake_data()
+                .await
+                .unwrap()
+                .downcast::<quinn::crypto::rustls::HandshakeData>()
+                .unwrap();
+            assert_eq!(
+                negotiation.protocol.as_deref(),
+                Some(b"mount-rs/2".as_slice())
+            );
+            let _ = connecting.await;
+        }
+    });
+    let trap = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let token = directory.path().join("token");
+    std::fs::write(&token, "dmFsaWQ.e30.c2ln").unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(cert).unwrap();
+    let connect = RemoteConnection::connect_with_transport(
+        proxy_address,
+        "localhost",
+        roots,
+        "red".into(),
+        CredentialSource::File(token),
+        ConnectionTransport::Auto {
+            websocket: trap.local_addr().unwrap(),
+        },
+    );
+    tokio::pin!(connect);
+    tokio::select! {
+        result=&mut connect=>assert!(result.is_err()),
+        _=trap.accept()=>panic!("progressed QUIC TLS must never contact WebSocket fallback"),
+        _=tokio::time::sleep(Duration::from_secs(6))=>panic!("initial selection must terminate"),
+    }
+    tokio::time::timeout(Duration::from_secs(1), delivered.notified())
+        .await
+        .unwrap();
+    proxy.abort();
+    server.close(0u32.into(), b"done");
+    handshake.await.unwrap();
+}
+
+struct CloseGateFs {
+    memory: Arc<MemoryFs>,
+    opened: AtomicUsize,
+    gate: Arc<CloseGate>,
+}
+struct CloseGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    invoked: AtomicUsize,
+    completed: AtomicUsize,
+}
+struct CloseGateHandle {
+    inner: Arc<dyn mount_rs_core::FileHandle>,
+    first: bool,
+    gate: Arc<CloseGate>,
+}
+#[async_trait]
+impl mount_rs_core::FileHandle for CloseGateHandle {
+    async fn read(&self, b: &mut [u8], p: Option<u64>) -> mount_rs_core::Result<usize> {
+        self.inner.read(b, p).await
+    }
+    async fn write(&self, b: &[u8], p: Option<u64>) -> mount_rs_core::Result<usize> {
+        self.inner.write(b, p).await
+    }
+    async fn stat(&self) -> mount_rs_core::Result<mount_rs_core::Stats> {
+        self.inner.stat().await
+    }
+    async fn truncate(&self, n: u64) -> mount_rs_core::Result<()> {
+        self.inner.truncate(n).await
+    }
+    async fn close(&self) -> mount_rs_core::Result<()> {
+        self.gate.invoked.fetch_add(1, Ordering::SeqCst);
+        if self.first {
+            self.gate.entered.notify_one();
+            self.gate.release.notified().await;
+        }
+        self.inner.close().await?;
+        self.gate.completed.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+#[async_trait]
+impl FsDriver for CloseGateFs {
+    fn capabilities(&self) -> mount_rs_core::Capabilities {
+        self.memory.capabilities()
+    }
+    async fn stat(&self, p: &str) -> mount_rs_core::Result<mount_rs_core::Stats> {
+        self.memory.stat(p).await
+    }
+    async fn readdir(&self, p: &str) -> mount_rs_core::Result<Vec<mount_rs_core::DirEntry>> {
+        self.memory.readdir(p).await
+    }
+    async fn open(
+        &self,
+        p: &str,
+        f: &str,
+        m: u32,
+    ) -> mount_rs_core::Result<Arc<dyn mount_rs_core::FileHandle>> {
+        Ok(Arc::new(CloseGateHandle {
+            inner: self.memory.open(p, f, m).await?,
+            first: self.opened.fetch_add(1, Ordering::SeqCst) == 0,
+            gate: self.gate.clone(),
+        }))
+    }
+}
+#[tokio::test]
+async fn websocket_shutdown_waits_for_all_actual_closes_after_thirty_seconds() {
+    let gate = Arc::new(CloseGate {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        invoked: AtomicUsize::new(0),
+        completed: AtomicUsize::new(0),
+    });
+    let memory = Arc::new(MemoryFs::new(MemoryOptions::default()));
+    memory.write_file("/file", b"old").await.unwrap();
+    let driver = Arc::new(CloseGateFs {
+        memory,
+        opened: AtomicUsize::new(0),
+        gate: gate.clone(),
+    });
+    let f = Fixture::with_driver(RemoteTransferLimits::default(), Some(driver)).await;
+    let mut socket = f.raw("mount-rs.v2").await.unwrap();
+    hello(&mut socket).await;
+    for request_id in 1..=2 {
+        send(
+            &mut socket,
+            &Message::Request {
+                request_id,
+                drive_id: "data".into(),
+                operation: Operation {
+                    name: OperationName::Open,
+                    body: json!({"path":"/file","flags":"r","mode":0}),
+                },
+            },
+            true,
+        )
+        .await;
+        assert!(matches!(
+            control(&mut socket).await,
+            Message::Response { result: Ok(_), .. }
+        ));
+    }
+    let shutdown = tokio::spawn(f.close());
+    gate.entered.notified().await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(31)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !shutdown.is_finished(),
+        "shutdown must not silently abandon handles at30s"
+    );
+    assert_eq!(gate.invoked.load(Ordering::SeqCst), 2);
+    assert_eq!(gate.completed.load(Ordering::SeqCst), 1);
+    gate.release.notify_one();
+    shutdown.await.unwrap();
+    tokio::time::resume();
+    assert_eq!(gate.invoked.load(Ordering::SeqCst), 2);
+    assert_eq!(gate.completed.load(Ordering::SeqCst), 2);
+}
+
+// Tungstenite's callback requires its unboxed HTTP ErrorResponse type.
+#[allow(clippy::result_large_err)]
+fn fixture_upgrade(
+    _: &tokio_tungstenite::tungstenite::handshake::server::Request,
+    mut response: tokio_tungstenite::tungstenite::handshake::server::Response,
+) -> Result<
+    tokio_tungstenite::tungstenite::handshake::server::Response,
+    tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
+> {
+    response
+        .headers_mut()
+        .insert("Sec-WebSocket-Protocol", "mount-rs.v2".parse().unwrap());
+    Ok(response)
+}
+
+#[tokio::test]
+async fn malformed_tls_websocket_responses_fail_closed_without_socket_reuse() {
+    for variant in 0..4 {
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let cert = certificate.cert.der().clone();
+        let tls = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![cert.clone()],
+            rustls::pki_types::PrivatePkcs8KeyDer::from(certificate.signing_key.serialize_der())
+                .into(),
+        )
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            tcp.set_nodelay(true).unwrap();
+            let tls = tokio_rustls::TlsAcceptor::from(Arc::new(tls))
+                .accept(tcp)
+                .await
+                .unwrap();
+            let mut socket = tokio_tungstenite::accept_hdr_async(tls, fixture_upgrade)
+                .await
+                .unwrap();
+            assert!(matches!(
+                peer_incoming(&mut socket).await,
+                binary::Incoming::Control(Message::ClientHello { version: 2, .. })
+            ));
+            send(
+                &mut socket,
+                &Message::ServerHello {
+                    version: 2,
+                    session_id: "fixture".into(),
+                },
+                true,
+            )
+            .await;
+            let request = loop {
+                let request = peer_incoming(&mut socket).await;
+                if matches!(request, binary::Incoming::Control(Message::Renew { .. })) {
+                    send(
+                        &mut socket,
+                        &Message::ServerHello {
+                            version: 2,
+                            session_id: "renewed".into(),
+                        },
+                        true,
+                    )
+                    .await;
+                } else {
+                    break request;
+                }
+            };
+            match request {
+                binary::Incoming::Control(Message::Request { request_id, .. }) => {
+                    send(
+                        &mut socket,
+                        &Message::Response {
+                            request_id: if variant == 0 {
+                                request_id + 1
+                            } else {
+                                request_id
+                            },
+                            result: Ok(json!(null)),
+                        },
+                        variant != 3,
+                    )
+                    .await
+                }
+                binary::Incoming::Write { request_id, .. } => {
+                    let mut bytes = Vec::new();
+                    binary::write_result(
+                        &mut bytes,
+                        request_id,
+                        Ok(if variant == 1 {
+                            binary::IoResult::Write(2)
+                        } else {
+                            binary::IoResult::Read(vec![1])
+                        }),
+                    )
+                    .await
+                    .unwrap();
+                    socket
+                        .send(WsMessage::Binary(bytes[..32].to_vec().into()))
+                        .await
+                        .unwrap();
+                    if bytes.len() > 32 {
+                        socket
+                            .send(WsMessage::Binary(bytes[32..].to_vec().into()))
+                            .await
+                            .unwrap();
+                    }
+                    socket
+                        .send(WsMessage::Binary(Vec::new().into()))
+                        .await
+                        .unwrap();
+                }
+                _ => panic!("fixture operation"),
+            }
+            if variant != 3 {
+                let next = tokio::time::timeout(Duration::from_secs(2), socket.next())
+                    .await
+                    .unwrap();
+                assert!(
+                    matches!(next, None | Some(Err(_)) | Some(Ok(WsMessage::Close(_)))),
+                    "malformed response must close socket without another request"
+                );
+            }
+        });
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(cert).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let token = directory.path().join("token");
+        std::fs::write(&token, "dmFsaWQ.e30.c2ln").unwrap();
+        let connection = RemoteConnection::connect_with_transport(
+            address,
+            "localhost",
+            roots,
+            "red".into(),
+            CredentialSource::File(token),
+            ConnectionTransport::WebSocket(address),
+        )
+        .await
+        .unwrap();
+        let result = if variant == 1 || variant == 2 {
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                connection.write("data", 1, Some(0), &[1]),
+            )
+            .await
+            .unwrap()
+            .map(|_| json!(null))
+        } else {
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                connection.request(
+                    "data",
+                    Operation {
+                        name: OperationName::Stat,
+                        body: json!({"path":"/"}),
+                    },
+                ),
+            )
+            .await
+            .unwrap()
+        };
+        assert!(matches!(
+            result,
+            Err(ClientError::Transport | ClientError::Protocol)
+        ));
+        assert!(matches!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                connection.request(
+                    "data",
+                    Operation {
+                        name: OperationName::Stat,
+                        body: json!({"path":"/"})
+                    }
+                )
+            )
+            .await
+            .unwrap(),
+            Err(ClientError::Transport)
+        ));
+        peer.await.unwrap();
+    }
+}
+async fn peer_incoming<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    socket: &mut WebSocketStream<S>,
+) -> binary::Incoming {
+    let bytes = next_binary(socket).await;
+    let header = Header::decode(bytes.as_slice().try_into().unwrap()).unwrap();
+    let mut body = Vec::new();
+    while body.len() < header.control_len + header.payload_len {
+        body.extend_from_slice(&next_binary(socket).await);
+    }
+    assert!(next_binary(socket).await.is_empty());
+    binary::read_body(&mut body.as_slice(), header)
+        .await
+        .unwrap()
 }

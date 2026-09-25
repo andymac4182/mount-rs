@@ -245,7 +245,7 @@ async fn serve(
         _ = session(&mut socket, &dispatcher, &*authenticator, &budgets, &handles) => {},
     }
     drop(socket);
-    let _ = tokio::time::timeout(OPERATION_TIMEOUT, handles.close_all()).await;
+    handles.close_all().await;
 }
 async fn session(
     socket: &mut Socket,

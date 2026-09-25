@@ -38,6 +38,46 @@ struct HandleState {
     closed: bool,
     revision: Option<u64>,
     entries: BTreeMap<u64, (String, u64, Arc<dyn FileHandle>)>,
+    pending: Vec<PendingClose>,
+}
+
+/// The task retains the actual close future across cancellation of any waiter.
+/// Completion is shared so revision cleanup and shutdown can join the same close.
+#[derive(Clone)]
+struct PendingClose(tokio::sync::watch::Receiver<Option<mount_rs_core::Result<()>>>);
+impl PendingClose {
+    async fn wait(mut self) -> mount_rs_core::Result<()> {
+        loop {
+            if let Some(result) = self.0.borrow().clone() {
+                return result;
+            }
+            if self.0.changed().await.is_err() {
+                return Err(mount_rs_core::FsError::new(mount_rs_core::ErrorCode::Eio)
+                    .with_syscall("handle cleanup"));
+            }
+        }
+    }
+}
+impl HandleState {
+    fn prune_closes(&mut self) {
+        self.pending.retain(|close| close.0.borrow().is_none());
+    }
+    fn schedule_close(&mut self, handle: Arc<dyn FileHandle>) -> PendingClose {
+        self.prune_closes();
+        let (completion, receiver) = tokio::sync::watch::channel(None);
+        tokio::spawn(async move {
+            completion.send_replace(Some(handle.close().await));
+        });
+        let close = PendingClose(receiver);
+        self.pending.push(close.clone());
+        close
+    }
+    fn schedule_entries(&mut self) {
+        // No await between removing handles and giving every close future an owner.
+        for (_, (_, _, handle)) in std::mem::take(&mut self.entries) {
+            self.schedule_close(handle);
+        }
+    }
 }
 
 fn handle_matches(
@@ -96,17 +136,19 @@ impl SessionHandles {
         handle: Arc<dyn FileHandle>,
     ) -> Result<u64, WireError> {
         let mut state = self.state.lock().await;
+        state.prune_closes();
         let next = match admit_handle(
             state.closed,
             state.revision,
             revision,
-            state.entries.len(),
+            state.entries.len() + state.pending.len(),
             state.next,
         ) {
             Ok(next) => next,
             Err(reason) => {
+                let close = state.schedule_close(handle);
                 drop(state);
-                let _ = handle.close().await;
+                let _ = close.wait().await;
                 return Err(error(reason.code()));
             }
         };
@@ -124,10 +166,11 @@ impl SessionHandles {
             return;
         }
         state.revision = Some(revision);
-        let entries = std::mem::take(&mut state.entries);
+        state.schedule_entries();
+        let pending = state.pending.clone();
         drop(state);
-        for (_, (_, _, handle)) in entries {
-            let _ = handle.close().await;
+        for close in pending {
+            let _ = close.wait().await;
         }
     }
 
@@ -135,13 +178,28 @@ impl SessionHandles {
         self.state.lock().await.closed
     }
 
+    async fn close_handle(&self, id: u64, drive_id: &str, revision: u64) -> Result<(), WireError> {
+        let mut state = self.state.lock().await;
+        let (drive, stored_revision, handle) =
+            state.entries.get(&id).ok_or_else(|| error("EBADF"))?;
+        if !handle_matches(drive, drive_id, *stored_revision, revision) {
+            return Err(error("EBADF"));
+        }
+        let handle = Arc::clone(handle);
+        state.entries.remove(&id);
+        let close = state.schedule_close(handle);
+        drop(state);
+        close.wait().await.map_err(fs_error)
+    }
+
     pub async fn close_all(&self) {
         let mut state = self.state.lock().await;
         state.closed = true;
-        let entries = std::mem::take(&mut state.entries);
+        state.schedule_entries();
+        let pending = state.pending.clone();
         drop(state);
-        for (_, (_, _, handle)) in entries {
-            let _ = handle.close().await;
+        for close in pending {
+            let _ = close.wait().await;
         }
     }
 }
@@ -463,7 +521,7 @@ impl DriveDispatcher {
                         }
                     };
                     let wait_profile = Span::new(Event::HandleWait);
-                    let mut state = handles.state.lock().await;
+                    let state = handles.state.lock().await;
                     drop(wait_profile);
                     let (drive, revision, handle) =
                         state.entries.get(&id).ok_or_else(|| error("EBADF"))?;
@@ -472,7 +530,9 @@ impl DriveDispatcher {
                     }
                     let handle = Arc::clone(handle);
                     if operation.name == OperationName::HandleClose {
-                        state.entries.remove(&id);
+                        drop(state);
+                        handles.close_handle(id, drive_id, catalog.revision).await?;
+                        return Ok(Value::Null);
                     }
                     drop(state);
                     match operation.name {
@@ -538,10 +598,6 @@ impl DriveDispatcher {
                         }
                         OperationName::HandleDatasync => {
                             handle.datasync().await.map_err(fs_error)?;
-                            Ok(Value::Null)
-                        }
-                        OperationName::HandleClose => {
-                            handle.close().await.map_err(fs_error)?;
                             Ok(Value::Null)
                         }
                         _ => unreachable!(),
@@ -930,6 +986,105 @@ mod tests {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
+    }
+    struct GatedHandle {
+        invocations: Arc<AtomicUsize>,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        closed: Arc<AtomicUsize>,
+    }
+    #[async_trait::async_trait]
+    impl FileHandle for GatedHandle {
+        async fn read(&self, _: &mut [u8], _: Option<u64>) -> mount_rs_core::Result<usize> {
+            Ok(0)
+        }
+        async fn write(&self, _: &[u8], _: Option<u64>) -> mount_rs_core::Result<usize> {
+            Ok(0)
+        }
+        async fn stat(&self) -> mount_rs_core::Result<mount_rs_core::Stats> {
+            Err(mount_rs_core::FsError::enosys("stat"))
+        }
+        async fn truncate(&self, _: u64) -> mount_rs_core::Result<()> {
+            Ok(())
+        }
+        async fn close(&self) -> mount_rs_core::Result<()> {
+            self.invocations.fetch_add(1, Ordering::SeqCst);
+            self.entered.notify_one();
+            self.release.notified().await;
+            self.closed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    #[tokio::test]
+    async fn cancelled_revision_cleanup_retains_every_pending_handle_for_shutdown() {
+        cancelled_cleanup(1).await;
+    }
+    #[tokio::test]
+    async fn cancelled_shutdown_retains_every_pending_handle_until_close_completes() {
+        cancelled_cleanup(0).await;
+    }
+    #[tokio::test]
+    async fn cancelled_explicit_close_retains_exact_future_for_shutdown() {
+        cancelled_cleanup(2).await;
+    }
+    async fn cancelled_cleanup(mode: u8) {
+        let handles = Arc::new(SessionHandles::default());
+        handles.refresh_revision(1).await;
+        let closed = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let id = handles
+            .insert(
+                "data",
+                1,
+                Arc::new(GatedHandle {
+                    invocations: invocations.clone(),
+                    entered: entered.clone(),
+                    release: release.clone(),
+                    closed: closed.clone(),
+                }),
+            )
+            .await
+            .unwrap();
+        handles
+            .insert("data", 1, Arc::new(CountedHandle(closed.clone())))
+            .await
+            .unwrap();
+        let task = tokio::spawn({
+            let handles = handles.clone();
+            async move {
+                match mode {
+                    1 => handles.refresh_revision(2).await,
+                    2 => {
+                        handles.close_handle(id, "data", 1).await.unwrap();
+                    }
+                    _ => handles.close_all().await,
+                }
+            }
+        });
+        entered.notified().await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let shutdown = tokio::spawn({
+            let handles = handles.clone();
+            async move {
+                handles.close_all().await;
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !shutdown.is_finished(),
+            "shutdown must retain pending closes after caller cancellation"
+        );
+        release.notify_one();
+        shutdown.await.unwrap();
+        assert_eq!(closed.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            1,
+            "close must never be reinvoked after waiter cancellation"
+        );
     }
     #[tokio::test]
     async fn in_flight_open_cannot_reinsert_after_revision_change_or_shutdown() {

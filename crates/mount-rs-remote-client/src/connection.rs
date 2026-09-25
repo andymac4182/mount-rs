@@ -170,6 +170,46 @@ pub enum ConnectionTransport {
     Auto { websocket: SocketAddr },
 }
 
+/// Conservative Auto selection evidence: any received datagram means the
+/// endpoint is no longer positively unavailable, even before TLS exposes ALPN.
+#[derive(Debug)]
+struct ContactSocket {
+    inner: Arc<dyn quinn::AsyncUdpSocket>,
+    received: Arc<AtomicBool>,
+}
+impl quinn::AsyncUdpSocket for ContactSocket {
+    fn create_io_poller(self: Arc<Self>) -> std::pin::Pin<Box<dyn quinn::UdpPoller>> {
+        self.inner.clone().create_io_poller()
+    }
+    fn try_send(&self, transmit: &quinn::udp::Transmit) -> std::io::Result<()> {
+        self.inner.try_send(transmit)
+    }
+    fn poll_recv(
+        &self,
+        cx: &mut std::task::Context<'_>,
+        bufs: &mut [std::io::IoSliceMut<'_>],
+        meta: &mut [quinn::udp::RecvMeta],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let result = self.inner.poll_recv(cx, bufs, meta);
+        if matches!(&result, std::task::Poll::Ready(Ok(count)) if *count > 0) {
+            self.received.store(true, Ordering::Release);
+        }
+        result
+    }
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.inner.local_addr()
+    }
+    fn max_transmit_segments(&self) -> usize {
+        self.inner.max_transmit_segments()
+    }
+    fn max_receive_segments(&self) -> usize {
+        self.inner.max_receive_segments()
+    }
+    fn may_fragment(&self) -> bool {
+        self.inner.may_fragment()
+    }
+}
+
 pub struct RemoteConnection {
     transport: Arc<dyn Transport>,
     credentials: Option<CredentialSource>,
@@ -223,7 +263,7 @@ impl RemoteConnection {
     ) -> Result<Arc<Self>, ClientError> {
         let transport = match selection {
             ConnectionTransport::Quic => {
-                Self::connect_quic_transport(address, server_name, roots, REQUEST_TIMEOUT)
+                Self::connect_quic_transport(address, server_name, roots, REQUEST_TIMEOUT, false)
                     .await
                     .map_err(QuicEstablishment::client_error)?
             }
@@ -235,6 +275,7 @@ impl RemoteConnection {
                 server_name,
                 roots.clone(),
                 Duration::from_secs(3),
+                true,
             )
             .await
             {
@@ -273,6 +314,7 @@ impl RemoteConnection {
         server_name: &str,
         roots: rustls::RootCertStore,
         connect_timeout: Duration,
+        classify_unavailable: bool,
     ) -> Result<Arc<dyn Transport>, QuicEstablishment> {
         let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(
             rustls::crypto::ring::default_provider(),
@@ -301,7 +343,30 @@ impl RemoteConnection {
         }
         .parse()
         .map_err(|_| ClientError::Transport)?;
-        let mut endpoint = quinn::Endpoint::client(bind).map_err(|_| ClientError::Transport)?;
+        let received = Arc::new(AtomicBool::new(false));
+        let mut endpoint = if classify_unavailable {
+            use quinn::Runtime;
+            let udp = std::net::UdpSocket::bind(bind).map_err(|_| ClientError::Transport)?;
+            udp.set_nonblocking(true)
+                .map_err(|_| ClientError::Transport)?;
+            let runtime = Arc::new(quinn::TokioRuntime);
+            let inner = runtime
+                .wrap_udp_socket(udp)
+                .map_err(|_| ClientError::Transport)?;
+            let socket = Arc::new(ContactSocket {
+                inner,
+                received: received.clone(),
+            });
+            quinn::Endpoint::new_with_abstract_socket(
+                quinn::EndpointConfig::default(),
+                None,
+                socket,
+                runtime,
+            )
+            .map_err(|_| ClientError::Transport)?
+        } else {
+            quinn::Endpoint::client(bind).map_err(|_| ClientError::Transport)?
+        };
         endpoint.set_default_client_config(config);
         let connection = tokio::time::timeout(
             connect_timeout,
@@ -310,11 +375,20 @@ impl RemoteConnection {
                 .map_err(|_| ClientError::Transport)?,
         )
         .await
-        .map_err(|_| QuicEstablishment::Unavailable)?
+        .map_err(|_| {
+            if received.load(Ordering::Acquire) {
+                QuicEstablishment::Fatal(ClientError::Transport)
+            } else {
+                QuicEstablishment::Unavailable
+            }
+        })?
         .map_err(|error| match error {
-            quinn::ConnectionError::TimedOut => QuicEstablishment::Unavailable,
+            quinn::ConnectionError::TimedOut if !received.load(Ordering::Acquire) => {
+                QuicEstablishment::Unavailable
+            }
             quinn::ConnectionError::ConnectionClosed(ref close)
-                if close.error_code == quinn::TransportErrorCode::CONNECTION_REFUSED =>
+                if close.error_code == quinn::TransportErrorCode::CONNECTION_REFUSED
+                    && !received.load(Ordering::Acquire) =>
             {
                 QuicEstablishment::Unavailable
             }
