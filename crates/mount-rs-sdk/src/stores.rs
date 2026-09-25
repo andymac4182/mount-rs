@@ -10,6 +10,10 @@ use async_trait::async_trait;
 use mount_rs_core::Result;
 use mount_rs_core::diagnostics::profile::{Event, Span, add};
 use mount_rs_core::storage::InodeId;
+use mount_rs_core::storage::compact::{
+    CompactInodeCapability, CompactPublication, CompactSnapshot, CompactStructuralDelta,
+    LoadedCompactInode, PhysicalInodeIdentity,
+};
 use mount_rs_core::storage::{
     BlockId, BlockReconcileReport, BlockStore, CheckoutRequest, ConcurrentBackingId,
     ConcurrentModeState, DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState,
@@ -39,6 +43,128 @@ impl ErasedMetadataStore {
 
 #[async_trait]
 impl MetadataStore for ErasedMetadataStore {
+    fn compact_inode_capability(&self) -> CompactInodeCapability {
+        self.inner.compact_inode_capability()
+    }
+
+    async fn prepare_compact_inode_mode(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        let _profile = Span::new(Event::MetadataConditional);
+        #[cfg(feature = "observability")]
+        let result = self
+            .telemetry
+            .observe_fs(
+                "provider.metadata",
+                "compact.prepare",
+                None,
+                self.inner
+                    .prepare_compact_inode_mode(backing, expected_revision),
+            )
+            .await;
+        #[cfg(not(feature = "observability"))]
+        let result = self
+            .inner
+            .prepare_compact_inode_mode(backing, expected_revision)
+            .await;
+        result
+    }
+
+    async fn load_compact_snapshot(&self, backing: ConcurrentBackingId) -> Result<CompactSnapshot> {
+        let _profile = Span::new(Event::MetadataLoad);
+        #[cfg(feature = "observability")]
+        let result = self
+            .telemetry
+            .observe_fs(
+                "provider.metadata",
+                "compact.snapshot",
+                None,
+                self.inner.load_compact_snapshot(backing),
+            )
+            .await;
+        #[cfg(not(feature = "observability"))]
+        let result = self.inner.load_compact_snapshot(backing).await;
+        result
+    }
+
+    async fn load_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+    ) -> Result<LoadedCompactInode> {
+        let _profile = Span::new(Event::InodeLoad);
+        #[cfg(feature = "observability")]
+        let result = self
+            .telemetry
+            .observe_fs(
+                "provider.metadata",
+                "compact.load",
+                None,
+                self.inner.load_compact_inode(backing, inode),
+            )
+            .await;
+        #[cfg(not(feature = "observability"))]
+        let result = self.inner.load_compact_inode(backing, inode).await;
+        result
+    }
+
+    async fn publish_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+        generation: u64,
+        expected: PhysicalInodeIdentity,
+        node: NodeMetadata,
+    ) -> Result<LoadedCompactInode> {
+        let _profile = Span::new(Event::InodePublication);
+        #[cfg(feature = "observability")]
+        let result = self
+            .telemetry
+            .observe_fs(
+                "provider.metadata",
+                "compact.publish_inode",
+                None,
+                self.inner
+                    .publish_compact_inode(backing, inode, generation, expected, node),
+            )
+            .await;
+        #[cfg(not(feature = "observability"))]
+        let result = self
+            .inner
+            .publish_compact_inode(backing, inode, generation, expected, node)
+            .await;
+        if result
+            .as_ref()
+            .is_err_and(|error| error.code == mount_rs_core::ErrorCode::Eagain)
+        {
+            add(Event::InodeConflict, 1);
+        }
+        result
+    }
+
+    async fn publish_compact_structure(
+        &self,
+        delta: &CompactStructuralDelta,
+    ) -> Result<CompactPublication> {
+        let affected_rows = delta.changed().len() + delta.created().len() + delta.removed().len();
+        let _profile = Span::new(Event::Publication).units(affected_rows as u64);
+        #[cfg(feature = "observability")]
+        let result = self
+            .telemetry
+            .observe_fs(
+                "provider.metadata",
+                "compact.publish_structure",
+                None,
+                self.inner.publish_compact_structure(delta),
+            )
+            .await;
+        #[cfg(not(feature = "observability"))]
+        let result = self.inner.publish_compact_structure(delta).await;
+        result
+    }
+
     async fn inode_mode_state(&self) -> Result<Option<InodeModeState>> {
         let _profile = Span::new(Event::MetadataConditional);
         #[cfg(feature = "observability")]
@@ -818,10 +944,343 @@ mod tests {
         );
     }
 
-    struct IdentityProbeMetadataStore(ConcurrentBackingId);
+    struct IdentityProbeMetadataStore(
+        ConcurrentBackingId,
+        Arc<std::sync::Mutex<Vec<&'static str>>>,
+        Option<Arc<std::sync::atomic::AtomicBool>>,
+    );
+
+    impl IdentityProbeMetadataStore {
+        fn new(backing: ConcurrentBackingId) -> Self {
+            Self(backing, Arc::new(std::sync::Mutex::new(Vec::new())), None)
+        }
+    }
+
+    #[tokio::test]
+    async fn erased_compact_prepare_waits_for_one_delegate_and_preserves_its_error() {
+        use std::future::Future;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::task::{Context, Poll, Waker};
+
+        let backing = ConcurrentBackingId::from_bytes([0xa8; 16]).unwrap();
+        let gate = Arc::new(AtomicBool::new(false));
+        let mut probe = IdentityProbeMetadataStore::new(backing);
+        probe.2 = Some(gate.clone());
+        let probe = Arc::new(probe);
+        #[cfg(feature = "observability")]
+        let erased = ErasedMetadataStore::new(probe.clone(), Telemetry::disabled());
+        #[cfg(not(feature = "observability"))]
+        let erased = ErasedMetadataStore::new(probe.clone());
+        let mut call = Box::pin(erased.prepare_compact_inode_mode(backing, 37));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(call.as_mut().poll(&mut context), Poll::Pending));
+        assert_eq!(*probe.1.lock().unwrap(), ["prepare"]);
+        assert!(matches!(call.as_mut().poll(&mut context), Poll::Pending));
+        assert_eq!(*probe.1.lock().unwrap(), ["prepare"]);
+        gate.store(true, Ordering::Release);
+        let Poll::Ready(Err(error)) = call.as_mut().poll(&mut context) else {
+            panic!("delegate error must be returned after release");
+        };
+        assert_eq!(error.code, ErrorCode::Eperm);
+        assert_eq!(error.syscall.as_deref(), Some("compact-probe:prepare"));
+        assert_eq!(error.to_string(), "delegate refused compact prepare");
+        assert_eq!(*probe.1.lock().unwrap(), ["prepare"]);
+    }
+
+    fn compact_probe_snapshot(
+        backing: ConcurrentBackingId,
+    ) -> mount_rs_core::storage::compact::CompactSnapshot {
+        use mount_rs_core::storage::NodeData;
+        use mount_rs_core::storage::compact::*;
+        let node = NodeMetadata {
+            stats: mount_rs_core::types::Stats {
+                dev: 0,
+                ino: 1,
+                mode: mount_rs_core::S_IFDIR | 0o755,
+                nlink: 2,
+                uid: 3,
+                gid: 4,
+                rdev: 0,
+                size: 0,
+                blksize: 4096,
+                blocks: 0,
+                atime_ms: 1,
+                mtime_ms: 2,
+                ctime_ms: 3,
+                birthtime_ms: 4,
+            },
+            data: NodeData::Directory { entries: vec![] },
+        };
+        CompactSnapshot {
+            anchor: CompactAnchor {
+                backing,
+                generation: 37,
+                root: 1,
+                next_inode: 2,
+                default_uid: 3,
+                default_gid: 4,
+                umask: 0o027,
+                default_chunker: ChunkerConfig {
+                    algorithm: "fixed-size".into(),
+                    version: 1,
+                    parameters: BTreeMap::from([("chunk_size".into(), 4096)]),
+                },
+                members: vec![1],
+            },
+            guards: BTreeMap::from([(
+                1,
+                CompactGuard {
+                    identity: PhysicalInodeIdentity {
+                        incarnation: 2,
+                        epoch: 11,
+                        revision: 13,
+                    },
+                    node,
+                },
+            )]),
+        }
+    }
+
+    fn compact_probe_loaded(
+        backing: ConcurrentBackingId,
+    ) -> mount_rs_core::storage::compact::LoadedCompactInode {
+        let snapshot = compact_probe_snapshot(backing);
+        mount_rs_core::storage::compact::LoadedCompactInode {
+            generation: snapshot.anchor.generation,
+            guard: snapshot.guards[&1].clone(),
+        }
+    }
+
+    #[tokio::test]
+    async fn erased_compact_forwards_exact_identity_body_delta_and_receipts_once() {
+        use mount_rs_core::storage::compact::{
+            CompactInodeCapability, CompactStructuralDelta, StructuralScope,
+        };
+        let backing = ConcurrentBackingId::from_bytes([0xa7; 16]).unwrap();
+        let probe = Arc::new(IdentityProbeMetadataStore::new(backing));
+        #[cfg(feature = "observability")]
+        let telemetry = Telemetry::new(mount_rs_observability::TelemetryConfig::enabled(
+            "compact-wrapper-test",
+        ));
+        #[cfg(feature = "observability")]
+        let erased = ErasedMetadataStore::new(probe.clone(), telemetry.clone());
+        #[cfg(not(feature = "observability"))]
+        let erased = ErasedMetadataStore::new(probe.clone());
+        let profile_before = mount_rs_core::diagnostics::profile::snapshot();
+        assert_eq!(
+            erased.compact_inode_capability(),
+            CompactInodeCapability::V1
+        );
+        erased
+            .prepare_compact_inode_mode(backing, 37)
+            .await
+            .unwrap();
+        let snapshot = erased.load_compact_snapshot(backing).await.unwrap();
+        assert_eq!(snapshot, compact_probe_snapshot(backing));
+        let loaded = erased.load_compact_inode(backing, 1).await.unwrap();
+        assert_eq!(loaded, compact_probe_loaded(backing));
+        let published = erased
+            .publish_compact_inode(
+                backing,
+                1,
+                37,
+                loaded.guard.identity,
+                loaded.guard.node.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(published.guard.identity.revision, 14);
+        assert_eq!(published.guard.node, loaded.guard.node);
+        let mut candidate = snapshot.namespace().unwrap();
+        candidate.nodes.get_mut(&1).unwrap().stats.mtime_ms += 1;
+        let delta =
+            CompactStructuralDelta::capture(&snapshot, &candidate, StructuralScope::Full).unwrap();
+        let receipt = erased.publish_compact_structure(&delta).await.unwrap();
+        assert_eq!(receipt.anchor, *delta.next_anchor());
+        assert_eq!(receipt.upserts[&1].node, candidate.nodes[&1]);
+        assert_eq!(receipt.upserts[&1].identity.epoch, 38);
+        assert_eq!(
+            *probe.1.lock().unwrap(),
+            [
+                "prepare",
+                "snapshot",
+                "load",
+                "publish_inode",
+                "publish_structure"
+            ]
+        );
+        #[cfg(feature = "observability")]
+        assert_eq!(telemetry.snapshot().operations, 5);
+        if mount_rs_core::diagnostics::profile::enabled() {
+            let profile = mount_rs_core::diagnostics::profile::snapshot()
+                .delta(&profile_before)
+                .unwrap();
+            for name in [
+                "provider.metadata.load_if_changed",
+                "provider.metadata.load",
+                "provider.inode.load",
+                "provider.inode.publish_cas",
+                "provider.metadata.publish_cas_nodes",
+            ] {
+                assert_eq!(
+                    profile
+                        .entries
+                        .iter()
+                        .find(|entry| entry.name == name)
+                        .unwrap()
+                        .calls,
+                    1,
+                    "{name}"
+                );
+            }
+            assert_eq!(
+                profile
+                    .entries
+                    .iter()
+                    .find(|entry| entry.name == "provider.metadata.publish_cas_nodes")
+                    .unwrap()
+                    .units,
+                1
+            );
+            assert!(
+                profile
+                    .entries
+                    .iter()
+                    .all(|entry| entry.name != "provider.inode.cas_conflict")
+            );
+        }
+
+        let incapable =
+            Arc::new(mount_rs_memory::MemoryMetadataStore::new()) as Arc<dyn MetadataStore>;
+        #[cfg(feature = "observability")]
+        let incapable = ErasedMetadataStore::new(incapable, Telemetry::disabled());
+        #[cfg(not(feature = "observability"))]
+        let incapable = ErasedMetadataStore::new(incapable);
+        assert_eq!(
+            incapable.compact_inode_capability(),
+            CompactInodeCapability::Unsupported
+        );
+        assert_eq!(
+            incapable
+                .prepare_compact_inode_mode(backing, 37)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Enotsup
+        );
+        assert_eq!(
+            incapable
+                .load_compact_snapshot(backing)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Enotsup
+        );
+        assert_eq!(
+            incapable
+                .load_compact_inode(backing, 1)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Enotsup
+        );
+        assert_eq!(
+            incapable
+                .publish_compact_inode(backing, 1, 37, loaded.guard.identity, loaded.guard.node)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Enotsup
+        );
+        assert_eq!(
+            incapable
+                .publish_compact_structure(&delta)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Enotsup
+        );
+    }
 
     #[async_trait]
     impl MetadataStore for IdentityProbeMetadataStore {
+        fn compact_inode_capability(
+            &self,
+        ) -> mount_rs_core::storage::compact::CompactInodeCapability {
+            mount_rs_core::storage::compact::CompactInodeCapability::V1
+        }
+        async fn prepare_compact_inode_mode(
+            &self,
+            backing: ConcurrentBackingId,
+            revision: u64,
+        ) -> Result<()> {
+            assert_eq!((backing, revision), (self.0, 37));
+            self.1.lock().unwrap().push("prepare");
+            if let Some(gate) = &self.2 {
+                std::future::poll_fn(|_| {
+                    if gate.load(std::sync::atomic::Ordering::Acquire) {
+                        std::task::Poll::Ready(())
+                    } else {
+                        std::task::Poll::Pending
+                    }
+                })
+                .await;
+                return Err(FsError::new(ErrorCode::Eperm)
+                    .with_syscall("compact-probe:prepare")
+                    .with_message("delegate refused compact prepare"));
+            }
+            Ok(())
+        }
+        async fn load_compact_snapshot(
+            &self,
+            backing: ConcurrentBackingId,
+        ) -> Result<mount_rs_core::storage::compact::CompactSnapshot> {
+            assert_eq!(backing, self.0);
+            self.1.lock().unwrap().push("snapshot");
+            Ok(compact_probe_snapshot(self.0))
+        }
+        async fn load_compact_inode(
+            &self,
+            backing: ConcurrentBackingId,
+            inode: InodeId,
+        ) -> Result<mount_rs_core::storage::compact::LoadedCompactInode> {
+            assert_eq!((backing, inode), (self.0, 1));
+            self.1.lock().unwrap().push("load");
+            Ok(compact_probe_loaded(self.0))
+        }
+        async fn publish_compact_inode(
+            &self,
+            backing: ConcurrentBackingId,
+            inode: InodeId,
+            generation: u64,
+            expected: mount_rs_core::storage::compact::PhysicalInodeIdentity,
+            node: NodeMetadata,
+        ) -> Result<mount_rs_core::storage::compact::LoadedCompactInode> {
+            assert_eq!((backing, inode, generation), (self.0, 1, 37));
+            assert_eq!(expected, compact_probe_loaded(self.0).guard.identity);
+            assert_eq!(node, compact_probe_loaded(self.0).guard.node);
+            self.1.lock().unwrap().push("publish_inode");
+            let mut receipt = compact_probe_loaded(self.0);
+            receipt.guard.identity.revision += 1;
+            Ok(receipt)
+        }
+        async fn publish_compact_structure(
+            &self,
+            delta: &mount_rs_core::storage::compact::CompactStructuralDelta,
+        ) -> Result<mount_rs_core::storage::compact::CompactPublication> {
+            assert_eq!(delta.base_anchor(), &compact_probe_snapshot(self.0).anchor);
+            assert_eq!(delta.changed().len(), 1);
+            self.1.lock().unwrap().push("publish_structure");
+            let mut guard = compact_probe_loaded(self.0).guard;
+            guard.node = delta.changed()[&1].clone();
+            guard.identity.epoch = delta.next_anchor().generation;
+            guard.identity.revision = 0;
+            Ok(mount_rs_core::storage::compact::CompactPublication {
+                anchor: delta.next_anchor().clone(),
+                upserts: BTreeMap::from([(1, guard)]),
+                removed: Default::default(),
+            })
+        }
         async fn inode_mode_state(&self) -> Result<Option<InodeModeState>> {
             Ok(Some(InodeModeState {
                 backing: self.0,
@@ -1033,7 +1492,7 @@ mod tests {
     #[tokio::test]
     async fn erased_metadata_forwards_conditional_load_and_provider_errors() {
         let id = ConcurrentBackingId::from_bytes([0x95; 16]).unwrap();
-        let inner = Arc::new(IdentityProbeMetadataStore(id)) as Arc<dyn MetadataStore>;
+        let inner = Arc::new(IdentityProbeMetadataStore::new(id)) as Arc<dyn MetadataStore>;
         #[cfg(feature = "observability")]
         let telemetry = Telemetry::new(mount_rs_observability::TelemetryConfig::enabled(
             "conditional-load-test",
@@ -1062,7 +1521,7 @@ mod tests {
     async fn erased_metadata_forwards_bound_mode_cas_and_migration() {
         let id = ConcurrentBackingId::from_bytes([0x93; 16]).unwrap();
         let other = ConcurrentBackingId::from_bytes([0x94; 16]).unwrap();
-        let inner = Arc::new(IdentityProbeMetadataStore(id)) as Arc<dyn MetadataStore>;
+        let inner = Arc::new(IdentityProbeMetadataStore::new(id)) as Arc<dyn MetadataStore>;
         #[cfg(feature = "observability")]
         let erased = ErasedMetadataStore::new(inner, Telemetry::disabled());
         #[cfg(not(feature = "observability"))]

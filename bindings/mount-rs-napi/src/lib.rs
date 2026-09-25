@@ -1459,6 +1459,92 @@ pub struct JsChunkedOptions {
 struct DynMetadataStore(Arc<dyn MetadataStore>);
 
 impl MetadataStore for DynMetadataStore {
+    fn compact_inode_capability(&self) -> mount_rs_core::storage::compact::CompactInodeCapability {
+        self.0.compact_inode_capability()
+    }
+    fn prepare_compact_inode_mode<'a, 'async_trait>(
+        &'a self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0
+            .prepare_compact_inode_mode(backing, expected_revision)
+    }
+    fn load_compact_snapshot<'a, 'async_trait>(
+        &'a self,
+        backing: ConcurrentBackingId,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = CoreResult<mount_rs_core::storage::compact::CompactSnapshot>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.load_compact_snapshot(backing)
+    }
+    fn load_compact_inode<'a, 'async_trait>(
+        &'a self,
+        backing: ConcurrentBackingId,
+        inode: u64,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = CoreResult<mount_rs_core::storage::compact::LoadedCompactInode>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.load_compact_inode(backing, inode)
+    }
+    fn publish_compact_inode<'a, 'async_trait>(
+        &'a self,
+        backing: ConcurrentBackingId,
+        inode: u64,
+        generation: u64,
+        expected: mount_rs_core::storage::compact::PhysicalInodeIdentity,
+        node: mount_rs_core::storage::NodeMetadata,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = CoreResult<mount_rs_core::storage::compact::LoadedCompactInode>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0
+            .publish_compact_inode(backing, inode, generation, expected, node)
+    }
+    fn publish_compact_structure<'a, 'b, 'async_trait>(
+        &'a self,
+        delta: &'b mount_rs_core::storage::compact::CompactStructuralDelta,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = CoreResult<mount_rs_core::storage::compact::CompactPublication>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.publish_compact_structure(delta)
+    }
     fn inode_mode_state<'a, 'async_trait>(
         &'a self,
     ) -> Pin<
@@ -4628,6 +4714,175 @@ pub async fn unmount_all() -> Vec<JsMountFailure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dynamic_metadata_forwards_compact_identity_and_borrowed_delta() {
+        use mount_rs_core::storage::compact::{
+            CompactInodeCapability, CompactStructuralDelta, StructuralScope,
+        };
+        block_on(async {
+            let path = std::env::temp_dir().join(format!(
+                "mount-rs-napi-compact-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            ));
+            std::fs::create_dir(&path).unwrap();
+            let backing = ConcurrentBackingId::from_bytes([0xb7; 16]).unwrap();
+            let store = DynMetadataStore(Arc::new(
+                SqliteMetadataStore::open(path.join("metadata.db")).unwrap(),
+            ));
+            assert_eq!(store.compact_inode_capability(), CompactInodeCapability::V1);
+            store.prepare_bound_concurrent_mode(backing).await.unwrap();
+            let stats = mount_rs_memfs::MemoryFs::empty().stat("/").await.unwrap();
+            let namespace = Namespace {
+                format_version: 1,
+                root: stats.ino,
+                next_inode: stats.ino + 1,
+                default_uid: 3,
+                default_gid: 4,
+                umask: 0o027,
+                default_chunker: mount_rs_core::chunking::ChunkerConfig {
+                    algorithm: "fixed-size".into(),
+                    version: 1,
+                    parameters: std::collections::BTreeMap::from([("chunk_size".into(), 4096)]),
+                },
+                nodes: std::collections::BTreeMap::from([(
+                    stats.ino,
+                    mount_rs_core::storage::NodeMetadata {
+                        stats,
+                        data: mount_rs_core::storage::NodeData::Directory { entries: vec![] },
+                    },
+                )]),
+            };
+            assert_eq!(
+                store
+                    .publish_bound_if_revision(backing, 0, namespace)
+                    .await
+                    .unwrap(),
+                1
+            );
+            store.prepare_compact_inode_mode(backing, 1).await.unwrap();
+            let snapshot = store.load_compact_snapshot(backing).await.unwrap();
+            let inode = snapshot.anchor.next_inode;
+            let mut candidate = snapshot.namespace().unwrap();
+            let mut file_stats = candidate.nodes[&candidate.root].stats.clone();
+            file_stats.ino = inode;
+            file_stats.mode = mount_rs_core::S_IFREG | 0o644;
+            file_stats.nlink = 1;
+            candidate.nodes.insert(
+                inode,
+                mount_rs_core::storage::NodeMetadata {
+                    stats: file_stats,
+                    data: mount_rs_core::storage::NodeData::File(
+                        mount_rs_core::storage::FileLayout {
+                            chunker: candidate.default_chunker.clone(),
+                            extents: vec![],
+                        },
+                    ),
+                },
+            );
+            let mount_rs_core::storage::NodeData::Directory { entries } =
+                &mut candidate.nodes.get_mut(&candidate.root).unwrap().data
+            else {
+                panic!()
+            };
+            entries.push(mount_rs_core::storage::DirectoryEntry {
+                name: "file".into(),
+                inode,
+            });
+            candidate.next_inode += 1;
+            let delta =
+                CompactStructuralDelta::capture(&snapshot, &candidate, StructuralScope::FileCreate)
+                    .unwrap();
+            let structural = store.publish_compact_structure(&delta).await.unwrap();
+            assert_eq!(structural.anchor, *delta.next_anchor());
+            assert_eq!(structural.upserts[&inode].node, candidate.nodes[&inode]);
+            let snapshot = store.load_compact_snapshot(backing).await.unwrap();
+            let loaded = store.load_compact_inode(backing, inode).await.unwrap();
+            assert_eq!(
+                loaded,
+                mount_rs_core::storage::compact::LoadedCompactInode::from_guard(
+                    &snapshot.anchor,
+                    inode,
+                    snapshot.guards[&inode].clone(),
+                )
+                .unwrap()
+            );
+            let mut updated = loaded.guard.node.clone();
+            updated.stats.mtime_ms += 1;
+            let receipt = store
+                .publish_compact_inode(
+                    backing,
+                    inode,
+                    loaded.generation,
+                    loaded.guard.identity,
+                    updated.clone(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(receipt.guard.node, updated);
+            assert_eq!(
+                receipt.guard.identity.revision,
+                loaded.guard.identity.revision + 1
+            );
+            let incapable = DynMetadataStore(Arc::new(mount_rs_memory::MemoryMetadataStore::new()));
+            assert_eq!(
+                incapable.compact_inode_capability(),
+                CompactInodeCapability::Unsupported
+            );
+            assert_eq!(
+                incapable
+                    .prepare_compact_inode_mode(backing, 1)
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Enotsup
+            );
+            assert_eq!(
+                incapable
+                    .load_compact_snapshot(backing)
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Enotsup
+            );
+            assert_eq!(
+                incapable
+                    .load_compact_inode(backing, inode)
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Enotsup
+            );
+            assert_eq!(
+                incapable
+                    .publish_compact_inode(
+                        backing,
+                        inode,
+                        loaded.generation,
+                        loaded.guard.identity,
+                        updated
+                    )
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Enotsup
+            );
+            assert_eq!(
+                incapable
+                    .publish_compact_structure(&delta)
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Enotsup
+            );
+            drop(store);
+            std::fs::remove_dir_all(path).unwrap();
+        });
+    }
     #[cfg(all(
         feature = "foundationdb",
         any(
@@ -4723,9 +4978,81 @@ mod tests {
         }
     }
 
-    struct ConditionalMetadata;
+    struct ConditionalMetadata(
+        Option<Arc<std::sync::atomic::AtomicBool>>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    );
+
+    #[test]
+    fn dynamic_compact_prepare_waits_for_one_delegate_and_preserves_its_error() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::task::{Context, Poll, Waker};
+
+        let backing = ConcurrentBackingId::from_bytes([0xb8; 16]).unwrap();
+        let gate = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let store = DynMetadataStore(Arc::new(ConditionalMetadata(
+            Some(gate.clone()),
+            calls.clone(),
+        )));
+        let mut call = store.prepare_compact_inode_mode(backing, 37);
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(call.as_mut().poll(&mut context), Poll::Pending));
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        assert!(matches!(call.as_mut().poll(&mut context), Poll::Pending));
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        gate.store(true, Ordering::Release);
+        let Poll::Ready(Err(error)) = call.as_mut().poll(&mut context) else {
+            panic!("delegate error must be returned after release");
+        };
+        assert_eq!(error.code, ErrorCode::Eperm);
+        assert_eq!(error.syscall.as_deref(), Some("compact-probe:prepare"));
+        assert_eq!(error.to_string(), "delegate refused compact prepare");
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+    }
 
     impl MetadataStore for ConditionalMetadata {
+        fn compact_inode_capability(
+            &self,
+        ) -> mount_rs_core::storage::compact::CompactInodeCapability {
+            if self.0.is_some() {
+                mount_rs_core::storage::compact::CompactInodeCapability::V1
+            } else {
+                mount_rs_core::storage::compact::CompactInodeCapability::Unsupported
+            }
+        }
+
+        fn prepare_compact_inode_mode<'a, 'async_trait>(
+            &'a self,
+            backing: ConcurrentBackingId,
+            revision: u64,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                assert_eq!(
+                    backing,
+                    ConcurrentBackingId::from_bytes([0xb8; 16]).unwrap()
+                );
+                assert_eq!(revision, 37);
+                let gate = self.0.as_ref().expect("compact probe gate");
+                self.1.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                std::future::poll_fn(|_| {
+                    if gate.load(std::sync::atomic::Ordering::Acquire) {
+                        std::task::Poll::Ready(())
+                    } else {
+                        std::task::Poll::Pending
+                    }
+                })
+                .await;
+                Err(FsError::new(ErrorCode::Eperm)
+                    .with_syscall("compact-probe:prepare")
+                    .with_message("delegate refused compact prepare"))
+            })
+        }
+
         fn durable(&self) -> bool {
             true
         }
@@ -4901,7 +5228,10 @@ mod tests {
 
     #[test]
     fn dynamic_metadata_forwards_conditional_load_and_provider_errors() {
-        let inner = Arc::new(ConditionalMetadata) as Arc<dyn MetadataStore>;
+        let inner = Arc::new(ConditionalMetadata(
+            None,
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        )) as Arc<dyn MetadataStore>;
         let metadata = DynMetadataStore(inner);
 
         assert!(block_on(metadata.load_if_changed(7)).unwrap().is_none());
