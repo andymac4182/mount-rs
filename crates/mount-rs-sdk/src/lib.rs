@@ -299,6 +299,7 @@ mod tests {
         reopened.shutdown().await.unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn sqlite_sdk_directory_handoff_and_expected_fence_recovery() {
         use mount_rs_core::storage::MetadataStore;
