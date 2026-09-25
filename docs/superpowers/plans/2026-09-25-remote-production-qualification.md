@@ -67,9 +67,11 @@ Files: crates/mount-rs-service/tests/{quic_tidb_saturation.rs,support/saturation
 Consumes Task 2 storage fixes and existing byte oracle; covers Task 1 fallback and Task 3 cache in end-to-end matrix.
 Produces idle/all-active ramps toward 10,000 clients / 10,000 Drives / 5,000 Partitions / 1,000 files per Drive, with varied I/O patterns, explicit machine boundaries, and a complete follow-up PR.
 
-- [ ] Verify small ten-server separate-drive run first; retain auth/oracle/cleanup results.
-- [ ] Model two Drives per Partition, exact per-client grants, 1,000 files per Drive, and declared file sizes; validate sibling-Drive and cross-Partition denial.
+- [x] Verify small ten-server separate-drive run first; retain auth/oracle/cleanup results.
+- [x] Model two Drives per Partition, exact per-client grants, 1,000 files per Drive, and declared file sizes; validate sibling-Drive and cross-Partition denial.
 - [ ] Ramp client counts for 100-active and all-active cases, with sequential/random, mixed read/write, hot-file, append/truncate, and namespace-churn profiles. Collect peak resources and datastore counters; stop each failed ramp point and diagnose before continuing.
 - [ ] Fix demonstrated resource blockers, rerun failed point, attempt 10,000 clients, retain both success and failure evidence.
 - [ ] Run QUIC and WebSocket end-to-end auth/filesystem/cache tests plus applicable native mounting/live backends; run full formatting, strict Clippy, workspace tests, and relevant CI.
 - [ ] Independently review full branch and correct findings; create/attach PR and report verified results and remaining environment limits.
+
+The accepted small TiDB point uses ten actual clients/Drives across five Partitions, 10,000 mixed files and a full 62,832,640-byte oracle, 100 routes, explicit scope denials and independently reviewed bounded cleanup. Catalog/model target shape checks are separate from this actual population. It does not complete the remaining ramp, cache, process, platform/formal, CI or delivery gates.

@@ -407,6 +407,66 @@ Candidate source freeze SHA256:
 `9ed07e6b4c69e1bcf3c75dcc5f8e5e1402410985a092c7b4aaa9db178ce1705a`.
 Final provider, filesystem, SDK and NAPI checks and strict touched all-target
 Clippy passed. Independent specification and quality review passed for the frozen source.
-The matched ten-Drive measurement remains pending. The earlier incomplete serial oracle
+The matched ten-Drive measurement follows below. The earlier incomplete serial oracle
 cannot supply a whole-oracle speedup denominator, and structural create/write
 amplification remains a separate measured issue.
+
+
+## Matched ten-Drive checkpoint after conditional refresh
+
+Committed source `0107577f` passed the same debug/resource-profiling checkpoint:
+ten actual signed clients, ten QUIC listeners, ten Drives across five
+Partitions, and 1,000 mixed files per Drive. All 10,000 files / 62,832,640 bytes
+passed the fresh backing byte oracle, all 100 server/Drive routes passed, and
+all ten sibling-Drive and ten other-Partition denials passed. No uncertain
+mutations, observer errors, cleanup errors or unresolved listener drains were
+recorded. The corrected cleanup completed in 0.586 seconds. The original
+failed attempt's cleanup counter remains insufficient evidence of full drain.
+
+| Matched workload measure | Before | After |
+|---|---:|---:|
+| Namespace creations acknowledged | 10,000 | 10,000 |
+| Namespace phase seconds | 546.219 | 554.318 |
+| Payload writes acknowledged | 10,000 | 10,000 |
+| Payload bytes acknowledged | 62,832,640 | 62,832,640 |
+| Payload phase seconds | 231.005 | 29.854 |
+| Payload returned inode node units | 10,030,000 | 20,000 |
+| Payload returned inode bytes | 4,262,086,520 | 6,577,920 |
+| Payload selected inode serialized bytes | 5,251,090 | 5,251,090 |
+| Payload executor SQL statements | 165,340 | 145,340 |
+| Payload main-process CPU seconds, user + system | 338.691 | 36.074 |
+| Payload TiKV process CPU seconds | 258.000 | 46.000 |
+| Payload RocksDB get-read bytes | 1,760,136,262 | 10,097,716 |
+| Payload TiKV VM network transmit bytes | 8,128,468,089 | 388,626,637 |
+| Payload TiKV VM cgroup write operations | 74,077 | 56,214 |
+| Payload TiKV VM cgroup write bytes | 1,101,287,424 | 271,515,648 |
+| Fresh serial byte oracle | 7,076 files at 600-second stop | 10,000 files in 180.982 seconds |
+
+Payload elapsed time fell by about 87.1% in this single pair (231.005 to
+29.854 seconds). The unfinished baseline cannot provide a whole-oracle speedup
+ratio. Namespace creation is essentially unchanged, retaining its measured
+full-replacement SQL and metadata amplification. This is a bounded point,
+not a distribution of repeated throughput measurements or full production
+capacity acceptance.
+
+The process sampler captured 7,700 samples and a 261,128,192-byte resident
+peak, with no capture failures. Allocation instrumentation was disabled;
+allocation fields are null, not zero. The 100 populated namespace replicas
+still contribute resident memory. SQL series coverage is incomplete, with no
+recorded resets. Component CPU, engine, VM network and cgroup counters include
+background traffic and different elapsed windows. They are not physical SSD
+IOPS or proof that every changed byte arises from this code path. Host disk0
+whole-window samples averaged 14,155.6 transfers/s and peaked at 26,538;
+these include all host traffic and cannot be attributed to TiDB.
+
+[Retained after artifact](benchmarks/remote-production-qualification-20260925/task4-ten-drive-population-after.json)
+contains the terminal journal, ten datastore stage summaries, source/binary
+identity and raw hashes. The exclusive raw directory also retains the exact
+executable, source patch, helper, logs and observer windows. Before and after
+use the same ten-worker depth-one population, serial oracle and 600-second
+phase limits; corrected cleanup is an explicit second harness difference.
+This remains one process on loopback with an 8.32 GB Docker TiDB fixture below
+the 10 GiB qualification floor. The 10,000-client / 10,000-Drive /
+5,000-Partition / 10-million-file target, workload patterns, cache capacity,
+independent server processes, final platform/formal gates, current CI and PR
+merge remain pending.
