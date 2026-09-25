@@ -126,3 +126,33 @@ These short, separated trials do not establish a precise throughput ratio:
 the changing host and datastore state still require a fresh alternating
 before/after comparison. They do establish that correctness review alone
 missed a measurable regression in connection and SQL work.
+
+## Bounded session retention verified
+
+Correction `0015437d` retains lazily opened sessions up to the configured pool
+maximum. Independent review accepted the fix. The live connection-identity
+regression changed from four different IDs and 27 discarded sessions to one
+reused ID and zero discards; bound, reconnect, cancellation, isolation, and
+sibling-lifetime gates passed.
+
+Two fresh alternating before/after release pairs used the same preprovisioned
+fixture settings. All four passed every exact-byte oracle and cleanup, with
+zero operation failures. A final corrected virgin-startup run also passed all
+ten fresh file oracles and cleanup.
+
+| Alternating trial | Before read IOPS | After read IOPS | Before write IOPS | After write IOPS |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 1,701.57 | 1,683.60 | 521.15 | 610.94 |
+| 2 | 1,715.28 | 1,569.53 | 595.56 | 385.45 |
+
+Both corrected controls retained **20 client sessions**, versus **310** in both
+before controls. SQL work returned to **3 queries/read and 10 queries/write**.
+The connection-count reduction and removed reconnect work are verified;
+these short trials do not establish a steady throughput gain. The earlier
+warmup EIO remains unexplained, although it did not recur in these five runs.
+The exact failed UTC window yielded no TiDB container log entries.
+
+[The session-retention artifact](benchmarks/remote-production-qualification-20260925/tidb-pool-retention.json)
+retains source identity, configuration, operation counts, session gauges,
+process resources, and all five control outcomes. This one-file, ten-client
+fixture does not establish the 10,000-client production target.

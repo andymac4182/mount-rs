@@ -19,3 +19,9 @@ production performance ranking.
 Raw binaries, checksums, scripts, logs, and observer samples remain under the
 owned local `/private/tmp/mount-rs-qualification-baseline` directory. Paired
 after-fix measurements and final acceptance evidence are still required.
+
+The after-fix investigation also retains `tidb-pool-churn.json` (including an
+unexplained failed warmup) and `tidb-pool-retention.json` (two alternating
+before/after pairs plus final virgin startup). The retention correction removes
+reconnect amplification and reduces measured client sessions from 310 to 20.
+Steady throughput improvement and full production scale remain unproven.
