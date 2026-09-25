@@ -376,6 +376,7 @@ impl Backend {
     }
 
     /// Exact owned-key logical backing counts; never physical SSD residency.
+    #[cfg(all(feature = "resource-profiling", unix))]
     pub async fn owned_counts(&self) -> Result<serde_json::Value, String> {
         let StoreConfig::Tidb {
             connection,
