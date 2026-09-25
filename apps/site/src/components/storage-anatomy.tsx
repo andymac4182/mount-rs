@@ -162,6 +162,21 @@ const sqliteTables: SchemaTable[] = [
 ]
 
 export const providerStorageModels: Record<string, StorageModel> = {
+  slatedb: {
+    kind: 'object',
+    providerLabel: 'SlateDB on RustFS',
+    metadataLabel: 'SlateDB database path',
+    blockLabel: 'Independent RustFS prefix',
+    description: 'SlateDB persists its WAL, SSTs and manifest in the object store; mount-rs stores a namespace record inside SlateDB and file bytes in separate RustFS blocks.',
+    bucket: 'caller-selected RustFS bucket',
+    prefix: 'separate SlateDB and block prefixes',
+    entries: [
+      { key: '<slatedb-path>/...', value: 'SlateDB WAL, SST and manifest objects', role: 'database storage' },
+      { key: 'mount-rs/metadata/v1', value: 'namespace, revision and fence', role: 'logical SlateDB key' },
+      { key: '<block-prefix>/...', value: 'immutable file blocks', role: 'ChunkedFs block storage' },
+    ],
+    idNote: 'The SlateDB path and block prefix must be distinct and owned by the same volume.',
+  },
   memory: {
     kind: 'memory',
     providerLabel: 'Process heap',

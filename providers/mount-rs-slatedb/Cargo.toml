@@ -1,0 +1,26 @@
+[package]
+name = "mount-rs-slatedb"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "SlateDB key-value store for mount-rs"
+license = "Apache-2.0"
+
+[dependencies]
+async-trait = "0.1"
+mount-rs-kv = { path = "../../filesystems/mount-rs-kv" }
+mount-rs-core = { path = "../.." }
+mount-rs-rustfs = { path = "../mount-rs-rustfs" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+slatedb = { version = "=0.16.0", default-features = false, features = ["aws"] }
+tokio = { version = "1", features = ["sync", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+mount-rs-chunked = { path = "../../filesystems/mount-rs-chunked" }
+mount-rs-memory = { path = "../mount-rs-memory" }
+
+[[example]]
+name = "slatedb_rustfs_benchmark"
+path = "../../benchmarks/slatedb-rustfs/runner.rs"

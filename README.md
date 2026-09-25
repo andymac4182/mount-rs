@@ -25,8 +25,13 @@ For a native NFS mount and its exact Finder path on macOS, see the
 - `ChunkedFs` — composes independently selected metadata and immutable block
   providers with persisted fixed-size chunking, coordinated writers and ordered
   durability barriers. Memory, SQLite and PGlite implement both provider roles;
-  R2 and AWS S3 provide block storage. Each provider and filesystem has its own
+  SlateDB provides single-writer metadata, while R2, RustFS and AWS S3 provide
+  block storage. Each provider and filesystem has its own
   crate under `providers/` or `filesystems/`.
+- `SlateDbStore` (`mount-rs-slatedb`) — object-store-backed flat key-value store
+  for `KeyValueFs`. The same crate exposes `SlateDbMetadataStore` for a
+  single-writer `ChunkedFs` with RustFS blocks. See the
+  [SlateDB/RustFS benchmark](benchmarks/slatedb-rustfs/README.md).
 - `MemoryFs` (`mount-rs-memfs`) — memfs-style in-memory filesystem with handles,
   links, symlinks, rename, timestamps, and special-node metadata.
 - `SqliteFs` (`mount-rs-sqlite-fs`) — persisted state in SQLite, including an

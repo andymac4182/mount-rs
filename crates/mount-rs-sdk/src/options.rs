@@ -26,6 +26,17 @@ pub enum StoreConfig {
         volume_key: String,
         durable: bool,
     },
+    /// SlateDB metadata on an S3-compatible service such as RustFS.
+    /// SlateDB owns `path`; keep it separate from the block-store prefix.
+    SlateDb {
+        endpoint: String,
+        bucket: String,
+        region: String,
+        path: String,
+        access_key_id: String,
+        secret_access_key: String,
+        durable: bool,
+    },
     FoundationDb {
         cluster_file: PathBuf,
         volume_key: String,
@@ -86,6 +97,23 @@ impl fmt::Debug for StoreConfig {
                 .debug_struct("Tidb")
                 .field("connection", &"<redacted>")
                 .field("volume_key", volume_key)
+                .field("durable", durable)
+                .finish(),
+            Self::SlateDb {
+                endpoint,
+                bucket,
+                region,
+                path,
+                durable,
+                ..
+            } => formatter
+                .debug_struct("SlateDb")
+                .field("endpoint", &rustfs_debug_endpoint_authority(endpoint))
+                .field("bucket", bucket)
+                .field("region", region)
+                .field("path", path)
+                .field("access_key_id", &"<redacted>")
+                .field("secret_access_key", &"<redacted>")
                 .field("durable", durable)
                 .finish(),
             Self::FoundationDb {

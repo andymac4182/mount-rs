@@ -27,6 +27,7 @@ mount-rs-observability = { path = "../mount-rs-observability", optional = true }
 mount-rs-pglite = { path = "../../providers/mount-rs-pglite" }
 mount-rs-r2 = { path = "../../providers/mount-rs-r2" }
 mount-rs-rustfs = { path = "../../providers/mount-rs-rustfs" }
+mount-rs-slatedb = { path = "../../providers/mount-rs-slatedb" }
 mount-rs-sqlite = { path = "../../providers/mount-rs-sqlite" }
 mount-rs-sqlite-fs = { path = "../../filesystems/mount-rs-sqlite-fs" }
 mount-rs-tidb = { path = "../../providers/mount-rs-tidb" }

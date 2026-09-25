@@ -120,9 +120,16 @@ Primary sources: [pinned repository](https://github.com/slatedb/slatedb/tree/851
 - **Adapt:** LSM/compaction ideas only to provider metadata and future physical layout; mount-rs's namespace manifests and block references remain the logical version contract. Map to W14/W18.
 - **Reject:** using SlateDB as a filesystem namespace or dependency; equating an object-store upload with SQLite `fsync`; and caching mutable head/WAL/coordination state as if it were immutable SST data.
 
+This was the 2026-09-20 reference-review decision. The later, explicit
+SlateDB integration adds `mount-rs-slatedb` as a single-writer metadata
+provider and a key-value filesystem store. Its RustFS benchmark and current
+limitations are recorded in `benchmarks/slatedb-rustfs/README.md`; the older
+review does not describe the newer implementation status.
+
 ### License status
 
-The pinned LICENSE is Apache-2.0 and is compatible in principle with mount-rs. No SlateDB code or dependency is incorporated.
+The pinned LICENSE is Apache-2.0 and is compatible in principle with mount-rs.
+At the time of this reference review, no SlateDB code or dependency was incorporated.
 
 ## 6. SQLite VFS and WAL boundary
 

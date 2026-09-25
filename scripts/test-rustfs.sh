@@ -610,7 +610,9 @@ start_pglite_server() {
   export PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$pglite_port/postgres?sslmode=disable"
   echo "PGLITE_READY endpoint=127.0.0.1:$pglite_port"
 }
-start_pglite_server
+if [ "${MOUNT_RS_RUSTFS_COMBO_ONLY:-0}" != "1" ]; then
+  start_pglite_server
+fi
 export RUSTFS_SQLITE_METADATA_FILE="$run_dir/sqlite-metadata.db"
 
 if bounded_docker_startup_command "run-service" docker run --detach \
@@ -790,6 +792,21 @@ bootstrap_bucket() {
 
 bootstrap_bucket
 echo "RUSTFS_READY endpoint=$rustfs_endpoint image=$rustfs_image"
+
+if [ "${MOUNT_RS_RUSTFS_COMBO_ONLY:-0}" = "1" ]; then
+  if [ -z "${RUSTFS_COMBO_COMMAND:-}" ]; then
+    echo "RUSTFS_COMBO_COMMAND is required for combo-only mode" >&2
+    exit 2
+  fi
+  python3 "$repo_dir/scripts/rustfs-combo-runner.py" \
+    "${RUSTFS_COMBO_TIMEOUT_SECONDS:-900}" \
+    "$repo_dir" \
+    "$combo_pid_file" \
+    "${RUSTFS_COMBO_NAME:-external}" \
+    "$RUSTFS_COMBO_COMMAND"
+  echo "RUSTFS_COMBO_ONLY_PASS name=${RUSTFS_COMBO_NAME:-external}"
+  exit 0
+fi
 
 "$repo_dir/scripts/cargo-shared" test \
   --manifest-path "$repo_dir/tests/rustfs/Cargo.toml" \
