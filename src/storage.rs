@@ -15,6 +15,8 @@ use crate::Result;
 use crate::types::{S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK, Stats};
 use crate::versioning::VolumeId;
 
+pub mod compact;
+
 pub use crate::delegation::{
     CheckoutRequest, DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState,
     DirectoryGrant, GrantToken,
@@ -982,6 +984,13 @@ pub struct WriterLease {
 
 #[async_trait]
 pub trait MetadataStore: Send + Sync {
+    /// Explicit optional compact-layout support. This advertisement neither
+    /// enrolls a volume nor changes any MRC4 method's contract. Resolve it before
+    /// mutation; unsupported providers must not be used for compact publication.
+    /// Never change publication methods after an uncertain commit outcome.
+    fn compact_inode_capability(&self) -> compact::CompactInodeCapability {
+        compact::CompactInodeCapability::Unsupported
+    }
     /// False for volatile stores; never advertise durable commits for memfs.
     fn durable(&self) -> bool;
     async fn load(&self) -> Result<LoadedMetadata>;
