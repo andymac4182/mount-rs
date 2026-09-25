@@ -35,6 +35,7 @@ events! {
     HandleWait => "service.handle_lock_wait",
     Audit => "service.audit",
     GateWait => "filesystem.gate_wait",
+    MutationBatch => "filesystem.mutation_batch_attempted_requests",
     Snapshot => "filesystem.snapshot_nodes",
     Refresh => "filesystem.metadata_refresh",
     Changed => "filesystem.changed_namespace_nodes",

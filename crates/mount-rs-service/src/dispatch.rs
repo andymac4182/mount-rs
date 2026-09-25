@@ -547,13 +547,20 @@ impl DriveDispatcher {
                                 return Err(error("EINVAL"));
                             }
                             let mut data = vec![0; length as usize];
-                            let count = handle
-                                .read(&mut data, read_position)
-                                .await
-                                .map_err(fs_error)?;
-                            if count > data.len() {
-                                return Err(error("EIO"));
-                            }
+                            let count = checked_handle_read(
+                                handle.as_ref(),
+                                &mut data,
+                                read_position,
+                                |fields| {
+                                    read_failure_diagnostic(
+                                        request_id,
+                                        drive_id,
+                                        read_position,
+                                        fields,
+                                    );
+                                },
+                            )
+                            .await?;
                             data.truncate(count);
                             // v2 returns the filesystem-owned raw buffer. Legacy
                             // dispatch retains its exact JSON result representation.
@@ -830,6 +837,125 @@ fn error(code: &str) -> WireError {
     }
 }
 
+/// Bounded local read-error fields. Arbitrary provider error text is excluded.
+#[doc(hidden)]
+#[derive(Debug, serde::Serialize)]
+pub struct ReadFailureFields {
+    pub category: &'static str,
+    pub posix_code: Option<&'static str>,
+    pub syscall: Option<&'static str>,
+    pub returned_count: Option<usize>,
+    pub buffer_length: usize,
+}
+impl ReadFailureFields {
+    pub fn from_parts(
+        code: &str,
+        syscall: Option<&str>,
+        count: Option<usize>,
+        length: usize,
+    ) -> Self {
+        let posix_code = match code {
+            "EPERM" => Some("EPERM"),
+            "ENOENT" => Some("ENOENT"),
+            "EINTR" => Some("EINTR"),
+            "EIO" => Some("EIO"),
+            "ENXIO" => Some("ENXIO"),
+            "EBADF" => Some("EBADF"),
+            "EAGAIN" => Some("EAGAIN"),
+            "ENOMEM" => Some("ENOMEM"),
+            "EACCES" => Some("EACCES"),
+            "EBUSY" => Some("EBUSY"),
+            "EEXIST" => Some("EEXIST"),
+            "EXDEV" => Some("EXDEV"),
+            "ENODEV" => Some("ENODEV"),
+            "ENOTDIR" => Some("ENOTDIR"),
+            "EISDIR" => Some("EISDIR"),
+            "EINVAL" => Some("EINVAL"),
+            "ENFILE" => Some("ENFILE"),
+            "EMFILE" => Some("EMFILE"),
+            "EFBIG" => Some("EFBIG"),
+            "ENOSPC" => Some("ENOSPC"),
+            "ESPIPE" => Some("ESPIPE"),
+            "EROFS" => Some("EROFS"),
+            "EMLINK" => Some("EMLINK"),
+            "ERANGE" => Some("ERANGE"),
+            "ENAMETOOLONG" => Some("ENAMETOOLONG"),
+            "ENOSYS" => Some("ENOSYS"),
+            "ENOTEMPTY" => Some("ENOTEMPTY"),
+            "ELOOP" => Some("ELOOP"),
+            "ENODATA" => Some("ENODATA"),
+            "EPROTO" => Some("EPROTO"),
+            "EOVERFLOW" => Some("EOVERFLOW"),
+            "ENOTSUP" => Some("ENOTSUP"),
+            "ESTALE" => Some("ESTALE"),
+            "EDQUOT" => Some("EDQUOT"),
+            _ => None,
+        };
+        let syscall = match syscall {
+            Some("read") => Some("read"),
+            Some("get") => Some("get"),
+            Some("handle_read") => Some("handle_read"),
+            Some(_) => Some("other"),
+            None => None,
+        };
+        Self {
+            category: if count.is_some_and(|count| count > length) {
+                "driver_count_exceeds_buffer"
+            } else {
+                "driver_error"
+            },
+            posix_code,
+            syscall,
+            returned_count: count,
+            buffer_length: length,
+        }
+    }
+    pub fn try_from_success(count: usize, length: usize) -> Option<Self> {
+        (count > length).then(|| Self::from_parts("EIO", None, Some(count), length))
+    }
+}
+async fn checked_handle_read(
+    handle: &dyn FileHandle,
+    data: &mut [u8],
+    position: Option<u64>,
+    mut emit: impl FnMut(ReadFailureFields),
+) -> Result<usize, WireError> {
+    let count = handle.read(data, position).await.map_err(|failure| {
+        emit(ReadFailureFields::from_parts(
+            failure.code.as_str(),
+            failure.syscall.as_deref(),
+            None,
+            data.len(),
+        ));
+        fs_error(failure)
+    })?;
+    if let Some(fields) = ReadFailureFields::try_from_success(count, data.len()) {
+        emit(fields);
+        return Err(error("EIO"));
+    }
+    Ok(count)
+}
+fn read_failure_diagnostic(
+    request_id: u64,
+    drive: &str,
+    position: Option<u64>,
+    fields: ReadFailureFields,
+) {
+    if std::env::var_os("MOUNT_RS_READ_FAILURE_DIAGNOSTICS").is_none() {
+        return;
+    }
+    // Drive identifiers were validated by dispatch; this event contains no path,
+    // raw FsError message, claims, provider URL, SQL or payload bytes.
+    let utc_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|time| time.as_millis());
+    eprintln!(
+        "{}",
+        serde_json::json!({"event":"remote_read_failure", "utc_unix_ms":utc_unix_ms,"request_id":request_id,"drive_id":drive,"position":position,"failure":fields})
+    );
+}
+
 fn fs_error(error_value: mount_rs_core::FsError) -> WireError {
     error(error_value.code.as_str())
 }
@@ -967,6 +1093,68 @@ fn validate_guarded_mutation(request: &mount_rs_core::GuardedMutation) -> Result
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    struct FaultReadHandle {
+        oversized: bool,
+        reads: AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl FileHandle for FaultReadHandle {
+        async fn read(&self, buffer: &mut [u8], _: Option<u64>) -> mount_rs_core::Result<usize> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            if self.oversized {
+                Ok(buffer.len() + 1)
+            } else {
+                Err(mount_rs_core::FsError::new(mount_rs_core::ErrorCode::Eio)
+                    .with_syscall("mysql://user:secret SQL payload")
+                    .with_path("/private-secret"))
+            }
+        }
+        async fn write(&self, _: &[u8], _: Option<u64>) -> mount_rs_core::Result<usize> {
+            Err(mount_rs_core::FsError::enosys("write"))
+        }
+        async fn stat(&self) -> mount_rs_core::Result<mount_rs_core::Stats> {
+            Err(mount_rs_core::FsError::enosys("stat"))
+        }
+        async fn truncate(&self, _: u64) -> mount_rs_core::Result<()> {
+            Err(mount_rs_core::FsError::enosys("truncate"))
+        }
+        async fn close(&self) -> mount_rs_core::Result<()> {
+            Ok(())
+        }
+    }
+    #[tokio::test]
+    async fn checked_read_emits_safe_context_and_preserves_eio_without_retry() {
+        for oversized in [false, true] {
+            let mut emitted = Vec::new();
+            let mut data = [0u8; 4096];
+            let handle = FaultReadHandle {
+                oversized,
+                reads: AtomicUsize::new(0),
+            };
+            let result =
+                checked_handle_read(&handle, &mut data, Some(12), |fields| emitted.push(fields))
+                    .await;
+            assert_eq!(result.unwrap_err().code, "EIO");
+            assert_eq!(handle.reads.load(Ordering::SeqCst), 1);
+            assert_eq!(emitted.len(), 1);
+            let fields = &emitted[0];
+            assert_eq!(
+                fields.category,
+                if oversized {
+                    "driver_count_exceeds_buffer"
+                } else {
+                    "driver_error"
+                }
+            );
+            assert_eq!(fields.buffer_length, 4096);
+            assert_eq!(fields.returned_count, oversized.then_some(4097));
+            let encoded = serde_json::to_string(fields).unwrap();
+            for forbidden in ["secret", "SQL", "payload", "mysql", "private"] {
+                assert!(!encoded.contains(forbidden));
+            }
+        }
+    }
+
     struct CountedHandle(Arc<AtomicUsize>);
     #[async_trait::async_trait]
     impl FileHandle for CountedHandle {

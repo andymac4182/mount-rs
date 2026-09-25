@@ -2849,6 +2849,8 @@ where
     }
 
     async fn apply_mutation_batch(&self, requests: Vec<MutationRequest>) {
+        // Attempted requests, including fenced retries; elapsed includes waits.
+        let _batch_profile = Span::new(Event::MutationBatch).units(requests.len() as u64);
         let gate_profile = Span::new(Event::GateWait);
         let _gate = self.inner.gate.lock().await;
         drop(gate_profile);

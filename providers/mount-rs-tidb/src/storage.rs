@@ -843,7 +843,46 @@ fn block_id(bytes: &[u8]) -> BlockId {
     BlockId(encoded)
 }
 
+fn mysql_numeric_error_fields<'a>(
+    operation: &str,
+    error: &'a MysqlError,
+) -> (&'static str, Option<u16>, Option<&'a str>) {
+    let operation = match operation {
+        "get TiDB block" => "block_get",
+        "load TiDB inode" => "inode_load",
+        "load TiDB inode snapshot" => "inode_snapshot",
+        "load TiDB metadata" | "conditionally load TiDB metadata" => "metadata_load",
+        "insert TiDB inode guard" | "lock TiDB structural guards" => "structural_guard",
+        _ => "other",
+    };
+    match error {
+        MysqlError::Server(server) => (
+            operation,
+            Some(server.code),
+            (server.state.len() == 5
+                && server
+                    .state
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit()))
+            .then_some(server.state.as_str()),
+        ),
+        _ => (operation, None, None),
+    }
+}
+
 fn db_error(operation: &str, error: MysqlError) -> FsError {
+    if std::env::var_os("MOUNT_RS_READ_FAILURE_DIAGNOSTICS").is_some() {
+        let (operation_class, server_code, sql_state) =
+            mysql_numeric_error_fields(operation, &error);
+        let utc_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|time| time.as_millis());
+        eprintln!(
+            "{}",
+            serde_json::json!({"event":"tidb_numeric_failure", "utc_unix_ms":utc_unix_ms, "operation_class":operation_class,"server_code":server_code,"sql_state":sql_state})
+        );
+    }
     let detail = mysql_error_detail(&error);
     if is_retryable_conflict(&error) {
         return FsError::new(ErrorCode::Eagain)
@@ -3030,6 +3069,39 @@ mod tests {
         assert!(expiry(u64::MAX, 1).is_err());
         assert!(nonnegative(-1, "metadata fence").is_err());
         assert!(signed(u64::MAX, "metadata fence").is_err());
+    }
+
+    #[test]
+    fn numeric_failure_diagnostic_excludes_server_text_and_unknown_operation() {
+        let error = MysqlError::Server(ServerError {
+            code: 1205,
+            message: "password SQL SELECT payload mysql://private".into(),
+            state: "HY000".into(),
+        });
+        let fields = mysql_numeric_error_fields("get TiDB block", &error);
+        assert_eq!(fields, ("block_get", Some(1205), Some("HY000")));
+        let output = format!("{fields:?}");
+        for forbidden in ["password", "SELECT", "payload", "private", "mysql://"] {
+            assert!(!output.contains(forbidden));
+        }
+        assert_eq!(
+            mysql_numeric_error_fields("password SQL", &error).0,
+            "other"
+        );
+        let malformed = MysqlError::Server(ServerError {
+            code: 42,
+            message: "secret".into(),
+            state: "secret-state".into(),
+        });
+        assert_eq!(
+            mysql_numeric_error_fields("get TiDB block", &malformed).2,
+            None
+        );
+        let disconnected = MysqlError::Driver(DriverError::ConnectionClosed);
+        assert_eq!(
+            mysql_numeric_error_fields("get TiDB block", &disconnected),
+            ("block_get", None, None)
+        );
     }
 
     #[test]

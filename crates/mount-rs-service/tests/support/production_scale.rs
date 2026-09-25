@@ -132,6 +132,10 @@ async fn catalog_shape_and_authorization_profile() {
         let snapshot = target_catalog(clients);
         let document_bytes = serde_json::to_vec(&snapshot).unwrap().len();
         catalog.compare_and_swap(0, snapshot).await.unwrap();
+        // Drain setup/CAS counters on all eight exact round-robin handles.
+        for _ in 0..8 {
+            catalog.load_shared_current().await.unwrap();
+        }
         let warm = catalog.load_shared_current().await.unwrap();
         let claims = json!({"sandbox_id":(clients - 1).to_string()});
         let partition = format!("partition-{}", (clients - 1) / 2);
@@ -573,3 +577,6 @@ async fn expect_authentication_denial(
         _ => Err("negative probe failed without explicit authentication denial".into()),
     }
 }
+
+#[path = "production_checkpoint.rs"]
+mod production_checkpoint;

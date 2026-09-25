@@ -375,6 +375,33 @@ impl Backend {
         })
     }
 
+    /// Exact owned-key logical backing counts; never physical SSD residency.
+    pub async fn owned_counts(&self) -> Result<serde_json::Value, String> {
+        let StoreConfig::Tidb {
+            connection,
+            volume_key,
+            ..
+        } = &self.store
+        else {
+            return Err("owned backing counts require TiDB".into());
+        };
+        let pool = Pool::from_url(connection).map_err(|_| "owned counts pool failed")?;
+        let result = async {
+            let mut connection = pool.get_conn().await.map_err(|_| "owned counts connection failed")?;
+            let (blocks, bytes): (u64, u64) = connection.exec_first("SELECT COUNT(*), COALESCE(SUM(OCTET_LENGTH(bytes)), 0) FROM mount_rs_tidb_blocks WHERE volume_key = ?", (volume_key.as_bytes(),)).await.map_err(|_| "owned block count failed")?.ok_or("owned block counts missing")?;
+            let (inodes, node_bytes): (u64, u64) = connection.exec_first("SELECT COUNT(*), COALESCE(SUM(OCTET_LENGTH(node)), 0) FROM mount_rs_tidb_inodes WHERE volume_key = ?", (volume_key.as_bytes(),)).await.map_err(|_| "owned inode count failed")?.ok_or("owned inode counts missing")?;
+            Ok(serde_json::json!({"owned_volume_key":volume_key,"blocks":blocks,"logical_block_bytes":bytes,"inodes":inodes,"inode_json_bytes":node_bytes,"scope":"exact owned key; SQL payload sums are not physical SSD bytes"}))
+        }.await;
+        let closed = pool
+            .disconnect()
+            .await
+            .map_err(|_| "owned counts pool disconnect failed".to_string());
+        match (result, closed) {
+            (Ok(result), Ok(())) => Ok(result),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        }
+    }
+
     pub async fn open(&self, index: usize) -> Result<Filesystem, String> {
         self.open_in_context(index, None).await
     }
