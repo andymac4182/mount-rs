@@ -622,3 +622,49 @@ fn assert_non_directory_parent_rejected(base: &CompactSnapshot, node: NodeMetada
         ErrorCode::Einval,
     );
 }
+
+#[test]
+fn compact_anchor_codec_is_strict_and_cannot_be_legacy_namespace() {
+    let snapshot = fixture();
+    let encoded = encode_compact_anchor(&snapshot.anchor).unwrap();
+    assert_eq!(decode_compact_anchor(&encoded).unwrap(), snapshot.anchor);
+    assert!(serde_json::from_slice::<Namespace>(&encoded).is_err());
+    assert!(decode_inode_namespace(&encoded).is_err());
+    let namespace = snapshot.namespace().unwrap();
+    assert!(decode_compact_anchor(&serde_json::to_vec(&namespace).unwrap()).is_err());
+    assert!(decode_compact_anchor(&encode_inode_namespace(&namespace).unwrap()).is_err());
+    for field in ["version", "layout", "extra", "anchor"] {
+        let mut value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        value[field] = serde_json::json!(999);
+        assert!(decode_compact_anchor(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+    let mut value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    value["anchor"]["extra"] = serde_json::json!(true);
+    assert!(decode_compact_anchor(&serde_json::to_vec(&value).unwrap()).is_err());
+    value["anchor"].as_object_mut().unwrap().remove("extra");
+    value["anchor"]["members"] = serde_json::json!([1, 1]);
+    assert!(decode_compact_anchor(&serde_json::to_vec(&value).unwrap()).is_err());
+    assert!(decode_compact_anchor(b"{}").is_err());
+    assert!(decode_compact_anchor(b"not json").is_err());
+}
+
+#[test]
+fn compact_selected_read_validates_membership_body_and_physical_identity() {
+    let snapshot = fixture();
+    let guard = snapshot.guards[&2].clone();
+    let loaded = LoadedCompactInode::from_guard(&snapshot.anchor, 2, guard.clone()).unwrap();
+    assert_eq!(loaded.generation, 3);
+    assert_eq!(loaded.guard, guard);
+    let mut anchor = snapshot.anchor.clone();
+    anchor.members.retain(|id| *id != 2);
+    assert!(LoadedCompactInode::from_guard(&anchor, 2, guard.clone()).is_err());
+    let mut wrong = guard.clone();
+    wrong.identity.epoch = 4;
+    assert!(LoadedCompactInode::from_guard(&snapshot.anchor, 2, wrong).is_err());
+    let mut wrong = guard.clone();
+    wrong.node.stats.ino = 9;
+    assert!(LoadedCompactInode::from_guard(&snapshot.anchor, 2, wrong).is_err());
+    let mut wrong = guard;
+    wrong.node.stats.mode = S_IFDIR | 0o755;
+    assert!(LoadedCompactInode::from_guard(&snapshot.anchor, 2, wrong).is_err());
+}

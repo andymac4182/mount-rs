@@ -12,3 +12,31 @@ fn existing_provider_does_not_opt_into_compact_layout() {
         CompactInodeCapability::Unsupported
     );
 }
+
+#[tokio::test]
+async fn existing_provider_rejects_compact_operational_bridge() {
+    use mount_rs_core::{ErrorCode, storage::ConcurrentBackingId};
+    let store = mount_rs_memory::MemoryMetadataStore::new();
+    let backing = ConcurrentBackingId::from_bytes([1; 16]).unwrap();
+    assert!(
+        store
+            .prepare_compact_inode_mode(backing, 1)
+            .await
+            .unwrap_err()
+            .is(ErrorCode::Enotsup)
+    );
+    assert!(
+        store
+            .load_compact_snapshot(backing)
+            .await
+            .unwrap_err()
+            .is(ErrorCode::Enotsup)
+    );
+    assert!(
+        store
+            .load_compact_inode(backing, 1)
+            .await
+            .unwrap_err()
+            .is(ErrorCode::Enotsup)
+    );
+}

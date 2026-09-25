@@ -2,12 +2,23 @@
 //! Each database contains one namespace. Metadata and blocks may reside in
 //! different databases, or either provider may be paired with another backend.
 
+#[cfg(all(test, unix))]
+#[path = "compact_tests.rs"]
+mod compact_tests;
+
 #[cfg(test)]
 #[path = "direct_io_benchmark.rs"]
 mod direct_io_benchmark;
 
+#[path = "compact.rs"]
+mod compact;
+
 use async_trait::async_trait;
 use mount_rs_core::diagnostics::profile::{self, Event};
+use mount_rs_core::storage::compact::{
+    CompactInodeCapability, CompactPublication, CompactSnapshot, CompactStructuralDelta,
+    LoadedCompactInode, PhysicalInodeIdentity,
+};
 use mount_rs_core::storage::{
     BlockId, BlockStore, CheckoutRequest, ConcurrentBackingId, ConcurrentModeState,
     DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState, DirectoryGrant,
@@ -44,6 +55,7 @@ const CONCURRENT_WRITE_MODE: &str = "MRC1";
 const BOUND_WRITE_MODE: &str = "MRC2";
 const DELEGATED_WRITE_MODE: &str = "MRC3";
 const INODE_WRITE_MODE: &str = "MRC4";
+const COMPACT_WRITE_MODE: &str = "MRC5";
 #[cfg(unix)]
 const INODE_CONDITIONAL_SQL: &str = "SELECT m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.revision,
                     m.physical_dev,m.physical_ino,m.physical_path,
@@ -1033,7 +1045,7 @@ fn initialize_version_schema(database: &Database) -> Result<()> {
                 && owner.is_none()
                 && fence == CONCURRENT_FENCE_SENTINEL
                 && expires == 0 => {}
-        Some(BOUND_WRITE_MODE | DELEGATED_WRITE_MODE | INODE_WRITE_MODE)
+        Some(BOUND_WRITE_MODE | DELEGATED_WRITE_MODE | INODE_WRITE_MODE | COMPACT_WRITE_MODE)
             if backing
                 .as_deref()
                 .is_some_and(|id| ConcurrentBackingId::from_hex(id).is_ok())
@@ -1051,7 +1063,7 @@ fn initialize_version_schema(database: &Database) -> Result<()> {
         let stamp = FileStamp::from_text(physical_dev.as_deref(), physical_ino.as_deref())?;
         if matches!(
             mode.as_deref(),
-            Some(BOUND_WRITE_MODE | DELEGATED_WRITE_MODE | INODE_WRITE_MODE)
+            Some(BOUND_WRITE_MODE | DELEGATED_WRITE_MODE | INODE_WRITE_MODE | COMPACT_WRITE_MODE)
         ) {
             require_matching_metadata_stamp(
                 database,
@@ -1084,7 +1096,7 @@ fn initialize_version_schema(database: &Database) -> Result<()> {
         let _ = (&physical_dev, &physical_ino, &physical_path);
         if matches!(
             mode.as_deref(),
-            Some(BOUND_WRITE_MODE | DELEGATED_WRITE_MODE | INODE_WRITE_MODE)
+            Some(BOUND_WRITE_MODE | DELEGATED_WRITE_MODE | INODE_WRITE_MODE | COMPACT_WRITE_MODE)
         ) {
             return Err(incompatible_schema(
                 "this platform cannot bind MRC2 SQLite metadata to a physical file",
@@ -1108,6 +1120,7 @@ fn initialize_version_schema(database: &Database) -> Result<()> {
             revision, physical_dev, physical_ino, physical_path)",
     )
     .map_err(backend_error)?;
+    compact::initialize_schema(&tx)?;
     let guard_columns = table_columns(&tx, "mount_rs_inode_guards")?
         .ok_or_else(|| incompatible_schema("MRC4 inode guard table missing"))?;
     require_columns(
@@ -1954,6 +1967,91 @@ fn rebuild_inode_guards(
 
 #[async_trait]
 impl MetadataStore for SqliteMetadataStore {
+    fn compact_inode_capability(&self) -> CompactInodeCapability {
+        if self.0.durable
+            && cfg!(any(
+                target_os = "macos",
+                all(target_os = "linux", target_env = "gnu")
+            ))
+        {
+            CompactInodeCapability::V1
+        } else {
+            CompactInodeCapability::Unsupported
+        }
+    }
+    async fn prepare_compact_inode_mode(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        #[cfg(unix)]
+        {
+            self.compact_prepare(backing, expected_revision)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (backing, expected_revision);
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+    }
+    async fn load_compact_snapshot(&self, backing: ConcurrentBackingId) -> Result<CompactSnapshot> {
+        #[cfg(unix)]
+        {
+            self.compact_snapshot(backing)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = backing;
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+    }
+    async fn load_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: u64,
+    ) -> Result<LoadedCompactInode> {
+        #[cfg(unix)]
+        {
+            self.compact_load(backing, inode)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (backing, inode);
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+    }
+    async fn publish_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: u64,
+        generation: u64,
+        expected: PhysicalInodeIdentity,
+        node: NodeMetadata,
+    ) -> Result<LoadedCompactInode> {
+        #[cfg(unix)]
+        {
+            self.compact_publish_inode(backing, inode, generation, expected, node)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (backing, inode, generation, expected, node);
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+    }
+    async fn publish_compact_structure(
+        &self,
+        delta: &CompactStructuralDelta,
+    ) -> Result<CompactPublication> {
+        #[cfg(unix)]
+        {
+            self.compact_publish_structure(delta)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = delta;
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+    }
     fn durable(&self) -> bool {
         self.0.durable
     }
@@ -1973,7 +2071,7 @@ impl MetadataStore for SqliteMetadataStore {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .map_err(backend_error)?;
-        if mode.as_deref() == Some(INODE_WRITE_MODE) {
+        if matches!(mode.as_deref(), Some(INODE_WRITE_MODE | COMPACT_WRITE_MODE)) {
             return Err(stale());
         }
         if let Some(json) = &namespace {
@@ -2199,7 +2297,7 @@ impl MetadataStore for SqliteMetadataStore {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .map_err(backend_error)?;
-        if mode.as_deref() == Some(INODE_WRITE_MODE) {
+        if matches!(mode.as_deref(), Some(INODE_WRITE_MODE | COMPACT_WRITE_MODE)) {
             return Err(stale());
         }
         if revision != 0 && revision == known_revision {

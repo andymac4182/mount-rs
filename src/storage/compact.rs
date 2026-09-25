@@ -3,7 +3,7 @@
 //!
 //! Providers must negotiate support before I/O and explicitly initialize only
 //! fresh, owned volumes under an atomic mode/lease fence. These types do not
-//! enroll, migrate, serialize or publish a volume. A provider must persist a
+//! enroll, migrate or publish a volume. A provider must persist a
 //! distinct layout tag; it must never infer this layout from MRC4 records.
 //!
 //! All inputs to transaction validators must come from ONE transaction view:
@@ -27,7 +27,8 @@ pub enum CompactInodeCapability {
 
 /// Exact sorted membership and namespace defaults. IDs remain O(N) to read,
 /// copy and rewrite; changed directory entry arrays also retain their cost.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CompactAnchor {
     pub backing: ConcurrentBackingId,
     pub generation: u64,
@@ -38,6 +39,62 @@ pub struct CompactAnchor {
     pub umask: u32,
     pub default_chunker: ChunkerConfig,
     pub members: Vec<InodeId>,
+}
+
+/// An unconditional selected read carries the body and its physical identity
+/// together with the anchor generation observed in the same transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedCompactInode {
+    pub generation: u64,
+    pub guard: CompactGuard,
+}
+
+impl LoadedCompactInode {
+    /// Validate membership, body kind and physical identity without fetching
+    /// unrelated guards. The anchor and guard must share a transaction view.
+    pub fn from_guard(anchor: &CompactAnchor, inode: InodeId, guard: CompactGuard) -> Result<Self> {
+        anchor.validate()?;
+        if anchor.members.binary_search(&inode).is_err() {
+            return Err(invalid_namespace(
+                "selected guard absent from compact membership",
+            ));
+        }
+        guard.validate(inode, anchor)?;
+        Ok(Self {
+            generation: anchor.generation,
+            guard,
+        })
+    }
+}
+
+/// Encode only the distinct compact v1 anchor representation.
+pub fn encode_compact_anchor(anchor: &CompactAnchor) -> Result<Vec<u8>> {
+    anchor.validate()?;
+    serde_json::to_vec(&CompactAnchorEnvelope {
+        layout: "mount-rs-compact-inodes".into(),
+        version: 1,
+        anchor: anchor.clone(),
+    })
+    .map_err(crate::backend_error)
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompactAnchorEnvelope {
+    layout: String,
+    version: u32,
+    anchor: CompactAnchor,
+}
+
+/// Reject legacy namespaces, MRC4 envelopes, malformed and future formats.
+pub fn decode_compact_anchor(bytes: &[u8]) -> Result<CompactAnchor> {
+    let envelope: CompactAnchorEnvelope =
+        serde_json::from_slice(bytes).map_err(crate::backend_error)?;
+    if envelope.layout != "mount-rs-compact-inodes" || envelope.version != 1 {
+        return Err(invalid_namespace("unsupported compact anchor envelope"));
+    }
+    envelope.anchor.validate()?;
+    Ok(envelope.anchor)
 }
 
 impl CompactAnchor {

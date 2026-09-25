@@ -991,6 +991,53 @@ pub trait MetadataStore: Send + Sync {
     fn compact_inode_capability(&self) -> compact::CompactInodeCapability {
         compact::CompactInodeCapability::Unsupported
     }
+    /// Enroll only fresh root-only, initialized, same-backing MRC2 metadata.
+    /// Atomically advance the generation and fence old namespace readers/writers.
+    async fn prepare_compact_inode_mode(
+        &self,
+        _backing: ConcurrentBackingId,
+        _expected_revision: u64,
+    ) -> Result<()> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Read anchor and exact complete guard keyspace in ONE coherent transaction.
+    async fn load_compact_snapshot(
+        &self,
+        _backing: ConcurrentBackingId,
+    ) -> Result<compact::CompactSnapshot> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Fresh selected body with generation and exact physical identity. A logical
+    /// reset token alone never establishes freshness of a retained body.
+    async fn load_compact_inode(
+        &self,
+        _backing: ConcurrentBackingId,
+        _inode: InodeId,
+    ) -> Result<compact::LoadedCompactInode> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Atomically validate anchor generation and physical identity, then update
+    /// only the selected guard. Immutable blocks must be durable before this call.
+    /// EAGAIN is a proven noncommit; uncertain outcomes must never be replayed.
+    async fn publish_compact_inode(
+        &self,
+        _backing: ConcurrentBackingId,
+        _inode: InodeId,
+        _generation: u64,
+        _expected: compact::PhysicalInodeIdentity,
+        _node: NodeMetadata,
+    ) -> Result<compact::LoadedCompactInode> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Publish an immutable captured delta under anchor and guard protection.
+    /// Full scope enumerates the entire guarded range; FileCreate fetches only
+    /// its expected affected parent. Return only the acknowledged write set.
+    async fn publish_compact_structure(
+        &self,
+        _delta: &compact::CompactStructuralDelta,
+    ) -> Result<compact::CompactPublication> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
     /// False for volatile stores; never advertise durable commits for memfs.
     fn durable(&self) -> bool;
     async fn load(&self) -> Result<LoadedMetadata>;

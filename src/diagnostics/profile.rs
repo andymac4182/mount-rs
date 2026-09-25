@@ -59,6 +59,8 @@ events! {
     InodeConditional => "provider.inode.load_if_changed",
     InodePublication => "provider.inode.publish_cas",
     InodeConflict => "provider.inode.cas_conflict",
+    CompactAnchorReturned => "provider.compact_anchor_returned_bytes",
+    CompactAnchorSerialized => "provider.compact_anchor_serialized_bytes",
     InodeReturned => "provider.inode_returned_bytes",
     InodeSerialized => "provider.inode_serialized_bytes",
 }

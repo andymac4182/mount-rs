@@ -2204,6 +2204,7 @@ dependencies = [
  "mount-rs-persist",
  "rusqlite",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
