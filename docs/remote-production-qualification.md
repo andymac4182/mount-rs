@@ -6,7 +6,7 @@ Status: in progress. The active goal covers secure WebSocket fallback, storage d
 
 Source: merged `cd92c7d4c4a46f5752c2f2af0d6983b6e4a3e39d`, with planning-only commit `c74ca180`. A preserved release executable was built with `resource-profiling` before functional edits.
 
-Local Docker ARM64 VM: 14 CPUs, 8,318,976,000 bytes memory. One PD, one TiKV, one TiDB, version v8.5.7. This is a single-host diagnostic configuration; it does not establish replicated production capacity or power-loss durability.
+Host hardware: 51,539,607,552 bytes RAM (48 GiB), 14 logical CPUs, and 14 physical CPUs, read using `sysctl`. Local Docker ARM64 VM: 14 CPUs, 8,318,976,000 bytes memory. The VM shares the host memory budget. One PD, one TiKV, one TiDB, version v8.5.7. This is a single-host diagnostic configuration; it does not establish replicated production capacity or power-loss durability.
 
 Workload: ten server coordinators, ten clients, one separate Drive per client, inode updates enabled, 4 KiB reads and overwrites, depth one, 32 blocks per file, one-second warmup and three-second measured stages. Measurements include request drain. This baseline uses the load fixture authenticator with synthetic bearer tokens and actual per-Drive claim policies; it does not measure OIDC signature validation or production authentication capacity.
 
@@ -54,7 +54,7 @@ Independent spec and quality re-review approved the implementation. Strict touch
 
 ## Production workload target
 
-The requested production workload has 10,000 clients using distinct Drives across 5,000 Partitions, with 1,000 files per Drive. A balanced fixture therefore uses two Drives per Partition and ten million files. Each connection remains bound to one Partition and one client's granted Drive; qualification must check denial of both other Partitions and the ungranted sibling Drive. Pending the user's preference, use 990 files of 4 KiB, nine of 128 KiB, and one of 1 MiB per Drive: 62.83 GB of unique logical payload across 10,000 Drives before metadata, logs, and replicas.
+The requested production workload has 10,000 clients using distinct Drives across 5,000 Partitions, with 1,000 files per Drive. A balanced fixture therefore uses two Drives per Partition and ten million files. Each connection remains bound to one Partition and one client's granted Drive; qualification must check denial of both other Partitions and the ungranted sibling Drive. The user confirmed 990 files of 4 KiB, nine of 128 KiB, and one of 1 MiB per Drive: 62.83 GB of unique logical payload across 10,000 Drives before metadata, logs, and replicas.
 
 The existing single-Partition, one-file-per-Drive baseline does not establish this target. Further runs must declare file counts and sizes, distinguish namespace and payload setup from steady I/O, and exercise random/sequential reads and overwrites, mixed traffic, hot-file skew, append/truncate, and namespace churn. Current catalog validation also limits Partitions to 1,024, so it cannot admit the requested 5,000-Partition fixture without a tested bounded capacity change.
 
@@ -70,3 +70,59 @@ The preserved NAPI addon at `180a4552` ran the same 400 create/read/unlink lifec
 | FoundationDB | 40.95 | 29.301 | Native single process, 1 GiB limit, persisted single-authority lease |
 
 These are short diagnostic measurements with different durability settings and execution environments, not a fair production ranking. All use legacy leased publication. FoundationDB opening took 0.136 seconds; the long delay was in the lifecycle workload. A prior 30-second bounded process stopped before completion and is retained as incomplete evidence. Controlled inode and steady-existing-file measurements must identify metadata contention and structural costs before attributing the difference.
+
+## Storage implementation checkpoint
+
+Commit `078eface` adds an explicit bounded TiDB pool context shared across a
+server's Drives, retryable role schema initialization, and inode-startup
+recovery that rechecks exact authority, backing markers, and snapshot validity.
+It also forwards all seven inode metadata operations through NAPI and adds
+explicit legacy/inode and lifecycle/steady benchmark profiles. The existing
+1,000 IOPS legacy lifecycle gate remains unchanged.
+
+Independent review identified two corrections, implemented in `50559c51`:
+initiate terminal shutdown for every owned pool even when the caller cancels,
+and encode distinguishable per-worker overwrite generations. Both have retained
+failing and passing regressions. The live two-identity TiDB cancellation test
+and a 256-worker SQLite byte-oracle run pass. Independent rereview accepted
+those corrections. Paired performance measurements remain required;
+the implementation checkpoint does not establish a throughput improvement.
+
+The formal CI gate checks seven bounded production decisions: exact grant
+scope and claims, handle admission, binary lengths before allocation, generic
+control charges, readonly flags, read-grant mutation denial, and exact Drive
+and revision handles. These proofs do not establish asynchronous cache
+persistence, transport behavior, or full-system capacity.
+
+## Paired measurement exposed pool reconnect amplification
+
+The release control rebuilt from `50559c51` passed virgin ten-server startup,
+exact-byte verification of all ten files, and cleanup. Its preprovisioned run
+failed during read warmup with ten server-side EIO errors after 220 completed
+reads; the identical repeat passed verification and cleanup. The first failure
+is retained and unexplained. A passing repeat does not close that gap.
+
+The passing runs were substantially slower than the earlier control:
+
+| Trial | Read IOPS | Write IOPS | SQL queries/read | SQL queries/write |
+| --- | ---: | ---: | ---: | ---: |
+| Before, preprovisioned | 1,895.21 | 680.13 | 3 | 10 |
+| `50559c51`, virgin | 322.11 | 162.21 | 30 | 56 |
+| `50559c51`, preprovisioned repeat | 47.71 | 44.56 | 30 | 56 |
+
+Stage-boundary client session gauges were zero in both passing new runs.
+Source inspection establishes a reconnect amplification bug: the new context
+sets pool minimum to zero, while the pinned mysql_async default inactive
+connection TTL is zero. Its recycler retains only the minimum in this mode,
+so every returned connection is closed. Subsequent checkouts reconnect and
+repeat session initialization. This explains the new SQL amplification; it
+does not establish the cause of the intermittent EIO. A bounded connection
+retention correction, an actual connection-identity reuse regression, and
+fresh matched controls are required before performance acceptance.
+
+Compact measured evidence, including the failed trial, is retained in
+[the pool churn artifact](benchmarks/remote-production-qualification-20260925/tidb-pool-churn.json).
+These short, separated trials do not establish a precise throughput ratio:
+the changing host and datastore state still require a fresh alternating
+before/after comparison. They do establish that correctness review alone
+missed a measurable regression in connection and SQL work.
