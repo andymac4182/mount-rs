@@ -25,8 +25,8 @@ use mount_rs_core::{Result, backend_error};
     )
 ))]
 use mount_rs_foundationdb::{
-    FoundationDbLimits, FoundationDbSharedLeaseOracle, FoundationDbStorage,
-    FoundationDbStorageOptions,
+    FoundationDbBlockAuthorityPolicy, FoundationDbLimits, FoundationDbSharedLeaseOracle,
+    FoundationDbStorage, FoundationDbStorageOptions,
 };
 use mount_rs_memory::{MemoryBlockStore, MemoryMetadataStore};
 use mount_rs_pglite::{PgliteBlockStore, PgliteMetadataStore, PgliteStorageOptions};
@@ -256,7 +256,7 @@ pub(crate) async fn open_storage_in_context(
         context.require_open()?;
     }
     let block_config = blocks;
-    let (metadata, mut metadata_resources) = open_metadata(metadata, context).await?;
+    let (metadata, mut metadata_resources) = open_metadata(metadata, blocks, context).await?;
     let (blocks, mut block_resources) = match open_blocks(blocks, context).await {
         Ok(opened) => opened,
         Err(error) => {
@@ -305,6 +305,7 @@ pub(crate) async fn open_storage_in_context(
 
 async fn open_metadata(
     provider: &StoreConfig,
+    _block_config: &StoreConfig,
     context: Option<&StorageContext>,
 ) -> Result<(Arc<dyn MetadataStore>, Vec<ProviderResource>)> {
     match provider {
@@ -388,8 +389,13 @@ async fn open_metadata(
                 )
             ))]
             {
-                let storage =
-                    open_foundationdb_storage(cluster_file, volume_key, *durable, lease_authority)?;
+                let storage = open_foundationdb_storage(
+                    cluster_file,
+                    volume_key,
+                    *durable,
+                    lease_authority,
+                    foundationdb_metadata_policy(cluster_file, volume_key, _block_config),
+                )?;
                 let store = storage.metadata();
                 Ok((
                     Arc::new(store),
@@ -483,8 +489,13 @@ async fn open_blocks(
                 )
             ))]
             {
-                let storage =
-                    open_foundationdb_storage(cluster_file, volume_key, *durable, lease_authority)?;
+                let storage = open_foundationdb_storage(
+                    cluster_file,
+                    volume_key,
+                    *durable,
+                    lease_authority,
+                    FoundationDbBlockAuthorityPolicy::SameKeyspace,
+                )?;
                 let store = storage.blocks();
                 Ok((
                     Arc::new(store),
@@ -570,13 +581,42 @@ async fn open_blocks(
         all(target_os = "macos", target_arch = "aarch64"),
     )
 ))]
+fn foundationdb_metadata_policy(
+    cluster: &Path,
+    prefix: &str,
+    blocks: &StoreConfig,
+) -> FoundationDbBlockAuthorityPolicy {
+    match blocks {
+        StoreConfig::FoundationDb {
+            cluster_file,
+            volume_key,
+            ..
+        } if cluster_file.as_os_str() == cluster.as_os_str() && volume_key == prefix => {
+            FoundationDbBlockAuthorityPolicy::SameKeyspace
+        }
+        _ => FoundationDbBlockAuthorityPolicy::ExternalBlockStore,
+    }
+}
+
+#[cfg(all(
+    feature = "foundationdb",
+    any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64"),
+    )
+))]
 fn open_foundationdb_storage(
     cluster_file: &Path,
     volume_key: &str,
     durable: bool,
     lease_authority: &FoundationDbLeaseAuthority,
+    policy: FoundationDbBlockAuthorityPolicy,
 ) -> Result<FoundationDbStorage> {
-    let options = FoundationDbStorageOptions::new(volume_key).with_durable(durable);
+    let options = FoundationDbStorageOptions::new(volume_key)
+        .with_durable(durable)
+        .with_block_authority_policy(policy);
     let options = match lease_authority {
         FoundationDbLeaseAuthority::PersistedSingleAuthority => {
             options.with_persisted_lease_oracle()
@@ -597,6 +637,44 @@ fn open_foundationdb_storage(
 #[cfg(test)]
 mod context_tests {
     use super::*;
+    #[cfg(all(
+        feature = "foundationdb",
+        any(
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "aarch64"),
+            all(target_os = "macos", target_arch = "x86_64"),
+            all(target_os = "macos", target_arch = "aarch64"),
+        )
+    ))]
+    #[test]
+    fn foundationdb_policy_requires_exact_cluster_and_prefix_pair() {
+        use FoundationDbBlockAuthorityPolicy::{ExternalBlockStore, SameKeyspace};
+        let config = |cluster: &str, prefix: &str| StoreConfig::FoundationDb {
+            cluster_file: cluster.into(),
+            volume_key: prefix.into(),
+            durable: true,
+            lease_authority: FoundationDbLeaseAuthority::RevisionCas,
+        };
+        for (cluster, prefix, expected) in [
+            ("/cluster", "volume", SameKeyspace),
+            ("/other", "volume", ExternalBlockStore),
+            ("/cluster", "other", ExternalBlockStore),
+            ("/./cluster", "volume", ExternalBlockStore),
+        ] {
+            assert_eq!(
+                foundationdb_metadata_policy(
+                    Path::new("/cluster"),
+                    "volume",
+                    &config(cluster, prefix)
+                ),
+                expected
+            );
+        }
+        assert_eq!(
+            foundationdb_metadata_policy(Path::new("/cluster"), "volume", &StoreConfig::Memory),
+            ExternalBlockStore
+        );
+    }
     #[tokio::test]
     #[ignore = "requires actual TiDB and MOUNT_RS_TIDB_URL"]
     async fn actual_tidb_cancelled_close_fences_every_identity_and_can_resume() {

@@ -44,8 +44,8 @@ use mount_rs_core::{
     )
 ))]
 use mount_rs_foundationdb::{
-    FoundationDbLimits, FoundationDbSharedLeaseOracle, FoundationDbStorage,
-    FoundationDbStorageOptions,
+    FoundationDbBlockAuthorityPolicy, FoundationDbLimits, FoundationDbSharedLeaseOracle,
+    FoundationDbStorage, FoundationDbStorageOptions,
 };
 use mount_rs_host::{HostFs, HostFsOptions};
 use mount_rs_memfs::MemoryFs;
@@ -2340,9 +2340,30 @@ fn required_string(value: &Option<String>, field: &str) -> Result<String, Error>
         all(target_os = "macos", target_arch = "aarch64"),
     )
 ))]
+fn foundationdb_metadata_policy(
+    metadata: &JsChunkedStoreOptions,
+    blocks: &JsChunkedStoreOptions,
+) -> FoundationDbBlockAuthorityPolicy {
+    if blocks.kind == "foundationdb" && metadata.uri == blocks.uri && metadata.key == blocks.key {
+        FoundationDbBlockAuthorityPolicy::SameKeyspace
+    } else {
+        FoundationDbBlockAuthorityPolicy::ExternalBlockStore
+    }
+}
+
+#[cfg(all(
+    feature = "foundationdb",
+    any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64"),
+    )
+))]
 fn open_foundationdb_storage(
     options: &JsChunkedStoreOptions,
     role: &str,
+    policy: FoundationDbBlockAuthorityPolicy,
 ) -> Result<FoundationDbStorage, Error> {
     let uri = required_string(&options.uri, &format!("{role}.uri"))?;
     let key = required_string(&options.key, &format!("{role}.key"))?;
@@ -2354,8 +2375,9 @@ fn open_foundationdb_storage(
         &options.secret_access_key,
         &format!("{role}.secretAccessKey"),
     )?;
-    let storage =
-        FoundationDbStorageOptions::new(key).with_durable(options.durable.unwrap_or(false));
+    let storage = FoundationDbStorageOptions::new(key)
+        .with_durable(options.durable.unwrap_or(false))
+        .with_block_authority_policy(policy);
     let storage = match authority.as_str() {
         "persisted-single-authority" => {
             reject_set(
@@ -2454,6 +2476,7 @@ fn optional_u32(name: &str, value: Option<f64>, default: u32) -> Result<u32, Err
 
 async fn build_metadata_store(
     options: &JsChunkedStoreOptions,
+    _block_options: &JsChunkedStoreOptions,
 ) -> Result<(Arc<dyn MetadataStore>, Option<ChunkedProviderResource>), Error> {
     if options.kind != "foundationdb" {
         reject_set(&options.lease_authority, "metadata.leaseAuthority")?;
@@ -2529,7 +2552,11 @@ async fn build_metadata_store(
                 )
             ))]
             {
-                let storage = open_foundationdb_storage(options, "metadata")?;
+                let storage = open_foundationdb_storage(
+                    options,
+                    "metadata",
+                    foundationdb_metadata_policy(options, _block_options),
+                )?;
                 let store = storage.metadata();
                 Ok((
                     Arc::new(store),
@@ -2637,7 +2664,11 @@ async fn build_block_store(
                 )
             ))]
             {
-                let storage = open_foundationdb_storage(options, "blocks")?;
+                let storage = open_foundationdb_storage(
+                    options,
+                    "blocks",
+                    FoundationDbBlockAuthorityPolicy::SameKeyspace,
+                )?;
                 let store = storage.blocks();
                 Ok((
                     Arc::new(store),
@@ -4320,7 +4351,8 @@ pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Fi
         chunk_options = chunk_options.with_checkout_path(path);
     }
 
-    let (metadata_store, metadata_resource) = build_metadata_store(&options.metadata).await?;
+    let (metadata_store, metadata_resource) =
+        build_metadata_store(&options.metadata, &options.blocks).await?;
     let (block_store, block_resource) = match build_block_store(&options.blocks).await {
         Ok(opened) => opened,
         Err(error) => {
@@ -4579,6 +4611,45 @@ pub async fn unmount_all() -> Vec<JsMountFailure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(all(
+        feature = "foundationdb",
+        any(
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "aarch64"),
+            all(target_os = "macos", target_arch = "x86_64"),
+            all(target_os = "macos", target_arch = "aarch64"),
+        )
+    ))]
+    #[test]
+    fn foundationdb_policy_requires_exact_kind_uri_and_prefix_pair() {
+        use FoundationDbBlockAuthorityPolicy::{ExternalBlockStore, SameKeyspace};
+        let config = |kind: &str, uri: &str, key: &str| JsChunkedStoreOptions {
+            kind: kind.into(),
+            uri: Some(uri.into()),
+            key: Some(key.into()),
+            durable: Some(true),
+            lease_authority: Some("revision-cas".into()),
+            authority_prefix: None,
+            endpoint: None,
+            bucket: None,
+            region: None,
+            access_key_id: None,
+            secret_access_key: None,
+        };
+        let metadata = config("foundationdb", "/cluster", "volume");
+        for (kind, uri, prefix, expected) in [
+            ("foundationdb", "/cluster", "volume", SameKeyspace),
+            ("foundationdb", "/other", "volume", ExternalBlockStore),
+            ("foundationdb", "/cluster", "other", ExternalBlockStore),
+            ("foundationdb", "/./cluster", "volume", ExternalBlockStore),
+            ("r2", "/cluster", "volume", ExternalBlockStore),
+        ] {
+            assert_eq!(
+                foundationdb_metadata_policy(&metadata, &config(kind, uri, prefix)),
+                expected
+            );
+        }
+    }
     use mount_rs_core::{PathGuard, PathIdentity};
     use std::future::Future;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
