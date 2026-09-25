@@ -1,0 +1,341 @@
+{
+  "schema": "mount-rs-local-provider-layout-comparison-v1",
+  "source": "396b7471 (storage0015437d)",
+  "limitations": [
+    "Single short trial per configuration; not an alternating regression experiment",
+    "Public NAPI logical operations, not physical device IOPS or QUIC throughput",
+    "PGlite volatile; TiDB and FoundationDB single-node diagnostic fixtures",
+    "FoundationDB split-prefix inode setup fails before any correctness operation",
+    "Failed setup cleanup pending means no driver was returned, not successful cleanup"
+  ],
+  "runs": [
+    {
+      "artifact": "napi-after-matched-legacy-lifecycle.json",
+      "result": {
+        "schema": "mount-rs-local-provider-probe-v1",
+        "run": "qualification-23428-cd62e9e2-ec5f-40ac-82ed-10afc11f0eea",
+        "source": "396b7471 (storage0015437d)",
+        "layout": "legacy-leased",
+        "scope": "public NAPI split stores; local blob providers; no QUIC/OIDC/native mounting",
+        "payloadBytes": 4096,
+        "iterations": 400,
+        "concurrency": 64,
+        "results": [
+          {
+            "provider": "sqlite",
+            "durability": "durable-local",
+            "successful": 400,
+            "verifiedReads": 400,
+            "errors": 0,
+            "cleanup": "passed",
+            "phase": "complete",
+            "setupSeconds": 0.026447083000000007,
+            "elapsedSeconds": 1.46198775,
+            "lifecycleIops": 820.8003110833179,
+            "logicalOperations": 1200,
+            "iops": 820.8003110833179
+          },
+          {
+            "provider": "pglite",
+            "durability": "configured-volatile",
+            "successful": 400,
+            "verifiedReads": 400,
+            "errors": 0,
+            "cleanup": "passed",
+            "phase": "complete",
+            "setupSeconds": 0.015963250000000016,
+            "elapsedSeconds": 0.8687988340000001,
+            "lifecycleIops": 1381.2173233188291,
+            "logicalOperations": 1200,
+            "iops": 1381.2173233188291
+          },
+          {
+            "provider": "tidb",
+            "durability": "single-node-diagnostic",
+            "successful": 400,
+            "verifiedReads": 400,
+            "errors": 0,
+            "cleanup": "passed",
+            "phase": "complete",
+            "setupSeconds": 0.0474895419999998,
+            "elapsedSeconds": 2.5123378330000006,
+            "lifecycleIops": 477.6427693114311,
+            "logicalOperations": 1200,
+            "iops": 477.6427693114311
+          },
+          {
+            "provider": "foundationdb",
+            "durability": "single-node-diagnostic",
+            "successful": 400,
+            "verifiedReads": 400,
+            "errors": 0,
+            "cleanup": "passed",
+            "phase": "complete",
+            "setupSeconds": 0.1903478750000004,
+            "elapsedSeconds": 28.859970459000003,
+            "lifecycleIops": 41.58008414127739,
+            "logicalOperations": 1200,
+            "iops": 41.58008414127739
+          }
+        ]
+      },
+      "execution": {
+        "exit_code": 0,
+        "elapsed_seconds": 34.250532334001036,
+        "timeout_seconds": 120,
+        "runner": "before",
+        "layout": "legacy",
+        "workload": "lifecycle",
+        "durable_pglite": false,
+        "source": "396b7471/storage0015437d"
+      }
+    },
+    {
+      "artifact": "napi-inode-lifecycle.json",
+      "result": {
+        "schema": "mount-rs-local-provider-probe-v1",
+        "run": "qualification-23960-2d6f9811-a6e4-41de-b169-7807260aec3b",
+        "source": "396b7471 (storage0015437d)",
+        "layout": "inode",
+        "workload": "lifecycle",
+        "scope": "public NAPI split stores; local blob providers; no QUIC/OIDC/native mounting",
+        "payloadBytes": 4096,
+        "oracle": "full-byte comparison; unique unsigned 64-bit generation i+1; setup generation zero",
+        "iterations": 400,
+        "concurrency": 64,
+        "results": [
+          {
+            "provider": "sqlite",
+            "durability": "durable-local",
+            "attempted": 400,
+            "successful": 400,
+            "verifiedReads": 400,
+            "errors": 0,
+            "cleanup": "passed",
+            "phase": "complete",
+            "setupSeconds": 0.006939791,
+            "elapsedSeconds": 2.422526667,
+            "logicalOperations": 1200,
+            "iops": 495.3505843079332
+          },
+          {
+            "provider": "pglite",
+            "durability": "configured-volatile",
+            "attempted": 400,
+            "successful": 400,
+            "verifiedReads": 400,
+            "errors": 0,
+            "cleanup": "passed",
+            "phase": "complete",
+            "setupSeconds": 0.014405999999999948,
+            "elapsedSeconds": 60.281904166,
+            "logicalOperations": 1200,
+            "iops": 19.906471379794603
+          },
+          {
+            "provider": "tidb",
+            "durability": "single-node-diagnostic",
+            "attempted": 400,
+            "successful": 400,
+            "verifiedReads": 400,
+            "errors": 0,
+            "cleanup": "passed",
+            "phase": "complete",
+            "setupSeconds": 0.06344825000000127,
+            "elapsedSeconds": 50.082735375000006,
+            "logicalOperations": 1200,
+            "iops": 23.96035262480908
+          },
+          {
+            "provider": "foundationdb",
+            "durability": "single-node-diagnostic",
+            "attempted": 0,
+            "successful": 0,
+            "verifiedReads": 0,
+            "errors": 1,
+            "cleanup": "pending",
+            "phase": "opening",
+            "errorCode": "ESTALE",
+            "errorClass": "Error",
+            "errorMessage": "ESTALE: stale file handle, FoundationDB concurrent backing authority"
+          }
+        ]
+      },
+      "execution": {
+        "exit_code": 1,
+        "elapsed_seconds": 113.14986000000499,
+        "timeout_seconds": 120,
+        "runner": "after",
+        "layout": "inode",
+        "workload": "lifecycle",
+        "durable_pglite": false,
+        "source": "396b7471/storage0015437d"
+      }
+    },
+    {
+      "artifact": "napi-legacy-steady.json",
+      "result": {
+        "schema": "mount-rs-local-provider-probe-v1",
+        "run": "qualification-28256-5fdde31f-3ce0-459a-a962-45a9796a7653",
+        "source": "396b7471 (storage0015437d)",
+        "layout": "legacy-leased",
+        "workload": "steady",
+        "scope": "public NAPI split stores; local blob providers; no QUIC/OIDC/native mounting",
+        "payloadBytes": 4096,
+        "oracle": "full-byte comparison; unique unsigned 64-bit generation i+1; setup generation zero",
+        "iterations": 400,
+        "concurrency": 64,
+        "results": [
+          {
+            "provider": "sqlite",
+            "durability": "durable-local",
+            "attempted": 400,
+            "successful": 400,
+            "verifiedReads": 400,
+            "errors": 0,
+            "cleanup": "passed",
+            "phase": "complete",
+            "setupSeconds": 0.023712417000000003,
+            "elapsedSeconds": 0.78867325,
+            "logicalOperations": 800,
+            "iops": 1014.3617778338495
+          },
+          {
+            "provider": "pglite",
+            "durability": "configured-volatile",
+            "attempted": 400,
+            "successful": 400,
+            "verifiedReads": 400,
+            "errors": 0,
+            "cleanup": "passed",
+            "phase": "complete",
+            "setupSeconds": 0.014358082999999964,
+            "elapsedSeconds": 0.7323629580000001,
+            "logicalOperations": 800,
+            "iops": 1092.3545371337582
+          },
+          {
+            "provider": "tidb",
+            "durability": "single-node-diagnostic",
+            "attempted": 400,
+            "successful": 400,
+            "verifiedReads": 400,
+            "errors": 0,
+            "cleanup": "passed",
+            "phase": "complete",
+            "setupSeconds": 0.04523762499999998,
+            "elapsedSeconds": 2.3923931249999995,
+            "logicalOperations": 800,
+            "iops": 334.3932030401568
+          },
+          {
+            "provider": "foundationdb",
+            "durability": "single-node-diagnostic",
+            "attempted": 400,
+            "successful": 400,
+            "verifiedReads": 400,
+            "errors": 0,
+            "cleanup": "passed",
+            "phase": "complete",
+            "setupSeconds": 0.13192820899999969,
+            "elapsedSeconds": 26.303732084000004,
+            "logicalOperations": 800,
+            "iops": 30.41393508135003
+          }
+        ]
+      },
+      "execution": {
+        "exit_code": 0,
+        "elapsed_seconds": 35.27468354199664,
+        "timeout_seconds": 120,
+        "runner": "after",
+        "layout": "legacy",
+        "workload": "steady",
+        "durable_pglite": false,
+        "source": "396b7471/storage0015437d"
+      }
+    },
+    {
+      "artifact": "napi-inode-steady.json",
+      "result": {
+        "schema": "mount-rs-local-provider-probe-v1",
+        "run": "qualification-29388-6964d5c2-7895-4401-bf6c-119143986e27",
+        "source": "396b7471 (storage0015437d)",
+        "layout": "inode",
+        "workload": "steady",
+        "scope": "public NAPI split stores; local blob providers; no QUIC/OIDC/native mounting",
+        "payloadBytes": 4096,
+        "oracle": "full-byte comparison; unique unsigned 64-bit generation i+1; setup generation zero",
+        "iterations": 400,
+        "concurrency": 64,
+        "results": [
+          {
+            "provider": "sqlite",
+            "durability": "durable-local",
+            "attempted": 400,
+            "successful": 400,
+            "verifiedReads": 400,
+            "errors": 0,
+            "cleanup": "passed",
+            "phase": "complete",
+            "setupSeconds": 0.02186954200000001,
+            "elapsedSeconds": 0.716350417,
+            "logicalOperations": 800,
+            "iops": 1116.7718773031718
+          },
+          {
+            "provider": "pglite",
+            "durability": "configured-volatile",
+            "attempted": 400,
+            "successful": 400,
+            "verifiedReads": 400,
+            "errors": 0,
+            "cleanup": "passed",
+            "phase": "complete",
+            "setupSeconds": 0.01310024999999996,
+            "elapsedSeconds": 2.852322416,
+            "logicalOperations": 800,
+            "iops": 280.47320159615504
+          },
+          {
+            "provider": "tidb",
+            "durability": "single-node-diagnostic",
+            "attempted": 400,
+            "successful": 400,
+            "verifiedReads": 400,
+            "errors": 0,
+            "cleanup": "passed",
+            "phase": "complete",
+            "setupSeconds": 0.05919670799999949,
+            "elapsedSeconds": 6.693604499999999,
+            "logicalOperations": 800,
+            "iops": 119.51707036171618
+          },
+          {
+            "provider": "foundationdb",
+            "durability": "single-node-diagnostic",
+            "attempted": 0,
+            "successful": 0,
+            "verifiedReads": 0,
+            "errors": 1,
+            "cleanup": "pending",
+            "phase": "opening",
+            "errorCode": "ESTALE",
+            "errorClass": "Error",
+            "errorMessage": "ESTALE: stale file handle, FoundationDB concurrent backing authority"
+          }
+        ]
+      },
+      "execution": {
+        "exit_code": 1,
+        "elapsed_seconds": 19.360578374995384,
+        "timeout_seconds": 120,
+        "runner": "after",
+        "layout": "inode",
+        "workload": "steady",
+        "durable_pglite": false,
+        "source": "396b7471/storage0015437d"
+      }
+    }
+  ]
+}

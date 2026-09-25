@@ -156,3 +156,60 @@ The exact failed UTC window yielded no TiDB container log entries.
 retains source identity, configuration, operation counts, session gauges,
 process resources, and all five control outcomes. This one-file, ten-client
 fixture does not establish the 10,000-client production target.
+
+## Distributed cache failure qualification
+
+The cache suite passed 33 unit tests and six new integration tests using real
+authenticated QUIC peers. It covers cold/warm reads, bounded disk eviction,
+corruption fallback, unavailable peers, peer restart with disk retention, scope
+isolation, cancellation cleanup, and successful/failed backing-store commits.
+A fresh undecorated SQLite SDK reopened acknowledged data after cache shutdown.
+The two live Redis directory tests also passed. Independent review accepted the
+final tests at `97cef0ad`.
+
+The 100-reader cold-miss test holds the actual peer response until every reader
+has reached the pending state. Disabling the production singleflight lock in a
+temporary mutation caused 100 peer requests instead of one before release; the
+restored implementation passed. This distinguishes coalescing from warm hits.
+
+In the small repeated-read fixture, 125 logical reads required two backing GETs
+(56 bytes), compared with 125 GETs (3,500 bytes) without caching. This is a
+98.4% request reduction for that fixture, not a prediction for uniformly unique
+production reads. The flush barrier proves ordering, not power-loss durability.
+The corruption test does not simulate operating-system ENOSPC. Redis and QUIC
+failure coverage are separate; the combined cache fallback test uses fixed
+discovery with an unavailable holder. Ten-server cache capacity remains pending.
+
+## Local provider layout diagnostics
+
+A fresh public NAPI comparison uses 64 workers, 400 iterations, unique 4 KiB
+payloads, and full-byte read verification. Lifecycle includes create, read and
+unlink; steady overwrites precreated files and reads them, with preparation and
+cleanup excluded. These are different operation mixes and logical operation
+counts. They do not measure physical SSD IOPS or QUIC throughput.
+
+| Provider | Legacy lifecycle IOPS | Inode lifecycle IOPS | Legacy steady IOPS | Inode steady IOPS |
+| --- | ---: | ---: | ---: | ---: |
+| SQLite | 820.80 | 495.35 | 1,014.36 | 1,116.77 |
+| PGlite (volatile) | 1,381.22 | 19.91 | 1,092.35 | 280.47 |
+| TiDB (single node) | 477.64 | 23.96 | 334.39 | 119.52 |
+| FoundationDB (single node) | 41.58 | Failed opening | 30.41 | Failed opening |
+
+All completed cases verified 400 reads with zero operation errors and passed
+cleanup. FoundationDB inode mode failed with ESTALE before any oracle operation
+when metadata and blocks used separate key prefixes. Its inode authority check
+currently reads a block marker under the metadata prefix; same-prefix tests do
+not qualify this split-store arrangement. The failed case remains a contract
+gap to resolve, including external blob backends.
+
+PGlite inode methods use untyped SQL calls that prepare statements, and structural
+publication rewrites all inode guards with individual INSERTs inside a serialized
+transaction. TiDB also rewrites structural guards. These are concrete source
+amplification candidates; the observed timings alone do not attribute all the
+slowdown to either mechanism. No deadlock was established: progress artifacts
+are persisted only at phase boundaries and all PGlite/TiDB iterations completed.
+
+These short single trials have different durability settings and are diagnostic
+comparisons, not a production ranking or a measured regression ratio.
+
+[The provider layout artifact](benchmarks/remote-production-qualification-20260925/local-providers-after.json) retains all four configurations, successful counts and both failed FoundationDB cases.
