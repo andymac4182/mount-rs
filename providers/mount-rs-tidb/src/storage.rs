@@ -305,8 +305,12 @@ impl TidbPoolContext {
                 FsError::new(ErrorCode::Einval).with_message("TiDB pool maximum must be positive")
             );
         }
-        let constraints =
-            mysql_async::PoolConstraints::new(0, max_connections).ok_or_else(|| {
+        // mysql_async's minimum is its retained idle bound when idle TTL is
+        // zero (the default), not an eager connection count. Retain every
+        // lazily opened session within this service's cap; min=0 would discard
+        // each returned session and repeat connection/session initialization.
+        let constraints = mysql_async::PoolConstraints::new(max_connections, max_connections)
+            .ok_or_else(|| {
                 FsError::new(ErrorCode::Einval).with_message("TiDB pool maximum must be positive")
             })?;
         let opts = Opts::from_url(url)
@@ -2722,6 +2726,119 @@ mod tests {
             fence: 0,
             expires: 0,
         }
+    }
+
+    #[tokio::test]
+    async fn context_pool_creation_is_lazy_and_rejects_zero_bound() {
+        let url = "mysql://unused@127.0.0.1:1/unused";
+        assert!(TidbPoolContext::new(url, 0).is_err());
+        for maximum in [1, 2, 16] {
+            let context = TidbPoolContext::new(url, maximum).unwrap();
+            assert_eq!(
+                context
+                    .0
+                    .pool
+                    .metrics()
+                    .connection_count
+                    .load(Ordering::SeqCst),
+                0
+            );
+            assert_eq!(
+                context
+                    .0
+                    .pool
+                    .metrics()
+                    .connections_in_pool
+                    .load(Ordering::SeqCst),
+                0
+            );
+            context.close().await.unwrap();
+            assert!(context.0.pool.get_conn().await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an actual TiDB service and MOUNT_RS_TIDB_URL"]
+    async fn actual_tidb_context_reuses_connection_after_sequential_provider_operations() {
+        let url = std::env::var("MOUNT_RS_TIDB_URL").unwrap();
+        let key = format!(
+            "context-reuse-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let context = TidbPoolContext::new(&url, 1).unwrap();
+        let metadata = context
+            .metadata(TidbStorageOptions::new(&key))
+            .await
+            .unwrap();
+        let blocks = context.blocks(TidbStorageOptions::new(&key)).await.unwrap();
+        let metrics = context.0.pool.metrics();
+        let mut ids = Vec::new();
+        for _ in 0..4 {
+            // Exercise both production provider roles before reacquiring the
+            // sole session; sharing an Arc alone does not establish reuse.
+            metadata.load().await.unwrap();
+            metadata.flush().await.unwrap();
+            let id = blocks.put(b"owned sequential reuse oracle").await.unwrap();
+            assert_eq!(
+                blocks.get(&id).await.unwrap(),
+                b"owned sequential reuse oracle"
+            );
+            blocks.delete(&id).await.unwrap();
+            let mut connection = context.0.pool.get_conn().await.unwrap();
+            ids.push(
+                connection
+                    .query_first::<u64, _>("SELECT CONNECTION_ID()")
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+            let recycled = metrics.connection_returned_to_pool.load(Ordering::SeqCst)
+                + metrics
+                    .discarded_superfluous_connection
+                    .load(Ordering::SeqCst);
+            drop(connection);
+            // Wait for the actual recycler decision, rather than relying on
+            // the next checkout winning a scheduling race against recycling.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while metrics.connection_returned_to_pool.load(Ordering::SeqCst)
+                    + metrics
+                        .discarded_superfluous_connection
+                        .load(Ordering::SeqCst)
+                    <= recycled
+                {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        let discarded = metrics
+            .discarded_superfluous_connection
+            .load(Ordering::SeqCst);
+        let mut cleanup = context.0.pool.get_conn().await.unwrap();
+        cleanup
+            .exec_drop(
+                "DELETE FROM mount_rs_tidb_metadata WHERE volume_key=?",
+                (&key,),
+            )
+            .await
+            .unwrap();
+        drop(cleanup);
+        context.close().await.unwrap();
+        eprintln!("sequential provider CONNECTION_IDs={ids:?}; discarded_before_close={discarded}");
+        assert!(
+            ids.iter().all(|id| *id == ids[0]),
+            "sequential provider operations recreated sessions: {ids:?}"
+        );
+        assert_eq!(
+            discarded, 0,
+            "bounded live sessions must remain reusable until context close"
+        );
+        assert!(context.0.pool.get_conn().await.is_err());
     }
 
     #[tokio::test]
