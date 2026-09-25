@@ -364,6 +364,10 @@ impl PgliteMetadataStore {
         options: PgliteStorageOptions,
     ) -> Result<Self> {
         let database = Database::connect(connection_string, METADATA_SCHEMA, options).await?;
+        {
+            let client = database.lock_client().await?;
+            compact::initialize(client.as_ref().ok_or_else(connection_closed)?).await?;
+        }
         database.ensure_metadata_row().await?;
         initialize_version_schema(&database).await?;
         let volume_id = load_volume_id(&database).await?;
@@ -817,6 +821,9 @@ fn decode_inode_node(inode: InodeId, json: &str) -> Result<NodeMetadata> {
     Ok(node)
 }
 
+#[path = "compact.rs"]
+mod compact;
+
 #[path = "inode_batch.rs"]
 mod inode_batch;
 
@@ -835,6 +842,47 @@ fn inode_signed(value: u64) -> Result<i64> {
 
 #[async_trait]
 impl MetadataStore for PgliteMetadataStore {
+    fn compact_inode_capability(&self) -> mount_rs_core::storage::compact::CompactInodeCapability {
+        mount_rs_core::storage::compact::CompactInodeCapability::V1
+    }
+    async fn prepare_compact_inode_mode(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        self.compact_prepare(backing, expected_revision).await
+    }
+    async fn load_compact_snapshot(
+        &self,
+        backing: ConcurrentBackingId,
+    ) -> Result<mount_rs_core::storage::compact::CompactSnapshot> {
+        self.compact_snapshot(backing).await
+    }
+    async fn load_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+    ) -> Result<mount_rs_core::storage::compact::LoadedCompactInode> {
+        self.compact_load(backing, inode).await
+    }
+    async fn publish_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+        generation: u64,
+        expected: mount_rs_core::storage::compact::PhysicalInodeIdentity,
+        node: NodeMetadata,
+    ) -> Result<mount_rs_core::storage::compact::LoadedCompactInode> {
+        self.compact_publish_inode(backing, inode, generation, expected, node)
+            .await
+    }
+    async fn publish_compact_structure(
+        &self,
+        delta: &mount_rs_core::storage::compact::CompactStructuralDelta,
+    ) -> Result<mount_rs_core::storage::compact::CompactPublication> {
+        self.compact_publish_structure(delta).await
+    }
+
     fn durable(&self) -> bool {
         self.0.durable
     }
@@ -858,7 +906,10 @@ impl MetadataStore for PgliteMetadataStore {
             .await
             .map_err(postgres_error)?
             .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
-        if row.get::<_, Option<String>>(2).as_deref() == Some("MRC4") {
+        if matches!(
+            row.get::<_, Option<String>>(2).as_deref(),
+            Some("MRC4" | "MRC5")
+        ) {
             return Err(stale());
         }
         let revision = nonnegative(row.get::<_, i64>(0), "metadata revision")?;
@@ -893,7 +944,10 @@ impl MetadataStore for PgliteMetadataStore {
             .await
             .map_err(postgres_error)?
             .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
-        if row.get::<_, Option<String>>(2).as_deref() == Some("MRC4") {
+        if matches!(
+            row.get::<_, Option<String>>(2).as_deref(),
+            Some("MRC4" | "MRC5")
+        ) {
             return Err(stale());
         }
         let revision = nonnegative(row.get::<_, i64>(0), "metadata revision")?;
@@ -921,6 +975,9 @@ impl MetadataStore for PgliteMetadataStore {
         let row = client.as_ref().ok_or_else(connection_closed)?.query_typed_one(
             "SELECT write_mode, backing_id, owner, fence, expires, revision FROM mount_rs_metadata WHERE volume_key=$1", &[(&self.0.volume_key, Type::TEXT)]
         ).await.map_err(postgres_error)?;
+        if row.get::<_, Option<String>>(0).as_deref() == Some("MRC5") {
+            return Err(stale());
+        }
         if row.get::<_, Option<String>>(0).as_deref() != Some("MRC4") {
             return Ok(None);
         }
@@ -5474,3 +5531,7 @@ mod tests {
 #[cfg(test)]
 #[path = "inode_wire_tests.rs"]
 mod inode_wire_tests;
+
+#[cfg(test)]
+#[path = "compact_tests.rs"]
+mod compact_tests;
