@@ -205,7 +205,62 @@ pub struct CompactSnapshot {
     pub guards: BTreeMap<InodeId, CompactGuard>,
 }
 
+/// Proof that a complete compact snapshot passed namespace graph validation.
+/// It describes topology only; it cannot certify the freshness of guard bodies.
+#[derive(Debug, Clone)]
+pub struct ValidatedCompactStructure {
+    anchor: std::sync::Arc<CompactAnchor>,
+}
+
+impl ValidatedCompactStructure {
+    pub fn anchor(&self) -> &CompactAnchor {
+        &self.anchor
+    }
+}
+
 impl CompactSnapshot {
+    /// Validate the complete graph, then move guard bodies into the runtime
+    /// namespace without retaining a second complete guard-body mirror.
+    pub fn into_validated_namespace(
+        self,
+    ) -> Result<(
+        Namespace,
+        BTreeMap<InodeId, PhysicalInodeIdentity>,
+        ValidatedCompactStructure,
+    )> {
+        let CompactSnapshot { anchor, guards } = self;
+        anchor.validate()?;
+        if !anchor.members.iter().copied().eq(guards.keys().copied()) {
+            return Err(invalid_namespace(
+                "compact guard membership differs from anchor",
+            ));
+        }
+        let mut namespace = Namespace {
+            format_version: NAMESPACE_FORMAT_VERSION,
+            root: anchor.root,
+            next_inode: anchor.next_inode,
+            default_uid: anchor.default_uid,
+            default_gid: anchor.default_gid,
+            umask: anchor.umask,
+            default_chunker: anchor.default_chunker.clone(),
+            nodes: BTreeMap::new(),
+        };
+        let mut identities = BTreeMap::new();
+        for (inode, guard) in guards {
+            guard.validate(inode, &anchor)?;
+            identities.insert(inode, guard.identity);
+            namespace.nodes.insert(inode, guard.node);
+        }
+        namespace.validate()?;
+        Ok((
+            namespace,
+            identities,
+            ValidatedCompactStructure {
+                anchor: std::sync::Arc::new(anchor),
+            },
+        ))
+    }
+
     pub fn namespace(&self) -> Result<Namespace> {
         self.anchor.validate()?;
         if !self
@@ -352,6 +407,78 @@ pub struct CompactPublication {
 }
 
 impl CompactStructuralDelta {
+    /// Derive structural provenance only after exact receipt validation and
+    /// a complete candidate graph check. The witness says nothing about
+    /// freshness of bodies that were not changed by this publication.
+    pub fn validate_next_structure(
+        &self,
+        base: &ValidatedCompactStructure,
+        receipt: &CompactPublication,
+        candidate: &Namespace,
+    ) -> Result<ValidatedCompactStructure> {
+        if base.anchor() != &self.base {
+            return Err(invalid_namespace(
+                "compact structural witness differs from capture",
+            ));
+        }
+        self.validate_receipt(receipt)?;
+        candidate.validate()?;
+        if candidate.root != receipt.anchor.root
+            || candidate.next_inode != receipt.anchor.next_inode
+            || candidate.default_uid != receipt.anchor.default_uid
+            || candidate.default_gid != receipt.anchor.default_gid
+            || candidate.umask != receipt.anchor.umask
+            || candidate.default_chunker != receipt.anchor.default_chunker
+            || !candidate
+                .nodes
+                .keys()
+                .copied()
+                .eq(receipt.anchor.members.iter().copied())
+        {
+            return Err(invalid_namespace(
+                "compact structural receipt differs from candidate",
+            ));
+        }
+        Ok(ValidatedCompactStructure {
+            anchor: std::sync::Arc::new(receipt.anchor.clone()),
+        })
+    }
+
+    /// Acknowledged providers may return only this exact write set. This
+    /// validates the receipt before local installation or guard disarming.
+    pub fn validate_receipt(&self, receipt: &CompactPublication) -> Result<()> {
+        if receipt.anchor != self.next || receipt.removed != self.removed {
+            return Err(invalid_namespace(
+                "compact structural receipt anchor/removals differ",
+            ));
+        }
+        if receipt.upserts.len() != self.changed.len() + self.created.len() {
+            return Err(invalid_namespace(
+                "compact structural receipt upserts differ",
+            ));
+        }
+        for (&inode, node) in self.changed.iter().chain(&self.created) {
+            let incarnation = self
+                .expected
+                .get(&inode)
+                .map_or(self.next.generation, |identity| identity.incarnation);
+            let expected = CompactGuard {
+                identity: PhysicalInodeIdentity {
+                    incarnation,
+                    epoch: self.next.generation,
+                    revision: 0,
+                },
+                node: node.clone(),
+            };
+            if receipt.upserts.get(&inode) != Some(&expected) {
+                return Err(invalid_namespace(
+                    "compact structural receipt body/identity differs",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn capture(
         base: &CompactSnapshot,
         candidate: &Namespace,

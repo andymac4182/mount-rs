@@ -326,6 +326,27 @@ impl SqliteMetadataStore {
             let (mode,stored,owner,fence,expires,revision,dev,ino,path):MetadataPublicationRow=tx.query_row(
                 "SELECT write_mode,backing_id,owner,fence,expires,revision,physical_dev,physical_ino,physical_path FROM mount_rs_metadata WHERE id=1",[],
                 |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?))).map_err(backend_error)?;
+            if mode.as_deref() == Some(COMPACT_WRITE_MODE)
+                && stored.as_deref() == Some(backing.to_hex().as_str())
+                && expected_revision > 0
+                && u64::try_from(revision).is_ok_and(|actual| actual > expected_revision)
+            {
+                // A same-backing peer enrolled after our MRC2 root capture.
+                // Validate its complete authority before classifying this
+                // pre-DML observation as a definite noncommit.
+                let anchor = anchor(&self.0, tx, backing)?;
+                let delegation: Option<String> = tx.query_row(
+                    "SELECT delegation_state FROM mount_rs_metadata WHERE id=1",
+                    [], |row| row.get(0),
+                ).map_err(backend_error)?;
+                if delegation.is_some() {
+                    return Err(incompatible_schema("compact enrollment found delegated authority"));
+                }
+                CompactSnapshot { anchor, guards: guards(tx, None)? }.namespace()?;
+                return Err(FsError::new(ErrorCode::Eagain)
+                    .with_syscall("prepare compact SQLite volume")
+                    .with_message("same-backing peer completed compact enrollment before publication"));
+            }
             if mode.as_deref()!=Some(BOUND_WRITE_MODE) || stored.as_deref()!=Some(backing.to_hex().as_str()) {return Err(stale());}
             require_matching_metadata_stamp(&self.0,dev.as_deref(),ino.as_deref(),path.as_deref())?;
             if owner.is_some() || fence!=CONCURRENT_FENCE_SENTINEL || expires!=0 {return Err(incompatible_schema("invalid compact enrollment fence"));}

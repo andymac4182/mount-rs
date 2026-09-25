@@ -122,6 +122,7 @@ impl Filesystem {
             .with_lease_ttl(options.lease_ttl)
             .with_concurrent_writes(options.concurrent_writes)
             .with_inode_updates(options.inode_updates)
+            .with_compact_inode_updates(options.compact_inode_updates)
             .with_writeback(options.writeback)
             .with_identity(options.uid, options.gid, options.umask);
         if options.delegated {
@@ -381,6 +382,17 @@ async fn complete_migration_after_teardown(
 }
 
 fn validate_concurrent_split_options(options: &SplitOptions) -> Result<()> {
+    if options.compact_inode_updates
+        && (!options.inode_updates
+            || !options.concurrent_writes
+            || options.delegated
+            || options.writeback
+            || options.checkout_path.is_some())
+    {
+        return Err(FsError::new(ErrorCode::Einval).with_message(
+            "compact_inode_updates requires shared write-through inode updates without checkout",
+        ));
+    }
     if options.inode_updates
         && (!options.concurrent_writes || options.delegated || options.writeback)
     {
@@ -505,6 +517,44 @@ mod tests {
         assert!(base.clone().with_inode_updates(false).concurrent_writes);
         assert!(base.clone().with_concurrent_writes(true).inode_updates);
         assert!(base.with_inode_updates(true).concurrent_writes);
+    }
+
+    #[test]
+    fn compact_options_preserve_explicit_selection_and_reject_raw_contradictions() {
+        let selected =
+            SplitOptions::memory("compact-options", 4096).with_compact_inode_updates(true);
+        assert!(selected.compact_inode_updates);
+        assert!(selected.inode_updates && selected.concurrent_writes);
+        for options in [
+            SplitOptions {
+                inode_updates: false,
+                ..selected.clone()
+            },
+            SplitOptions {
+                concurrent_writes: false,
+                ..selected.clone()
+            },
+            SplitOptions {
+                delegated: true,
+                ..selected.clone()
+            },
+            SplitOptions {
+                writeback: true,
+                ..selected.clone()
+            },
+            SplitOptions {
+                checkout_path: Some("/".into()),
+                ..selected.clone()
+            },
+        ] {
+            assert_eq!(
+                validate_concurrent_split_options(&options)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Einval
+            );
+        }
+        assert!(selected.with_compact_inode_updates(false).inode_updates);
     }
 
     #[tokio::test]

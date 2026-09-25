@@ -6,6 +6,18 @@ use mount_rs_core::{
     storage::{BlockExtent, DirectoryEntry, FileLayout, NodeData, compact::*},
 };
 use mount_rs_memfs::MemoryFs;
+use std::io::Write as _;
+
+fn record_owned_key(key: &str) {
+    let manifest = std::env::var("MOUNT_RS_COMPACT_CLEANUP_MANIFEST")
+        .expect("runner-owned compact cleanup manifest required");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(manifest)
+        .expect("open owned compact cleanup manifest");
+    writeln!(file, "pglite\t{key}").unwrap();
+    file.sync_all().unwrap();
+}
 
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
@@ -60,6 +72,7 @@ impl Fixture {
     }
     async fn new_at(enroll: bool, connection_string: String) -> Self {
         let volume = format!("compact-{}", uuid::Uuid::new_v4());
+        record_owned_key(&volume);
         let store = PgliteMetadataStore::connect_with_key(&connection_string, &volume)
             .await
             .unwrap();
@@ -303,17 +316,16 @@ async fn raw(f: &Fixture) -> Raw {
     (authority, rows, block_marker)
 }
 #[test]
+#[ignore = "requires owned PostgreSQL-compatible endpoint"]
 fn compact_mode_discovery_is_read_only_and_fences_deleted_markers() {
     runtime().block_on(async {
         let virgin_key = format!("compact-discovery-virgin-{}", uuid::Uuid::new_v4());
+        record_owned_key(&virgin_key);
         let virgin = PgliteMetadataStore::connect_with_key(&url(), &virgin_key)
             .await
             .unwrap();
         assert_eq!(virgin.compact_inode_mode_state().await.unwrap(), None);
-        let f = Fixture::new(false).await;
-        let before = raw(&f).await;
-        assert_eq!(f.store.compact_inode_mode_state().await.unwrap(), None);
-        assert_eq!(raw(&f).await, before);
+        drop(virgin);
         let mrc4 = Fixture::new(false).await;
         mrc4.store
             .prepare_inode_mode(mrc4.backing, 1)
@@ -322,6 +334,11 @@ fn compact_mode_discovery_is_read_only_and_fences_deleted_markers() {
         let before_mrc4 = raw(&mrc4).await;
         assert_eq!(mrc4.store.compact_inode_mode_state().await.unwrap(), None);
         assert_eq!(raw(&mrc4).await, before_mrc4);
+        drop(mrc4);
+        let f = Fixture::new(false).await;
+        let before = raw(&f).await;
+        assert_eq!(f.store.compact_inode_mode_state().await.unwrap(), None);
+        assert_eq!(raw(&f).await, before);
         f.store
             .prepare_compact_inode_mode(f.backing, 1)
             .await
@@ -351,6 +368,7 @@ fn compact_mode_discovery_is_read_only_and_fences_deleted_markers() {
     });
 }
 #[test]
+#[ignore = "requires owned PostgreSQL-compatible endpoint"]
 fn compact_mode_discovery_rejects_retained_mrc5_authority_after_mode_change() {
     runtime().block_on(async {
         let mut accepted = Vec::new();
@@ -377,6 +395,7 @@ fn compact_mode_discovery_rejects_retained_mrc5_authority_after_mode_change() {
     });
 }
 #[test]
+#[ignore = "requires owned PostgreSQL-compatible endpoint"]
 fn compact_mode_discovery_rejects_each_retained_mrc5_marker_alone() {
     runtime().block_on(async {
         for (mode, anchor_only) in [("MRC2", true), ("MRC2", false), ("MRC4", true)] {

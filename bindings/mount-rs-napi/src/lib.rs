@@ -1436,6 +1436,10 @@ pub struct JsChunkedOptions {
     pub concurrent_writes: Option<bool>,
     /// Enable independent inode revisions. Requires concurrentWrites and no ownershipMode.
     pub inode_updates: Option<bool>,
+    /// Opt in to compact MRC5 metadata. Enables inodeUpdates and
+    /// concurrentWrites; rejects either explicitly false, ownershipMode,
+    /// or checkoutPath.
+    pub compact_inode_updates: Option<bool>,
     /// Explicit exclusive ownership enables writeback until sync or shutdown.
     /// Shared ownership uses fenced directory delegation; same-host SQLite constraints remain.
     /// Must agree with concurrentWrites when both options are supplied.
@@ -4382,16 +4386,49 @@ fn chunked_ownership_mode(
     Ok((mode, shared.or(concurrent_writes).unwrap_or(false)))
 }
 
-#[napi]
-pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Filesystem> {
-    let (ownership_mode, concurrent_writes) =
-        chunked_ownership_mode(options.ownership_mode.as_deref(), options.concurrent_writes)?;
-    let inode_updates = options.inode_updates.unwrap_or(false);
-    if inode_updates && (!concurrent_writes || ownership_mode.is_some()) {
+fn resolve_chunked_inode_selection(
+    compact: bool,
+    inode_updates: Option<bool>,
+    concurrent_writes: Option<bool>,
+    ownership_mode: Option<OwnershipMode>,
+    checkout: bool,
+) -> napi::Result<(bool, bool)> {
+    if compact
+        && (inode_updates == Some(false)
+            || concurrent_writes == Some(false)
+            || ownership_mode.is_some()
+            || checkout)
+    {
+        return Err(config_error(
+            "compactInodeUpdates requires shared write-through inodeUpdates and concurrentWrites without checkout",
+        ));
+    }
+    let concurrent = ownership_mode
+        .map(|mode| mode == OwnershipMode::Shared)
+        .or(concurrent_writes)
+        .unwrap_or(false)
+        || compact;
+    let inode = inode_updates.unwrap_or(false) || compact;
+    if inode && (!concurrent || ownership_mode.is_some()) {
         return Err(config_error(
             "inodeUpdates requires concurrentWrites and no ownershipMode",
         ));
     }
+    Ok((inode, concurrent))
+}
+
+#[napi]
+pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Filesystem> {
+    let (ownership_mode, _) =
+        chunked_ownership_mode(options.ownership_mode.as_deref(), options.concurrent_writes)?;
+    let compact_inode_updates = options.compact_inode_updates.unwrap_or(false);
+    let (inode_updates, concurrent_writes) = resolve_chunked_inode_selection(
+        compact_inode_updates,
+        options.inode_updates,
+        options.concurrent_writes,
+        ownership_mode,
+        options.checkout_path.is_some(),
+    )?;
     if concurrent_writes {
         match options.metadata.kind.as_str() {
             "foundationdb"
@@ -4454,6 +4491,7 @@ pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Fi
         .with_lease_ttl(ttl)
         .with_concurrent_writes(concurrent_writes)
         .with_inode_updates(inode_updates)
+        .with_compact_inode_updates(compact_inode_updates)
         .with_identity(uid, gid, umask)
         .with_root_mode(root_mode);
     if let Some(mode) = ownership_mode {
@@ -4725,6 +4763,96 @@ mod tests {
     use super::*;
 
     #[test]
+    fn compact_option_implies_inode_and_concurrency_but_rejects_explicit_false() {
+        assert_eq!(
+            resolve_chunked_inode_selection(true, None, None, None, false).unwrap(),
+            (true, true)
+        );
+        for (inode, concurrent, mode, checkout) in [
+            (Some(false), None, None, false),
+            (None, Some(false), None, false),
+            (None, None, Some(OwnershipMode::Shared), false),
+            (None, None, None, true),
+        ] {
+            assert!(
+                resolve_chunked_inode_selection(true, inode, concurrent, mode, checkout).is_err()
+            );
+        }
+        assert_eq!(
+            resolve_chunked_inode_selection(false, Some(true), Some(true), None, false).unwrap(),
+            (true, true)
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn create_chunked_driver_forwards_compact_runtime_through_dynamic_stores() {
+        block_on(async {
+            let path = std::env::temp_dir().join(format!(
+                "mount-rs-napi-compact-runtime-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            ));
+            std::fs::create_dir(&path).unwrap();
+            let store = |name: &str| JsChunkedStoreOptions {
+                kind: "sqlite".into(),
+                uri: Some(path.join(name).to_string_lossy().into_owned()),
+                key: None,
+                durable: None,
+                lease_authority: None,
+                authority_prefix: None,
+                endpoint: None,
+                bucket: None,
+                region: None,
+                access_key_id: None,
+                secret_access_key: None,
+            };
+            let options = || JsChunkedOptions {
+                metadata: store("metadata.db"),
+                blocks: store("blocks.db"),
+                chunk_size: 16.0,
+                owner: Some("napi-compact".into()),
+                ttl_ms: None,
+                concurrent_writes: None,
+                inode_updates: None,
+                compact_inode_updates: Some(true),
+                ownership_mode: None,
+                checkout_path: None,
+                uid: None,
+                gid: None,
+                umask: None,
+                root_mode: None,
+            };
+            let first = create_chunked_driver(options()).await.unwrap();
+            let driver = first.driver().unwrap();
+            driver.write_file("/file", b"before").await.unwrap();
+            let handle = driver.open("/file", "r+", 0).await.unwrap();
+            handle.write(b"AFTER!", Some(0)).await.unwrap();
+            handle.close().await.unwrap();
+            driver.rename("/file", "/renamed").await.unwrap();
+            drop(driver);
+            first.shutdown().await.unwrap();
+            drop(first);
+            let second = create_chunked_driver(options()).await.unwrap();
+            let driver = second.driver().unwrap();
+            let handle = driver.open("/renamed", "r", 0).await.unwrap();
+            let mut bytes = [0; 6];
+            assert_eq!(handle.read(&mut bytes, Some(0)).await.unwrap(), 6);
+            assert_eq!(&bytes, b"AFTER!");
+            assert_eq!(handle.read(&mut bytes, Some(6)).await.unwrap(), 0);
+            handle.close().await.unwrap();
+            drop(driver);
+            second.shutdown().await.unwrap();
+            drop(second);
+            std::fs::remove_dir_all(path).unwrap();
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn dynamic_metadata_forwards_compact_identity_and_borrowed_delta() {
         use mount_rs_core::storage::compact::{
             CompactInodeCapability, CompactStructuralDelta, StructuralScope,
@@ -4898,6 +5026,36 @@ mod tests {
                     .await
                     .unwrap_err()
                     .code,
+                ErrorCode::Enotsup
+            );
+            drop(store);
+            std::fs::remove_dir_all(path).unwrap();
+        });
+    }
+
+    #[test]
+    #[cfg(not(unix))]
+    fn dynamic_metadata_preserves_platform_unsupported_compact_capability() {
+        use mount_rs_core::storage::compact::CompactInodeCapability;
+        futures_lite::future::block_on(async {
+            let path = std::env::temp_dir().join(format!(
+                "mount-rs-napi-compact-unsupported-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&path).unwrap();
+            let store = DynMetadataStore(Arc::new(
+                SqliteMetadataStore::open(path.join("metadata.db")).unwrap(),
+            ));
+            assert_eq!(
+                store.compact_inode_capability(),
+                CompactInodeCapability::Unsupported
+            );
+            assert_eq!(
+                store.compact_inode_mode_state().await.unwrap_err().code,
                 ErrorCode::Enotsup
             );
             drop(store);

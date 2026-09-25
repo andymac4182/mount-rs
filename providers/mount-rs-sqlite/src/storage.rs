@@ -2784,6 +2784,30 @@ impl MetadataStore for SqliteMetadataStore {
             if mode.as_deref() == Some(CONCURRENT_WRITE_MODE) {
                 return Err(mrc1_migration_required());
             }
+            if mode.as_deref() == Some(COMPACT_WRITE_MODE)
+                && stored.as_deref() == Some(backing.to_hex().as_str())
+            {
+                // A peer reached MRC5 on the same backing before this
+                // transaction performed any DML. This attempt definitely
+                // did not commit; the caller may re-read MRC5 authority.
+                require_matching_metadata_stamp(
+                    &self.0,
+                    physical_dev.as_deref(),
+                    physical_ino.as_deref(),
+                    physical_path.as_deref(),
+                )?;
+                if revision > 0
+                    && namespace.is_some()
+                    && owner.is_none()
+                    && fence == CONCURRENT_FENCE_SENTINEL
+                    && expires == 0
+                {
+                    return Err(FsError::new(ErrorCode::Eagain)
+                        .with_syscall("prepare bound concurrent SQLite volume")
+                        .with_message("same-backing peer completed compact mode before claim"));
+                }
+                return Err(incompatible_schema("compact marker and fence disagree"));
+            }
             if mode.is_some() || stored.is_some() {
                 return Err(incompatible_schema(
                     "unsupported SQLite concurrent write mode",
@@ -3043,6 +3067,36 @@ impl MetadataStore for SqliteMetadataStore {
                     [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?))
                 ).map_err(backend_error)?;
             if mode.as_deref() == Some(CONCURRENT_WRITE_MODE) { return Err(mrc1_migration_required()); }
+            if expected == 0
+                && actual_revision > 0
+                && mode.as_deref() == Some(COMPACT_WRITE_MODE)
+                && stored.as_deref() == Some(&backing_text)
+            {
+                // The initial root lost to a same-backing peer before this
+                // transaction wrote anything. Only this revision conflict is
+                // a definite noncommit; later bound publications stay fenced.
+                require_matching_metadata_stamp(
+                    &self.0,
+                    physical_dev.as_deref(),
+                    physical_ino.as_deref(),
+                    physical_path.as_deref(),
+                )?;
+                let has_namespace: i64 = tx.query_row(
+                    "SELECT namespace IS NOT NULL FROM mount_rs_metadata WHERE id=1",
+                    [],
+                    |row| row.get(0),
+                ).map_err(backend_error)?;
+                if has_namespace == 1
+                    && owner.is_none()
+                    && fence == CONCURRENT_FENCE_SENTINEL
+                    && expires == 0
+                {
+                    return Err(FsError::new(ErrorCode::Eagain)
+                        .with_syscall("publish bound concurrent SQLite metadata")
+                        .with_message("same-backing peer completed initial root before publication"));
+                }
+                return Err(incompatible_schema("compact marker and fence disagree"));
+            }
             if mode.as_deref() != Some(BOUND_WRITE_MODE) || stored.as_deref() != Some(&backing_text) {
                 return Err(stale());
             }
@@ -5847,6 +5901,76 @@ mod tests {
         );
         drop(store);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compact_peer_prewrite_claim_is_known_noncommit_only_for_exact_valid_backing() {
+        for case in ["same", "foreign", "bad-fence", "bad-stamp"] {
+            let path = super::super::tests::unique_database_path();
+            let store = SqliteMetadataStore::open(&path).unwrap();
+            let backing = ConcurrentBackingId::from_bytes([1; 16]).unwrap();
+            let foreign = ConcurrentBackingId::from_bytes([2; 16]).unwrap();
+            run(store.prepare_bound_concurrent_mode(backing)).unwrap();
+            assert_eq!(
+                run(store.publish_bound_if_revision(backing, 0, namespace())).unwrap(),
+                1
+            );
+            run(store.prepare_compact_inode_mode(backing, 1)).unwrap();
+            match case {
+                "bad-fence" => {
+                    store
+                        .0
+                        .lock()
+                        .unwrap()
+                        .execute("UPDATE mount_rs_metadata SET fence=0 WHERE id=1", [])
+                        .unwrap();
+                }
+                "bad-stamp" => {
+                    store
+                        .0
+                        .lock()
+                        .unwrap()
+                        .execute(
+                            "UPDATE mount_rs_metadata SET physical_dev='-1' WHERE id=1",
+                            [],
+                        )
+                        .unwrap();
+                }
+                _ => {}
+            }
+            let raw = || -> (Option<String>, Option<String>, i64, Option<String>, i64, Option<String>) {
+                store.0.lock().unwrap().query_row(
+                    "SELECT write_mode, backing_id, revision, namespace, fence, physical_dev FROM mount_rs_metadata WHERE id=1",
+                    [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+                ).unwrap()
+            };
+            let before = raw();
+            let requested = if case == "foreign" { foreign } else { backing };
+            let error = run(store.prepare_bound_concurrent_mode(requested)).unwrap_err();
+            if case == "same" {
+                assert_eq!(error.code, ErrorCode::Eagain);
+            } else {
+                assert_ne!(error.code, ErrorCode::Eagain, "{case}");
+            }
+            let root_error =
+                run(store.publish_bound_if_revision(requested, 0, namespace())).unwrap_err();
+            if case == "same" {
+                assert_eq!(root_error.code, ErrorCode::Eagain);
+                assert_eq!(
+                    run(store.publish_bound_if_revision(backing, 1, namespace()))
+                        .unwrap_err()
+                        .code,
+                    ErrorCode::Estale,
+                    "positive revisions must retain mode-change fencing",
+                );
+            } else {
+                assert_ne!(root_error.code, ErrorCode::Eagain, "{case}");
+            }
+            assert_eq!(raw(), before, "{case}");
+            drop(store);
+            std::fs::remove_file(path).unwrap();
+        }
     }
 
     #[test]

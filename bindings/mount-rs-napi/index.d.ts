@@ -1307,6 +1307,8 @@ export interface JsChunkedOptions {
   concurrentWrites?: boolean
   /** Enable independent inode revisions. Requires concurrentWrites and no ownershipMode. */
   inodeUpdates?: boolean
+  /** Opt in to compact MRC5 metadata. Enables inodeUpdates and concurrentWrites; rejects either explicitly false, ownershipMode, or checkoutPath. */
+  compactInodeUpdates?: boolean
   /**
    * Explicit exclusive ownership enables writeback until sync or shutdown.
    * Shared ownership uses fenced directory delegation; same-host SQLite constraints remain.

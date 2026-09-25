@@ -668,3 +668,41 @@ fn compact_selected_read_validates_membership_body_and_physical_identity() {
     wrong.node.stats.mode = S_IFDIR | 0o755;
     assert!(LoadedCompactInode::from_guard(&snapshot.anchor, 2, wrong).is_err());
 }
+
+#[test]
+fn consuming_snapshot_attests_graph_and_preserves_exact_physical_identities() {
+    let snapshot = fixture();
+    let (namespace, identities, structure) = snapshot.clone().into_validated_namespace().unwrap();
+    assert_eq!(namespace.nodes[&2], snapshot.guards[&2].node);
+    assert_eq!(identities[&2], snapshot.guards[&2].identity);
+    assert_eq!(structure.anchor(), &snapshot.anchor);
+
+    let mut invalid = snapshot;
+    invalid.guards.get_mut(&1).unwrap().node.stats.nlink += 1;
+    assert!(invalid.into_validated_namespace().is_err());
+}
+
+#[test]
+fn structural_receipt_rejects_extra_or_changed_upserts() {
+    let base = fixture();
+    let candidate = create_candidate(&base, "new");
+    let delta = CompactStructuralDelta::capture(&base, &candidate, StructuralScope::Full).unwrap();
+    let receipt = delta.evaluate(&base).unwrap();
+    let expected = CompactPublication {
+        anchor: receipt.anchor.clone(),
+        upserts: receipt
+            .guards
+            .iter()
+            .filter(|(id, _)| delta.changed().contains_key(id) || delta.created().contains_key(id))
+            .map(|(&id, guard)| (id, guard.clone()))
+            .collect(),
+        removed: delta.removed().clone(),
+    };
+    delta.validate_receipt(&expected).unwrap();
+    let mut forged = expected.clone();
+    forged.upserts.insert(2, base.guards[&2].clone());
+    assert!(delta.validate_receipt(&forged).is_err());
+    let mut forged = expected;
+    forged.upserts.get_mut(&1).unwrap().identity.revision += 1;
+    assert!(delta.validate_receipt(&forged).is_err());
+}

@@ -1362,3 +1362,65 @@ incompatible_compact_schema_test!(
     "inode TEXT PRIMARY KEY, incarnation INTEGER, epoch INTEGER, revision INTEGER, node TEXT",
     false
 );
+
+#[test]
+fn compact_enrollment_peer_transition_is_known_noncommit_without_mutation() {
+    let f = fixture(true);
+    let before = raw(&f);
+    let snapshot = run(f.store.load_compact_snapshot(f.backing)).unwrap();
+    let error = run(f.store.prepare_compact_inode_mode(f.backing, 1)).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Eagain);
+    assert_eq!(raw(&f), before);
+    assert_eq!(
+        run(f.store.load_compact_snapshot(f.backing)).unwrap(),
+        snapshot
+    );
+}
+
+#[test]
+fn compact_enrollment_peer_transition_refuses_invalid_authority_without_mutation() {
+    for damage in [
+        "foreign-backing",
+        "zero-expected",
+        "equal-expected",
+        "newer-expected",
+        "owner",
+        "fence",
+        "expiry",
+        "stamp",
+        "anchor",
+        "generation",
+        "missing-guard",
+        "guard-body",
+        "delegation",
+    ] {
+        let f = fixture(true);
+        let (backing, expected) = match damage {
+            "foreign-backing" => (ConcurrentBackingId::from_bytes([0x63; 16]).unwrap(), 1),
+            "zero-expected" => (f.backing, 0),
+            "equal-expected" => (f.backing, 2),
+            "newer-expected" => (f.backing, 3),
+            _ => (f.backing, 1),
+        };
+        let sql = match damage {
+            "owner" => Some("UPDATE mount_rs_metadata SET owner='foreign' WHERE id=1"),
+            "fence" => Some("UPDATE mount_rs_metadata SET fence=0 WHERE id=1"),
+            "expiry" => Some("UPDATE mount_rs_metadata SET expires=1 WHERE id=1"),
+            "stamp" => Some("UPDATE mount_rs_metadata SET physical_ino='0' WHERE id=1"),
+            "anchor" => Some("UPDATE mount_rs_metadata SET namespace='{}' WHERE id=1"),
+            "generation" => Some("UPDATE mount_rs_metadata SET revision=3 WHERE id=1"),
+            "missing-guard" => Some("DELETE FROM mount_rs_compact_guards"),
+            "guard-body" => Some("UPDATE mount_rs_compact_guards SET node='{}'"),
+            "delegation" => Some("UPDATE mount_rs_metadata SET delegation_state='{}' WHERE id=1"),
+            _ => None,
+        };
+        if let Some(sql) = sql {
+            f.store.0.lock().unwrap().execute(sql, []).unwrap();
+        }
+        let before = raw(&f);
+        let error = run(f.store.prepare_compact_inode_mode(backing, expected)).unwrap_err();
+        assert_ne!(error.code, ErrorCode::Eagain, "{damage}: {error:?}");
+        assert_eq!(raw(&f), before, "{damage}");
+        println!("ENROLLMENT_REFUSAL {damage} terminal=1 raw_unchanged=1");
+    }
+}
