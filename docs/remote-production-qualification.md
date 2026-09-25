@@ -278,3 +278,37 @@ single-node diagnostic trials. Earlier split-prefix inode trials failed before
 opening, so no before/after throughput improvement ratio is available. Neither
 logical operation rate establishes physical SSD IOPS or production capacity.
 Raw results are retained in `fdb-split-inode-after.json`.
+
+### PGlite typed inode queries: bounded improvement and remaining work
+
+Independent review accepted `c24e1513`: fifteen SQL calls now carry explicit
+TEXT/INT8 parameter types; SQL text, locking, transactions, authority guards and
+uncertain-outcome behavior are unchanged. Both eight-case wire experiments
+passed all 64 complete-byte checks. Statement closes drop to zero; inode
+lifecycle Sync counts fall from 800 to 320 and steady counts from 272 to 112
+at one worker. Parse/SQL execution and the structural whole-guard rewrite remain.
+Legacy message counts are unchanged.
+
+Two alternating public Node 400-iteration/64-worker pairs per inode workload
+completed all 3,200 complete-byte checks, with zero errors and cleanup:
+
+| Workload | Before trial 1 | After trial 1 | Before trial 2 | After trial 2 |
+| --- | ---: | ---: | ---: | ---: |
+| Create/read/delete logical ops/s | 21.54 | 25.68 | 21.65 | 25.66 |
+| Steady overwrite/read logical ops/s | 302.07 | 348.91 | 261.75 | 360.76 |
+
+These are short configured-volatile PGlite diagnostics. They show a modest
+repeatable lifecycle improvement and variable steady gains, not production
+capacity or acceptance of the existing 1,000 lifecycle IOPS floor.
+The recorded server-process disk-write byte deltas during whole lifecycle-run
+windows were 138.2 MB (after trial 1), 139.9 MB (before trial 2) and 145.9 MB
+(after trial 2). Those windows include setup, cleanup and background work;
+they do not isolate physical SSD amplification. Short steady windows recorded
+0 or 19.0 MB, so a zero delta cannot establish zero writes or durable publication.
+
+The same-process kernel observer validates process identity and counter
+monotonicity. Host `iostat` intervals exclude the initial since-boot sample,
+but include all host traffic; the virtual FoundationDB image is not summed
+with the physical device. Full results and explicit counter-window limits are
+retained in `pglite-typed-paired.json` and both raw wire JSON artifacts.
+No allocator or server CPU profile was performed in these paired runs.

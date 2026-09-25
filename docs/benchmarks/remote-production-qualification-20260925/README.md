@@ -25,3 +25,11 @@ unexplained failed warmup) and `tidb-pool-retention.json` (two alternating
 before/after pairs plus final virgin startup). The retention correction removes
 reconnect amplification and reduces measured client sessions from 310 to 20.
 Steady throughput improvement and full production scale remain unproven.
+
+
+`fdb-split-inode-after.json` retains corrected split-prefix native diagnostics
+with all 400 byte checks per workload. `pglite-typed-paired.json` retains two
+alternating pairs per workload, 3,200 complete-byte checks and explicitly scoped
+process disk-byte/host interval counters. `pglite-typed-wire-before.json` and
+`pglite-typed-wire-after.json` retain the complete eight-case message experiment.
+These do not qualify physical datastore IOPS, canonical R2, or the full target.
