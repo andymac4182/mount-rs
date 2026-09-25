@@ -470,3 +470,29 @@ the 10 GiB qualification floor. The 10,000-client / 10,000-Drive /
 5,000-Partition / 10-million-file target, workload patterns, cache capacity,
 independent server processes, final platform/formal gates, current CI and PR
 merge remain pending.
+
+### Structural batching packet-limit prerequisite
+
+Two actual TiDB 8.5.7 prerequisite tests passed before changing the singleton
+insert loop. Fresh, reused and reconnected sessions retained the expected
+packet cap under the provider's no-reset policy. A 65,537-byte parameter
+succeeded with default client options and failed with the exact outbound
+codec error under a 65,536-byte client cap. The negative control accepts
+neither an arbitrary I/O error nor a large inbound result as evidence.
+
+Both private and shared provider paths accepted a 131-node namespace with a
+930-byte UTF-8 key under that client cap. Fresh reopen verified the exact
+namespace, generation and guard revisions, plus all 4,096 persistent block
+bytes. Exact-key cleanup passed. Touched package formatting and strict
+integration-test Clippy passed. No production source changed in this step.
+
+The pinned server/driver source and session observations support taking the
+minimum of the transaction's session cap, any configured client cap and a
+private batching budget, with full encoded-command sizing. No GLOBAL setting
+was changed; a low server cap and manual reset/change-user were not tested.
+This is a prerequisite, not proof of batching, rollback, throughput or
+physical I/O improvement. The initial incorrect error-variant assertions and
+their correction are retained as test-harness failures.
+
+[Prerequisite artifact](benchmarks/remote-production-qualification-20260925/structural-packet-cap-prerequisite.json)
+records source identity, observations and hashes of the retained raw evidence.
