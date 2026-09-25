@@ -174,7 +174,7 @@ async fn catalog_shape_and_authorization_profile() {
         let resources = serde_json::Value::Null;
         rows.push(json!({"clients":clients,"partitions":clients/2,"drives":clients,"grants":clients,"queries":40,"document_bytes":document_bytes,"elapsed_us":elapsed.as_micros(),"profile":profile,"resources":resources}));
     }
-    let artifact = json!({"schema":"mount-rs-catalog-shape-profile-v1","source_revision":std::env::var("MOUNT_RS_PRODUCTION_SOURCE_REVISION").expect("source revision required"),"scope":"one process, minimal fixture descriptors, authoritative SQLite catalog calls plus exact authorization; no network/filesystem/connection capacity claim; instrumentation affects throughput","allocation_profile":cfg!(feature="allocation-profiling"),"rows":rows});
+    let artifact = json!({"schema":"mount-rs-catalog-shape-profile-v1","source_revision":std::env::var("MOUNT_RS_PRODUCTION_SOURCE_REVISION").expect("source revision required"),"build_profile":if cfg!(debug_assertions){"debug"}else{"release"},"scope":"one process, minimal fixture descriptors, authoritative SQLite catalog calls plus exact authorization; no network/filesystem/connection capacity claim; instrumentation affects throughput","allocation_profile":cfg!(feature="allocation-profiling"),"rows":rows});
     let output = std::env::var("MOUNT_RS_PRODUCTION_CATALOG_PROFILE_OUTPUT")
         .expect("retained output required");
     std::fs::write(output, serde_json::to_vec_pretty(&artifact).unwrap()).unwrap();
