@@ -681,3 +681,49 @@ boundary retained complete observations of admitted chains; the observation's
 retain launch/configuration, raw hashes, exact counters and independent reviews.
 The rebase onto SlateDB main follows these fixed-binary runs; their evidence
 continues to identify the original source.
+
+
+### Release controls after rebasing main
+
+The release controls identify source `fd370b8` and their retained executable;
+these are separate measurements from the earlier debug pair. The approved
+10-client / 10-Drive control passed all 10,000 files / 62,832,640 bytes,
+100 routes, scope denials and cleanup (20 SQL sessions to zero). Namespace
+preparation took 272.425 seconds, payload preparation 28.044 seconds and the
+fresh full-byte oracle 161.464 seconds. All ten datastore windows were complete
+with no counter resets. The first attempt retained the same successful file
+oracle but failed observer coverage because Docker socket access was denied.
+It remains a failed qualification point.
+
+The release 25-Drive attempt exceeded the unchanged 600-second namespace
+budget after 21,670 of 25,000 acknowledged creates. Payload preparation and
+the fresh byte oracle were not reached. Cleanup drained 49 SQL sessions to
+zero. This failed point gives no capacity acceptance. Source and dependencies
+changed between the earlier debug controls and this release run, so the
+measurements do not isolate a compiler optimization effect.
+
+The successful release ten-Drive namespace stage still serialized 5,015,000
+inode records and returned 15,025,000 records. The three full-guard read
+passes and full guard replacement explain this quadratic work. SQL executor
+statements totaled 323,350. TiKV logical block reads and VM storage counters
+include background work and do not measure physical laptop SSD IOPS.
+
+A separate compiled allocation diagnostic passed the same full oracle and
+cleanup. Its namespace stage recorded 381,417,150 Rust allocation calls,
+11,358,137 reallocations and 70,743,763,437 allocated bytes: about 38,142
+allocations and 7.07 MB allocated per acknowledged create. Allocated bytes
+include each realloc's full new size. These process-wide totals include
+clients, servers, providers, journals and background work; foreign C heaps
+are excluded. They do not attribute allocations to individual metadata sites
+or establish a leak. All eleven stage live-byte accounting residuals were
+zero. Instrumented timing is a separate diagnostic, with no throughput claim.
+
+[Release ten-Drive evidence](benchmarks/remote-production-qualification-20260925/task4-release-ten-drive-open1.json),
+[observer failure](benchmarks/remote-production-qualification-20260925/task4-release-ten-drive-observer-failed.json),
+[failed release 25-Drive point](benchmarks/remote-production-qualification-20260925/task4-release-twentyfive-drive-open1-failed.json),
+[allocation evidence](benchmarks/remote-production-qualification-20260925/task4-release-ten-drive-allocation.json),
+and [allocation analysis](benchmarks/remote-production-qualification-20260925/task4-release-ten-drive-allocation-analysis.json)
+retain exact identities, raw hashes, counters and limitations.
+[The retention manifest](benchmarks/remote-production-qualification-20260925/task4-release-retention-manifest.json)
+binds their independent reviews. The TiDB VM remains below its qualification
+memory floor, and the 10,000-client target remains unqualified.

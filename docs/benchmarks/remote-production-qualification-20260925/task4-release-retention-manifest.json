@@ -1,0 +1,54 @@
+{
+  "schema": "mount-rs-release-evidence-retention-v1",
+  "source_revision": "fd370b881fcaa01c2f1776978b6a081314132025",
+  "artifacts": [
+    {
+      "source": "/private/tmp/task4-production-release-controls-20260925/ten-open1-evidence.json",
+      "retained": "task4-release-ten-drive-observer-failed.json",
+      "sha256": "d04ba9a2291ff48a70993e3793cb552ffbdfe796d56ec7e4534e5836c7ec884c"
+    },
+    {
+      "source": "/private/tmp/task4-production-release-controls-20260925/ten-open1-approved-evidence.json",
+      "retained": "task4-release-ten-drive-open1.json",
+      "sha256": "5708ba8b978b13d1c70649bbff0c5c1e28a78ff69f999e0dda9b061565471598"
+    },
+    {
+      "source": "/private/tmp/task4-production-release-controls-20260925/twentyfive-open1-evidence.json",
+      "retained": "task4-release-twentyfive-drive-open1-failed.json",
+      "sha256": "79d544a9b8a502b0125e26b7ef32b5ab9917d3f6f0f60cfa5382170797b20ef7"
+    },
+    {
+      "source": "/private/tmp/task4-production-release-controls-20260925/allocation-ten-open1-evidence.json",
+      "retained": "task4-release-ten-drive-allocation.json",
+      "sha256": "92fe3fecf3cdeb6233991670f8711a95c8ca2ffef4ddae52c5ae32cc05832387"
+    },
+    {
+      "source": "/private/tmp/task4-production-release-controls-20260925/allocation-ten-open1-analysis.json",
+      "retained": "task4-release-ten-drive-allocation-analysis.json",
+      "sha256": "2c63e186dad0dd5ce04163caf9afb5c486168ca0ef707349533451279836439d"
+    }
+  ],
+  "independent_reviews": [
+    {
+      "path": "/private/tmp/mount-rs-task4-release-ten-open1-observer-failure-review.md",
+      "sha256": "505e466c946ebd5b79206252fdb0db9efff1977b30c72442bd098ce23fd8f501"
+    },
+    {
+      "path": "/private/tmp/mount-rs-task4-release-ten-open1-approved-review.md",
+      "sha256": "1bf911eeaf19701532a5e68b5951c91ffc7601fd19987cb96c1f8e11f5f95049"
+    },
+    {
+      "path": "/private/tmp/mount-rs-task4-release-twentyfive-open1-review.md",
+      "sha256": "bbeacba80f42b296c1c6867703dbadbd3bccbc891b12b49d209247a655f4370f"
+    },
+    {
+      "path": "/private/tmp/mount-rs-task4-allocation-ten-open1-review.md",
+      "sha256": "3a1e1686ea37ba82baaa2cd246f2ed518a3b5e673c05ba211f75c8ab9cc77ec1"
+    }
+  ],
+  "limits": [
+    "Compiled source predates incremental structural changes.",
+    "Bounded diagnostics do not qualify full production target.",
+    "Full raw binaries, logs and observers remain in owned local paths."
+  ]
+}
