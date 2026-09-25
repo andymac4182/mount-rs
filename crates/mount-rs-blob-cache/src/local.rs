@@ -1,13 +1,18 @@
 use crate::*;
 use std::{
     collections::BTreeMap,
-    fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    fs::File,
+    io::Read,
     path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
+};
+#[cfg(unix)]
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
 };
 pub type CacheKey = [u8; 32];
 #[derive(Clone, Debug)]
@@ -58,6 +63,12 @@ pub struct LocalCache {
     pub(crate) io_permits: Arc<tokio::sync::Semaphore>,
 }
 impl LocalCache {
+    /// Secure descriptor-relative disk operations currently require Unix.
+    #[cfg(not(unix))]
+    pub fn new(_config: LocalCacheConfig) -> Result<Arc<Self>> {
+        Err(FsError::new(ErrorCode::Enotsup).with_syscall("blob cache"))
+    }
+    #[cfg(unix)]
     pub fn new(config: LocalCacheConfig) -> Result<Arc<Self>> {
         if config.max_entries == 0
             || config.max_entries > 1_000_000
@@ -754,6 +765,7 @@ fn is_key(s: &str) -> bool {
         && s.bytes()
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
+#[cfg(unix)]
 fn options() -> OpenOptions {
     let mut o = OpenOptions::new();
     #[cfg(unix)]
@@ -764,6 +776,7 @@ fn options() -> OpenOptions {
     }
     o
 }
+#[cfg(unix)]
 fn open_relative(root: &File, name: &str, write: bool, create: bool) -> Result<File> {
     use std::os::fd::{AsRawFd, FromRawFd};
     let name = std::ffi::CString::new(name).map_err(|_| error())?;
@@ -779,6 +792,7 @@ fn open_relative(root: &File, name: &str, write: bool, create: bool) -> Result<F
         Ok(unsafe { File::from_raw_fd(fd) })
     }
 }
+#[cfg(unix)]
 fn unlink_relative(root: &File, name: &str) -> Result<()> {
     use std::os::fd::AsRawFd;
     let n = std::ffi::CString::new(name).map_err(|_| error())?;
@@ -812,6 +826,7 @@ fn checksum(key: &str, bytes: &[u8]) -> Result<CacheKey> {
     hash.update(bytes);
     Ok(hash.finalize().into())
 }
+#[cfg(unix)]
 fn write_checked(root: &File, key: &str, bytes: &[u8]) -> Result<()> {
     use std::os::fd::AsRawFd;
     let temp = format!("{key}.tmp");
@@ -842,7 +857,7 @@ fn write_checked(root: &File, key: &str, bytes: &[u8]) -> Result<()> {
     }
     outcome
 }
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     fn scope(drive: &str) -> CacheScope {
@@ -1166,4 +1181,32 @@ mod tests {
         assert!(c.get(&s, &id, IntegrityPolicy::Opaque).is_none());
         assert_eq!(fs::read(outside).unwrap(), b"secret");
     }
+}
+
+#[cfg(not(unix))]
+fn open_relative(_root: &File, _name: &str, _write: bool, _create: bool) -> Result<File> {
+    Err(FsError::new(ErrorCode::Enotsup))
+}
+#[cfg(not(unix))]
+fn unlink_relative(_root: &File, _name: &str) -> Result<()> {
+    Err(FsError::new(ErrorCode::Enotsup))
+}
+#[cfg(not(unix))]
+fn write_checked(_root: &File, _key: &str, _bytes: &[u8]) -> Result<()> {
+    Err(FsError::new(ErrorCode::Enotsup))
+}
+#[cfg(all(test, not(unix)))]
+#[test]
+fn unsupported_cache_platform_fails_before_creating_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let directory = temp.path().join("uncreated-cache");
+    let result = LocalCache::new(LocalCacheConfig {
+        directory: directory.clone(),
+        memory_bytes: 4096,
+        disk_bytes: 4096,
+        max_entries: 4,
+        max_blob_bytes: 4096,
+    });
+    assert!(result.err().unwrap().is(ErrorCode::Enotsup));
+    assert!(!directory.exists());
 }

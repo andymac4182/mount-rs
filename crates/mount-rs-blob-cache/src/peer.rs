@@ -484,7 +484,7 @@ fn encode_header(
     out.extend_from_slice(&s.backing.as_bytes());
     Ok(out)
 }
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn encode(s: &CacheScope, id: &BlockId, payload: Option<&[u8]>, max: usize) -> Result<Vec<u8>> {
     let mut out = encode_header(s, id, payload.map(<[u8]>::len), max)?;
     if let Some(bytes) = payload {
@@ -540,7 +540,7 @@ fn decode(data: &[u8], max: usize) -> Result<(u8, CacheScope, BlockId, &[u8])> {
         bytes,
     ))
 }
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     #[tokio::test]

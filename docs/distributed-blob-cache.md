@@ -2,6 +2,8 @@
 
 The server cache decorates the existing immutable block storage providers. A cache miss checks local RAM, local disk, eligible QUIC peers and finally the backing provider. Metadata remains authoritative for drive access and file references. Cache keys include the cluster, partition, drive and verified backing identity; equal block IDs from different drives do not share entries.
 
+The local disk cache currently requires Linux or macOS descriptor-relative filesystem operations. Cache construction on unsupported platforms returns `ENOTSUP` before creating its directory.
+
 ## Discovery strategies
 
 Strategies are compiled into the server and selected through configuration. Applications can implement the discovery trait to add integrations without changing cache admission, transport or durability rules.

@@ -476,6 +476,7 @@ mod tests {
         c.redis.as_mut().unwrap().address = "127.0.0.1:6379".into();
         assert!(c.validate().is_ok());
     }
+    #[cfg(unix)]
     #[tokio::test]
     async fn sqlite_drive_uses_service_decorator_and_reopens_with_cache_hits() {
         use async_trait::async_trait;

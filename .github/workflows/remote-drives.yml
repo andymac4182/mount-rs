@@ -20,6 +20,8 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697
+        with:
+          components: clippy
       - run: ./scripts/cargo-shared test --locked -p mount-rs-service -p mount-rs-remote-protocol -p mount-rs-remote-client -p mount-rs-cli
       - run: ./scripts/cargo-shared clippy --locked -p mount-rs-service -p mount-rs-remote-protocol -p mount-rs-remote-client -p mount-rs-cli --all-targets -- -D warnings
       - name: Run bounded QUIC soak

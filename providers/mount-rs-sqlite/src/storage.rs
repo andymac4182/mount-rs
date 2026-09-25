@@ -13,8 +13,10 @@ use mount_rs_core::storage::{
     DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState, DirectoryGrant,
     InodeMetadataSnapshot, InodeModeState, InodeVersion, LoadedInode, LoadedMetadata,
     MetadataStore, Namespace, NodeMetadata, WriterLease, decode_inode_namespace,
-    encode_inode_namespace, validate_inode_publication, validate_node_kind,
+    validate_node_kind,
 };
+#[cfg(unix)]
+use mount_rs_core::storage::{encode_inode_namespace, validate_inode_publication};
 use mount_rs_core::versioning::{
     PublicationId, ReadLease, ReadLeaseRequest, VersionHead, VersionId, VersionInfo, VersionKind,
     VersionPublication, VersionedMetadataStore, VolumeId,
@@ -42,6 +44,7 @@ const CONCURRENT_WRITE_MODE: &str = "MRC1";
 const BOUND_WRITE_MODE: &str = "MRC2";
 const DELEGATED_WRITE_MODE: &str = "MRC3";
 const INODE_WRITE_MODE: &str = "MRC4";
+#[cfg(unix)]
 const INODE_CONDITIONAL_SQL: &str = "SELECT m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.revision,
                     m.physical_dev,m.physical_ino,m.physical_path,
                     g.structural_generation,g.inode_revision,
@@ -1795,10 +1798,12 @@ impl SqliteMetadataStore {
     }
 }
 
+#[cfg(unix)]
 fn inode_conflict() -> FsError {
     FsError::new(ErrorCode::Eagain).with_syscall("publish SQLite inode metadata")
 }
 
+#[cfg(unix)]
 fn checked_sqlite_next(revision: u64) -> Result<i64> {
     i64::try_from(revision)
         .ok()
@@ -1875,6 +1880,7 @@ fn validate_inode_authority_fields(
     Ok(revision as u64)
 }
 
+#[cfg(unix)]
 fn inode_guard_versions(
     connection: &Connection,
     generation: u64,
@@ -1924,6 +1930,7 @@ fn decode_inode_guard(inode: u64, json: &str) -> Result<NodeMetadata> {
     Ok(node)
 }
 
+#[cfg(unix)]
 fn rebuild_inode_guards(
     connection: &Connection,
     generation: u64,
