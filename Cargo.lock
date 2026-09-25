@@ -2137,6 +2137,7 @@ dependencies = [
  "mount-rs-sqlite",
  "mount-rs-sqlite-fs",
  "mount-rs-tidb",
+ "mysql_async",
  "tokio",
 ]
 

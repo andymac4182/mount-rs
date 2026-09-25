@@ -121,13 +121,33 @@ impl StorageContext {
             state.closed = true;
             state.tidb.values().cloned().collect()
         };
+        let mut closing: Vec<_> = contexts
+            .iter()
+            .map(|context| Some(Box::pin(context.close())))
+            .collect();
         let mut error = None;
-        for context in contexts {
-            if let Err(e) = context.close().await {
-                error.get_or_insert(e);
+        std::future::poll_fn(|cx| {
+            // Every close must be polled before yielding: each provider and
+            // mysql_async pool then enters terminal closure, even if this
+            // caller is cancelled while a checked-out connection drains.
+            // Retaining contexts in the map lets a later close resume waiting.
+            for close in &mut closing {
+                if let Some(future) = close
+                    && let std::task::Poll::Ready(result) = future.as_mut().poll(cx)
+                {
+                    if let Err(e) = result {
+                        error.get_or_insert(e);
+                    }
+                    *close = None;
+                }
             }
-        }
-        error.map_or(Ok(()), Err)
+            if closing.iter().any(Option::is_some) {
+                std::task::Poll::Pending
+            } else {
+                std::task::Poll::Ready(error.take().map_or(Ok(()), Err))
+            }
+        })
+        .await
     }
 }
 
@@ -577,6 +597,124 @@ fn open_foundationdb_storage(
 #[cfg(test)]
 mod context_tests {
     use super::*;
+    #[tokio::test]
+    #[ignore = "requires actual TiDB and MOUNT_RS_TIDB_URL"]
+    async fn actual_tidb_cancelled_close_fences_every_identity_and_can_resume() {
+        use mysql_async::prelude::Queryable;
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+        let url = std::env::var("MOUNT_RS_TIDB_URL").unwrap();
+        let second_url = format!(
+            "{url}{}stmt_cache_size=31",
+            if url.contains('?') { "&" } else { "?" }
+        );
+        let context = StorageContext::new(1).unwrap();
+        context.tidb(&url).unwrap();
+        context.tidb(&second_url).unwrap();
+        // Match the stable map traversal in close, so the held pool is first.
+        let pools: Vec<_> = context
+            .inner
+            .lock()
+            .unwrap()
+            .tidb
+            .values()
+            .cloned()
+            .collect();
+        assert_eq!(pools.len(), 2);
+        let prefix = format!(
+            "sdk-cancel-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let first_key = format!("{prefix}-held");
+        let second_key = format!("{prefix}-idle");
+        let held = pools[0]
+            .metadata(TidbStorageOptions::new(&first_key))
+            .await
+            .unwrap();
+        let idle = pools[1]
+            .metadata(TidbStorageOptions::new(&second_key))
+            .await
+            .unwrap();
+        let admin_pool = mysql_async::Pool::from_url(&url).unwrap();
+        let mut admin = admin_pool.get_conn().await.unwrap();
+        admin
+            .query_drop("SET SESSION tidb_txn_mode='pessimistic'")
+            .await
+            .unwrap();
+        let mut lock = admin
+            .start_transaction(mysql_async::TxOpts::default())
+            .await
+            .unwrap();
+        let _: Option<i64> = lock
+            .exec_first(
+                "SELECT revision FROM mount_rs_tidb_metadata WHERE volume_key=? FOR UPDATE",
+                (&first_key,),
+            )
+            .await
+            .unwrap();
+        // This real provider transaction retains the pool's only connection
+        // while the independent transaction holds its metadata row lock.
+        let mut operation = Box::pin(held.acquire_writer("held", Duration::from_secs(30)));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut operation)
+                .await
+                .is_err()
+        );
+        let mut closing = Box::pin(context.close());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut closing)
+                .await
+                .is_err()
+        );
+        drop(closing);
+        let checkouts_closed = [held.flush().await.is_err(), idle.flush().await.is_err()];
+        let retained_contexts_closed = [
+            pools[0]
+                .metadata(TidbStorageOptions::new(&first_key))
+                .await
+                .is_err(),
+            pools[1]
+                .metadata(TidbStorageOptions::new(&second_key))
+                .await
+                .is_err(),
+        ];
+        lock.rollback().await.unwrap();
+        let completed = tokio::time::timeout(Duration::from_secs(5), operation).await;
+        let resumed = tokio::time::timeout(Duration::from_secs(5), context.close()).await;
+        for key in [&first_key, &second_key] {
+            admin
+                .exec_drop(
+                    "DELETE FROM mount_rs_tidb_metadata WHERE volume_key=?",
+                    (key,),
+                )
+                .await
+                .unwrap();
+        }
+        drop(admin);
+        admin_pool.disconnect().await.unwrap();
+        assert!(
+            completed.is_ok(),
+            "held operation must release its connection"
+        );
+        assert!(
+            resumed.is_ok_and(|result| result.is_ok()),
+            "close completion must be resumable"
+        );
+        assert_eq!(
+            checkouts_closed,
+            [true, true],
+            "cancellation left a pool accepting existing-store checkouts"
+        );
+        assert_eq!(
+            retained_contexts_closed,
+            [true, true],
+            "cancellation left an already obtained provider context open"
+        );
+    }
+
     #[tokio::test]
     async fn contexts_isolate_credentials_database_options_and_server_lifetime() {
         let context = StorageContext::new(2).unwrap();

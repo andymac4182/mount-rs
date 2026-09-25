@@ -139,6 +139,9 @@ async function testCli() {
   assert.equal(parseArgs(["--workload", "steady-overwrite"]).workload, "steady-overwrite")
   assert.throws(() => parseArgs(["--layout", "unknown"]), /layout/)
   assert.throws(() => parseArgs(["--workload", "unknown"]), /workload/)
+  assert.equal(parseArgs(["--workload", "steady-overwrite", "--payload-bytes", "1", "--iterations", "255"]).iterations, 255)
+  assert.throws(() => parseArgs(["--workload", "steady-overwrite", "--payload-bytes", "1", "--iterations", "256"]), /generation capacity/)
+  assert.equal(parseArgs(["--workload", "lifecycle", "--payload-bytes", "1", "--iterations", "256"]).iterations, 256)
 
   assert.deepEqual(parseArgs(["--smoke"]).sizes, [1])
   assert.deepEqual(parseArgs(["--sizes", "1,4MiB,10MB,16", "--iterations", "3", "--concurrency", "2"]), {
@@ -604,13 +607,13 @@ async function testSteadyOverwriteOracle() {
       return { bytesRead: length, buffer: target }
     },
   }
-  const args = { definition: { id: "steady-test" }, handle, payload: Buffer.from([1, 2, 3]), path: "/owned", iteration: 1, options: { timeoutMs: 100, cleanupTimeoutMs: 100 }, pendingOperations: new Map() }
+  const args = { definition: { id: "steady-test" }, handle, payload: Buffer.from([1, 2, 3]), path: "/owned", iteration: 1, generation: 1, options: { timeoutMs: 100, cleanupTimeoutMs: 100 }, pendingOperations: new Map() }
   const success = await runSteadySample(args)
   assert.equal(success.success, true)
   assert.equal(success.deleteSucceeded, null)
   assert.deepEqual(calls, [["write", 1, 3], ["read", 0, 5]])
   initial[0] = 0 // An unchanged boundary is still part of the full byte oracle.
-  const corrupt = await runSteadySample({ ...args, iteration: 2 })
+  const corrupt = await runSteadySample({ ...args, iteration: 2, generation: 2 })
   assert.equal(corrupt.success, false)
   assert.equal(corrupt.payloadVerified, false)
   const partial = await runSteadySample({ ...args, handle: { ...handle, async write() { return { bytesWritten: 1 } } } })
@@ -623,6 +626,52 @@ async function testSteadyOverwriteOracle() {
   assert.equal((await runSteadySample(pendingArgs)).success, false)
   assert.equal(attempts, 1, "unresolved operation must not be replayed on its handle")
 }
+async function testSteadyGenerationsRejectDroppedWrites() {
+  function lane() {
+    const payload = Buffer.alloc(8, 0x39)
+    const file = Buffer.concat([Buffer.from([0x51]), payload, Buffer.from([0xa7])])
+    const state = { payload, file, drop: false }
+    state.handle = {
+      async write(bytes, offset, length, position) {
+        if (!state.drop) bytes.copy(file, position, offset, offset + length)
+        return { bytesWritten: length }
+      },
+      async read(target) { file.copy(target); return { bytesRead: file.length, buffer: target } },
+    }
+    return state
+  }
+  async function sample(state, iteration, generation) {
+    return runSteadySample({ definition: { id: "generation-test" }, handle: state.handle, payload: state.payload, path: "/owned", iteration, generation, options: { timeoutMs: 100, cleanupTimeoutMs: 100 }, pendingOperations: new Map() })
+  }
+  const distinct = lane()
+  const seen = new Set([distinct.file.toString("hex")])
+  for (const generation of [1, 256, 257, Number.MAX_SAFE_INTEGER]) {
+    assert.equal((await sample(distinct, generation, generation)).success, true)
+    seen.add(distinct.file.toString("hex"))
+  }
+  assert.equal(seen.size, 5, "all supported generations must differ from setup and each other")
+  await assert.rejects(() => runSteadySample({ definition: { id: "tiny" }, payload: Buffer.alloc(1), generation: 256, path: "/tiny", iteration: 256, pendingOperations: new Map() }), /generation.*capacity/)
+  const first256 = lane()
+  first256.drop = true
+  const firstOverwrite = await sample(first256, 256, 1) // First operation of lane 256.
+  const recurring = lane()
+  assert.equal((await sample(recurring, 1, 1)).success, true)
+  recurring.drop = true
+  const stale257 = await sample(recurring, 257, 2) // Scheduler returns to the same lane.
+  const sequence256 = lane()
+  sequence256.drop = true
+  const wrappedSequence = await sample(sequence256, 256, 256)
+  const recurring257 = lane()
+  assert.equal((await sample(recurring257, 1, 1)).success, true)
+  recurring257.drop = true
+  const wrappedStale = await sample(recurring257, 257, 257)
+  assert.deepEqual(
+    [firstOverwrite.success, stale257.success, wrappedSequence.success, wrappedStale.success],
+    [false, false, false, false],
+    "iteration 256/concurrency 256 and same-lane 1/257 must reject dropped writes",
+  )
+}
+await testSteadyGenerationsRejectDroppedWrites()
 await testSteadyOverwriteOracle()
 await testStats()
 await testErrors()

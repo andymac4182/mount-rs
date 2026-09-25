@@ -162,6 +162,9 @@ export function parseArgs(argv) {
     }
   }
 
+  if (workload === "steady-overwrite" && (iterations || (smoke ? 1 : 2)) > maxSteadyGenerations(payloadBytes ?? 1024 * 1024)) {
+    throw usageError("steady-overwrite iterations exceed the payload's nonrepeating generation capacity")
+  }
   return {
     help,
     layout,
@@ -538,7 +541,26 @@ export async function runSample({
 
 // Steady-state operations keep a preopened inode and overwrite its interior.
 // The unchanged first/last bytes are part of the read oracle.
-export async function runSteadySample({ definition, handle, payload, path, iteration, options, pendingOperations }) {
+function maxSteadyGenerations(payloadBytes) {
+  return Math.min(Number.MAX_SAFE_INTEGER, 256 ** Math.min(payloadBytes, 7) - 1)
+}
+
+function steadyGenerationPayload(payload, generation) {
+  if (!Number.isSafeInteger(generation) || generation <= 0 || generation > maxSteadyGenerations(payload.byteLength)) {
+    throw usageError("steady-overwrite generation exceeds the payload's nonrepeating capacity")
+  }
+  const changed = Buffer.from(payload)
+  let remaining = BigInt(generation)
+  // XOR preserves the seeded setup payload as generation zero. Seven bytes
+  // encode every positive safe-integer generation without wrapping.
+  for (let index = 0; index < Math.min(changed.length, 7); index += 1) {
+    changed[index] ^= Number(remaining & 255n)
+    remaining >>= 8n
+  }
+  return changed
+}
+
+export async function runSteadySample({ definition, handle, payload, path, iteration, generation, options, pendingOperations }) {
   const sample = emptySample(definition, payload.byteLength, iteration, path)
   sample.workload = "steady-overwrite"
   sample.deleteSucceeded = null
@@ -546,8 +568,8 @@ export async function runSteadySample({ definition, handle, payload, path, itera
     firstFailure(sample, "write", new Error("prior operation remains pending on this handle"))
     return finishSample(sample, payload)
   }
-  const changed = Buffer.from(payload)
-  changed[0] = (changed[0] + iteration) % 256
+  const changed = steadyGenerationPayload(payload, generation)
+  sample.laneGeneration = generation
   const expected = Buffer.concat([Buffer.from([0x51]), changed, Buffer.from([0xa7])])
   for (const operation of ["write", "read"]) {
     const started = performance.now()
@@ -614,6 +636,9 @@ async function runSize(
   const steady = options.workload === "steady-overwrite"
   const lanes = []
   if (steady) {
+    // A worker may receive every iteration regardless of concurrency. Tiny
+    // payloads therefore bound total iterations conservatively before setup.
+    if (options.iterations > maxSteadyGenerations(payload.byteLength)) throw usageError("steady-overwrite iterations exceed the payload's nonrepeating generation capacity")
     // Setup precedes the measurement. Ownership is recorded before each write
     // so existing cleanup also covers failed setup and delayed native work.
     for (let slot = 0; slot < Math.min(options.concurrency, options.iterations); slot += 1) {
@@ -623,7 +648,7 @@ async function runSize(
       try {
         await withTimeout(() => filesystem.writeFile(path, initial), options.timeoutMs, "steady setup")
         const handle = await withTimeout(() => filesystem.open(path, "r+"), options.timeoutMs, "steady open")
-        lanes.push({ path, handle })
+        lanes.push({ path, handle, generation: 0 })
       } catch (error) {
         if (isTimeout(error)) pendingOperations.set(path, { operation: "steady setup", promise: error.lateOperation })
         await closeSteadyLanes(lanes, options, pendingOperations).catch(() => {})
@@ -638,7 +663,7 @@ async function runSize(
     path: benchmarkPath(context.runId, definition.id, sizeMiBValue, index + 1),
   }))
   const samples = await runWorkers(options.iterations === 0 ? [] : tasks, options.concurrency, (task, slot) =>
-    (steady ? runSteadySample({ definition, ...lanes[slot], payload, iteration: task.iteration, options, pendingOperations }) : runSample({
+    (steady ? runSteadySample({ definition, ...lanes[slot], generation: ++lanes[slot].generation, payload, iteration: task.iteration, options, pendingOperations }) : runSample({
       definition,
       filesystem,
       payload,
@@ -711,7 +736,7 @@ async function runSize(
     sizeMiB: sizeMiBValue,
     fileSizeBytes: steady ? sizeBytes + 2 : sizeBytes,
     writePayloadBytes: sizeBytes,
-    ...(steady ? { payloadDerivation: "increment first payload byte by iteration; verify unchanged 0x51/0xa7 boundary bytes" } : {}),
+    ...(steady ? { payloadDerivation: "encode a positive per-lane safe-integer generation in up to seven payload bytes; setup is generation zero; verify unchanged 0x51/0xa7 boundary bytes" } : {}),
     iterationsRequested: options.iterations,
     concurrency: options.concurrency,
     status: successfulIterations === samples.length && !iopsTargetFailure ? "ok" : "failed",
