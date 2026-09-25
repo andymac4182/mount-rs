@@ -190,6 +190,7 @@ mod tests {
         assert_eq!(source.token().await.unwrap().expose(), "YWJj.ZGVm.Z2hp");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn command_captures_stdout_without_shell() {
         let source =
@@ -229,6 +230,7 @@ mod tests {
         assert_eq!(source.token().await.unwrap().expose(), token);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn command_timeout_is_bounded() {
         let source =
@@ -237,6 +239,7 @@ mod tests {
         assert!(matches!(result, Err(CredentialError::Timeout)));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn command_output_is_bounded() {
         let source = CredentialSource::Command(vec![OsString::from("/usr/bin/yes")]);
