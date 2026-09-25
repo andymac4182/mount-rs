@@ -364,3 +364,14 @@ and unbounded final listener cleanup. The original `cleanup_errors=0` therefore
 does not prove complete drain. This first attempt, its exact source, logs and
 all observer windows are retained under a distinct run ID; corrected attempts
 must use new artifacts and receive a fresh review.
+
+The harness correction in `b92d8280` passed a fresh bounded source review.
+Cleanup borrows the replica vector, attempts all shutdowns with concurrent
+deadlines, explicitly closes all shared contexts, and retains unresolved
+listener tasks through terminal evidence. Scope-probe attempts are counted
+before awaiting transport. Ten focused checkpoint tests and sixteen broader
+production-scale tests passed (overlapping suites), with touched formatting and
+strict Clippy. The cancellation test now counts actual future polling. The
+initial RED was a missing-helper compilation failure, not behavioral proof of
+the original lifecycle defect. This source acceptance does not qualify the
+failed baseline or replace a corrected live run.
