@@ -312,3 +312,55 @@ but include all host traffic; the virtual FoundationDB image is not summed
 with the physical device. Full results and explicit counter-window limits are
 retained in `pglite-typed-paired.json` and both raw wire JSON artifacts.
 No allocator or server CPU profile was performed in these paired runs.
+
+### Actual TiDB population checkpoint: partial oracle and amplification
+
+The first actual checkpoint used ten signed-OIDC clients, ten QUIC listeners,
+ten TiDB Drives across five Partitions and 1,000 files per Drive. Each Drive
+contains 990 × 4KiB, 9 × 128KiB and 1 × 1MiB files. The debug/resource-profiling
+binary and frozen source patch are identified in
+`task4-ten-drive-population-before.json`; this is one process/runtime and the
+existing single-node diagnostic TiDB VM, not production capacity.
+
+| Phase | Actual result | Wall seconds | TiDB executor statements |
+| --- | --- | ---: | ---: |
+| Namespace creation, ten workers | 10,000 acknowledged files | 546.219 | 5,245,000 |
+| Payload population, ten workers | 10,000 acknowledged full writes / 62,832,640 bytes | 231.005 | 165,340 |
+| Populated replica refresh | 100 independently reopened filesystems | 8.714 | Retained by stage |
+| Fresh backend byte oracle, serial | 7,076 files / 44,294,144 bytes verified | Stopped at 600-second phase budget | Retained by stage |
+
+**The checkpoint is unqualified.** No byte mismatch was reported, but the
+oracle stopped before verifying all 10,000 files. The subsequent 100 server/Drive
+routing probes were not reached. Ninety bounded protocol read/EOF requests
+completed before the full oracle. Budgets are checked between operations;
+protocol requests have a 30-second deadline. The 1,800-second work-body budget
+does not bound preceding setup or synchronous observer commands.
+
+Namespace creation published 5,015,000 node units, serialized 1,847,507,460
+namespace bytes plus 1,811,255,630 inode bytes, and returned 5,426,533,270 inode
+bytes. The phase recorded approximately 524.5 SQL statements per created file.
+Primary client QUIC traffic was 4,464,336 transmitted and 3,327,861 received UDP
+bytes, with zero reported packet loss. Async provider elapsed spans overlap
+across workers and must not be summed as CPU time.
+
+Payload writes serialized only 5,251,090 inode bytes and no namespace bodies,
+but returned 4,262,086,520 inode bytes across 10,030,000 node-row units. Opening
+each existing file currently invokes a complete inode snapshot and namespace
+copy. This measured read amplification is separate from per-node structural
+INSERT exchanges. The next fixes must preserve selected-file freshness and
+structural authority while measuring these costs separately.
+
+The process sampler recorded a 260,063,232-byte resident peak with no capture
+errors; Rust allocations were not instrumented in this run. SQL counter-series
+coverage is incomplete and no counter reset was recorded. TiKV namespace-stage
+cgroup counters recorded 206,106 writes / 11,337,207,808 bytes in the VM; these
+are not physical SSD IOPS. Whole-window host disk0 samples averaged 16,130.6
+transfers/s and peaked at 53,330, including all host traffic. They cannot be
+attributed to this datastore or combined with the virtual FoundationDB disk.
+
+Independent source review found three cleanup defects: missing explicit shared
+context closure, transition shutdown abandoning later replicas after an error,
+and unbounded final listener cleanup. The original `cleanup_errors=0` therefore
+does not prove complete drain. This first attempt, its exact source, logs and
+all observer windows are retained under a distinct run ID; corrected attempts
+must use new artifacts and receive a fresh review.

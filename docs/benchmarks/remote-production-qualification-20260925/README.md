@@ -33,3 +33,12 @@ alternating pairs per workload, 3,200 complete-byte checks and explicitly scoped
 process disk-byte/host interval counters. `pglite-typed-wire-before.json` and
 `pglite-typed-wire-after.json` retain the complete eight-case message experiment.
 These do not qualify physical datastore IOPS, canonical R2, or the full target.
+
+`task4-ten-drive-population-before.json` retains the first actual ten-Drive,
+10,000-file TiDB checkpoint. Namespace and payload preparation completed, but
+the fresh byte oracle hit its 600-second phase budget after 7,076 files; the
+point is unqualified. It includes the complete terminal journal, selected SQL
+and VM counter windows, host observer summary, source/binary identities and raw
+hashes. Known harness cleanup defects prevent interpreting its zero cleanup
+error count as proven drain. Its process-only QUIC placeholders are not traffic
+measurements; use the separately captured primary-connection network windows.
