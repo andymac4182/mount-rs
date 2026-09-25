@@ -162,6 +162,14 @@ impl Transport for QuicTransport {
     }
 }
 
+/// Initial transport selection only. No switch after authentication or RPCs.
+#[derive(Clone, Copy, Debug)]
+pub enum ConnectionTransport {
+    Quic,
+    WebSocket(SocketAddr),
+    Auto { websocket: SocketAddr },
+}
+
 pub struct RemoteConnection {
     transport: Arc<dyn Transport>,
     credentials: Option<CredentialSource>,
@@ -194,6 +202,78 @@ impl RemoteConnection {
         partition_id: String,
         credentials: CredentialSource,
     ) -> Result<Arc<Self>, ClientError> {
+        Self::connect_with_transport(
+            address,
+            server_name,
+            roots,
+            partition_id,
+            credentials,
+            ConnectionTransport::Quic,
+        )
+        .await
+    }
+
+    pub async fn connect_with_transport(
+        address: SocketAddr,
+        server_name: &str,
+        roots: rustls::RootCertStore,
+        partition_id: String,
+        credentials: CredentialSource,
+        selection: ConnectionTransport,
+    ) -> Result<Arc<Self>, ClientError> {
+        let transport = match selection {
+            ConnectionTransport::Quic => {
+                Self::connect_quic_transport(address, server_name, roots, REQUEST_TIMEOUT)
+                    .await
+                    .map_err(QuicEstablishment::client_error)?
+            }
+            ConnectionTransport::WebSocket(websocket) => {
+                Self::connect_websocket_transport(websocket, server_name, roots).await?
+            }
+            ConnectionTransport::Auto { websocket } => match Self::connect_quic_transport(
+                address,
+                server_name,
+                roots.clone(),
+                Duration::from_secs(3),
+            )
+            .await
+            {
+                Ok(transport) => transport,
+                Err(QuicEstablishment::Unavailable) => {
+                    Self::connect_websocket_transport(websocket, server_name, roots).await?
+                }
+                Err(error) => return Err(error.client_error()),
+            },
+        };
+        let token = credentials
+            .token()
+            .await
+            .map_err(|_| ClientError::Credential)?;
+        let hello = Message::ClientHello {
+            version: PROTOCOL_VERSION,
+            partition_id,
+            bearer: token.expose().to_owned(),
+        };
+        match tokio::time::timeout(REQUEST_TIMEOUT, transport.exchange(hello)).await {
+            Ok(Ok(Message::ServerHello { version, .. })) if version == transport.version() => {}
+            _ => return Err(ClientError::Authentication),
+        }
+        Ok(Arc::new(Self {
+            transport,
+            credentials: Some(credentials),
+            expires_at: AtomicI64::new(token_exp(&token)),
+            renew_lock: Mutex::new(()),
+            next_id: AtomicU64::new(0),
+            closed: AtomicBool::new(false),
+        }))
+    }
+
+    async fn connect_quic_transport(
+        address: SocketAddr,
+        server_name: &str,
+        roots: rustls::RootCertStore,
+        connect_timeout: Duration,
+    ) -> Result<Arc<dyn Transport>, QuicEstablishment> {
         let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(
             rustls::crypto::ring::default_provider(),
         ))
@@ -224,48 +304,49 @@ impl RemoteConnection {
         let mut endpoint = quinn::Endpoint::client(bind).map_err(|_| ClientError::Transport)?;
         endpoint.set_default_client_config(config);
         let connection = tokio::time::timeout(
-            REQUEST_TIMEOUT,
+            connect_timeout,
             endpoint
                 .connect(address, server_name)
                 .map_err(|_| ClientError::Transport)?,
         )
         .await
-        .map_err(|_| ClientError::Transport)?
-        .map_err(|_| ClientError::Transport)?;
+        .map_err(|_| QuicEstablishment::Unavailable)?
+        .map_err(|error| match error {
+            quinn::ConnectionError::TimedOut => QuicEstablishment::Unavailable,
+            quinn::ConnectionError::ConnectionClosed(ref close)
+                if close.error_code == quinn::TransportErrorCode::CONNECTION_REFUSED =>
+            {
+                QuicEstablishment::Unavailable
+            }
+            _ => QuicEstablishment::Fatal(ClientError::Authentication),
+        })?;
         let handshake = connection
             .handshake_data()
             .ok_or(ClientError::Protocol)?
             .downcast::<quinn::crypto::rustls::HandshakeData>()
             .map_err(|_| ClientError::Protocol)?;
         if handshake.protocol.as_deref() != Some(b"mount-rs/2") {
-            return Err(ClientError::Protocol);
+            return Err(ClientError::Protocol.into());
         }
         let transport: Arc<dyn Transport> = Arc::new(QuicTransport {
             _endpoint: endpoint,
             connection,
             version: PROTOCOL_VERSION,
         });
-        let token = credentials
-            .token()
-            .await
-            .map_err(|_| ClientError::Credential)?;
-        let hello = Message::ClientHello {
-            version: PROTOCOL_VERSION,
-            partition_id,
-            bearer: token.expose().to_owned(),
-        };
-        match tokio::time::timeout(REQUEST_TIMEOUT, transport.exchange(hello)).await {
-            Ok(Ok(Message::ServerHello { version, .. })) if version == transport.version() => {}
-            _ => return Err(ClientError::Authentication),
-        }
-        Ok(Arc::new(Self {
-            transport,
-            credentials: Some(credentials),
-            expires_at: AtomicI64::new(token_exp(&token)),
-            renew_lock: Mutex::new(()),
-            next_id: AtomicU64::new(0),
-            closed: AtomicBool::new(false),
-        }))
+        Ok(transport)
+    }
+
+    async fn connect_websocket_transport(
+        address: SocketAddr,
+        server_name: &str,
+        roots: rustls::RootCertStore,
+    ) -> Result<Arc<dyn Transport>, ClientError> {
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            crate::websocket::WebSocketTransport::connect(address, server_name, roots),
+        )
+        .await
+        .map_err(|_| ClientError::Transport)?
     }
 
     #[cfg(test)]
@@ -465,6 +546,24 @@ fn token_exp(token: &SecretToken) -> i64 {
         .ok()
         .and_then(|value| value.get("exp")?.as_i64())
         .unwrap_or(0)
+}
+
+enum QuicEstablishment {
+    Unavailable,
+    Fatal(ClientError),
+}
+impl From<ClientError> for QuicEstablishment {
+    fn from(error: ClientError) -> Self {
+        Self::Fatal(error)
+    }
+}
+impl QuicEstablishment {
+    fn client_error(self) -> ClientError {
+        match self {
+            Self::Unavailable => ClientError::Transport,
+            Self::Fatal(error) => error,
+        }
+    }
 }
 
 #[cfg(test)]

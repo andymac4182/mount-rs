@@ -24,6 +24,8 @@ struct ServiceConfig {
     version: u32,
     catalog: PathBuf,
     listen: SocketAddr,
+    #[serde(default)]
+    websocket_listen: Option<SocketAddr>,
     certificate: PathBuf,
     private_key: PathBuf,
     #[serde(default = "default_connection_limit")]
@@ -59,12 +61,43 @@ struct MountConfig {
 struct RemoteProvider {
     kind: String,
     endpoint: SocketAddr,
+    #[serde(default)]
+    connection_transport: ConnectionMode,
+    #[serde(default)]
+    websocket_endpoint: Option<SocketAddr>,
     server_name: String,
     partition: String,
     credentials: Credentials,
     #[serde(default)]
     ca_certificate: Option<PathBuf>,
     mounts: Vec<DriveMount>,
+}
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ConnectionMode {
+    #[default]
+    Quic,
+    Websocket,
+    Auto,
+}
+impl RemoteProvider {
+    fn connection_selection(
+        &self,
+    ) -> Result<mount_rs_remote_client::connection::ConnectionTransport, CliError> {
+        use mount_rs_remote_client::connection::ConnectionTransport;
+        Ok(match self.connection_transport {
+            ConnectionMode::Quic => ConnectionTransport::Quic,
+            ConnectionMode::Websocket => ConnectionTransport::WebSocket(
+                self.websocket_endpoint
+                    .ok_or_else(|| CliError::usage("websocket_endpoint is required"))?,
+            ),
+            ConnectionMode::Auto => ConnectionTransport::Auto {
+                websocket: self
+                    .websocket_endpoint
+                    .ok_or_else(|| CliError::usage("websocket_endpoint is required"))?,
+            },
+        })
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -110,6 +143,7 @@ fn id(value: &str) -> bool {
 fn validate_mount(config: &MountConfig) -> Result<(), CliError> {
     version(config.version)?;
     let provider = &config.driver;
+    provider.connection_selection()?;
     if provider.kind != "remote"
         || !id(&provider.partition)
         || provider.server_name.is_empty()
@@ -247,19 +281,53 @@ pub(crate) async fn serve(path: &Path) -> Result<(), CliError> {
             catalog.clone(),
         ));
         let mut signal = CtrlCHandler::install().await?;
-        let server = mount_rs_service::server::RemoteServer::bind_with_options(
+        let dispatcher = Arc::new(dispatcher);
+        let websocket = if let Some(address) = config.websocket_listen {
+            Some(
+                mount_rs_service::websocket::WebSocketServer::bind_with_options(
+                    address,
+                    certs.clone(),
+                    key.clone_key(),
+                    dispatcher.clone(),
+                    authenticator.clone(),
+                    server_options,
+                )
+                .await
+                .map_err(|_| CliError::runtime("cannot start TLS websocket service"))?,
+            )
+        } else {
+            None
+        };
+        let server = match mount_rs_service::server::RemoteServer::bind_with_options(
             config.listen,
             certs,
             key,
-            Arc::new(dispatcher),
+            dispatcher,
             authenticator,
             server_options,
         )
         .await
-        .map_err(|_| CliError::runtime("cannot start remote service"))?;
+        {
+            Ok(server) => server,
+            Err(_) => {
+                if let Some(websocket) = websocket {
+                    websocket.close().await;
+                }
+                return Err(CliError::runtime("cannot start remote service"));
+            }
+        };
+        if let Some(websocket) = &websocket {
+            println!(
+                "remote TLS websocket listening at {}",
+                websocket.local_addr()
+            );
+        }
         println!("remote listening at {}", server.local_addr());
         let result = signal.wait().await;
         server.close().await;
+        if let Some(websocket) = websocket {
+            websocket.close().await;
+        }
         result
     }
     .await;
@@ -306,12 +374,13 @@ pub(crate) async fn mount(path: &Path) -> Result<(), CliError> {
             )
         }
     };
-    let connection = mount_rs_remote_client::connection::RemoteConnection::connect(
+    let connection = mount_rs_remote_client::connection::RemoteConnection::connect_with_transport(
         config.driver.endpoint,
         &config.driver.server_name,
         roots,
         config.driver.partition.clone(),
         credentials,
+        config.driver.connection_selection()?,
     )
     .await
     .map_err(|_| CliError::runtime("remote connection failed"))?;
@@ -403,6 +472,29 @@ pub(crate) fn validate(path: &Path) -> Result<(), CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn websocket_remote_configuration_is_explicit() {
+        let mut value = valid();
+        value["driver"]["connection_transport"] = serde_json::json!("websocket");
+        value["driver"]["websocket_endpoint"] = serde_json::json!("127.0.0.1:4434");
+        let config: MountConfig = serde_json::from_value(value).expect("TLS websocket config");
+        assert!(validate_mount(&config).is_ok());
+    }
+
+    #[test]
+    fn automatic_remote_selection_requires_explicit_tls_endpoint() {
+        for mode in ["websocket", "auto"] {
+            let mut value = valid();
+            value["driver"]["connection_transport"] = serde_json::json!(mode);
+            assert!(validate_mount(&serde_json::from_value(value.clone()).unwrap()).is_err());
+            value["driver"]["websocket_endpoint"] = serde_json::json!("127.0.0.1:4434");
+            assert!(validate_mount(&serde_json::from_value(value).unwrap()).is_ok());
+        }
+        let mut value = valid();
+        value["driver"]["connection_transport"] = serde_json::json!("plaintext");
+        assert!(serde_json::from_value::<MountConfig>(value).is_err());
+    }
+
     #[test]
     fn server_connection_capacity_is_explicit_with_compatible_default() {
         let mut value = serde_json::json!({"version":1,"catalog":"catalog.sqlite","listen":"127.0.0.1:4433","certificate":"cert.pem","private_key":"key.pem"});

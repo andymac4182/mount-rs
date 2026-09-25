@@ -3,3 +3,5 @@
 pub mod connection;
 pub mod credentials;
 pub mod driver;
+
+pub mod websocket;

@@ -542,7 +542,7 @@ fn denied() -> Message {
     }
 }
 
-fn session_id() -> String {
+pub(crate) fn session_id() -> String {
     use ring::rand::SecureRandom;
     let mut bytes = [0_u8; 16];
     if ring::rand::SystemRandom::new().fill(&mut bytes).is_err() {

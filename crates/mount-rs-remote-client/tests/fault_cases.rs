@@ -13,7 +13,7 @@ use mount_rs_core::{
 };
 use mount_rs_memfs::{MemoryFs, MemoryOptions};
 use mount_rs_remote_client::{
-    connection::{ClientError, RemoteConnection},
+    connection::{ClientError, ConnectionTransport, RemoteConnection},
     credentials::CredentialSource,
 };
 use mount_rs_remote_protocol::{Operation, OperationName};
@@ -24,6 +24,7 @@ use mount_rs_service::{
     },
     dispatch::{DriveDispatcher, SessionIdentity},
     server::{Authenticator, RemoteServer},
+    websocket::WebSocketServer,
 };
 use serde_json::json;
 
@@ -51,12 +52,14 @@ struct CommitThenWait {
     memory: MemoryFs,
     commits: Arc<AtomicUsize>,
     committed: Arc<tokio::sync::Notify>,
+    closes: Arc<AtomicUsize>,
 }
 
 struct CommitHandle {
     handle: Arc<dyn FileHandle>,
     commits: Arc<AtomicUsize>,
     committed: Arc<tokio::sync::Notify>,
+    closes: Arc<AtomicUsize>,
 }
 #[async_trait]
 impl FileHandle for CommitHandle {
@@ -70,7 +73,9 @@ impl FileHandle for CommitHandle {
         self.handle.truncate(length).await
     }
     async fn close(&self) -> FsResult<()> {
-        self.handle.close().await
+        self.handle.close().await?;
+        self.closes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
     async fn write(&self, data: &[u8], position: Option<u64>) -> FsResult<usize> {
         self.handle.write(data, position).await?;
@@ -96,6 +101,7 @@ impl FsDriver for CommitThenWait {
             handle: self.memory.open(path, flags, mode).await?,
             commits: self.commits.clone(),
             committed: self.committed.clone(),
+            closes: self.closes.clone(),
         }))
     }
     async fn write_file(&self, path: &str, data: &[u8]) -> FsResult<()> {
@@ -108,13 +114,43 @@ impl FsDriver for CommitThenWait {
 
 #[tokio::test]
 async fn quic_disconnect_after_backend_commit_does_not_replay_uncertain_write() {
-    uncertain_write(false).await;
+    uncertain_write(false, false, false).await;
 }
 #[tokio::test]
 async fn binary_disconnect_after_backend_commit_does_not_replay_uncertain_handle_write() {
-    uncertain_write(true).await;
+    uncertain_write(true, false, false).await;
 }
-async fn uncertain_write(binary: bool) {
+#[tokio::test]
+async fn websocket_uncertain_generic_write_commits_once_without_replay() {
+    uncertain_write(false, true, false).await;
+}
+#[tokio::test]
+async fn websocket_uncertain_binary_write_commits_once_without_replay() {
+    uncertain_write(true, true, false).await;
+}
+#[tokio::test]
+async fn cancelled_websocket_write_fails_closed_without_replay() {
+    uncertain_write(true, true, true).await;
+}
+enum TestServer {
+    Quic(RemoteServer),
+    WebSocket(WebSocketServer),
+}
+impl TestServer {
+    fn local_addr(&self) -> std::net::SocketAddr {
+        match self {
+            Self::Quic(s) => s.local_addr(),
+            Self::WebSocket(s) => s.local_addr(),
+        }
+    }
+    async fn close(self) {
+        match self {
+            Self::Quic(s) => s.close().await,
+            Self::WebSocket(s) => s.close().await,
+        }
+    }
+}
+async fn uncertain_write(binary: bool, websocket: bool, cancel_caller: bool) {
     let directory = tempfile::tempdir().unwrap();
     let catalog = Arc::new(
         SqliteCatalog::open(directory.path().join("catalog.sqlite"))
@@ -152,6 +188,7 @@ async fn uncertain_write(binary: bool) {
         memory: MemoryFs::new(MemoryOptions::default()),
         commits: Arc::new(AtomicUsize::new(0)),
         committed: Arc::new(tokio::sync::Notify::new()),
+        closes: Arc::new(AtomicUsize::new(0)),
     });
     let mut dispatcher = DriveDispatcher::new(catalog);
     dispatcher
@@ -160,25 +197,48 @@ async fn uncertain_write(binary: bool) {
     let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let cert = certificate.cert.der().clone();
     let key = rustls::pki_types::PrivatePkcs8KeyDer::from(certificate.signing_key.serialize_der());
-    let server = RemoteServer::bind(
-        "127.0.0.1:0".parse().unwrap(),
-        vec![cert.clone()],
-        key.into(),
-        Arc::new(dispatcher),
-        Arc::new(TestAuthenticator),
-    )
-    .await
-    .unwrap();
+    let dispatcher = Arc::new(dispatcher);
+    let authenticator = Arc::new(TestAuthenticator);
+    let server = if websocket {
+        TestServer::WebSocket(
+            WebSocketServer::bind(
+                "127.0.0.1:0".parse().unwrap(),
+                vec![cert.clone()],
+                key.into(),
+                dispatcher,
+                authenticator,
+            )
+            .await
+            .unwrap(),
+        )
+    } else {
+        TestServer::Quic(
+            RemoteServer::bind(
+                "127.0.0.1:0".parse().unwrap(),
+                vec![cert.clone()],
+                key.into(),
+                dispatcher,
+                authenticator,
+            )
+            .await
+            .unwrap(),
+        )
+    };
     let mut roots = rustls::RootCertStore::empty();
     roots.add(cert).unwrap();
     let token_path = directory.path().join("token");
     std::fs::write(&token_path, "dmFsaWQ.e30.c2ln").unwrap();
-    let connection = RemoteConnection::connect(
+    let connection = RemoteConnection::connect_with_transport(
         server.local_addr(),
         "localhost",
         roots,
         "red".into(),
         CredentialSource::File(token_path),
+        if websocket {
+            ConnectionTransport::WebSocket(server.local_addr())
+        } else {
+            ConnectionTransport::Quic
+        },
     )
     .await
     .unwrap();
@@ -232,27 +292,41 @@ async fn uncertain_write(binary: bool) {
             .unwrap(),
         [1, 2, 3]
     );
-    connection.close();
-    assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(3), request)
-            .await
-            .unwrap()
-            .unwrap(),
-        Err(ClientError::Transport | ClientError::Protocol)
-    ));
+    let closes_before_shutdown = backend.closes.load(Ordering::SeqCst);
+    if cancel_caller {
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+    } else {
+        connection.close();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(3), request)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err(ClientError::Transport | ClientError::Protocol)
+        ));
+    }
     assert_eq!(backend.commits.load(Ordering::SeqCst), 1);
     assert!(matches!(
-        connection
-            .request(
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            connection.request(
                 "data",
                 Operation {
                     name: OperationName::Stat,
                     body: json!({"path":"/"})
                 }
             )
-            .await,
+        )
+        .await
+        .expect("cancelled socket must fail closed immediately"),
         Err(ClientError::Transport)
     ));
     assert_eq!(backend.commits.load(Ordering::SeqCst), 1);
     server.close().await;
+    assert_eq!(
+        backend.closes.load(Ordering::SeqCst),
+        closes_before_shutdown + usize::from(binary),
+        "session handle cleanup must finish before server shutdown returns"
+    );
 }
