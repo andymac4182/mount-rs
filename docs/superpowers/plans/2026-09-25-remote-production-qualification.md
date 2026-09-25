@@ -15,7 +15,7 @@
 - One current negotiated protocol version; no compatibility implementation.
 - Writes commit to backing storage before acknowledgment; uncertain writes are never replayed.
 - Keep the existing 1,000 lifecycle IOPS threshold; record legacy versus inode layouts explicitly.
-- Ten servers, up to 10,000 mostly separate-drive clients, both mostly idle and all active.
+- Ten servers, 10,000 concurrent clients, 10,000 distinct Drives across 5,000 Partitions, 1,000 files per Drive; both mostly idle and all active.
 - Keep caches bounded in RAM, disk, network, and concurrent misses; no cache durability claims.
 - Serialize Cargo and timed loads; use scripts/cargo-shared and a checkout-specific external target.
 - Preserve unrelated dirty work. Distinguish local, VM, native, cross-host, and production evidence.
@@ -27,15 +27,15 @@ Files: crates/mount-rs-remote-client/src/{connection.rs,websocket.rs,lib.rs}, cr
 Consumes Transport::exchange/read/write/close, Message/Incoming binary codecs, Authenticator::authenticate, DriveDispatcher, SessionHandles, admission helpers.
 Produces TLS WebSocket listener/client and explicit CLI transport/fallback configuration preserving existing QUIC API.
 
-- [ ] Read complete transport/session and CLI contracts; document exact public API decisions before editing.
-- [ ] Add meaningful failing real-TLS tests for WebSocket filesystem roundtrip, initial UDP-unavailable fallback, revoked/read-only/cross-Partition access, rejected negotiation, malformed/oversize frames, shutdown, and uncertain write nonreplay.
-- [ ] Implement bounded negotiated transport and CLI wiring with existing dispatcher authorization and handle lifecycle; classify fallback conditions conservatively.
-- [ ] Run remote-protocol/client/service and CLI focused tests and strict touched Clippy; retain commands/results in task report.
-- [ ] Commit touched source/tests/docs and obtain independent task review.
+- [x] Read complete transport/session and CLI contracts; document exact public API decisions before editing.
+- [x] Add meaningful failing real-TLS tests for WebSocket filesystem roundtrip, initial UDP-unavailable fallback, revoked/read-only/cross-Partition access, rejected negotiation, malformed/oversize frames, shutdown, and uncertain write nonreplay.
+- [x] Implement bounded negotiated transport and CLI wiring with existing dispatcher authorization and handle lifecycle; classify fallback conditions conservatively.
+- [x] Run remote-protocol/client/service and CLI focused tests and strict touched Clippy; retain commands/results in task report.
+- [x] Commit touched source/tests/docs and obtain independent task review.
 
 ## Task 2: Controlled storage diagnosis and fixes
 
-Files: benchmarks/storage/{runner.mjs,providers.mjs,test.mjs}, bindings/mount-rs-napi/src/memory_factory.rs, providers/mount-rs-tidb/src/storage.rs, crates/mount-rs-sdk/src/{stores.rs,providers.rs,filesystem.rs}, filesystems/mount-rs-chunked/src/lib.rs, focused concurrency/lifecycle tests, measurement scripts/docs.
+Files: benchmarks/storage/{runner.mjs,providers.mjs,test.mjs}, bindings/mount-rs-napi/src/lib.rs, providers/mount-rs-tidb/src/storage.rs, crates/mount-rs-sdk/src/{stores.rs,providers.rs,filesystem.rs}, filesystems/mount-rs-chunked/src/lib.rs, focused concurrency/lifecycle tests, measurement scripts/docs.
 
 Consumes existing lifecycle benchmark, provider diagnostics, legacy and inode publication APIs.
 Produces controlled comparison artifacts, diagnosed amplification, bounded pool/startup improvements where supported by evidence.
@@ -63,10 +63,11 @@ Produces failure qualification and measured backing-read savings, plus fixes dem
 Files: crates/mount-rs-service/tests/{quic_tidb_saturation.rs,support/saturation_backend.rs,support/resource_profile.rs}, scripts/{bench-remote-scaling.sh,summarize-remote-scaling.py}, docs/remote-client-scaling.md, docs/remote-production-qualification.md, CI workflow as required.
 
 Consumes Task 2 storage fixes and existing byte oracle; covers Task 1 fallback and Task 3 cache in end-to-end matrix.
-Produces idle/all-active separate-drive ramp results through 10,000 clients when achievable, explicit machine boundaries, complete follow-up PR.
+Produces idle/all-active ramps toward 10,000 clients / 10,000 Drives / 5,000 Partitions / 1,000 files per Drive, with varied I/O patterns, explicit machine boundaries, and a complete follow-up PR.
 
 - [ ] Verify small ten-server separate-drive run first; retain auth/oracle/cleanup results.
-- [ ] Ramp client counts for 100-active and all-active cases, collecting peak resources and datastore counters; stop each failed ramp point and diagnose before continuing.
+- [ ] Model two Drives per Partition, exact per-client grants, 1,000 files per Drive, and declared file sizes; validate sibling-Drive and cross-Partition denial.
+- [ ] Ramp client counts for 100-active and all-active cases, with sequential/random, mixed read/write, hot-file, append/truncate, and namespace-churn profiles. Collect peak resources and datastore counters; stop each failed ramp point and diagnose before continuing.
 - [ ] Fix demonstrated resource blockers, rerun failed point, attempt 10,000 clients, retain both success and failure evidence.
 - [ ] Run QUIC and WebSocket end-to-end auth/filesystem/cache tests plus applicable native mounting/live backends; run full formatting, strict Clippy, workspace tests, and relevant CI.
 - [ ] Independently review full branch and correct findings; create/attach PR and report verified results and remaining environment limits.

@@ -1,0 +1,67 @@
+{
+  "schema": "mount-rs-local-provider-probe-v1",
+  "run": "qualification-85563-37907fb4-5500-42c1-955d-0b1868b1538c",
+  "source": "180a4552",
+  "layout": "legacy-leased",
+  "scope": "public NAPI split stores; local blob providers; no QUIC/OIDC/native mounting",
+  "payloadBytes": 4096,
+  "iterations": 400,
+  "concurrency": 64,
+  "results": [
+    {
+      "provider": "sqlite",
+      "durability": "durable-local",
+      "successful": 400,
+      "verifiedReads": 400,
+      "errors": 0,
+      "cleanup": "passed",
+      "phase": "complete",
+      "setupSeconds": 0.017997709,
+      "elapsedSeconds": 0.825292042,
+      "lifecycleIops": 1454.0307417625627
+    },
+    {
+      "provider": "pglite",
+      "durability": "configured-volatile",
+      "successful": 400,
+      "verifiedReads": 400,
+      "errors": 0,
+      "cleanup": "passed",
+      "phase": "complete",
+      "setupSeconds": 0.040366457999999966,
+      "elapsedSeconds": 0.721785333,
+      "lifecycleIops": 1662.5441736428302
+    },
+    {
+      "provider": "tidb",
+      "durability": "single-node-diagnostic",
+      "successful": 400,
+      "verifiedReads": 400,
+      "errors": 0,
+      "cleanup": "passed",
+      "phase": "complete",
+      "setupSeconds": 0.04126587500000005,
+      "elapsedSeconds": 2.2308609169999998,
+      "lifecycleIops": 537.9089260363784
+    },
+    {
+      "provider": "foundationdb",
+      "durability": "single-node-diagnostic",
+      "successful": 400,
+      "verifiedReads": 400,
+      "errors": 0,
+      "cleanup": "passed",
+      "phase": "complete",
+      "setupSeconds": 0.13636449999999967,
+      "elapsedSeconds": 29.301206583,
+      "lifecycleIops": 40.95394490328658
+    }
+  ],
+  "limitations": [
+    "single short trial, no confidence intervals",
+    "different durability policies/environments; not a production ranking",
+    "legacy leased layout, no QUIC or OIDC or native mount",
+    "FoundationDB native single process1GiB; TiDB Docker single topology8.32GBVM",
+    "not acceptance of R2/Ozone lifecycle throughput gate"
+  ]
+}

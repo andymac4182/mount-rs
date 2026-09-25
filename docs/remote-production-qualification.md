@@ -1,0 +1,72 @@
+# Remote production qualification
+
+Status: in progress. The active goal covers secure WebSocket fallback, storage diagnosis, real distributed-cache failure tests, and ten-server separate-Drive scaling. WebSocket fallback is implemented, independently reviewed, and accepted. Storage, cache failure qualification, scaling, and final delivery remain in progress.
+
+## Controlled TiDB baseline
+
+Source: merged `cd92c7d4c4a46f5752c2f2af0d6983b6e4a3e39d`, with planning-only commit `c74ca180`. A preserved release executable was built with `resource-profiling` before functional edits.
+
+Local Docker ARM64 VM: 14 CPUs, 8,318,976,000 bytes memory. One PD, one TiKV, one TiDB, version v8.5.7. This is a single-host diagnostic configuration; it does not establish replicated production capacity or power-loss durability.
+
+Workload: ten server coordinators, ten clients, one separate Drive per client, inode updates enabled, 4 KiB reads and overwrites, depth one, 32 blocks per file, one-second warmup and three-second measured stages. Measurements include request drain. This baseline uses the load fixture authenticator with synthetic bearer tokens and actual per-Drive claim policies; it does not measure OIDC signature validation or production authentication capacity.
+
+| Setup | Outcome |
+| --- | --- |
+| Virgin Drives, parallel server startup | Nine of ten coordinator initializations failed before I/O, primarily ESTALE. Cleanup succeeded; verification skipped. |
+| Identical preprovisioned control | Byte verification and cleanup passed. Read 1,895.21 IOPS; write 680.13 IOPS; zero operation failures. |
+
+The virgin setup failure is reproducible separately from steady-state throughput. The startup implementation can observe another coordinator transitioning metadata from MRC2 to inode mode between its authority inspection and enrollment. Deterministic regressions and an actual datastore rerun are required before accepting a fix.
+
+### Datastore and process profile
+
+The preprovisioned control had 310 TiDB client sessions at both measured stage boundaries. Current construction creates separate pools for every metadata and block role of every Drive on every server. Schema setup also repeats global DDL. Pool ownership and schema initialization need explicit lifetimes before sharing those resources.
+
+| Counter | Read | Write |
+| --- | ---: | ---: |
+| Successful operations | 5,692 | 2,047 |
+| TiDB statements per logical operation | 3 | 10 |
+| TiDB CPU milliseconds per operation | 1.448 | 3.117 |
+| TiKV VM block write operations per logical operation | 0.0016 | 3.8471 |
+| TiKV VM block write bytes per logical operation | 4.32 | 20,692.10 |
+| Process RSS at stage boundary | 43,040,768 bytes | 44,089,344 bytes |
+
+The TiKV block counters are Linux VM cgroup I/O, not physical Mac SSD IOPS. Datastore counters include background traffic and observer-boundary overhead. New metric series appeared during the read stage, so coverage is marked incomplete there. These short diagnostic runs identify amplification; they are not stable capacity estimates. Rust allocation counts were not instrumented in this baseline.
+
+Protocol traffic was approximately 4,237 received bytes per 4 KiB read and 4,262 transmitted bytes per 4 KiB write. Inode publication serialized approximately 4,462 bytes per write for a file containing 32 extents. Ordinary independent file updates lock their selected inode, not the global namespace revision.
+
+Raw local artifacts, executable checksum, source identity, observer samples, and compact summary are retained under `/private/tmp/mount-rs-qualification-baseline`. Paired after-fix results must use the same topology, workload, oracle, and timing definitions.
+
+## WebSocket fallback acceptance
+
+Commits `180a4552` and `9c355020` implement verified TLS WebSocket transport with the `mount-rs.v2` subprotocol, bounded binary envelopes, and initial QUIC fallback only when no UDP response has arrived. Cancellation closes an incomplete transaction without replaying an uncertain write. Removed handles retain independently owned close tasks through cancellation and shutdown.
+
+Focused client/service validation passed 103 tests with four ignored integration gates. The wire suite passed 12 tests, including a QUIC handshake that receives a server response and then stalls: it must not contact the WebSocket listener. Signed OIDC filesystem tests passed for QUIC, WebSocket, and fallback, including read-only, revocation, partition isolation, and fresh-store persistence.
+
+The macOS native NFS end-to-end gate passed all three transport tests with `MOUNT_RS_REMOTE_NATIVE_NFS=1`: two Drive mounts, kernel file create/write/sync/read/rename, read-only denial, explicit unmount, and fresh SQLite persistence. The command ran as the ordinary user with approved host filesystem access; a filesystem-sandbox trial failed at mounting. No sudo or user identity change was used. Linux native mounting remains a CI gate.
+
+Independent spec and quality re-review approved the implementation. Strict touched-surface Clippy and formatting passed. These results precede the storage changes; final branch validation must run again after integration.
+
+## Acceptance still required
+- Deterministic startup regressions, bounded shared-pool lifetime and isolation tests, actual TiDB rerun, and controlled provider comparisons.
+- Real authenticated QUIC cache peers with backing counters, peer loss/restart, stale discovery, corruption, disk pressure, and commit-before-placement.
+- Ten-server ramps toward 10,000 concurrent clients, 10,000 Drives across 5,000 Partitions, and 1,000 files per Drive with varied read/write patterns, in mostly idle and all-active modes, with byte verification, explicit resource limits, and a signed OIDC authentication mode distinguished from synthetic data-path measurements.
+- Independent reviews, touched and full validation, and a tested follow-up PR.
+
+## Production workload target
+
+The requested production workload has 10,000 clients using distinct Drives across 5,000 Partitions, with 1,000 files per Drive. A balanced fixture therefore uses two Drives per Partition and ten million files. Each connection remains bound to one Partition and one client's granted Drive; qualification must check denial of both other Partitions and the ungranted sibling Drive. Pending the user's preference, use 990 files of 4 KiB, nine of 128 KiB, and one of 1 MiB per Drive: 62.83 GB of unique logical payload across 10,000 Drives before metadata, logs, and replicas.
+
+The existing single-Partition, one-file-per-Drive baseline does not establish this target. Further runs must declare file counts and sizes, distinguish namespace and payload setup from steady I/O, and exercise random/sequential reads and overwrites, mixed traffic, hot-file skew, append/truncate, and namespace churn. Current catalog validation also limits Partitions to 1,024, so it cannot admit the requested 5,000-Partition fixture without a tested bounded capacity change.
+
+## Pre-change local provider diagnostic
+
+The preserved NAPI addon at `180a4552` ran the same 400 create/read/unlink lifecycles with 64 workers and unique 4 KiB payloads against split local stores. Every provider completed 400 exact-byte reads and cleanup with zero errors. The ordinary-user host run used existing owned fixtures.
+
+| Provider | Lifecycle IOPS | Measured seconds | Configuration |
+| --- | ---: | ---: | --- |
+| SQLite | 1,454.03 | 0.825 | Durable local files |
+| PGlite | 1,662.54 | 0.722 | Persistent fixture, configured volatile acknowledgment |
+| TiDB | 537.91 | 2.231 | Single Docker VM topology |
+| FoundationDB | 40.95 | 29.301 | Native single process, 1 GiB limit, persisted single-authority lease |
+
+These are short diagnostic measurements with different durability settings and execution environments, not a fair production ranking. All use legacy leased publication. FoundationDB opening took 0.136 seconds; the long delay was in the lifecycle workload. A prior 30-second bounded process stopped before completion and is retained as incomplete evidence. Controlled inode and steady-existing-file measurements must identify metadata contention and structural costs before attributing the difference.
