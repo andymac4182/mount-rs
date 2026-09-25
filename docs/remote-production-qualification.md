@@ -213,3 +213,40 @@ These short single trials have different durability settings and are diagnostic
 comparisons, not a production ranking or a measured regression ratio.
 
 [The provider layout artifact](benchmarks/remote-production-qualification-20260925/local-providers-after.json) retains all four configurations, successful counts and both failed FoundationDB cases.
+
+A separate one-file native FoundationDB control confirms the prefix boundary:
+same-prefix inode create/read/full-byte verification/unlink/shutdown passed;
+otherwise-identical separate-prefix construction failed with the same ESTALE
+before returning a driver. No authority marker was copied or altered.
+[The prefix control artifact](benchmarks/remote-production-qualification-20260925/fdb-inode-prefix-control.json) retains both outcomes.
+
+A small PostgreSQL wire probe verified eight iterations in each of eight
+layout/workload/concurrency combinations. At one worker, inode steady work
+produced 112 Parse, 80 Close and 272 Sync messages, versus 24 Parse, zero Close
+and 24 Sync for legacy. Inode lifecycle produced 320 Parse, 240 Close and 800
+Sync, versus 32 Parse, zero Close and 32 Sync. This confirms extra statement
+protocol work; it does not attribute every slowdown or establish a throughput
+gain. The proxy recorded message types only and affects timing.
+[The wire-count artifact](benchmarks/remote-production-qualification-20260925/pglite-wire-control.json) retains all cases and failed diagnostic setup limitations.
+
+## Production harness checkpoints
+
+The balanced catalog accepts the requested 5,000 Partitions and 10,000 Drives
+and grants within the unchanged 8 MiB document bound. Independent checkpoint
+review accepted the count, resource and mixed-file oracle changes. These are
+model and catalog gates, not a populated ten-million-file capacity result.
+
+A release profile of 40 authoritative catalog reads at the target shape read
+90,850,280 document bytes (2,271,257 per call), taking 28.711 ms wall and
+27.656 ms process CPU. The ten-client shape took 2.182 ms wall with 2,222 bytes
+per call. A separate debug allocation profile recorded about 14.725 Rust
+allocations and 2,170.1 allocated bytes per call; SQLite's foreign heap is
+excluded and recorded separately. No zero-allocation claim is supported.
+
+A ten-listener signed-OIDC smoke passed ten own-Drive full-byte reads, ten
+ungranted sibling denials and ten other-Partition authentication denials.
+Negative probes require the exact authentication application close, so network
+failures cannot count as denials. All ten legitimate connections remain held
+through the sequential work. Independent review accepted this checkpoint.
+The smoke uses shared volatile MemoryFs and an owned static JWK source; it
+does not test discovery, TiDB population, simultaneous I/O or production capacity.
