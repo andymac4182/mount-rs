@@ -30,8 +30,13 @@ struct ServiceConfig {
     private_key: PathBuf,
     #[serde(default = "default_connection_limit")]
     max_connections: usize,
+    #[serde(default = "default_tidb_pool_max_connections")]
+    tidb_pool_max_connections: usize,
     #[serde(default)]
     cache: Option<crate::server_cache::CacheServiceConfig>,
+}
+fn default_tidb_pool_max_connections() -> usize {
+    16
 }
 fn default_connection_limit() -> usize {
     mount_rs_service::server::RemoteServerOptions::default().max_connections
@@ -208,6 +213,7 @@ pub(crate) async fn serve(path: &Path) -> Result<(), CliError> {
     if let Some(cache) = &config.cache {
         cache.validate()?;
     }
+    let context = mount_rs_sdk::StorageContext::new(config.tidb_pool_max_connections)?;
     let catalog = Arc::new(
         SqliteCatalog::open(relative(path, &config.catalog))
             .await
@@ -257,24 +263,25 @@ pub(crate) async fn serve(path: &Path) -> Result<(), CliError> {
                         "server blob cache requires concurrent_writes for split-storage drives",
                     ));
                 }
-                let runtime = DriverRuntime::open_with_block_decorator(
+                let runtime = DriverRuntime::open_with_storage_context(
                     &options,
                     uid,
                     gid,
                     decorator
                         .as_ref()
                         .map(|d| d as &dyn mount_rs_sdk::BlockStoreDecorator),
+                    Some(&context),
                 )
                 .await?;
+                runtimes.push(runtime);
                 dispatcher
                     .register_definition(
                         partition_id,
                         drive_id,
                         drive.driver.clone(),
-                        runtime.driver(),
+                        runtimes.last().expect("just opened runtime").driver(),
                     )
                     .map_err(CliError::usage)?;
-                runtimes.push(runtime);
             }
         }
         let authenticator = Arc::new(mount_rs_service::auth::CatalogAuthenticator::new(
@@ -336,6 +343,9 @@ pub(crate) async fn serve(path: &Path) -> Result<(), CliError> {
         if let Err(error) = runtime.shutdown().await {
             shutdown_error.get_or_insert_with(|| CliError::from(error));
         }
+    }
+    if let Err(error) = context.close().await {
+        shutdown_error.get_or_insert_with(|| CliError::from(error));
     }
     if let Some(cache) = cache {
         cache.shutdown().await;
@@ -500,9 +510,23 @@ mod tests {
         let mut value = serde_json::json!({"version":1,"catalog":"catalog.sqlite","listen":"127.0.0.1:4433","certificate":"cert.pem","private_key":"key.pem"});
         let config: ServiceConfig = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(config.max_connections, 128);
+        assert_eq!(config.tidb_pool_max_connections, 16);
         value["max_connections"] = serde_json::json!(1024);
         let config: ServiceConfig = serde_json::from_value(value).unwrap();
         assert_eq!(config.max_connections, 1024);
+    }
+
+    #[tokio::test]
+    async fn invalid_pool_bound_fails_before_opening_server_resources() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("service.json");
+        std::fs::write(&path,serde_json::json!({"version":1,"catalog":"absent/catalog.sqlite","listen":"127.0.0.1:0","certificate":"absent.pem","private_key":"absent-key.pem","tidb_pool_max_connections":0}).to_string()).unwrap();
+        let error = serve(&path).await.unwrap_err();
+        assert!(
+            error.to_string().contains("maximum must be positive"),
+            "{error}"
+        );
+        assert!(!directory.path().join("absent").exists());
     }
 
     #[test]

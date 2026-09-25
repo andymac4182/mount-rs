@@ -72,6 +72,8 @@ function takeValue(argv, index, flag) {
 }
 
 export function parseArgs(argv) {
+  let layout = "legacy"
+  let workload = "lifecycle"
   let smoke = false
   let sizes
   let iterations
@@ -91,6 +93,14 @@ export function parseArgs(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
     switch (argument) {
+      case "--layout":
+        layout = takeValue(argv, index++, argument)
+        if (!["legacy", "inode"].includes(layout)) throw usageError("layout must be legacy or inode")
+        break
+      case "--workload":
+        workload = takeValue(argv, index++, argument)
+        if (!["lifecycle", "steady-overwrite"].includes(workload)) throw usageError("workload must be lifecycle or steady-overwrite")
+        break
       case "--help":
       case "-h":
         help = true
@@ -154,6 +164,8 @@ export function parseArgs(argv) {
 
   return {
     help,
+    layout,
+    workload,
     mode: smoke ? "smoke" : "full",
     sizes: sizes || (smoke ? [1] : [...FILE_SIZE_MIB]),
     iterations: iterations || (smoke ? 1 : 2),
@@ -182,6 +194,8 @@ Usage:
 Options:
   --smoke                  1 MiB, one iteration, concurrency one, local providers
   --sizes LIST             MiB values; defaults to 1,4,10,16 in full mode
+  --layout legacy|inode     metadata layout (default legacy; inode requires split storage)
+  --workload lifecycle|steady-overwrite  create/read/delete or precreated partial overwrite/read
   --iterations N            lifecycle iterations per size (default 2 full, 1 smoke)
   --concurrency N           concurrent lifecycle workers per provider/size (default 1)
   --providers LIST          provider ids (default all in full mode)
@@ -522,6 +536,65 @@ export async function runSample({
   return finishSample(sample, payload)
 }
 
+// Steady-state operations keep a preopened inode and overwrite its interior.
+// The unchanged first/last bytes are part of the read oracle.
+export async function runSteadySample({ definition, handle, payload, path, iteration, options, pendingOperations }) {
+  const sample = emptySample(definition, payload.byteLength, iteration, path)
+  sample.workload = "steady-overwrite"
+  sample.deleteSucceeded = null
+  if (pendingOperations.has(path)) {
+    firstFailure(sample, "write", new Error("prior operation remains pending on this handle"))
+    return finishSample(sample, payload)
+  }
+  const changed = Buffer.from(payload)
+  changed[0] = (changed[0] + iteration) % 256
+  const expected = Buffer.concat([Buffer.from([0x51]), changed, Buffer.from([0xa7])])
+  for (const operation of ["write", "read"]) {
+    const started = performance.now()
+    try {
+      if (operation === "write") {
+        const result = await withTimeout(() => handle.write(changed, 0, changed.length, 1), options.timeoutMs, operation)
+        if (result.bytesWritten !== changed.length) throw new Error("partial steady overwrite")
+        sample.writeSucceeded = true
+      } else {
+        const target = Buffer.alloc(expected.length)
+        const result = await withTimeout(() => handle.read(target, 0, target.length, 0), options.timeoutMs, operation)
+        sample.readMs = performance.now() - started
+        sample.readSucceeded = true
+        sample.bytesReturned = result.bytesRead
+        sample.payloadVerified = result.bytesRead === expected.length && sameBytes(bytes(result.buffer), expected)
+        if (!sample.payloadVerified) throw Object.assign(new Error("steady overwrite byte oracle mismatch"), { code: "PAYLOAD_MISMATCH" })
+      }
+    } catch (error) {
+      firstFailure(sample, operation, error)
+      await observeLateOperation(sample, operation, error, options, path, pendingOperations)
+      break
+    } finally {
+      sample[`${operation}Ms`] ??= performance.now() - started
+    }
+  }
+  sample.uploadMs = sample.writeMs
+  sample.downloadMs = sample.readMs
+  finishSample(sample, payload)
+  sample.success = sample.writeSucceeded && sample.readSucceeded && sample.payloadVerified === true
+  sample.status = sample.success ? "ok" : "failed"
+  return sample
+}
+
+async function closeSteadyLanes(lanes, options, pendingOperations) {
+  const results = await Promise.allSettled(lanes.map(async ({ path, handle }) => {
+    if (pendingOperations.has(path)) return
+    try {
+      await withTimeout(() => handle.close(), options.cleanupTimeoutMs, "steady close")
+    } catch (error) {
+      if (isTimeout(error)) pendingOperations.set(path, { operation: "steady close", promise: error.lateOperation })
+      throw error
+    }
+  }))
+  const failed = results.find((result) => result.status === "rejected")
+  if (failed) throw failed.reason
+}
+
 function values(samples, key, predicate = () => true) {
   return samples
     .filter((sample) => predicate(sample) && Number.isFinite(sample[key]))
@@ -538,6 +611,26 @@ async function runSize(
   ownedPaths,
   pendingOperations,
 ) {
+  const steady = options.workload === "steady-overwrite"
+  const lanes = []
+  if (steady) {
+    // Setup precedes the measurement. Ownership is recorded before each write
+    // so existing cleanup also covers failed setup and delayed native work.
+    for (let slot = 0; slot < Math.min(options.concurrency, options.iterations); slot += 1) {
+      const path = benchmarkPath(context.runId, definition.id, sizeMiBValue, `steady-${slot}`)
+      ownedPaths.add(path)
+      const initial = Buffer.concat([Buffer.from([0x51]), payload, Buffer.from([0xa7])])
+      try {
+        await withTimeout(() => filesystem.writeFile(path, initial), options.timeoutMs, "steady setup")
+        const handle = await withTimeout(() => filesystem.open(path, "r+"), options.timeoutMs, "steady open")
+        lanes.push({ path, handle })
+      } catch (error) {
+        if (isTimeout(error)) pendingOperations.set(path, { operation: "steady setup", promise: error.lateOperation })
+        await closeSteadyLanes(lanes, options, pendingOperations).catch(() => {})
+        throw error
+      }
+    }
+  }
   const measurementStarted = performance.now()
   const sizeBytes = payload.byteLength
   const tasks = Array.from({ length: options.iterations }, (_, index) => ({
@@ -545,7 +638,7 @@ async function runSize(
     path: benchmarkPath(context.runId, definition.id, sizeMiBValue, index + 1),
   }))
   const samples = await runWorkers(options.iterations === 0 ? [] : tasks, options.concurrency, (task, slot) =>
-    runSample({
+    (steady ? runSteadySample({ definition, ...lanes[slot], payload, iteration: task.iteration, options, pendingOperations }) : runSample({
       definition,
       filesystem,
       payload,
@@ -554,9 +647,11 @@ async function runSize(
       options,
       ownedPaths,
       pendingOperations,
-    }).then((sample) => ({ ...sample, concurrencySlot: slot })),
+    })).then((sample) => ({ ...sample, concurrencySlot: slot })),
   )
 
+  const elapsedMs = performance.now() - measurementStarted
+  await closeSteadyLanes(lanes, options, pendingOperations)
   const writeValues = values(samples, "writeMs", (sample) => sample.writeSucceeded)
   const readValues = values(samples, "readMs", (sample) => sample.readSucceeded)
   const throughputValues = values(
@@ -568,8 +663,7 @@ async function runSize(
   const successfulIterations = samples.filter((sample) => sample.success).length
   const timeoutCount = samples.reduce((total, sample) => total + sample.timeoutCount, 0)
   const cleanupFailureCount = samples.filter((sample) => sample.cleanupFailure).length
-  const elapsedMs = performance.now() - measurementStarted
-  const operationsPerLifecycle = 3
+  const operationsPerLifecycle = steady ? 2 : 3
   const successfulOperations = successfulIterations * operationsPerLifecycle
   const attemptedOperations = samples.length * operationsPerLifecycle
   const iops = elapsedMs > 0 ? successfulOperations / (elapsedMs / 1000) : 0
@@ -612,8 +706,12 @@ async function runSize(
   return {
     ...providerSummary(definition, options.chunkSizeBytes),
     provider: definition.id,
+    layout: options.layout ?? "legacy",
+    workload: options.workload ?? "lifecycle",
     sizeMiB: sizeMiBValue,
-    fileSizeBytes: sizeBytes,
+    fileSizeBytes: steady ? sizeBytes + 2 : sizeBytes,
+    writePayloadBytes: sizeBytes,
+    ...(steady ? { payloadDerivation: "increment first payload byte by iteration; verify unchanged 0x51/0xa7 boundary bytes" } : {}),
     iterationsRequested: options.iterations,
     concurrency: options.concurrency,
     status: successfulIterations === samples.length && !iopsTargetFailure ? "ok" : "failed",
@@ -991,7 +1089,11 @@ export async function runBenchmark(options, environment = process.env) {
   }
 
   const runId = makeRunId()
+  if (options.layout === "inode" && selectedIds.some((id) => !id.startsWith("mount-rs-split-"))) {
+    throw usageError("inode layout requires mount-rs split storage providers")
+  }
   const context = {
+    layout: options.layout ?? "legacy",
     runId,
     environment,
     chunkSizeBytes: options.chunkSizeBytes,
@@ -1027,6 +1129,8 @@ export async function runBenchmark(options, environment = process.env) {
     },
     mode: options.mode,
     config: {
+      layout: options.layout ?? "legacy",
+      workload: options.workload ?? "lifecycle",
       sizesMiB: options.sizes,
       payloadSizesBytes: options.sizes.map(
         (size) => options.payloadBytes ?? size * 1024 * 1024,
@@ -1039,7 +1143,7 @@ export async function runBenchmark(options, environment = process.env) {
       payloadBytes: options.payloadBytes ?? null,
       minIops: options.minIops ?? null,
       requireConfigured: options.requireConfigured,
-      iopsDefinition: "successful write+read+delete lifecycle operations divided by measured lifecycle wall time",
+      iopsDefinition: options.workload === "steady-overwrite" ? "successful partial overwrite+full-file read operations divided by measured wall time; precreate/open/close/unlink excluded" : "successful write+read+delete lifecycle operations divided by measured lifecycle wall time",
       payloadSeed: options.payloadSeed,
       setupExcludedFromTimings: true,
       payloadVerificationExcludedFromReadTimings: true,

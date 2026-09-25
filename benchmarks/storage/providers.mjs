@@ -207,6 +207,7 @@ async function openNapiSplitSqlite(context) {
       metadata: { kind: "sqlite", uri: join(directory, "metadata.sqlite") },
       blocks: { kind: "sqlite", uri: join(directory, "blocks.sqlite") },
       chunkSize: context.chunkSizeBytes,
+    ...(context.layout === "inode" ? { concurrentWrites: true, inodeUpdates: true } : {}),
       owner: `storage-benchmark-${context.runId}`,
     })
     return {
@@ -236,6 +237,7 @@ async function openNapiSplitPglite(context) {
       durable: context.environment.MOUNT_RS_PGLITE_DURABLE === "1",
     },
     chunkSize: context.chunkSizeBytes,
+    ...(context.layout === "inode" ? { concurrentWrites: true, inodeUpdates: true } : {}),
     owner: `storage-benchmark-${context.runId}`,
   })
   return {
@@ -265,6 +267,7 @@ async function openNapiSplitPgliteR2(context) {
       durable: r2.durable,
     },
     chunkSize: context.chunkSizeBytes,
+    ...(context.layout === "inode" ? { concurrentWrites: true, inodeUpdates: true } : {}),
     owner: `storage-benchmark-${context.runId}`,
   })
   return {
@@ -293,6 +296,7 @@ async function openNapiSplitSqliteR2(context) {
         durable: r2.durable,
       },
       chunkSize: context.chunkSizeBytes,
+    ...(context.layout === "inode" ? { concurrentWrites: true, inodeUpdates: true } : {}),
       owner: `storage-benchmark-${context.runId}`,
     })
     return {
@@ -326,6 +330,7 @@ async function openNapiSplitTidbR2(context) {
       durable: r2.durable,
     },
     chunkSize: context.chunkSizeBytes,
+    ...(context.layout === "inode" ? { concurrentWrites: true, inodeUpdates: true } : {}),
     owner: `storage-benchmark-${context.runId}`,
   })
   return {
@@ -334,10 +339,7 @@ async function openNapiSplitTidbR2(context) {
   }
 }
 
-async function openNapiSplitFoundationDbR2(context) {
-  const { createChunkedDriver } = loadNapi()
-  const foundationDb = readFoundationDbConfig(context.environment)
-  const r2 = readR2Config(context.environment)
+export function foundationDbMetadataOptions(foundationDb, context) {
   const metadata = {
     kind: "foundationdb",
     uri: foundationDb.clusterFile,
@@ -345,7 +347,16 @@ async function openNapiSplitFoundationDbR2(context) {
     durable: true,
     leaseAuthority: foundationDb.leaseAuthority,
   }
-  if (foundationDb.sharedProvider) metadata.authorityPrefix = foundationDb.authorityPrefix
+  if (context.layout === "inode") metadata.leaseAuthority = "revision-cas"
+  if (foundationDb.sharedProvider && context.layout !== "inode") metadata.authorityPrefix = foundationDb.authorityPrefix
+  return metadata
+}
+
+async function openNapiSplitFoundationDbR2(context) {
+  const { createChunkedDriver } = loadNapi()
+  const foundationDb = readFoundationDbConfig(context.environment)
+  const r2 = readR2Config(context.environment)
+  const metadata = foundationDbMetadataOptions(foundationDb, context)
   const filesystem = await createChunkedDriver({
     metadata,
     blocks: {
@@ -358,6 +369,7 @@ async function openNapiSplitFoundationDbR2(context) {
       durable: r2.durable,
     },
     chunkSize: context.chunkSizeBytes,
+    ...(context.layout === "inode" ? { concurrentWrites: true, inodeUpdates: true } : {}),
     owner: `storage-benchmark-${context.runId}`,
   })
   return {

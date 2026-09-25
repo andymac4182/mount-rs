@@ -1017,6 +1017,52 @@ where
         Err(FsError::new(ErrorCode::Eacces).with_message("inode is outside checked-out directory"))
     }
 
+    // Recovery is a read-only recognition of an already established authority.
+    // In particular this never creates a missing block marker or replays a write.
+    async fn verified_inode_startup(
+        metadata: &M,
+        blocks: &B,
+        expected: Option<ConcurrentBackingId>,
+    ) -> Result<
+        Option<(
+            ConcurrentBackingId,
+            mount_rs_core::storage::InodeMetadataSnapshot,
+        )>,
+    > {
+        let Some(mode) = metadata.inode_mode_state().await? else {
+            return Ok(None);
+        };
+        if expected.is_some_and(|backing| backing != mode.backing) {
+            return Err(FsError::new(ErrorCode::Estale));
+        }
+        blocks.verify_concurrent_backing(mode.backing).await?;
+        let snapshot = metadata.load_inode_snapshot(mode.backing).await?;
+        snapshot.validate()?;
+        Ok(Some((mode.backing, snapshot)))
+    }
+
+    async fn startup_concurrent_mode(
+        metadata: &M,
+        blocks: &B,
+        inode_updates: bool,
+    ) -> Result<ConcurrentModeState> {
+        match metadata.concurrent_mode_state().await {
+            Ok(mode) => Ok(mode),
+            Err(error) => {
+                // Older provider inspectors may report EIO for MRC4. This is
+                // a read, so independently verifying exact MRC4 is safe; no
+                // mutating operation's ambiguous failure enters this path.
+                if inode_updates
+                    && let Some((backing, _)) =
+                        Self::verified_inode_startup(metadata, blocks, None).await?
+                {
+                    return Ok(ConcurrentModeState::Mrc2(backing));
+                }
+                Err(error)
+            }
+        }
+    }
+
     /// Open the current namespace. The default mode acquires a fenced writer
     /// lease; opt-in concurrent mode prepares the provider's revision-CAS
     /// protocol. An empty metadata store is initialized with an empty root
@@ -1054,50 +1100,87 @@ where
             } else {
                 None
             };
-            let backing = if let Some(mode) = &inode_mode {
-                blocks.verify_concurrent_backing(mode.backing).await?;
-                mode.backing
-            } else {
-                match metadata.concurrent_mode_state().await? {
-                    ConcurrentModeState::Mrc2(id) => {
-                        blocks.verify_concurrent_backing(id).await?;
-                        metadata.prepare_bound_concurrent_mode(id).await?;
-                        id
-                    }
-                    ConcurrentModeState::Mrc1 => {
-                        return Err(FsError::new(ErrorCode::Ebusy)
-                            .with_syscall("migrate MRC1 backing")
-                            .with_message("stop old mounts and run migrate-concurrent-backing"));
-                    }
-                    ConcurrentModeState::Legacy => {
-                        match metadata.preflight_new_bound_mode().await {
-                            Ok(()) => {
-                                let id = blocks.prepare_concurrent_backing().await?;
-                                metadata.prepare_bound_concurrent_mode(id).await?;
-                                blocks.verify_concurrent_backing(id).await?;
-                                id
-                            }
-                            Err(error) => {
-                                // A peer may enroll MRC2 after the Legacy inspection.
-                                // Reuse its authority only through the established
-                                // read-only block verification path.
-                                let ConcurrentModeState::Mrc2(id) =
-                                    metadata.concurrent_mode_state().await?
-                                else {
-                                    return Err(error);
-                                };
-                                blocks.verify_concurrent_backing(id).await?;
-                                metadata.prepare_bound_concurrent_mode(id).await?;
-                                id
+            let mut expected_backing = inode_mode.as_ref().map(|mode| mode.backing);
+            let backing_result = async {
+                Ok(if let Some(mode) = &inode_mode {
+                    blocks.verify_concurrent_backing(mode.backing).await?;
+                    mode.backing
+                } else {
+                    match Self::startup_concurrent_mode(
+                        metadata.as_ref(),
+                        blocks.as_ref(),
+                        options.inode_updates,
+                    )
+                    .await?
+                    {
+                        ConcurrentModeState::Mrc2(id) => {
+                            expected_backing = Some(id);
+                            blocks.verify_concurrent_backing(id).await?;
+                            metadata.prepare_bound_concurrent_mode(id).await?;
+                            id
+                        }
+                        ConcurrentModeState::Mrc1 => {
+                            return Err(FsError::new(ErrorCode::Ebusy)
+                                .with_syscall("migrate MRC1 backing")
+                                .with_message(
+                                    "stop old mounts and run migrate-concurrent-backing",
+                                ));
+                        }
+                        ConcurrentModeState::Legacy => {
+                            match metadata.preflight_new_bound_mode().await {
+                                Ok(()) => {
+                                    let id = blocks.prepare_concurrent_backing().await?;
+                                    expected_backing = Some(id);
+                                    metadata.prepare_bound_concurrent_mode(id).await?;
+                                    blocks.verify_concurrent_backing(id).await?;
+                                    id
+                                }
+                                Err(error) => {
+                                    // A peer may enroll MRC2 after the Legacy inspection.
+                                    // Reuse its authority only through the established
+                                    // read-only block verification path.
+                                    let ConcurrentModeState::Mrc2(id) =
+                                        Self::startup_concurrent_mode(
+                                            metadata.as_ref(),
+                                            blocks.as_ref(),
+                                            options.inode_updates,
+                                        )
+                                        .await?
+                                    else {
+                                        return Err(error);
+                                    };
+                                    expected_backing = Some(id);
+                                    blocks.verify_concurrent_backing(id).await?;
+                                    metadata.prepare_bound_concurrent_mode(id).await?;
+                                    id
+                                }
                             }
                         }
                     }
+                })
+            }
+            .await;
+            let backing = match backing_result {
+                Ok(backing) => backing,
+                Err(error)
+                    if options.inode_updates
+                        && matches!(error.code, ErrorCode::Estale | ErrorCode::Enotsup) =>
+                {
+                    Self::verified_inode_startup(
+                        metadata.as_ref(),
+                        blocks.as_ref(),
+                        expected_backing,
+                    )
+                    .await?
+                    .ok_or(error)?
+                    .0
                 }
+                Err(error) => return Err(error),
             };
             // Two clients may initialize one fresh volume together. Only one
             // CAS publishes its root; the loser reloads the winner's root.
             for attempt in 0..MAX_CONCURRENT_CAS_RETRIES {
-                let established_inode_mode = if options.inode_updates {
+                let mut established_inode_mode = if options.inode_updates {
                     metadata.inode_mode_state().await?
                 } else {
                     None
@@ -1109,7 +1192,24 @@ where
                         namespace: Some(snapshot.namespace),
                     }
                 } else {
-                    metadata.load().await?
+                    match metadata.load().await {
+                        Ok(loaded) => loaded,
+                        Err(error) if options.inode_updates && error.code == ErrorCode::Estale => {
+                            let (_, snapshot) = Self::verified_inode_startup(
+                                metadata.as_ref(),
+                                blocks.as_ref(),
+                                Some(backing),
+                            )
+                            .await?
+                            .ok_or(error)?;
+                            established_inode_mode = metadata.inode_mode_state().await?;
+                            mount_rs_core::storage::LoadedMetadata {
+                                revision: snapshot.structural_generation,
+                                namespace: Some(snapshot.namespace),
+                            }
+                        }
+                        Err(error) => return Err(error),
+                    }
                 };
                 loaded.validate()?;
                 let (namespace, revision) = match loaded.namespace {
@@ -1133,6 +1233,18 @@ where
                                 concurrent_cas_backoff(attempt, &options.owner).await;
                                 continue;
                             }
+                            Err(error)
+                                if options.inode_updates && error.code == ErrorCode::Estale =>
+                            {
+                                Self::verified_inode_startup(
+                                    metadata.as_ref(),
+                                    blocks.as_ref(),
+                                    Some(backing),
+                                )
+                                .await?
+                                .ok_or(error)?;
+                                continue;
+                            }
                             Err(error) => return Err(error),
                         }
                     }
@@ -1148,6 +1260,15 @@ where
                             Ok(()) => {}
                             Err(error) if error.code == ErrorCode::Eagain => {
                                 continue;
+                            }
+                            Err(error) if error.code == ErrorCode::Estale => {
+                                Self::verified_inode_startup(
+                                    metadata.as_ref(),
+                                    blocks.as_ref(),
+                                    Some(backing),
+                                )
+                                .await?
+                                .ok_or(error)?;
                             }
                             Err(error) => return Err(error),
                         }

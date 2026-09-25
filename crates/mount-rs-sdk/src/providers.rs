@@ -34,7 +34,7 @@ use mount_rs_r2::{R2BlockStore, R2Config};
 use mount_rs_rustfs::{RustFsBlockStore, RustFsConfig};
 use mount_rs_slatedb::{SlateDbMetadataStore, rustfs_object_store};
 use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
-use mount_rs_tidb::{TidbBlockStore, TidbMetadataStore, TidbStorageOptions};
+use mount_rs_tidb::{TidbBlockStore, TidbMetadataStore, TidbPoolContext, TidbStorageOptions};
 
 #[cfg(all(
     feature = "foundationdb",
@@ -48,6 +48,88 @@ use mount_rs_tidb::{TidbBlockStore, TidbMetadataStore, TidbStorageOptions};
 use crate::options::FoundationDbLeaseAuthority;
 use crate::options::StoreConfig;
 use crate::stores::{ErasedBlockStore, ErasedMetadataStore};
+
+/// Server-owned storage resources. TiDB pools are bounded per exact connection
+/// string (including credentials, database, TLS and session options). Equivalent
+/// strings may use separate pools; different strings never share credentials.
+/// Shut down every filesystem before explicitly closing the context.
+#[derive(Clone)]
+pub struct StorageContext {
+    inner: Arc<std::sync::Mutex<ContextState>>,
+    max_tidb_connections: usize,
+}
+#[derive(Default)]
+struct ContextState {
+    closed: bool,
+    tidb: std::collections::HashMap<String, TidbPoolContext>,
+}
+impl Default for StorageContext {
+    fn default() -> Self {
+        Self::new(16).expect("positive default pool bound")
+    }
+}
+impl StorageContext {
+    pub fn new(max_tidb_connections: usize) -> Result<Self> {
+        if max_tidb_connections == 0 {
+            return Err(
+                mount_rs_core::FsError::new(mount_rs_core::ErrorCode::Einval)
+                    .with_message("TiDB context pool maximum must be positive"),
+            );
+        }
+        Ok(Self {
+            inner: Arc::new(std::sync::Mutex::new(ContextState::default())),
+            max_tidb_connections,
+        })
+    }
+    fn require_open(&self) -> Result<()> {
+        if self
+            .inner
+            .lock()
+            .map_err(|_| backend_error("storage context lock poisoned"))?
+            .closed
+        {
+            return Err(
+                mount_rs_core::FsError::new(mount_rs_core::ErrorCode::Estale)
+                    .with_message("storage context is closed"),
+            );
+        }
+        Ok(())
+    }
+    fn tidb(&self, connection: &str) -> Result<TidbPoolContext> {
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| backend_error("storage context lock poisoned"))?;
+        if state.closed {
+            return Err(mount_rs_core::FsError::new(
+                mount_rs_core::ErrorCode::Estale,
+            ));
+        }
+        if let Some(context) = state.tidb.get(connection) {
+            return Ok(context.clone());
+        }
+        let context = TidbPoolContext::new(connection, self.max_tidb_connections)?;
+        state.tidb.insert(connection.to_owned(), context.clone());
+        Ok(context)
+    }
+    pub async fn close(&self) -> Result<()> {
+        let contexts: Vec<_> = {
+            let mut state = self
+                .inner
+                .lock()
+                .map_err(|_| backend_error("storage context lock poisoned"))?;
+            state.closed = true;
+            state.tidb.values().cloned().collect()
+        };
+        let mut error = None;
+        for context in contexts {
+            if let Err(e) = context.close().await {
+                error.get_or_insert(e);
+            }
+        }
+        error.map_or(Ok(()), Err)
+    }
+}
 
 #[derive(Clone)]
 enum ProviderResource {
@@ -141,9 +223,21 @@ pub(crate) async fn open_storage_decorated(
     blocks: &StoreConfig,
     decorator: Option<&dyn crate::filesystem::BlockStoreDecorator>,
 ) -> Result<OpenStorage> {
+    open_storage_in_context(metadata, blocks, decorator, None).await
+}
+
+pub(crate) async fn open_storage_in_context(
+    metadata: &StoreConfig,
+    blocks: &StoreConfig,
+    decorator: Option<&dyn crate::filesystem::BlockStoreDecorator>,
+    context: Option<&StorageContext>,
+) -> Result<OpenStorage> {
+    if let Some(context) = context {
+        context.require_open()?;
+    }
     let block_config = blocks;
-    let (metadata, mut metadata_resources) = open_metadata(metadata).await?;
-    let (blocks, mut block_resources) = match open_blocks(blocks).await {
+    let (metadata, mut metadata_resources) = open_metadata(metadata, context).await?;
+    let (blocks, mut block_resources) = match open_blocks(blocks, context).await {
         Ok(opened) => opened,
         Err(error) => {
             let resources = StorageResources {
@@ -191,6 +285,7 @@ pub(crate) async fn open_storage_decorated(
 
 async fn open_metadata(
     provider: &StoreConfig,
+    context: Option<&StorageContext>,
 ) -> Result<(Arc<dyn MetadataStore>, Vec<ProviderResource>)> {
     match provider {
         StoreConfig::Memory => Ok((Arc::new(MemoryMetadataStore::new()), Vec::new())),
@@ -217,6 +312,13 @@ async fn open_metadata(
             volume_key,
             durable,
         } => {
+            if let Some(context) = context {
+                let store = context
+                    .tidb(connection)?
+                    .metadata(TidbStorageOptions::new(volume_key).with_durable(*durable))
+                    .await?;
+                return Ok((Arc::new(store), Vec::new()));
+            }
             let store = TidbMetadataStore::connect_with_options(
                 connection,
                 TidbStorageOptions::new(volume_key.clone()).with_durable(*durable),
@@ -300,6 +402,7 @@ async fn open_metadata(
 
 async fn open_blocks(
     provider: &StoreConfig,
+    context: Option<&StorageContext>,
 ) -> Result<(Arc<dyn BlockStore>, Vec<ProviderResource>)> {
     match provider {
         StoreConfig::Memory => Ok((Arc::new(MemoryBlockStore::new()), Vec::new())),
@@ -327,6 +430,13 @@ async fn open_blocks(
             volume_key,
             durable,
         } => {
+            if let Some(context) = context {
+                let store = context
+                    .tidb(connection)?
+                    .blocks(TidbStorageOptions::new(volume_key).with_durable(*durable))
+                    .await?;
+                return Ok((Arc::new(store), Vec::new()));
+            }
             let store = TidbBlockStore::connect_with_options(
                 connection,
                 TidbStorageOptions::new(volume_key.clone()).with_durable(*durable),
@@ -462,4 +572,31 @@ fn open_foundationdb_storage(
         FoundationDbLeaseAuthority::RevisionCas => options.without_lease_oracle(),
     };
     FoundationDbStorage::connect(cluster_file, options)
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+    #[tokio::test]
+    async fn contexts_isolate_credentials_database_options_and_server_lifetime() {
+        let context = StorageContext::new(2).unwrap();
+        assert!(StorageContext::new(0).is_err());
+        for url in [
+            "mysql://user:one@127.0.0.1/db",
+            "mysql://user:two@127.0.0.1/db",
+            "mysql://user:one@127.0.0.1/other",
+            "mysql://user:one@127.0.0.1/db?stmt_cache_size=1",
+        ] {
+            context.tidb(url).unwrap();
+            context.tidb(url).unwrap();
+        }
+        assert_eq!(context.inner.lock().unwrap().tidb.len(), 4);
+        let independent = StorageContext::new(2).unwrap();
+        assert_eq!(independent.inner.lock().unwrap().tidb.len(), 0);
+        context.close().await.unwrap();
+        assert!(context.tidb("mysql://user:one@127.0.0.1/db").is_err());
+        assert!(context.require_open().is_err());
+        assert!(independent.require_open().is_ok());
+        independent.close().await.unwrap();
+    }
 }

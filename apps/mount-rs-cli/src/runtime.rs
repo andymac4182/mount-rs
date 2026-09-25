@@ -165,6 +165,16 @@ impl DriverRuntime {
         gid: u32,
         decorator: Option<&dyn mount_rs_sdk::BlockStoreDecorator>,
     ) -> Result<Self, CliError> {
+        Self::open_with_storage_context(options, uid, gid, decorator, None).await
+    }
+
+    pub(crate) async fn open_with_storage_context(
+        options: &CliOptions,
+        uid: u32,
+        gid: u32,
+        decorator: Option<&dyn mount_rs_sdk::BlockStoreDecorator>,
+        context: Option<&mount_rs_sdk::StorageContext>,
+    ) -> Result<Self, CliError> {
         #[cfg(feature = "observability")]
         let telemetry = mount_rs_observability::global();
         let filesystem = match options.driver {
@@ -195,11 +205,18 @@ impl DriverRuntime {
             }
             DriverChoice::SplitStore => {
                 let split = split_options(options, uid, gid)?;
-                match decorator {
-                    Some(decorator) => {
+                match (context, decorator) {
+                    (Some(context), Some(decorator)) => {
+                        Filesystem::split_with_context_and_block_decorator(
+                            split, context, decorator,
+                        )
+                        .await?
+                    }
+                    (Some(context), None) => Filesystem::split_with_context(split, context).await?,
+                    (None, Some(decorator)) => {
                         Filesystem::split_with_block_decorator(split, decorator).await?
                     }
-                    None => Filesystem::split(split).await?,
+                    (None, None) => Filesystem::split(split).await?,
                 }
             }
         };

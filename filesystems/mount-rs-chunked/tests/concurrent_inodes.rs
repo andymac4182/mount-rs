@@ -321,3 +321,291 @@ fn simultaneous_replacement_and_other_inode_truncate_keep_both_results() {
         b.shutdown().await.unwrap();
     });
 }
+
+// A deterministic peer completes enrollment at each await boundary in open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EnrollmentBoundary {
+    InitialInspection,
+    LegacyInspection,
+    Preflight,
+    Load,
+    RootPublication,
+    Enrollment,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RaceFault {
+    None,
+    ChangedBacking,
+    CorruptSnapshot,
+    AmbiguousPublication,
+    AmbiguousEnrollment,
+}
+struct RacingMetadata {
+    inner: SqliteMetadataStore,
+    path: PathBuf,
+    boundary: EnrollmentBoundary,
+    fault: RaceFault,
+    fired: std::sync::atomic::AtomicBool,
+}
+impl RacingMetadata {
+    async fn peer(&self, boundary: EnrollmentBoundary) {
+        if self.boundary != boundary || self.fired.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let peer = ChunkedFs::open(
+            SqliteMetadataStore::open(self.path.join("metadata.db")).unwrap(),
+            SqliteBlockStore::open(self.path.join("blocks.db")).unwrap(),
+            ChunkedOptions::fixed("peer", 16)
+                .unwrap()
+                .with_inode_updates(true),
+        )
+        .await
+        .unwrap();
+        peer.write_file("/peer", b"peer authority bytes")
+            .await
+            .unwrap();
+        peer.shutdown().await.unwrap();
+    }
+}
+use async_trait::async_trait;
+use mount_rs_core::storage::{
+    ConcurrentBackingId, ConcurrentModeState, InodeMetadataSnapshot, InodeModeState,
+    LoadedMetadata, Namespace, WriterLease,
+};
+use mount_rs_core::{FsError, Result};
+use std::time::Duration;
+#[async_trait]
+impl MetadataStore for RacingMetadata {
+    fn durable(&self) -> bool {
+        true
+    }
+    async fn load(&self) -> Result<LoadedMetadata> {
+        self.peer(EnrollmentBoundary::Load).await;
+        self.inner.load().await
+    }
+    async fn inode_mode_state(&self) -> Result<Option<InodeModeState>> {
+        let state = self.inner.inode_mode_state().await?;
+        self.peer(EnrollmentBoundary::InitialInspection).await;
+        if self.fault == RaceFault::ChangedBacking && self.fired.load(Ordering::SeqCst) {
+            return Ok(state.map(|mut mode| {
+                mode.backing = ConcurrentBackingId::from_bytes([42; 16]).unwrap();
+                mode
+            }));
+        }
+        Ok(state)
+    }
+    async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
+        // TiDB's legacy inspector reports EIO for MRC4, unlike its load ESTALE.
+        if self.inner.inode_mode_state().await?.is_some() {
+            return Err(FsError::backend("legacy inspector cannot decode MRC4"));
+        }
+        let state = self.inner.concurrent_mode_state().await?;
+        self.peer(EnrollmentBoundary::LegacyInspection).await;
+        Ok(state)
+    }
+    async fn preflight_new_bound_mode(&self) -> Result<()> {
+        let result = self.inner.preflight_new_bound_mode().await;
+        self.peer(EnrollmentBoundary::Preflight).await;
+        result
+    }
+    async fn prepare_bound_concurrent_mode(&self, backing: ConcurrentBackingId) -> Result<()> {
+        self.inner.prepare_bound_concurrent_mode(backing).await
+    }
+    async fn prepare_inode_mode(&self, backing: ConcurrentBackingId, revision: u64) -> Result<()> {
+        self.peer(EnrollmentBoundary::Enrollment).await;
+        if self.fault == RaceFault::AmbiguousEnrollment {
+            return Err(FsError::backend("lost commit acknowledgement"));
+        }
+        self.inner.prepare_inode_mode(backing, revision).await
+    }
+    async fn load_inode_snapshot(
+        &self,
+        backing: ConcurrentBackingId,
+    ) -> Result<InodeMetadataSnapshot> {
+        let mut snapshot = self.inner.load_inode_snapshot(backing).await?;
+        if self.fault == RaceFault::CorruptSnapshot {
+            snapshot.inode_revisions.clear();
+        }
+        Ok(snapshot)
+    }
+    async fn load_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: u64,
+    ) -> Result<mount_rs_core::storage::LoadedInode> {
+        self.inner.load_inode(backing, inode).await
+    }
+    async fn load_inode_if_changed(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: u64,
+        known: Option<mount_rs_core::storage::InodeVersion>,
+    ) -> Result<Option<mount_rs_core::storage::LoadedInode>> {
+        self.inner
+            .load_inode_if_changed(backing, inode, known)
+            .await
+    }
+    async fn publish_bound_if_revision(
+        &self,
+        backing: ConcurrentBackingId,
+        revision: u64,
+        ns: Namespace,
+    ) -> Result<u64> {
+        self.peer(EnrollmentBoundary::RootPublication).await;
+        if self.fault == RaceFault::AmbiguousPublication {
+            return Err(FsError::backend("lost commit acknowledgement"));
+        }
+        self.inner
+            .publish_bound_if_revision(backing, revision, ns)
+            .await
+    }
+    async fn acquire_writer(&self, owner: &str, ttl: Duration) -> Result<WriterLease> {
+        self.inner.acquire_writer(owner, ttl).await
+    }
+    async fn renew_writer(&self, lease: &WriterLease, ttl: Duration) -> Result<WriterLease> {
+        self.inner.renew_writer(lease, ttl).await
+    }
+    async fn release_writer(&self, lease: &WriterLease) -> Result<()> {
+        self.inner.release_writer(lease).await
+    }
+    async fn publish(&self, revision: u64, lease: &WriterLease, ns: Namespace) -> Result<u64> {
+        self.inner.publish(revision, lease, ns).await
+    }
+    async fn flush(&self) -> Result<()> {
+        self.inner.flush().await
+    }
+}
+#[test]
+fn peer_inode_enrollment_at_every_startup_boundary_preserves_authority() {
+    block_on(async {
+        let mut failures = Vec::new();
+        for boundary in [
+            EnrollmentBoundary::InitialInspection,
+            EnrollmentBoundary::LegacyInspection,
+            EnrollmentBoundary::Preflight,
+            EnrollmentBoundary::Load,
+            EnrollmentBoundary::RootPublication,
+            EnrollmentBoundary::Enrollment,
+        ] {
+            let volume = Volume::new();
+            let metadata = RacingMetadata {
+                inner: volume.metadata(),
+                path: volume.0.clone(),
+                boundary,
+                fault: RaceFault::None,
+                fired: false.into(),
+            };
+            let result = ChunkedFs::open(
+                metadata,
+                SqliteBlockStore::open(volume.0.join("blocks.db")).unwrap(),
+                ChunkedOptions::fixed("racing", 16)
+                    .unwrap()
+                    .with_inode_updates(true),
+            )
+            .await;
+            let fs = match result {
+                Ok(fs) => fs,
+                Err(error) => {
+                    failures.push(format!("{boundary:?}: {error:?}"));
+                    continue;
+                }
+            };
+            assert_eq!(fs.stat("/peer").await.unwrap().size, 20);
+            let handle = fs.open("/peer", "r", 0).await.unwrap();
+            let mut bytes = [0; 20];
+            assert_eq!(handle.read(&mut bytes, Some(0)).await.unwrap(), 20);
+            assert_eq!(&bytes, b"peer authority bytes");
+            handle.close().await.unwrap();
+            let backing = volume
+                .metadata()
+                .inode_mode_state()
+                .await
+                .unwrap()
+                .unwrap()
+                .backing;
+            mount_rs_core::storage::BlockStore::verify_concurrent_backing(
+                &SqliteBlockStore::open(volume.0.join("blocks.db")).unwrap(),
+                backing,
+            )
+            .await
+            .unwrap();
+            fs.shutdown().await.unwrap();
+        }
+        assert!(
+            failures.is_empty(),
+            "startup boundaries failed: {failures:#?}"
+        );
+    });
+}
+
+#[test]
+fn startup_recovery_rejects_changed_authority_corrupt_snapshot_and_ambiguous_commits() {
+    block_on(async {
+        for (boundary, fault) in [
+            (EnrollmentBoundary::Load, RaceFault::ChangedBacking),
+            (
+                EnrollmentBoundary::InitialInspection,
+                RaceFault::CorruptSnapshot,
+            ),
+            (
+                EnrollmentBoundary::RootPublication,
+                RaceFault::AmbiguousPublication,
+            ),
+            (
+                EnrollmentBoundary::Enrollment,
+                RaceFault::AmbiguousEnrollment,
+            ),
+        ] {
+            let volume = Volume::new();
+            let metadata = RacingMetadata {
+                inner: volume.metadata(),
+                path: volume.0.clone(),
+                boundary,
+                fault,
+                fired: false.into(),
+            };
+            let result = ChunkedFs::open(
+                metadata,
+                SqliteBlockStore::open(volume.0.join("blocks.db")).unwrap(),
+                ChunkedOptions::fixed("rejected", 16)
+                    .unwrap()
+                    .with_inode_updates(true),
+            )
+            .await;
+            assert!(result.is_err(), "invalid recovery at {boundary:?}");
+            if matches!(
+                fault,
+                RaceFault::AmbiguousPublication | RaceFault::AmbiguousEnrollment
+            ) {
+                assert_eq!(result.err().unwrap().code, ErrorCode::Eio);
+            }
+        }
+        let volume = Volume::new();
+        let fs = volume.open("established").await;
+        fs.shutdown().await.unwrap();
+        let backing = volume
+            .metadata()
+            .inode_mode_state()
+            .await
+            .unwrap()
+            .unwrap()
+            .backing;
+        let missing = SqliteBlockStore::open(volume.0.join("missing-marker.db")).unwrap();
+        assert!(
+            ChunkedFs::open(
+                volume.metadata(),
+                missing.clone(),
+                ChunkedOptions::fixed("missing", 16)
+                    .unwrap()
+                    .with_inode_updates(true)
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            mount_rs_core::storage::BlockStore::verify_concurrent_backing(&missing, backing)
+                .await
+                .is_err()
+        );
+    });
+}

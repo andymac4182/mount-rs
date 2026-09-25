@@ -17,7 +17,12 @@ use mysql_async::{
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
+use tokio::sync::OnceCell;
 
 /// A conservative default below TiDB's default single-entry and packet
 /// limits. Deployments that raise the corresponding TiDB/TiKV limits may
@@ -147,6 +152,7 @@ struct Database {
     durable: bool,
     max_block_bytes: usize,
     max_namespace_bytes: usize,
+    shared_context: Option<Arc<TidbPoolInner>>,
 }
 
 impl Database {
@@ -180,6 +186,7 @@ impl Database {
             durable: options.durable,
             max_block_bytes: options.max_block_bytes,
             max_namespace_bytes: options.max_namespace_bytes,
+            shared_context: None,
         };
 
         let mut connection = database
@@ -187,45 +194,9 @@ impl Database {
             .get_conn()
             .await
             .map_err(|error| db_error("connect to TiDB", error))?;
-        connection
-            .query_drop(schema)
-            .await
-            .map_err(|error| db_error("initialize TiDB schema", error))?;
+        initialize_schema(&mut connection, schema, ensure_metadata_row).await?;
         if ensure_metadata_row {
-            connection
-                .query_drop(INODE_SCHEMA)
-                .await
-                .map_err(|error| db_error("initialize TiDB inode schema", error))?;
-            // Additive upgrades retain the existing lease row and namespace.
-            // New columns remain NULL until an explicit enrollment/migration.
-            for statement in [
-                "ALTER TABLE mount_rs_tidb_metadata ADD COLUMN IF NOT EXISTS delegation LONGTEXT NULL",
-                "ALTER TABLE mount_rs_tidb_metadata ADD COLUMN IF NOT EXISTS write_mode VARBINARY(4) NULL",
-                "ALTER TABLE mount_rs_tidb_metadata ADD COLUMN IF NOT EXISTS backing_id VARBINARY(32) NULL",
-                "ALTER TABLE mount_rs_tidb_metadata ADD INDEX IF NOT EXISTS idx_mount_rs_volume_revision (volume_key, revision)",
-                "ALTER TABLE mount_rs_tidb_metadata ADD INDEX IF NOT EXISTS idx_mount_rs_volume_revision_mode (volume_key, revision, write_mode)",
-                "ALTER TABLE mount_rs_tidb_metadata ADD INDEX IF NOT EXISTS idx_mount_rs_inode_authority (volume_key, revision, write_mode, backing_id, owner, fence, expires)",
-            ] {
-                connection
-                    .query_drop(statement)
-                    .await
-                    .map_err(|error| db_error("upgrade TiDB metadata schema", error))?;
-            }
-            connection
-                .exec_drop(
-                    "INSERT INTO mount_rs_tidb_metadata
-                        (volume_key, revision, namespace, owner, fence, expires)
-                     VALUES (?, 0, NULL, NULL, 0, 0)
-                     ON DUPLICATE KEY UPDATE volume_key=volume_key",
-                    (&database.volume_key,),
-                )
-                .await
-                .map_err(|error| db_error("initialize TiDB metadata row", error))?;
-        } else {
-            connection
-                .query_drop(BLOCK_AUTHORITY_SCHEMA)
-                .await
-                .map_err(|error| db_error("initialize TiDB block authority schema", error))?;
+            initialize_metadata_row(&mut connection, &database.volume_key).await?;
         }
         Ok(database)
     }
@@ -250,11 +221,183 @@ impl Database {
     }
 
     async fn close(&self) -> Result<()> {
+        if self.shared_context.is_some() {
+            return Ok(());
+        }
         self.pool
             .clone()
             .disconnect()
             .await
             .map_err(|error| db_error("close TiDB connection pool", error))
+    }
+}
+
+async fn initialize_schema(
+    connection: &mut Conn,
+    schema: &str,
+    ensure_metadata_row: bool,
+) -> Result<()> {
+    connection
+        .query_drop(schema)
+        .await
+        .map_err(|error| db_error("initialize TiDB schema", error))?;
+    if ensure_metadata_row {
+        connection
+            .query_drop(INODE_SCHEMA)
+            .await
+            .map_err(|error| db_error("initialize TiDB inode schema", error))?;
+        // Additive upgrades retain the existing lease row and namespace.
+        // New columns remain NULL until an explicit enrollment/migration.
+        for statement in [
+            "ALTER TABLE mount_rs_tidb_metadata ADD COLUMN IF NOT EXISTS delegation LONGTEXT NULL",
+            "ALTER TABLE mount_rs_tidb_metadata ADD COLUMN IF NOT EXISTS write_mode VARBINARY(4) NULL",
+            "ALTER TABLE mount_rs_tidb_metadata ADD COLUMN IF NOT EXISTS backing_id VARBINARY(32) NULL",
+            "ALTER TABLE mount_rs_tidb_metadata ADD INDEX IF NOT EXISTS idx_mount_rs_volume_revision (volume_key, revision)",
+            "ALTER TABLE mount_rs_tidb_metadata ADD INDEX IF NOT EXISTS idx_mount_rs_volume_revision_mode (volume_key, revision, write_mode)",
+            "ALTER TABLE mount_rs_tidb_metadata ADD INDEX IF NOT EXISTS idx_mount_rs_inode_authority (volume_key, revision, write_mode, backing_id, owner, fence, expires)",
+        ] {
+            connection
+                .query_drop(statement)
+                .await
+                .map_err(|error| db_error("upgrade TiDB metadata schema", error))?;
+        }
+    } else {
+        connection
+            .query_drop(BLOCK_AUTHORITY_SCHEMA)
+            .await
+            .map_err(|error| db_error("initialize TiDB block authority schema", error))?;
+    }
+    Ok(())
+}
+async fn initialize_metadata_row(connection: &mut Conn, volume_key: &str) -> Result<()> {
+    connection
+        .exec_drop(
+            "INSERT INTO mount_rs_tidb_metadata
+                        (volume_key, revision, namespace, owner, fence, expires)
+                     VALUES (?, 0, NULL, NULL, 0, 0)
+                     ON DUPLICATE KEY UPDATE volume_key=volume_key",
+            (volume_key,),
+        )
+        .await
+        .map_err(|error| db_error("initialize TiDB metadata row", error))?;
+    Ok(())
+}
+
+struct TidbPoolInner {
+    pool: Pool,
+    metadata_schema: OnceCell<()>,
+    block_schema: OnceCell<()>,
+    closed: AtomicBool,
+}
+
+/// Explicit service-owned pool for one complete connection identity.
+///
+/// Credentials, database, TLS and session options are parsed once. Every
+/// connection retains the same verified session hook as private stores. Store
+/// close only releases its caller's lifecycle; call `close` on this context
+/// after all filesystems have shut down. No process-global pool is retained.
+#[derive(Clone)]
+pub struct TidbPoolContext(Arc<TidbPoolInner>);
+impl TidbPoolContext {
+    pub fn new(url: &str, max_connections: usize) -> Result<Self> {
+        if max_connections == 0 {
+            return Err(
+                FsError::new(ErrorCode::Einval).with_message("TiDB pool maximum must be positive")
+            );
+        }
+        let constraints =
+            mysql_async::PoolConstraints::new(0, max_connections).ok_or_else(|| {
+                FsError::new(ErrorCode::Einval).with_message("TiDB pool maximum must be positive")
+            })?;
+        let opts = Opts::from_url(url)
+            .map_err(|error| db_error("parse TiDB URL", MysqlError::Url(error)))?;
+        let pool_options = opts
+            .pool_opts()
+            .clone()
+            .with_reset_connection(false)
+            .with_constraints(constraints);
+        let pool = Pool::new(
+            OptsBuilder::from_opts(opts)
+                .pool_opts(pool_options)
+                .after_connect(|connection| Box::pin(configure_pessimistic_session(connection))),
+        );
+        Ok(Self(Arc::new(TidbPoolInner {
+            pool,
+            metadata_schema: OnceCell::new(),
+            block_schema: OnceCell::new(),
+            closed: AtomicBool::new(false),
+        })))
+    }
+
+    async fn database(&self, options: TidbStorageOptions, metadata: bool) -> Result<Database> {
+        options.validate()?;
+        self.require_open()?;
+        let cell = if metadata {
+            &self.0.metadata_schema
+        } else {
+            &self.0.block_schema
+        };
+        cell.get_or_try_init(|| async {
+            let mut connection = self
+                .0
+                .pool
+                .get_conn()
+                .await
+                .map_err(|e| db_error("initialize TiDB context", e))?;
+            initialize_schema(
+                &mut connection,
+                if metadata {
+                    METADATA_SCHEMA
+                } else {
+                    BLOCK_SCHEMA
+                },
+                metadata,
+            )
+            .await
+        })
+        .await?;
+        self.require_open()?;
+        if metadata {
+            let mut connection = self
+                .0
+                .pool
+                .get_conn()
+                .await
+                .map_err(|e| db_error("open TiDB context volume", e))?;
+            initialize_metadata_row(&mut connection, &options.volume_key).await?;
+        }
+        self.require_open()?;
+        Ok(Database {
+            pool: self.0.pool.clone(),
+            volume_key: options.volume_key,
+            durable: options.durable,
+            max_block_bytes: options.max_block_bytes,
+            max_namespace_bytes: options.max_namespace_bytes,
+            shared_context: Some(self.0.clone()),
+        })
+    }
+    fn require_open(&self) -> Result<()> {
+        if self.0.closed.load(Ordering::SeqCst) {
+            Err(FsError::new(ErrorCode::Estale).with_message("TiDB pool context is closed"))
+        } else {
+            Ok(())
+        }
+    }
+    pub async fn metadata(&self, options: TidbStorageOptions) -> Result<TidbMetadataStore> {
+        self.database(options, true).await.map(TidbMetadataStore)
+    }
+    pub async fn blocks(&self, options: TidbStorageOptions) -> Result<TidbBlockStore> {
+        self.database(options, false).await.map(TidbBlockStore)
+    }
+    /// Permanently close this service's pool, after all driver shutdowns.
+    pub async fn close(&self) -> Result<()> {
+        self.0.closed.store(true, Ordering::SeqCst);
+        self.0
+            .pool
+            .clone()
+            .disconnect()
+            .await
+            .map_err(|e| db_error("close TiDB context", e))
     }
 }
 
@@ -277,8 +420,10 @@ impl TidbMetadataStore {
         ))
     }
 
-    /// Stop this store's pool. It is idempotent from the caller's point of
-    /// view; subsequent operations return a backend connection error.
+    /// Stop a privately connected store's pool. Context-backed stores leave
+    /// their shared pool alive; the service must close its TidbPoolContext
+    /// after every filesystem shutdown. Private close is idempotent and
+    /// subsequent operations return a backend connection error.
     pub async fn close(&self) -> Result<()> {
         self.0.close().await
     }
@@ -303,6 +448,8 @@ impl TidbBlockStore {
         ))
     }
 
+    /// Close private resources. Context-backed resources remain owned by
+    /// TidbPoolContext until the service explicitly closes that context.
     pub async fn close(&self) -> Result<()> {
         self.0.close().await
     }
@@ -344,6 +491,9 @@ impl ConcurrentRow {
                 Ok(ConcurrentModeState::Mrc2(backing_from_bytes(id)?))
             }
             (Some(mode), _) if mode == BOUND_CONCURRENT_WRITE_MODE.as_bytes() => Err(stale()),
+            // MRC4 fences this legacy protocol before any legacy publication.
+            // Exact inode authority is verified separately by inode_mode_state.
+            (Some(b"MRC4"), _) => Err(stale()),
             _ => Err(backend_error(
                 "TiDB concurrent mode, backing ID, and fence disagree",
             )),
@@ -2572,6 +2722,72 @@ mod tests {
             fence: 0,
             expires: 0,
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an actual TiDB service and MOUNT_RS_TIDB_URL"]
+    async fn actual_tidb_context_enforces_session_bound_and_verified_reuse() {
+        let url = std::env::var("MOUNT_RS_TIDB_URL").unwrap();
+        let context = TidbPoolContext::new(&url, 2).unwrap();
+        let mut first = context.0.pool.get_conn().await.unwrap();
+        let second = context.0.pool.get_conn().await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), context.0.pool.get_conn())
+                .await
+                .is_err()
+        );
+        let settings: (String, String, u8) = first
+            .query_first("SELECT @@tidb_txn_mode, @@transaction_isolation, @@autocommit")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(settings.0.to_ascii_lowercase(), "pessimistic");
+        assert_eq!(settings.1.to_ascii_uppercase(), "REPEATABLE-READ");
+        assert_eq!(settings.2, 1);
+        drop(first);
+        second.disconnect().await.unwrap();
+        let mut reused = context.0.pool.get_conn().await.unwrap();
+        let enabled: u8 = reused
+            .query_first("SELECT @@autocommit")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(enabled, 1);
+        let old_id: u64 = reused
+            .query_first("SELECT CONNECTION_ID()")
+            .await
+            .unwrap()
+            .unwrap();
+        reused.disconnect().await.unwrap();
+        let mut reconnected = context.0.pool.get_conn().await.unwrap();
+        let settings: (String, String, u8, u64) = reconnected
+            .query_first(
+                "SELECT @@tidb_txn_mode, @@transaction_isolation, @@autocommit, CONNECTION_ID()",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(settings.0.to_ascii_lowercase(), "pessimistic");
+        assert_eq!(settings.1.to_ascii_uppercase(), "REPEATABLE-READ");
+        assert_eq!(settings.2, 1);
+        assert_ne!(settings.3, old_id);
+        drop(reconnected);
+        context.close().await.unwrap();
+        assert!(context.0.pool.get_conn().await.is_err());
+    }
+
+    #[test]
+    fn inode_mode_fences_legacy_inspectors_with_known_stale_authority() {
+        let mut row = pristine_concurrent_row();
+        row.mode = Some(b"MRC4".to_vec());
+        row.backing = Some(
+            ConcurrentBackingId::from_bytes([4; 16])
+                .unwrap()
+                .to_hex()
+                .into_bytes(),
+        );
+        row.fence = CONCURRENT_FENCE_SENTINEL;
+        assert_eq!(row.mode_state().unwrap_err().code, ErrorCode::Estale);
     }
 
     #[test]

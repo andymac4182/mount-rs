@@ -1305,6 +1305,8 @@ export interface JsChunkedOptions {
    * local SQLite metadata. SQLite metadata and blocks are same-host only.
    */
   concurrentWrites?: boolean
+  /** Enable independent inode revisions. Requires concurrentWrites and no ownershipMode. */
+  inodeUpdates?: boolean
   /**
    * Explicit exclusive ownership enables writeback until sync or shutdown.
    * Shared ownership uses fenced directory delegation; same-host SQLite constraints remain.

@@ -16,8 +16,8 @@ import {
   usageError,
   withTimeout,
 } from "./errors.mjs"
-import { providerById, providerSummary } from "./providers.mjs"
-import { cleanupOwnedPaths, parseArgs, runBenchmark, runSample } from "./runner.mjs"
+import { foundationDbMetadataOptions, providerById, providerSummary } from "./providers.mjs"
+import { cleanupOwnedPaths, parseArgs, runBenchmark, runSample, runSteadySample } from "./runner.mjs"
 import { computeStats, percentile, round, roundStats } from "./stats.mjs"
 
 async function testStats() {
@@ -135,10 +135,17 @@ async function testDeferredWriteCleanup() {
 }
 
 async function testCli() {
+  assert.equal(parseArgs(["--layout", "inode", "--workload", "steady-overwrite"]).layout, "inode")
+  assert.equal(parseArgs(["--workload", "steady-overwrite"]).workload, "steady-overwrite")
+  assert.throws(() => parseArgs(["--layout", "unknown"]), /layout/)
+  assert.throws(() => parseArgs(["--workload", "unknown"]), /workload/)
+
   assert.deepEqual(parseArgs(["--smoke"]).sizes, [1])
   assert.deepEqual(parseArgs(["--sizes", "1,4MiB,10MB,16", "--iterations", "3", "--concurrency", "2"]), {
     help: false,
     mode: "full",
+    layout: "legacy",
+    workload: "lifecycle",
     sizes: [1, 4, 10, 16],
     iterations: 3,
     concurrency: 2,
@@ -290,6 +297,9 @@ async function testQualificationArtifact() {
       profile: { ...W26_IOPS_PROFILE },
     },
   )
+  for (const extra of [{ layout: "inode" }, { workload: "steady-overwrite" }]) {
+    assert.throws(() => validateArtifact({ ...artifact, config: { ...artifact.config, ...extra } }, { providers: ["mount-rs-split-sqlite-r2"], minimumIops: W26_IOPS_MINIMUM }), /layout|workload/)
+  }
   assert.throws(
     () => validateArtifact({ ...artifact, config: { ...artifact.config, minIops: 999 } }, {
       providers: ["mount-rs-split-sqlite-r2"],
@@ -573,6 +583,47 @@ async function testOzoneProviderMatrix() {
   assert.equal(summary.includes("access-key"), false)
 }
 
+const fdbConfig = { clusterFile: "/owned/fdb.cluster", leaseAuthority: "shared-provider", sharedProvider: true, authorityPrefix: "owned-authority" }
+assert.equal(foundationDbMetadataOptions(fdbConfig, { runId: "test", layout: "legacy" }).authorityPrefix, "owned-authority")
+const inodeFdb = foundationDbMetadataOptions(fdbConfig, { runId: "test", layout: "inode" })
+assert.equal(inodeFdb.leaseAuthority, "revision-cas")
+assert.equal("authorityPrefix" in inodeFdb, false)
+
+async function testSteadyOverwriteOracle() {
+  const initial = Buffer.from([0x51, 1, 2, 3, 0xa7])
+  const calls = []
+  const handle = {
+    async write(bytes, offset, length, position) {
+      calls.push(["write", position, length])
+      bytes.copy(initial, position, offset, offset + length)
+      return { bytesWritten: length }
+    },
+    async read(target, offset, length, position) {
+      calls.push(["read", position, length])
+      initial.copy(target, offset, position, position + length)
+      return { bytesRead: length, buffer: target }
+    },
+  }
+  const args = { definition: { id: "steady-test" }, handle, payload: Buffer.from([1, 2, 3]), path: "/owned", iteration: 1, options: { timeoutMs: 100, cleanupTimeoutMs: 100 }, pendingOperations: new Map() }
+  const success = await runSteadySample(args)
+  assert.equal(success.success, true)
+  assert.equal(success.deleteSucceeded, null)
+  assert.deepEqual(calls, [["write", 1, 3], ["read", 0, 5]])
+  initial[0] = 0 // An unchanged boundary is still part of the full byte oracle.
+  const corrupt = await runSteadySample({ ...args, iteration: 2 })
+  assert.equal(corrupt.success, false)
+  assert.equal(corrupt.payloadVerified, false)
+  const partial = await runSteadySample({ ...args, handle: { ...handle, async write() { return { bytesWritten: 1 } } } })
+  assert.equal(partial.success, false)
+  assert.equal(partial.readSucceeded, false)
+  let attempts = 0
+  const pendingArgs = { ...args, options: { timeoutMs: 5, cleanupTimeoutMs: 5 }, handle: { async write() { attempts += 1; return new Promise(() => {}) } }, pendingOperations: new Map() }
+  assert.equal((await runSteadySample(pendingArgs)).success, false)
+  assert.equal(pendingArgs.pendingOperations.size, 1)
+  assert.equal((await runSteadySample(pendingArgs)).success, false)
+  assert.equal(attempts, 1, "unresolved operation must not be replayed on its handle")
+}
+await testSteadyOverwriteOracle()
 await testStats()
 await testErrors()
 await testCli()

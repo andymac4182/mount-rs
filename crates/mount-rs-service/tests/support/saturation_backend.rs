@@ -376,6 +376,14 @@ impl Backend {
     }
 
     pub async fn open(&self, index: usize) -> Result<Filesystem, String> {
+        self.open_in_context(index, None).await
+    }
+
+    pub async fn open_in_context(
+        &self,
+        index: usize,
+        context: Option<&mount_rs_sdk::StorageContext>,
+    ) -> Result<Filesystem, String> {
         let mut options = SplitOptions::memory(format!("remote-saturation-{index}"), 4096)
             .with_concurrent_writes(true);
         if std::env::var("MOUNT_RS_REMOTE_SATURATION_INODE_UPDATES").as_deref() == Ok("1") {
@@ -383,7 +391,11 @@ impl Backend {
         }
         options.metadata = self.store.clone();
         options.blocks = self.store.clone();
-        Filesystem::split(options).await.map_err(|error| {
+        let result = match context {
+            Some(context) => Filesystem::split_with_context(options, context).await,
+            None => Filesystem::split(options).await,
+        };
+        result.map_err(|error| {
             // TiDB's db_error explicitly redacts URL parsing details.
             // Other providers retain code-only diagnostics.
             if self.name == "tidb" {

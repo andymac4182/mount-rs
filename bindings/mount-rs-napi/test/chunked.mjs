@@ -48,6 +48,29 @@ async function exercise(options, expected) {
 
 const directory = await mkdtemp(join(tmpdir(), "mount-rs-napi-chunked-"))
 try {
+  await assertCode(() => openDriver({ inodeUpdates: true }), "EINVAL")
+  await assertCode(() => openDriver({ inodeUpdates: true, concurrentWrites: true, ownershipMode: "shared" }), "EINVAL")
+  const inodeOptions = {
+    metadata: { kind: "sqlite", uri: join(directory, "inode-metadata.sqlite") },
+    blocks: { kind: "sqlite", uri: join(directory, "inode-blocks.sqlite") },
+    concurrentWrites: true,
+    inodeUpdates: true,
+  }
+  const inodeDriver = await openDriver(inodeOptions)
+  await inodeDriver.writeFile("/inode", Buffer.from("unchanged boundary"))
+  const inodeHandle = await inodeDriver.open("/inode", "r+")
+  const patch = Buffer.from("CHANGED")
+  assert.equal((await inodeHandle.write(patch, 0, patch.length, 2)).bytesWritten, patch.length)
+  await inodeHandle.close()
+  const expectedInode = Buffer.from("unchanged boundary")
+  patch.copy(expectedInode, 2)
+  assert.deepEqual(Buffer.from(await inodeDriver.readFile("/inode")), expectedInode)
+  await inodeDriver.shutdown()
+  const reopenedInode = await openDriver(inodeOptions)
+  assert.deepEqual(Buffer.from(await reopenedInode.readFile("/inode")), expectedInode)
+  await reopenedInode.unlink("/inode")
+  await reopenedInode.shutdown()
+  await assert.rejects(() => openDriver({ ...inodeOptions, inodeUpdates: false }))
   for (const ownershipMode of ["invalid", "shared"]) {
     await assertCode(() => openDriver({ ownershipMode }), "EINVAL")
   }

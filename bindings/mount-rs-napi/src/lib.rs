@@ -1434,6 +1434,8 @@ pub struct JsChunkedOptions {
     /// Enable persisted multiwriter revision CAS for FoundationDB, PGlite, or
     /// local SQLite metadata. SQLite metadata and blocks are same-host only.
     pub concurrent_writes: Option<bool>,
+    /// Enable independent inode revisions. Requires concurrentWrites and no ownershipMode.
+    pub inode_updates: Option<bool>,
     /// Explicit exclusive ownership enables writeback until sync or shutdown.
     /// Shared ownership uses fenced directory delegation; same-host SQLite constraints remain.
     /// Must agree with concurrentWrites when both options are supplied.
@@ -1457,6 +1459,123 @@ pub struct JsChunkedOptions {
 struct DynMetadataStore(Arc<dyn MetadataStore>);
 
 impl MetadataStore for DynMetadataStore {
+    fn inode_mode_state<'a, 'async_trait>(
+        &'a self,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = CoreResult<Option<mount_rs_core::storage::InodeModeState>>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.inode_mode_state()
+    }
+    fn prepare_inode_mode<'a, 'async_trait>(
+        &'a self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.prepare_inode_mode(backing, expected_revision)
+    }
+    fn load_inode_snapshot<'a, 'async_trait>(
+        &'a self,
+        backing: ConcurrentBackingId,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = CoreResult<mount_rs_core::storage::InodeMetadataSnapshot>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.load_inode_snapshot(backing)
+    }
+    fn load_inode<'a, 'async_trait>(
+        &'a self,
+        backing: ConcurrentBackingId,
+        inode: u64,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = CoreResult<mount_rs_core::storage::LoadedInode>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.load_inode(backing, inode)
+    }
+    fn load_inode_if_changed<'a, 'async_trait>(
+        &'a self,
+        backing: ConcurrentBackingId,
+        inode: u64,
+        known: Option<mount_rs_core::storage::InodeVersion>,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = CoreResult<Option<mount_rs_core::storage::LoadedInode>>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.load_inode_if_changed(backing, inode, known)
+    }
+    fn publish_inode_if_version<'a, 'async_trait>(
+        &'a self,
+        backing: ConcurrentBackingId,
+        inode: u64,
+        expected: mount_rs_core::storage::InodeVersion,
+        node: mount_rs_core::storage::NodeMetadata,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = CoreResult<mount_rs_core::storage::InodeVersion>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0
+            .publish_inode_if_version(backing, inode, expected, node)
+    }
+    fn publish_structure_if_versions<'a, 'b, 'async_trait>(
+        &'a self,
+        backing: ConcurrentBackingId,
+        expected_generation: u64,
+        expected_inode_revisions: &'b std::collections::BTreeMap<u64, u64>,
+        namespace: Namespace,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<u64>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.publish_structure_if_versions(
+            backing,
+            expected_generation,
+            expected_inode_revisions,
+            namespace,
+        )
+    }
+
     fn durable(&self) -> bool {
         self.0.durable()
     }
@@ -4124,6 +4243,12 @@ fn chunked_ownership_mode(
 pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Filesystem> {
     let (ownership_mode, concurrent_writes) =
         chunked_ownership_mode(options.ownership_mode.as_deref(), options.concurrent_writes)?;
+    let inode_updates = options.inode_updates.unwrap_or(false);
+    if inode_updates && (!concurrent_writes || ownership_mode.is_some()) {
+        return Err(config_error(
+            "inodeUpdates requires concurrentWrites and no ownershipMode",
+        ));
+    }
     if concurrent_writes {
         match options.metadata.kind.as_str() {
             "foundationdb"
@@ -4185,6 +4310,7 @@ pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Fi
         .map_err(to_js_error)?
         .with_lease_ttl(ttl)
         .with_concurrent_writes(concurrent_writes)
+        .with_inode_updates(inode_updates)
         .with_identity(uid, gid, umask)
         .with_root_mode(root_mode);
     if let Some(mode) = ownership_mode {
@@ -4607,6 +4733,67 @@ mod tests {
         {
             unreachable!()
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn dynamic_metadata_supports_inode_startup_structure_and_existing_writes() {
+        block_on(async {
+            let directory = std::env::temp_dir().join(format!(
+                "mount-rs-napi-inodes-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&directory).unwrap();
+            let metadata = DynMetadataStore(Arc::new(
+                SqliteMetadataStore::open(directory.join("metadata.db")).unwrap(),
+            ));
+            let blocks = DynBlockStore(Arc::new(
+                SqliteBlockStore::open(directory.join("blocks.db")).unwrap(),
+            ));
+            let fs = ChunkedFs::open(
+                metadata.clone(),
+                blocks,
+                ChunkedOptions::fixed("napi-inode", 16)
+                    .unwrap()
+                    .with_inode_updates(true),
+            )
+            .await
+            .unwrap();
+            fs.write_file("/file", b"initial").await.unwrap();
+            let backing = metadata.inode_mode_state().await.unwrap().unwrap().backing;
+            let snapshot = metadata.load_inode_snapshot(backing).await.unwrap();
+            let handle = fs.open("/file", "r+", 0).await.unwrap();
+            handle.write(b"updated", Some(0)).await.unwrap();
+            let mut bytes = [0; 7];
+            handle.read(&mut bytes, Some(0)).await.unwrap();
+            assert_eq!(&bytes, b"updated");
+            let inode = handle.stat().await.unwrap().ino;
+            let loaded = metadata.load_inode(backing, inode).await.unwrap();
+            assert!(
+                metadata
+                    .load_inode_if_changed(backing, inode, Some(loaded.version))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                metadata
+                    .load_inode_snapshot(backing)
+                    .await
+                    .unwrap()
+                    .structural_generation,
+                snapshot.structural_generation
+            );
+            handle.close().await.unwrap();
+            fs.shutdown().await.unwrap();
+            drop(fs);
+            drop(metadata);
+            std::fs::remove_dir_all(directory).unwrap();
+        });
     }
 
     #[test]

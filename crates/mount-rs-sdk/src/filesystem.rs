@@ -17,7 +17,7 @@ use mount_rs_memfs::{MemoryFs, MemoryOptions};
 use mount_rs_sqlite_fs::{SqliteFs, open_sqlite};
 
 use crate::options::{FoundationDbLeaseAuthority, SplitOptions, StoreConfig};
-use crate::providers::{StorageResources, open_storage, open_storage_decorated};
+use crate::providers::{StorageContext, StorageResources, open_storage, open_storage_in_context};
 use crate::stores::{ErasedBlockStore, ErasedMetadataStore};
 #[cfg(feature = "observability")]
 use crate::{Telemetry, global_telemetry};
@@ -80,7 +80,7 @@ impl Filesystem {
 
     /// Open a filesystem composed from independent metadata and block stores.
     pub async fn split(options: SplitOptions) -> Result<Self> {
-        Self::split_impl(options, None).await
+        Self::split_impl(options, None, None).await
     }
 
     /// Open split storage with an application-owned block provider decorator.
@@ -88,12 +88,30 @@ impl Filesystem {
         options: SplitOptions,
         decorator: &dyn BlockStoreDecorator,
     ) -> Result<Self> {
-        Self::split_impl(options, Some(decorator)).await
+        Self::split_impl(options, Some(decorator), None).await
+    }
+
+    /// Open split storage borrowing pools owned by an explicit server context.
+    pub async fn split_with_context(
+        options: SplitOptions,
+        context: &StorageContext,
+    ) -> Result<Self> {
+        Self::split_impl(options, None, Some(context)).await
+    }
+
+    /// Context-backed variant preserving the application's block decorator.
+    pub async fn split_with_context_and_block_decorator(
+        options: SplitOptions,
+        context: &StorageContext,
+        decorator: &dyn BlockStoreDecorator,
+    ) -> Result<Self> {
+        Self::split_impl(options, Some(decorator), Some(context)).await
     }
 
     async fn split_impl(
         options: SplitOptions,
         decorator: Option<&dyn BlockStoreDecorator>,
+        context: Option<&StorageContext>,
     ) -> Result<Self> {
         if options.chunk_size_bytes == 0 {
             return Err(FsError::new(ErrorCode::Einval)
@@ -113,7 +131,8 @@ impl Filesystem {
                 chunk_options = chunk_options.with_checkout_path(path);
             }
         }
-        let opened = open_storage_decorated(&options.metadata, &options.blocks, decorator).await?;
+        let opened =
+            open_storage_in_context(&options.metadata, &options.blocks, decorator, context).await?;
         let resources = opened.resources.clone();
         match ChunkedFs::open(opened.metadata, opened.blocks, chunk_options).await {
             Ok(driver) => Ok(Self {

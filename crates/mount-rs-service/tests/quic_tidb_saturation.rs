@@ -581,6 +581,14 @@ async fn packet() -> Result<(), String> {
     let preseed = std::env::var("MOUNT_RS_REMOTE_SATURATION_PRESEED").as_deref() == Ok("1");
     let separate =
         std::env::var("MOUNT_RS_REMOTE_SATURATION_SEPARATE_DRIVES").as_deref() == Ok("1");
+    let tidb_pool_max_connections =
+        env_num("MOUNT_RS_REMOTE_SATURATION_TIDB_POOL_MAX", 16, 1, 1024);
+    let storage_contexts: Vec<_> = (0..server_count)
+        .map(|_| {
+            mount_rs_sdk::StorageContext::new(tidb_pool_max_connections)
+                .map_err(|_| "invalid TiDB pool maximum")
+        })
+        .collect::<Result<_, _>>()?;
     let mut drive_backends = vec![];
     if separate {
         for i in 0..client_count {
@@ -616,14 +624,15 @@ async fn packet() -> Result<(), String> {
         }
         if separate {
             let mut starts = tokio::task::JoinSet::new();
-            for i in 0..server_count {
+            for (i, context) in storage_contexts.iter().enumerate() {
                 let backends = drive_backends.clone();
+                let context = context.clone();
                 starts.spawn(async move {
                     let mut opened = vec![];
                     let result = async {
                         let mut drivers = vec![];
                         for b in backends.iter() {
-                            let fs = b.open(i).await?;
+                            let fs = b.open_in_context(i, Some(&context)).await?;
                             drivers.push(fs.driver()); opened.push(fs);
                         }
                         wire::setup_with_drives(drivers).await
@@ -646,8 +655,8 @@ async fn packet() -> Result<(), String> {
             for (_, (s,e,d)) in prepared {servers.push(s);endpoints.push(e);dirs.push(d);}
             if !errors.is_empty() {return Err(format!("server setup failures: {errors:?}"));}
         } else {
-            for i in 0..server_count {
-                let fs = backend.open(i).await?;
+            for (i, context) in storage_contexts.iter().enumerate() {
+                let fs = backend.open_in_context(i, Some(context)).await?;
                 let left = fs.driver(); providers.push(fs);
                 let (s,e,d) = wire::setup_with_left(left).await?;
                 servers.push(s);endpoints.push(e);dirs.push(d);
@@ -825,6 +834,11 @@ async fn packet() -> Result<(), String> {
                 failures.push("filesystem shutdown failed");
             }
         }
+        for context in &storage_contexts {
+            if context.close().await.is_err() {
+                failures.push("storage context shutdown failed");
+            }
+        }
         if failures.is_empty() {
             Ok(())
         } else {
@@ -888,6 +902,7 @@ async fn packet() -> Result<(), String> {
     artifact["encoding_timing"] = json!(
         "request construction and serialization included; payload generation excluded equally"
     );
+    artifact["tidb_pool"] = json!({"scope":"per server per exact connection identity", "max_connections":tidb_pool_max_connections,"schema_initialization":"once per context and role"});
     let limits = mount_rs_service::server::RemoteTransferLimits::default();
     artifact["server_admission"] = json!({"scope":"per server, shared across all connections","active_data_operations":limits.active_data_operations,"active_control_operations":limits.active_control_operations,"data_bytes_each_direction":limits.data_bytes,"reserved_control_bytes_each_direction":limits.control_bytes,"quic_bidi_streams_per_connection":40});
     if let Ok(path) = std::env::var("MOUNT_RS_REMOTE_TIDB_SATURATION_OUTPUT") {

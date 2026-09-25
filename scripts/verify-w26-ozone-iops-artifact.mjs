@@ -76,6 +76,8 @@ export function validateArtifact(document, options = {}) {
   requireEqual(root.status, "ok", "status")
 
   const config = requireObject(root.config, "config")
+  requireEqual(config.layout ?? "legacy", "legacy", "config.layout")
+  requireEqual(config.workload ?? "lifecycle", "lifecycle", "config.workload")
   requireEqual(config.requireConfigured, true, "config.requireConfigured")
   requireInteger(config.minIops, "config.minIops", minimumIopsFloor)
   requireEqual(config.payloadBytes, W26_IOPS_PROFILE.payloadBytes, "config.payloadBytes")

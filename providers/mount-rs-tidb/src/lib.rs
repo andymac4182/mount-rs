@@ -35,5 +35,5 @@ mod storage;
 
 pub use storage::{
     DEFAULT_MAX_BLOCK_BYTES, DEFAULT_MAX_NAMESPACE_BYTES, TidbBlockStore, TidbMetadataStore,
-    TidbStorageOptions,
+    TidbPoolContext, TidbStorageOptions,
 };
