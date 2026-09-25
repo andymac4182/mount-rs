@@ -26,5 +26,9 @@
   "review_checkpoints": [
     "d4935e1b: no material findings, bounded counts/oracle/resource claims",
     "bd5af8a6: no material findings, signed auth and binder; not simultaneous I/O/capacity approval"
+  ],
+  "counter_window_limitations": [
+    "Catalog profile warms one read, not all eight round-robin connections. SQLite pager counters are drained after each read, so initial measured drains can include earlier setup/CAS work on other connections. Pager writes are not writes performed by the forty-read workload. Raw artifacts retained unchanged; document-byte query units and process resource deltas keep their explicit measured window.",
+    "A future paired warm profile must drain every connection before measuring; report cold preparation separately."
   ]
 }

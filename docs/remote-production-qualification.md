@@ -250,3 +250,10 @@ failures cannot count as denials. All ten legitimate connections remain held
 through the sequential work. Independent review accepted this checkpoint.
 The smoke uses shared volatile MemoryFs and an owned static JWK source; it
 does not test discovery, TiDB population, simultaneous I/O or production capacity.
+
+The catalog profile warms one read across an eight-connection pool. Initial
+measured SQLite pager-counter drains can therefore include earlier setup and
+CAS activity on other connections. Pager-write units do not establish writes
+by the forty-read workload. Raw artifacts are retained; document-byte units
+and process resource deltas have their stated measurement window. A future
+matched warm profile must drain every connection and report cold setup separately.
