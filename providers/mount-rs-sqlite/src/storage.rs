@@ -1979,6 +1979,16 @@ impl MetadataStore for SqliteMetadataStore {
             CompactInodeCapability::Unsupported
         }
     }
+    async fn compact_inode_mode_state(&self) -> Result<Option<InodeModeState>> {
+        #[cfg(unix)]
+        {
+            self.compact_inspect()
+        }
+        #[cfg(not(unix))]
+        {
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+    }
     async fn prepare_compact_inode_mode(
         &self,
         backing: ConcurrentBackingId,

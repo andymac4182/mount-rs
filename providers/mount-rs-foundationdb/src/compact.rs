@@ -4,6 +4,7 @@ use mount_rs_core::diagnostics::profile::{self, Event};
 use mount_rs_core::storage::compact::*;
 
 const GUARDS: &[u8] = b"meta/compact-guard/";
+const COMPACT_ANCHOR_PREFIX: &[u8] = b"{\"layout\":\"mount-rs-compact-inodes\"";
 const HEADER: usize = 28;
 
 fn guard_key(keys: &Keyspace, inode: u64) -> Vec<u8> {
@@ -111,6 +112,54 @@ impl<'a> View<'a> {
             value.as_ref().map_or(0, Vec::len),
         ));
         Ok(value)
+    }
+    async fn has_prefix(&mut self, prefix: Vec<u8>) -> TxnResult<bool> {
+        let end = range_end(&prefix).map_err(TxnError::Fs)?;
+        self.budget.range(&prefix, &end)?;
+        let key = self
+            .trx
+            .get_key(
+                &foundationdb::KeySelector::first_greater_or_equal(prefix.clone()),
+                false,
+            )
+            .await?;
+        self.budget.point(&key, 0)?;
+        Ok(key.starts_with(&prefix))
+    }
+    async fn require_no_compact_markers(&mut self) -> TxnResult<()> {
+        if self.has_prefix(self.keys.key(GUARDS)).await? || self.has_compact_anchor_prefix().await?
+        {
+            return Err(TxnError::Fs(stale_backing()));
+        }
+        Ok(())
+    }
+    async fn has_compact_anchor_prefix(&mut self) -> TxnResult<bool> {
+        let chunk_bytes = self.inner.limits.metadata_chunk_bytes;
+        let mut matched = 0;
+        let mut index = 0u32;
+        while matched < COMPACT_ANCHOR_PREFIX.len() {
+            let key = metadata_chunk_key(&self.keys.chunks(), index);
+            let Some(chunk) = self.get(key).await? else {
+                return if matched == 0 {
+                    Ok(false)
+                } else {
+                    Err(TxnError::Fs(stale_backing()))
+                };
+            };
+            let needed = (COMPACT_ANCHOR_PREFIX.len() - matched).min(chunk_bytes);
+            let compared = needed.min(chunk.len());
+            if chunk[..compared] != COMPACT_ANCHOR_PREFIX[matched..matched + compared] {
+                return Ok(false);
+            }
+            if chunk.len() < needed || chunk.len() > chunk_bytes {
+                return Err(TxnError::Fs(stale_backing()));
+            }
+            matched += needed;
+            index = index
+                .checked_add(1)
+                .ok_or_else(|| TxnError::Fs(stale_backing()))?;
+        }
+        Ok(true)
     }
     async fn range(&mut self, prefix: Vec<u8>) -> TxnResult<Vec<(Vec<u8>, Vec<u8>)>> {
         let end = range_end(&prefix).map_err(TxnError::Fs)?;
@@ -340,6 +389,7 @@ impl Plan {
 
 #[derive(Clone)]
 pub(super) enum Command {
+    Inspect,
     Prepare(ConcurrentBackingId, u64),
     Snapshot(ConcurrentBackingId),
     Load(ConcurrentBackingId, u64),
@@ -353,6 +403,7 @@ pub(super) enum Command {
     Structure(CompactStructuralDelta),
 }
 pub(super) enum Output {
+    Mode(Option<InodeModeState>),
     Prepared,
     Snapshot(CompactSnapshot),
     Inode(LoadedCompactInode),
@@ -377,6 +428,99 @@ impl FoundationDbMetadataStore {
 async fn execute(trx: &Transaction, inner: &Inner, command: Command) -> TxnResult<Output> {
     let mut view = View::new(trx, inner)?;
     match command {
+        Command::Inspect => {
+            let mode = view.get(view.keys.write_mode()).await?;
+            let raw_backing = view.get(view.keys.metadata_backing()).await?;
+            match (mode.as_deref(), raw_backing.as_deref()) {
+                (Some(b"MRC5"), Some(id)) => {
+                    let backing =
+                        parse_backing_bytes(id).ok_or_else(|| TxnError::Fs(stale_backing()))?;
+                    let (_, anchor) = view.anchor(backing).await?;
+                    Ok(Output::Mode(Some(InodeModeState {
+                        backing,
+                        structural_generation: anchor.generation,
+                    })))
+                }
+                (Some(b"MRC4"), Some(id)) => {
+                    let backing =
+                        parse_backing_bytes(id).ok_or_else(|| TxnError::Fs(stale_backing()))?;
+                    let policy = view.get(view.keys.block_authority_policy()).await?;
+                    view.inner.block_authority_policy.require(
+                        policy
+                            .as_deref()
+                            .map(FoundationDbBlockAuthorityPolicy::decode)
+                            .transpose()?,
+                    )?;
+                    let authority = view.get(view.keys.block_authority()).await?;
+                    let lease = view.get(view.keys.lease()).await?;
+                    let fence = view.get(view.keys.fence()).await?;
+                    let delegation = view.get(view.keys.key(b"meta/delegation")).await?;
+                    let manifest = view.get(view.keys.manifest()).await?;
+                    let generation = manifest
+                        .as_deref()
+                        .map(decode_manifest)
+                        .transpose()
+                        .map_err(TxnError::Fs)?
+                        .ok_or_else(|| TxnError::Fs(stale_backing()))?
+                        .revision;
+                    if generation == 0
+                        || lease.is_some()
+                        || delegation.is_some()
+                        || fence.as_deref() != Some(CONCURRENT_FENCE_SENTINEL)
+                        || (view.inner.block_authority_policy
+                            == FoundationDbBlockAuthorityPolicy::SameKeyspace
+                            && authority.as_deref().and_then(parse_backing_bytes) != Some(backing))
+                    {
+                        return Err(TxnError::Fs(stale_backing()));
+                    }
+                    view.require_no_compact_markers().await?;
+                    Ok(Output::Mode(None))
+                }
+                (Some(b"MRC2"), Some(id)) if parse_backing_bytes(id).is_some() => {
+                    let backing =
+                        parse_backing_bytes(id).ok_or_else(|| TxnError::Fs(stale_backing()))?;
+                    let policy = view.get(view.keys.block_authority_policy()).await?;
+                    view.inner.block_authority_policy.require(
+                        policy
+                            .as_deref()
+                            .map(FoundationDbBlockAuthorityPolicy::decode)
+                            .transpose()?,
+                    )?;
+                    let lease = view.get(view.keys.lease()).await?;
+                    let fence = view.get(view.keys.fence()).await?;
+                    let delegation = view.get(view.keys.key(b"meta/delegation")).await?;
+                    let authority = view.get(view.keys.block_authority()).await?;
+                    if lease.is_some()
+                        || delegation.is_some()
+                        || fence.as_deref() != Some(CONCURRENT_FENCE_SENTINEL)
+                        || (view.inner.block_authority_policy
+                            == FoundationDbBlockAuthorityPolicy::SameKeyspace
+                            && authority.as_deref().and_then(parse_backing_bytes) != Some(backing))
+                    {
+                        return Err(TxnError::Fs(stale_backing()));
+                    }
+                    view.require_no_compact_markers().await?;
+                    Ok(Output::Mode(None))
+                }
+                (None, None) | (Some(b"MRC1"), None) => {
+                    let authority = view.get(view.keys.block_authority()).await?;
+                    let fence = view.get(view.keys.fence()).await?;
+                    let lease = view.get(view.keys.lease()).await?;
+                    let delegation = view.get(view.keys.key(b"meta/delegation")).await?;
+                    if authority.is_some()
+                        || delegation.is_some()
+                        || (mode.is_some() && lease.is_some())
+                        || (mode.is_none() && fence.as_deref() == Some(CONCURRENT_FENCE_SENTINEL))
+                        || (mode.is_some() && fence.as_deref() != Some(CONCURRENT_FENCE_SENTINEL))
+                    {
+                        return Err(TxnError::Fs(stale_backing()));
+                    }
+                    view.require_no_compact_markers().await?;
+                    Ok(Output::Mode(None))
+                }
+                _ => Err(TxnError::Fs(stale_backing())),
+            }
+        }
         Command::Prepare(backing, expected) => {
             let generation = expected
                 .checked_add(1)

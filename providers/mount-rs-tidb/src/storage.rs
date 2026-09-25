@@ -1249,6 +1249,9 @@ impl MetadataStore for TidbMetadataStore {
     fn compact_inode_capability(&self) -> mount_rs_core::storage::compact::CompactInodeCapability {
         mount_rs_core::storage::compact::CompactInodeCapability::V1
     }
+    async fn compact_inode_mode_state(&self) -> Result<Option<InodeModeState>> {
+        self.compact_inspect().await
+    }
     async fn prepare_compact_inode_mode(
         &self,
         backing: ConcurrentBackingId,

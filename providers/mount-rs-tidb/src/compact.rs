@@ -82,6 +82,10 @@ async fn anchor<C: Queryable>(
     let row: AnchorRow = conn.exec_first(
         "SELECT revision,write_mode,backing_id,owner,fence,expires,namespace,delegation FROM mount_rs_tidb_metadata WHERE volume_key=?", (volume,)
     ).await.map_err(|e| db_error("read TiDB compact anchor", e))?.ok_or_else(stale)?;
+    decode_anchor_row(row, backing)
+}
+
+fn decode_anchor_row(row: AnchorRow, backing: ConcurrentBackingId) -> Result<CompactAnchor> {
     if row.1.as_deref() != Some(b"MRC5")
         || row.2.as_deref() != Some(backing.to_hex().as_bytes())
         || row.3.is_some()
@@ -220,7 +224,86 @@ async fn read_transaction(conn: &mut Conn) -> Result<Transaction<'_>> {
         .map_err(|e| db_error("begin TiDB compact snapshot", e))
 }
 
+async fn require_no_compact_markers<C: Queryable>(
+    tx: &mut C,
+    volume: &str,
+    namespace: Option<&str>,
+) -> Result<()> {
+    if namespace.is_some_and(|body| decode_compact_anchor(body.as_bytes()).is_ok()) {
+        return Err(stale());
+    }
+    let guard: Option<u8> = tx
+        .exec_first(
+            "SELECT 1 FROM mount_rs_tidb_compact_guards WHERE volume_key=? LIMIT 1",
+            (volume,),
+        )
+        .await
+        .map_err(|e| db_error("inspect TiDB compact guards", e))?;
+    if guard.is_some() {
+        return Err(stale());
+    }
+    Ok(())
+}
+
 impl TidbMetadataStore {
+    pub(super) async fn compact_inspect(&self) -> Result<Option<InodeModeState>> {
+        let mut conn = self
+            .0
+            .pool
+            .get_conn()
+            .await
+            .map_err(|e| db_error("inspect TiDB compact mode", e))?;
+        let mut tx = read_transaction(&mut conn).await?;
+        let row: AnchorRow = tx.exec_first(
+            "SELECT revision,write_mode,backing_id,owner,fence,expires,namespace,delegation FROM mount_rs_tidb_metadata WHERE volume_key=?",
+            (&self.0.volume_key,),
+        ).await.map_err(|e| db_error("inspect TiDB compact mode", e))?.ok_or_else(stale)?;
+        let result = match (row.1.as_deref(), row.2.as_deref()) {
+            (Some(b"MRC5"), Some(id)) => {
+                let backing = backing_from_bytes(id)?;
+                let anchor = decode_anchor_row(row, backing)?;
+                Ok(Some(InodeModeState {
+                    backing,
+                    structural_generation: anchor.generation,
+                }))
+            }
+            (Some(b"MRC4"), Some(_)) => {
+                compact_inode_authority((row.0, row.1, row.2, row.3, row.4, row.5), None)?;
+                if row.6.is_none() || row.7.is_some() {
+                    return Err(stale());
+                }
+                require_no_compact_markers(&mut tx, &self.0.volume_key, row.6.as_deref()).await?;
+                Ok(None)
+            }
+            (Some(b"MRC2"), Some(id)) => {
+                backing_from_bytes(id)?;
+                if row.3.is_some()
+                    || row.4 != CONCURRENT_FENCE_SENTINEL
+                    || row.5 != 0
+                    || row.7.is_some()
+                {
+                    return Err(stale());
+                }
+                require_no_compact_markers(&mut tx, &self.0.volume_key, row.6.as_deref()).await?;
+                Ok(None)
+            }
+            (None, None) | (Some(b"MRC1"), None) if row.7.is_none() => {
+                if (row.1.is_some()
+                    && (row.3.is_some() || row.4 != CONCURRENT_FENCE_SENTINEL || row.5 != 0))
+                    || (row.1.is_none() && row.4 == CONCURRENT_FENCE_SENTINEL)
+                {
+                    return Err(stale());
+                }
+                require_no_compact_markers(&mut tx, &self.0.volume_key, row.6.as_deref()).await?;
+                Ok(None)
+            }
+            _ => Err(stale()),
+        }?;
+        tx.rollback()
+            .await
+            .map_err(|e| db_error("finish TiDB compact inspection", e))?;
+        Ok(result)
+    }
     pub(super) async fn compact_prepare(
         &self,
         backing: ConcurrentBackingId,

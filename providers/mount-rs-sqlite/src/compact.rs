@@ -93,6 +93,104 @@ fn anchor(
 }
 
 #[cfg(unix)]
+impl SqliteMetadataStore {
+    pub(super) fn compact_inspect(&self) -> Result<Option<InodeModeState>> {
+        let mut connection = self.0.lock()?;
+        let tx = connection.transaction().map_err(backend_error)?;
+        let row: MetadataPublicationRow = tx.query_row(
+            "SELECT write_mode,backing_id,owner,fence,expires,revision,physical_dev,physical_ino,physical_path FROM mount_rs_metadata WHERE id=1", [],
+            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?))
+        ).map_err(backend_error)?;
+        let delegation: Option<String> = tx
+            .query_row(
+                "SELECT delegation_state FROM mount_rs_metadata WHERE id=1",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(backend_error)?;
+        if delegation.is_some() {
+            return Err(incompatible_schema(
+                "compact inspector found delegated authority",
+            ));
+        }
+        match (row.0.as_deref(), row.1.as_deref()) {
+            (Some(COMPACT_WRITE_MODE), Some(id)) => {
+                let backing = ConcurrentBackingId::from_hex(id)
+                    .map_err(|_| incompatible_schema("invalid compact backing ID"))?;
+                let generation = anchor(&self.0, &tx, backing)?.generation;
+                Ok(Some(InodeModeState {
+                    backing,
+                    structural_generation: generation,
+                }))
+            }
+            (Some(INODE_WRITE_MODE), Some(id)) => {
+                let backing = ConcurrentBackingId::from_hex(id)
+                    .map_err(|_| incompatible_schema("invalid inode backing ID"))?;
+                validate_inode_authority(&self.0, backing, row)?;
+                require_no_compact_markers(&tx)?;
+                Ok(None)
+            }
+            (Some(BOUND_WRITE_MODE), Some(id)) => {
+                ConcurrentBackingId::from_hex(id)
+                    .map_err(|_| incompatible_schema("invalid bound backing ID"))?;
+                require_matching_metadata_stamp(
+                    &self.0,
+                    row.6.as_deref(),
+                    row.7.as_deref(),
+                    row.8.as_deref(),
+                )?;
+                if row.2.is_some() || row.3 != CONCURRENT_FENCE_SENTINEL || row.4 != 0 {
+                    return Err(incompatible_schema("invalid bound authority fence"));
+                }
+                require_no_compact_markers(&tx)?;
+                Ok(None)
+            }
+            (None, None) | (Some(CONCURRENT_WRITE_MODE), None) => {
+                if row.0.is_some()
+                    && (row.2.is_some() || row.3 != CONCURRENT_FENCE_SENTINEL || row.4 != 0)
+                {
+                    return Err(incompatible_schema("invalid concurrent authority fence"));
+                }
+                if row.0.is_none() && row.3 == CONCURRENT_FENCE_SENTINEL {
+                    return Err(incompatible_schema("missing concurrent mode marker"));
+                }
+                require_no_compact_markers(&tx)?;
+                Ok(None)
+            }
+            _ => Err(incompatible_schema(
+                "invalid compact mode and backing authority",
+            )),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn require_no_compact_markers(tx: &Connection) -> Result<()> {
+    let guard: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM mount_rs_compact_guards)",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(backend_error)?;
+    let namespace: Option<String> = tx
+        .query_row(
+            "SELECT namespace FROM mount_rs_metadata WHERE id=1",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(backend_error)?;
+    if guard
+        || namespace
+            .as_deref()
+            .is_some_and(|body| decode_compact_anchor(body.as_bytes()).is_ok())
+    {
+        return Err(incompatible_schema("compact authority markers are missing"));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn decode_guard(row: &Row<'_>) -> Result<(u64, CompactGuard)> {
     let text: String = row.get(0).map_err(backend_error)?;
     let inode = text.parse::<u64>().map_err(backend_error)?;

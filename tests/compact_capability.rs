@@ -20,6 +20,13 @@ async fn existing_provider_rejects_compact_operational_bridge() {
     let backing = ConcurrentBackingId::from_bytes([1; 16]).unwrap();
     assert!(
         store
+            .compact_inode_mode_state()
+            .await
+            .unwrap_err()
+            .is(ErrorCode::Enotsup)
+    );
+    assert!(
+        store
             .prepare_compact_inode_mode(backing, 1)
             .await
             .unwrap_err()

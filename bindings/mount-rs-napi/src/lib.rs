@@ -26,7 +26,7 @@ use mount_rs_chunked::{ChunkedFs, ChunkedOptions, OwnershipMode};
 use mount_rs_core::storage::{
     BlockId, BlockReconcileReport, BlockStore, CheckoutRequest, ConcurrentBackingId,
     ConcurrentModeState, DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState,
-    DirectoryGrant, LoadedMetadata, MetadataStore, Namespace, WriterLease,
+    DirectoryGrant, InodeModeState, LoadedMetadata, MetadataStore, Namespace, WriterLease,
 };
 use mount_rs_core::versioning::VolumeId;
 use mount_rs_core::{
@@ -1461,6 +1461,15 @@ struct DynMetadataStore(Arc<dyn MetadataStore>);
 impl MetadataStore for DynMetadataStore {
     fn compact_inode_capability(&self) -> mount_rs_core::storage::compact::CompactInodeCapability {
         self.0.compact_inode_capability()
+    }
+    fn compact_inode_mode_state<'a, 'async_trait>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<Option<InodeModeState>>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.compact_inode_mode_state()
     }
     fn prepare_compact_inode_mode<'a, 'async_trait>(
         &'a self,
@@ -4764,7 +4773,15 @@ mod tests {
                     .unwrap(),
                 1
             );
+            assert_eq!(store.compact_inode_mode_state().await.unwrap(), None);
             store.prepare_compact_inode_mode(backing, 1).await.unwrap();
+            assert_eq!(
+                store.compact_inode_mode_state().await.unwrap(),
+                Some(InodeModeState {
+                    backing,
+                    structural_generation: 2
+                })
+            );
             let snapshot = store.load_compact_snapshot(backing).await.unwrap();
             let inode = snapshot.anchor.next_inode;
             let mut candidate = snapshot.namespace().unwrap();
@@ -4832,6 +4849,10 @@ mod tests {
             assert_eq!(
                 incapable.compact_inode_capability(),
                 CompactInodeCapability::Unsupported
+            );
+            assert_eq!(
+                incapable.compact_inode_mode_state().await.unwrap_err().code,
+                ErrorCode::Enotsup
             );
             assert_eq!(
                 incapable

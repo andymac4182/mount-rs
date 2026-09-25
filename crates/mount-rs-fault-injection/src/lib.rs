@@ -22,7 +22,7 @@ use mount_rs_core::storage::compact::{
 };
 use mount_rs_core::storage::{
     BlockId, BlockReconcileReport, BlockStore, ConcurrentBackingId, ConcurrentModeState,
-    LoadedMetadata, MetadataStore, Namespace, NodeMetadata, WriterLease,
+    InodeModeState, LoadedMetadata, MetadataStore, Namespace, NodeMetadata, WriterLease,
 };
 use mount_rs_core::versioning::VolumeId;
 use mount_rs_core::{ErrorCode, FsError, Result};
@@ -858,6 +858,17 @@ where
         self.inner.compact_inode_capability()
     }
 
+    async fn compact_inode_mode_state(&self) -> Result<Option<InodeModeState>> {
+        self.injector
+            .before(FaultBoundary::Metadata, FaultOperation::Load)
+            .await?;
+        self.injector
+            .after(FaultBoundary::Metadata, FaultOperation::Load, || {
+                self.inner.compact_inode_mode_state()
+            })
+            .await
+    }
+
     async fn prepare_compact_inode_mode(
         &self,
         backing: ConcurrentBackingId,
@@ -1104,6 +1115,93 @@ mod compact_wrapper_tests {
         calls: Arc<AtomicUsize>,
     }
 
+    struct ModeProbeStore {
+        state: InodeModeState,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl MetadataStore for ModeProbeStore {
+        fn compact_inode_capability(&self) -> CompactInodeCapability {
+            CompactInodeCapability::V1
+        }
+        async fn compact_inode_mode_state(&self) -> Result<Option<InodeModeState>> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            Ok(Some(self.state))
+        }
+        fn durable(&self) -> bool {
+            true
+        }
+        async fn load(&self) -> Result<LoadedMetadata> {
+            unreachable!()
+        }
+        async fn acquire_writer(&self, _: &str, _: Duration) -> Result<WriterLease> {
+            unreachable!()
+        }
+        async fn renew_writer(&self, _: &WriterLease, _: Duration) -> Result<WriterLease> {
+            unreachable!()
+        }
+        async fn release_writer(&self, _: &WriterLease) -> Result<()> {
+            unreachable!()
+        }
+        async fn publish(&self, _: u64, _: &WriterLease, _: Namespace) -> Result<u64> {
+            unreachable!()
+        }
+        async fn flush(&self) -> Result<()> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn compact_mode_faults_preserve_exact_state_and_before_skips_delegate() {
+        let state = InodeModeState {
+            backing: ConcurrentBackingId::from_bytes([0xc9; 16]).unwrap(),
+            structural_generation: 9,
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let before = FaultMetadataStore::new(
+            ModeProbeStore {
+                state,
+                calls: calls.clone(),
+            },
+            injector(
+                FaultPhase::Before,
+                FaultOperation::Load,
+                FaultAction::Error(ErrorCode::Eio),
+            ),
+        );
+        assert_eq!(
+            before.compact_inode_mode_state().await.unwrap_err().code,
+            ErrorCode::Eio
+        );
+        assert_eq!(calls.load(Ordering::Acquire), 0);
+        let after = FaultMetadataStore::new(
+            ModeProbeStore {
+                state,
+                calls: calls.clone(),
+            },
+            injector(
+                FaultPhase::After,
+                FaultOperation::Load,
+                FaultAction::Error(ErrorCode::Eio),
+            ),
+        );
+        assert_eq!(
+            after.compact_inode_mode_state().await.unwrap_err().code,
+            ErrorCode::Eio
+        );
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        let plain = FaultMetadataStore::new(
+            ModeProbeStore {
+                state,
+                calls: calls.clone(),
+            },
+            FaultInjector::disabled(99),
+        );
+        assert_eq!(plain.compact_inode_mode_state().await.unwrap(), Some(state));
+        assert_eq!(calls.load(Ordering::Acquire), 2);
+    }
+
     #[async_trait]
     impl MetadataStore for PendingCompactStore {
         fn compact_inode_capability(&self) -> CompactInodeCapability {
@@ -1327,6 +1425,25 @@ mod compact_wrapper_tests {
         let directory = tempfile::tempdir().unwrap();
         let raw = SqliteMetadataStore::open(directory.path().join("metadata.db")).unwrap();
         let backing = ConcurrentBackingId::from_bytes([0xc7; 16]).unwrap();
+        if !cfg!(unix) {
+            assert_eq!(
+                raw.compact_inode_capability(),
+                CompactInodeCapability::Unsupported
+            );
+            assert_eq!(
+                raw.compact_inode_mode_state().await.unwrap_err().code,
+                ErrorCode::Enotsup
+            );
+            assert_eq!(
+                raw.prepare_compact_inode_mode(backing, 1)
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Enotsup
+            );
+            return;
+        }
+        assert_eq!(raw.compact_inode_capability(), CompactInodeCapability::V1);
         raw.prepare_bound_concurrent_mode(backing).await.unwrap();
         raw.publish_bound_if_revision(backing, 0, namespace())
             .await
@@ -1386,6 +1503,25 @@ mod compact_wrapper_tests {
         let directory = tempfile::tempdir().unwrap();
         let raw = SqliteMetadataStore::open(directory.path().join("metadata.db")).unwrap();
         let backing = ConcurrentBackingId::from_bytes([0xc8; 16]).unwrap();
+        if !cfg!(unix) {
+            assert_eq!(
+                raw.compact_inode_capability(),
+                CompactInodeCapability::Unsupported
+            );
+            assert_eq!(
+                raw.compact_inode_mode_state().await.unwrap_err().code,
+                ErrorCode::Enotsup
+            );
+            assert_eq!(
+                raw.prepare_compact_inode_mode(backing, 1)
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Enotsup
+            );
+            return;
+        }
+        assert_eq!(raw.compact_inode_capability(), CompactInodeCapability::V1);
         raw.prepare_bound_concurrent_mode(backing).await.unwrap();
         raw.publish_bound_if_revision(backing, 0, namespace())
             .await

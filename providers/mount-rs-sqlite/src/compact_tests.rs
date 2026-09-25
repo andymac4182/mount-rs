@@ -88,7 +88,7 @@ fn create(f: &Fixture, name: &str) -> u64 {
     id
 }
 type RawGuards = Vec<(String, u64, u64, u64, String)>;
-fn raw(f: &Fixture) -> (u64, String, RawGuards) {
+fn raw(f: &Fixture) -> (u64, String, RawGuards, String) {
     let conn = f.store.0.lock().unwrap();
     let (generation, anchor) = conn
         .query_row(
@@ -98,7 +98,131 @@ fn raw(f: &Fixture) -> (u64, String, RawGuards) {
         )
         .unwrap();
     let rows=conn.prepare("SELECT inode,incarnation,epoch,revision,node FROM mount_rs_compact_guards ORDER BY inode").unwrap().query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).unwrap().collect::<std::result::Result<Vec<_>,_>>().unwrap();
-    (generation, anchor, rows)
+    let authority: MetadataPublicationRow = conn.query_row("SELECT write_mode,backing_id,owner,fence,expires,revision,physical_dev,physical_ino,physical_path FROM mount_rs_metadata WHERE id=1", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?))).unwrap();
+    (generation, anchor, rows, format!("{authority:?}"))
+}
+#[test]
+fn compact_mode_discovery_is_read_only_and_rejects_damaged_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let virgin = SqliteMetadataStore::open(dir.path().join("virgin.db")).unwrap();
+    assert_eq!(run(virgin.compact_inode_mode_state()).unwrap(), None);
+
+    let f = fixture(false);
+    let before = raw(&f);
+    assert_eq!(run(f.store.compact_inode_mode_state()).unwrap(), None);
+    assert_eq!(raw(&f), before);
+    let mrc4 = fixture(false);
+    run(mrc4.store.prepare_inode_mode(mrc4.backing, 1)).unwrap();
+    let before_mrc4 = raw(&mrc4);
+    assert_eq!(run(mrc4.store.compact_inode_mode_state()).unwrap(), None);
+    assert_eq!(raw(&mrc4), before_mrc4);
+    run(f.store.prepare_compact_inode_mode(f.backing, 1)).unwrap();
+    let before = raw(&f);
+    assert_eq!(
+        run(f.store.compact_inode_mode_state()).unwrap(),
+        Some(InodeModeState {
+            backing: f.backing,
+            structural_generation: 2
+        })
+    );
+    assert_eq!(raw(&f), before);
+    assert!(run(f.store.inode_mode_state()).unwrap().is_none());
+
+    {
+        let conn = f.store.0.lock().unwrap();
+        conn.execute(
+            "UPDATE mount_rs_metadata SET write_mode=NULL,backing_id=NULL WHERE id=1",
+            [],
+        )
+        .unwrap();
+    }
+    let damaged = raw(&f);
+    assert!(run(f.store.compact_inode_mode_state()).is_err());
+    assert_eq!(raw(&f), damaged);
+}
+#[test]
+fn compact_mode_discovery_rejects_malformed_persisted_fields_without_repair() {
+    for sql in [
+        "UPDATE mount_rs_metadata SET write_mode='MRC?' WHERE id=1",
+        "UPDATE mount_rs_metadata SET backing_id=NULL WHERE id=1",
+        "UPDATE mount_rs_metadata SET backing_id='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' WHERE id=1",
+        "UPDATE mount_rs_metadata SET revision=0 WHERE id=1",
+        "UPDATE mount_rs_metadata SET owner='active',fence=1,expires=999 WHERE id=1",
+        "UPDATE mount_rs_metadata SET physical_dev='999' WHERE id=1",
+    ] {
+        let f = fixture(true);
+        f.store.0.lock().unwrap().execute(sql, []).unwrap();
+        let before = raw(&f);
+        assert!(run(f.store.compact_inode_mode_state()).is_err(), "{sql}");
+        assert_eq!(raw(&f), before, "{sql}");
+    }
+}
+#[test]
+fn compact_mode_discovery_rejects_retained_mrc5_authority_after_mode_change() {
+    let mut accepted = Vec::new();
+    for mode in ["MRC2", "MRC4"] {
+        let f = fixture(true);
+        f.store
+            .0
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE mount_rs_metadata SET write_mode=?1 WHERE id=1",
+                [mode],
+            )
+            .unwrap();
+        let before = raw(&f);
+        if run(f.store.compact_inode_mode_state()).is_ok() {
+            accepted.push(mode);
+        }
+        assert_eq!(raw(&f), before, "{mode}");
+    }
+    assert!(
+        accepted.is_empty(),
+        "accepted retained MRC5 authority as {accepted:?}"
+    );
+}
+#[test]
+fn compact_mode_discovery_rejects_each_retained_mrc5_marker_alone() {
+    for (mode, anchor_only) in [("MRC2", true), ("MRC2", false), ("MRC4", true)] {
+        let f = fixture(false);
+        let old_namespace: String = f
+            .store
+            .0
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT namespace FROM mount_rs_metadata WHERE id=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        run(f.store.prepare_compact_inode_mode(f.backing, 1)).unwrap();
+        {
+            let conn = f.store.0.lock().unwrap();
+            conn.execute(
+                "UPDATE mount_rs_metadata SET write_mode=?1 WHERE id=1",
+                [mode],
+            )
+            .unwrap();
+            if anchor_only {
+                conn.execute("DELETE FROM mount_rs_compact_guards", [])
+                    .unwrap();
+            } else {
+                conn.execute(
+                    "UPDATE mount_rs_metadata SET namespace=?1 WHERE id=1",
+                    [&old_namespace],
+                )
+                .unwrap();
+            }
+        }
+        let before = raw(&f);
+        assert!(
+            run(f.store.compact_inode_mode_state()).is_err(),
+            "mode={mode} anchor_only={anchor_only}"
+        );
+        assert_eq!(raw(&f), before);
+    }
 }
 #[test]
 fn compact_enrollment_fences_old_readers_and_reopens() {

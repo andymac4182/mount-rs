@@ -3244,6 +3244,12 @@ impl MetadataStore for FoundationDbMetadataStore {
     fn compact_inode_capability(&self) -> CompactInodeCapability {
         CompactInodeCapability::V1
     }
+    async fn compact_inode_mode_state(&self) -> Result<Option<InodeModeState>> {
+        match self.compact_transaction(compact::Command::Inspect).await? {
+            compact::Output::Mode(state) => Ok(state),
+            _ => unreachable!(),
+        }
+    }
     async fn prepare_compact_inode_mode(
         &self,
         backing: ConcurrentBackingId,

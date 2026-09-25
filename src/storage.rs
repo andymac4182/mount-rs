@@ -991,6 +991,11 @@ pub trait MetadataStore: Send + Sync {
     fn compact_inode_capability(&self) -> compact::CompactInodeCapability {
         compact::CompactInodeCapability::Unsupported
     }
+    /// Inspect exact persisted MRC5 authority without enrollment or repair.
+    /// `None` denotes a coherently recognized noncompact mode, not a fresh volume.
+    async fn compact_inode_mode_state(&self) -> Result<Option<InodeModeState>> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
     /// Enroll only fresh root-only, initialized, same-backing MRC2 metadata.
     /// Atomically advance the generation and fence old namespace readers/writers.
     async fn prepare_compact_inode_mode(

@@ -276,7 +276,11 @@ impl Control {
             .expect("controlled seam reached");
     }
 }
-type Raw = (String, Vec<(i64, i64, i64, i64, String, String)>);
+type Raw = (
+    String,
+    Vec<(i64, i64, i64, i64, String, String)>,
+    Option<String>,
+);
 async fn raw(f: &Fixture) -> Raw {
     let c = raw_client_at(&f.connection_string).await;
     let authority: String = c
@@ -288,7 +292,140 @@ async fn raw(f: &Fixture) -> Raw {
         .unwrap()
         .get(0);
     let rows=c.query_typed("SELECT inode,incarnation,epoch,revision,node,xmin::text FROM mount_rs_compact_guards WHERE volume_key=$1 ORDER BY inode",&[(&f.volume,Type::TEXT)]).await.unwrap().into_iter().map(|r|(r.get(0),r.get(1),r.get(2),r.get(3),r.get(4),r.get(5))).collect();
-    (authority, rows)
+    let block_marker = c
+        .query_typed_opt(
+            "SELECT backing_id FROM mount_rs_block_authority WHERE volume_key=$1",
+            &[(&f.volume, Type::TEXT)],
+        )
+        .await
+        .unwrap()
+        .map(|row| row.get(0));
+    (authority, rows, block_marker)
+}
+#[test]
+fn compact_mode_discovery_is_read_only_and_fences_deleted_markers() {
+    runtime().block_on(async {
+        let virgin_key = format!("compact-discovery-virgin-{}", uuid::Uuid::new_v4());
+        let virgin = PgliteMetadataStore::connect_with_key(&url(), &virgin_key)
+            .await
+            .unwrap();
+        assert_eq!(virgin.compact_inode_mode_state().await.unwrap(), None);
+        let f = Fixture::new(false).await;
+        let before = raw(&f).await;
+        assert_eq!(f.store.compact_inode_mode_state().await.unwrap(), None);
+        assert_eq!(raw(&f).await, before);
+        let mrc4 = Fixture::new(false).await;
+        mrc4.store
+            .prepare_inode_mode(mrc4.backing, 1)
+            .await
+            .unwrap();
+        let before_mrc4 = raw(&mrc4).await;
+        assert_eq!(mrc4.store.compact_inode_mode_state().await.unwrap(), None);
+        assert_eq!(raw(&mrc4).await, before_mrc4);
+        f.store
+            .prepare_compact_inode_mode(f.backing, 1)
+            .await
+            .unwrap();
+        let before = raw(&f).await;
+        assert_eq!(
+            f.store.compact_inode_mode_state().await.unwrap(),
+            Some(InodeModeState {
+                backing: f.backing,
+                structural_generation: 2
+            })
+        );
+        assert_eq!(raw(&f).await, before);
+        assert!(f.store.inode_mode_state().await.is_err());
+
+        let client = raw_client_at(&f.connection_string).await;
+        client
+            .execute_typed(
+                "UPDATE mount_rs_metadata SET write_mode=NULL,backing_id=NULL WHERE volume_key=$1",
+                &[(&f.volume, Type::TEXT)],
+            )
+            .await
+            .unwrap();
+        let damaged = raw(&f).await;
+        assert!(f.store.compact_inode_mode_state().await.is_err());
+        assert_eq!(raw(&f).await, damaged);
+    });
+}
+#[test]
+fn compact_mode_discovery_rejects_retained_mrc5_authority_after_mode_change() {
+    runtime().block_on(async {
+        let mut accepted = Vec::new();
+        for mode in ["MRC2", "MRC4"] {
+            let f = Fixture::new(true).await;
+            let client = raw_client_at(&f.connection_string).await;
+            client
+                .execute_typed(
+                    "UPDATE mount_rs_metadata SET write_mode=$2 WHERE volume_key=$1",
+                    &[(&f.volume, Type::TEXT), (&mode, Type::TEXT)],
+                )
+                .await
+                .unwrap();
+            let before = raw(&f).await;
+            if f.store.compact_inode_mode_state().await.is_ok() {
+                accepted.push(mode);
+            }
+            assert_eq!(raw(&f).await, before, "{mode}");
+        }
+        assert!(
+            accepted.is_empty(),
+            "accepted retained MRC5 authority as {accepted:?}"
+        );
+    });
+}
+#[test]
+fn compact_mode_discovery_rejects_each_retained_mrc5_marker_alone() {
+    runtime().block_on(async {
+        for (mode, anchor_only) in [("MRC2", true), ("MRC2", false), ("MRC4", true)] {
+            let f = Fixture::new(false).await;
+            let client = raw_client_at(&f.connection_string).await;
+            let old_namespace: String = client
+                .query_typed_one(
+                    "SELECT namespace FROM mount_rs_metadata WHERE volume_key=$1",
+                    &[(&f.volume, Type::TEXT)],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            f.store
+                .prepare_compact_inode_mode(f.backing, 1)
+                .await
+                .unwrap();
+            client
+                .execute_typed(
+                    "UPDATE mount_rs_metadata SET write_mode=$2 WHERE volume_key=$1",
+                    &[(&f.volume, Type::TEXT), (&mode, Type::TEXT)],
+                )
+                .await
+                .unwrap();
+            if anchor_only {
+                client
+                    .execute_typed(
+                        "DELETE FROM mount_rs_compact_guards WHERE volume_key=$1",
+                        &[(&f.volume, Type::TEXT)],
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                client
+                    .execute_typed(
+                        "UPDATE mount_rs_metadata SET namespace=$2 WHERE volume_key=$1",
+                        &[(&f.volume, Type::TEXT), (&old_namespace, Type::TEXT)],
+                    )
+                    .await
+                    .unwrap();
+            }
+            let before = raw(&f).await;
+            assert!(
+                f.store.compact_inode_mode_state().await.is_err(),
+                "mode={mode} anchor_only={anchor_only}"
+            );
+            assert_eq!(raw(&f).await, before);
+        }
+    });
 }
 async fn update(
     store: &PgliteMetadataStore,

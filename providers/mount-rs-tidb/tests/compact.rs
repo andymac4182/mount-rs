@@ -699,15 +699,23 @@ type Raw = (
         Option<String>,
     ),
     Vec<(i64, i64, i64, i64, String)>,
+    Option<Vec<u8>>,
 );
 async fn raw(f: &Fixture) -> Raw {
     let pool = Pool::from_url(&f.url).unwrap();
     let mut conn = pool.get_conn().await.unwrap();
     let authority=conn.exec_first("SELECT revision,write_mode,backing_id,owner,fence,expires,namespace,delegation FROM mount_rs_tidb_metadata WHERE volume_key=?",(&f.key,)).await.unwrap().unwrap();
     let rows=conn.exec("SELECT inode,incarnation,epoch,revision,node FROM mount_rs_tidb_compact_guards WHERE volume_key=? ORDER BY inode",(&f.key,)).await.unwrap();
+    let marker: Option<Vec<u8>> = conn
+        .exec_first(
+            "SELECT backing_id FROM mount_rs_tidb_block_authority WHERE volume_key=?",
+            (&f.key,),
+        )
+        .await
+        .unwrap();
     drop(conn);
     pool.disconnect().await.unwrap();
-    (authority, rows)
+    (authority, rows, marker)
 }
 async fn corrupt(f: &Fixture, sql: &str) {
     let pool = Pool::from_url(&f.url).unwrap();
@@ -715,6 +723,131 @@ async fn corrupt(f: &Fixture, sql: &str) {
     conn.exec_drop(sql, (&f.key,)).await.unwrap();
     drop(conn);
     pool.disconnect().await.unwrap();
+}
+#[tokio::test]
+#[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL"]
+async fn actual_compact_mode_discovery_preserves_authority_and_rejects_deleted_markers() {
+    let virgin_key = format!(
+        "compact-discovery-virgin-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let virgin = TidbMetadataStore::connect_with_key(
+        &std::env::var("MOUNT_RS_TIDB_URL").unwrap(),
+        &virgin_key,
+    )
+    .await
+    .unwrap();
+    assert_eq!(virgin.compact_inode_mode_state().await.unwrap(), None);
+    let f = fixture(false).await;
+    let before = raw(&f).await;
+    assert_eq!(f.store.compact_inode_mode_state().await.unwrap(), None);
+    assert_eq!(raw(&f).await, before);
+    let mrc4 = fixture(false).await;
+    mrc4.store
+        .prepare_inode_mode(mrc4.backing, 1)
+        .await
+        .unwrap();
+    let before_mrc4 = raw(&mrc4).await;
+    assert_eq!(mrc4.store.compact_inode_mode_state().await.unwrap(), None);
+    assert_eq!(raw(&mrc4).await, before_mrc4);
+    f.store
+        .prepare_compact_inode_mode(f.backing, 1)
+        .await
+        .unwrap();
+    let before = raw(&f).await;
+    assert_eq!(
+        f.store.compact_inode_mode_state().await.unwrap(),
+        Some(mount_rs_core::storage::InodeModeState {
+            backing: f.backing,
+            structural_generation: 2
+        })
+    );
+    assert_eq!(raw(&f).await, before);
+    corrupt(
+        &f,
+        "UPDATE mount_rs_tidb_metadata SET write_mode=NULL,backing_id=NULL WHERE volume_key=?",
+    )
+    .await;
+    let damaged = raw(&f).await;
+    assert!(f.store.compact_inode_mode_state().await.is_err());
+    assert_eq!(raw(&f).await, damaged);
+}
+#[tokio::test]
+#[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL"]
+async fn actual_compact_mode_discovery_rejects_retained_mrc5_authority_after_mode_change() {
+    let mut accepted = Vec::new();
+    for mode in ["MRC2", "MRC4"] {
+        let f = fixture(true).await;
+        let pool = Pool::from_url(&f.url).unwrap();
+        let mut conn = pool.get_conn().await.unwrap();
+        conn.exec_drop(
+            "UPDATE mount_rs_tidb_metadata SET write_mode=? WHERE volume_key=?",
+            (mode, &f.key),
+        )
+        .await
+        .unwrap();
+        drop(conn);
+        pool.disconnect().await.unwrap();
+        let before = raw(&f).await;
+        if f.store.compact_inode_mode_state().await.is_ok() {
+            accepted.push(mode);
+        }
+        assert_eq!(raw(&f).await, before, "{mode}");
+    }
+    assert!(
+        accepted.is_empty(),
+        "accepted retained MRC5 authority as {accepted:?}"
+    );
+}
+#[tokio::test]
+#[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL"]
+async fn actual_compact_mode_discovery_rejects_each_retained_mrc5_marker_alone() {
+    for (mode, anchor_only) in [("MRC2", true), ("MRC2", false), ("MRC4", true)] {
+        let f = fixture(false).await;
+        let old_namespace = raw(&f).await.0.6.unwrap();
+        f.store
+            .prepare_compact_inode_mode(f.backing, 1)
+            .await
+            .unwrap();
+        let pool = Pool::from_url(&f.url).unwrap();
+        let mut conn = pool.get_conn().await.unwrap();
+        conn.exec_drop(
+            "UPDATE mount_rs_tidb_metadata SET write_mode=? WHERE volume_key=?",
+            (mode, &f.key),
+        )
+        .await
+        .unwrap();
+        drop(conn);
+        pool.disconnect().await.unwrap();
+        if anchor_only {
+            corrupt(
+                &f,
+                "DELETE FROM mount_rs_tidb_compact_guards WHERE volume_key=?",
+            )
+            .await;
+        } else {
+            let pool = Pool::from_url(&f.url).unwrap();
+            let mut conn = pool.get_conn().await.unwrap();
+            conn.exec_drop(
+                "UPDATE mount_rs_tidb_metadata SET namespace=? WHERE volume_key=?",
+                (&old_namespace, &f.key),
+            )
+            .await
+            .unwrap();
+            drop(conn);
+            pool.disconnect().await.unwrap();
+        }
+        let before = raw(&f).await;
+        assert!(
+            f.store.compact_inode_mode_state().await.is_err(),
+            "mode={mode} anchor_only={anchor_only}"
+        );
+        assert_eq!(raw(&f).await, before);
+    }
 }
 
 #[tokio::test]

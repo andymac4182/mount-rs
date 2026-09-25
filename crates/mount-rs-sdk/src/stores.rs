@@ -47,6 +47,23 @@ impl MetadataStore for ErasedMetadataStore {
         self.inner.compact_inode_capability()
     }
 
+    async fn compact_inode_mode_state(&self) -> Result<Option<InodeModeState>> {
+        let _profile = Span::new(Event::MetadataConditional);
+        #[cfg(feature = "observability")]
+        let result = self
+            .telemetry
+            .observe_fs(
+                "provider.metadata",
+                "compact.mode",
+                None,
+                self.inner.compact_inode_mode_state(),
+            )
+            .await;
+        #[cfg(not(feature = "observability"))]
+        let result = self.inner.compact_inode_mode_state().await;
+        result
+    }
+
     async fn prepare_compact_inode_mode(
         &self,
         backing: ConcurrentBackingId,
@@ -1071,6 +1088,13 @@ mod tests {
             erased.compact_inode_capability(),
             CompactInodeCapability::V1
         );
+        assert_eq!(
+            erased.compact_inode_mode_state().await.unwrap(),
+            Some(InodeModeState {
+                backing,
+                structural_generation: 37
+            })
+        );
         erased
             .prepare_compact_inode_mode(backing, 37)
             .await
@@ -1102,6 +1126,7 @@ mod tests {
         assert_eq!(
             *probe.1.lock().unwrap(),
             [
+                "mode",
                 "prepare",
                 "snapshot",
                 "load",
@@ -1110,7 +1135,7 @@ mod tests {
             ]
         );
         #[cfg(feature = "observability")]
-        assert_eq!(telemetry.snapshot().operations, 5);
+        assert_eq!(telemetry.snapshot().operations, 6);
         if mount_rs_core::diagnostics::profile::enabled() {
             let profile = mount_rs_core::diagnostics::profile::snapshot()
                 .delta(&profile_before)
@@ -1129,7 +1154,11 @@ mod tests {
                         .find(|entry| entry.name == name)
                         .unwrap()
                         .calls,
-                    1,
+                    if name == "provider.metadata.load_if_changed" {
+                        2
+                    } else {
+                        1
+                    },
                     "{name}"
                 );
             }
@@ -1159,6 +1188,10 @@ mod tests {
         assert_eq!(
             incapable.compact_inode_capability(),
             CompactInodeCapability::Unsupported
+        );
+        assert_eq!(
+            incapable.compact_inode_mode_state().await.unwrap_err().code,
+            ErrorCode::Enotsup
         );
         assert_eq!(
             incapable
@@ -1208,6 +1241,13 @@ mod tests {
             &self,
         ) -> mount_rs_core::storage::compact::CompactInodeCapability {
             mount_rs_core::storage::compact::CompactInodeCapability::V1
+        }
+        async fn compact_inode_mode_state(&self) -> Result<Option<InodeModeState>> {
+            self.1.lock().unwrap().push("mode");
+            Ok(Some(InodeModeState {
+                backing: self.0,
+                structural_generation: 37,
+            }))
         }
         async fn prepare_compact_inode_mode(
             &self,

@@ -346,7 +346,104 @@ async fn commit(tx: Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
+async fn require_no_compact_markers(tx: &Transaction<'_>, volume: &str) -> Result<()> {
+    let row = tx.query_typed_one(
+        "SELECT EXISTS(SELECT 1 FROM mount_rs_compact_guards WHERE volume_key=$1), namespace FROM mount_rs_metadata WHERE volume_key=$1",
+        &[(&volume, Type::TEXT)],
+    ).await.map_err(postgres_error)?;
+    let guard: bool = row.try_get(0).map_err(postgres_error)?;
+    let namespace: Option<String> = row.try_get(1).map_err(postgres_error)?;
+    if guard
+        || namespace
+            .as_deref()
+            .is_some_and(|body| decode_compact_anchor(body.as_bytes()).is_ok())
+    {
+        return Err(stale());
+    }
+    Ok(())
+}
+
 impl PgliteMetadataStore {
+    pub(super) async fn compact_inspect(&self) -> Result<Option<InodeModeState>> {
+        key(&self.0.volume_key)?;
+        let mut client = self.0.lock_client().await?;
+        let tx = client
+            .as_mut()
+            .ok_or_else(connection_closed)?
+            .build_transaction()
+            .isolation_level(IsolationLevel::RepeatableRead)
+            .read_only(true)
+            .start()
+            .await
+            .map_err(postgres_error)?;
+        let row = tx.query_typed_opt(
+            "SELECT write_mode,backing_id,owner,fence,expires,revision,delegation FROM mount_rs_metadata WHERE volume_key=$1",
+            &[(&self.0.volume_key, Type::TEXT)],
+        ).await.map_err(postgres_error)?.ok_or_else(stale)?;
+        let mode = row
+            .try_get::<_, Option<String>>(0)
+            .map_err(postgres_error)?;
+        let raw_backing = row
+            .try_get::<_, Option<String>>(1)
+            .map_err(postgres_error)?;
+        if row
+            .try_get::<_, Option<String>>(6)
+            .map_err(postgres_error)?
+            .is_some()
+        {
+            return Err(stale());
+        }
+        let result = match (mode.as_deref(), raw_backing.as_deref()) {
+            (Some("MRC5"), Some(id)) => {
+                let backing = ConcurrentBackingId::from_hex(id).map_err(|_| stale())?;
+                let mut budget = Budget::default();
+                let anchor = anchor(&tx, &self.0.volume_key, backing, &mut budget).await?;
+                Some(InodeModeState {
+                    backing,
+                    structural_generation: anchor.generation,
+                })
+            }
+            (Some("MRC4"), Some(id)) => {
+                let backing = ConcurrentBackingId::from_hex(id).map_err(|_| stale())?;
+                inode_authority(&row, backing)?;
+                require_no_compact_markers(&tx, &self.0.volume_key).await?;
+                None
+            }
+            (Some("MRC2"), Some(id)) => {
+                ConcurrentBackingId::from_hex(id).map_err(|_| stale())?;
+                if row
+                    .try_get::<_, Option<String>>(2)
+                    .map_err(postgres_error)?
+                    .is_some()
+                    || row.try_get::<_, i64>(3).map_err(postgres_error)?
+                        != CONCURRENT_FENCE_SENTINEL
+                    || row.try_get::<_, i64>(4).map_err(postgres_error)? != 0
+                {
+                    return Err(stale());
+                }
+                require_no_compact_markers(&tx, &self.0.volume_key).await?;
+                None
+            }
+            (None, None) | (Some("MRC1"), None) => {
+                let owner = row
+                    .try_get::<_, Option<String>>(2)
+                    .map_err(postgres_error)?;
+                let fence = row.try_get::<_, i64>(3).map_err(postgres_error)?;
+                let expires = row.try_get::<_, i64>(4).map_err(postgres_error)?;
+                if (mode.is_some()
+                    && (owner.is_some() || fence != CONCURRENT_FENCE_SENTINEL || expires != 0))
+                    || (mode.is_none() && fence == CONCURRENT_FENCE_SENTINEL)
+                {
+                    return Err(stale());
+                }
+                require_no_compact_markers(&tx, &self.0.volume_key).await?;
+                None
+            }
+            _ => return Err(stale()),
+        };
+        tx.rollback().await.map_err(postgres_error)?;
+        Ok(result)
+    }
     pub(super) async fn compact_prepare(
         &self,
         backing: ConcurrentBackingId,

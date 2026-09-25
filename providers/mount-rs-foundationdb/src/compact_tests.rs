@@ -122,6 +122,204 @@ async fn raw(f: &Fixture) -> Vec<(Vec<u8>, Vec<u8>)> {
         .await
         .unwrap()
 }
+#[tokio::test]
+#[ignore = "requires actual owned FoundationDB"]
+async fn actual_compact_mode_discovery_preserves_virgin_and_enrolled_keys() {
+    let key = format!("mount-rs/compact-discovery-virgin/{}", uuid::Uuid::new_v4());
+    let virgin = FoundationDbStorage::connect(
+        std::env::var("MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE").unwrap(),
+        FoundationDbStorageOptions::new(&key),
+    )
+    .unwrap();
+    assert_eq!(
+        virgin.metadata().compact_inode_mode_state().await.unwrap(),
+        None
+    );
+    let trx = virgin.inner.db.create_trx().unwrap();
+    let prefix = Keyspace::new(key.as_bytes()).key(b"meta/");
+    let end = range_end(&prefix).unwrap();
+    let rows: Vec<_> = trx
+        .get_ranges_keyvalues((prefix.as_slice(), end.as_slice()).into(), false)
+        .map_ok(|kv| (kv.key().to_vec(), kv.value().to_vec()))
+        .try_collect()
+        .await
+        .unwrap();
+    assert!(rows.is_empty());
+
+    let f = fixture(false).await;
+    let before = raw(&f).await;
+    assert_eq!(f.store.compact_inode_mode_state().await.unwrap(), None);
+    assert_eq!(raw(&f).await, before);
+    let mrc4 = fixture(false).await;
+    mrc4.store
+        .prepare_inode_mode(mrc4.backing, 1)
+        .await
+        .unwrap();
+    let before_mrc4 = raw(&mrc4).await;
+    assert_eq!(mrc4.store.compact_inode_mode_state().await.unwrap(), None);
+    assert_eq!(raw(&mrc4).await, before_mrc4);
+    f.store
+        .prepare_compact_inode_mode(f.backing, 1)
+        .await
+        .unwrap();
+    let before = raw(&f).await;
+    assert_eq!(
+        f.store.compact_inode_mode_state().await.unwrap(),
+        Some(InodeModeState {
+            backing: f.backing,
+            structural_generation: 2
+        })
+    );
+    assert_eq!(raw(&f).await, before);
+    assert!(f.store.inode_mode_state().await.is_err());
+    let keys = Keyspace::new(f.key.as_bytes());
+    replace(&f, &keys.write_mode(), None).await;
+    replace(&f, &keys.metadata_backing(), None).await;
+    let damaged = raw(&f).await;
+    assert!(f.store.compact_inode_mode_state().await.is_err());
+    assert_eq!(raw(&f).await, damaged);
+}
+#[tokio::test]
+#[ignore = "requires actual owned FoundationDB"]
+async fn actual_compact_mode_discovery_rejects_retained_mrc5_keys_after_mode_change() {
+    let mut accepted = Vec::new();
+    for mode in [b"MRC2".as_slice(), b"MRC4".as_slice()] {
+        let f = fixture(true).await;
+        let keys = Keyspace::new(f.key.as_bytes());
+        replace(&f, &keys.write_mode(), Some(mode)).await;
+        let before = raw(&f).await;
+        if f.store.compact_inode_mode_state().await.is_ok() {
+            accepted.push(mode);
+        }
+        assert_eq!(raw(&f).await, before, "{mode:?}");
+    }
+    assert!(
+        accepted.is_empty(),
+        "accepted retained MRC5 authority as {accepted:?}"
+    );
+}
+#[tokio::test]
+#[ignore = "requires actual owned FoundationDB"]
+async fn actual_compact_mode_discovery_rejects_each_retained_mrc5_marker_alone() {
+    for (mode, anchor_only) in [
+        (b"MRC2".as_slice(), true),
+        (b"MRC2".as_slice(), false),
+        (b"MRC4".as_slice(), true),
+    ] {
+        let f = fixture(false).await;
+        let keys = Keyspace::new(f.key.as_bytes());
+        let old = raw(&f).await;
+        f.store
+            .prepare_compact_inode_mode(f.backing, 1)
+            .await
+            .unwrap();
+        replace(&f, &keys.write_mode(), Some(mode)).await;
+        if anchor_only {
+            replace(&f, &raw_guard_key(&f, 1), None).await;
+        } else {
+            for key in [keys.manifest(), metadata_chunk_key(&keys.chunks(), 0)] {
+                let value = old.iter().find(|(candidate, _)| candidate == &key).unwrap();
+                replace(&f, &key, Some(&value.1)).await;
+            }
+        }
+        let before = raw(&f).await;
+        assert!(
+            f.store.compact_inode_mode_state().await.is_err(),
+            "mode={mode:?} anchor_only={anchor_only}"
+        );
+        assert_eq!(raw(&f).await, before);
+    }
+}
+#[tokio::test]
+#[ignore = "requires actual owned FoundationDB"]
+async fn actual_compact_mode_discovery_rejects_anchor_split_across_short_chunks() {
+    let mut accepted = Vec::new();
+    for chunk_bytes in [1, 16] {
+        let limits = FoundationDbLimits {
+            metadata_chunk_bytes: chunk_bytes,
+            max_metadata_bytes: 4096,
+            ..FoundationDbLimits::default()
+        };
+        let valid = fixture_limits(false, limits).await;
+        let mrc2 = raw(&valid).await;
+        assert_eq!(valid.store.compact_inode_mode_state().await.unwrap(), None);
+        assert_eq!(raw(&valid).await, mrc2);
+        valid
+            .store
+            .prepare_inode_mode(valid.backing, 1)
+            .await
+            .unwrap();
+        let mrc4 = raw(&valid).await;
+        assert_eq!(valid.store.compact_inode_mode_state().await.unwrap(), None);
+        assert_eq!(raw(&valid).await, mrc4);
+        for mode in [b"MRC2".as_slice(), b"MRC4".as_slice()] {
+            let f = fixture_limits(true, limits).await;
+            let keys = Keyspace::new(f.key.as_bytes());
+            let first_chunk = metadata_chunk_key(&keys.chunks(), 0);
+            let enrolled = raw(&f).await;
+            let first = &enrolled
+                .iter()
+                .find(|(key, _)| key == &first_chunk)
+                .unwrap()
+                .1;
+            assert_eq!(first.len(), chunk_bytes);
+            assert!(first.len() < b"{\"layout\":\"mount-rs-compact-inodes\"".len());
+            replace(&f, &keys.write_mode(), Some(mode)).await;
+            replace(&f, &raw_guard_key(&f, 1), None).await;
+            let before = raw(&f).await;
+            assert!(
+                !before
+                    .iter()
+                    .any(|(key, _)| key.starts_with(&keys.key(b"meta/compact-guard/")))
+            );
+            if f.store.compact_inode_mode_state().await.is_ok() {
+                accepted.push((chunk_bytes, mode));
+            }
+            assert_eq!(
+                raw(&f).await,
+                before,
+                "chunk_bytes={chunk_bytes} mode={mode:?}"
+            );
+            if chunk_bytes == 1 {
+                replace(&f, &metadata_chunk_key(&keys.chunks(), 1), None).await;
+                let truncated = raw(&f).await;
+                assert!(f.store.compact_inode_mode_state().await.is_err());
+                assert_eq!(raw(&f).await, truncated);
+            }
+        }
+    }
+    assert!(
+        accepted.is_empty(),
+        "accepted split compact anchor as {accepted:?}"
+    );
+}
+#[tokio::test]
+#[ignore = "requires actual owned FoundationDB"]
+async fn actual_compact_mode_discovery_rejects_mrc1_lease_but_accepts_legacy_lease() {
+    let key = format!("mount-rs/compact-discovery-lease/{}", uuid::Uuid::new_v4());
+    let storage = FoundationDbStorage::connect(
+        std::env::var("MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE").unwrap(),
+        FoundationDbStorageOptions::new(&key),
+    )
+    .unwrap();
+    let store = storage.metadata();
+    let f = Fixture {
+        storage,
+        store,
+        key,
+        backing: ConcurrentBackingId::from_bytes([0x61; 16]).unwrap(),
+    };
+    let keys = Keyspace::new(f.key.as_bytes());
+    replace(&f, &keys.lease(), Some(b"stray lease")).await;
+    let legacy = raw(&f).await;
+    assert_eq!(f.store.compact_inode_mode_state().await.unwrap(), None);
+    assert_eq!(raw(&f).await, legacy);
+    replace(&f, &keys.write_mode(), Some(b"MRC1")).await;
+    replace(&f, &keys.fence(), Some(CONCURRENT_FENCE_SENTINEL)).await;
+    let damaged = raw(&f).await;
+    assert!(f.store.compact_inode_mode_state().await.is_err());
+    assert_eq!(raw(&f).await, damaged);
+}
 fn root_namespace() -> Namespace {
     let mut ns = template_namespace();
     ns.nodes.retain(|id, _| *id == ns.root);
