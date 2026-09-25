@@ -116,7 +116,7 @@ Each future harness needs its own property, input assumptions, bound, and result
 
 MRC4 enrollment advances the persisted structural generation and stores the base namespace inside an exact `{"format":"MRC4","namespace":...}` envelope. Both changes must commit with the mode marker and complete inode guards. Already running MRC2 readers that check only the global revision therefore invalidate their cached namespace and fail plain `Namespace` decoding. The envelope remains mandatory on every structural publication; new MRC4 readers use the shared strict codec. This fences old metadata decoding in addition to the separate mode checks that fence old writes. It is a compatibility contract and unit-test slice, not a proof of provider transaction atomicity.
 
-The remote provider has a separate six-harness runner,
+The remote provider has a separate seven-harness runner,
 [`scripts/verify-remote-formal`](../scripts/verify-remote-formal). Its executed
 results, input domains, and limits are documented in
 [Remote verification](remote-verification.md). These decision proofs supplement
