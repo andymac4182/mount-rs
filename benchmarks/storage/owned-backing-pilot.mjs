@@ -391,18 +391,24 @@ export async function runOwnedPilot(environment = process.env, testing = {}) {
   return { status: benchmark.status, artifact, observation_status: artifact.omitted ? "incomplete" : record.observation_status, live_measurement_qualified: !artifact.omitted && record.live_measurement_qualified }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+export async function main(argv = process.argv.slice(2), environment = process.env) {
   try {
-    const action = process.argv[2]
-    if (action === "fixture-rustfs" || action === "fixture-tidb") await writeFixtureReceipt(action.slice(8), process.env)
+    const action = argv[0]
+    if (action === "fixture-rustfs" || action === "fixture-tidb") await writeFixtureReceipt(action.slice(8), environment)
     else if (action === "run") {
-      const outcome = await runOwnedPilot()
-      if (outcome.status !== "ok") process.exitCode = 1
+      const outcome = await runOwnedPilot(environment)
       process.stdout.write(`OWNED_BACKING_PILOT ${JSON.stringify(outcome)}\n`)
+      return outcome.status === "ok" ? 0 : 1
     } else fail("pilot_handoff_rejected")
+    return 0
   } catch (error) {
     const code = ["pilot_handoff_rejected", "pilot_endpoint_binding_rejected", "pilot_native_selection_rejected", "pilot_private_file_rejected", "pilot_output_cap"].includes(error.code) ? error.code : "pilot_projection_unavailable"
     process.stderr.write(`OWNED_BACKING_PILOT_FAILURE ${code}\n`)
-    process.exitCode = 1
+    return 1
   }
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  // Finish library evaluation before the runner imports observePilotBinding.
+  main().then((code) => { process.exitCode = code })
 }

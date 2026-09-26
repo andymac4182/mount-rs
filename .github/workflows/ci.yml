@@ -934,6 +934,7 @@ jobs:
             benchmarks/storage/backing-observer.test.mjs \
             benchmarks/storage/backing-engine-transport.test.mjs \
             benchmarks/storage/owned-backing-pilot.test.mjs \
+            benchmarks/storage/owned-backing-pilot-entry.test.mjs \
             scripts/verify-owned-backing-pilot.test.mjs
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
         with:
