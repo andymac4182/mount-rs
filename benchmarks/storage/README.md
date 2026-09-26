@@ -93,6 +93,39 @@ this check on the Node platform matrix and uploads its JSON separately.
 
 ### Ozone IOPS qualification
 
+Set `MOUNT_RS_PROFILE_IO=1` before loading the native addon to include
+`storageDiagnostics` in each provider's benchmark JSON. The runner records
+create, per-size workload, owned-path cleanup, and shutdown phases and prints
+one bounded `MOUNT_RS_STORAGE_PHASE` summary per phase. The JSON retains exact
+decimal-string native counters, fixed log2 microsecond latency buckets,
+successful payload bytes, success/error/cancellation counts, existing core
+profile counters, SQLite pager and SQL-category counters by connection ID, and
+live R2 logical block-store/cache counters. Closed SQLite connections or R2
+instances, counter resets, and native operations crossing a phase boundary
+mark attribution incomplete. Snapshot observer time is separate from measured
+phase time; `benchmark_measured_elapsed_ms` retains the unchanged timed workload
+window while phase elapsed time also includes `runSize` bookkeeping. Process
+CPU records aligned workload and observer deltas separately.
+Global native and JS allocation counts, internal successful HTTP retries,
+HTTP attempts, and physical device IOPS are unavailable from this interface.
+The enabled N-API dynamic-provider adapter reports the exact number of its
+forwarding `Box::pin` sites and the requested future-object bytes at those
+sites. This subset excludes allocator overhead, all other native/JS
+allocations, and the default disabled path (which makes no forwarding box).
+The recorder's atomic updates themselves allocate nothing. Diagnostic JSON
+retains explicit inclusive-time scope, all 32 log2 microsecond intervals with
+a terminal overflow bucket, logical/provider and pager scopes, and the
+unavailable fields. Native SQLite controls capture connection stats before
+each shutdown and separately after reopen; closed connection counters cannot
+be reconstructed from an overall lifecycle delta. PGlite client mutex
+wait is recorded; TiDB pool wait remains unavailable. Inclusive provider
+durations overlap under concurrency. `MOUNT_RS_TRACE_STORAGE=1` separately
+enables at most 16 slow-operation stderr records with fixed labels and no
+paths, keys, payloads, SQL, or raw errors. It is off during normal profiling.
+For server-side SQL and host/process I/O, use `scripts/observe-tidb-stage.py`
+with its documented scope instead of treating SQLite pager or provider calls
+as physical IOPS.
+
 The same runner can measure a small, concurrent split-provider lifecycle over
 the real Ozone S3 Gateway and fail below a requested threshold:
 

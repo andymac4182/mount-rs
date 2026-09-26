@@ -822,6 +822,7 @@ module.exports.WebdavStreamRequest = nativeBinding.WebdavStreamRequest
 module.exports.WebdavStreamResponse = nativeBinding.WebdavStreamResponse
 module.exports.basename = nativeBinding.basename
 module.exports.createChunkedDriver = nativeBinding.createChunkedDriver
+module.exports.storageDiagnostics = nativeBinding.storageDiagnostics
 module.exports.createDriver = nativeBinding.createDriver
 module.exports.createMemoryDriver = nativeBinding.createMemoryDriver
 module.exports.createNfsServer = nativeBinding.createNfsServer

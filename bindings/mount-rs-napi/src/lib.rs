@@ -14,7 +14,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
@@ -23,6 +23,10 @@ use mount_rs_auto::{
     TransportProbe,
 };
 use mount_rs_chunked::{ChunkedFs, ChunkedOptions, OwnershipMode};
+use mount_rs_core::diagnostics::{
+    profile,
+    storage::{self, Operation},
+};
 use mount_rs_core::storage::{
     BlockId, BlockReconcileReport, BlockStore, CheckoutRequest, ConcurrentBackingId,
     ConcurrentModeState, DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState,
@@ -63,6 +67,7 @@ use mount_rs_tidb::{TidbBlockStore, TidbMetadataStore, TidbStorageOptions};
 use napi::bindgen_prelude::{Buffer, Either, Env, PromiseRaw, Reference};
 use napi::{Error, Status};
 use napi_derive::napi;
+use serde_json::{Value, json};
 
 use crate::servers::{
     JsP9AssertionCallback, JsP9SessionErrorCallback, JsTransportErrorCallback, P9AssertionCallback,
@@ -73,6 +78,107 @@ use crate::servers::{
 const ERROR_MARKER: &str = "__mount_rs_error_v1__";
 const RANGE_ERROR_MARKER: &str = "__mount_rs_range_error_v1__";
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+
+struct R2DiagnosticEntry {
+    id: u64,
+    store: Weak<R2BlockStore>,
+}
+static R2_DIAGNOSTICS: OnceLock<Mutex<Vec<R2DiagnosticEntry>>> = OnceLock::new();
+static NEXT_R2_DIAGNOSTIC_ID: AtomicU64 = AtomicU64::new(1);
+
+fn r2_diagnostics() -> Value {
+    let Some(registry) = R2_DIAGNOSTICS.get() else {
+        return json!({"scope":"process_live_instances","instances":[],"internal_successful_retries":"unavailable"});
+    };
+    let Ok(mut entries) = registry.lock() else {
+        return json!({"scope":"process_live_instances","available":false,"reason":"registry_unavailable"});
+    };
+    let mut instances = Vec::new();
+    entries.retain(|entry| {
+        let Some(store) = entry.store.upgrade() else {
+            return false;
+        };
+        let stats = store.stats();
+        instances.push(json!({"id":entry.id,"puts":stats.puts,"gets":stats.gets,
+            "deletes":stats.deletes,"reconciles":stats.reconciles,
+            "successes":stats.successes,"errors":stats.errors,
+            "duration_ms_total":stats.duration_ms_total,"duration_ms_max":stats.duration_ms_max,
+            "bytes_read":stats.bytes_read,"bytes_written":stats.bytes_written,
+            "conditional_conflicts":stats.conditional_conflicts,
+            "id_collision_exhausted":stats.id_collision_exhausted,
+            "retry_exhausted":stats.retry_exhausted,"cache_hits":stats.cache_hits}));
+        true
+    });
+    json!({"scope":"process_live_instances","instances":instances,"internal_successful_retries":"unavailable"})
+}
+
+fn stringify_counters(value: &mut Value) {
+    match value {
+        Value::Number(number) => *value = Value::String(number.to_string()),
+        Value::Array(values) => values.iter_mut().for_each(stringify_counters),
+        Value::Object(fields) => fields.values_mut().for_each(stringify_counters),
+        _ => {}
+    }
+}
+
+/// Read-only, quiescent process snapshot. All integer counters are decimal
+/// strings so JavaScript cannot round u64 nanoseconds or byte totals.
+#[napi]
+pub fn storage_diagnostics() -> String {
+    let mut sqlite = mount_rs_sqlite::sqlite_io_diagnostics(false);
+    if let Some(connections) = sqlite.get_mut("connections").and_then(Value::as_array_mut) {
+        for connection in connections {
+            if connection.get("error").is_some() {
+                connection["error"] = json!("unavailable");
+            }
+        }
+    }
+    let mut value = json!({
+        "schema_version":"mount-rs.storage-diagnostics.v1",
+        "enabled":storage::enabled(),
+        "scope":"process",
+        "quiescent_snapshot_required":true,
+        "elapsed_semantics":"inclusive_wall_nanoseconds",
+        "storage":storage::snapshot(),
+        "profile":profile::snapshot(),
+        "sqlite":sqlite,
+        "r2":r2_diagnostics(),
+        "backend_waits":{"pglite_client_lock":"instrumented","tidb_pool":"unavailable"},
+        "http_attempts":"unavailable",
+        "physical_device_iops":"unavailable",
+        "measurement":{
+            "storage_calls":"logical_provider_calls",
+            "storage_bytes":"successful_payload_bytes_at_provider_boundary",
+            "storage_duration":"inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap",
+            "latency_histogram":{
+                "unit":"microseconds",
+                "intervals": (0..32).map(|index| {
+                    if index == 0 {
+                        json!({"lower_inclusive_us":"0","upper_exclusive_us":"1"})
+                    } else if index == 31 {
+                        json!({"lower_inclusive_us":(1_u64 << 30).to_string(),"upper_exclusive_us":null,"terminal_overflow":true})
+                    } else {
+                        json!({"lower_inclusive_us":(1_u64 << (index - 1)).to_string(),"upper_exclusive_us":(1_u64 << index).to_string()})
+                    }
+                }).collect::<Vec<_>>()
+            },
+            "forwarding_boxes":"enabled_napi_dynamic_provider_box_pin_site_calls_and_requested_future_object_bytes; excludes_allocator_overhead_and_other_allocations",
+            "profile":"existing_core_profile_counters",
+            "sqlite":"live_connection_pager_and_sql_category_counters; pager_bytes_are_page_size_estimates",
+            "r2":"live_store_logical_calls_and_cache_hits; not_http_attempts",
+            "unavailable":{
+                "http_attempts":"unavailable",
+                "internal_successful_retries":"unavailable",
+                "physical_device_iops":"unavailable",
+                "tidb_pool_wait":"unavailable",
+                "native_allocation_count":"unavailable",
+                "js_allocation_count":"unavailable"
+            }
+        },
+    });
+    stringify_counters(&mut value);
+    value.to_string()
+}
 
 /// Apply the optional Node application-boundary decorator at construction
 /// time. The feature is off by default; when enabled, an embedding Rust
@@ -1462,6 +1568,34 @@ pub struct JsChunkedOptions {
 #[derive(Clone)]
 struct DynMetadataStore(Arc<dyn MetadataStore>);
 
+/// Preserve the provider's original boxed future on the default disabled path.
+/// Enabled recording adds one forwarding future allocation per operation; the
+/// recorder itself uses only fixed atomic arrays until a phase snapshot.
+fn measured<'a, T, F>(
+    operation: Operation,
+    future: Pin<Box<dyn Future<Output = CoreResult<T>> + Send + 'a>>,
+    bytes: F,
+) -> Pin<Box<dyn Future<Output = CoreResult<T>> + Send + 'a>>
+where
+    T: Send + 'a,
+    F: FnOnce(&T) -> u64 + Send + 'a,
+{
+    if !storage::enabled() {
+        return future;
+    }
+    let forwarding = async move {
+        let mut span = storage::Span::new(operation);
+        let result = future.await;
+        match &result {
+            Ok(value) => span.finish_success(bytes(value)),
+            Err(_) => span.finish_error(),
+        }
+        result
+    };
+    storage::record_forwarding_box(std::mem::size_of_val(&forwarding) as u64);
+    Box::pin(forwarding)
+}
+
 impl MetadataStore for DynMetadataStore {
     fn compact_inode_capability(&self) -> mount_rs_core::storage::compact::CompactInodeCapability {
         self.0.compact_inode_capability()
@@ -1501,7 +1635,11 @@ impl MetadataStore for DynMetadataStore {
         'a: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.load_compact_snapshot(backing)
+        measured(
+            Operation::MetadataSnapshot,
+            self.0.load_compact_snapshot(backing),
+            |_| 0,
+        )
     }
     fn load_compact_inode<'a, 'async_trait>(
         &'a self,
@@ -1518,7 +1656,11 @@ impl MetadataStore for DynMetadataStore {
         'a: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.load_compact_inode(backing, inode)
+        measured(
+            Operation::MetadataLoad,
+            self.0.load_compact_inode(backing, inode),
+            |_| 0,
+        )
     }
     fn publish_compact_inode<'a, 'async_trait>(
         &'a self,
@@ -1538,8 +1680,12 @@ impl MetadataStore for DynMetadataStore {
         'a: 'async_trait,
         Self: 'async_trait,
     {
-        self.0
-            .publish_compact_inode(backing, inode, generation, expected, node)
+        measured(
+            Operation::MetadataPublish,
+            self.0
+                .publish_compact_inode(backing, inode, generation, expected, node),
+            |_| 0,
+        )
     }
     fn publish_compact_structure<'a, 'b, 'async_trait>(
         &'a self,
@@ -1556,7 +1702,11 @@ impl MetadataStore for DynMetadataStore {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.publish_compact_structure(delta)
+        measured(
+            Operation::MetadataPublish,
+            self.0.publish_compact_structure(delta),
+            |_| 0,
+        )
     }
     fn inode_mode_state<'a, 'async_trait>(
         &'a self,
@@ -1599,7 +1749,11 @@ impl MetadataStore for DynMetadataStore {
         'a: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.load_inode_snapshot_if_changed(backing, known)
+        measured(
+            Operation::MetadataConditionalLoad,
+            self.0.load_inode_snapshot_if_changed(backing, known),
+            |_| 0,
+        )
     }
     fn load_inode_snapshot<'a, 'async_trait>(
         &'a self,
@@ -1615,7 +1769,11 @@ impl MetadataStore for DynMetadataStore {
         'a: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.load_inode_snapshot(backing)
+        measured(
+            Operation::MetadataSnapshot,
+            self.0.load_inode_snapshot(backing),
+            |_| 0,
+        )
     }
     fn load_inode<'a, 'async_trait>(
         &'a self,
@@ -1632,7 +1790,11 @@ impl MetadataStore for DynMetadataStore {
         'a: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.load_inode(backing, inode)
+        measured(
+            Operation::MetadataLoad,
+            self.0.load_inode(backing, inode),
+            |_| 0,
+        )
     }
     fn load_inode_if_changed<'a, 'async_trait>(
         &'a self,
@@ -1650,7 +1812,11 @@ impl MetadataStore for DynMetadataStore {
         'a: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.load_inode_if_changed(backing, inode, known)
+        measured(
+            Operation::MetadataConditionalLoad,
+            self.0.load_inode_if_changed(backing, inode, known),
+            |_| 0,
+        )
     }
     fn publish_inode_if_version<'a, 'async_trait>(
         &'a self,
@@ -1669,8 +1835,12 @@ impl MetadataStore for DynMetadataStore {
         'a: 'async_trait,
         Self: 'async_trait,
     {
-        self.0
-            .publish_inode_if_version(backing, inode, expected, node)
+        measured(
+            Operation::MetadataPublish,
+            self.0
+                .publish_inode_if_version(backing, inode, expected, node),
+            |_| 0,
+        )
     }
     fn publish_structure_if_versions<'a, 'b, 'async_trait>(
         &'a self,
@@ -1684,11 +1854,15 @@ impl MetadataStore for DynMetadataStore {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.publish_structure_if_versions(
-            backing,
-            expected_generation,
-            expected_inode_revisions,
-            namespace,
+        measured(
+            Operation::MetadataPublish,
+            self.0.publish_structure_if_versions(
+                backing,
+                expected_generation,
+                expected_inode_revisions,
+                namespace,
+            ),
+            |_| 0,
         )
     }
 
@@ -1707,7 +1881,7 @@ impl MetadataStore for DynMetadataStore {
         'a: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.load()
+        measured(Operation::MetadataLoad, self.0.load(), |_| 0)
     }
 
     fn load_if_changed<'a, 'async_trait>(
@@ -1718,7 +1892,11 @@ impl MetadataStore for DynMetadataStore {
         'a: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.load_if_changed(known_revision)
+        measured(
+            Operation::MetadataConditionalLoad,
+            self.0.load_if_changed(known_revision),
+            |_| 0,
+        )
     }
 
     fn concurrent_mode_state<'a, 'async_trait>(
@@ -1872,7 +2050,11 @@ impl MetadataStore for DynMetadataStore {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.publish(expected_revision, lease, namespace)
+        measured(
+            Operation::MetadataPublish,
+            self.0.publish(expected_revision, lease, namespace),
+            |_| 0,
+        )
     }
 
     fn publish_bound_if_revision<'a, 'async_trait>(
@@ -1885,8 +2067,12 @@ impl MetadataStore for DynMetadataStore {
         'a: 'async_trait,
         Self: 'async_trait,
     {
-        self.0
-            .publish_bound_if_revision(backing, expected_revision, namespace)
+        measured(
+            Operation::MetadataPublish,
+            self.0
+                .publish_bound_if_revision(backing, expected_revision, namespace),
+            |_| 0,
+        )
     }
 
     fn migrate_mrc1_to_bound_mode<'a, 'async_trait>(
@@ -1947,7 +2133,7 @@ impl MetadataStore for DynMetadataStore {
         'a: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.flush()
+        measured(Operation::MetadataFlush, self.0.flush(), |_| 0)
     }
 }
 
@@ -1966,7 +2152,11 @@ impl BlockStore for DynBlockStore {
         'a: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.prepare_concurrent_backing()
+        measured(
+            Operation::BlockPrepareBacking,
+            self.0.prepare_concurrent_backing(),
+            |_| 0,
+        )
     }
 
     fn verify_concurrent_backing<'a, 'async_trait>(
@@ -1977,7 +2167,11 @@ impl BlockStore for DynBlockStore {
         'a: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.verify_concurrent_backing(expected)
+        measured(
+            Operation::BlockVerifyBacking,
+            self.0.verify_concurrent_backing(expected),
+            |_| 0,
+        )
     }
 
     fn get_for_migration<'a, 'b, 'async_trait>(
@@ -1989,7 +2183,9 @@ impl BlockStore for DynBlockStore {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.get_for_migration(id)
+        measured(Operation::BlockGet, self.0.get_for_migration(id), |bytes| {
+            bytes.len() as u64
+        })
     }
 
     fn put<'a, 'b, 'async_trait>(
@@ -2001,7 +2197,9 @@ impl BlockStore for DynBlockStore {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.put(bytes)
+        measured(Operation::BlockPut, self.0.put(bytes), move |_| {
+            bytes.len() as u64
+        })
     }
 
     fn get<'a, 'b, 'async_trait>(
@@ -2013,7 +2211,9 @@ impl BlockStore for DynBlockStore {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.get(id)
+        measured(Operation::BlockGet, self.0.get(id), |bytes| {
+            bytes.len() as u64
+        })
     }
 
     fn flush<'a, 'async_trait>(
@@ -2023,7 +2223,7 @@ impl BlockStore for DynBlockStore {
         'a: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.flush()
+        measured(Operation::BlockFlush, self.0.flush(), |_| 0)
     }
 
     fn delete<'a, 'b, 'async_trait>(
@@ -2035,7 +2235,7 @@ impl BlockStore for DynBlockStore {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.delete(id)
+        measured(Operation::BlockDelete, self.0.delete(id), |_| 0)
     }
 
     fn reconcile<'a, 'b, 'async_trait>(
@@ -2048,7 +2248,11 @@ impl BlockStore for DynBlockStore {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.reconcile(live, grace)
+        measured(
+            Operation::BlockReconcile,
+            self.0.reconcile(live, grace),
+            |_| 0,
+        )
     }
 }
 
@@ -2830,7 +3034,17 @@ async fn build_block_store(
                 options.durable.unwrap_or(true),
             )
             .map_err(to_js_error)?;
-            Ok((Arc::new(blocks), None))
+            let blocks = Arc::new(blocks);
+            if storage::enabled()
+                && let Ok(mut entries) = R2_DIAGNOSTICS.get_or_init(Mutex::default).lock()
+            {
+                entries.retain(|entry| entry.store.strong_count() != 0);
+                entries.push(R2DiagnosticEntry {
+                    id: NEXT_R2_DIAGNOSTIC_ID.fetch_add(1, Ordering::Relaxed),
+                    store: Arc::downgrade(&blocks),
+                });
+            }
+            Ok((blocks, None))
         }
         "rustfs" => {
             let prefix = required_string(&options.key, "blocks.key")?;
@@ -5480,6 +5694,155 @@ mod tests {
         let error = block_on(erased.prepare_concurrent_backing())
             .expect_err("volatile SQLite block preflight must reach the provider");
         assert_eq!(error.code, ErrorCode::Enotsup);
+    }
+
+    #[test]
+    #[ignore = "run isolated with MOUNT_RS_PROFILE_IO=1 and --ignored --exact"]
+    fn dynamic_provider_calls_report_positive_bytes_and_error_outcomes() {
+        assert!(
+            mount_rs_core::diagnostics::storage::enabled(),
+            "run with MOUNT_RS_PROFILE_IO=1"
+        );
+        let before = mount_rs_core::diagnostics::storage::snapshot();
+        let blocks = DynBlockStore(Arc::new(MemoryBlockStore::new()));
+        let id = block_on(blocks.put(b"actual provider bytes")).unwrap();
+        assert_eq!(block_on(blocks.get(&id)).unwrap(), b"actual provider bytes");
+        let missing = BlockId("missing".into());
+        assert!(block_on(blocks.get(&missing)).is_err());
+        let delta = mount_rs_core::diagnostics::storage::snapshot()
+            .delta(&before)
+            .unwrap();
+        let put = delta
+            .entries
+            .iter()
+            .find(|entry| entry.name == "blocks.put")
+            .unwrap();
+        let get = delta
+            .entries
+            .iter()
+            .find(|entry| entry.name == "blocks.get")
+            .unwrap();
+        assert_eq!(put.success, 1);
+        assert_eq!(put.bytes, 21);
+        assert_eq!(get.success, 1);
+        assert_eq!(get.error, 1);
+        assert_eq!(get.bytes, 21);
+        assert_eq!(delta.forwarding_boxes.calls, 3);
+        assert!(delta.forwarding_boxes.requested_object_bytes > 0);
+    }
+
+    #[test]
+    fn native_storage_snapshot_serializes_exact_decimal_counters() {
+        let json = storage_diagnostics();
+        let snapshot: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            snapshot["schema_version"],
+            "mount-rs.storage-diagnostics.v1"
+        );
+        assert!(snapshot["storage"]["entries"][0]["calls"].is_string());
+        assert!(snapshot["storage"]["forwarding_boxes"]["calls"].is_string());
+        assert!(snapshot["storage"]["forwarding_boxes"]["requested_object_bytes"].is_string());
+        assert_eq!(
+            snapshot["measurement"]["latency_histogram"]["intervals"]
+                .as_array()
+                .unwrap()
+                .len(),
+            32
+        );
+        assert_eq!(
+            snapshot["measurement"]["latency_histogram"]["intervals"][31]["upper_exclusive_us"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            snapshot["measurement"]["unavailable"]["tidb_pool_wait"],
+            "unavailable"
+        );
+        assert_eq!(snapshot["http_attempts"], "unavailable");
+        assert!(!json.contains("test-secret"));
+    }
+
+    #[test]
+    #[ignore = "run isolated with MOUNT_RS_PROFILE_IO=1 and --ignored --exact"]
+    fn polled_then_dropped_provider_future_counts_cancellation() {
+        struct PendingBlocks;
+        impl BlockStore for PendingBlocks {
+            fn durable(&self) -> bool {
+                false
+            }
+            fn put<'a, 'b, 'async_trait>(
+                &'a self,
+                _: &'b [u8],
+            ) -> Pin<Box<dyn Future<Output = CoreResult<BlockId>> + Send + 'async_trait>>
+            where
+                'a: 'async_trait,
+                'b: 'async_trait,
+                Self: 'async_trait,
+            {
+                Box::pin(std::future::pending())
+            }
+            fn get<'a, 'b, 'async_trait>(
+                &'a self,
+                _: &'b BlockId,
+            ) -> Pin<Box<dyn Future<Output = CoreResult<Vec<u8>>> + Send + 'async_trait>>
+            where
+                'a: 'async_trait,
+                'b: 'async_trait,
+                Self: 'async_trait,
+            {
+                Box::pin(std::future::pending())
+            }
+            fn flush<'a, 'async_trait>(
+                &'a self,
+            ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+            where
+                'a: 'async_trait,
+                Self: 'async_trait,
+            {
+                Box::pin(std::future::pending())
+            }
+            fn delete<'a, 'b, 'async_trait>(
+                &'a self,
+                _: &'b BlockId,
+            ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+            where
+                'a: 'async_trait,
+                'b: 'async_trait,
+                Self: 'async_trait,
+            {
+                Box::pin(std::future::pending())
+            }
+        }
+        assert!(storage::enabled(), "run with MOUNT_RS_PROFILE_IO=1");
+        let before = storage::snapshot();
+        let blocks = DynBlockStore(Arc::new(PendingBlocks));
+        let id = BlockId("cancel-control".into());
+        let mut future = blocks.delete(&id);
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(future.as_mut().poll(&mut context).is_pending());
+        drop(future);
+        let delta = storage::snapshot().delta(&before).unwrap();
+        let deleted = delta
+            .entries
+            .iter()
+            .find(|entry| entry.name == "blocks.delete")
+            .unwrap();
+        assert_eq!(deleted.cancelled, 1);
+        assert_eq!(delta.forwarding_boxes.calls, 1);
+        assert!(delta.forwarding_boxes.requested_object_bytes > 0);
+    }
+
+    #[test]
+    fn profiling_disabled_leaves_dynamic_store_counters_unchanged() {
+        if storage::enabled() {
+            return;
+        }
+        let before = storage::snapshot();
+        let blocks = DynBlockStore(Arc::new(MemoryBlockStore::new()));
+        block_on(blocks.put(b"disabled control")).unwrap();
+        let delta = storage::snapshot().delta(&before).unwrap();
+        assert!(delta.entries.iter().all(|entry| entry.calls == 0));
+        assert_eq!(delta.forwarding_boxes.calls, 0);
+        assert_eq!(delta.forwarding_boxes.requested_object_bytes, 0);
     }
 
     #[test]

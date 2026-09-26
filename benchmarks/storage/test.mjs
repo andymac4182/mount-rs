@@ -21,6 +21,110 @@ import {
 import { foundationDbMetadataOptions, providerById, providerSummary } from "./providers.mjs"
 import { cleanupOwnedPaths, helpText, parseArgs, runBenchmark, runSample, runSteadySample } from "./runner.mjs"
 import { computeStats, percentile, round, roundStats } from "./stats.mjs"
+import { deltaNativeSnapshots, takePhaseSnapshot, finishPhase } from "./diagnostics.mjs"
+
+async function testStoragePhaseDiagnostics() {
+  const snapshot = (calls, connectionId = "7") => ({
+    schema_version: "mount-rs.storage-diagnostics.v1", enabled: true,
+    measurement: { storage_calls: "logical_provider_calls", storage_bytes: "successful_payload_bytes_at_provider_boundary",
+      storage_duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap",
+      forwarding_boxes: "enabled_napi_dynamic_provider_box_pin_site_calls_and_requested_future_object_bytes; excludes_allocator_overhead_and_other_allocations",
+      sqlite: "live_connection_pager_and_sql_category_counters; pager_bytes_are_page_size_estimates",
+      r2: "live_store_logical_calls_and_cache_hits; not_http_attempts",
+      unavailable: { http_attempts: "unavailable", internal_successful_retries: "unavailable", physical_device_iops: "unavailable", tidb_pool_wait: "unavailable", native_allocation_count: "unavailable", js_allocation_count: "unavailable" },
+      latency_histogram: { unit: "microseconds", intervals: Array.from({ length: 32 }, (_, bucket) => bucket === 0
+        ? { lower_inclusive_us: "0", upper_exclusive_us: "1" }
+        : bucket === 31
+          ? { lower_inclusive_us: String(2 ** 30), upper_exclusive_us: null, terminal_overflow: true }
+          : { lower_inclusive_us: String(2 ** (bucket - 1)), upper_exclusive_us: String(2 ** bucket) }) } },
+    backend_waits: { pglite_client_lock: "instrumented", tidb_pool: "unavailable" },
+    http_attempts: "unavailable", physical_device_iops: "unavailable",
+    storage: { in_flight: "0", forwarding_boxes: { sites: "napi_dynamic_provider_forwarding_future", calls: String(calls), requested_object_bytes: String(calls * 80) }, entries: [{ name: "blocks.put", calls: String(calls), success: String(calls), error: "0", cancelled: "0", bytes: String(calls * 4096), elapsed_ns: String(calls * 1000), latency_log2_us: [String(calls), ...Array(31).fill("0")] }] },
+    profile: { entries: [{ name: "filesystem.gate_wait", calls: String(calls), elapsed_ns: String(calls * 50), units: "0" }] },
+    sqlite: { connections: [{ connection_id: connectionId, pager: { cache_hits: String(calls), cache_misses: "0", page_writes: String(calls), cache_spills: "0" }, page_size: "4096", pager_read_bytes_estimate: "0", pager_write_bytes_estimate: String(calls * 4096), sql_statements: String(calls), sql_categories: { SELECT: String(calls) } }] },
+    r2: { instances: [], internal_successful_retries: "unavailable" },
+  })
+  const delta = deltaNativeSnapshots(snapshot(2), snapshot(5))
+  assert.equal(delta.complete, true)
+  assert.equal(delta.storage?.entries?.[0]?.bytes, "12288")
+  assert.equal(delta.storage.forwarding_boxes.calls, "3")
+  assert.equal(delta.storage.forwarding_boxes.requested_object_bytes, "240")
+  assert.equal(delta.measurement.storage_duration, "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap")
+  assert.equal(delta.backend_waits.tidb_pool, "unavailable")
+  assert.equal(delta.profile.entries[0].elapsed_ns, "150")
+  assert.equal(delta.sqlite.connections[0].pager.page_writes, "3")
+  assert.equal(delta.sqlite.connections[0].sql_categories.SELECT, "3")
+  assert.equal(deltaNativeSnapshots(snapshot(5), snapshot(2)).complete, false)
+  assert.equal(deltaNativeSnapshots(snapshot(2), { ...snapshot(5), sqlite: { connections: [] } }).complete, false)
+  assert.equal(deltaNativeSnapshots(snapshot(2), snapshot(5, "8")).complete, false)
+  const unsafe = snapshot(5)
+  unsafe.storage.entries[0].calls = Number.MAX_SAFE_INTEGER + 1
+  assert.equal(deltaNativeSnapshots(snapshot(2), unsafe).complete, false)
+  const changedHistogram = snapshot(5)
+  changedHistogram.storage.entries[0].latency_log2_us.push("0")
+  assert.equal(deltaNativeSnapshots(snapshot(2), changedHistogram).complete, false)
+  const inflight = snapshot(5)
+  inflight.storage.in_flight = "1"
+  assert.equal(deltaNativeSnapshots(snapshot(2), inflight).complete, false)
+  const missingMetadata = snapshot(5)
+  delete missingMetadata.measurement
+  assert.equal(deltaNativeSnapshots(snapshot(2), missingMetadata).complete, false)
+  const resetBoxes = snapshot(5)
+  resetBoxes.storage.forwarding_boxes.calls = "1"
+  assert.equal(deltaNativeSnapshots(snapshot(2), resetBoxes).complete, false)
+}
+
+async function testObserverEndpointsExcludeSnapshotWork() {
+  const order = []
+  let tick = 0
+  const samplers = {
+    now: () => { order.push("wall"); return ++tick },
+    cpu: () => { order.push("cpu"); return { user: ++tick, system: ++tick } },
+    resources: () => { order.push("resources"); return { voluntaryContextSwitches: ++tick, involuntaryContextSwitches: ++tick } },
+    memory: () => { order.push("memory"); return { rss: ++tick } },
+  }
+  const snapshot = () => { order.push("native"); return "{}" }
+  const before = takePhaseSnapshot(snapshot, samplers)
+  assert.deepEqual(order, ["wall", "cpu", "resources", "native", "memory", "resources", "cpu", "wall"])
+  order.length = 0
+  const after = takePhaseSnapshot(snapshot, samplers)
+  const phase = finishPhase("observer-control", before, after)
+  assert.equal(phase.elapsed_ms, after.started - before.ended)
+  assert.equal(phase.process.cpu_work.user_us, String(after.cpuStart.user - before.cpuEnd.user))
+  assert.equal(phase.observer_snapshot_ms, (before.ended - before.started) + (after.ended - after.started))
+}
+
+async function testOzoneMetricsReachAllNodeProcesses() {
+  const workflow = await readFile(fileURLToPath(new URL("../../.github/workflows/ci.yml", import.meta.url)), "utf8")
+  const foundation = await readFile(fileURLToPath(new URL("../../scripts/test-foundationdb.sh", import.meta.url)), "utf8")
+  assert.equal((workflow.match(/MOUNT_RS_PROFILE_IO: '1'/gu) || []).length, 3)
+  assert.equal((foundation.match(/--env MOUNT_RS_PROFILE_IO \\/gu) || []).length, 2)
+}
+
+async function testPendingProviderInvalidatesFollowingPhaseAttribution() {
+  const definitions = providerById({})
+  definitions.get("mount-rs-memory").create = async () => ({
+    filesystem: { writeFile: () => new Promise(() => {}), unlink: async () => {} },
+    cleanup: async () => {},
+  })
+  definitions.get("mount-rs-sqlite").create = async () => ({
+    filesystem: { writeFile: async () => {}, readFile: async () => Buffer.from([1]), unlink: async () => {} },
+    cleanup: async () => {},
+  })
+  const options = parseArgs(["--providers", "mount-rs-memory,mount-rs-sqlite", "--sizes", "1", "--payload-bytes", "1", "--iterations", "1", "--concurrency", "1", "--timeout-ms", "5", "--cleanup-timeout-ms", "5"])
+  const originalWrite = process.stderr.write
+  const summaries = []
+  process.stderr.write = (text) => { summaries.push(String(text)); return true }
+  let result
+  try { result = await runBenchmark(options, { MOUNT_RS_PROFILE_IO: "1" }, definitions) }
+  finally { process.stderr.write = originalWrite }
+  assert.equal(summaries.filter((line) => line.startsWith("MOUNT_RS_STORAGE_PHASE ")).length, 8)
+  assert.equal(result.providers[0].cleanup.resource.status, "deferred")
+  assert.equal(result.providers[1].cleanup.resource.status, "ok")
+  const secondPhases = result.providers[1].storageDiagnostics.phases
+  assert.ok(secondPhases.length > 0)
+  assert.ok(secondPhases.every((phase) => !phase.native.complete && phase.native.issues.includes("prior provider cleanup or native operation incomplete")))
+}
 
 async function testStats() {
   assert.deepEqual(computeStats([]), { median: 0, p95: 0, p99: 0 })
@@ -898,6 +1002,9 @@ async function testSteadyGenerationsRejectDroppedWrites() {
 await testSteadyGenerationsRejectDroppedWrites()
 await testSteadyOverwriteOracle()
 await testStats()
+await testStoragePhaseDiagnostics()
+await testObserverEndpointsExcludeSnapshotWork()
+await testOzoneMetricsReachAllNodeProcesses()
 await testErrors()
 await testCli()
 await testCompactRejectsNonSplitBeforeProviderIo()
@@ -912,4 +1019,5 @@ await testW26WorkflowKeepsProvenanceClean()
 await testExecutionSurfaceLabels()
 await testOzoneProviderMatrix()
 await testDeferredWriteCleanup()
+await testPendingProviderInvalidatesFollowingPhaseAttribution()
 console.log("storage benchmark unit tests: PASS")

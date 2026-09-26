@@ -11,6 +11,7 @@
 use async_trait::async_trait;
 use md5::{Digest, Md5};
 use mount_rs_core::diagnostics::profile::{self, Event};
+use mount_rs_core::diagnostics::storage::{Operation as StorageOperation, Span as StorageSpan};
 use mount_rs_core::storage::InodeId;
 use mount_rs_core::storage::{
     BlockId, BlockStore, CheckoutRequest, ConcurrentBackingId, ConcurrentModeState,
@@ -196,7 +197,9 @@ impl Database {
         if !self.close_gate.is_open() {
             return Err(connection_closed());
         }
+        let mut wait = StorageSpan::new(StorageOperation::PgliteClientWait);
         let client = self.client.lock().await;
+        wait.finish_success(0);
         if client.is_none() || !self.close_gate.is_open() {
             return Err(connection_closed());
         }

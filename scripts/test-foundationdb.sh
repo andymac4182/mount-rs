@@ -832,6 +832,7 @@ if [ "$run_napi" -eq 1 ]; then
       --env "MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE=/fdb/fdb.cluster" \
       --env LD_LIBRARY_PATH=/fdb \
       --env NAPI_RS_NATIVE_LIBRARY_PATH=/fdb/mount-rs.linux-x64-gnu.node \
+      --env MOUNT_RS_PROFILE_IO \
       --env MOUNT_RS_NAPI_FOUNDATIONDB=1 \
       --env MOUNT_RS_NAPI_FOUNDATIONDB_SHARED_PROVIDER=1 \
       --env "MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX=$authority_prefix" \
@@ -856,6 +857,7 @@ if [ "$run_napi" -eq 1 ]; then
       --env "MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE=/fdb/fdb.cluster" \
       --env LD_LIBRARY_PATH=/fdb \
       --env NAPI_RS_NATIVE_LIBRARY_PATH=/fdb/mount-rs.linux-x64-gnu.node \
+      --env MOUNT_RS_PROFILE_IO \
       --env MOUNT_RS_NAPI_FOUNDATIONDB=1 \
       --env MOUNT_RS_NAPI_FOUNDATIONDB_SHARED_PROVIDER=1 \
       --env "MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX=$authority_prefix" \

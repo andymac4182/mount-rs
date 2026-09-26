@@ -870,6 +870,8 @@ export declare class WebdavStreamResponse {
 export declare function basename(path: string): string
 
 export declare function createChunkedDriver(options: JsChunkedOptions): Promise<Filesystem>
+/** Versioned, read-only JSON snapshot. Counters are exact decimal strings. */
+export declare function storageDiagnostics(): string
 
 /**
  * Construct a Rust `Filesystem` backed by a structural JavaScript

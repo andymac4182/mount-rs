@@ -26,6 +26,10 @@ function loadNapi() {
   return nativeModule
 }
 
+export function nativeStorageDiagnostics() {
+  return loadNapi().storageDiagnostics()
+}
+
 function firstEnvironmentValue(environment, names) {
   for (const name of names) {
     const value = environment[name]

@@ -20,9 +20,11 @@ import {
   MOUNTX_PINNED_REVISION,
   providerById,
   providerSummary,
+  nativeStorageDiagnostics,
   DEFAULT_CHUNK_SIZE_BYTES,
 } from "./providers.mjs"
 import { computeStats, round, roundStats } from "./stats.mjs"
+import { finishPhase, logPhaseSummary, takePhaseSnapshot } from "./diagnostics.mjs"
 
 export const REFERENCE_REVISION = "92fbbc9ba7739111899121195236acb4fc6a8bb5"
 export const FILE_SIZE_MIB = Object.freeze([1, 4, 10, 16])
@@ -861,6 +863,8 @@ function failedSizeResult(definition, sizeMiBValue, options, operation, error) {
 }
 
 async function runProvider(definition, options, context) {
+  const diagnosticEnabled = context.environment.MOUNT_RS_PROFILE_IO === "1"
+  const phaseSnapshot = diagnosticEnabled ? () => takePhaseSnapshot(nativeStorageDiagnostics) : null
   const availability = definition.availability(context.environment, context)
   const requiredEnvVars =
     typeof definition.requiredEnvVars === "function"
@@ -886,6 +890,7 @@ async function runProvider(definition, options, context) {
         }
       : {}),
     sizes: [],
+    ...(diagnosticEnabled ? { storageDiagnostics: { enabled: true, phases: [], scope: "process; quiescent boundaries required" } } : {}),
     cleanup: {
       pathsAttempted: 0,
       remainingPaths: 0,
@@ -904,6 +909,14 @@ async function runProvider(definition, options, context) {
       : {}),
   }
   const sizeResults = []
+  const recordPhase = (name, before, quiescent = true, measuredElapsedMs = null) => {
+    if (!phaseSnapshot || !before) return
+    const phase = finishPhase(name, before, phaseSnapshot(), quiescent && !context.diagnosticPriorPending)
+    if (context.diagnosticPriorPending) phase.native.issues.push("prior provider cleanup or native operation incomplete")
+    if (measuredElapsedMs !== null) phase.benchmark_measured_elapsed_ms = measuredElapsedMs
+    providerRun.storageDiagnostics.phases.push(phase)
+    try { logPhaseSummary(phase) } catch { /* Diagnostics must not replace provider cleanup. */ }
+  }
 
   if (availability.revisionMismatch) {
     providerRun.status = "failed"
@@ -930,6 +943,7 @@ async function runProvider(definition, options, context) {
 
   let opened
   const setupStarted = performance.now()
+  const setupSnapshot = phaseSnapshot?.()
   try {
     opened = await withTimeout(
       () => definition.create({ ...context, options }),
@@ -937,6 +951,7 @@ async function runProvider(definition, options, context) {
       "provider setup",
     )
     providerRun.setupMs = performance.now() - setupStarted
+    recordPhase("create", setupSnapshot)
     if (options.layout === "compact") {
       providerRun.layoutSelection = {
         requested: "compact",
@@ -947,9 +962,11 @@ async function runProvider(definition, options, context) {
     }
   } catch (error) {
     providerRun.setupMs = performance.now() - setupStarted
+    recordPhase("create", setupSnapshot, false)
     providerRun.status = "failed"
     providerRun.setupError = errorRecord(error)
     providerRun.sizes = options.sizes.map((size) => failedSizeResult(definition, size, options, "setup", error))
+    if (isTimeout(error)) context.diagnosticPriorPending = true
     return { providerRun, sizeResults: providerRun.sizes }
   }
 
@@ -957,12 +974,15 @@ async function runProvider(definition, options, context) {
   const pendingOperations = new Map()
   try {
     for (const sizeMiBValue of options.sizes) {
+      const payloadBytes = options.payloadBytes ?? sizeMiBValue * 1024 * 1024
+      let workloadSnapshot
       try {
         // Payload allocation and hashing happen before the first timed write.
         const payload = makePayload(
           options.payloadBytes ?? sizeMiBValue * 1024 * 1024,
           options.payloadSeed,
         )
+        workloadSnapshot = phaseSnapshot?.()
         const result = await runSize(
           definition,
           opened.filesystem,
@@ -974,11 +994,14 @@ async function runProvider(definition, options, context) {
           pendingOperations,
         )
         sizeResults.push(result)
+        recordPhase(`workload-${payloadBytes}bytes`, workloadSnapshot, pendingOperations.size === 0, result.summary?.elapsedMs)
       } catch (error) {
         sizeResults.push(failedSizeResult(definition, sizeMiBValue, options, "benchmark", error))
+        recordPhase(`workload-${payloadBytes}bytes`, workloadSnapshot, pendingOperations.size === 0)
       }
     }
   } finally {
+    const cleanupSnapshot = phaseSnapshot?.()
     const pathCleanup = await cleanupOwnedPaths(
       opened.filesystem,
       ownedPaths,
@@ -989,8 +1012,10 @@ async function runProvider(definition, options, context) {
     providerRun.cleanup.remainingPaths = pathCleanup.remaining
     providerRun.cleanup.failures = pathCleanup.failures
     providerRun.cleanup.pendingOperations = pathCleanup.pendingOperations
+    recordPhase("cleanup", cleanupSnapshot, pendingOperations.size === 0 && pathCleanup.failures.length === 0)
 
     const resourceCleanupStarted = performance.now()
+    const shutdownSnapshot = phaseSnapshot?.()
     if (pendingOperations.size > 0) {
       providerRun.cleanup.resource = {
         status: "deferred",
@@ -1029,6 +1054,7 @@ async function runProvider(definition, options, context) {
         }
       }
     }
+    recordPhase("shutdown", shutdownSnapshot, pendingOperations.size === 0 && providerRun.cleanup.resource.status === "ok")
   }
 
   const hasResultFailure = sizeResults.some((result) => result.status === "failed")
@@ -1038,6 +1064,9 @@ async function runProvider(definition, options, context) {
     providerRun.cleanup.resource.status !== "ok"
   providerRun.status = hasResultFailure || hasCleanupFailure ? "failed" : "ok"
   providerRun.sizes = sizeResults
+  if (pendingOperations.size > 0 || providerRun.cleanup.resource.status !== "ok" || providerRun.cleanup.failures.length > 0) {
+    context.diagnosticPriorPending = true
+  }
   return { providerRun, sizeResults }
 }
 
@@ -1129,8 +1158,11 @@ async function environmentRecord(options, environment) {
   }
 }
 
-export async function runBenchmark(options, environment = process.env) {
-  const definitions = providerById(environment)
+export async function runBenchmark(options, environment = process.env, providerDefinitions) {
+  // Native profiling is latched on first module use. Set the opt-in before
+  // provider discovery or a phase snapshot can load the addon.
+  if (environment.MOUNT_RS_PROFILE_IO === "1") process.env.MOUNT_RS_PROFILE_IO = "1"
+  const definitions = providerDefinitions ?? providerById(environment)
   const selectedIds = options.providers || [...definitions.keys()]
   const unknown = selectedIds.filter((id) => !definitions.has(id))
   if (unknown.length > 0) {
@@ -1149,6 +1181,7 @@ export async function runBenchmark(options, environment = process.env) {
     runId,
     environment,
     chunkSizeBytes: options.chunkSizeBytes,
+    diagnosticPriorPending: false,
   }
   const providerRuns = []
   const results = []
@@ -1195,6 +1228,7 @@ export async function runBenchmark(options, environment = process.env) {
       payloadBytes: options.payloadBytes ?? null,
       minIops: options.minIops ?? null,
       requireConfigured: options.requireConfigured,
+      storageDiagnosticsEnabled: environment.MOUNT_RS_PROFILE_IO === "1",
       iopsDefinition: options.workload === "steady-overwrite" ? "successful partial overwrite+full-file read operations divided by measured wall time; precreate/open/close/unlink excluded" : "successful write+read+delete lifecycle operations divided by measured lifecycle wall time",
       payloadSeed: options.payloadSeed,
       setupExcludedFromTimings: true,

@@ -175,6 +175,7 @@ jobs:
           echo "W26_NAPI_BUILD_SOURCE_CLEAN_PASS native_path=$native_path"
       - name: Verify Ozone with SQLite and PGlite metadata
         env:
+          MOUNT_RS_PROFILE_IO: '1'
           MOUNT_RS_OZONE_COMPOSITIONS: '1'
           MOUNT_RS_OZONE_NODE_COMPOSITION: '1'
           MOUNT_RS_OZONE_IOPS: '1'
@@ -239,6 +240,7 @@ jobs:
           echo "W26_NAPI_BUILD_SOURCE_CLEAN_PASS native_path=$native_path"
       - name: Verify durable TiDB metadata over Apache Ozone chunks
         env:
+          MOUNT_RS_PROFILE_IO: '1'
           MOUNT_RS_OZONE_TIDB_COMPOSITION: '1'
           MOUNT_RS_TIDB_NAPI: '1'
           MOUNT_RS_TIDB_IOPS: '1'
@@ -281,6 +283,7 @@ jobs:
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
       - name: Verify durable FoundationDB metadata over Apache Ozone chunks
         env:
+          MOUNT_RS_PROFILE_IO: '1'
           MOUNT_RS_OZONE_FOUNDATIONDB_COMPOSITION: '1'
           MOUNT_RS_FOUNDATIONDB_TOPOLOGY: durable
           MOUNT_RS_FOUNDATIONDB_NAPI: '1'
