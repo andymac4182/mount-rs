@@ -27,14 +27,14 @@ type AnchorRow = (
 type Column = (String, String, String, String, String);
 
 pub(super) async fn initialize(conn: &mut Conn) -> Result<()> {
-    conn.query_drop(SCHEMA)
+    conn.query_drop_observed(StorageOperation::TidbSqlDdl, SCHEMA)
         .await
         .map_err(|e| db_error("initialize TiDB compact guards", e))?;
     validate_schema(conn, TABLE).await
 }
 
 async fn validate_schema<C: Queryable>(conn: &mut C, table: &str) -> Result<()> {
-    let columns: Vec<Column> = conn.exec(
+    let columns: Vec<Column> = conn.exec_observed(StorageOperation::TidbSqlMetadataRead,
         "SELECT COLUMN_NAME,DATA_TYPE,COLUMN_TYPE,IS_NULLABLE,EXTRA FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? ORDER BY ORDINAL_POSITION", (table,)
     ).await.map_err(|e| db_error("validate TiDB compact columns", e))?;
     let expected = [
@@ -60,7 +60,7 @@ async fn validate_schema<C: Queryable>(conn: &mut C, table: &str) -> Result<()> 
     {
         return Err(backend_error("incompatible TiDB compact guard columns"));
     }
-    let indexes: Vec<(String, u64, String, Option<u64>)> = conn.exec(
+    let indexes: Vec<(String, u64, String, Option<u64>)> = conn.exec_observed(StorageOperation::TidbSqlMetadataRead,
         "SELECT INDEX_NAME,SEQ_IN_INDEX,COLUMN_NAME,SUB_PART FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? ORDER BY INDEX_NAME,SEQ_IN_INDEX", (table,)
     ).await.map_err(|e| db_error("validate TiDB compact primary key", e))?;
     if indexes
@@ -79,7 +79,7 @@ async fn anchor<C: Queryable>(
     volume: &str,
     backing: ConcurrentBackingId,
 ) -> Result<CompactAnchor> {
-    let row: AnchorRow = conn.exec_first(
+    let row: AnchorRow = conn.exec_first_observed(StorageOperation::TidbSqlMetadataRead,
         "SELECT revision,write_mode,backing_id,owner,fence,expires,namespace,delegation FROM mount_rs_tidb_metadata WHERE volume_key=?", (volume,)
     ).await.map_err(|e| db_error("read TiDB compact anchor", e))?.ok_or_else(stale)?;
     decode_anchor_row(row, backing)
@@ -121,7 +121,7 @@ async fn guards<C: Queryable>(
     sql.push_str(" ORDER BY inode");
     sql.push_str(suffix);
     let rows: Vec<GuardRow> = conn
-        .exec(sql, params)
+        .exec_observed(StorageOperation::TidbSqlInodeRead, sql, params)
         .await
         .map_err(|e| db_error("read TiDB compact guards", e))?;
     let mut guards = BTreeMap::new();
@@ -165,7 +165,10 @@ fn encode_guard(inode: u64, guard: &CompactGuard) -> Result<String> {
 async fn packet_budget(tx: &mut Transaction<'_>) -> Result<usize> {
     let client = tx.opts().max_allowed_packet().unwrap_or(usize::MAX);
     let session: u64 = tx
-        .query_first("SELECT @@SESSION.max_allowed_packet")
+        .query_first_observed(
+            StorageOperation::TidbSqlSession,
+            "SELECT @@SESSION.max_allowed_packet",
+        )
         .await
         .map_err(|e| db_error("read TiDB compact packet budget", e))?
         .ok_or_else(stale)?;
@@ -196,6 +199,7 @@ async fn write_guard(
         "UPDATE mount_rs_tidb_compact_guards SET incarnation=?,epoch=?,revision=?,node=? WHERE volume_key=? AND inode=?"
     };
     let changed = changed_query(
+        StorageOperation::TidbSqlInodeWrite,
         tx,
         sql,
         (
@@ -219,9 +223,13 @@ async fn read_transaction(conn: &mut Conn) -> Result<Transaction<'_>> {
     // writes commit between statements without advancing anchor generation.
     let mut opts = TxOpts::default();
     opts.with_isolation_level(IsolationLevel::RepeatableRead);
-    conn.start_transaction(opts)
-        .await
-        .map_err(|e| db_error("begin TiDB compact snapshot", e))
+    observe_result_future(
+        StorageOperation::TidbBeginCompactRead,
+        conn.start_transaction(opts),
+        0,
+    )
+    .await
+    .map_err(|e| db_error("begin TiDB compact snapshot", e))
 }
 
 async fn require_no_compact_markers<C: Queryable>(
@@ -233,7 +241,8 @@ async fn require_no_compact_markers<C: Queryable>(
         return Err(stale());
     }
     let guard: Option<u8> = tx
-        .exec_first(
+        .exec_first_observed(
+            StorageOperation::TidbSqlInodeRead,
             "SELECT 1 FROM mount_rs_tidb_compact_guards WHERE volume_key=? LIMIT 1",
             (volume,),
         )
@@ -250,11 +259,11 @@ impl TidbMetadataStore {
         let mut conn = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|e| db_error("inspect TiDB compact mode", e))?;
         let mut tx = read_transaction(&mut conn).await?;
-        let row: AnchorRow = tx.exec_first(
+        let row: AnchorRow = tx.exec_first_observed(StorageOperation::TidbSqlMetadataRead,
             "SELECT revision,write_mode,backing_id,owner,fence,expires,namespace,delegation FROM mount_rs_tidb_metadata WHERE volume_key=?",
             (&self.0.volume_key,),
         ).await.map_err(|e| db_error("inspect TiDB compact mode", e))?.ok_or_else(stale)?;
@@ -299,7 +308,7 @@ impl TidbMetadataStore {
             }
             _ => Err(stale()),
         }?;
-        tx.rollback()
+        observe_result_future(StorageOperation::TidbRollback, tx.rollback(), 0)
             .await
             .map_err(|e| db_error("finish TiDB compact inspection", e))?;
         Ok(result)
@@ -316,7 +325,7 @@ impl TidbMetadataStore {
         let mut conn = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|e| db_error("enroll TiDB compact", e))?;
         let mut tx = begin_inode_write(&mut conn).await?;
@@ -332,7 +341,8 @@ impl TidbMetadataStore {
             return Err(FsError::new(ErrorCode::Eagain));
         }
         let (json, delegation): (String, Option<String>) = tx
-            .exec_first(
+            .exec_first_observed(
+                StorageOperation::TidbSqlMetadataRead,
                 "SELECT namespace,delegation FROM mount_rs_tidb_metadata WHERE volume_key=?",
                 (&self.0.volume_key,),
             )
@@ -354,7 +364,7 @@ impl TidbMetadataStore {
         {
             return Err(FsError::new(ErrorCode::Ebusy));
         }
-        let count: u64 = tx.exec_first("SELECT (SELECT count(*) FROM mount_rs_tidb_inodes WHERE volume_key=?)+(SELECT count(*) FROM mount_rs_tidb_compact_guards WHERE volume_key=?)", (&self.0.volume_key, &self.0.volume_key)).await.map_err(|e| db_error("check TiDB compact enrollment history", e))?.ok_or_else(stale)?;
+        let count: u64 = tx.exec_first_observed(StorageOperation::TidbSqlMetadataRead, "SELECT (SELECT count(*) FROM mount_rs_tidb_inodes WHERE volume_key=?)+(SELECT count(*) FROM mount_rs_tidb_compact_guards WHERE volume_key=?)", (&self.0.volume_key, &self.0.volume_key)).await.map_err(|e| db_error("check TiDB compact enrollment history", e))?.ok_or_else(stale)?;
         if count != 0 {
             return Err(FsError::new(ErrorCode::Ebusy));
         }
@@ -383,7 +393,7 @@ impl TidbMetadataStore {
         check_bytes(&self.0, body.len(), budget)?;
         check_bytes(&self.0, node.len(), budget)?;
         write_guard(&mut tx, &self.0.volume_key, ns.root, &root, node, true).await?;
-        tx.exec_drop("UPDATE mount_rs_tidb_metadata SET write_mode='MRC5',revision=?,namespace=? WHERE volume_key=?", (signed(generation,"compact generation")?, body, &self.0.volume_key)).await.map_err(|e| db_error("enroll TiDB compact anchor", e))?;
+        tx.exec_drop_observed(StorageOperation::TidbSqlMetadataWrite, "UPDATE mount_rs_tidb_metadata SET write_mode='MRC5',revision=?,namespace=? WHERE volume_key=?", (signed(generation,"compact generation")?, body, &self.0.volume_key)).await.map_err(|e| db_error("enroll TiDB compact anchor", e))?;
         commit(tx, "enroll compact mode").await
     }
 
@@ -394,7 +404,7 @@ impl TidbMetadataStore {
         let mut conn = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|e| db_error("load TiDB compact snapshot", e))?;
         let mut tx = read_transaction(&mut conn).await?;
@@ -404,7 +414,7 @@ impl TidbMetadataStore {
             guards: guards(&mut tx, &self.0.volume_key, None, false).await?,
         };
         snapshot.namespace()?;
-        tx.rollback()
+        observe_result_future(StorageOperation::TidbRollback, tx.rollback(), 0)
             .await
             .map_err(|e| db_error("finish TiDB compact snapshot", e))?;
         Ok(snapshot)
@@ -417,7 +427,7 @@ impl TidbMetadataStore {
         let mut conn = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|e| db_error("load TiDB compact inode", e))?;
         let mut tx = read_transaction(&mut conn).await?;
@@ -427,7 +437,7 @@ impl TidbMetadataStore {
             .remove(&inode)
             .ok_or_else(stale)?;
         let loaded = LoadedCompactInode::from_guard(&anchor, inode, guard)?;
-        tx.rollback()
+        observe_result_future(StorageOperation::TidbRollback, tx.rollback(), 0)
             .await
             .map_err(|e| db_error("finish TiDB compact inode", e))?;
         Ok(loaded)
@@ -443,7 +453,7 @@ impl TidbMetadataStore {
         let mut conn = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|e| db_error("publish TiDB compact inode", e))?;
         let mut tx = begin_inode_write(&mut conn).await?;
@@ -474,7 +484,7 @@ impl TidbMetadataStore {
         let mut conn = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|e| db_error("publish TiDB compact structure", e))?;
         let mut tx = begin_inode_write(&mut conn).await?;
@@ -511,6 +521,7 @@ impl TidbMetadataStore {
         // No guard or anchor mutations occur before all SQL/byte checks above.
         for &inode in &publication.removed {
             if changed_query(
+                StorageOperation::TidbSqlInodeWrite,
                 &mut tx,
                 "DELETE FROM mount_rs_tidb_compact_guards WHERE volume_key=? AND inode=?",
                 (&self.0.volume_key, signed(inode, "compact inode")?),
@@ -533,7 +544,8 @@ impl TidbMetadataStore {
             )
             .await?;
         }
-        tx.exec_drop(
+        tx.exec_drop_observed(
+            StorageOperation::TidbSqlMetadataWrite,
             "UPDATE mount_rs_tidb_metadata SET revision=?,namespace=? WHERE volume_key=?",
             (
                 signed(publication.anchor.generation, "compact generation")?,

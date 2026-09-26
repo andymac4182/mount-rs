@@ -1,4 +1,6 @@
 //! Diagnostic-only allocator and process counters. Never enabled in production.
+#[path = "device_io.rs"]
+pub mod device_io;
 use serde::Serialize;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 #[cfg(feature = "allocation-profiling")]
@@ -197,6 +199,7 @@ pub struct Snapshot {
     freed_bytes: u64,
     live_bytes: u64,
     network: Vec<Network>,
+    os_io: device_io::Snapshot,
 }
 
 fn sqlite_heap() -> Result<(u64, u64), &'static str> {
@@ -279,6 +282,15 @@ impl Snapshot {
     pub fn capture_connections(connections: &[quinn::Connection]) -> Result<Self, &'static str> {
         Self::capture_network(connections.iter().map(Network::capture).collect())
     }
+    /// Explicit phase boundary only: the100ms sampler never selects or queries
+    /// disk counters. MOUNT_RS_PROFILE_IO=1 enables these new OS observations.
+    pub fn capture_connections_io_boundary(
+        connections: &[quinn::Connection],
+    ) -> Result<Self, &'static str> {
+        let mut snapshot = Self::capture_connections(connections)?;
+        snapshot.os_io = device_io::Snapshot::capture_from_env();
+        Ok(snapshot)
+    }
     pub fn connection_deltas(&self, before: &Self) -> Result<serde_json::Value, &'static str> {
         if self.network.len() != before.network.len() {
             return Err("resource profile client count changed");
@@ -297,6 +309,13 @@ impl Snapshot {
     /// Observe namespace/population/setup before any protocol clients exist.
     pub fn capture_process() -> Result<Self, &'static str> {
         Self::capture_network(Vec::new())
+    }
+    /// Collect own-process disk accounting and one explicitly selected host
+    /// device at a phase boundary. Missing counters remain diagnostic gaps.
+    pub fn capture_process_io_boundary() -> Result<Self, &'static str> {
+        let mut snapshot = Self::capture_process()?;
+        snapshot.os_io = device_io::Snapshot::capture_from_env();
+        Ok(snapshot)
     }
 
     fn capture_network(network: Vec<Network>) -> Result<Self, &'static str> {
@@ -350,6 +369,7 @@ impl Snapshot {
             freed_bytes: total(|c| &c.freed_bytes),
             live_bytes: u64::try_from(live).map_err(|_| "inconsistent live allocation snapshot")?,
             network,
+            os_io: device_io::Snapshot::disabled(),
         })
     }
     pub fn delta(&self, before: &Self) -> Result<serde_json::Value, &'static str> {
@@ -382,6 +402,7 @@ impl Snapshot {
             "rust_allocated_bytes":allocation_profile.then_some(delta!(allocated_bytes)), "rust_freed_bytes":allocation_profile.then_some(delta!(freed_bytes)),
             "rust_live_start_bytes":allocation_profile.then_some(before.live_bytes), "rust_live_end_bytes":allocation_profile.then_some(self.live_bytes),
             "quic_client_side":network,
+            "os_io":self.os_io.delta(&before.os_io),
             "scope":"one process includes clients, servers, verification and background; System Rust allocations exclude foreign C allocators; QUIC UDP bytes exclude IP/UDP headers; atomic allocator instrumentation affects throughput"}),
         )
     }

@@ -79,17 +79,22 @@ fn capture(
     previous_peak: u64,
     previous_disk: u64,
 ) -> Result<Value, String> {
-    let snapshot = super::resource_profile::Snapshot::capture_process()
-        .map_err(|_| "process observation failed")?;
-    let mut delta = snapshot.delta(first).map_err(|_| "process delta failed")?;
-    delta["quic_client_side"] =
-        json!({"available":false,"reason":"process-only sampler; no transport observation"});
-    let current = snapshot.resident_bytes().ok_or("current RSS unavailable")?;
-    let lifetime = delta["lifetime_peak_rss_bytes"]
-        .as_u64()
-        .ok_or("lifetime RSS unavailable")?;
-    let value = json!({"pid":std::process::id(),"samples":samples,"peak_rss_bytes":previous_peak.max(current).max(lifetime),"minimum_host_free_bytes":previous_disk.min(disk_available()?),"error":null,"process_delta":delta,"sample_interval_ms":100,"observed_unix_ms":super::utc_ms()});
-    Ok(value)
+    let span = super::metrics::observer().begin("sampler_capture");
+    let result: Result<Value, String> = (|| {
+        let snapshot = super::resource_profile::Snapshot::capture_process()
+            .map_err(|_| "process observation failed")?;
+        let mut delta = snapshot.delta(first).map_err(|_| "process delta failed")?;
+        delta["quic_client_side"] =
+            json!({"available":false,"reason":"process-only sampler; no transport observation"});
+        let current = snapshot.resident_bytes().ok_or("current RSS unavailable")?;
+        let lifetime = delta["lifetime_peak_rss_bytes"]
+            .as_u64()
+            .ok_or("lifetime RSS unavailable")?;
+        let value = json!({"pid":std::process::id(),"samples":samples,"peak_rss_bytes":previous_peak.max(current).max(lifetime),"minimum_host_free_bytes":previous_disk.min(disk_available()?),"error":null,"process_delta":delta,"sample_interval_ms":100,"observed_unix_ms":super::utc_ms()});
+        Ok(value)
+    })();
+    span.finish(result.is_ok(), 0);
+    result
 }
 fn retain_observation(
     previous: Value,

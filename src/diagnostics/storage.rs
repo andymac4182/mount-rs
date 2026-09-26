@@ -32,8 +32,73 @@ pub enum Operation {
     BlockDelete,
     BlockReconcile,
     PgliteClientWait,
+    SdkMetadataCompactInodeCapability,
+    SdkMetadataCompactInodeModeState,
+    SdkMetadataPrepareCompactInodeMode,
+    SdkMetadataLoadCompactSnapshot,
+    SdkMetadataLoadCompactInode,
+    SdkMetadataPublishCompactInode,
+    SdkMetadataPublishCompactStructure,
+    SdkMetadataInodeModeState,
+    SdkMetadataPrepareInodeMode,
+    SdkMetadataLoadInodeSnapshotIfChanged,
+    SdkMetadataLoadInodeSnapshot,
+    SdkMetadataLoadInode,
+    SdkMetadataLoadInodeIfChanged,
+    SdkMetadataPublishInodeIfVersion,
+    SdkMetadataPublishStructureIfVersions,
+    SdkMetadataDelegationState,
+    SdkMetadataPrepareDelegatedMode,
+    SdkMetadataCheckout,
+    SdkMetadataPublishDelegated,
+    SdkMetadataCheckin,
+    SdkMetadataRecover,
+    SdkMetadataDurable,
+    SdkMetadataPublishIncludesFlushBarrier,
+    SdkMetadataLoad,
+    SdkMetadataLoadIfChanged,
+    SdkMetadataConcurrentModeState,
+    SdkMetadataPreflightNewBoundMode,
+    SdkMetadataPrepareBoundConcurrentMode,
+    SdkMetadataAcquireWriter,
+    SdkMetadataRenewWriter,
+    SdkMetadataReleaseWriter,
+    SdkMetadataPublish,
+    SdkMetadataPublishBoundIfRevision,
+    SdkMetadataMigrateMrc1ToBoundMode,
+    SdkMetadataPreflightMrc1ToBoundMode,
+    SdkMetadataPreflightTrustedUnstampedMrc1,
+    SdkMetadataMigrateTrustedUnstampedMrc1,
+    SdkMetadataFlush,
+    SdkBlocksDurable,
+    SdkBlocksPrepareConcurrentBacking,
+    SdkBlocksVerifyConcurrentBacking,
+    SdkBlocksGetForMigration,
+    SdkBlocksPut,
+    SdkBlocksGet,
+    SdkBlocksFlush,
+    SdkBlocksDelete,
+    SdkBlocksReconcile,
+    TidbPoolCheckout,
+    TidbSessionConfigure,
+    TidbSchemaInitialize,
+    TidbMetadataOpen,
+    TidbBeginMetadata,
+    TidbBeginInode,
+    TidbBeginCompactRead,
+    TidbCommit,
+    TidbRollback,
+    TidbSqlSession,
+    TidbSqlDdl,
+    TidbSqlMetadataRead,
+    TidbSqlMetadataWrite,
+    TidbSqlInodeRead,
+    TidbSqlInodeWrite,
+    TidbSqlBlockRead,
+    TidbSqlBlockWrite,
+    TidbSqlFlushProbe,
 }
-const NAMES: [&str; 13] = [
+const NAMES: [&str; 78] = [
     "metadata.load",
     "metadata.load_if_changed",
     "metadata.snapshot",
@@ -47,7 +112,77 @@ const NAMES: [&str; 13] = [
     "blocks.delete",
     "blocks.reconcile",
     "pglite.client_lock_wait",
+    "sdk.metadata.compact_inode_capability",
+    "sdk.metadata.compact_inode_mode_state",
+    "sdk.metadata.prepare_compact_inode_mode",
+    "sdk.metadata.load_compact_snapshot",
+    "sdk.metadata.load_compact_inode",
+    "sdk.metadata.publish_compact_inode",
+    "sdk.metadata.publish_compact_structure",
+    "sdk.metadata.inode_mode_state",
+    "sdk.metadata.prepare_inode_mode",
+    "sdk.metadata.load_inode_snapshot_if_changed",
+    "sdk.metadata.load_inode_snapshot",
+    "sdk.metadata.load_inode",
+    "sdk.metadata.load_inode_if_changed",
+    "sdk.metadata.publish_inode_if_version",
+    "sdk.metadata.publish_structure_if_versions",
+    "sdk.metadata.delegation_state",
+    "sdk.metadata.prepare_delegated_mode",
+    "sdk.metadata.checkout",
+    "sdk.metadata.publish_delegated",
+    "sdk.metadata.checkin",
+    "sdk.metadata.recover",
+    "sdk.metadata.durable",
+    "sdk.metadata.publish_includes_flush_barrier",
+    "sdk.metadata.load",
+    "sdk.metadata.load_if_changed",
+    "sdk.metadata.concurrent_mode_state",
+    "sdk.metadata.preflight_new_bound_mode",
+    "sdk.metadata.prepare_bound_concurrent_mode",
+    "sdk.metadata.acquire_writer",
+    "sdk.metadata.renew_writer",
+    "sdk.metadata.release_writer",
+    "sdk.metadata.publish",
+    "sdk.metadata.publish_bound_if_revision",
+    "sdk.metadata.migrate_mrc1_to_bound_mode",
+    "sdk.metadata.preflight_mrc1_to_bound_mode",
+    "sdk.metadata.preflight_trusted_unstamped_mrc1",
+    "sdk.metadata.migrate_trusted_unstamped_mrc1",
+    "sdk.metadata.flush",
+    "sdk.blocks.durable",
+    "sdk.blocks.prepare_concurrent_backing",
+    "sdk.blocks.verify_concurrent_backing",
+    "sdk.blocks.get_for_migration",
+    "sdk.blocks.put",
+    "sdk.blocks.get",
+    "sdk.blocks.flush",
+    "sdk.blocks.delete",
+    "sdk.blocks.reconcile",
+    "tidb.pool.checkout",
+    "tidb.session.configure",
+    "tidb.open.schema",
+    "tidb.open.metadata_row",
+    "tidb.tx.begin.metadata",
+    "tidb.tx.begin.inode",
+    "tidb.tx.begin.compact_read",
+    "tidb.tx.commit",
+    "tidb.tx.rollback",
+    "tidb.sql.session",
+    "tidb.sql.ddl",
+    "tidb.sql.metadata_read",
+    "tidb.sql.metadata_write",
+    "tidb.sql.inode_read",
+    "tidb.sql.inode_write",
+    "tidb.sql.block_read",
+    "tidb.sql.block_write",
+    "tidb.sql.flush_probe",
 ];
+
+/// Fixed serialized row order. Appended families have separate invocation semantics.
+pub fn operation_names() -> &'static [&'static str] {
+    &NAMES
+}
 
 #[derive(Clone, Copy)]
 pub enum Outcome {
@@ -66,6 +201,9 @@ impl Outcome {
 }
 
 struct Metric {
+    in_flight: AtomicU64,
+    returned_rows: AtomicU64,
+    returned_row_observations: AtomicU64,
     calls: AtomicU64,
     success: AtomicU64,
     error: AtomicU64,
@@ -77,6 +215,9 @@ struct Metric {
 impl Metric {
     fn new() -> Self {
         Self {
+            in_flight: AtomicU64::new(0),
+            returned_rows: AtomicU64::new(0),
+            returned_row_observations: AtomicU64::new(0),
             calls: AtomicU64::new(0),
             success: AtomicU64::new(0),
             error: AtomicU64::new(0),
@@ -107,7 +248,14 @@ impl Recorder {
         self.forwarding_requested_bytes
             .fetch_add(requested_object_bytes, Ordering::Relaxed);
     }
-    fn record(&self, operation: Operation, outcome: Outcome, bytes: u64, elapsed_ns: u64) {
+    fn record(
+        &self,
+        operation: Operation,
+        outcome: Outcome,
+        bytes: u64,
+        rows: Option<u64>,
+        elapsed_ns: u64,
+    ) {
         let metric = &self.metrics[operation as usize];
         metric.calls.fetch_add(1, Ordering::Relaxed);
         match outcome {
@@ -117,6 +265,12 @@ impl Recorder {
         }
         .fetch_add(1, Ordering::Relaxed);
         metric.bytes.fetch_add(bytes, Ordering::Relaxed);
+        if let Some(rows) = rows {
+            metric.returned_rows.fetch_add(rows, Ordering::Relaxed);
+            metric
+                .returned_row_observations
+                .fetch_add(1, Ordering::Relaxed);
+        }
         metric.elapsed_ns.fetch_add(elapsed_ns, Ordering::Relaxed);
         let micros = elapsed_ns / 1_000;
         let bucket = if micros == 0 {
@@ -141,6 +295,11 @@ impl Recorder {
                 .enumerate()
                 .map(|(index, metric)| Entry {
                     name: NAMES[index],
+                    in_flight: metric.in_flight.load(Ordering::Relaxed),
+                    returned_rows: metric.returned_rows.load(Ordering::Relaxed),
+                    returned_row_observations: metric
+                        .returned_row_observations
+                        .load(Ordering::Relaxed),
                     calls: metric.calls.load(Ordering::Relaxed),
                     success: metric.success.load(Ordering::Relaxed),
                     error: metric.error.load(Ordering::Relaxed),
@@ -177,6 +336,13 @@ pub fn snapshot() -> Snapshot {
 #[derive(Clone, Debug, Serialize)]
 pub struct Entry {
     pub name: &'static str,
+    /// Active invocations at snapshot time; a gauge, not a cumulative counter.
+    pub in_flight: u64,
+    /// Successful returned rows from invocations with a known row count.
+    pub returned_rows: u64,
+    /// Number of successful invocations with a known count, including zero.
+    /// Zero observations means unavailable, not an observed empty result.
+    pub returned_row_observations: u64,
     pub calls: u64,
     pub success: u64,
     pub error: u64,
@@ -218,6 +384,12 @@ impl Snapshot {
             }
             entries.push(Entry {
                 name: now.name,
+                in_flight: now.in_flight,
+                returned_rows: subtract(now.returned_rows, old.returned_rows)?,
+                returned_row_observations: subtract(
+                    now.returned_row_observations,
+                    old.returned_row_observations,
+                )?,
                 calls: subtract(now.calls, old.calls)?,
                 success: subtract(now.success, old.success)?,
                 error: subtract(now.error, old.error)?,
@@ -263,6 +435,9 @@ impl Span<'static> {
         let recorder = enabled().then(|| GLOBAL.get_or_init(Recorder::new));
         if let Some(recorder) = recorder {
             recorder.in_flight.fetch_add(1, Ordering::Relaxed);
+            recorder.metrics[operation as usize]
+                .in_flight
+                .fetch_add(1, Ordering::Relaxed);
         }
         Self {
             recorder,
@@ -276,6 +451,9 @@ impl<'a> Span<'a> {
     #[cfg(test)]
     fn with_recorder(recorder: &'a Recorder, operation: Operation) -> Self {
         recorder.in_flight.fetch_add(1, Ordering::Relaxed);
+        recorder.metrics[operation as usize]
+            .in_flight
+            .fetch_add(1, Ordering::Relaxed);
         Self {
             recorder: Some(recorder),
             operation,
@@ -283,14 +461,17 @@ impl<'a> Span<'a> {
             finished: false,
         }
     }
-    fn finish(&mut self, outcome: Outcome, bytes: u64) {
+    fn finish(&mut self, outcome: Outcome, bytes: u64, rows: Option<u64>) {
         if self.finished {
             return;
         }
         self.finished = true;
         if let (Some(recorder), Some(started)) = (self.recorder, self.started) {
             let elapsed_ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
-            recorder.record(self.operation, outcome, bytes, elapsed_ns);
+            recorder.record(self.operation, outcome, bytes, rows, elapsed_ns);
+            recorder.metrics[self.operation as usize]
+                .in_flight
+                .fetch_sub(1, Ordering::Relaxed);
             recorder.in_flight.fetch_sub(1, Ordering::Relaxed);
             if elapsed_ns >= SLOW_THRESHOLD_NS && trace_enabled() {
                 let _ = write_slow_record(
@@ -303,15 +484,20 @@ impl<'a> Span<'a> {
         }
     }
     pub fn finish_success(&mut self, bytes: u64) {
-        self.finish(Outcome::Success, bytes);
+        self.finish(Outcome::Success, bytes, None);
+    }
+    /// Complete a successful invocation with an already known returned-row count.
+    /// This does not serialize or inspect payloads, and a known zero is observed.
+    pub fn finish_success_with_rows(&mut self, bytes: u64, rows: u64) {
+        self.finish(Outcome::Success, bytes, Some(rows));
     }
     pub fn finish_error(&mut self) {
-        self.finish(Outcome::Error, 0);
+        self.finish(Outcome::Error, 0, None);
     }
 }
 impl Drop for Span<'_> {
     fn drop(&mut self) {
-        self.finish(Outcome::Cancelled, 0);
+        self.finish(Outcome::Cancelled, 0, None);
     }
 }
 
@@ -369,7 +555,7 @@ mod tests {
     fn delta_rejects_counter_resets_and_changed_names() {
         let recorder = Recorder::new();
         let before = recorder.snapshot();
-        recorder.record(Operation::BlockPut, Outcome::Success, 4, 1_000);
+        recorder.record(Operation::BlockPut, Outcome::Success, 4, None, 1_000);
         let after = recorder.snapshot();
         assert!(before.delta(&after).is_err());
         let mut renamed = after.clone();
@@ -380,7 +566,7 @@ mod tests {
     #[test]
     fn pool_wait_has_distinct_fixed_latency_label() {
         let recorder = Recorder::new();
-        recorder.record(Operation::PgliteClientWait, Outcome::Success, 0, 2000);
+        recorder.record(Operation::PgliteClientWait, Outcome::Success, 0, None, 2000);
         let snapshot = recorder.snapshot();
         let entry = snapshot
             .entries
@@ -416,6 +602,65 @@ mod tests {
         assert!(
             log.lines()
                 .all(|line| line.contains("operation=blocks.put outcome=error"))
+        );
+    }
+    #[test]
+    fn per_row_gauges_are_terminal_and_known_zero_rows_are_observed() {
+        let recorder = Recorder::new();
+        let mut held = Span::with_recorder(&recorder, Operation::TidbSqlBlockRead);
+        let before = recorder.snapshot();
+        assert_eq!(
+            before.entries[Operation::TidbSqlBlockRead as usize].in_flight,
+            1
+        );
+        held.finish_success_with_rows(5, 0);
+        let mut unknown = Span::with_recorder(&recorder, Operation::TidbSqlBlockRead);
+        unknown.finish_success(7);
+        let mut known = Span::with_recorder(&recorder, Operation::TidbSqlBlockRead);
+        known.finish_success_with_rows(9, 3);
+        known.finish_success_with_rows(99, 99);
+        let delta = recorder.snapshot().delta(&before).unwrap();
+        let row = &delta.entries[Operation::TidbSqlBlockRead as usize];
+        assert_eq!((row.in_flight, delta.in_flight), (0, 0));
+        assert_eq!(
+            (
+                row.calls,
+                row.bytes,
+                row.returned_rows,
+                row.returned_row_observations
+            ),
+            (3, 21, 3, 2)
+        );
+        let mut reset = recorder.snapshot();
+        reset.entries[Operation::TidbSqlBlockRead as usize].returned_rows = 0;
+        assert!(reset.delta(&recorder.snapshot()).is_err());
+        let mut reset = recorder.snapshot();
+        reset.entries[Operation::TidbSqlBlockRead as usize].returned_row_observations = 0;
+        assert!(reset.delta(&recorder.snapshot()).is_err());
+    }
+
+    #[test]
+    fn fixed_names_match_appended_sdk_and_reserved_tidb_rows() {
+        let names = operation_names();
+        assert_eq!(names.len(), 78);
+        assert_eq!(
+            names[Operation::SdkMetadataLoadIfChanged as usize],
+            "sdk.metadata.load_if_changed"
+        );
+        assert_eq!(
+            names[Operation::SdkBlocksGetForMigration as usize],
+            "sdk.blocks.get_for_migration"
+        );
+        assert_eq!(
+            names[Operation::TidbSqlFlushProbe as usize],
+            "tidb.sql.flush_probe"
+        );
+        assert_eq!(
+            names
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            names.len()
         );
     }
 }

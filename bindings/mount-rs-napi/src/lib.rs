@@ -134,6 +134,80 @@ fn stringify_counters(value: &mut Value) {
     }
 }
 
+fn storage_operation_families() -> Value {
+    let matching = |prefixes: &[&str]| {
+        storage::operation_names()
+            .iter()
+            .copied()
+            .filter(|name| prefixes.iter().any(|prefix| name.starts_with(*prefix)))
+            .collect::<Vec<_>>()
+    };
+    let duration = "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap";
+    let block_bytes = "known_successful_block_put_input_and_get_or_migration_payload_bytes; metadata_bytes_unavailable";
+    json!({
+        "napi_provider":{"operations":matching(&["metadata.","blocks."]),
+            "calls":"napi_dynamic_provider_method_invocations","bytes":block_bytes,
+            "returned_rows":"unavailable","duration":duration},
+        "sdk_provider":{"operations":matching(&["sdk."]),
+            "calls":"direct_sdk_provider_method_invocations_including_synchronous_methods","bytes":block_bytes,
+            "returned_rows":"unavailable","duration":duration},
+        "pglite_client_lock":{"operations":["pglite.client_lock_wait"],
+            "calls":"client_lock_acquisition_invocations","bytes":"unavailable",
+            "returned_rows":"unavailable","duration":"inclusive_client_lock_await_nanoseconds"},
+        "tidb_pool_checkout":{"operations":["tidb.pool.checkout"],
+            "calls":"pool_checkout_invocations","bytes":"unavailable","returned_rows":"unavailable",
+            "duration":"inclusive_checkout_nanoseconds_including_lazy_connect_and_session_configuration; queue_only_wait_unavailable"},
+        "tidb_session":{"operations":["tidb.session.configure"],
+            "calls":"session_configuration_invocations","bytes":"unavailable",
+            "returned_rows":"unavailable","duration":duration},
+        "tidb_open":{"operations":matching(&["tidb.open."]),
+            "calls":"open_schema_and_metadata_initialization_invocations","bytes":"unavailable",
+            "returned_rows":"unavailable","duration":duration},
+        "tidb_transaction":{"operations":matching(&["tidb.tx."]),
+            "calls":"transaction_lifecycle_invocations","bytes":"unavailable",
+            "returned_rows":"unavailable","duration":duration},
+        "tidb_sql":{"operations":matching(&["tidb.sql."]),
+            "calls":"categorized_sql_adapter_invocations; not_internal_requests",
+            "bytes":"known_selected_successful_payload_bytes_only; other_sql_bytes_unavailable",
+            "returned_rows":"known_returned_sql_rows; observations_count_successes_with_known_rows; excludes_affected_rows",
+            "duration":duration}
+    })
+}
+
+fn storage_instrumented_operation_names() -> Vec<&'static str> {
+    // Keep the core order while consuming audited producer coverage explicitly.
+    storage::operation_names()
+        .iter()
+        .copied()
+        .filter(|name| {
+            !name.starts_with("tidb.")
+                || mount_rs_tidb::TIDB_DIAGNOSTIC_COVERAGE
+                    .operations
+                    .contains(name)
+        })
+        .collect()
+}
+
+fn tidb_diagnostic_coverage() -> Value {
+    let coverage = mount_rs_tidb::TIDB_DIAGNOSTIC_COVERAGE;
+    json!({
+        "schema":coverage.schema,"status":coverage.status,
+        "pool_checkout_sites":coverage.pool_checkout_sites,
+        "session_configure_sites":coverage.session_configure_sites,
+        "schema_initialize_sites":coverage.schema_initialize_sites,
+        "metadata_open_sites":coverage.metadata_open_sites,
+        "transaction_begin_sites":coverage.transaction_begin_sites,
+        "transaction_commit_sites":coverage.transaction_commit_sites,
+        "transaction_rollback_sites":coverage.transaction_rollback_sites,
+        "sql_statement_sites":coverage.sql_statement_sites,
+        "operations":coverage.operations,
+        "sql_returned_rows_scope":coverage.sql_returned_rows_scope,
+        "sql_payload_bytes_scope":coverage.sql_payload_bytes_scope,
+        "pool_checkout_scope":coverage.pool_checkout_scope,
+        "unavailable":coverage.unavailable
+    })
+}
+
 /// Read-only, quiescent process snapshot. All integer counters are decimal
 /// strings so JavaScript cannot round u64 nanoseconds or byte totals.
 #[napi]
@@ -147,7 +221,7 @@ pub fn storage_diagnostics() -> String {
         }
     }
     let mut value = json!({
-        "schema_version":"mount-rs.storage-diagnostics.v2",
+        "schema_version":"mount-rs.storage-diagnostics.v3",
         "enabled":storage::enabled(),
         "scope":"process",
         "quiescent_snapshot_required":true,
@@ -156,12 +230,17 @@ pub fn storage_diagnostics() -> String {
         "profile":profile::snapshot(),
         "sqlite":sqlite,
         "r2":r2_diagnostics(),
-        "backend_waits":{"pglite_client_lock":"instrumented","tidb_pool":"unavailable"},
+        "backend_waits":{"pglite_client_lock":"instrumented","tidb_pool":"instrumented_inclusive_checkout_including_lazy_connect_and_session_configuration"},
         "http_attempts":"unavailable",
         "physical_device_iops":"unavailable",
         "measurement":{
-            "storage_calls":"logical_provider_calls",
-            "storage_bytes":"successful_payload_bytes_at_provider_boundary",
+            "storage_calls":"fixed_label_provider_and_driver_operations; families_overlap_and_are_not_application_iops",
+            "storage_bytes":"known_successful_payload_bytes_only; zero_does_not_establish_no_payload",
+            "storage_rows":"known_returned_sql_rows; observations_count_successes_with_known_rows; excludes_affected_rows",
+            "storage_operations":storage::operation_names(),
+            "storage_families":storage_operation_families(),
+            "storage_instrumented_operations":storage_instrumented_operation_names(),
+            "tidb_coverage":tidb_diagnostic_coverage(),
             "storage_duration":"inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap",
             "latency_histogram":{
                 "unit":"microseconds",
@@ -193,7 +272,7 @@ pub fn storage_diagnostics() -> String {
                 "http_attempts":"unavailable",
                 "internal_successful_retries":"unavailable",
                 "physical_device_iops":"unavailable",
-                "tidb_pool_wait":"unavailable",
+                "tidb_pool_wait":"isolated_queue_only_wait_unavailable",
                 "native_allocation_count":"unavailable",
                 "js_allocation_count":"unavailable"
             }
@@ -5782,7 +5861,7 @@ mod tests {
         );
         assert_eq!(
             snapshot["schema_version"],
-            "mount-rs.storage-diagnostics.v2"
+            "mount-rs.storage-diagnostics.v3"
         );
         assert!(instance["id"].is_string());
         assert_eq!(instance["raw_api"]["entries"][0]["calls"], "0");
@@ -5889,8 +5968,83 @@ mod tests {
         let snapshot: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(
             snapshot["schema_version"],
-            "mount-rs.storage-diagnostics.v2"
+            "mount-rs.storage-diagnostics.v3"
         );
+        assert_eq!(
+            snapshot["measurement"]["storage_operations"],
+            json!(storage::operation_names())
+        );
+        let families = snapshot["measurement"]["storage_families"]
+            .as_object()
+            .unwrap();
+        assert_eq!(families.len(), 8);
+        let declared = families
+            .values()
+            .flat_map(|family| family["operations"].as_array().unwrap())
+            .map(|name| name.as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(declared.len(), 78);
+        assert_eq!(
+            declared
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            storage::operation_names()
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+        );
+        assert_eq!(families["sdk_provider"]["returned_rows"], "unavailable");
+        assert_eq!(families["tidb_transaction"]["bytes"], "unavailable");
+        assert_eq!(
+            families["tidb_pool_checkout"]["duration"],
+            "inclusive_checkout_nanoseconds_including_lazy_connect_and_session_configuration; queue_only_wait_unavailable"
+        );
+        assert_eq!(
+            families["tidb_sql"]["returned_rows"],
+            "known_returned_sql_rows; observations_count_successes_with_known_rows; excludes_affected_rows"
+        );
+        assert_eq!(
+            snapshot["measurement"]["storage_instrumented_operations"],
+            json!(
+                storage::operation_names()
+                    .iter()
+                    .filter(|name| {
+                        !name.starts_with("tidb.")
+                            || mount_rs_tidb::TIDB_DIAGNOSTIC_COVERAGE
+                                .operations
+                                .contains(name)
+                    })
+                    .collect::<Vec<_>>()
+            )
+        );
+        let coverage = &snapshot["measurement"]["tidb_coverage"];
+        assert_eq!(coverage["status"], "source_sites_instrumented");
+        assert_eq!(coverage["pool_checkout_sites"], "34");
+        assert_eq!(coverage["sql_statement_sites"], "56");
+        assert_eq!(
+            coverage["operations"],
+            json!(mount_rs_tidb::TIDB_DIAGNOSTIC_COVERAGE.operations)
+        );
+        assert_eq!(coverage["operations"].as_array().unwrap().len(), 18);
+        for field in [
+            "session_configure_sites",
+            "schema_initialize_sites",
+            "metadata_open_sites",
+            "transaction_begin_sites",
+            "transaction_commit_sites",
+            "transaction_rollback_sites",
+        ] {
+            assert!(
+                coverage[field].is_string(),
+                "exact static site count {field}"
+            );
+        }
+        assert_eq!(snapshot["storage"]["entries"].as_array().unwrap().len(), 78);
+        for row in snapshot["storage"]["entries"].as_array().unwrap() {
+            for field in ["in_flight", "returned_rows", "returned_row_observations"] {
+                assert!(row[field].is_string(), "exact driver counter {field}");
+            }
+        }
         assert!(snapshot["storage"]["entries"][0]["calls"].is_string());
         assert!(snapshot["storage"]["forwarding_boxes"]["calls"].is_string());
         assert!(snapshot["storage"]["forwarding_boxes"]["requested_object_bytes"].is_string());
@@ -5907,10 +6061,15 @@ mod tests {
         );
         assert_eq!(
             snapshot["measurement"]["unavailable"]["tidb_pool_wait"],
-            "unavailable"
+            "isolated_queue_only_wait_unavailable"
+        );
+        assert_eq!(
+            snapshot["backend_waits"]["tidb_pool"],
+            "instrumented_inclusive_checkout_including_lazy_connect_and_session_configuration"
         );
         assert_eq!(snapshot["http_attempts"], "unavailable");
         assert!(!json.contains("test-secret"));
+        eprintln!("NATIVE_STORAGE_DRIVER_JSON {json}");
     }
 
     #[test]

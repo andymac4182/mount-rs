@@ -94,6 +94,7 @@ impl Lane {
     ) -> Result<(), String> {
         let file = self.expected.files[name].identity;
         // Byte preparation precedes the measured transport request.
+        let preparation = super::metrics::observer().begin("byte_preparation");
         let data = oracle_block(
             (self.expected.drive / 2) as u64,
             self.expected.drive as u64,
@@ -101,6 +102,7 @@ impl Lane {
             block as u64,
             generation,
         );
+        preparation.finish(true, data.len() as u64);
         let request = IoRequest {
             drive_id: format!("sandbox-{}", self.expected.drive),
             handle,
@@ -124,7 +126,9 @@ impl Lane {
         }
     }
     pub async fn read(&mut self, handle: u64, name: &str, block: usize) -> Result<(), String> {
+        let preparation = super::metrics::observer().begin("byte_preparation");
         let expected = self.expected.bytes(name, block);
+        preparation.finish(true, expected.len() as u64);
         let mut data = [0; 4096];
         let request = IoRequest {
             drive_id: format!("sandbox-{}", self.expected.drive),
@@ -141,7 +145,10 @@ impl Lane {
         self.latency(began);
         if matches!(result, Ok(Ok(4096))) {
             self.counts.lock().unwrap().acknowledge(id)?;
-            if data != expected {
+            let comparison = super::metrics::observer().begin("expected_compare");
+            let matches = data == expected;
+            comparison.finish(matches, data.len() as u64);
+            if !matches {
                 return Err("online every-byte oracle mismatch".into());
             }
             Ok(())

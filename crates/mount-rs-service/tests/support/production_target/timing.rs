@@ -3,24 +3,32 @@ use std::time::Duration;
 pub struct WorkloadClock {
     start: tokio::time::Instant,
     active_end: Option<tokio::time::Instant>,
+    observer_elapsed: Duration,
 }
 impl WorkloadClock {
     pub fn start() -> Self {
         Self {
             start: tokio::time::Instant::now(),
             active_end: None,
+            observer_elapsed: Duration::ZERO,
         }
     }
     pub fn active_finished(&mut self) {
         self.active_end = Some(tokio::time::Instant::now());
+    }
+    pub fn add_observer_elapsed(&mut self, elapsed: Duration) {
+        self.observer_elapsed += elapsed;
     }
     pub fn finish(&self, cycles: usize) -> Value {
         let now = tokio::time::Instant::now();
         let elapsed = now.duration_since(self.start).as_secs_f64();
         let active_end = self.active_end.unwrap_or(now);
         let active = active_end.duration_since(self.start).as_secs_f64();
-        let idle = now.duration_since(active_end).as_secs_f64();
-        json!({"active_elapsed_seconds":active,"idle_liveness_elapsed_seconds":idle,"phase_elapsed_seconds":elapsed,"cycles_per_second":if active > 0.0 {Some(cycles as f64/active)} else {None}})
+        let idle = now
+            .duration_since(active_end)
+            .saturating_sub(self.observer_elapsed)
+            .as_secs_f64();
+        json!({"active_elapsed_seconds":active,"idle_liveness_elapsed_seconds":idle,"phase_elapsed_seconds":elapsed,"metrics_observer_elapsed_seconds":self.observer_elapsed.as_secs_f64(),"cycles_per_second":if active > 0.0 {Some(cycles as f64/active)} else {None}})
     }
 }
 #[tokio::test(start_paused = true)]
@@ -34,4 +42,21 @@ async fn prereview_red_blocked_liveness_does_not_change_active_denominator() {
     assert_eq!(result["cycles_per_second"], 10.0);
     assert_eq!(result["idle_liveness_elapsed_seconds"], 10.0);
     assert_eq!(result["phase_elapsed_seconds"], 40.0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn phase_metrics_observer_is_separate_from_active_and_idle() {
+    let mut clock = WorkloadClock::start();
+    tokio::time::advance(Duration::from_secs(30)).await;
+    clock.active_finished();
+    let observation = tokio::time::Instant::now();
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    clock.add_observer_elapsed(observation.elapsed());
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let result = clock.finish(300);
+    assert_eq!(result["active_elapsed_seconds"], 30.0);
+    assert_eq!(result["cycles_per_second"], 10.0);
+    assert_eq!(result["idle_liveness_elapsed_seconds"], 10.0);
+    assert_eq!(result["metrics_observer_elapsed_seconds"], 4.0);
+    assert_eq!(result["phase_elapsed_seconds"], 44.0);
 }

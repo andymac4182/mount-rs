@@ -21,7 +21,29 @@ import {
 import { foundationDbMetadataOptions, providerById, providerSummary } from "./providers.mjs"
 import { cleanupOwnedPaths, helpText, parseArgs, runBenchmark, runSample, runSteadySample } from "./runner.mjs"
 import { computeStats, percentile, round, roundStats } from "./stats.mjs"
-import { deltaNativeSnapshots, takePhaseSnapshot, finishPhase } from "./diagnostics.mjs"
+import { deltaNativeSnapshots, takePhaseSnapshot, finishPhase, logPhaseSummary, STORAGE_OPERATION_NAMES, STORAGE_CALL_SEMANTICS, STORAGE_BYTE_SEMANTICS, STORAGE_ROW_SEMANTICS } from "./diagnostics.mjs"
+
+const storageFamilyMeasurement = {
+  napi_provider: { operations: STORAGE_OPERATION_NAMES.filter((name) => name.startsWith("metadata.") || name.startsWith("blocks.")), calls: "napi_dynamic_provider_method_invocations", bytes: "known_successful_block_put_input_and_get_or_migration_payload_bytes; metadata_bytes_unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  sdk_provider: { operations: STORAGE_OPERATION_NAMES.filter((name) => name.startsWith("sdk.")), calls: "direct_sdk_provider_method_invocations_including_synchronous_methods", bytes: "known_successful_block_put_input_and_get_or_migration_payload_bytes; metadata_bytes_unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  pglite_client_lock: { operations: ["pglite.client_lock_wait"], calls: "client_lock_acquisition_invocations", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_client_lock_await_nanoseconds" },
+  tidb_pool_checkout: { operations: ["tidb.pool.checkout"], calls: "pool_checkout_invocations", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_checkout_nanoseconds_including_lazy_connect_and_session_configuration; queue_only_wait_unavailable" },
+  tidb_session: { operations: ["tidb.session.configure"], calls: "session_configuration_invocations", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  tidb_open: { operations: STORAGE_OPERATION_NAMES.filter((name) => name.startsWith("tidb.open.")), calls: "open_schema_and_metadata_initialization_invocations", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  tidb_transaction: { operations: STORAGE_OPERATION_NAMES.filter((name) => name.startsWith("tidb.tx.")), calls: "transaction_lifecycle_invocations", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  tidb_sql: { operations: STORAGE_OPERATION_NAMES.filter((name) => name.startsWith("tidb.sql.")), calls: "categorized_sql_adapter_invocations; not_internal_requests", bytes: "known_selected_successful_payload_bytes_only; other_sql_bytes_unavailable", returned_rows: STORAGE_ROW_SEMANTICS, duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+}
+const storageInstrumentedOperations = [...STORAGE_OPERATION_NAMES]
+const tidbCoverageMeasurement = {
+  schema: "mount-rs-tidb-client-diagnostic-coverage-v1", status: "source_sites_instrumented",
+  pool_checkout_sites: "34", session_configure_sites: "1", schema_initialize_sites: "1", metadata_open_sites: "1",
+  transaction_begin_sites: "3", transaction_commit_sites: "1", transaction_rollback_sites: "5", sql_statement_sites: "56",
+  operations: STORAGE_OPERATION_NAMES.filter((name) => name.startsWith("tidb.")),
+  sql_returned_rows_scope: "successful SELECT Option/Vec results only; exec_iter affected_rows excluded",
+  sql_payload_bytes_scope: "successful block INSERT submitted bytes and block-body SELECT returned bytes only; other SQL payload bytes unavailable",
+  pool_checkout_scope: "pool.get_conn await includes possible lazy connection and session setup; queue-only wait unavailable",
+  unavailable: ["pool_queue_only_wait", "separate_driver_connect_handshake", "server_sql_execution_time", "transaction_lifetime_and_implicit_drop_rollback", "affected_rows", "other_sql_payload_bytes", "sql_wire_bytes_and_client_internal_retries", "tikv_and_physical_device_io"],
+}
 
 const rawApiNames = ["put_opts.block_create", "get.block_read", "body_read.block_read", "get.conflict_verify", "body_read.conflict_verify", "get.migration", "body_read.migration", "head.direct_delete", "delete.direct", "delete.reconcile"]
 const rawApiMeasurement = {
@@ -53,23 +75,23 @@ function rawApiInstance(calls, id = "19") {
 
 function diagnosticSnapshot(calls, connectionId = "7", instances = []) {
   return {
-    schema_version: "mount-rs.storage-diagnostics.v2", enabled: true, scope: "process", quiescent_snapshot_required: true, elapsed_semantics: "inclusive_wall_nanoseconds",
-    measurement: { storage_calls: "logical_provider_calls", storage_bytes: "successful_payload_bytes_at_provider_boundary",
+    schema_version: "mount-rs.storage-diagnostics.v3", enabled: true, scope: "process", quiescent_snapshot_required: true, elapsed_semantics: "inclusive_wall_nanoseconds",
+    measurement: { storage_calls: STORAGE_CALL_SEMANTICS, storage_bytes: STORAGE_BYTE_SEMANTICS, storage_rows: STORAGE_ROW_SEMANTICS, storage_operations: [...STORAGE_OPERATION_NAMES], storage_families: structuredClone(storageFamilyMeasurement), storage_instrumented_operations: [...storageInstrumentedOperations], tidb_coverage: structuredClone(tidbCoverageMeasurement),
       storage_duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap",
       forwarding_boxes: "enabled_napi_dynamic_provider_box_pin_site_calls_and_requested_future_object_bytes; excludes_allocator_overhead_and_other_allocations",
       profile: "existing_core_profile_counters",
       sqlite: "live_connection_pager_and_sql_category_counters; pager_bytes_are_page_size_estimates",
       r2: "live_store_logical_calls_and_cache_hits; not_http_attempts",
       r2_api: structuredClone(rawApiMeasurement),
-      unavailable: { http_attempts: "unavailable", internal_successful_retries: "unavailable", physical_device_iops: "unavailable", tidb_pool_wait: "unavailable", native_allocation_count: "unavailable", js_allocation_count: "unavailable" },
+      unavailable: { http_attempts: "unavailable", internal_successful_retries: "unavailable", physical_device_iops: "unavailable", tidb_pool_wait: "isolated_queue_only_wait_unavailable", native_allocation_count: "unavailable", js_allocation_count: "unavailable" },
       latency_histogram: { unit: "microseconds", intervals: Array.from({ length: 32 }, (_, bucket) => bucket === 0
         ? { lower_inclusive_us: "0", upper_exclusive_us: "1" }
         : bucket === 31
           ? { lower_inclusive_us: String(2 ** 30), upper_exclusive_us: null, terminal_overflow: true }
           : { lower_inclusive_us: String(2 ** (bucket - 1)), upper_exclusive_us: String(2 ** bucket) }) } },
-    backend_waits: { pglite_client_lock: "instrumented", tidb_pool: "unavailable" },
+    backend_waits: { pglite_client_lock: "instrumented", tidb_pool: "instrumented_inclusive_checkout_including_lazy_connect_and_session_configuration" },
     http_attempts: "unavailable", physical_device_iops: "unavailable",
-    storage: { in_flight: "0", forwarding_boxes: { sites: "napi_dynamic_provider_forwarding_future", calls: String(calls), requested_object_bytes: String(calls * 80) }, entries: [{ name: "blocks.put", calls: String(calls), success: String(calls), error: "0", cancelled: "0", bytes: String(calls * 4096), elapsed_ns: String(calls * 1000), latency_log2_us: [String(calls), ...Array(31).fill("0")] }] },
+    storage: { in_flight: "0", forwarding_boxes: { sites: "napi_dynamic_provider_forwarding_future", calls: String(calls), requested_object_bytes: String(calls * 80) }, entries: STORAGE_OPERATION_NAMES.map((name) => { const count = name === "blocks.put" ? calls : 0; return { name, calls: String(count), success: String(count), error: "0", cancelled: "0", bytes: String(count * 4096), returned_rows: "0", returned_row_observations: "0", in_flight: "0", elapsed_ns: String(count * 1000), latency_log2_us: [String(count), ...Array(31).fill("0")] } }) },
     profile: { entries: [{ name: "filesystem.gate_wait", calls: String(calls), elapsed_ns: String(calls * 50), units: "0" }] },
     sqlite: { connections: [{ connection_id: connectionId, pager: { cache_hits: String(calls), cache_misses: "0", page_writes: String(calls), cache_spills: "0" }, page_size: "4096", pager_read_bytes_estimate: "0", pager_write_bytes_estimate: String(calls * 4096), sql_statements: String(calls), sql_categories: { SELECT: String(calls) } }] },
     r2: { scope: "process_live_instances", instances, internal_successful_retries: "unavailable" },
@@ -80,12 +102,13 @@ async function testStoragePhaseDiagnostics() {
   const snapshot = diagnosticSnapshot
   const delta = deltaNativeSnapshots(snapshot(2), snapshot(5))
   assert.equal(delta.complete, true)
-  assert.equal(delta.storage?.entries?.[0]?.bytes, "12288")
+  assert.equal(delta.storage?.entries?.[5]?.bytes, "12288")
   assert.equal(delta.storage.forwarding_boxes.calls, "3")
   assert.equal(delta.storage.forwarding_boxes.requested_object_bytes, "240")
   assert.equal(delta.measurement.storage_duration, "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap")
   assert.equal(delta.measurement.profile, "existing_core_profile_counters")
-  assert.equal(delta.backend_waits.tidb_pool, "unavailable")
+  assert.equal(delta.backend_waits.tidb_pool, "instrumented_inclusive_checkout_including_lazy_connect_and_session_configuration")
+  assert.equal(delta.measurement.unavailable.tidb_pool_wait, "isolated_queue_only_wait_unavailable")
   assert.equal(delta.profile.entries[0].elapsed_ns, "150")
   assert.equal(delta.sqlite.connections[0].pager.page_writes, "3")
   assert.equal(delta.sqlite.connections[0].sql_categories.SELECT, "3")
@@ -93,10 +116,10 @@ async function testStoragePhaseDiagnostics() {
   assert.equal(deltaNativeSnapshots(snapshot(2), { ...snapshot(5), sqlite: { connections: [] } }).complete, false)
   assert.equal(deltaNativeSnapshots(snapshot(2), snapshot(5, "8")).complete, false)
   const unsafe = snapshot(5)
-  unsafe.storage.entries[0].calls = Number.MAX_SAFE_INTEGER + 1
+  unsafe.storage.entries[5].calls = Number.MAX_SAFE_INTEGER + 1
   assert.equal(deltaNativeSnapshots(snapshot(2), unsafe).complete, false)
   const changedHistogram = snapshot(5)
-  changedHistogram.storage.entries[0].latency_log2_us.push("0")
+  changedHistogram.storage.entries[5].latency_log2_us.push("0")
   assert.equal(deltaNativeSnapshots(snapshot(2), changedHistogram).complete, false)
   const inflight = snapshot(5)
   inflight.storage.in_flight = "1"
@@ -109,11 +132,99 @@ async function testStoragePhaseDiagnostics() {
   assert.equal(deltaNativeSnapshots(snapshot(2), resetBoxes).complete, false)
 }
 
+async function testStorageDriverFieldDeltas() {
+  const before = diagnosticSnapshot(2)
+  const after = diagnosticSnapshot(5)
+  const sqlIndex = STORAGE_OPERATION_NAMES.indexOf("tidb.sql.metadata_read")
+  Object.assign(before.storage.entries[sqlIndex], {
+    in_flight: "0", calls: "2", success: "2", elapsed_ns: "2000", latency_log2_us: ["2", ...Array(31).fill("0")], returned_rows: "9007199254740993", returned_row_observations: "1",
+  })
+  Object.assign(after.storage.entries[sqlIndex], {
+    in_flight: "0", calls: "5", success: "5", elapsed_ns: "5000", latency_log2_us: ["5", ...Array(31).fill("0")], returned_rows: "9007199254740996", returned_row_observations: "3",
+  })
+  const delta = deltaNativeSnapshots(before, after)
+  assert.equal(delta.complete, true)
+  assert.equal(delta.storage.entries[sqlIndex].returned_rows, "3", "driver rows must retain exact integer deltas")
+  assert.equal(delta.storage.entries[sqlIndex].returned_row_observations, "2")
+  assert.equal(delta.storage.entries[sqlIndex].in_flight_start, "0")
+  assert.equal(delta.storage.entries[sqlIndex].in_flight_end, "0")
+  const pending = structuredClone(after)
+  pending.storage.entries[sqlIndex].in_flight = "1"
+  assert.equal(deltaNativeSnapshots(before, pending).complete, false, "per-operation pending work cannot disappear behind a zero global gauge")
+  const reset = structuredClone(after)
+  reset.storage.entries[sqlIndex].returned_rows = "1"
+  assert.equal(deltaNativeSnapshots(before, reset).complete, false)
+  const noObservation = structuredClone(after)
+  noObservation.storage.entries[sqlIndex].returned_row_observations = "1"
+  assert.equal(deltaNativeSnapshots(before, noObservation).complete, false, "valid endpoints cannot produce rows without a known phase observation")
+  const excessObservations = structuredClone(after)
+  excessObservations.storage.entries[sqlIndex].returned_row_observations = "5"
+  assert.equal(deltaNativeSnapshots(before, excessObservations).complete, false, "phase observations cannot exceed successful phase calls")
+  const nonSql = diagnosticSnapshot(5)
+  Object.assign(nonSql.storage.entries[5], { returned_rows: "1", returned_row_observations: "1" })
+  assert.equal(deltaNativeSnapshots(diagnosticSnapshot(2), nonSql).complete, false, "block put success cannot claim an observed SQL result row")
+}
+
+async function testStorageFamilyMetadata() {
+  const before = diagnosticSnapshot(2)
+  const after = diagnosticSnapshot(5)
+  const sql = after.storage.entries.find((entry) => entry.name === "tidb.sql.flush_probe")
+  Object.assign(sql, { calls: "1", success: "1", elapsed_ns: "43", returned_rows: "0", returned_row_observations: "1", latency_log2_us: ["1", ...Array(31).fill("0")] })
+  const delta = deltaNativeSnapshots(before, after)
+  assert.equal(delta.complete, true)
+  assert.deepEqual(delta.measurement.storage_families, storageFamilyMeasurement, "closed families must retain distinct byte, row and duration meanings")
+  assert.deepEqual(delta.measurement.storage_instrumented_operations, storageInstrumentedOperations, "coverage must retain the producer's audited operation list")
+  assert.deepEqual(delta.measurement.tidb_coverage, tidbCoverageMeasurement, "static coverage is distinct from dynamic operation counters")
+  assert.equal(delta.storage.entries.length, 78)
+  assert.equal(delta.storage.entries.at(-1).returned_row_observations, "1", "the last declared row must reach phase evidence")
+  for (const field of ["storage_families", "storage_instrumented_operations", "tidb_coverage"]) {
+    const missingBefore = structuredClone(before)
+    const missingAfter = structuredClone(after)
+    delete missingBefore.measurement[field]
+    delete missingAfter.measurement[field]
+    assert.equal(deltaNativeSnapshots(missingBefore, missingAfter).complete, false, `missing ${field} must be incomplete`)
+  }
+  const invalidBefore = structuredClone(before)
+  const invalidAfter = structuredClone(after)
+  invalidBefore.measurement.storage_families.tidb_pool_checkout.duration = "queue_wait_only"
+  invalidAfter.measurement.storage_families.tidb_pool_checkout.duration = "queue_wait_only"
+  const invalid = deltaNativeSnapshots(invalidBefore, invalidAfter)
+  assert.equal(invalid.complete, false)
+  assert.equal(invalid.observations.after.measurement.storage_families, "unavailable")
+  assert.deepEqual(invalid.observations.after.measurement.storage_operations, STORAGE_OPERATION_NAMES)
+  assert.equal(invalid.observations.after.measurement.storage_rows, STORAGE_ROW_SEMANTICS)
+  const malformedCoverageBefore = structuredClone(before)
+  const malformedCoverageAfter = structuredClone(after)
+  for (const endpoint of [malformedCoverageBefore, malformedCoverageAfter]) {
+    endpoint.measurement.tidb_coverage.operations.push("secret-payload-category")
+    endpoint.measurement.tidb_coverage.status = "live_server_performance_proven"
+  }
+  const malformedCoverage = deltaNativeSnapshots(malformedCoverageBefore, malformedCoverageAfter)
+  assert.equal(malformedCoverage.complete, false)
+  assert.equal(malformedCoverage.observations.after.measurement.tidb_coverage, "unavailable")
+  assert.equal(JSON.stringify(malformedCoverage).includes("secret-payload-category"), false, "invalid coverage must not retain arbitrary labels")
+  const alteredSitesBefore = structuredClone(before)
+  const alteredSitesAfter = structuredClone(after)
+  alteredSitesBefore.measurement.tidb_coverage.pool_checkout_sites = "35"
+  alteredSitesAfter.measurement.tidb_coverage.pool_checkout_sites = "35"
+  assert.equal(deltaNativeSnapshots(alteredSitesBefore, alteredSitesAfter).complete, false, "equal endpoints cannot silently alter static coverage")
+  const lines = []
+  const originalWrite = process.stderr.write
+  process.stderr.write = (value) => { lines.push(String(value)); return true }
+  try { logPhaseSummary({ name: "workload-family-control", elapsed_ms: 1, native: delta }) }
+  finally { process.stderr.write = originalWrite }
+  const summary = JSON.parse(lines[0].slice("MOUNT_RS_STORAGE_PHASE ".length))
+  assert.equal(summary.families.tidb_sql.elapsed_ns, "43")
+  assert.equal(summary.families.tidb_sql.returned_rows, "0")
+  assert.equal(summary.families.tidb_sql.returned_row_observations, "1", "known zero SQL rows differ from unknown rows")
+  assert.equal(summary.families.tidb_pool_checkout.instrumented, true)
+}
+
 async function testRawObjectStorePhaseDiagnostics() {
   const snapshot = (calls) => diagnosticSnapshot(calls, "7", [rawApiInstance(calls)])
   const delta = deltaNativeSnapshots(snapshot(2), snapshot(5))
   assert.equal(delta.complete, true)
-  assert.equal(delta.schema_version, "mount-rs.storage-diagnostics.v2")
+  assert.equal(delta.schema_version, "mount-rs.storage-diagnostics.v3")
   assert.equal(delta.r2.scope, "process_live_instances")
   assert.deepEqual(delta.r2.instance_ids_start, ["19"])
   assert.deepEqual(delta.r2.instance_ids_end, ["19"])
@@ -215,7 +326,7 @@ async function testRawObjectStorePhaseDiagnostics() {
   const privateBefore = snapshot(2)
   const privateAfter = snapshot(5)
   for (const value of [privateBefore, privateAfter]) {
-    value.storage.entries[0].name = "private-storage-label"
+    value.storage.entries[5].name = "private-storage-label"
     value.profile.entries[0].name = "private-profile-label"
     value.sqlite.connections[0].sql_categories = { "private-sql-label": "1" }
   }
@@ -848,6 +959,10 @@ function rawQualificationArtifact(providers = ["mount-rs-split-sqlite-r2"], size
       native.issues = []
       native.storage.in_flight_start = "0"
       native.storage.in_flight_end = "0"
+      for (const row of native.storage.entries) {
+        Object.assign(row, { in_flight_start: "0", in_flight_end: "0" })
+        delete row.in_flight
+      }
       Object.assign(native.r2, { complete: true, instance_ids_start: ["19"], instance_ids_end: ["19"], missing_instance_ids: [] })
       for (const instance of native.r2.instances) {
         instance.opened_during_phase = false
@@ -1308,7 +1423,7 @@ async function testSteadyGenerationsRejectDroppedWrites() {
 }
 if (process.argv.includes("--diagnostics-only")) {
   const failures = []
-  for (const test of [testStoragePhaseDiagnostics, testRawObjectStorePhaseDiagnostics, testRawQualificationArtifact, testQualificationProviderCoverage, testObserverEndpointsExcludeSnapshotWork, testQualificationArtifact]) {
+  for (const test of [testStorageDriverFieldDeltas, testStorageFamilyMetadata, testStoragePhaseDiagnostics, testRawObjectStorePhaseDiagnostics, testRawQualificationArtifact, testQualificationProviderCoverage, testObserverEndpointsExcludeSnapshotWork, testQualificationArtifact]) {
     try { await test(); console.log(`${test.name}: PASS`) }
     catch (error) { failures.push(test.name); console.error(`${test.name}: FAIL`, error) }
   }
@@ -1319,6 +1434,8 @@ await testSteadyGenerationsRejectDroppedWrites()
 await testSteadyOverwriteOracle()
 await testStats()
 await testStoragePhaseDiagnostics()
+await testStorageDriverFieldDeltas()
+await testStorageFamilyMetadata()
 await testRawObjectStorePhaseDiagnostics()
 await testObserverEndpointsExcludeSnapshotWork()
 await testOzoneMetricsReachAllNodeProcesses()

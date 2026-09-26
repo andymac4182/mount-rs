@@ -15,7 +15,10 @@ use size::{PREFIX, ROW, encoded_bound};
 pub(super) async fn budget(tx: &mut Transaction<'_>) -> Result<usize> {
     let configured = tx.opts().max_allowed_packet().unwrap_or(usize::MAX);
     let session: Option<u64> = tx
-        .query_first("SELECT @@SESSION.max_allowed_packet")
+        .query_first_observed(
+            StorageOperation::TidbSqlSession,
+            "SELECT @@SESSION.max_allowed_packet",
+        )
         .await
         .map_err(|e| db_error("read TiDB guard packet budget", e))?;
     Ok(session
@@ -51,9 +54,13 @@ async fn flush(
             Value::Bytes(node.into_bytes()),
         ]);
     }
-    tx.exec_drop(sql, Params::Positional(params))
-        .await
-        .map_err(|e| db_error("insert TiDB inode guards", e))
+    tx.exec_drop_observed(
+        StorageOperation::TidbSqlInodeWrite,
+        sql,
+        Params::Positional(params),
+    )
+    .await
+    .map_err(|e| db_error("insert TiDB inode guards", e))
 }
 
 pub(super) async fn insert(
@@ -84,9 +91,13 @@ pub(super) async fn insert(
             // sending; never replay a failed bulk statement at a smaller size.
             #[cfg(test)]
             let inode = tests::before_single(inode).await;
-            tx.exec_drop(SINGLE, (volume, inode, generation, json))
-                .await
-                .map_err(|e| db_error("insert TiDB inode guard", e))?;
+            tx.exec_drop_observed(
+                StorageOperation::TidbSqlInodeWrite,
+                SINGLE,
+                (volume, inode, generation, json),
+            )
+            .await
+            .map_err(|e| db_error("insert TiDB inode guard", e))?;
         } else {
             bytes += json.len();
             rows.push((inode, json));

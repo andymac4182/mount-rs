@@ -5,6 +5,8 @@ mod config;
 #[allow(dead_code)]
 #[path = "../production_fixture.rs"]
 mod fixture;
+#[allow(dead_code)]
+mod metrics;
 mod oracle;
 mod preflight;
 mod process;
@@ -44,27 +46,42 @@ pub fn digest(bytes: &[u8]) -> String {
         .collect()
 }
 pub fn file_digest(path: &Path) -> Result<String, String> {
-    Ok(digest(
-        &std::fs::read(path).map_err(|_| "identity file unavailable")?,
-    ))
+    let span = metrics::observer().begin("file_hash");
+    let result = std::fs::read(path).map_err(|_| "identity file unavailable".to_string());
+    let bytes = result.as_ref().map_or(0, |bytes| bytes.len() as u64);
+    let result = result.map(|bytes| digest(&bytes));
+    span.finish(result.is_ok(), bytes);
+    result
 }
 pub fn read_json(path: &Path) -> Result<Value, String> {
     serde_json::from_slice(&std::fs::read(path).map_err(|_| "receipt unavailable")?)
         .map_err(|_| "receipt invalid".into())
 }
 pub fn write_json(path: &Path, value: &Value) -> Result<(), String> {
-    let pending = path.with_extension("pending");
-    std::fs::write(
-        &pending,
-        serde_json::to_vec_pretty(value).map_err(|_| "receipt encoding failed")?,
-    )
-    .map_err(|_| "receipt write failed")?;
-    std::fs::rename(pending, path).map_err(|_| "receipt publication failed".into())
+    let span = metrics::observer().begin("receipt_publication");
+    let result: Result<u64, String> = (|| {
+        let pending = path.with_extension("pending");
+        let bytes = serde_json::to_vec_pretty(value).map_err(|_| "receipt encoding failed")?;
+        std::fs::write(&pending, &bytes).map_err(|_| "receipt write failed")?;
+        std::fs::rename(pending, path).map_err(|_| "receipt publication failed")?;
+        Ok(bytes.len() as u64)
+    })();
+    span.finish(result.is_ok(), result.as_ref().copied().unwrap_or(0));
+    result.map(|_| ())
 }
 pub async fn source_identity(commands: &mut command::Commands) -> Result<Value, String> {
     let sources = [
         ("command.rs", include_bytes!("command.rs").as_slice()),
         ("timing.rs", include_bytes!("timing.rs").as_slice()),
+        ("metrics.rs", include_bytes!("metrics.rs").as_slice()),
+        (
+            "../../../src/server.rs",
+            include_bytes!("../../../src/server.rs").as_slice(),
+        ),
+        (
+            "../../../src/server/diagnostics.rs",
+            include_bytes!("../../../src/server/diagnostics.rs").as_slice(),
+        ),
         ("mod.rs", include_bytes!("mod.rs").as_slice()),
         ("config.rs", include_bytes!("config.rs").as_slice()),
         ("state.rs", include_bytes!("state.rs").as_slice()),
@@ -85,6 +102,10 @@ pub async fn source_identity(commands: &mut command::Commands) -> Result<Value, 
         (
             "../resource_profile.rs",
             include_bytes!("../resource_profile.rs").as_slice(),
+        ),
+        (
+            "../device_io.rs",
+            include_bytes!("../device_io.rs").as_slice(),
         ),
         (
             "../../quic_production_target.rs",
@@ -170,9 +191,12 @@ struct Journal {
     value: Value,
     output: std::path::PathBuf,
     counts: Vec<Arc<Mutex<state::Counts>>>,
+    enclosing_deadline: Instant,
+    phase_deadline: Instant,
 }
 impl Journal {
     fn flush(&mut self) -> Result<(), String> {
+        let span = metrics::observer().begin("journal_publication");
         self.value["lanes"] = serde_json::to_value(
             self.counts
                 .iter()
@@ -181,9 +205,17 @@ impl Journal {
         )
         .unwrap();
         self.value["updated_unix_ms"] = json!(utc_ms());
-        write_json(&self.output.join("terminal.json"), &self.value)
+        let result = write_json(&self.output.join("terminal.json"), &self.value);
+        span.finish(result.is_ok(), 0);
+        result
     }
     fn phase(&mut self, name: &str) -> Result<(), String> {
+        if Instant::now() >= self.phase_deadline {
+            return Err("previous phase exhausted its inherited deadline".into());
+        }
+        self.phase_deadline = self
+            .enclosing_deadline
+            .min(Instant::now() + Duration::from_secs(PHASE_SECONDS));
         let now = utc_ms();
         let previous = self.value["phase"].clone();
         let began = self.value["phase_started_unix_ms"]
@@ -208,24 +240,69 @@ async fn supervised<T>(
     seconds: u64,
     future: impl std::future::Future<Output = Result<T, String>>,
 ) -> Result<T, String> {
-    let begin = Instant::now();
+    let deadline = journal
+        .phase_deadline
+        .min(Instant::now() + Duration::from_secs(seconds));
+    if Instant::now() >= deadline {
+        return Err("inherited workload phase deadline".into());
+    }
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tokio::pin!(future);
     loop {
         tokio::select! {
-                result=&mut future=>return result,
+                biased;
+                _=tokio::time::sleep_until(deadline.into())=>return Err("inherited workload phase deadline; partial work incomplete".into()),
+                result=&mut future=>return if Instant::now() < deadline { result } else { Err("work completed after inherited phase deadline".into()) },
         _=tick.tick()=>{
                 resources.check()?;
                 fleet.check()?;
                 journal.value["controller_resources"]=resources.snapshot();
                 journal.flush()?;
-                if begin.elapsed()>=Duration::from_secs(seconds){
-                return Err(format!("{} phase deadline; partial work incomplete",
-        journal.value["phase"]));
-                }
                 }
                 }
     }
+}
+async fn metric_boundary(
+    collector: &mut metrics::Collector,
+    fleet: &mut Fleet,
+    private: &PrivateConfig,
+    resources: &resources::Resources,
+    journal: &mut Journal,
+    boundary: (&str, &str),
+    oracle: &oracle::Owner,
+) -> Result<Duration, String> {
+    if journal.counts.iter().any(|counts| {
+        let counts = counts.lock().unwrap();
+        counts.pending.is_some() || counts.uncertain != 0
+    }) {
+        collector.complete = false;
+        return Err("metric boundary has pending or uncertain owned work".into());
+    }
+    let deadline = journal.phase_deadline;
+    let result = tokio::time::timeout_at(
+        deadline.into(),
+        collector.boundary(
+            fleet,
+            private,
+            resources,
+            boundary,
+            oracle.accounting.snapshot(),
+            deadline,
+        ),
+    )
+    .await
+    .map_err(|_| "metric inherited enclosing phase deadline".to_string())
+    .and_then(|result| result);
+    if result.is_err() {
+        collector.complete = false;
+    }
+    journal.value["phase_metrics"] = collector.summary();
+    journal.flush()?;
+    if Instant::now() >= deadline {
+        collector.complete = false;
+        return Err("metric publication exceeded inherited phase deadline".into());
+    }
+    result
 }
 async fn connect(
     endpoint: &quinn::Endpoint,
@@ -259,6 +336,7 @@ pub async fn controller() -> Result<(), String> {
     if output.join("terminal.json").exists() {
         return Err("output already contains a run; refusing overwrite".into());
     }
+    let setup_deadline = Instant::now() + Duration::from_secs(600);
     let mut journal = Journal {
         value: json!({
                 "schema":"mount-rs-production-target-v1",
@@ -288,6 +366,8 @@ pub async fn controller() -> Result<(), String> {
         ),
         output: output.clone(),
         counts: vec![],
+        enclosing_deadline: setup_deadline,
+        phase_deadline: setup_deadline,
     };
     journal.flush()?;
     let mut fleet = Fleet::new();
@@ -301,8 +381,10 @@ pub async fn controller() -> Result<(), String> {
     let mut initialization_start = None;
     let mut commands = command::Commands::default();
     let mut provider_preflight = preflight::Owner::default();
+    let mut phase_metrics = None;
     let result: Result<(), String> = async {
         let setup = async {
+            phase_metrics=Some(metrics::Collector::new()?);
             let config = Config::environment()?;
             journal.value["full_target"] = json!(config.full_target);
             journal.value["fault_injection"] = json!(std::env::var("MOUNT_RS_TARGET_INJECT").ok());
@@ -418,6 +500,7 @@ pub async fn controller() -> Result<(), String> {
                 }
             }
             fleet.ready(&private, 0).await?;
+            metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resources.as_ref().unwrap(),&mut journal,("worker_setup","after_ready"),&initializer_owner).await?;
             journal.value["workers"] = json!(fleet.receipts());
             journal.flush()?;
             if std::env::var("MOUNT_RS_TARGET_INJECT").as_deref() == Ok("child_loss") {
@@ -435,11 +518,14 @@ pub async fn controller() -> Result<(), String> {
             Ok::<_, String>((config, private, tokens, catalog, backend))
         };
         let (config, private, tokens, catalog, backend) =
-            tokio::time::timeout(Duration::from_secs(600), setup)
+            tokio::time::timeout_at(setup_deadline.into(), setup)
                 .await
                 .map_err(|_| "complete setup deadline; retained owners require cleanup")??;
         let resource = resources.as_ref().ok_or("setup resource owner missing")?;
         let work_started = Instant::now();
+        let work_deadline = work_started + Duration::from_secs(WORK_SECONDS);
+        journal.enclosing_deadline = work_deadline;
+        journal.phase_deadline = work_deadline;
         let work = async {
             if std::env::var("MOUNT_RS_TARGET_INJECT").as_deref() == Ok("work_timeout") {
                 journal.phase("injected_timeout")?;
@@ -453,6 +539,7 @@ pub async fn controller() -> Result<(), String> {
                 .await?;
             }
             journal.phase("signed_connections")?;
+            tokio::time::timeout_at(journal.phase_deadline.into(), async {
             for drive in 0..config.drives {
                 let connection = connect(
                     &endpoints[drive % SERVERS],
@@ -466,8 +553,11 @@ pub async fn controller() -> Result<(), String> {
                 journal.counts.push(lane.counts.clone());
                 lanes.push(lane);
             }
+                Ok::<_, String>(())
+            }).await.map_err(|_| "signed connections inherited phase deadline")??;
             journal.value["connected_clients"] = json!(lanes.len());
             journal.phase("online_namespace")?;
+            metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("online_namespace","before"),&oracle_owner).await?;
             supervised(&mut fleet, resource, &mut journal, PHASE_SECONDS, async {
                 futures_util::future::try_join_all(
                     lanes.iter_mut().map(|l| l.populate(config.files, false)),
@@ -476,8 +566,10 @@ pub async fn controller() -> Result<(), String> {
                 Ok(())
             })
             .await?;
+            metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("online_namespace","after"),&oracle_owner).await?;
             journal.value["namespace_files"] = json!(lanes.iter().map(|l|l.expected.files.len()as u64).sum::<u64>());
             journal.phase("online_payload")?;
+            metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("online_payload","before"),&oracle_owner).await?;
             supervised(&mut fleet, resource, &mut journal, PHASE_SECONDS, async {
                 futures_util::future::try_join_all(
                     lanes.iter_mut().map(|l| l.populate(config.files, true)),
@@ -486,8 +578,10 @@ pub async fn controller() -> Result<(), String> {
                 Ok(())
             })
             .await?;
+            metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("online_payload","after"),&oracle_owner).await?;
             journal.value["population_bytes"] = json!(lanes.iter().flat_map(|l|l.expected.files.values()).map(|f|f.length as u64).sum::<u64>());
             journal.phase("initial_fresh_oracle")?;
+            metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("initial_fresh_oracle","before"),&oracle_owner).await?;
             supervised(&mut fleet, resource, &mut journal, PHASE_SECONDS, async {
                 for lane in &lanes {
                     oracle::verify(&mut oracle_owner, &backend, &lane.expected).await?;
@@ -495,14 +589,20 @@ pub async fn controller() -> Result<(), String> {
                 Ok(())
             })
             .await?;
+            metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("initial_fresh_oracle","after"),&oracle_owner).await?;
             journal.value["verified_passes"] = json!(1);
             // End old connections and all replicas before reopening each worker.
             journal.phase("refresh_replicas")?;
+            metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("refresh_replicas","before"),&oracle_owner).await?;
             for lane in &lanes {
                 lane.connection.close(0u32.into(), b"replica refresh");
             }
             fleet.command("reopen", 1)?;
-            fleet.ready(&private, 1).await?;
+            tokio::time::timeout_at(journal.phase_deadline.into(), fleet.ready(&private, 1))
+                .await.map_err(|_| "replica refresh inherited phase deadline")??;
+            metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("refresh_replicas","after_ready"),&oracle_owner).await?;
+
+            tokio::time::timeout_at(journal.phase_deadline.into(), async {
             for (drive, lane) in lanes.iter_mut().enumerate() {
                 lane.connection = connect(
                     &endpoints[drive % SERVERS],
@@ -513,7 +613,11 @@ pub async fn controller() -> Result<(), String> {
                 )
                 .await?;
             }
+                Ok::<_, String>(())
+            }).await.map_err(|_| "replica reconnect inherited phase deadline")??;
             journal.phase("routes_and_scope")?;
+            metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("routes_and_scope","before"),&oracle_owner).await?;
+            let (routes, sibling, partition) = tokio::time::timeout_at(journal.phase_deadline.into(), async {
             let mut routes = 0;
             let mut sibling = 0;
             let mut partition = 0;
@@ -575,11 +679,14 @@ pub async fn controller() -> Result<(), String> {
                 .map_err(|_| "cross Partition deadline")??;
                 partition += 1;
             }
+                Ok::<_, String>((routes, sibling, partition))
+            }).await.map_err(|_| "routes inherited phase deadline")??;
             journal.value["routes"] = json!(routes);
             journal.value["scope_denials"] = json!({
                     "sibling":sibling,
                     "partition":partition}
             );
+            metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("routes_and_scope","after"),&oracle_owner).await?;
             for mostly_idle in [true, false] {
                 for pattern in PATTERNS {
                     let mode = if mostly_idle {
@@ -589,6 +696,8 @@ pub async fn controller() -> Result<(), String> {
                     };
                     journal.phase(&format!("{mode}/{pattern}"))?;
                     let phase_begin = Instant::now();
+                    let metrics_first_sequence=phase_metrics.as_ref().unwrap().sequence+1;
+                    metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,(&format!("{mode}/{pattern}"),"before_active"),&oracle_owner).await?;
                     let active = config.active(mostly_idle);
                     let connections: Vec<_> =
                         lanes.iter().map(|lane| lane.connection.clone()).collect();
@@ -619,6 +728,9 @@ pub async fn controller() -> Result<(), String> {
                         })
                         .await?;
                     clock.active_finished();
+                    let observer_start=tokio::time::Instant::now();
+                    metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,(&format!("{mode}/{pattern}"),"after_active"),&oracle_owner).await?;
+                    clock.add_observer_elapsed(observer_start.elapsed());
                     let mut idle_live = 0;
                     supervised(&mut fleet, resource, &mut journal, PHASE_SECONDS, async {
                         for lane in &mut lanes[active..] {
@@ -637,6 +749,9 @@ pub async fn controller() -> Result<(), String> {
                         Ok::<_, String>(())
                     })
                     .await?;
+                    let observer_start=tokio::time::Instant::now();
+                    metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,(&format!("{mode}/{pattern}"),"after_idle"),&oracle_owner).await?;
+                    clock.add_observer_elapsed(observer_start.elapsed());
                     let timing = clock.finish(cycles.iter().sum());
                     let network_after =
                         resource_profile::Snapshot::capture_connections(&connections)
@@ -667,8 +782,9 @@ pub async fn controller() -> Result<(), String> {
                         .push(json!({
                                 "mode":mode,
                                 "pattern":pattern,
+                                "metric_sequences":[metrics_first_sequence,metrics_first_sequence+1,metrics_first_sequence+2],
                                 "rpc_latency_histogram_log2_microseconds":latency_histogram,
-                                "timing":timing,"controller_quic_boundary":{"scope":"actual retained client connections; active workload plus idle liveness; snapshot observer outside active throughput interval; server transport unavailable","connections":network},
+                                "timing":timing,"controller_quic_boundary":{"scope":"actual retained client connections; active workload plus idle liveness; snapshot observer outside active throughput interval; server transport retained separately in worker phase receipts","connections":network},
                                 "configured_active_clients":active,
                                 "clients_with_completed_cycles":cycles.iter().filter(|n|**n>0).count(),
                                 "connected_clients":lanes.len(),
@@ -684,6 +800,7 @@ pub async fn controller() -> Result<(), String> {
                 }
             }
             journal.phase("final_fresh_oracle")?;
+            metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("final_fresh_oracle","before"),&oracle_owner).await?;
             let mut verified_files = 0;
             let mut verified_bytes = 0;
             supervised(&mut fleet, resource, &mut journal, PHASE_SECONDS, async {
@@ -696,10 +813,13 @@ pub async fn controller() -> Result<(), String> {
                 Ok(())
             })
             .await?;
+            metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("final_fresh_oracle","after"),&oracle_owner).await?;
             journal.value["verified_passes"] = json!(2);
             journal.value["verified_files"] = json!(verified_files);
             journal.value["verified_bytes"] = json!(verified_bytes);
             journal.phase("revocation")?;
+            metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("revocation","before"),&oracle_owner).await?;
+            tokio::time::timeout_at(journal.phase_deadline.into(), async {
             let mut revoked = target_catalog(config.drives);
             revoked.grants.clear();
             catalog
@@ -725,10 +845,14 @@ pub async fn controller() -> Result<(), String> {
                     return Err("revocation not enforced".into());
                 }
             }
+                Ok::<_, String>(())
+            }).await.map_err(|_| "revocation inherited phase deadline")??;
             journal.value["revocation_denials"] = json!(lanes.len());
+            metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("revocation","after"),&oracle_owner).await?;
+
             Ok(())
         };
-        let result = tokio::time::timeout(Duration::from_secs(WORK_SECONDS), work)
+        let result = tokio::time::timeout_at(work_deadline.into(), work)
             .await
             .map_err(|_| "enclosing work deadline; partial work incomplete".to_string())
             .and_then(|r| r);
@@ -787,6 +911,7 @@ pub async fn controller() -> Result<(), String> {
                 "error":"private key config removal failed"}
         ));
     }
+    let expected_span = metrics::observer().begin("expected_state_observation");
     let expected_start = Instant::now();
     let initialization_path = output.join("initialization-receipts.json");
     match write_json(&initialization_path, &json!(initialization_receipts))
@@ -831,6 +956,8 @@ pub async fn controller() -> Result<(), String> {
     }
     journal.value["expected_state_observation"] = json!({"complete":expected_complete,"elapsed_seconds":expected_start.elapsed().as_secs_f64(),"deadline_seconds":30,"bound":"cooperative post-write/hash checks; blocked OS I/O cannot be interrupted"});
     journal.value["expected_state_receipts"] = json!(expected_receipts);
+    expected_span.finish(expected_complete, 0);
+    let audit_span = metrics::observer().begin("audit_observation");
     let audit_start = Instant::now();
     let audit_deadline = audit_start + Duration::from_secs(30);
     let audit: Vec<_> = fleet
@@ -847,12 +974,29 @@ pub async fn controller() -> Result<(), String> {
     if !audit_complete {
         cleanup.push(json!({"error":"audit observation incomplete"}));
     }
+    audit_span.finish(
+        audit_complete,
+        audit.iter().filter_map(|v| v["bytes"].as_u64()).sum(),
+    );
     journal.value["worker_audit_logs"] = json!(audit);
     journal.value["audit_observation"] = json!({"complete":audit_complete,"elapsed_seconds":audit_start.elapsed().as_secs_f64(),"deadline_seconds":30,"bound":"cooperative checks before/after each OS read; cannot interrupt blocked filesystem calls"});
     let worker_receipts = fleet.receipts();
     journal.value["workers"] = json!(worker_receipts);
     journal.value["cleanup_errors"] = json!(cleanup);
     journal.value["error"] = json!(result.as_ref().err());
+    if let Some(collector) = &mut phase_metrics {
+        if let Err(error) = collector.terminal_workers(&fleet, audit_deadline) {
+            collector.complete = false;
+            journal.value["worker_metrics_terminal_error"] = json!(error);
+        }
+        if let Err(error) =
+            collector.terminal(&output, oracle_owner.accounting.snapshot(), audit_deadline)
+        {
+            collector.complete = false;
+            journal.value["metrics_terminal_error"] = json!(error);
+        }
+        journal.value["phase_metrics"] = collector.summary();
+    }
     if let Some(r) = &mut resources
         && let Err(error) = r.finish().await
     {
@@ -865,11 +1009,29 @@ pub async fn controller() -> Result<(), String> {
             "sum_individual_peak_rss_bytes":worker_receipts.iter().filter_map(|w|w["resources"]["peak_rss_bytes"].as_u64()).sum::<u64>()+resources.as_ref().and_then(|r|r.snapshot()["peak_rss_bytes"].as_u64()).unwrap_or(0),
             "scope":"sum of separately sampled process peaks; not a simultaneous aggregate peak; no host or Docker attribution"}
     );
+    journal.value["oracle_accounting"] = oracle_owner.accounting.snapshot();
+    journal.value["initialization_accounting"] = initializer_owner.accounting.snapshot();
+    journal.value["workload_complete"] = json!(result.is_ok());
+    journal.value["metrics_complete"] = json!(
+        phase_metrics
+            .as_ref()
+            .is_some_and(metrics::Collector::qualified)
+            && oracle_owner.accounting.complete()
+            && initializer_owner.accounting.complete()
+    );
     journal.value["cleanup_errors"] = json!(cleanup);
     journal.value["last_work_phase"] = journal.value["phase"].clone();
-    let success = result.is_ok() && cleanup.is_empty();
+    let workload_success = result.is_ok() && cleanup.is_empty();
+    let metrics_required = mount_rs_core::diagnostics::profile::enabled();
+    let success =
+        workload_success && (!metrics_required || journal.value["metrics_complete"] == true);
+    journal.value["metrics_required_for_outcome"] = json!(metrics_required);
     journal.value["outcome"] = json!(if success { "success" } else { "incomplete" });
     journal.value["phase"] = json!("terminal");
+    journal.value["observer_accounting"] = metrics::observer().snapshot();
+    journal.value["observer_accounting_scope"] = json!(
+        "includes completed final metric publication and resource sampler; excludes this final journal encode/write; overlapping observer wall is not exclusive CPU"
+    );
     journal.flush()?;
     if success {
         Ok(())

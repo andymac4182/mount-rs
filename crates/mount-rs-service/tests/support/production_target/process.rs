@@ -7,7 +7,7 @@ use mount_rs_service::{
     auth::{AuthError, CatalogAuthenticator, Jwk, OidcKeySource, OidcVerifier},
     catalog::SqliteCatalog,
     dispatch::DriveDispatcher,
-    server::{RemoteServer, RemoteServerOptions},
+    server::{RemoteServer, RemoteServerOptions, RemoteTransferLimits},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -53,6 +53,7 @@ pub struct Ready {
     pub receipts: Vec<Value>,
     pub resources: Value,
     pub core_profile: Value,
+    pub phase_metrics: Value,
 }
 pub struct OwnedChild {
     pub child: Child,
@@ -378,11 +379,20 @@ pub async fn worker() -> Result<(), String> {
     let context = mount_rs_sdk::StorageContext::new(16).map_err(|_| "storage context failed")?;
     let mut filesystems = Vec::new();
     let mut server = None;
+    let mut server_diagnostics = None;
     let mut listener_closes = CloseTasks::default();
     let mut generation = 0;
     let mut opens = 0;
     let mut commands = super::command::Commands::default();
+    let mut phase_metrics = None;
+    let mut metric_sequence = super::metrics::Sequence::default();
+    let mut last_metric_sequence = 0;
+    let metrics_root = root.join("metrics");
     let result = tokio::time::timeout(Duration::from_secs(2500), async {
+        phase_metrics = Some(super::metrics::Local::new()?);
+        std::fs::create_dir(&metrics_root)
+            .map_err(|_| "worker metrics directory exists or unavailable")?;
+        let phase_metrics = phase_metrics.as_mut().ok_or("worker metric owner unavailable")?;
         if super::file_digest(&std::env::current_exe().map_err(|_| "executable unavailable")?)?
             != p.binary_digest
         {
@@ -440,7 +450,7 @@ pub async fn worker() -> Result<(), String> {
                 Arc::new(Keys(p.jwk.clone())),
             ));
             server = Some(
-                RemoteServer::bind_with_options(
+                RemoteServer::bind_with_diagnostics(
                     "127.0.0.1:0".parse().unwrap(),
                     vec![rustls::pki_types::CertificateDer::from(p.cert.clone())],
                     rustls::pki_types::PrivatePkcs8KeyDer::from(p.key.clone()).into(),
@@ -449,10 +459,19 @@ pub async fn worker() -> Result<(), String> {
                     RemoteServerOptions {
                         max_connections: (p.config.drives / SERVERS + 32).max(128),
                     },
+                    RemoteTransferLimits::default(),
+                    mount_rs_core::diagnostics::profile::enabled(),
                 )
                 .await
                 .map_err(|_| "worker TLS listener bind failed")?,
             );
+            server_diagnostics=server.as_ref().unwrap().diagnostics();
+            let startup_metrics = phase_metrics.capture(
+                super::metrics::identity(&p, std::process::id(), Some(index), generation, last_metric_sequence, "worker_startup", "ready"),
+                server_diagnostics.as_ref(), Value::Null,
+            )?;
+            let startup_path = metrics_root.join(format!("startup-g{generation}.json"));
+            super::metrics::publish_immutable(&startup_path, &startup_metrics)?;
             let ready = Ready {
                 pid: std::process::id(),
                 server: index,
@@ -466,6 +485,7 @@ pub async fn worker() -> Result<(), String> {
                 replicas: filesystems.len(),
                 receipts,
                 resources: resources.snapshot(),
+                phase_metrics: json!({"file":format!("metrics/startup-g{generation}.json"),"sha256":super::file_digest(&startup_path)?,"metrics_complete":startup_metrics["metrics_complete"]}),
                 core_profile: json!({
                         "enabled":mount_rs_core::diagnostics::profile::enabled(),
                         "scope":"worker service SDK startup and replica refresh cumulative counters",
@@ -487,9 +507,29 @@ pub async fn worker() -> Result<(), String> {
                 {
                     break;
                 }
+                if command["command"] == "metrics" {
+                    let requested = &command["identity"];
+                    let sequence = requested["sequence"].as_u64().ok_or("metric command sequence missing")?;
+                    let expected = super::metrics::identity(&p, std::process::id(), Some(index), generation, sequence,
+                        requested["phase"].as_str().ok_or("metric command phase missing")?,
+                        requested["boundary"].as_str().ok_or("metric command boundary missing")?);
+                    super::metrics::validate_receipt(requested, &expected)?;
+                    if metric_sequence.accept(requested)? {
+                        let captured = phase_metrics.capture(expected, server_diagnostics.as_ref(), Value::Null)?;
+                        let path = metrics_root.join(format!("g{generation}-s{sequence}.json"));
+                        super::metrics::publish_immutable(&path, &captured)?;
+                        super::write_json(&root.join("metrics-ack.json"), &json!({"identity":requested,"file":format!("metrics/g{generation}-s{sequence}.json"),"sha256":super::file_digest(&path)?}))?;
+                        last_metric_sequence = sequence;
+                    }
+                }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
             close_replicas(&mut server, &mut filesystems, &mut listener_closes).await?;
+            let closed_metrics=phase_metrics.capture(
+                super::metrics::identity(&p,std::process::id(),Some(index),generation,last_metric_sequence+1,"replica_close","after"),
+                server_diagnostics.as_ref(),Value::Null,
+            )?;
+            super::metrics::publish_immutable(&metrics_root.join(format!("closed-g{generation}.json")),&closed_metrics)?;
             generation += 1;
         }
     })
@@ -499,6 +539,28 @@ pub async fn worker() -> Result<(), String> {
     let close = close_replicas(&mut server, &mut filesystems, &mut listener_closes).await;
     let context_close = tokio::time::timeout(Duration::from_secs(30), context.close()).await;
     let observer_close = commands.cleanup().await;
+    let terminal_metrics = phase_metrics
+        .as_mut()
+        .ok_or_else(|| "worker metric setup incomplete".to_string())
+        .and_then(|metrics| {
+            metrics.capture(
+                super::metrics::identity(
+                    &p,
+                    std::process::id(),
+                    Some(index),
+                    generation,
+                    last_metric_sequence + 1,
+                    "worker_cleanup",
+                    "terminal",
+                ),
+                server_diagnostics.as_ref(),
+                Value::Null,
+            )
+        })
+        .and_then(|value| {
+            super::metrics::publish_immutable(&metrics_root.join("terminal.json"), &value)?;
+            Ok(value)
+        });
     let sampler_close = resources.finish().await;
     let clean = result.is_ok()
         && close.is_ok()
@@ -515,8 +577,11 @@ pub async fn worker() -> Result<(), String> {
                 "replica_close_error":close.err(),
                 "context_closed":matches!(context_close,
                     Ok(Ok(()))),
+                "phase_metrics":{"file":"metrics/terminal.json","capture_error":terminal_metrics.as_ref().err(),"metrics_complete":terminal_metrics.as_ref().ok().map(|m| &m["metrics_complete"])},
                 "replica_opens":opens,"sampler_shutdown_error":sampler_close.err(),"observer_close_error":observer_close.err(),"observer_processes":commands.receipts(),
                 "resources":resources.snapshot(),
+                "observer_accounting":super::metrics::observer().snapshot(),
+                "observer_accounting_scope":"includes completed final metric publication and sampler; excludes this terminal receipt write; wall is inclusive, not isolated CPU",
                 "core_profile":{
                     "enabled":mount_rs_core::diagnostics::profile::enabled(),
                     "scope":"worker service SDK cumulative startup, workload and cleanup counters; no NAPI recorder",
@@ -555,6 +620,7 @@ fn example_ready() -> Ready {
         receipts: (0..10).map(|drive| json!({"drive":drive,"mode":"MRC5","backing":format!("{:032x}",drive+1),"provider_backing_verified":true})).collect(),
         resources: super::resources::example_sample(123),
         core_profile: Value::Null,
+        phase_metrics: Value::Null,
     }
 }
 #[test]
