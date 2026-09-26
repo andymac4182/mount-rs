@@ -1,5 +1,6 @@
 //! Versioned service metadata, separate from filesystem namespace metadata.
 
+#[cfg(unix)]
 use mount_rs_core::diagnostics::profile;
 use mount_rs_core::diagnostics::profile::{Event, Span};
 
@@ -720,6 +721,37 @@ impl CatalogConnections {
     }
 }
 
+#[cfg(any(not(unix), test))]
+fn select_fallback_row(
+    connection: &Connection,
+    cache: &mut CacheState,
+) -> Result<Arc<CatalogSnapshot>, CatalogError> {
+    let mut query_profile = Span::new(Event::CatalogQuery);
+    let mut statement = connection.prepare_cached(
+        "SELECT revision, length(document), document FROM service_catalog WHERE singleton = 1",
+    )?;
+    let row = statement
+        .query_row([], |row| {
+            let length: i64 = row.get(1)?;
+            if length < 0 || length > MAX_DOCUMENT_BYTES as i64 {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            let document = match row.get_ref(2)? {
+                rusqlite::types::ValueRef::Blob(document) => document,
+                _ => return Err(rusqlite::Error::InvalidQuery),
+            };
+            if document.len() != length as usize {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            query_profile.set_units(document.len() as u64);
+            Ok(cache.select(row.get(0)?, document))
+        })
+        .optional()?;
+    let snapshot = row.ok_or(CatalogError::Invalid("catalog row missing"))??;
+    drop(statement);
+    Ok(snapshot)
+}
+
 impl SqliteCatalog {
     async fn load_shared_mode(
         &self,
@@ -742,30 +774,7 @@ impl SqliteCatalog {
                     .current
                     .lock()
                     .map_err(|_| CatalogError::Invalid("catalog snapshot unavailable"))?;
-                let result = (|| {
-                    let mut query_profile = Span::new(Event::CatalogQuery);
-                    let mut statement = connection.prepare_cached(
-                        "SELECT revision, length(document), document FROM service_catalog WHERE singleton = 1",
-                    )?;
-                    let row = statement.query_row([], |row| {
-                        let length: i64 = row.get(1)?;
-                        if length < 0 || length > MAX_DOCUMENT_BYTES as i64 {
-                            return Err(rusqlite::Error::InvalidQuery);
-                        }
-                        let document = match row.get_ref(2)? {
-                            rusqlite::types::ValueRef::Blob(document) => document,
-                            _ => return Err(rusqlite::Error::InvalidQuery),
-                        };
-                        if document.len() != length as usize {
-                            return Err(rusqlite::Error::InvalidQuery);
-                        }
-                        query_profile.set_units(document.len() as u64);
-                        cache.select(row.get(0)?, document)
-                    }).optional()?;
-                    let snapshot = row.ok_or(CatalogError::Invalid("catalog row missing"))??;
-                    drop(statement);
-                    Ok(snapshot)
-                })();
+                let result = select_fallback_row(&connection, &mut cache);
                 if result.is_err() {
                     cache.invalidate();
                 }
@@ -1134,6 +1143,91 @@ where
 #[cfg(test)]
 mod reuse_tests {
     use super::*;
+
+    fn fallback_test_connection() -> Connection {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE service_catalog (
+                    singleton INTEGER PRIMARY KEY,
+                    revision INTEGER NOT NULL,
+                    document BLOB NOT NULL
+                );",
+            )
+            .unwrap();
+        let document = serde_json::to_vec(&CatalogSnapshot::empty()).unwrap();
+        connection
+            .execute(
+                "INSERT INTO service_catalog VALUES (1, 0, ?1)",
+                params![document],
+            )
+            .unwrap();
+        connection
+    }
+
+    #[test]
+    fn fallback_row_reuses_valid_exact_document() {
+        let connection = fallback_test_connection();
+        let mut cache = CacheState::new();
+        let first = select_fallback_row(&connection, &mut cache).unwrap();
+        let second = select_fallback_row(&connection, &mut cache).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(cache.generation, 1);
+    }
+
+    #[test]
+    fn fallback_row_observes_same_revision_changed_document() {
+        let connection = fallback_test_connection();
+        let mut cache = CacheState::new();
+        let first = select_fallback_row(&connection, &mut cache).unwrap();
+        let mut changed = CatalogSnapshot::empty();
+        changed.partitions.insert(
+            "new".into(),
+            PartitionDefinition {
+                drives: BTreeMap::new(),
+            },
+        );
+        let document = serde_json::to_vec(&changed).unwrap();
+        connection
+            .execute("UPDATE service_catalog SET document=?1", params![document])
+            .unwrap();
+        let current = select_fallback_row(&connection, &mut cache).unwrap();
+        assert!(!Arc::ptr_eq(&first, &current));
+        assert_eq!(current.revision, first.revision);
+        assert!(current.partitions.contains_key("new"));
+        assert_eq!(cache.generation, 2);
+    }
+
+    #[test]
+    fn fallback_row_rejects_malformed_document() {
+        let connection = fallback_test_connection();
+        let mut cache = CacheState::new();
+        select_fallback_row(&connection, &mut cache).unwrap();
+        connection
+            .execute(
+                "UPDATE service_catalog SET document=?1",
+                params![b"malformed".as_slice()],
+            )
+            .unwrap();
+        assert!(matches!(
+            select_fallback_row(&connection, &mut cache),
+            Err(CatalogError::Invalid("malformed catalog document"))
+        ));
+    }
+
+    #[test]
+    fn fallback_row_rejects_missing_row() {
+        let connection = fallback_test_connection();
+        let mut cache = CacheState::new();
+        select_fallback_row(&connection, &mut cache).unwrap();
+        connection
+            .execute("DELETE FROM service_catalog", [])
+            .unwrap();
+        assert!(matches!(
+            select_fallback_row(&connection, &mut cache),
+            Err(CatalogError::Invalid("catalog row missing"))
+        ));
+    }
 
     #[test]
     fn unchanged_document_selection_allocates_no_snapshot_or_document_data() {
