@@ -9,6 +9,19 @@ const rawScope = "one_object_store_block_store_instance"
 const rawNames = ["put_opts.block_create", "get.block_read", "body_read.block_read", "get.conflict_verify", "body_read.conflict_verify", "get.migration", "body_read.migration", "head.direct_delete", "delete.direct", "delete.reconcile"]
 const claimFields = ["leader_claims", "leader_success", "leader_error", "leader_cancelled", "follower_claims", "follower_success", "follower_error", "follower_cancelled"]
 const rawFields = ["calls", "success", "error", "cancelled", "elapsed_ns", "attempted_bytes", "confirmed_bytes", "returned_bytes"]
+const localSchema = "mount-rs.object-store-local.v1"
+const localFields = ["calls", "success", "error", "cancelled", "elapsed_ns", "input_bytes", "output_bytes"]
+export const OBJECT_STORE_LOCAL_NAMES = ["sha256.digest", "block_id.encode", "copy.upload_payload", "copy.cache_insert", "copy.return_vec", "cache.lock_acquire", "put.follower_wait"]
+export const OBJECT_STORE_LOCAL_MEASUREMENT = {
+  schema: localSchema, scope: "live_registered_split_r2_block_store_instances",
+  calls: "fixed_local_adapter_work_invocations; not_backend_requests_or_allocations",
+  duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap",
+  input_bytes: "entered_digest_encoding_and_copy_input; waits_zero",
+  output_bytes: "completed_digest_32_id_65_and_actual_copy_bytes; waits_zero",
+  cache_lock_scope: "mutex_acquisition_including_wait; excludes_lock_hold_and_lru_work",
+  latency_max: "cumulative_per_instance; exact_phase_max_unavailable", adapter_compression: "not_used",
+  excluded: ["backing_marker_prepare_and_verify", "concurrent_prefix_probes", "qualification_and_preflight", "unregistered_rust_factories_and_mount_r2", "client_internal_work", "cache_key_and_lru_work", "upload_claim_setup"],
+}
 const logicalR2Fields = ["puts", "gets", "deletes", "reconciles", "successes", "errors", "duration_ms_total", "bytes_read", "bytes_written", "conditional_conflicts", "id_collision_exhausted", "retry_exhausted", "cache_hits"]
 export const STORAGE_OPERATION_NAMES = [
   "metadata.load",
@@ -263,7 +276,67 @@ function rawDelta(before, after) {
   return { schema: rawSchema, scope: rawScope, saturated_start: old.saturated, saturated_end: after.saturated,
     in_flight_start: old.in_flight, in_flight_end: after.in_flight, pending_claims_start: old.pending_claims, pending_claims_end: after.pending_claims, claims, entries }
 }
-function r2Delta(before, after) {
+function validateLocalRows(entries, phase = false) {
+  if (!Array.isArray(entries) || entries.length !== OBJECT_STORE_LOCAL_NAMES.length) invalid("local operation rows unavailable")
+  for (const [index, entry] of entries.entries()) {
+    if (!object(entry) || entry.name !== OBJECT_STORE_LOCAL_NAMES[index]) invalid("local operation names or order changed")
+    for (const field of localFields) integer(entry[field], true)
+    if (BigInt(entry.calls) !== BigInt(entry.success) + BigInt(entry.error) + BigInt(entry.cancelled)) invalid("local call outcomes do not reconcile")
+    if (!Array.isArray(entry.latency_log2_us) || entry.latency_log2_us.length !== 32 || entry.latency_log2_us.reduce((sum, value) => sum + integer(value, true), 0n) !== BigInt(entry.calls)) invalid("local histogram does not reconcile")
+    if (entry.calls === "0" && localFields.some((field) => entry[field] !== "0")) invalid("local zero-call totals inconsistent")
+    if (phase) {
+      const start = integer(entry.latency_max_ns_start, true), end = integer(entry.latency_max_ns_end, true)
+      if (end < start || entry.calls === "0" && end !== start || end > start && end > BigInt(entry.elapsed_ns) || entry.exact_phase_max_ns !== "unavailable") invalid("local phase maximum inconsistent")
+    } else {
+      const maximum = integer(entry.latency_max_ns, true)
+      if (maximum > BigInt(entry.elapsed_ns) || entry.calls === "0" && maximum !== 0n) invalid("local cumulative maximum inconsistent")
+    }
+    const input = BigInt(entry.input_bytes), output = BigInt(entry.output_bytes), success = BigInt(entry.success)
+    if (index === 0 && output !== success * 32n || index === 1 && (input !== BigInt(entry.calls) * 32n || output !== success * 65n) || index >= 2 && index <= 4 && (output > input || success === 0n && output !== 0n) || index >= 5 && (input !== 0n || output !== 0n)) invalid("local byte applicability inconsistent")
+  }
+}
+function validateLocalSnapshot(local) {
+  if (!object(local) || local.schema !== localSchema || local.scope !== rawScope) invalid("local schema or scope unavailable")
+  if (local.saturated !== false) invalid("local saturation state unavailable")
+  if (integer(local.in_flight, true) !== 0n) invalid("local operation crossed phase boundary")
+  validateLocalRows(local.entries)
+}
+export function validateLocalPhaseDiagnostics(local, measurement) {
+  if (!isDeepStrictEqual(measurement, OBJECT_STORE_LOCAL_MEASUREMENT)) invalid("local phase measurement metadata unavailable")
+  if (!object(local) || local.status !== "observed" || local.complete !== true || local.schema !== localSchema || local.scope !== rawScope) invalid("local phase schema or availability unavailable")
+  if (local.saturated_start !== false || local.saturated_end !== false || integer(local.in_flight_start, true) !== 0n || integer(local.in_flight_end, true) !== 0n) invalid("local phase saturation or boundary unavailable")
+  validateLocalRows(local.entries, true)
+  return local
+}
+function localObservation(local) {
+  if (!object(local)) return { unavailable: local === null ? "disabled" : "missing" }
+  const counter = (value) => typeof value === "string" && value.length <= 20 && decimal.test(value) && BigInt(value) <= u64Maximum ? value : "unavailable"
+  const rows = Array.isArray(local.entries) ? local.entries.slice(0, OBJECT_STORE_LOCAL_NAMES.length) : []
+  return { schema: local.schema === localSchema ? localSchema : "unavailable", scope: local.scope === rawScope ? rawScope : "unavailable",
+    saturated: typeof local.saturated === "boolean" ? local.saturated : "unavailable", in_flight: counter(local.in_flight),
+    entries: OBJECT_STORE_LOCAL_NAMES.map((name) => {
+      const matches = rows.filter((entry) => entry?.name === name), row = matches.length === 1 ? matches[0] : null
+      return { name, ...Object.fromEntries([...localFields, "latency_max_ns"].map((field) => [field, counter(row?.[field])])),
+        latency_log2_us: Array.from({ length: 32 }, (_, index) => counter(row?.latency_log2_us?.[index])) }
+    }) }
+}
+function localDelta(before, after, beforeMeasurement, afterMeasurement, opened) {
+  if (!object(after) || !opened && !object(before)) return { status: "unavailable", complete: false, issues: [before === null && after === null ? "local diagnostics disabled" : "local diagnostics unavailable or changed availability"] }
+  try {
+    if (!isDeepStrictEqual(beforeMeasurement, OBJECT_STORE_LOCAL_MEASUREMENT) || !isDeepStrictEqual(afterMeasurement, OBJECT_STORE_LOCAL_MEASUREMENT)) invalid("local measurement metadata unavailable")
+    if (!opened) validateLocalSnapshot(before)
+    validateLocalSnapshot(after)
+    const old = before ?? { saturated: false, in_flight: "0", entries: OBJECT_STORE_LOCAL_NAMES.map((name) => ({ name, ...Object.fromEntries([...localFields, "latency_max_ns"].map((field) => [field, "0"])), latency_log2_us: Array(32).fill("0") })) }
+    const entries = entriesDelta(old.entries, after.entries, "name", [...localFields, "latency_log2_us"])
+    for (const [index, row] of entries.entries()) Object.assign(row, { latency_max_ns_start: old.entries[index].latency_max_ns, latency_max_ns_end: after.entries[index].latency_max_ns, exact_phase_max_ns: "unavailable" })
+    validateLocalRows(entries, true)
+    return { status: "observed", complete: true, schema: localSchema, scope: rawScope, saturated_start: old.saturated, saturated_end: after.saturated,
+      in_flight_start: old.in_flight, in_flight_end: after.in_flight, entries }
+  } catch (error) {
+    return { status: "invalid", complete: false, issues: [error instanceof DiagnosticValidationError ? error.message : "invalid local diagnostic shape"], observations: { before: localObservation(before), after: localObservation(after) } }
+  }
+}
+function r2Delta(before, after, beforeLocalMeasurement, afterLocalMeasurement) {
   if (before?.scope !== "process_live_instances" || after?.scope !== before.scope || before.available === false || after.available === false || before.internal_successful_retries !== "unavailable" || after.internal_successful_retries !== "unavailable") invalid("R2 registry metadata unavailable")
   const previous = instanceMap(before.instances)
   const current = instanceMap(after.instances)
@@ -274,7 +347,9 @@ function r2Delta(before, after) {
   const missing = [...previous.keys()].filter((id) => !current.has(id))
   return { scope: "process_live_instances", instance_ids_start: [...previous.keys()], instance_ids_end: [...current.keys()], instances: after.instances.map((entry) => {
     const old = previous.get(entry.id)
-    return { id: entry.id, opened_during_phase: !old, raw_api: rawDelta(old?.raw_api, entry.raw_api), ...Object.fromEntries(logicalR2Fields.map((field) => [field, subtract(entry[field], old?.[field])])) }
+    return { id: entry.id, opened_during_phase: !old, raw_api: rawDelta(old?.raw_api, entry.raw_api),
+      local_work: localDelta(old?.local_work, entry.local_work, beforeLocalMeasurement, afterLocalMeasurement, !old),
+      ...Object.fromEntries(logicalR2Fields.map((field) => [field, subtract(entry[field], old?.[field])])) }
   }), missing_instance_ids: missing, complete: missing.length === 0, internal_successful_retries: "unavailable" }
 }
 
@@ -311,6 +386,7 @@ function sanitizedObservations(before, after) {
         storage_instrumented_operations: isDeepStrictEqual(value.measurement?.storage_instrumented_operations, STORAGE_INSTRUMENTED_OPERATION_NAMES) ? [...STORAGE_INSTRUMENTED_OPERATION_NAMES] : "unavailable",
         tidb_coverage: isDeepStrictEqual(value.measurement?.tidb_coverage, TIDB_DIAGNOSTIC_COVERAGE) ? structuredClone(TIDB_DIAGNOSTIC_COVERAGE) : "unavailable",
         r2_api: isDeepStrictEqual(value.measurement?.r2_api, rawMeasurement) ? structuredClone(rawMeasurement) : "unavailable",
+        r2_local: isDeepStrictEqual(value.measurement?.r2_local, OBJECT_STORE_LOCAL_MEASUREMENT) ? structuredClone(OBJECT_STORE_LOCAL_MEASUREMENT) : "unavailable",
         latency_histogram: isDeepStrictEqual(value.measurement?.latency_histogram, { unit: "microseconds", intervals: histogramIntervals }) ? { unit: "microseconds", intervals: histogramIntervals } : "unavailable" },
       storage: { in_flight: counter(value.storage?.in_flight), entries: rows(value.storage?.entries, storageNames, ["calls", "success", "error", "cancelled", "bytes", "returned_rows", "returned_row_observations", "in_flight", "elapsed_ns"]) },
       r2: { scope: value.r2?.scope === "process_live_instances" ? "process_live_instances" : "unavailable",
@@ -325,6 +401,7 @@ function sanitizedObservations(before, after) {
             claims: Object.fromEntries(claimFields.map((field) => [field, counter(entry.raw_api.claims?.[field])])),
             entries: rows(entry.raw_api.entries, rawNames, [...rawFields, "latency_max_ns"]),
           } : { unavailable: entry?.raw_api === null ? "null" : "missing" },
+          local_work: localObservation(entry?.local_work),
         })) },
     }
   }
@@ -348,7 +425,8 @@ export function deltaNativeSnapshots(before, after) {
   try {
     if (before.schema_version !== NATIVE_DIAGNOSTICS_SCHEMA || after.schema_version !== before.schema_version || before.enabled !== true || after.enabled !== true) invalid("diagnostic version or enabled state changed")
     if (before.scope !== "process" || after.scope !== before.scope || before.quiescent_snapshot_required !== true || after.quiescent_snapshot_required !== true || before.elapsed_semantics !== "inclusive_wall_nanoseconds" || after.elapsed_semantics !== before.elapsed_semantics) invalid("native diagnostic scope changed")
-    if (!before.measurement || !isDeepStrictEqual(before.measurement, after.measurement) ||
+    const withoutLocal = (measurement) => object(measurement) ? Object.fromEntries(Object.entries(measurement).filter(([name]) => name !== "r2_local")) : measurement
+    if (!before.measurement || !isDeepStrictEqual(withoutLocal(before.measurement), withoutLocal(after.measurement)) ||
         !isDeepStrictEqual(after.measurement.latency_histogram, { unit: "microseconds", intervals: histogramIntervals }) ||
         after.measurement.storage_calls !== STORAGE_CALL_SEMANTICS ||
         after.measurement.storage_bytes !== STORAGE_BYTE_SEMANTICS ||
@@ -384,7 +462,7 @@ export function deltaNativeSnapshots(before, after) {
     validateStorageRows(storage.entries, true)
     const profile = { entries: entriesDelta(before.profile.entries, after.profile.entries, "name", ["calls", "elapsed_ns", "units"]) }
     const sqlite = connectionDelta(before.sqlite.connections, after.sqlite.connections)
-    const r2 = r2Delta(before.r2, after.r2)
+    const r2 = r2Delta(before.r2, after.r2, before.measurement.r2_local, after.measurement.r2_local)
     const issues = []
     if (typeof storage.in_flight_start !== "string" || typeof storage.in_flight_end !== "string" ||
         !decimal.test(storage.in_flight_start) || !decimal.test(storage.in_flight_end)) invalid("invalid in-flight gauge")
@@ -393,7 +471,8 @@ export function deltaNativeSnapshots(before, after) {
     if (!sqlite.complete) issues.push("SQLite connection closed during phase")
     if (!r2.complete) issues.push("R2 instance closed during phase")
     const result = { schema_version: NATIVE_DIAGNOSTICS_SCHEMA, complete: issues.length === 0, issues,
-      measurement: Object.fromEntries(["storage_calls", "storage_bytes", "storage_rows", "storage_operations", "storage_families", "storage_instrumented_operations", "tidb_coverage", "storage_duration", "latency_histogram", "forwarding_boxes", "profile", "sqlite", "r2", "r2_api", "unavailable"].map((field) => [field, after.measurement[field]])),
+      measurement: { ...Object.fromEntries(["storage_calls", "storage_bytes", "storage_rows", "storage_operations", "storage_families", "storage_instrumented_operations", "tidb_coverage", "storage_duration", "latency_histogram", "forwarding_boxes", "profile", "sqlite", "r2", "r2_api", "unavailable"].map((field) => [field, after.measurement[field]])),
+        r2_local: isDeepStrictEqual(after.measurement.r2_local, OBJECT_STORE_LOCAL_MEASUREMENT) ? structuredClone(OBJECT_STORE_LOCAL_MEASUREMENT) : "unavailable" },
       backend_waits: after.backend_waits, http_attempts: after.http_attempts,
       physical_device_iops: after.physical_device_iops, storage, profile, sqlite, r2 }
     return retainIncompleteEvidence(result, before, after)
@@ -474,5 +553,14 @@ export function logPhaseSummary(phase) {
     const rows = entries.filter((entry) => semantics.operations.includes(entry.name))
     return [name, { ...coverage, ...Object.fromEntries(["calls", "bytes", "error", "cancelled", "elapsed_ns", "returned_rows", "returned_row_observations"].map((field) => [field, rows.reduce((sum, entry) => sum + BigInt(entry[field]), 0n).toString()])) }]
   }))
-  process.stderr.write(`MOUNT_RS_STORAGE_PHASE ${JSON.stringify({ name: phase.name, complete: phase.native.complete, elapsed_ms: phase.elapsed_ms, families, scope: "inclusive_instrumented_operations; families_overlap; bytes_only_known_payload; rows_only_known_observations; not_application_or_device_iops" })}\n`)
+  const instances = Array.isArray(phase.native.r2?.instances) ? phase.native.r2.instances : []
+  const observedLocal = instances.flatMap((instance) => {
+    try { return [validateLocalPhaseDiagnostics(instance.local_work, phase.native.measurement?.r2_local)] } catch { return [] }
+  })
+  const localWork = { status: observedLocal.length ? observedLocal.length === instances.length ? "observed" : "partial" : "unavailable",
+    observed_instances: observedLocal.length, unavailable_instances: instances.length - observedLocal.length,
+    scope: "inclusive_local_wall_time; concurrent_spans_overlap; copy_bytes_are_not_network_bytes; not_cpu_or_device_iops" }
+  if (observedLocal.length) localWork.entries = OBJECT_STORE_LOCAL_NAMES.map((name, index) => ({ name,
+    ...Object.fromEntries(localFields.map((field) => [field, observedLocal.reduce((sum, local) => sum + BigInt(local.entries[index][field]), 0n).toString()])) }))
+  process.stderr.write(`MOUNT_RS_STORAGE_PHASE ${JSON.stringify({ name: phase.name, complete: phase.native.complete, elapsed_ms: phase.elapsed_ms, families, local_work: localWork, scope: "inclusive_instrumented_operations; families_overlap; bytes_only_known_payload; rows_only_known_observations; not_application_or_device_iops" })}\n`)
 }

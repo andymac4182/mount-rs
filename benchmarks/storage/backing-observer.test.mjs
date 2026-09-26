@@ -237,7 +237,7 @@ test("inspect identity is projected before retention and drift is rejected", asy
   assert.match(interval.attribution, /descriptive/)
   assert.equal(transport.requests.every((request) => request.method === "GET"), true)
   assert.equal(transport.requests.some((request) => /containers\/json/.test(request.path)), false)
-  assert.match(transport.requests.at(-1).path, /stats\?stream=false&one-shot=true$/)
+  assert.match(transport.requests.at(-1).path, /stats\?stream=false$/)
   for (const edits of [{ Id: secondCid }, { Image: `sha256:${"d".repeat(64)}` }, { RestartCount: 1 }, { State: { Running: false, StartedAt: "2026-09-26T00:00:00Z" } }, { Config: { Labels: { "mount-rs.tidb.run": "foreign" } } }]) {
     fakeClock.advance(1000)
     transport.request = async () => ({ status: 200, body: (async function* () { yield Buffer.from(inspect(cid, edits)) })() })
@@ -544,6 +544,79 @@ test("unsupported Engine contracts and foreign stats are incomplete without disc
   const observer = factory(fakeClock, transportFor(fakeClock, (request) => request.path.includes("/stats?") ? { status: 200, body: (async function* () { yield Buffer.from(stats({ id: secondCid })) })() } : undefined))
   assert.equal((await observer.captureBoundary({ id: "foreign", kind: "phase" })).complete, false)
   assert.ok(observer.receipt().issues.includes("stats_identity"))
+})
+
+test("stats identity failures retain only fixed missing, type and mismatch flags", async () => {
+  for (const [id, flag] of [[undefined, "stats_identity_missing"], [null, "stats_identity_type"], [true, "stats_identity_type"], [[], "stats_identity_type"], [7, "stats_identity_type"], [secret, "stats_identity_mismatch"]]) {
+    const fakeClock = clock()
+    const raw = JSON.parse(stats())
+    if (id === undefined) delete raw.id
+    else raw.id = id
+    const transport = transportFor(fakeClock, (request) => request.path.includes("/stats?") ? { status: 200, body: (async function* () { yield Buffer.from(JSON.stringify(raw)) })() } : undefined)
+    const observer = factory(fakeClock, transport)
+    const boundary = await observer.captureBoundary({ id: "identity-failure", kind: "phase" })
+    assert.equal(boundary.complete, false)
+    assert.deepEqual(boundary.samples, [])
+    assert.ok(boundary.issues.includes("stats_identity"))
+    assert.ok(boundary.issues.includes(flag))
+    assert.ok(observer.receipt().issues.includes(flag))
+    assert.equal(JSON.stringify(observer.receipt()).includes(secret), false)
+    assert.equal(transport.requests.length, 3)
+  }
+})
+
+test("lossless counter parsing cannot turn numeric identity tokens into owned strings", () => {
+  const { parseEngineJSON, projectStats, projectInspect } = api()
+  const digitsOnlyCid = "1".repeat(64)
+  const numericStats = stats({ id: digitsOnlyCid }).replace(`"id":"${digitsOnlyCid}"`, `"id":${digitsOnlyCid}`)
+  assert.throws(() => projectStats(parseEngineJSON(numericStats), digitsOnlyCid), (error) => error.code === "stats_identity" && error.identityIssue === "stats_identity_type")
+  const numericInspect = inspect(digitsOnlyCid).replace(`"Id":"${digitsOnlyCid}"`, `"Id":${digitsOnlyCid}`)
+  assert.throws(() => projectInspect(parseEngineJSON(numericInspect), { ...owned, cid: digitsOnlyCid }), /inspect_identity/)
+  const numericOwner = inspect(cid, { Config: { Labels: { "mount-rs.tidb.run": 123 } } })
+  assert.throws(() => projectInspect(parseEngineJSON(numericOwner), { ...owned, labels: { "mount-rs.tidb.run": "123" } }), /ownership_mismatch/)
+  const stringOwner = inspect(cid, { Config: { Labels: { "mount-rs.tidb.run": "123" } } })
+  assert.equal(projectInspect(parseEngineJSON(stringOwner), { ...owned, labels: { "mount-rs.tidb.run": "123" } }).labels["mount-rs.tidb.run"], "123")
+})
+
+test("finalization retires the bounded wrapper even when an injected transport ignores abort", async () => {
+  const fakeClock = clock()
+  let resolveTransport, captureSettled = false
+  const observer = factory(fakeClock, { request() { return new Promise((resolve) => { resolveTransport = resolve }) } })
+  const capture = observer.captureBoundary({ id: "ignored-abort", kind: "phase" })
+  capture.then(() => { captureSettled = true })
+  for (let turn = 0; turn < 4; turn++) await new Promise((resolve) => setImmediate(resolve))
+  const finalized = await observer.finalize({ status: "failed" })
+  for (let turn = 0; turn < 4; turn++) await new Promise((resolve) => setImmediate(resolve))
+  try {
+    assert.equal(captureSettled, true, "logical cancellation must not wait for an untrusted ignored abort")
+    assert.equal(finalized.complete, false)
+    assert.ok(finalized.issues.includes("unsettled_request_at_finalization"))
+    assert.equal(finalized.cost.in_flight, 1, "unsettled underlying work must remain visible rather than fabricated zero")
+    assert.equal(fakeClock.timers.size, 0)
+  } finally {
+    resolveTransport({ status: 200, body: (async function* () { yield Buffer.from(secret) })() })
+    await capture
+  }
+  assert.equal(JSON.stringify(observer.receipt()).includes(secret), false)
+})
+
+test("lowercase block byte counters preserve deltas while absent physical operations stay unavailable", () => {
+  const { parseEngineJSON, projectStats, summarizeInterval } = api()
+  const raw = (bytes, second) => stats({ bytes, second, omitted: ["io_serviced_recursive"] }).replaceAll('"op":"Read"', '"op":"read"').replaceAll('"op":"Write"', '"op":"write"')
+  const sample = (bytes, second) => ({ cid, stats: projectStats(parseEngineJSON(raw(bytes, second)), cid) })
+  const before = sample("7", 0), after = sample("9", 1)
+  assert.deepEqual(before.stats.block_bytes, { "8:0:Read": "7", "8:0:Write": "0" })
+  const interval = summarizeInterval([owned], { samples: [before] }, { samples: [after] })
+  assert.equal(interval.metrics.block_bytes.complete, true)
+  assert.equal(interval.metrics.block_bytes.total, "2")
+  assert.equal(interval.metrics.block_operations.complete, false)
+  assert.equal(interval.metrics.block_operations.total, null)
+  assert.equal(interval.complete, false)
+  const duplicate = stats({ extraEntries: [{ major: 8, minor: 0, op: "read", value: 0 }] })
+  assert.throws(() => projectStats(parseEngineJSON(duplicate), cid), /duplicate_device_key/)
+  const reset = summarizeInterval([owned], { samples: [before] }, { samples: [sample("6", 1)] })
+  assert.equal(reset.metrics.block_bytes.total, null)
+  assert.equal(reset.containers[0].metrics.block_bytes.issue, "counter_reset")
 })
 
 test("concurrent captures cannot overlap a pinned CID request", async () => {

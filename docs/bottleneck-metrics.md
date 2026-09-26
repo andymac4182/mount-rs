@@ -216,6 +216,82 @@ counter reset remains unavailable. Linux counts completed block operations;
 macOS counts operations processed by the selected driver. Neither selection
 proves that the device backs a remote database or blob service.
 
+## Separate blob-local work from storage waits
+
+The native storage benchmark exports an optional `local_work` sibling beside
+object-store API counters, using `mount-rs.object-store-local.v1`. Its seven
+fixed rows identify work inside one object-store block-store instance:
+
+| Row | What is timed | Byte observations |
+| --- | --- | --- |
+| `sha256.digest` | SHA256 computation | Input length; 32 bytes after a completed digest |
+| `block_id.encode` | Encoding the digest as a block ID | 32 input bytes; 65 output bytes on completion |
+| `copy.upload_payload` | Creating the upload payload buffer | Actual copied bytes |
+| `copy.cache_insert` | Copying an admitted payload into the local cache | Actual copied bytes |
+| `copy.return_vec` | Copying a returned cache, cold-read or migration payload | Actual copied bytes |
+| `cache.lock_acquire` | Waiting to acquire the cache mutex | No payload bytes; excludes lock hold time |
+| `put.follower_wait` | Waiting for another upload of the same block | No payload bytes |
+
+The bank retains a total in-flight gauge. Each row retains calls,
+success/error/cancellation outcomes, inclusive elapsed nanoseconds and 32
+latency buckets. Input bytes count entered
+work; output bytes count completed work. A successful digest remains a success
+if its later integrity comparison rejects the block. Follower leader-errors and
+caller cancellations have separate outcomes.
+
+`measurement.r2_local` states the scope, byte units, latency meaning and exclusions. The bank construction and export costs are documented separately. Missing, disabled,
+invalid, reset, saturated or active-at-boundary local observations stay
+unavailable or incomplete; they are not measured zero. Local validation is
+separate from the existing raw blob API qualification checks. Snapshots read
+relaxed counters separately and are non-atomic; an observed zero in-flight gauge
+does not prove application drain. Phase reports
+retain cumulative maximum latency at both boundaries; subtracting maxima does
+not produce a phase maximum.
+
+The existing `MOUNT_RS_STORAGE_PHASE` summary includes seven fixed local totals
+and observed/unavailable instance counts. Full phase JSON retains the rows and
+metadata. Enable collection with `MOUNT_RS_PROFILE_IO=1` before native addon
+construction, and compare with the same workload with profiling disabled.
+
+Fixed recorder updates and the fixed `LocalState`/`RawState` snapshots allocate
+nothing. Enabling the bank adds state to the existing per-store allocation.
+The public `ObjectStoreBlockStore::stats()` error-class map, NAPI JSON exports
+and full observations can allocate. These statements do not claim
+allocation-free file operations. Cache lock hold time, cache bookkeeping and
+other allocation sites remain outside these seven timed rows.
+The adapter applies no compression. Copy bytes are local buffer traffic, not
+wire bytes, and these timers are not exclusive CPU time or physical IOPS.
+The public CLI shutdown envelope still reports raw object-store instance
+statistics unavailable; this local bank is exported through the native storage
+benchmark path.
+
+## Observe owned backing resources
+
+The owned-backing pilot samples only its configured container identities. It
+requests standard non-streaming Engine stats, requires the observed full
+container ID, and retains the existing image, ownership, start and restart
+checks. Missing identity makes capture incomplete. Missing counters remain
+unavailable and can prevent interval qualification; expected identities and
+zero counters are never substituted.
+
+Capture runs in parallel across at most 16 owned containers, with inspection and
+stats requests serial within each container. Replies remain in the configured
+order. The standard API discards its first sample and returns the second;
+parallel capture removes the serial sampling multiplier but cannot guarantee
+completion within the unchanged two-second hook deadline. Late sampling remains
+incomplete.
+
+The enclosing hook records wall and process CPU cost once. Summed per-request
+costs include overlapping windows and must not be treated as exclusive time.
+The workload timer is separate from observation time; backing counter windows
+can include observation and idle activity. Compare their retained timestamps
+before interpreting a rate.
+
+Cgroup block byte counters accept the documented read/write spellings. Missing
+block operation counters remain unavailable, even when byte counters exist.
+Container block accounting, process disk bytes and shared host device counters
+are different observations; none establishes physical NAND IOPS.
+
 ## Slow-operation logging
 
 Set `MOUNT_RS_TRACE_STORAGE=1` for storage spans or
@@ -241,3 +317,7 @@ control. Observer time is reported separately from workload time, while process
 CPU includes it. Do not subtract cumulative maxima or use shared host activity
 as exact provider IOPS. A profile identifies where to investigate; a performance
 win needs a controlled before/after workload with matching correctness checks.
+
+Authentication spans currently combine cache-mutex waiting, key fetching, JWT
+verification and grant traversal. Their totals do not identify which of those
+steps is responsible; separate authentication-stage measurements remain a gap.

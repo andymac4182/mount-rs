@@ -201,6 +201,7 @@ pub fn free_disk(path: &Path) -> Result<u64> {
     let bytes = (info.f_bavail as u128) * (info.f_frsize as u128);
     u64::try_from(bytes).map_err(|_| "free disk counter overflow".into())
 }
+const RSS_UNAVAILABLE: &str = "owned child RSS snapshot unavailable";
 #[cfg(target_os = "macos")]
 fn rss(pid: u32) -> Result<u64> {
     let mut info = std::mem::MaybeUninit::<libc::proc_taskinfo>::uninit();
@@ -216,7 +217,7 @@ fn rss(pid: u32) -> Result<u64> {
         )
     };
     if got != size as libc::c_int {
-        return Err("owned child RSS snapshot unavailable".into());
+        return Err(RSS_UNAVAILABLE.into());
     }
     Ok(unsafe { info.assume_init() }.pti_resident_size)
 }
@@ -226,7 +227,7 @@ fn rss(pid: u32) -> Result<u64> {
     let row = text
         .lines()
         .find_map(|line| line.strip_prefix("VmRSS:"))
-        .ok_or("owned child RSS snapshot unavailable")?;
+        .ok_or(RSS_UNAVAILABLE)?;
     let kb: u64 = row
         .split_whitespace()
         .next()
@@ -449,10 +450,16 @@ impl OwnedProcess {
         })
     }
     fn poll_exit(&mut self) -> Result<()> {
+        self.poll_exit_with(&mut Child::try_wait)
+    }
+    fn poll_exit_with(
+        &mut self,
+        poll: &mut impl FnMut(&mut Child) -> std::io::Result<Option<std::process::ExitStatus>>,
+    ) -> Result<()> {
         if self.terminal {
             return Ok(());
         }
-        if let Some(status) = self.child.try_wait().map_err(|e| e.to_string())? {
+        if let Some(status) = poll(&mut self.child).map_err(|e| e.to_string())? {
             self.terminal = true;
             self.receipt.reaped = true;
             self.receipt.success = status.success();
@@ -470,11 +477,29 @@ impl OwnedProcess {
         Ok(())
     }
     fn sample_rss(&mut self) -> Result<()> {
+        self.sample_rss_with(&mut rss, &mut Child::try_wait)
+    }
+    fn sample_rss_with(
+        &mut self,
+        sample: &mut impl FnMut(u32) -> Result<u64>,
+        poll: &mut impl FnMut(&mut Child) -> std::io::Result<Option<std::process::ExitStatus>>,
+    ) -> Result<()> {
         if self.terminal {
             return Ok(());
         }
-        let value = rss(self.child.id())?;
-        self.record_rss(value)
+        match sample(self.child.id()) {
+            Ok(value) => self.record_rss(value),
+            Err(error) => {
+                if error == RSS_UNAVAILABLE {
+                    // The owned Child, not an absent OS counter, establishes retirement.
+                    self.poll_exit_with(poll)?;
+                    if self.terminal {
+                        return Ok(());
+                    }
+                }
+                Err(error)
+            }
+        }
     }
     fn record_rss(&mut self, value: u64) -> Result<()> {
         let stamp = u64::try_from(self.started.elapsed().as_nanos())
@@ -497,6 +522,9 @@ impl OwnedProcess {
         }
     }
     fn sample(&mut self) -> Result<()> {
+        self.sample_with(&mut rss)
+    }
+    fn sample_with(&mut self, sample: &mut impl FnMut(u32) -> Result<u64>) -> Result<()> {
         self.poll_exit()?;
         if self.terminal {
             return Err(format!(
@@ -504,7 +532,13 @@ impl OwnedProcess {
                 self.receipt.node
             ));
         }
-        self.sample_rss()?;
+        self.sample_rss_with(sample, &mut Child::try_wait)?;
+        if self.terminal {
+            return Err(format!(
+                "{} exited before requested stop",
+                self.receipt.node
+            ));
+        }
         output(&self.stdout, false)?;
         output(&self.stderr, false)?;
         Ok(())
@@ -675,38 +709,94 @@ impl Fleet {
         result
     }
     fn sample_resources(&mut self, force: bool, terminal: bool) -> Result<()> {
+        self.sample_resources_with(force, terminal, &mut measured)
+    }
+    fn sample_resources_with(
+        &mut self,
+        force: bool,
+        terminal: bool,
+        measure: &mut impl FnMut(RssIdentity, bool) -> Result<RssObservation>,
+    ) -> Result<()> {
         if let Err(error) = self.resources.stop_requested() {
             self.resources.remember(error);
         }
-        let started_ns = monotonic_ns()?;
-        let mut expected = vec![
-            supervisor_identity("controller", self.resources.run.controller_pid),
-            supervisor_identity("worker", self.resources.run.worker_pid),
-        ];
-        // Take the exact roster after actual reaps; no retired PID is queried.
-        for process in &mut self.processes {
-            process.poll_exit()?;
-        }
-        expected.extend(
-            self.processes
-                .iter()
-                .filter(|p| !p.terminal)
-                .map(OwnedProcess::identity),
-        );
-        let mut observations = vec![
-            measured(expected[0].clone(), true)?,
-            measured(expected[1].clone(), false)?,
-        ];
-        for process in self.processes.iter_mut().filter(|p| !p.terminal) {
-            let observation = measured(process.identity(), false)?;
-            if let Some(bytes) = observation.bytes
-                && let Err(error) = process.record_rss(bytes)
-            {
-                self.resources.remember(error);
+        let capture_started_ns = monotonic_ns()?;
+        // One original poll budget covers every rebuild; retirement cannot extend it.
+        let retry_deadline_ns = capture_started_ns
+            .checked_add(POLL_MS * 1_000_000)
+            .ok_or("RSS capture deadline overflow")?
+            .min(self.resources.outer_ns)
+            .min(self.resources.stop_deadline_ns.unwrap_or(u64::MAX));
+        let mut unreaped = self.processes.iter().filter(|p| !p.terminal).count();
+        let mut rebuilding = false;
+        let (started_ns, expected, observations, finished_ns) = loop {
+            let started_ns = monotonic_ns()?;
+            if rebuilding && started_ns >= retry_deadline_ns {
+                return Err("RSS capture retirement deadline exhausted".into());
             }
-            observations.push(observation);
-        }
-        let finished_ns = monotonic_ns()?;
+            let mut expected = vec![
+                supervisor_identity("controller", self.resources.run.controller_pid),
+                supervisor_identity("worker", self.resources.run.worker_pid),
+            ];
+            // Take the exact roster after actual reaps; no retired PID is queried.
+            for process in &mut self.processes {
+                process.poll_exit()?;
+            }
+            expected.extend(
+                self.processes
+                    .iter()
+                    .filter(|p| !p.terminal)
+                    .map(OwnedProcess::identity),
+            );
+            let mut observations = vec![
+                measure(expected[0].clone(), true)?,
+                measure(expected[1].clone(), false)?,
+            ];
+            let mut retired_during_capture = false;
+            for process in self.processes.iter_mut().filter(|p| !p.terminal) {
+                let observation = measure(process.identity(), false)?;
+                if observation.bytes.is_none()
+                    && observation.missing.as_deref() == Some(RSS_UNAVAILABLE)
+                {
+                    process.poll_exit()?;
+                    if process.terminal {
+                        // Only the retiring child's unavailable sample may be discarded.
+                        // Keep failures in every earlier, still-owned observation sticky.
+                        if let Err(error) =
+                            rss_totals(&expected[..observations.len()], &observations)
+                        {
+                            self.resources.remember(error);
+                        }
+                        retired_during_capture = true;
+                        break;
+                    }
+                }
+                if let Some(bytes) = observation.bytes
+                    && let Err(error) = process.record_rss(bytes)
+                {
+                    self.resources.remember(error);
+                }
+                observations.push(observation);
+            }
+            let finished_ns = monotonic_ns()?;
+            if rebuilding && finished_ns >= retry_deadline_ns {
+                return Err("RSS capture retirement deadline exhausted".into());
+            }
+            if !retired_during_capture {
+                break (started_ns, expected, observations, finished_ns);
+            }
+            let remaining = self.processes.iter().filter(|p| !p.terminal).count();
+            if remaining >= unreaped {
+                return Err("RSS capture rebuild without confirmed retirement".into());
+            }
+            unreaped = remaining;
+            if finished_ns >= retry_deadline_ns {
+                return Err("RSS capture retirement deadline exhausted".into());
+            }
+            rebuilding = true;
+            // Discard this unpublished candidate, including supervisor readings. A fresh
+            // envelope and exact roster replace it; missing RSS never becomes a zero sample.
+        };
         let total_bytes = observations
             .iter()
             .try_fold(0u64, |sum, v| sum.checked_add(v.bytes?));
@@ -904,6 +994,9 @@ impl Fleet {
                 return Ok(());
             }
             self.processes[index].sample_rss()?;
+            if self.processes[index].terminal {
+                return self.finish_process(index, deadline).map(|_| ());
+            }
             for (other, process) in self.processes.iter_mut().enumerate() {
                 if other != index {
                     process.sample()?;
@@ -966,6 +1059,12 @@ impl Fleet {
                     process.sample()?;
                 }
             }
+            if self.processes[index].terminal {
+                let banks = self
+                    .finish_process(index, deadline)?
+                    .ok_or("server bank missing")?;
+                return Ok(banks);
+            }
             if Instant::now() >= force_at {
                 self.processes[index].receipt.forced = true;
                 self.processes[index]
@@ -1020,6 +1119,12 @@ impl Fleet {
                     let process = &mut self.processes[index];
                     if let Err(error) = process.sample_rss() {
                         failure.get_or_insert(error);
+                    }
+                    if process.terminal {
+                        if let Err(error) = self.finish_process(index, deadline) {
+                            failure.get_or_insert(error);
+                        }
+                        continue;
                     }
                     if Instant::now() >= force_at {
                         process.receipt.forced = true;
@@ -1410,6 +1515,457 @@ mod tests {
         io::Cursor,
         rc::Rc,
     };
+
+    fn inert_process(root: &Path) -> (OwnedProcess, Option<std::process::ChildStdin>) {
+        inert_process_status(root, 0)
+    }
+
+    fn inert_process_status(
+        root: &Path,
+        status: u8,
+    ) -> (OwnedProcess, Option<std::process::ChildStdin>) {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", &format!("printf ready; read release; exit {status}")])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut ready = [0u8; 5];
+        child.stdout.take().unwrap().read_exact(&mut ready).unwrap();
+        assert_eq!(&ready, b"ready");
+        let input = child.stdin.take();
+        let stdout = root.join("inert.stdout");
+        let stderr = root.join("inert.stderr");
+        fs::write(&stdout, []).unwrap();
+        fs::write(&stderr, []).unwrap();
+        let receipt = ProcessReceipt {
+            launch: LaunchBinding {
+                config_path: String::new(),
+                config_sha256: String::new(),
+                cli_binary_path: "/bin/sh".into(),
+                cli_binary_sha256: String::new(),
+                catalog_path: String::new(),
+                catalog_at_launch: None,
+                catalog_after_completion: None,
+                apply_expected_revision: None,
+                apply_document_sha256: None,
+            },
+            node: "inert-owned-child".into(),
+            generation: 1,
+            pid: child.id(),
+            role: "server".into(),
+            reaped: false,
+            success: false,
+            forced: false,
+            sockets_reusable: false,
+            disk_lock_reusable: false,
+            max_rss_bytes: 0,
+            rss_samples: 0,
+            rss_first_ns: None,
+            rss_last_ns: None,
+            stdout_bytes: 0,
+            stderr_bytes: 0,
+        };
+        (
+            OwnedProcess {
+                child,
+                receipt,
+                stdout,
+                stderr,
+                quic: None,
+                peer: None,
+                cache: None,
+                terminal: false,
+                started: Instant::now(),
+            },
+            input,
+        )
+    }
+
+    fn release_inert_child(input: &mut Option<std::process::ChildStdin>, pid: u32) -> Result<()> {
+        drop(input.take());
+        let deadline = Instant::now() + Duration::from_millis(POLL_MS);
+        loop {
+            let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+            // Observe only this fixture's owned PID without reaping it: production try_wait
+            // must be the operation that establishes and records actual retirement.
+            if unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid as libc::id_t,
+                    info.as_mut_ptr(),
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            } != 0
+            {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+            if unsafe { info.assume_init().si_pid() } == pid as libc::pid_t {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err("inert child exit barrier expired".into());
+            }
+            thread::yield_now();
+        }
+    }
+
+    fn cleanup_inert_child(process: &mut OwnedProcess) {
+        if !process.terminal {
+            process.child.kill().unwrap();
+            let status = process.child.wait().unwrap();
+            process.terminal = true;
+            process.receipt.reaped = true;
+            process.receipt.success = status.success();
+        }
+    }
+
+    #[test]
+    fn rss_retirement_rechecks_the_same_child_without_a_fake_sample() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, mut input) = inert_process(directory.path());
+        process.record_rss(16384).unwrap();
+        process.poll_exit().unwrap();
+        assert!(!process.terminal);
+        let owned_pid = process.child.id();
+        let mut reads = 0;
+        let mut polls = 0;
+        let result = process.sample_rss_with(
+            &mut |pid| {
+                assert_eq!(pid, owned_pid);
+                reads += 1;
+                release_inert_child(&mut input, pid)?;
+                Err("owned child RSS snapshot unavailable".into())
+            },
+            &mut |child| {
+                assert_eq!(child.id(), owned_pid);
+                polls += 1;
+                child.try_wait()
+            },
+        );
+        let state = (
+            process.terminal,
+            process.receipt.reaped,
+            process.receipt.success,
+            process.receipt.forced,
+            process.receipt.rss_samples,
+            process.receipt.max_rss_bytes,
+        );
+        cleanup_inert_child(&mut process);
+        assert_eq!(result, Ok(()));
+        assert_eq!(state, (true, true, true, false, 1, 16384));
+        assert_eq!((reads, polls), (1, 1));
+        process
+            .sample_rss_with(&mut |_| panic!("RSS queried after reap"), &mut |_| {
+                panic!("Child polled after known reap")
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn rss_retirement_still_rejects_unexpected_exit_during_active_sampling() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, mut input) = inert_process(directory.path());
+        let result = process.sample_with(&mut |pid| {
+            release_inert_child(&mut input, pid)?;
+            Err("owned child RSS snapshot unavailable".into())
+        });
+        let terminal = process.terminal;
+        cleanup_inert_child(&mut process);
+        assert_eq!(
+            result,
+            Err("inert-owned-child exited before requested stop".into())
+        );
+        assert!(terminal);
+    }
+
+    #[test]
+    fn rss_retirement_rebuilds_a_fresh_exact_resource_frame() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, mut input) = inert_process(directory.path());
+        process.record_rss(16384).unwrap();
+        let mut fleet = inert_resource_fleet(directory.path(), process);
+        let mut supervisor_reads = 0;
+        let mut retiring_reads = 0;
+        let mut discarded_finished = 0;
+        let result = fleet.sample_resources_with(true, false, &mut |identity, _| {
+            let started_ns = monotonic_ns().unwrap();
+            let (bytes, missing) = if identity.role == "server" {
+                retiring_reads += 1;
+                release_inert_child(&mut input, identity.pid)?;
+                (None, Some(RSS_UNAVAILABLE.into()))
+            } else {
+                supervisor_reads += 1;
+                (Some(4096), None)
+            };
+            let finished_ns = monotonic_ns().unwrap();
+            if bytes.is_none() {
+                discarded_finished = finished_ns;
+            }
+            Ok(RssObservation {
+                identity,
+                started_ns,
+                finished_ns,
+                bytes,
+                missing,
+            })
+        });
+        let terminal = fleet.processes[0].terminal;
+        let samples = fleet.processes[0].receipt.rss_samples;
+        cleanup_inert_child(&mut fleet.processes[0]);
+        assert_eq!(result, Ok(()));
+        assert!(terminal);
+        assert_eq!(samples, 1);
+        assert_eq!((supervisor_reads, retiring_reads), (4, 1));
+        let frame = fleet.resources.last.as_ref().unwrap();
+        assert!(frame.started_ns > discarded_finished);
+        assert_eq!(frame.sequence, 5);
+        assert_eq!(frame.expected.len(), 2);
+        assert_eq!(
+            (frame.total_bytes, frame.child_bytes),
+            (Some(8192), Some(0))
+        );
+        assert_eq!(frame.max_total_bytes, 524288);
+        assert!(frame.error.is_none());
+        frame
+            .validate(&fleet.resources.run, 5, monotonic_ns().unwrap())
+            .unwrap();
+    }
+
+    fn inert_resource_fleet(root: &Path, process: OwnedProcess) -> Fleet {
+        let now = monotonic_ns().unwrap();
+        let mut previous = resource_frame(now);
+        previous.run.root = root.to_string_lossy().into_owned();
+        previous.sequence = 4;
+        previous.max_total_bytes = 524288;
+        Fleet {
+            root: root.into(),
+            processes: vec![process],
+            retired: Vec::new(),
+            banks: Vec::new(),
+            next_generation: 2,
+            resources: ResourceMonitor {
+                run: previous.run.clone(),
+                outer_ns: now + RESOURCE_FRESH_NS,
+                sequence: previous.sequence,
+                max_total: previous.max_total_bytes,
+                published_ns: now,
+                last: Some(previous),
+                failure: None,
+                stop_deadline_ns: None,
+            },
+        }
+    }
+
+    fn fixture_observation(identity: RssIdentity, unavailable: bool) -> Result<RssObservation> {
+        let now = monotonic_ns()?;
+        Ok(RssObservation {
+            identity,
+            started_ns: now,
+            finished_ns: now,
+            bytes: (!unavailable).then_some(4096),
+            missing: unavailable.then(|| RSS_UNAVAILABLE.into()),
+        })
+    }
+
+    #[test]
+    fn rss_retirement_unavailable_live_child_remains_a_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, _input) = inert_process(directory.path());
+        let mut polls = 0;
+        let result = process.sample_rss_with(&mut |_| Err(RSS_UNAVAILABLE.into()), &mut |child| {
+            polls += 1;
+            child.try_wait()
+        });
+        let state = (
+            process.terminal,
+            process.receipt.reaped,
+            process.receipt.rss_samples,
+        );
+        cleanup_inert_child(&mut process);
+        assert_eq!(result, Err(RSS_UNAVAILABLE.into()));
+        assert_eq!(polls, 1);
+        assert_eq!(state, (false, false, 0));
+    }
+
+    #[test]
+    fn rss_retirement_exit_poll_error_does_not_invent_terminal_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, _input) = inert_process(directory.path());
+        let process_pid = process.child.id();
+        let mut polls = 0;
+        let result = process.sample_rss_with(&mut |_| Err(RSS_UNAVAILABLE.into()), &mut |child| {
+            assert_eq!(child.id(), process_pid);
+            polls += 1;
+            Err(std::io::Error::other("injected owned exit poll failure"))
+        });
+        let state = (
+            process.terminal,
+            process.receipt.reaped,
+            process.receipt.rss_samples,
+        );
+        cleanup_inert_child(&mut process);
+        assert_eq!(result, Err("injected owned exit poll failure".into()));
+        assert_eq!(polls, 1);
+        assert_eq!(state, (false, false, 0));
+    }
+
+    #[test]
+    fn rss_retirement_does_not_excuse_malformed_samples() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, _input) = inert_process(directory.path());
+        let mut polls = 0;
+        let result =
+            process.sample_rss_with(&mut |_| Err("invalid RSS value".into()), &mut |child| {
+                polls += 1;
+                child.try_wait()
+            });
+        cleanup_inert_child(&mut process);
+        assert_eq!(result, Err("invalid RSS value".into()));
+        assert_eq!(polls, 0);
+        assert_eq!(process.receipt.rss_samples, 0);
+    }
+
+    #[test]
+    fn rss_retirement_records_an_unsuccessful_real_exit() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, mut input) = inert_process_status(directory.path(), 7);
+        let result = process.sample_rss_with(
+            &mut |pid| {
+                release_inert_child(&mut input, pid)?;
+                Err(RSS_UNAVAILABLE.into())
+            },
+            &mut Child::try_wait,
+        );
+        let state = (
+            process.terminal,
+            process.receipt.reaped,
+            process.receipt.success,
+            process.receipt.forced,
+        );
+        cleanup_inert_child(&mut process);
+        assert_eq!(result, Ok(()));
+        assert_eq!(state, (true, true, false, false));
+        assert_eq!(process.receipt.rss_samples, 0);
+    }
+
+    #[test]
+    fn rss_retirement_live_missing_resource_frame_stays_incomplete() {
+        let directory = tempfile::tempdir().unwrap();
+        let (process, _input) = inert_process(directory.path());
+        let mut fleet = inert_resource_fleet(directory.path(), process);
+        let mut supervisor_reads = 0;
+        let result = fleet.sample_resources_with(true, false, &mut |identity, _| {
+            let unavailable = identity.role == "server";
+            supervisor_reads += usize::from(!unavailable);
+            fixture_observation(identity, unavailable)
+        });
+        let terminal = fleet.processes[0].terminal;
+        cleanup_inert_child(&mut fleet.processes[0]);
+        assert_eq!(result, Err("RSS snapshot unavailable".into()));
+        assert!(!terminal);
+        assert_eq!(supervisor_reads, 2);
+        let frame = fleet.resources.last.as_ref().unwrap();
+        assert_eq!(frame.expected.len(), 3);
+        assert_eq!((frame.total_bytes, frame.child_bytes), (None, None));
+        assert_eq!(frame.error.as_deref(), Some("RSS snapshot unavailable"));
+        assert!(
+            frame
+                .validate(&fleet.resources.run, 5, monotonic_ns().unwrap())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rss_retirement_rebuild_preserves_prior_sticky_observer_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let (process, mut input) = inert_process(directory.path());
+        let mut fleet = inert_resource_fleet(directory.path(), process);
+        fleet.resources.remember("prior observer failure".into());
+        let result = fleet.sample_resources_with(true, false, &mut |identity, _| {
+            let unavailable = identity.role == "server";
+            if unavailable {
+                release_inert_child(&mut input, identity.pid)?;
+            }
+            fixture_observation(identity, unavailable)
+        });
+        cleanup_inert_child(&mut fleet.processes[0]);
+        assert_eq!(result, Err("prior observer failure".into()));
+        let frame = fleet.resources.last.as_ref().unwrap();
+        assert_eq!(frame.expected.len(), 2);
+        assert_eq!(frame.error.as_deref(), Some("prior observer failure"));
+        assert!(
+            frame
+                .validate(&fleet.resources.run, 5, monotonic_ns().unwrap())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rss_retirement_rebuild_cannot_extend_the_original_outer_deadline() {
+        let directory = tempfile::tempdir().unwrap();
+        let (process, mut input) = inert_process(directory.path());
+        let mut fleet = inert_resource_fleet(directory.path(), process);
+        fleet.resources.outer_ns = monotonic_ns().unwrap();
+        let mut supervisor_reads = 0;
+        let result = fleet.sample_resources_with(true, false, &mut |identity, _| {
+            let unavailable = identity.role == "server";
+            if unavailable {
+                release_inert_child(&mut input, identity.pid)?;
+            } else {
+                supervisor_reads += 1;
+            }
+            fixture_observation(identity, unavailable)
+        });
+        let terminal = fleet.processes[0].terminal;
+        cleanup_inert_child(&mut fleet.processes[0]);
+        assert_eq!(
+            result,
+            Err("RSS capture retirement deadline exhausted".into())
+        );
+        assert!(terminal);
+        assert_eq!(supervisor_reads, 2);
+        assert_eq!(fleet.resources.sequence, 4);
+        assert_eq!(fleet.resources.last.as_ref().unwrap().sequence, 4);
+    }
+
+    #[test]
+    fn rss_retirement_rebuild_does_not_erase_an_earlier_missing_supervisor() {
+        let directory = tempfile::tempdir().unwrap();
+        let (process, mut input) = inert_process(directory.path());
+        let mut fleet = inert_resource_fleet(directory.path(), process);
+        let mut controller_reads = 0;
+        let result = fleet.sample_resources_with(true, false, &mut |identity, _| {
+            let unavailable = match identity.role.as_str() {
+                "controller" => {
+                    controller_reads += 1;
+                    controller_reads == 1
+                }
+                "server" => {
+                    release_inert_child(&mut input, identity.pid)?;
+                    true
+                }
+                _ => false,
+            };
+            fixture_observation(identity, unavailable)
+        });
+        cleanup_inert_child(&mut fleet.processes[0]);
+        assert_eq!(result, Err("RSS snapshot unavailable".into()));
+        assert_eq!(controller_reads, 2);
+        assert_eq!(
+            fleet.resources.failure.as_deref(),
+            Some("RSS snapshot unavailable")
+        );
+        let frame = fleet.resources.last.as_ref().unwrap();
+        assert_eq!(frame.expected.len(), 2);
+        assert_eq!(frame.error.as_deref(), Some("RSS snapshot unavailable"));
+        assert!(
+            frame
+                .validate(&fleet.resources.run, 5, monotonic_ns().unwrap())
+                .is_err()
+        );
+    }
 
     fn resource_frame(now: u64) -> ResourceFrame {
         let expected = vec![

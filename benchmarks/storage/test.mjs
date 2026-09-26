@@ -56,6 +56,159 @@ const rawApiMeasurement = {
   excluded: ["backing_marker_prepare_and_verify", "concurrent_prefix_probes", "qualification_and_preflight", "unregistered_rust_factories_and_mount_r2", "internal_client_retries"],
 }
 
+const localWorkNames = ["sha256.digest", "block_id.encode", "copy.upload_payload", "copy.cache_insert", "copy.return_vec", "cache.lock_acquire", "put.follower_wait"]
+const localWorkMeasurement = {
+  schema: "mount-rs.object-store-local.v1", scope: "live_registered_split_r2_block_store_instances",
+  calls: "fixed_local_adapter_work_invocations; not_backend_requests_or_allocations",
+  duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap",
+  input_bytes: "entered_digest_encoding_and_copy_input; waits_zero",
+  output_bytes: "completed_digest_32_id_65_and_actual_copy_bytes; waits_zero",
+  cache_lock_scope: "mutex_acquisition_including_wait; excludes_lock_hold_and_lru_work",
+  latency_max: "cumulative_per_instance; exact_phase_max_unavailable", adapter_compression: "not_used",
+  excluded: ["backing_marker_prepare_and_verify", "concurrent_prefix_probes", "qualification_and_preflight", "unregistered_rust_factories_and_mount_r2", "client_internal_work", "cache_key_and_lru_work", "upload_claim_setup"],
+}
+
+function localWorkSnapshot(calls) {
+  const instance = rawApiInstance(calls)
+  instance.local_work = {
+    schema: "mount-rs.object-store-local.v1", scope: "one_object_store_block_store_instance", saturated: false, in_flight: "0",
+    entries: localWorkNames.map((name, index) => {
+      const count = index === 0 ? calls : 0
+      return { name, calls: String(count), success: String(count), error: "0", cancelled: "0", elapsed_ns: String(count * 1000), input_bytes: String(count * 4096), output_bytes: String(count * 32), latency_max_ns: count ? "1000" : "0", latency_log2_us: ["0", String(count), ...Array(30).fill("0")] }
+    }),
+  }
+  const snapshot = diagnosticSnapshot(calls, "7", [instance])
+  snapshot.measurement.r2_local = structuredClone(localWorkMeasurement)
+  return snapshot
+}
+
+async function testObjectStoreLocalPhaseDiagnostics() {
+  const before = localWorkSnapshot(2), after = localWorkSnapshot(5)
+  const delta = deltaNativeSnapshots(before, after)
+  assert.equal(delta.complete, true)
+  const local = delta.r2.instances[0].local_work
+  assert.equal(local?.status, "observed", "optional local evidence must survive the phase delta")
+  assert.equal(local.complete, true)
+  assert.deepEqual(local.entries.map((row) => row.name), localWorkNames)
+  assert.equal(local.entries[0].calls, "3")
+  assert.equal(local.entries[0].input_bytes, "12288")
+  assert.equal(local.entries[0].output_bytes, "96")
+  assert.equal(local.entries[0].latency_max_ns_start, "1000")
+  assert.equal(local.entries[0].latency_max_ns_end, "1000")
+  assert.equal(local.entries[0].exact_phase_max_ns, "unavailable")
+  assert.deepEqual(local.entries[0].latency_log2_us, ["0", "3", ...Array(30).fill("0")])
+  assert.deepEqual(delta.measurement.r2_local, localWorkMeasurement)
+  const rawOnly = deltaNativeSnapshots(diagnosticSnapshot(2, "7", [rawApiInstance(2)]), diagnosticSnapshot(5, "7", [rawApiInstance(5)]))
+  assert.deepEqual(delta.r2.instances[0].raw_api, rawOnly.r2.instances[0].raw_api)
+  assert.deepEqual(delta.measurement.r2_api, rawOnly.measurement.r2_api)
+  assert.equal(rawOnly.r2.instances[0].local_work.status, "unavailable")
+  assert.equal(rawOnly.r2.instances[0].local_work.complete, false)
+  const lines = [], originalWrite = process.stderr.write
+  process.stderr.write = (value) => { lines.push(String(value)); return true }
+  try {
+    logPhaseSummary({ name: "workload-local-control", elapsed_ms: 1, native: delta })
+    logPhaseSummary({ name: "workload-legacy-control", elapsed_ms: 1, native: rawOnly })
+    for (const metadata of [undefined, { schema: "EXCLUDED_LOCAL_SECRET" }]) {
+      const altered = structuredClone(delta)
+      altered.measurement.r2_local = metadata
+      logPhaseSummary({ name: "workload-local-metadata-control", elapsed_ms: 1, native: altered })
+    }
+  } finally { process.stderr.write = originalWrite }
+  const summaries = lines.map((line) => JSON.parse(line.slice("MOUNT_RS_STORAGE_PHASE ".length)))
+  assert.equal(summaries[0].local_work?.status, "observed", "the existing bounded phase log must expose local bottleneck totals")
+  assert.equal(summaries[0].local_work.observed_instances, 1)
+  assert.equal(summaries[0].local_work.unavailable_instances, 0)
+  assert.deepEqual(summaries[0].local_work.entries.map((row) => row.name), localWorkNames)
+  assert.equal(summaries[0].local_work.entries[0].input_bytes, "12288")
+  assert.equal(summaries[1].local_work.status, "unavailable")
+  assert.equal(summaries[1].local_work.entries, undefined)
+  for (const summary of summaries.slice(2)) {
+    assert.equal(summary.complete, true)
+    assert.equal(summary.local_work.status, "unavailable", "valid-looking local rows require their exact local measurement provenance")
+    assert.equal(summary.local_work.entries, undefined)
+    assert.equal(JSON.stringify(summary).includes("EXCLUDED_LOCAL_SECRET"), false)
+  }
+
+  const malformed = [
+    (snapshot) => { snapshot.r2.instances[0].local_work.saturated = true },
+    (snapshot) => { snapshot.r2.instances[0].local_work.in_flight = "1" },
+    (snapshot) => { snapshot.r2.instances[0].local_work.entries.pop() },
+    (snapshot) => { snapshot.r2.instances[0].local_work.entries[1].name = localWorkNames[0] },
+    (snapshot) => { snapshot.r2.instances[0].local_work.entries[0].name = "EXCLUDED_LOCAL_SECRET" },
+    (snapshot) => { snapshot.r2.instances[0].local_work.entries[0].calls = "1" },
+    (snapshot) => { snapshot.r2.instances[0].local_work.entries[0].input_bytes = "01" },
+    (snapshot) => { snapshot.r2.instances[0].local_work.entries[0].output_bytes = "0" },
+    (snapshot) => { snapshot.r2.instances[0].local_work.entries[5].input_bytes = "1" },
+    (snapshot) => { snapshot.r2.instances[0].local_work.entries[0].latency_log2_us[1] = "0" },
+    (snapshot) => { snapshot.r2.instances[0].local_work.entries[0].latency_max_ns = "99999" },
+    (snapshot) => { snapshot.measurement.r2_local.calls = "private-secret-metadata" },
+    (snapshot) => { delete snapshot.measurement.r2_local },
+    (snapshot) => { snapshot.r2.instances[0].local_work = null },
+  ]
+  for (const mutate of malformed) {
+    const altered = structuredClone(after)
+    mutate(altered)
+    const result = deltaNativeSnapshots(before, altered)
+    assert.equal(result.complete, true, "optional local failure must preserve the existing raw qualification")
+    assert.equal(result.r2.instances[0].local_work.complete, false)
+    assert.doesNotMatch(JSON.stringify(result), /private-secret-metadata/u)
+    assert.deepEqual(result.r2.instances[0].raw_api, delta.r2.instances[0].raw_api)
+  }
+  for (const endpoint of [before, after]) endpoint.r2.instances[0].local_work = null
+  const disabled = deltaNativeSnapshots(before, after)
+  assert.equal(disabled.complete, true)
+  assert.equal(disabled.r2.instances[0].local_work.status, "unavailable")
+  assert.equal(disabled.r2.instances[0].local_work.complete, false)
+  assert.equal(disabled.r2.instances[0].local_work.entries, undefined, "disabled evidence cannot be fabricated as zero work")
+
+  const hugeBefore = localWorkSnapshot(2), hugeAfter = localWorkSnapshot(5)
+  hugeBefore.r2.instances[0].local_work.entries[0].input_bytes = "9007199254740993"
+  hugeAfter.r2.instances[0].local_work.entries[0].input_bytes = "9007199254745090"
+  assert.equal(deltaNativeSnapshots(hugeBefore, hugeAfter).r2.instances[0].local_work.entries[0].input_bytes, "4097")
+  const advanced = localWorkSnapshot(5)
+  advanced.r2.instances[0].local_work.entries[0].latency_max_ns = "1500"
+  const maximum = deltaNativeSnapshots(localWorkSnapshot(2), advanced).r2.instances[0].local_work.entries[0]
+  assert.equal(maximum.latency_max_ns_end, "1500")
+  assert.equal(maximum.exact_phase_max_ns, "unavailable")
+  const idle = deltaNativeSnapshots(localWorkSnapshot(2), localWorkSnapshot(2)).r2.instances[0].local_work.entries[0]
+  assert.equal(idle.calls, "0")
+  assert.equal(idle.latency_max_ns_end, "1000")
+  const openedBefore = localWorkSnapshot(0)
+  openedBefore.r2.instances = []
+  const opened = deltaNativeSnapshots(openedBefore, localWorkSnapshot(5)).r2.instances[0]
+  assert.equal(opened.opened_during_phase, true)
+  assert.equal(opened.local_work.entries[0].calls, "5", "a genuinely new instance has an explicit zero local baseline")
+  const badBaseline = localWorkSnapshot(2)
+  badBaseline.r2.instances[0].local_work.saturated = true
+  const baselineFailure = deltaNativeSnapshots(badBaseline, localWorkSnapshot(5))
+  assert.equal(baselineFailure.complete, true)
+  assert.equal(baselineFailure.r2.instances[0].local_work.complete, false)
+  const mixed = (calls) => {
+    const snapshot = localWorkSnapshot(calls)
+    snapshot.r2.instances[0].local_work.entries = localWorkNames.map((name, index) => ({
+      name, calls: String(calls), success: String(index === 6 && calls === 5 ? 3 : calls), error: index === 6 && calls === 5 ? "1" : "0", cancelled: index === 6 && calls === 5 ? "1" : "0",
+      elapsed_ns: String(calls * 1000), input_bytes: String(calls * (index === 1 ? 32 : index < 5 ? 4096 : 0)), output_bytes: String(calls * (index === 0 ? 32 : index === 1 ? 65 : index < 5 ? 4096 : 0)),
+      latency_max_ns: "1000", latency_log2_us: ["0", String(calls), ...Array(30).fill("0")],
+    }))
+    return snapshot
+  }
+  const allRows = deltaNativeSnapshots(mixed(2), mixed(5)).r2.instances[0].local_work
+  assert.equal(allRows.complete, true)
+  assert.equal(allRows.entries[1].input_bytes, "96")
+  assert.equal(allRows.entries[1].output_bytes, "195")
+  for (const row of allRows.entries.slice(2, 5)) assert.deepEqual([row.input_bytes, row.output_bytes], ["12288", "12288"])
+  for (const row of allRows.entries.slice(5)) assert.deepEqual([row.input_bytes, row.output_bytes], ["0", "0"])
+  assert.deepEqual([allRows.entries[6].success, allRows.entries[6].error, allRows.entries[6].cancelled], ["1", "1", "1"])
+  for (const reset of ["input_bytes", "latency_max_ns"]) {
+    const endpoint = localWorkSnapshot(5)
+    endpoint.r2.instances[0].local_work.entries[0][reset] = reset === "input_bytes" ? "1" : "999"
+    const result = deltaNativeSnapshots(localWorkSnapshot(2), endpoint)
+    assert.equal(result.complete, true)
+    assert.equal(result.r2.instances[0].local_work.status, "invalid", `${reset} reset at otherwise valid endpoints must be rejected independently`)
+    assert.equal(result.r2.instances[0].local_work.complete, false)
+  }
+}
+
 function rawApiInstance(calls, id = "19") {
   return {
     id, puts: String(calls), gets: "0", deletes: "0", reconciles: "0", successes: String(calls), errors: "0",
@@ -1423,7 +1576,7 @@ async function testSteadyGenerationsRejectDroppedWrites() {
 }
 if (process.argv.includes("--diagnostics-only")) {
   const failures = []
-  for (const test of [testStorageDriverFieldDeltas, testStorageFamilyMetadata, testStoragePhaseDiagnostics, testRawObjectStorePhaseDiagnostics, testRawQualificationArtifact, testQualificationProviderCoverage, testObserverEndpointsExcludeSnapshotWork, testQualificationArtifact]) {
+  for (const test of [testStorageDriverFieldDeltas, testStorageFamilyMetadata, testStoragePhaseDiagnostics, testRawObjectStorePhaseDiagnostics, testObjectStoreLocalPhaseDiagnostics, testRawQualificationArtifact, testQualificationProviderCoverage, testObserverEndpointsExcludeSnapshotWork, testQualificationArtifact]) {
     try { await test(); console.log(`${test.name}: PASS`) }
     catch (error) { failures.push(test.name); console.error(`${test.name}: FAIL`, error) }
   }
@@ -1437,6 +1590,7 @@ await testStoragePhaseDiagnostics()
 await testStorageDriverFieldDeltas()
 await testStorageFamilyMetadata()
 await testRawObjectStorePhaseDiagnostics()
+await testObjectStoreLocalPhaseDiagnostics()
 await testObserverEndpointsExcludeSnapshotWork()
 await testOzoneMetricsReachAllNodeProcesses()
 await testErrors()

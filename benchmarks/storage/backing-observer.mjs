@@ -10,10 +10,12 @@ const LIMIT_KEYS = ["Memory", "MemorySwap", "NanoCpus", "CpuQuota", "CpuPeriod",
 const FACTORY_OBSERVERS = new WeakMap()
 
 class ObserverFault extends Error {
-  constructor(code) { super(code); this.code = code }
+  constructor(code, identityIssue) { super(code); this.code = code; this.identityIssue = identityIssue }
 }
-const fault = (code) => { throw new ObserverFault(code) }
+const fault = (code, identityIssue) => { throw new ObserverFault(code, identityIssue) }
 const issueCode = (error) => error instanceof ObserverFault ? error.code : "observer_transport_failure"
+const issueCodes = (error) => error instanceof ObserverFault && error.code === "stats_identity" && ["stats_identity_missing", "stats_identity_type", "stats_identity_mismatch"].includes(error.identityIssue)
+  ? [error.code, error.identityIssue] : [issueCode(error)]
 const defaultClock = () => ({ now: () => performance.now(), utc: () => new Date().toISOString(), cpu: () => process.cpuUsage(), setTimeout, clearTimeout })
 
 function validateClock(clock) {
@@ -47,7 +49,8 @@ export function parseEngineJSON(text) {
     return JSON.parse(text, (_key, value, context) => {
       if (typeof value !== "number") return value
       if (typeof context?.source !== "string") fault("lossless_json_runtime_unavailable")
-      return context.source
+      // Identity fields must retain their JSON type; counters retain exact tokens.
+      return _key === "id" || _key === "Id" || LABEL_KEYS.has(_key) ? value : context.source
     })
   } catch (error) {
     if (error instanceof ObserverFault) throw error
@@ -103,8 +106,10 @@ function deviceCounters(entries, maxEntries) {
   if (!Array.isArray(entries) || entries.length > maxEntries) fault("device_entries_cap")
   const selected = new Map()
   for (const entry of entries) {
-    if (!["Read", "Write"].includes(entry?.op)) continue
-    const key = `${uint(entry.major)}:${uint(entry.minor)}:${entry.op}`
+    const operation = entry?.op === "read" || entry?.op === "Read" ? "Read"
+      : entry?.op === "write" || entry?.op === "Write" ? "Write" : null
+    if (operation === null) continue
+    const key = `${uint(entry.major)}:${uint(entry.minor)}:${operation}`
     if (selected.has(key)) fault("duplicate_device_key")
     selected.set(key, uint(entry.value))
   }
@@ -129,7 +134,7 @@ function networkCounters(input, maximum) {
 }
 
 export function projectStats(input, cid, maxEntries = HARD_CAPS.maxDeviceEntries, maxNetworkInterfaces = HARD_CAPS.maxNetworkInterfaces) {
-  if (input?.id !== cid) fault("stats_identity")
+  if (input?.id !== cid) fault("stats_identity", input?.id === undefined ? "stats_identity_missing" : typeof input.id !== "string" ? "stats_identity_type" : "stats_identity_mismatch")
   const cpu = input.cpu_stats || {}
   return {
     cid, read: input.read, read_ns: timestamp(input.read),
@@ -214,11 +219,14 @@ export function summarizeInterval(allowlist, before, after, metadata = {}) {
 
 async function deadlineCall(operation, clock, deadline, controller, parentSignal) {
   if (clock.now() >= deadline) { controller.abort(); fault("request_deadline") }
-  let timer, onAbort
+  let timer, onAbort, onControllerAbort
   const cancellation = new Promise((_resolve, reject) => {
-    timer = clock.setTimeout(() => { controller.abort(); reject(new ObserverFault("request_deadline")) }, deadline - clock.now())
+    onControllerAbort = () => reject(controller.signal.reason instanceof ObserverFault ? controller.signal.reason : new ObserverFault("observer_aborted"))
+    controller.signal.addEventListener("abort", onControllerAbort, { once: true })
+    if (controller.signal.aborted) onControllerAbort()
+    timer = clock.setTimeout(() => { reject(new ObserverFault("request_deadline")); controller.abort() }, deadline - clock.now())
     if (parentSignal) {
-      onAbort = () => { controller.abort(); reject(new ObserverFault("observer_aborted")) }
+      onAbort = () => { reject(new ObserverFault("observer_aborted")); controller.abort() }
       if (parentSignal.aborted) onAbort()
       else parentSignal.addEventListener("abort", onAbort, { once: true })
     }
@@ -229,6 +237,7 @@ async function deadlineCall(operation, clock, deadline, controller, parentSignal
     return value
   } finally {
     clock.clearTimeout(timer)
+    controller.signal.removeEventListener("abort", onControllerAbort)
     if (onAbort) parentSignal.removeEventListener("abort", onAbort)
   }
 }
@@ -257,12 +266,12 @@ export function createBackingObserver({ allowlist, transport, clock = defaultClo
   const reservedBytes = Buffer.byteLength(JSON.stringify({ allowlist: expected, caps: limits })) + 4096
   if (reservedBytes > limits.maxJournalBytes) fault("receipt_base_cap")
   const started = clock.now(), ownerDeadline = started + limits.ownerTimeoutMs
-  const identities = new Map(), active = new Map(), lastStats = new Map(), phases = new Map()
+  const identities = new Map(), active = new Map(), lastStats = new Map(), phases = new Map(), captures = new Set()
   const issues = new Set(), journal = []
-  const cost = { requests: 0, response_bytes: 0, wall_ms: 0, cpu_user_us: 0, cpu_system_us: 0 }
-  let version, closed = false, stopped = false, boundaries = 0, droppedEntries = 0, journalBytes = 0, terminal, finalizedAt, finalReceipt
+  const cost = { requests: 0, response_bytes: 0, wall_ms: 0, cpu_user_us: 0, cpu_system_us: 0, peak_in_flight: 0 }
+  let version, negotiation, finalizing, closed = false, stopped = false, boundaries = 0, droppedEntries = 0, journalBytes = 0, terminal, finalizedAt, finalReceipt
   let claimedBy, finalizedBy
-  const issue = (error) => { issues.add(issueCode(error)) }
+  const issue = (error) => { for (const code of issueCodes(error)) issues.add(code) }
   const append = (entry) => {
     const bytes = Buffer.byteLength(JSON.stringify(entry)) + 1
     if (journalBytes + bytes > limits.maxJournalBytes - reservedBytes) { issues.add("journal_bytes_cap"); droppedEntries += 1; return false }
@@ -281,6 +290,7 @@ export function createBackingObserver({ allowlist, transport, clock = defaultClo
     cost.requests += 1
     const handle = { controller, utc: clock.utc() }
     active.set(key, handle)
+    cost.peak_in_flight = Math.max(cost.peak_in_flight, active.size)
     let work
     try {
       const value = await deadlineCall(() => {
@@ -292,10 +302,10 @@ export function createBackingObserver({ allowlist, transport, clock = defaultClo
           let bytes = 0
           for await (const chunk of response.body) {
             if (controller.signal.aborted) fault("observer_aborted")
-            if (clock.now() > deadline) { controller.abort(); fault("request_deadline") }
+            if (clock.now() > deadline) { controller.abort(new ObserverFault("request_deadline")); fault("request_deadline") }
             if (!(chunk instanceof Uint8Array)) fault("response_chunk")
             bytes += chunk.byteLength; cost.response_bytes += chunk.byteLength
-            if (bytes > limits.maxResponseBytes) { controller.abort(); fault("response_bytes_cap") }
+            if (bytes > limits.maxResponseBytes) { controller.abort(new ObserverFault("response_bytes_cap")); fault("response_bytes_cap") }
             hash.update(chunk); chunks.push(Buffer.from(chunk))
           }
           return { value: parseEngineJSON(Buffer.concat(chunks).toString("utf8")), sha256: hash.digest("hex"), bytes }
@@ -318,14 +328,17 @@ export function createBackingObserver({ allowlist, transport, clock = defaultClo
   }
   async function negotiate(signal) {
     if (version) return
-    const response = await request("/version", undefined, signal)
-    const input = response.value
-    const parse = (value) => { const match = /^1\.(\d{2})$/.exec(value || ""); if (!match) fault("api_version"); return Number(match[1]) }
-    const maximum = Math.min(51, parse(input.ApiVersion)), minimum = Math.max(41, parse(input.MinAPIVersion))
-    if (input.Os !== "linux") fault("unsupported_platform")
-    if (minimum > maximum) fault("unsupported_api_version")
-    version = `1.${maximum}`
-    append({ type: "version", api_version: version, mode: "stream=false;one-shot=true", platform: "linux", body_sha256: response.sha256 })
+    negotiation ??= (async () => {
+      const response = await request("/version", undefined, signal)
+      const input = response.value
+      const parse = (value) => { const match = /^1\.(\d{2})$/.exec(value || ""); if (!match) fault("api_version"); return Number(match[1]) }
+      const maximum = Math.min(51, parse(input.ApiVersion)), minimum = Math.max(41, parse(input.MinAPIVersion))
+      if (input.Os !== "linux") fault("unsupported_platform")
+      if (minimum > maximum) fault("unsupported_api_version")
+      version = `1.${maximum}`
+      append({ type: "version", api_version: version, mode: "stream=false", platform: "linux", body_sha256: response.sha256 })
+    })()
+    await negotiation
   }
   function authorizeMutation(capability) {
     if (claimedBy && capability !== claimedBy) {
@@ -333,7 +346,13 @@ export function createBackingObserver({ allowlist, transport, clock = defaultClo
       fault("observer_mutation_outside_session")
     }
   }
-  async function captureBoundary(metadata, capability) {
+  function captureBoundary(metadata, capability) {
+    const pending = captureOwnedBoundary(metadata, capability)
+    captures.add(pending)
+    pending.then(() => captures.delete(pending), () => captures.delete(pending))
+    return pending
+  }
+  async function captureOwnedBoundary(metadata, capability) {
     authorizeMutation(capability)
     const boundary = { id: name(metadata.id), kind: metadata.kind === "idle" ? "idle" : "phase", complete: true, samples: [], issues: [] }
     if (closed || ++boundaries > limits.maxBoundaries) {
@@ -343,7 +362,9 @@ export function createBackingObserver({ allowlist, transport, clock = defaultClo
     }
     try { await negotiate(metadata.signal) }
     catch (error) { issue(error); boundary.complete = false; boundary.issues.push(issueCode(error)); append({ type: "boundary", ...boundary }); return boundary }
-    for (const entry of expected) {
+    // Only distinct owned CIDs fan out (at most16); each inspect→stats chain
+    // remains serial, and all success/error results fold in allowlist order.
+    const results = await Promise.all(expected.map(async (entry) => {
       try {
         if (lastStats.has(entry.cid) && clock.now() - lastStats.get(entry.cid) < 1000) fault("sample_interval_cap")
         const inspected = await request(`/v${version}/containers/${entry.cid}/json`, entry.cid, metadata.signal)
@@ -351,30 +372,43 @@ export function createBackingObserver({ allowlist, transport, clock = defaultClo
         if (identities.has(entry.cid) && JSON.stringify(identities.get(entry.cid)) !== JSON.stringify(identity)) fault("identity_drift")
         identities.set(entry.cid, identity)
         lastStats.set(entry.cid, clock.now())
-        const sampled = await request(`/v${version}/containers/${entry.cid}/stats?stream=false&one-shot=true`, entry.cid, metadata.signal)
+        const sampled = await request(`/v${version}/containers/${entry.cid}/stats?stream=false`, entry.cid, metadata.signal)
         const stats = projectStats(sampled.value, entry.cid, limits.maxDeviceEntries, limits.maxNetworkInterfaces)
-        boundary.samples.push({ cid: entry.cid, identity, stats, inspect_body_sha256: inspected.sha256, stats_body_sha256: sampled.sha256, inspect_window: inspected.window, stats_window: sampled.window })
-      } catch (error) { issue(error); boundary.complete = false; boundary.issues.push(issueCode(error)) }
+        return { sample: { cid: entry.cid, identity, stats, inspect_body_sha256: inspected.sha256, stats_body_sha256: sampled.sha256, inspect_window: inspected.window, stats_window: sampled.window } }
+      } catch (error) { return { error } }
+    }))
+    for (const result of results) {
+      if (result.sample) boundary.samples.push(result.sample)
+      else { issue(result.error); boundary.complete = false; boundary.issues.push(...issueCodes(result.error)) }
     }
     append({ type: "boundary", ...boundary })
     return structuredClone(boundary)
   }
   async function finalize(metadata, capability) {
     authorizeMutation(capability)
+    if (finalizing) return await finalizing
     if (closed) return receipt()
     finalizedAt = clock.now()
     if (finalizedAt > ownerDeadline) issues.add("owner_deadline")
     closed = true
-    for (const { controller } of active.values()) controller.abort()
-    if (active.size) issues.add("unsettled_request_at_finalization")
-    if (phases.size) issues.add("unclosed_phase")
-    terminal = terminalProjection(metadata, issues.size === 0 && droppedEntries === 0)
-    finalReceipt = receipt()
-    return receipt()
+    // Assign the shared finalization before abort callbacks can re-enter it.
+    finalizing = Promise.resolve().then(async () => {
+      if (active.size) issues.add("unsettled_request_at_finalization")
+      for (const { controller } of active.values()) controller.abort()
+      // Abort retires each bounded wrapper even if an injected transport
+      // ignores its signal. Any unsettled underlying work stays in active
+      // and invalidates the receipt; it is never reported as zero traffic.
+      await Promise.allSettled([...captures])
+      if (phases.size) issues.add("unclosed_phase")
+      terminal = terminalProjection(metadata, issues.size === 0 && droppedEntries === 0)
+      finalReceipt = receipt()
+      return receipt()
+    })
+    return await finalizing
   }
   function receipt() {
     if (finalReceipt) return structuredClone(finalReceipt)
-    return structuredClone({ schema: "mount-rs.backing-observer.v1", complete: issues.size === 0 && droppedEntries === 0 && Boolean(terminal), api_version: version ?? null, allowlist: expected, caps: limits, journal, journal_bytes: journalBytes, dropped_entries: droppedEntries, issues: [...issues], terminal: terminal ? { ...terminal, safe_to_continue_pair: terminal.safe_to_continue_pair && issues.size === 0 } : null, cost: { ...cost, owner_lifetime_ms: Math.max(0, (finalizedAt ?? clock.now()) - started), cpu_scope: "process_cpu_during_observer_calls; overlapping_work_not_isolated" }, daemon_overhead: "unisolated", retention: "selected_projections_and_raw_body_sha256; raw_bodies_discarded" })
+    return structuredClone({ schema: "mount-rs.backing-observer.v1", complete: issues.size === 0 && droppedEntries === 0 && Boolean(terminal), api_version: version ?? null, allowlist: expected, caps: limits, journal, journal_bytes: journalBytes, dropped_entries: droppedEntries, issues: [...issues], terminal: terminal ? { ...terminal, safe_to_continue_pair: terminal.safe_to_continue_pair && issues.size === 0 } : null, cost: { ...cost, in_flight: active.size, owner_lifetime_ms: Math.max(0, (finalizedAt ?? clock.now()) - started), wall_scope: "inclusive_request_windows; concurrent_windows_overlap; not_exclusive_hook_wall", cpu_scope: "inclusive_process_cpu_during_observer_calls; overlapping_work_not_isolated" }, daemon_overhead: "unisolated", retention: "selected_projections_and_raw_body_sha256; raw_bodies_discarded" })
   }
   const observer = {
     captureBoundary, receipt, finalize,

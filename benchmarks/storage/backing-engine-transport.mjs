@@ -5,7 +5,7 @@ const MAX_REQUESTS = 257
 const MAX_RESPONSE_BYTES = 1_048_576
 const CID = /^[a-f0-9]{64}$/
 const INSPECT = /^\/v1\.(4[1-9]|5[01])\/containers\/([a-f0-9]{64})\/json$/
-const STATS = /^\/v1\.(4[1-9]|5[01])\/containers\/([a-f0-9]{64})\/stats\?stream=false&one-shot=true$/
+const STATS = /^\/v1\.(4[1-9]|5[01])\/containers\/([a-f0-9]{64})\/stats\?stream=false$/
 
 class EngineTransportError extends Error {
   constructor(code) {
@@ -54,12 +54,13 @@ export function createBackingEngineTransport(input) {
     throw failure("engine_request_contract")
   }
 
-  let active = false
+  const active = new Set()
   let dispatched = 0
   async function request(input) {
     validateRoute(input, cids)
-    if (active || dispatched >= MAX_REQUESTS) throw failure("engine_request_contract")
-    active = true
+    const key = input.cid ?? "version"
+    if (active.has(key) || active.size >= cids.size || dispatched >= MAX_REQUESTS) throw failure("engine_request_contract")
+    active.add(key)
     dispatched++
     const { path, signal, maxResponseBytes } = input
     let outgoing
@@ -94,7 +95,7 @@ export function createBackingEngineTransport(input) {
     function finish() {
       if (finished) return
       finished = true
-      active = false
+      active.delete(key)
       signal.removeEventListener("abort", abort)
       if (incoming && !incoming.destroyed) incoming.destroy()
       if (outgoing && !outgoing.destroyed) outgoing.destroy()

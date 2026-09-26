@@ -180,7 +180,7 @@ function engineResponse(path, clock) {
     HostConfig: { Memory: 0, MemorySwap: -1, NanoCpus: 0, CpuQuota: -1, CpuPeriod: 0, CpuShares: 0, CpusetCpus: "", PidsLimit: 0 },
     Mounts: [{ Source: "EXCLUDED_MOCK_SECRET" }],
   }
-  assert.match(path, /\/stats\?stream=false&one-shot=true$/)
+  assert.match(path, /\/stats\?stream=false$/)
   return {
     id: cid, read: clock.utc(),
     cpu_stats: { cpu_usage: { total_usage: 1000 + clock.now() * 1000 }, system_cpu_usage: 1000 + clock.now() * 10000, online_cpus: 4 },
@@ -783,6 +783,58 @@ test("pure healthy modeled projector reaches native join and complete evidence w
   assert.equal(baseline.live_measurement_qualified, true, "pure modeled branch coverage only; no real native proof")
   assert.equal(capture.__napiBindingTarget, "storage-benchmark-capture")
   assert.equal(Object.keys(require.cache).some((path) => path.endsWith(".node")), false)
+})
+
+test("pilot retains optional local work with fixed labels independently of raw qualification", () => {
+  const { benchmark, identity } = healthyModeledProjectionInput()
+  const instance = benchmark.providers[0].storageDiagnostics.phases[0].native.r2.instances[0]
+  const names = ["sha256.digest", "block_id.encode", "copy.upload_payload", "copy.cache_insert", "copy.return_vec", "cache.lock_acquire", "put.follower_wait"]
+  const baseline = pilot.projectPilotRecord(benchmark, identity)
+  benchmark.providers[0].storageDiagnostics.phases[0].native.measurement.r2_local = structuredClone(diagnostics.OBJECT_STORE_LOCAL_MEASUREMENT)
+  instance.local_work = { status: "observed", complete: true, schema: "mount-rs.object-store-local.v1", scope: "one_object_store_block_store_instance",
+    saturated_start: false, saturated_end: false, in_flight_start: "0", in_flight_end: "0", private: "EXCLUDED_LOCAL_SECRET",
+    entries: names.map((name, index) => {
+      const calls = 2
+      return { name, calls: String(calls), success: index === 6 ? "0" : String(calls), error: index === 6 ? "1" : "0", cancelled: index === 6 ? "1" : "0", elapsed_ns: String(calls * 1000), input_bytes: String(calls * (index === 1 ? 32 : index < 5 ? 4096 : 0)), output_bytes: String(calls * (index === 0 ? 32 : index === 1 ? 65 : index < 5 ? 4096 : 0)),
+        latency_max_ns_start: "0", latency_max_ns_end: calls ? "1000" : "0", exact_phase_max_ns: "unavailable", latency_log2_us: ["0", String(calls), ...Array(30).fill("0")], private: "EXCLUDED_LOCAL_SECRET" }
+    }) }
+  const projected = pilot.projectPilotRecord(benchmark, identity)
+  const local = projected.native_phases.phases[1].raw_instances[0].local_work
+  assert.equal(local?.status, "observed", "pilot must retain optional local counters")
+  assert.equal(local.complete, true)
+  assert.deepEqual(local.entries.map((row) => row.name), names)
+  assert.equal(local.entries[0].input_bytes, "8192")
+  assert.equal(local.entries[0].output_bytes, "64")
+  assert.equal(local.entries[1].output_bytes, "130")
+  assert.equal(local.entries[4].output_bytes, "8192")
+  assert.deepEqual([local.entries[6].error, local.entries[6].cancelled], ["1", "1"])
+  assert.equal(JSON.stringify(projected).includes("EXCLUDED_LOCAL_SECRET"), false)
+  assert.equal(projected.live_measurement_qualified, baseline.live_measurement_qualified, "local metrics do not alter the established raw qualification gate")
+  const raw = projected.native_phases.phases[1].raw_instances[0]
+  const { local_work: _local, ...existingRaw } = raw
+  const { local_work: _baselineLocal, ...baselineRaw } = baseline.native_phases.phases[1].raw_instances[0]
+  assert.deepEqual(existingRaw, baselineRaw)
+  for (const metadata of [undefined, { schema: "EXCLUDED_LOCAL_SECRET" }]) {
+    benchmark.providers[0].storageDiagnostics.phases[0].native.measurement.r2_local = metadata
+    const missingMetadata = pilot.projectPilotRecord(benchmark, identity)
+    assert.equal(missingMetadata.native_phases.phases[1].raw_instances[0].local_work.status, "invalid", "local rows alone cannot establish their measurement provenance")
+    assert.equal(missingMetadata.native_phases.phases[1].raw_instances[0].local_work.complete, false)
+    assert.equal(missingMetadata.live_measurement_qualified, baseline.live_measurement_qualified)
+    assert.equal(JSON.stringify(missingMetadata).includes("EXCLUDED_LOCAL_SECRET"), false)
+  }
+  benchmark.providers[0].storageDiagnostics.phases[0].native.measurement.r2_local = structuredClone(diagnostics.OBJECT_STORE_LOCAL_MEASUREMENT)
+  instance.local_work.entries.push({ ...instance.local_work.entries[0], name: names[0], private: "EXCLUDED_LOCAL_SECRET" })
+  const duplicate = pilot.projectPilotRecord(benchmark, identity)
+  assert.equal(duplicate.native_phases.phases[1].raw_instances[0].local_work.status, "invalid")
+  assert.equal(duplicate.native_phases.phases[1].raw_instances[0].local_work.complete, false)
+  assert.equal(duplicate.native_phases.phases[1].raw_instances[0].local_work.entries[0].calls, null)
+  assert.equal(duplicate.live_measurement_qualified, baseline.live_measurement_qualified)
+  assert.equal(JSON.stringify(duplicate).includes("EXCLUDED_LOCAL_SECRET"), false)
+  instance.local_work = { status: "unavailable", complete: false, issues: ["EXCLUDED_LOCAL_SECRET"] }
+  const unavailable = pilot.projectPilotRecord(benchmark, identity)
+  assert.equal(unavailable.native_phases.phases[1].raw_instances[0].local_work.status, "unavailable")
+  assert.equal(unavailable.native_phases.phases[1].raw_instances[0].local_work.entries, undefined)
+  assert.equal(JSON.stringify(unavailable).includes("EXCLUDED_LOCAL_SECRET"), false)
 })
 
 for (const schema of ["unsupported", "missing"]) test(`pure modeled ${schema} backing schema stays unavailable and cannot qualify`, () => {

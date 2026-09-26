@@ -6,7 +6,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { createBackingObserver } from "./backing-observer.mjs"
 import { createBackingEngineTransport } from "./backing-engine-transport.mjs"
-import { STORAGE_OPERATION_NAMES, validateRawPhaseDiagnostics } from "./diagnostics.mjs"
+import { OBJECT_STORE_LOCAL_NAMES, STORAGE_OPERATION_NAMES, validateLocalPhaseDiagnostics, validateRawPhaseDiagnostics } from "./diagnostics.mjs"
 
 export const OUTPUT_CAP = 8_388_608
 export const OUTCOME_RESERVE = 16_384
@@ -227,6 +227,23 @@ function projectOutcome(benchmark) {
     native_quiescent: typeof provider?.backingObserver?.terminal?.native_quiescent === "boolean" ? provider.backingObserver.terminal.native_quiescent : null,
     owned_operations_settled: typeof provider?.backingObserver?.terminal?.owned_operations_settled === "boolean" ? provider.backingObserver.terminal.owned_operations_settled : null }
 }
+function projectLocalWork(local, measurement) {
+  if (!object(local) || local.status === "unavailable") return { status: "unavailable", complete: false }
+  let valid = false
+  try { validateLocalPhaseDiagnostics(local, measurement); valid = true } catch {}
+  const fields = ["calls", "success", "error", "cancelled", "elapsed_ns", "input_bytes", "output_bytes", "latency_max_ns_start", "latency_max_ns_end"]
+  return { status: valid ? "observed" : "invalid", complete: valid,
+    schema: local.schema === "mount-rs.object-store-local.v1" ? local.schema : null,
+    scope: local.scope === "one_object_store_block_store_instance" ? local.scope : null,
+    saturated_start: typeof local.saturated_start === "boolean" ? local.saturated_start : null,
+    saturated_end: typeof local.saturated_end === "boolean" ? local.saturated_end : null,
+    in_flight_start: decimal(local.in_flight_start), in_flight_end: decimal(local.in_flight_end),
+    entries: OBJECT_STORE_LOCAL_NAMES.map((name, index) => {
+      const row = valid ? local.entries[index] : null
+      return { name, ...Object.fromEntries(fields.map((field) => [field, decimal(row?.[field])])), exact_phase_max_ns: "unavailable",
+        latency_log2_us: Array.from({ length: 32 }, (_, bucket) => decimal(row?.latency_log2_us?.[bucket])) }
+    }) }
+}
 function projectNativePhases(phases) {
   if (!Array.isArray(phases)) return { status: "unavailable", phases: [] }
   return { status: "observed", scope: "inclusive_nested_provider_driver_counters; not_sql_wire_or_physical_iops", phases: phaseNames.map((name) => {
@@ -247,6 +264,7 @@ function projectNativePhases(phases) {
       instance_count: allInstances === null ? null : allInstances.length,
       omitted_instances: allInstances === null ? null : Math.max(0, allInstances.length - 16) }
     const instances = (allInstances?.slice(0, 16) || []).map((instance) => ({ id: decimal(instance.id),
+      local_work: projectLocalWork(instance.local_work, phase.native?.measurement?.r2_local),
       claims: Object.fromEntries(claims.map((field) => [field, decimal(instance.raw_api?.claims?.[field])])),
       cache_hits: decimal(instance.cache_hits), conditional_conflicts: decimal(instance.conditional_conflicts),
       entries: rawNames.map((operation) => { const row = instance.raw_api?.entries?.find((entry) => entry.name === operation)

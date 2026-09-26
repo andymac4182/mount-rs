@@ -98,31 +98,57 @@ fn r2_diagnostics() -> Value {
         let Some(store) = entry.store.upgrade() else {
             return false;
         };
-        let stats = store.stats();
-        instances.push(json!({"id":entry.id,"puts":stats.puts,"gets":stats.gets,
-            "deletes":stats.deletes,"reconciles":stats.reconciles,
-            "successes":stats.successes,"errors":stats.errors,
-            "duration_ms_total":stats.duration_ms_total,"duration_ms_max":stats.duration_ms_max,
-            "bytes_read":stats.bytes_read,"bytes_written":stats.bytes_written,
-            "conditional_conflicts":stats.conditional_conflicts,
-            "id_collision_exhausted":stats.id_collision_exhausted,
-            "retry_exhausted":stats.retry_exhausted,"cache_hits":stats.cache_hits,
-            "raw_api":stats.raw_api.map(|raw| json!({
-                "schema":raw.schema,"scope":raw.scope,"saturated":raw.saturated,
-                "in_flight":raw.in_flight,"pending_claims":raw.pending_claims,
-                "claims":{"leader_claims":raw.claims.leader_claims,"leader_success":raw.claims.leader_success,
-                    "leader_error":raw.claims.leader_error,"leader_cancelled":raw.claims.leader_cancelled,
-                    "follower_claims":raw.claims.follower_claims,"follower_success":raw.claims.follower_success,
-                    "follower_error":raw.claims.follower_error,"follower_cancelled":raw.claims.follower_cancelled},
-                "entries":raw.entries.iter().map(|entry| json!({"name":entry.name,
-                    "calls":entry.calls,"success":entry.success,"error":entry.error,"cancelled":entry.cancelled,
-                    "elapsed_ns":entry.elapsed_ns,"latency_max_ns":entry.latency_max_ns,
-                    "attempted_bytes":entry.attempted_bytes,"confirmed_bytes":entry.confirmed_bytes,
-                    "returned_bytes":entry.returned_bytes,"latency_log2_us":entry.latency_log2_us})).collect::<Vec<_>>()
-            }))}));
+        instances.push(r2_instance_diagnostics(entry.id, store.stats()));
         true
     });
     json!({"scope":"process_live_instances","instances":instances,"internal_successful_retries":"unavailable"})
+}
+
+fn r2_instance_diagnostics(id: u64, stats: mount_rs_r2::R2BlockStoreStats) -> Value {
+    json!({"id":id,"puts":stats.puts,"gets":stats.gets,
+    "deletes":stats.deletes,"reconciles":stats.reconciles,
+    "successes":stats.successes,"errors":stats.errors,
+    "duration_ms_total":stats.duration_ms_total,"duration_ms_max":stats.duration_ms_max,
+    "bytes_read":stats.bytes_read,"bytes_written":stats.bytes_written,
+    "conditional_conflicts":stats.conditional_conflicts,
+    "id_collision_exhausted":stats.id_collision_exhausted,
+    "retry_exhausted":stats.retry_exhausted,"cache_hits":stats.cache_hits,
+    "raw_api":stats.raw_api.map(|raw| json!({
+        "schema":raw.schema,"scope":raw.scope,"saturated":raw.saturated,
+        "in_flight":raw.in_flight,"pending_claims":raw.pending_claims,
+        "claims":{"leader_claims":raw.claims.leader_claims,"leader_success":raw.claims.leader_success,
+            "leader_error":raw.claims.leader_error,"leader_cancelled":raw.claims.leader_cancelled,
+            "follower_claims":raw.claims.follower_claims,"follower_success":raw.claims.follower_success,
+            "follower_error":raw.claims.follower_error,"follower_cancelled":raw.claims.follower_cancelled},
+        "entries":raw.entries.iter().map(|entry| json!({"name":entry.name,
+            "calls":entry.calls,"success":entry.success,"error":entry.error,"cancelled":entry.cancelled,
+            "elapsed_ns":entry.elapsed_ns,"latency_max_ns":entry.latency_max_ns,
+            "attempted_bytes":entry.attempted_bytes,"confirmed_bytes":entry.confirmed_bytes,
+            "returned_bytes":entry.returned_bytes,"latency_log2_us":entry.latency_log2_us})).collect::<Vec<_>>()
+    })),
+    "local_work":stats.local_work.map(|local| json!({
+        "schema":local.schema,"scope":local.scope,"saturated":local.saturated,
+        "in_flight":local.in_flight,
+        "entries":local.entries.iter().map(|entry| json!({"name":entry.name,
+            "calls":entry.calls,"success":entry.success,"error":entry.error,"cancelled":entry.cancelled,
+            "elapsed_ns":entry.elapsed_ns,"latency_max_ns":entry.latency_max_ns,
+            "input_bytes":entry.input_bytes,"output_bytes":entry.output_bytes,
+            "latency_log2_us":entry.latency_log2_us})).collect::<Vec<_>>()
+    }))})
+}
+
+fn r2_local_measurement() -> Value {
+    json!({
+        "schema":"mount-rs.object-store-local.v1","scope":"live_registered_split_r2_block_store_instances",
+        "calls":"fixed_local_adapter_work_invocations; not_backend_requests_or_allocations",
+        "duration":"inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap",
+        "input_bytes":"entered_digest_encoding_and_copy_input; waits_zero",
+        "output_bytes":"completed_digest_32_id_65_and_actual_copy_bytes; waits_zero",
+        "cache_lock_scope":"mutex_acquisition_including_wait; excludes_lock_hold_and_lru_work",
+        "latency_max":"cumulative_per_instance; exact_phase_max_unavailable",
+        "adapter_compression":"not_used",
+        "excluded":["backing_marker_prepare_and_verify","concurrent_prefix_probes","qualification_and_preflight","unregistered_rust_factories_and_mount_r2","client_internal_work","cache_key_and_lru_work","upload_claim_setup"]
+    })
 }
 
 fn stringify_counters(value: &mut Value) {
@@ -268,6 +294,7 @@ pub fn storage_diagnostics() -> String {
                 "reconcile_listing":"unavailable",
                 "excluded":["backing_marker_prepare_and_verify","concurrent_prefix_probes","qualification_and_preflight","unregistered_rust_factories_and_mount_r2","internal_client_retries"]
             },
+            "r2_local":r2_local_measurement(),
             "unavailable":{
                 "http_attempts":"unavailable",
                 "internal_successful_retries":"unavailable",
@@ -5856,6 +5883,70 @@ mod tests {
         let snapshot: Value = serde_json::from_str(&exported).unwrap();
         let instance = &snapshot["r2"]["instances"][0];
         assert!(
+            instance["local_work"].is_object(),
+            "enabled live R2 instance must export local_work"
+        );
+        assert_eq!(
+            instance["local_work"]["schema"],
+            "mount-rs.object-store-local.v1"
+        );
+        assert_eq!(
+            instance["local_work"]["scope"],
+            "one_object_store_block_store_instance"
+        );
+        assert_eq!(instance["local_work"]["in_flight"], "0");
+        assert_eq!(instance["local_work"]["saturated"], false);
+        let local_names = instance["local_work"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            local_names,
+            [
+                "sha256.digest",
+                "block_id.encode",
+                "copy.upload_payload",
+                "copy.cache_insert",
+                "copy.return_vec",
+                "cache.lock_acquire",
+                "put.follower_wait"
+            ]
+        );
+        for row in instance["local_work"]["entries"].as_array().unwrap() {
+            for field in [
+                "calls",
+                "success",
+                "error",
+                "cancelled",
+                "elapsed_ns",
+                "latency_max_ns",
+                "input_bytes",
+                "output_bytes",
+            ] {
+                assert_eq!(row[field], "0");
+            }
+            assert_eq!(
+                row["latency_log2_us"].as_array().unwrap(),
+                &vec![json!("0"); 32]
+            );
+        }
+        assert_eq!(
+            snapshot["measurement"]["r2_local"],
+            json!({
+                "schema":"mount-rs.object-store-local.v1","scope":"live_registered_split_r2_block_store_instances",
+                "calls":"fixed_local_adapter_work_invocations; not_backend_requests_or_allocations",
+                "duration":"inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap",
+                "input_bytes":"entered_digest_encoding_and_copy_input; waits_zero",
+                "output_bytes":"completed_digest_32_id_65_and_actual_copy_bytes; waits_zero",
+                "cache_lock_scope":"mutex_acquisition_including_wait; excludes_lock_hold_and_lru_work",
+                "latency_max":"cumulative_per_instance; exact_phase_max_unavailable",
+                "adapter_compression":"not_used",
+                "excluded":["backing_marker_prepare_and_verify","concurrent_prefix_probes","qualification_and_preflight","unregistered_rust_factories_and_mount_r2","client_internal_work","cache_key_and_lru_work","upload_claim_setup"]
+            })
+        );
+        assert!(
             instance["raw_api"].is_object(),
             "enabled live R2 instance must export raw_api"
         );
@@ -5948,6 +6039,30 @@ mod tests {
         assert_eq!(extremes["id"], "18446744073709551615");
         assert_eq!(extremes["claims"]["leader_claims"], "9007199254740993");
         assert_eq!(extremes["latency_log2_us"][0], "18446744073709551615");
+        let store = R2_DIAGNOSTICS.get().unwrap().lock().unwrap()[0]
+            .store
+            .upgrade()
+            .unwrap();
+        let mut stats = store.stats();
+        let local = stats.local_work.as_mut().unwrap();
+        local.entries[0].input_bytes = u64::MAX;
+        local.entries[0].output_bytes = 9_007_199_254_740_993;
+        local.entries[0].latency_log2_us[31] = u64::MAX;
+        let mut actual_instance = r2_instance_diagnostics(u64::MAX, stats);
+        stringify_counters(&mut actual_instance);
+        assert_eq!(actual_instance["id"], "18446744073709551615");
+        assert_eq!(
+            actual_instance["local_work"]["entries"][0]["input_bytes"],
+            "18446744073709551615"
+        );
+        assert_eq!(
+            actual_instance["local_work"]["entries"][0]["output_bytes"],
+            "9007199254740993"
+        );
+        assert_eq!(
+            actual_instance["local_work"]["entries"][0]["latency_log2_us"][31],
+            "18446744073709551615"
+        );
         for private in [
             "private-test-prefix",
             "private-test-bucket",
@@ -5960,6 +6075,46 @@ mod tests {
         // Fixed counters/metadata only; retained to check the actual serializer
         // contract against the Node consumer without any backing-store I/O.
         eprintln!("NATIVE_R2_RAW_JSON {exported}");
+    }
+
+    #[test]
+    #[ignore = "run isolated with MOUNT_RS_PROFILE_IO unset and --ignored --exact"]
+    fn disabled_r2_local_diagnostics_do_not_register_instances() {
+        assert!(!storage::enabled(), "run with MOUNT_RS_PROFILE_IO unset");
+        let options = JsChunkedStoreOptions {
+            kind: "r2".to_owned(),
+            uri: None,
+            key: Some("private-disabled-prefix".to_owned()),
+            durable: None,
+            lease_authority: None,
+            authority_prefix: None,
+            endpoint: Some("http://127.0.0.1:9878".to_owned()),
+            bucket: Some("private-disabled-bucket".to_owned()),
+            region: None,
+            access_key_id: Some("private-disabled-key".to_owned()),
+            secret_access_key: Some("private-disabled-secret".to_owned()),
+        };
+        let (_blocks, _) = block_on(build_block_store(&options)).unwrap();
+        let snapshot: Value = serde_json::from_str(&storage_diagnostics()).unwrap();
+        assert_eq!(snapshot["r2"]["instances"], json!([]));
+        let unregistered = R2BlockStore::from_config_with_durable(
+            &R2Config {
+                endpoint: "http://127.0.0.1:9878".to_owned(),
+                bucket: "private-disabled-bucket".to_owned(),
+                access_key_id: "private-disabled-key".to_owned(),
+                secret_access_key: "private-disabled-secret".to_owned(),
+                state_key: "unused".to_owned(),
+            },
+            "private-disabled-prefix",
+            true,
+        )
+        .unwrap();
+        let actual_instance = r2_instance_diagnostics(1, unregistered.stats());
+        assert_eq!(actual_instance["raw_api"], Value::Null);
+        assert_eq!(actual_instance["local_work"], Value::Null);
+        eprintln!(
+            "NATIVE_LOCAL_DISABLED_CONTROL registered_instances=0 raw_api=null local_work=null service_calls=0"
+        );
     }
 
     #[test]

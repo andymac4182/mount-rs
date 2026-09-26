@@ -186,6 +186,24 @@ fn snapshot(blocks: &ObjectStoreBlockStore) -> RawApiSnapshot {
 fn row<'a>(raw: &'a RawApiSnapshot, name: &str) -> &'a RawApiEntry {
     raw.entries.iter().find(|x| x.name == name).unwrap()
 }
+fn local_snapshot(blocks: &ObjectStoreBlockStore) -> LocalWorkSnapshot {
+    blocks.stats().local_work.unwrap()
+}
+fn local_row<'a>(local: &'a LocalWorkSnapshot, name: &str) -> &'a LocalWorkEntry {
+    local.entries.iter().find(|row| row.name == name).unwrap()
+}
+fn local_quiescent(local: &LocalWorkSnapshot) {
+    assert!(!local.saturated);
+    assert_eq!(local.in_flight, 0);
+    assert_eq!(
+        local.entries.each_ref().map(|row| row.name),
+        LOCAL_WORK_NAMES
+    );
+    for row in &local.entries {
+        assert_eq!(row.calls, row.success + row.error + row.cancelled);
+        assert_eq!(row.calls, row.latency_log2_us.iter().sum::<u64>());
+    }
+}
 fn quiescent(raw: &RawApiSnapshot) {
     assert_eq!(raw.in_flight, 0);
     assert_eq!(raw.pending_claims, 0);
@@ -225,6 +243,19 @@ async fn held_identical_puts_have_one_actual_upload_and_exact_follower_claims() 
     assert_eq!(held.pending_claims, N as u64);
     assert_eq!(held.in_flight, 1);
     assert_eq!(store.puts.load(Ordering::SeqCst), 1);
+    let local = local_snapshot(&blocks);
+    assert_eq!(local_row(&local, "sha256.digest").calls, N as u64);
+    assert_eq!(
+        local_row(&local, "block_id.encode").output_bytes,
+        65 * N as u64
+    );
+    assert_eq!(local_row(&local, "copy.upload_payload").calls, 1);
+    assert_eq!(
+        local_row(&local, "copy.upload_payload").output_bytes,
+        bytes.len() as u64
+    );
+    assert_eq!(local_row(&local, "put.follower_wait").calls, (N - 1) as u64);
+    assert_eq!(local.in_flight, (N - 1) as u64);
     let put = row(&held, "put_opts.block_create");
     assert_eq!(
         (
@@ -268,6 +299,31 @@ async fn held_identical_puts_have_one_actual_upload_and_exact_follower_claims() 
         )
     );
     assert_eq!(raw.claims.leader_success, 1);
+    let local = local_snapshot(&blocks);
+    local_quiescent(&local);
+    assert_eq!(
+        local_row(&local, "sha256.digest").input_bytes,
+        N as u64 * bytes.len() as u64
+    );
+    assert_eq!(
+        local_row(&local, "sha256.digest").output_bytes,
+        N as u64 * 32
+    );
+    assert_eq!(
+        local_row(&local, "block_id.encode").input_bytes,
+        N as u64 * 32
+    );
+    assert_eq!(local_row(&local, "copy.cache_insert").calls, 1);
+    assert_eq!(
+        local_row(&local, "copy.cache_insert").output_bytes,
+        bytes.len() as u64
+    );
+    assert_eq!(local_row(&local, "copy.return_vec").calls, 0);
+    assert_eq!(local_row(&local, "cache.lock_acquire").calls, 1);
+    assert_eq!(
+        local_row(&local, "put.follower_wait").success,
+        (N - 1) as u64
+    );
     for name in [
         "get.conflict_verify",
         "body_read.conflict_verify",
@@ -340,6 +396,14 @@ async fn committed_lost_reply_is_not_replayed_or_confirmed_and_explicit_retry_ve
     let raw = snapshot(&blocks);
     assert_eq!(row(&raw, "put_opts.block_create").confirmed_bytes, 0);
     quiescent(&raw);
+    let local = local_snapshot(&blocks);
+    local_quiescent(&local);
+    assert_eq!(
+        local_row(&local, "copy.upload_payload").output_bytes,
+        bytes.len() as u64
+    );
+    assert_eq!(local_row(&local, "copy.cache_insert").calls, 0);
+    assert_eq!(local_row(&local, "copy.return_vec").calls, 0);
     blocks.put(bytes).await.unwrap();
     let raw = snapshot(&blocks);
     quiescent(&raw);
@@ -369,6 +433,17 @@ async fn cancelled_leader_errors_surviving_follower_but_dropped_follower_is_canc
     assert_eq!(row(&raw, "put_opts.block_create").cancelled, 1);
     assert_eq!(store.puts.load(Ordering::SeqCst), 1);
     assert!(blocks.inflight_puts.lock().unwrap().is_empty());
+    let local = local_snapshot(&blocks);
+    local_quiescent(&local);
+    let wait = local_row(&local, "put.follower_wait");
+    assert_eq!(
+        (wait.calls, wait.success, wait.error, wait.cancelled),
+        (2, 0, 1, 1)
+    );
+    assert_eq!((wait.input_bytes, wait.output_bytes), (0, 0));
+    assert_eq!(local_row(&local, "sha256.digest").success, 3);
+    assert_eq!(local_row(&local, "copy.upload_payload").success, 1);
+    assert_eq!(local_row(&local, "copy.cache_insert").calls, 0);
 }
 #[tokio::test]
 async fn held_body_is_cancelled_after_successful_get() {
@@ -395,8 +470,27 @@ async fn direct_read_migration_delete_and_reconcile_preserve_distinct_api_outcom
     let id = store.preseed(b"read", b"read").await;
     let blocks = adapter(store.clone(), true);
     blocks.get(&id).await.unwrap();
+    let cold = local_snapshot(&blocks);
+    assert_eq!(local_row(&cold, "copy.return_vec").calls, 1);
+    assert_eq!(local_row(&cold, "copy.return_vec").output_bytes, 4);
+    assert_eq!(local_row(&cold, "sha256.digest").calls, 1);
+    assert_eq!(local_row(&cold, "copy.cache_insert").calls, 1);
     blocks.get(&id).await.unwrap();
+    let hot = local_snapshot(&blocks);
+    assert_eq!(local_row(&hot, "copy.return_vec").calls, 2);
+    assert_eq!(local_row(&hot, "copy.return_vec").output_bytes, 8);
+    assert_eq!(local_row(&hot, "sha256.digest").calls, 1);
+    assert_eq!(local_row(&hot, "copy.cache_insert").calls, 1);
     blocks.get_for_migration(&id).await.unwrap();
+    let migration = local_snapshot(&blocks);
+    assert_eq!(local_row(&migration, "copy.return_vec").calls, 3);
+    assert_eq!(local_row(&migration, "copy.return_vec").output_bytes, 12);
+    assert_eq!(local_row(&migration, "sha256.digest").calls, 2);
+    assert_eq!(local_row(&migration, "copy.cache_insert").calls, 1);
+    assert_eq!(
+        local_row(&migration, "cache.lock_acquire").calls,
+        local_row(&hot, "cache.lock_acquire").calls
+    );
     blocks.delete(&id).await.unwrap();
     let id = store.preseed(b"stale", b"stale").await;
     store.delete_not_found.store(true, Ordering::SeqCst);
@@ -417,6 +511,17 @@ async fn direct_read_migration_delete_and_reconcile_preserve_distinct_api_outcom
     assert_eq!(store.gets.load(Ordering::SeqCst), 3);
     assert_eq!(store.heads.load(Ordering::SeqCst), 1);
     assert_eq!(store.deletes.load(Ordering::SeqCst), 2);
+    let local = local_snapshot(&blocks);
+    local_quiescent(&local);
+    assert_eq!(local_row(&local, "sha256.digest").calls, 3);
+    assert_eq!(local_row(&local, "sha256.digest").input_bytes, 13);
+    assert_eq!(local_row(&local, "block_id.encode").output_bytes, 3 * 65);
+    assert_eq!(local_row(&local, "copy.cache_insert").calls, 1);
+    assert_eq!(local_row(&local, "copy.cache_insert").output_bytes, 4);
+    assert_eq!(local_row(&local, "copy.return_vec").calls, 4);
+    assert_eq!(local_row(&local, "copy.return_vec").output_bytes, 17);
+    assert_eq!(local_row(&local, "cache.lock_acquire").calls, 5);
+    assert_eq!(local_row(&local, "copy.upload_payload").calls, 0);
 }
 #[tokio::test]
 async fn backing_marker_calls_are_explicitly_outside_raw_bank() {
@@ -433,6 +538,12 @@ async fn backing_marker_calls_are_explicitly_outside_raw_bank() {
     assert!(store.puts.load(Ordering::SeqCst) > 0);
     assert!(store.gets.load(Ordering::SeqCst) > 0);
     assert!(raw.entries.iter().all(|r| r.calls == 0));
+    assert!(
+        local_snapshot(&blocks)
+            .entries
+            .iter()
+            .all(|row| row.calls == 0)
+    );
 }
 #[tokio::test]
 async fn disabled_injection_keeps_behavior_and_raw_unavailable() {
@@ -441,6 +552,7 @@ async fn disabled_injection_keeps_behavior_and_raw_unavailable() {
     let id = blocks.put(b"disabled").await.unwrap();
     assert_eq!(blocks.get(&id).await.unwrap(), b"disabled");
     assert!(blocks.stats().raw_api.is_none());
+    assert!(blocks.stats().local_work.is_none());
     assert_eq!(store.puts.load(Ordering::SeqCst), 1);
 }
 #[test]
@@ -450,6 +562,10 @@ fn public_constructor_caches_actual_profile_enablement() {
     assert_eq!(
         blocks.stats().raw_api.is_some(),
         std::env::var_os("MOUNT_RS_PROFILE_IO").is_some_and(|v| v == "1")
+    );
+    assert_eq!(
+        blocks.stats().local_work.is_some(),
+        blocks.stats().raw_api.is_some()
     );
 }
 
@@ -512,17 +628,32 @@ fn recorder_updates_allocate_nothing_enabled_or_disabled_with_positive_control()
                 raw.result(&Ok::<_, object_store::Error>(()), 12, 0);
                 let mut claim = ClaimSpan::new(state, Claim::Leader);
                 claim.result(&Ok::<_, FsError>(()));
+                let mut local =
+                    LocalSpan::new(state.map(|state| &state.local), Local::UploadCopy, 12);
+                local.success(12);
+                let mut wait =
+                    LocalSpan::new(state.map(|state| &state.local), Local::FollowerWait, 0);
+                wait.result(&Err::<(), ()>(()), 0);
+                drop(LocalSpan::new(
+                    state.map(|state| &state.local),
+                    Local::FollowerWait,
+                    0,
+                ));
             }
         });
         assert_eq!(allocations, 0);
     }
     let (_, snapshots) = allocation_control::count(|| bank.snapshot());
     assert_eq!(snapshots, 0);
+    let (_, local_snapshots) = allocation_control::count(|| bank.local.snapshot());
+    assert_eq!(local_snapshots, 0);
     eprintln!(
-        "RAW_METRICS_ALLOCATION_CONTROL enabled_startup_allocations={startup} positive_control_allocations={positive} enabled_update_allocations=0 disabled_update_allocations=0 fixed_raw_snapshot_allocations=0 raw_span_size={} claim_span_size={} raw_bank_size={}",
+        "RAW_METRICS_ALLOCATION_CONTROL enabled_startup_allocations={startup} positive_control_allocations={positive} enabled_update_allocations=0 disabled_update_allocations=0 fixed_raw_snapshot_allocations=0 fixed_local_snapshot_allocations=0 raw_span_size={} claim_span_size={} raw_bank_size={} local_span_size={} local_bank_size={}",
         std::mem::size_of::<RawSpan<'_>>(),
         std::mem::size_of::<ClaimSpan<'_>>(),
-        std::mem::size_of::<RawState>()
+        std::mem::size_of::<RawState>(),
+        std::mem::size_of::<LocalSpan<'_>>(),
+        std::mem::size_of::<LocalState>()
     );
 }
 #[tokio::test]
@@ -532,6 +663,7 @@ async fn integrity_failure_keeps_raw_success_bytes_and_unpolled_drop_has_no_call
     let blocks = adapter(store.clone(), true);
     drop(blocks.put(b"unpolled"));
     assert!(snapshot(&blocks).entries.iter().all(|r| r.calls == 0));
+    assert!(local_snapshot(&blocks).entries.iter().all(|r| r.calls == 0));
     assert!(blocks.get(&id).await.is_err());
     assert!(blocks.get_for_migration(&id).await.is_err());
     let raw = snapshot(&blocks);
@@ -540,9 +672,94 @@ async fn integrity_failure_keeps_raw_success_bytes_and_unpolled_drop_has_no_call
     assert_eq!(row(&raw, "body_read.block_read").returned_bytes, 8);
     assert_eq!(row(&raw, "body_read.migration").returned_bytes, 8);
     assert!(blocks.cache.get(&id.0).is_none());
+    let local = local_snapshot(&blocks);
+    local_quiescent(&local);
+    assert_eq!(local_row(&local, "sha256.digest").success, 2);
+    assert_eq!(local_row(&local, "sha256.digest").output_bytes, 64);
+    assert_eq!(local_row(&local, "copy.cache_insert").calls, 0);
+    assert_eq!(local_row(&local, "copy.return_vec").calls, 0);
     assert!(blocks.delete(&BlockId(block_id(b"missing"))).await.is_err());
     let raw = snapshot(&blocks);
     quiescent(&raw);
     assert_eq!(row(&raw, "head.direct_delete").error, 1);
     assert_eq!(row(&raw, "delete.direct").calls, 0);
+}
+
+#[tokio::test]
+async fn poisoned_cache_acquisition_counts_error_and_preserves_remote_fallback() {
+    let store = ApiStore::new();
+    let id = store.preseed(b"fallback", b"fallback").await;
+    let blocks = adapter(store.clone(), true);
+    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = blocks.cache.state.lock().unwrap();
+        panic!("owned cache poison control");
+    }));
+    assert!(poisoned.is_err());
+    assert_eq!(blocks.get(&id).await.unwrap(), b"fallback");
+    let local = local_snapshot(&blocks);
+    local_quiescent(&local);
+    let lock = local_row(&local, "cache.lock_acquire");
+    assert_eq!((lock.calls, lock.error, lock.success), (2, 2, 0));
+    assert_eq!(local_row(&local, "copy.cache_insert").calls, 0);
+    assert_eq!(local_row(&local, "copy.return_vec").output_bytes, 8);
+    assert_eq!(row(&snapshot(&blocks), "get.block_read").success, 1);
+    assert_eq!(store.gets.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn held_real_cache_mutex_keeps_local_span_active_until_acquisition() {
+    let blocks = adapter(ApiStore::new(), true);
+    let guard = blocks.cache.state.lock().unwrap();
+    let reader = blocks.clone();
+    let worker =
+        std::thread::spawn(move || reader.cache.get_with_metrics("missing", reader.local()));
+    let started = std::time::Instant::now();
+    let held = loop {
+        let local = local_snapshot(&blocks);
+        if local.in_flight == 1 || started.elapsed() > Duration::from_secs(5) {
+            break local;
+        }
+        std::thread::yield_now();
+    };
+    drop(guard);
+    assert!(worker.join().unwrap().is_none());
+    assert_eq!(held.in_flight, 1);
+    assert_eq!(local_row(&held, "cache.lock_acquire").success, 0);
+    let local = local_snapshot(&blocks);
+    local_quiescent(&local);
+    let lock = local_row(&local, "cache.lock_acquire");
+    assert_eq!((lock.calls, lock.success), (1, 1));
+    assert!(lock.elapsed_ns > 0);
+    assert_eq!(lock.latency_max_ns, lock.elapsed_ns);
+    assert_eq!((lock.input_bytes, lock.output_bytes), (0, 0));
+    assert_eq!(local_row(&local, "copy.return_vec").calls, 0);
+}
+
+#[tokio::test]
+async fn legacy_migration_copy_does_not_invent_digest_or_cache_work() {
+    let store = ApiStore::new();
+    let id = BlockId("b0123456789abcdef0123456789abcdef".to_owned());
+    store
+        .inner
+        .put(
+            &ObjectPath::from(format!("private/{}", id.0)),
+            PutPayload::from(b"legacy".to_vec()),
+        )
+        .await
+        .unwrap();
+    let blocks = adapter(store, true);
+    assert_eq!(blocks.get_for_migration(&id).await.unwrap(), b"legacy");
+    let local = local_snapshot(&blocks);
+    local_quiescent(&local);
+    assert_eq!(local_row(&local, "copy.return_vec").calls, 1);
+    assert_eq!(local_row(&local, "copy.return_vec").output_bytes, 6);
+    for name in [
+        "sha256.digest",
+        "block_id.encode",
+        "cache.lock_acquire",
+        "copy.cache_insert",
+        "copy.upload_payload",
+    ] {
+        assert_eq!(local_row(&local, name).calls, 0);
+    }
 }
