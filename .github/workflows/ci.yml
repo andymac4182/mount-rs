@@ -1002,6 +1002,18 @@ jobs:
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-fuse-init.mjs
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-fuse-session.mjs
       - run: pnpm --dir tests/pglite install --frozen-lockfile
+      - name: Verify provider matrix CLI process helper
+        env:
+          MOUNT_RS_TEST_POSIX_GROUP_SIGNALS: '1'
+        run: node --test tests/provider_matrix/cli-run.test.mjs
+      - name: Precompile PGlite provider matrix and Rust CLI
+        # The timed fixture runs the standalone matrix binary, the root CLI,
+        # and two filtered CLI lib tests with these graphs and shared target.
+        timeout-minutes: 15
+        run: |
+          ./scripts/cargo-shared build --locked --manifest-path tests/provider_matrix/Cargo.toml
+          ./scripts/cargo-shared build --locked -p mount-rs-cli
+          ./scripts/cargo-shared test --no-run --lib --locked -p mount-rs-cli
       - name: Verify PGlite integration and restart recovery
         timeout-minutes: 10
         run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" ./scripts/test-pglite.sh
