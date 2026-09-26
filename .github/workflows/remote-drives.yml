@@ -20,6 +20,10 @@ on:
         description: Run the owned durable TiDB and RustFS native backing pilot
         type: boolean
         default: false
+      formal_qualification:
+        description: Run all committed named Kani proof runners with retained per-harness results
+        type: boolean
+        default: false
       owned_engine_socket:
         description: Explicit owned backing pilot Engine socket; requires /var/run/docker.sock
         type: string
@@ -28,7 +32,7 @@ permissions:
   contents: read
 jobs:
   protocol:
-    if: github.event_name != 'workflow_dispatch' || !(inputs.native_qualification || inputs.production_target || inputs.owned_backing_pilot)
+    if: github.event_name != 'workflow_dispatch' || !(inputs.native_qualification || inputs.production_target || inputs.owned_backing_pilot || inputs.formal_qualification)
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
@@ -51,7 +55,7 @@ jobs:
           name: remote-quic-soak-${{ matrix.os }}
           path: remote-quic-soak.log
   native-linux:
-    if: github.event_name != 'workflow_dispatch' || !(inputs.native_qualification || inputs.production_target || inputs.owned_backing_pilot)
+    if: github.event_name != 'workflow_dispatch' || !(inputs.native_qualification || inputs.production_target || inputs.owned_backing_pilot || inputs.formal_qualification)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -63,7 +67,7 @@ jobs:
       - name: Qualify two Drives through the existing Linux NFS adapter
         run: sudo env PATH="$PATH" CARGO_HOME="$HOME/.cargo" RUSTUP_HOME="$HOME/.rustup" CARGO_TARGET_DIR=/tmp/mount-rs-remote-target MOUNT_RS_REMOTE_NATIVE_NFS=1 ./scripts/cargo-shared test --locked -p mount-rs-remote-client --test quic_mount -- --nocapture
   formal:
-    if: github.event_name != 'workflow_dispatch' || !(inputs.native_qualification || inputs.production_target || inputs.owned_backing_pilot)
+    if: github.event_name != 'workflow_dispatch' || !(inputs.native_qualification || inputs.production_target || inputs.owned_backing_pilot || inputs.formal_qualification)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -77,7 +81,7 @@ jobs:
       - name: Verify each remote decision separately
         run: ./scripts/verify-remote-formal
   tidb-scale:
-    if: github.event_name == 'workflow_dispatch' && !(inputs.native_qualification || inputs.production_target || inputs.owned_backing_pilot)
+    if: github.event_name == 'workflow_dispatch' && !(inputs.native_qualification || inputs.production_target || inputs.owned_backing_pilot || inputs.formal_qualification)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -94,7 +98,7 @@ jobs:
           name: remote-tidb-scale
           path: remote-tidb-scale.log
   tidb-saturation:
-    if: github.event_name == 'workflow_dispatch' && inputs.tidb_saturation && !(inputs.native_qualification || inputs.production_target || inputs.owned_backing_pilot)
+    if: github.event_name == 'workflow_dispatch' && inputs.tidb_saturation && !(inputs.native_qualification || inputs.production_target || inputs.owned_backing_pilot || inputs.formal_qualification)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -419,5 +423,260 @@ jobs:
             ${{ env.PILOT_PRIVATE }}/pilot.json
             ${{ env.PILOT_PRIVATE }}/build.json
             ${{ env.PILOT_PRIVATE }}/capacity.json
+          if-no-files-found: error
+          retention-days: 14
+
+  formal-qualification:
+    if: github.event_name == 'workflow_dispatch' && inputs.formal_qualification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_BUILD_JOBS: '1'
+      CARGO_TERM_COLOR: never
+      RUSTUP_TOOLCHAIN: 1.95.0
+      NO_COLOR: '1'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697
+      - name: Bind clean source and derive every named proof invocation
+        run: |
+          set -euo pipefail
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/mount-rs-formal-target"
+          export KANI_HOME="$RUNNER_TEMP/mount-rs-formal-kani"
+          export FORMAL_EVIDENCE="$RUNNER_TEMP/mount-rs-formal-evidence"
+          printf 'CARGO_TARGET_DIR=%s\nKANI_HOME=%s\nFORMAL_EVIDENCE=%s\n' "$CARGO_TARGET_DIR" "$KANI_HOME" "$FORMAL_EVIDENCE" >> "$GITHUB_ENV"
+          mkdir -m 700 "$FORMAL_EVIDENCE"
+          git rev-parse HEAD > "$FORMAL_EVIDENCE/checkout-sha.txt"
+          git status --porcelain=v1 --untracked-files=all > "$FORMAL_EVIDENCE/source-before.txt"
+          test ! -s "$FORMAL_EVIDENCE/source-before.txt"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re, shlex, subprocess, tomllib
+          root = pathlib.Path.cwd()
+          evidence = pathlib.Path(os.environ['FORMAL_EVIDENCE'])
+          digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+          tracked = subprocess.check_output(['git', 'ls-files', '-z', '*.rs', '*Cargo.toml', '*Cargo.lock', 'scripts/verify-*formal', 'scripts/cargo-shared*'], text=True).split('\0')
+          source_hashes = {path: digest(root / path) for path in tracked if path}
+          (evidence / 'source-sha256.json').write_text(json.dumps(source_hashes, sort_keys=True) + '\n')
+          (evidence / 'root-lock-before.toml').write_bytes((root / 'Cargo.lock').read_bytes())
+          def package_for(path):
+              for directory in path.parents:
+                  manifest = directory / 'Cargo.toml'
+                  if manifest.is_file():
+                      value = tomllib.loads(manifest.read_text()).get('package', {}).get('name')
+                      if value: return value
+                  if directory == root: break
+              raise ValueError('proof source has no package identity')
+          declarations = {}
+          pattern = re.compile(r'#\[kani::proof\](?:\s*#\[[^]]+\])*\s*(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?fn\s+(\w+)\s*\(')
+          for relative in source_hashes:
+              if not relative.endswith('.rs'): continue
+              path = root / relative
+              content = path.read_text()
+              for match in pattern.finditer(content):
+                  start = content.find('{', match.end())
+                  if start < 0: raise ValueError('proof body unavailable')
+                  depth, end = 1, start + 1
+                  while depth and end < len(content):
+                      depth += (content[end] == '{') - (content[end] == '}')
+                      end += 1
+                  if depth: raise ValueError('proof body boundary unavailable')
+                  identity = package_for(path) + '/' + match.group(1)
+                  if identity in declarations: raise ValueError('duplicate proof declaration')
+                  declarations[identity] = {'source': relative, 'source_sha256': source_hashes[relative], 'line': content.count('\n', 0, match.start()) + 1, 'declared_covers': len(re.findall(r'kani::cover!\s*\(', content[start:end])), 'declared_unwind': re.findall(r'#\[kani::unwind\(([^)]+)\)\]', match.group())}
+          # Both grammar proofs call check_block_id_grammar, whose four covers
+          # are outside the proof bodies. Direct lexical counts are provenance,
+          # not an exact bound on Kani's transitive/expanded cover properties.
+          helper_covers = {'mount-rs-object-store-blocks/legacy_block_id_grammar_is_lowercase_hex': 4, 'mount-rs-object-store-blocks/content_block_id_grammar_is_lowercase_hex': 4}
+          for identity, value in declarations.items():
+              value['required_covers_minimum'] = max(value['declared_covers'], helper_covers.get(identity, 0))
+          baseline = set(["mount-rs-core/single_extent_validation","mount-rs-core/two_extent_validation","mount-rs-core/three_extent_validation","mount-rs-core/inode_publication_preserves_structural_attributes","mount-rs-core/directory_link_count_boundaries","mount-rs-core/namespace_path_boundaries","mount-rs-core/decoded_truncation_requires_write","mount-rs-core/linux_wire_open_bits_preserve_access_and_truncate_guard","mount-rs-core/read_lease_ttl_milliseconds_are_checked","mount-rs-napi/native_numeric_open_bits_preserve_host_rights_and_truncate_guard","mount-rs-9p/bounded_payload_range_stays_within_wire_input","mount-rs-9p/bounded_frame_size_classification_matches_wire_bounds","mount-rs-fuse/reply_frame_len_bounds","mount-rs-nfs/stateid_tokens_are_injective","mount-rs-nfs/anonymous_access_uses_other_mode_bits","mount-rs-nfs/anonymous_access4_uses_other_mode_bits","mount-rs-nfs/nonroot_access_selects_owner_primary_supplemental_and_other","mount-rs-nfs/nonroot_access4_selects_owner_primary_supplemental_and_other","mount-rs-nfs/supported_access4_mask_respects_request_and_object_kind","mount-rs-nfs/var_opaque_frame_bounds","mount-rs-nfs/var_opaque_short_wire_payload","mount-rs-nfs/var_opaque_short_wire_decision","mount-rs-nfs/var_opaque_all_wire_prefixes","mount-rs-nfs/record_fragment_total_never_wraps_or_exceeds_limit","mount-rs-nfs/record_pending_budget_matches_exact_wire_envelope","mount-rs-s3/part_number_marker_boundary_does_not_wrap","mount-rs-s3/decoded_chunk_total_never_wraps_or_exceeds_limits","mount-rs-s3/chunk_payload_and_footer_stay_within_body","mount-rs-chunked/reacquired_writer_fence_is_exactly_next","mount-rs-webdav/timeout_and_remaining_are_wide_before_clamping","mount-rs-webdav/canonical_scope_and_two_lock_conflicts","mount-rs-sqlite-vfs/sqlite_io_extent_matches_signed_range","mount-rs-sqlite/view_pin_renewal_requires_exact_live_token_and_checked_expiry","mount-rs-sqlite/signed_writer_lease_boundaries_are_checked","mount-rs-pglite/view_pin_renewal_requires_exact_live_token_and_checked_expiry","mount-rs-pglite/signed_writer_lease_boundaries_are_checked","mount-rs-object-store-blocks/reconciliation_deletes_only_unreferenced_direct_old_blocks","mount-rs-object-store-blocks/legacy_block_id_grammar_is_lowercase_hex","mount-rs-object-store-blocks/content_block_id_grammar_is_lowercase_hex","mount-rs-fskit-bridge/abi_request_slice_preconditions","mount-rs-fskit-bridge/frame_header_classification_precedes_body_copy","mount-rs-foundationdb/writer_takeover_is_fenced_and_checked","mount-rs-foundationdb/writer_renewal_requires_exact_live_fence_and_checked_expiry","mount-rs-foundationdb/authority_time_sample_is_monotonic_and_bounds_forward_jumps","mount-rs-service/remote_grant_requires_exact_scope_and_all_claims","mount-rs-service/remote_handle_admission_is_fenced_and_bounded","mount-rs-remote-protocol/binary_io_lengths_bounded_before_allocation","mount-rs-service/generic_control_charge_cannot_wrap_or_exceed_default_admission","mount-rs-remote-protocol/remote_readonly_flags_require_explicit_nonmutating_values","mount-rs-service/remote_read_grants_cannot_authorize_mutations","mount-rs-service/remote_handles_require_exact_drive_and_revision","mount-rs-core/cache_reservations_never_wrap_or_exceed_budget"])
+          invocations = []
+          for runner in ['verify-formal', 'verify-remote-formal', 'verify-cache-formal']:
+              cwd = '.'
+              for line in (root / 'scripts' / runner).read_text().splitlines():
+                  if line.strip() == 'cd transports/mount-rs-fskit': cwd = 'transports/mount-rs-fskit'
+                  if line.strip() == ')': cwd = '.'
+                  if 'scripts/cargo-shared kani ' not in line: continue
+                  args = shlex.split(line)
+                  if args[0] not in ['./scripts/cargo-shared', '../../scripts/cargo-shared'] or args[1] != 'kani' or args.count('--harness') != 1:
+                      raise ValueError('unsupported named runner invocation')
+                  package = args[args.index('-p') + 1] if '-p' in args else package_for(root / cwd / 'src/lib.rs')
+                  identity = package + '/' + args[args.index('--harness') + 1]
+                  if identity not in declarations: raise ValueError('named invocation has no proof declaration')
+                  invocations.append({'runner': runner, 'cwd': cwd, 'args': args, 'identity': identity, **declarations[identity]})
+          selected = {value['identity'] for value in invocations}
+          if len(selected) != len(invocations) or not baseline.issubset(selected) or selected != set(declarations):
+              raise ValueError('named runner coverage differs from committed proof inventory')
+          (evidence / 'inventory.json').write_text(json.dumps({'schema': 'mount-rs.formal-inventory.v1', 'checkout_sha': (evidence / 'checkout-sha.txt').read_text().strip(), 'baseline_proofs': len(baseline), 'expected_proofs': len(invocations), 'invocations': invocations}, indent=2, sort_keys=True) + '\n')
+          PY
+      - name: Install bindgen prerequisites and extract the pinned FDB client without starting a server
+        run: |
+          set -euo pipefail
+          sudo apt-get update > "$FORMAL_EVIDENCE/prerequisites.log" 2>&1
+          sudo apt-get install -y --no-install-recommends clang libclang-dev >> "$FORMAL_EVIDENCE/prerequisites.log" 2>&1
+          client_image='foundationdb/foundationdb:7.4.7@sha256:c13aed110fe17c6feb678f5dadc73dbcc2dbc42f2a3e952a877c116f63f052d3'
+          client_dir="$RUNNER_TEMP/mount-rs-formal-fdb-client"
+          owner="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -m 700 "$client_dir"
+          cid=''
+          cleanup() {
+            status=$?
+            if [ -n "$cid" ]; then
+              identity=$(docker container inspect "$cid" --format '{{.Id}} {{.State.Running}} {{index .Config.Labels "mount-rs.formal.run"}}' 2>> "$FORMAL_EVIDENCE/prerequisites.log") || identity=''
+              if [ "$identity" = "$cid false $owner" ] && docker rm "$cid" >> "$FORMAL_EVIDENCE/prerequisites.log" 2>&1; then
+                printf 'removed\n' > "$FORMAL_EVIDENCE/fdb-client-cleanup.txt"
+              else
+                printf 'failed\n' > "$FORMAL_EVIDENCE/fdb-client-cleanup.txt"
+                status=1
+              fi
+            else
+              printf 'unavailable\n' > "$FORMAL_EVIDENCE/fdb-client-cleanup.txt"
+            fi
+            exit "$status"
+          }
+          trap cleanup EXIT
+          docker pull --platform linux/amd64 "$client_image" >> "$FORMAL_EVIDENCE/prerequisites.log" 2>&1
+          docker image inspect "$client_image" --format '{{.Id}}' > "$FORMAL_EVIDENCE/fdb-image-id.txt"
+          cid=$(docker create --platform linux/amd64 --label "mount-rs.formal.run=$owner" "$client_image" 2>> "$FORMAL_EVIDENCE/prerequisites.log")
+          test -n "$cid"
+          docker cp "$cid:/usr/lib/libfdb_c.so" "$client_dir/libfdb_c.so" >> "$FORMAL_EVIDENCE/prerequisites.log" 2>&1
+          printf 'FDB_CLIENT_LIB_PATH=%s\nLD_LIBRARY_PATH=%s\n' "$client_dir" "$client_dir" >> "$GITHUB_ENV"
+          sha256sum "$client_dir/libfdb_c.so" > "$FORMAL_EVIDENCE/fdb-client-sha256.txt"
+          clang --version > "$FORMAL_EVIDENCE/clang-version.txt"
+          dpkg-query -W clang libclang-dev > "$FORMAL_EVIDENCE/bindgen-package-versions.txt"
+      - name: Install exactly Kani 0.68 and retain setup and tool identity
+        id: formal_tools
+        run: |
+          set -euo pipefail
+          rustc --version --verbose > "$FORMAL_EVIDENCE/host-rustc-version.txt"
+          cargo --version --verbose > "$FORMAL_EVIDENCE/host-cargo-version.txt"
+          grep -q '^rustc 1\.95\.0 ' "$FORMAL_EVIDENCE/host-rustc-version.txt"
+          ./scripts/cargo-shared install --version 0.68.0 --locked kani-verifier > "$FORMAL_EVIDENCE/kani-install.log" 2>&1
+          ./scripts/cargo-shared kani setup > "$FORMAL_EVIDENCE/kani-setup.log" 2>&1
+          ./scripts/cargo-shared kani --version > "$FORMAL_EVIDENCE/kani-version.txt" 2>&1
+          grep -q '^Kani Rust Verifier 0\.68\.0 ' "$FORMAL_EVIDENCE/kani-version.txt"
+          grep -q '^CBMC 6\.11\.0$' "$FORMAL_EVIDENCE/kani-version.txt"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, shutil, subprocess
+          evidence = pathlib.Path(os.environ['FORMAL_EVIDENCE'])
+          bundle = pathlib.Path(os.environ['KANI_HOME']) / 'kani-0.68.0'
+          tools = {'installed-kani': pathlib.Path(shutil.which('kani')), 'installed-cargo-kani': pathlib.Path(shutil.which('cargo-kani'))}
+          tools.update({name: bundle / 'bin' / name for name in ['kani-driver', 'kani-compiler', 'cbmc', 'goto-instrument']})
+          tools.update({name: bundle / 'toolchain' / 'bin' / name for name in ['rustc', 'cargo']})
+          receipt = {'schema': 'mount-rs.formal-tools.v1', 'kani_version': '0.68.0', 'cbmc_version': '6.11.0', 'host_rust': '1.95.0', 'kani_toolchain': (bundle / 'rust-toolchain-version').read_text().strip(), 'kani_rustc_build': (bundle / 'rustc-version').read_text().strip(), 'binaries': {name: hashlib.sha256(path.resolve(strict=True).read_bytes()).hexdigest() for name, path in tools.items()}}
+          (evidence / 'tool-identity.json').write_text(json.dumps(receipt, sort_keys=True) + '\n')
+          (evidence / 'kani-rustc-version.txt').write_text(subprocess.check_output([str(bundle / 'toolchain/bin/rustc'), '--version', '--verbose'], text=True))
+          (evidence / 'kani-cargo-version.txt').write_text(subprocess.check_output([str(bundle / 'toolchain/bin/cargo'), '--version', '--verbose'], text=True))
+          PY
+          # Kani 0.68 does not forward --locked to proof builds. Capture the
+          # independent FSKit resolution, then gate both lock digests at exit.
+          ./scripts/cargo-shared generate-lockfile --manifest-path transports/mount-rs-fskit/Cargo.toml > "$FORMAL_EVIDENCE/fskit-lock-generation.log" 2>&1
+          cp transports/mount-rs-fskit/Cargo.lock "$FORMAL_EVIDENCE/fskit-lock-before.toml"
+      - name: Run the unchanged full general proof runner
+        if: ${{ !cancelled() && steps.formal_tools.outcome == 'success' }}
+        run: |
+          status=0
+          PS4='+ ' bash -x ./scripts/verify-formal > "$FORMAL_EVIDENCE/verify-formal.log" 2>&1 || status=$?
+          printf '%s\n' "$status" > "$FORMAL_EVIDENCE/verify-formal.exit"
+          cat "$FORMAL_EVIDENCE/verify-formal.log"
+          exit "$status"
+      - name: Run the unchanged remote proof runner
+        if: ${{ !cancelled() && steps.formal_tools.outcome == 'success' }}
+        run: |
+          status=0
+          PS4='+ ' bash -x ./scripts/verify-remote-formal > "$FORMAL_EVIDENCE/verify-remote-formal.log" 2>&1 || status=$?
+          printf '%s\n' "$status" > "$FORMAL_EVIDENCE/verify-remote-formal.exit"
+          cat "$FORMAL_EVIDENCE/verify-remote-formal.log"
+          exit "$status"
+      - name: Run the unchanged cache proof runner
+        if: ${{ !cancelled() && steps.formal_tools.outcome == 'success' }}
+        run: |
+          status=0
+          PS4='+ ' bash -x ./scripts/verify-cache-formal > "$FORMAL_EVIDENCE/verify-cache-formal.log" 2>&1 || status=$?
+          printf '%s\n' "$status" > "$FORMAL_EVIDENCE/verify-cache-formal.exit"
+          cat "$FORMAL_EVIDENCE/verify-cache-formal.log"
+          exit "$status"
+      - name: Retain per-harness checks, covers, incomplete proofs, locks and source identity
+        if: always() && env.FORMAL_EVIDENCE != ''
+        run: |
+          set -euo pipefail
+          mkdir -p "$FORMAL_EVIDENCE/harnesses"
+          git status --porcelain=v1 --untracked-files=all > "$FORMAL_EVIDENCE/source-after.txt"
+          cp Cargo.lock "$FORMAL_EVIDENCE/root-lock-after.toml"
+          if [ -f transports/mount-rs-fskit/Cargo.lock ]; then cp transports/mount-rs-fskit/Cargo.lock "$FORMAL_EVIDENCE/fskit-lock-after.toml"; fi
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re, shlex
+          evidence = pathlib.Path(os.environ['FORMAL_EVIDENCE'])
+          digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+          inventory_path = evidence / 'inventory.json'
+          if not inventory_path.is_file(): raise SystemExit('proof inventory unavailable; no qualification')
+          inventory = json.loads(inventory_path.read_text())
+          results, unexpected = [], []
+          for runner in ['verify-formal', 'verify-remote-formal', 'verify-cache-formal']:
+              expected = [value for value in inventory['invocations'] if value['runner'] == runner]
+              path = evidence / (runner + '.log')
+              content = path.read_text() if path.is_file() else ''
+              chunks = {}
+              current = None
+              for line in content.splitlines(keepends=True):
+                  if re.match(r'^\+ (?:\./|\.\./\.\./)scripts/cargo-shared kani ', line):
+                      args = shlex.split(line[2:])
+                      matches = [value for value in expected if value['args'] == args]
+                      if len(matches) != 1 or matches[0]['identity'] in chunks:
+                          unexpected.append({'runner': runner, 'command': line.strip()})
+                          current = None
+                      else:
+                          current = matches[0]['identity']
+                          chunks[current] = []
+                  if current is not None: chunks[current].append(line)
+              exit_path = evidence / (runner + '.exit')
+              runner_exit = int(exit_path.read_text().strip()) if exit_path.is_file() else None
+              for value in expected:
+                  text = ''.join(chunks.get(value['identity'], []))
+                  destination = evidence / 'harnesses' / (value['identity'].replace('/', '--') + '.log')
+                  destination.write_text(text if text else 'UNEXECUTED: named runner did not reach this invocation.\n')
+                  # Preserve raw logs/hashes, removing only display SGR codes
+                  # for the pinned Kani renderer's human-readable summaries.
+                  parsed = re.sub(r'\x1b\[[0-9;]*m', '', text)
+                  checks = re.findall(r'^\s*\*\* (\d+) of (\d+) failed(?:\s+\([^\n]*\))?\s*$', parsed, re.M)
+                  covers = re.findall(r'^\s*\*\* (\d+) of (\d+) cover properties satisfied(?:\s+\([^\n]*\))?\s*$', parsed, re.M)
+                  checking = re.findall(r'^Checking harness (.+)\.\.\.$', parsed, re.M)
+                  completion = re.findall(r'^Complete - (\d+) successfully verified harnesses, (\d+) failures, (\d+) total\.$', parsed, re.M)
+                  verification = re.findall(r'^VERIFICATION:- (.+)$', parsed, re.M)
+                  name = value['identity'].split('/', 1)[1]
+                  complete = len(checking) == 1 and checking[0].split('::')[-1] == name and completion == [('1', '0', '1')] and len(checks) == 1 and int(checks[0][0]) == 0 and int(checks[0][1]) > 0 and verification == ['SUCCESSFUL']
+                  minimum = value['required_covers_minimum']
+                  cover_ok = len(covers) == 1 and int(covers[0][0]) == int(covers[0][1]) and int(covers[0][1]) >= minimum if covers else minimum == 0
+                  status = 'verified' if complete and cover_ok else 'incomplete_or_failed' if text else 'unexecuted'
+                  results.append({**value, 'status': status, 'runner_exit_code': runner_exit, 'failed_checks': int(checks[0][0]) if len(checks) == 1 else None, 'checks': int(checks[0][1]) if len(checks) == 1 else None, 'covers_satisfied': int(covers[0][0]) if len(covers) == 1 else 0 if complete else None, 'covers': int(covers[0][1]) if len(covers) == 1 else 0 if complete else None, 'log_sha256': digest(destination)})
+          source_hashes = json.loads((evidence / 'source-sha256.json').read_text())
+          source_unchanged = all(pathlib.Path(path).is_file() and digest(pathlib.Path(path)) == expected for path, expected in source_hashes.items())
+          locks = {}
+          for workspace in ['root', 'fskit']:
+              before, after = evidence / (workspace + '-lock-before.toml'), evidence / (workspace + '-lock-after.toml')
+              locks[workspace] = {'before_sha256': digest(before) if before.is_file() else None, 'after_sha256': digest(after) if after.is_file() else None}
+          target = pathlib.Path(os.environ['CARGO_TARGET_DIR'])
+          models = {str(path.relative_to(target)): digest(path) for path in (target / 'kani').rglob('*') if path.is_file() and not path.is_symlink() and (path.name.endswith('.out') or path.name.endswith('.kani-metadata.json'))}
+          (evidence / 'model-sha256.json').write_text(json.dumps(models, sort_keys=True) + '\n')
+          cleanup_path = evidence / 'fdb-client-cleanup.txt'
+          cleanup_complete = cleanup_path.is_file() and cleanup_path.read_text().strip() == 'removed'
+          tool_path = evidence / 'tool-identity.json'
+          tools = json.loads(tool_path.read_text()) if tool_path.is_file() else {}
+          binary_names = {'installed-kani', 'installed-cargo-kani', 'kani-driver', 'kani-compiler', 'cbmc', 'goto-instrument', 'rustc', 'cargo'}
+          tool_identity_complete = tools.get('schema') == 'mount-rs.formal-tools.v1' and tools.get('kani_version') == '0.68.0' and tools.get('cbmc_version') == '6.11.0' and tools.get('host_rust') == '1.95.0' and all(isinstance(tools.get(key), str) and tools[key] for key in ['kani_toolchain', 'kani_rustc_build']) and isinstance(tools.get('binaries'), dict) and set(tools['binaries']) == binary_names and all(isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value) for value in tools['binaries'].values())
+          verified = len(results) == inventory['expected_proofs'] and all(value['status'] == 'verified' and value['runner_exit_code'] == 0 for value in results) and not unexpected and source_unchanged and not (evidence / 'source-after.txt').read_text().strip() and tool_identity_complete and cleanup_complete and bool(models) and all(value['before_sha256'] is not None and value['before_sha256'] == value['after_sha256'] for value in locks.values())
+          summary = {'schema': 'mount-rs.formal-qualification.v1', 'checkout_sha': inventory['checkout_sha'], 'expected_proofs': inventory['expected_proofs'], 'verified_proofs': sum(value['status'] == 'verified' for value in results), 'qualified': verified, 'source_unchanged': source_unchanged, 'client_cleanup_complete': cleanup_complete, 'tool_identity_complete': tool_identity_complete, 'lock_verification': 'before_and_after_digest; Kani 0.68 does not forward --locked', 'locks': locks, 'unexpected_invocations': unexpected, 'results': results, 'scope': 'bounded symbolic current-source decisions; no provider, kernel, network, durability, cache-fault or production capacity qualification'}
+          (evidence / 'summary.json').write_text(json.dumps(summary, indent=2, sort_keys=True) + '\n')
+          if not verified: raise SystemExit('full current-source proof inventory did not qualify; retained statuses name missing or failed proofs')
+          PY
+      - name: Retain full proof qualification evidence
+        if: always() && env.FORMAL_EVIDENCE != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: remote-formal-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.FORMAL_EVIDENCE }}
           if-no-files-found: error
           retention-days: 14
