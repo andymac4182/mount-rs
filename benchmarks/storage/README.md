@@ -69,11 +69,21 @@ fields needed to interpret failures.
 
 Useful options include `--providers`, `--timeout-ms`,
 `--cleanup-timeout-ms`, `--chunk-size-bytes`, `--payload-seed`, and
-`--network-context`. Use `--require-configured` for a qualification lane that
-must run every requested provider; without it, missing external configuration
-is recorded as an explicit skip and the overall result can remain `ok` for a
-mixed local/provider matrix. A sequential run is explicit with
-`--concurrency 1`.
+`--network-context`. Split providers also accept `--layout inode` and
+`--layout compact`; compact passes `concurrentWrites`, `inodeUpdates`, and
+`compactInodeUpdates` to the public `createChunkedDriver` constructor. Combined
+providers reject either layout before provider setup. Use `--require-configured`
+for a qualification lane that must run every requested provider; without it,
+missing external configuration is recorded as an explicit skip and the overall
+result can remain `ok` for a mixed local/provider matrix. A sequential run is
+explicit with `--concurrency 1`.
+
+Compact provider artifacts distinguish the requested and constructor-selected
+layout from physical metadata evidence. The benchmark records
+`selectionEvidence: "createChunkedDriver-constructor-accepted"` and
+`persistedMarkerEvidence: "not-observed-by-benchmark-runner"`; constructor
+acceptance does not claim that the runner directly inspected a persisted MRC5
+marker.
 
 The PGlite script requires `pnpm --dir tests/pglite install --frozen-lockfile`
 and a built native addon. It starts an isolated real PGlite socket server,

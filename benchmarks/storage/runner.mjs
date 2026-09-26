@@ -95,7 +95,9 @@ export function parseArgs(argv) {
     switch (argument) {
       case "--layout":
         layout = takeValue(argv, index++, argument)
-        if (!["legacy", "inode"].includes(layout)) throw usageError("layout must be legacy or inode")
+        if (!["legacy", "inode", "compact"].includes(layout)) {
+          throw usageError("layout must be legacy, inode, or compact")
+        }
         break
       case "--workload":
         workload = takeValue(argv, index++, argument)
@@ -197,7 +199,7 @@ Usage:
 Options:
   --smoke                  1 MiB, one iteration, concurrency one, local providers
   --sizes LIST             MiB values; defaults to 1,4,10,16 in full mode
-  --layout legacy|inode     metadata layout (default legacy; inode requires split storage)
+  --layout legacy|inode|compact  metadata layout (default legacy; inode/compact require split storage)
   --workload lifecycle|steady-overwrite  create/read/delete or precreated partial overwrite/read
   --iterations N            lifecycle iterations per size (default 2 full, 1 smoke)
   --concurrency N           concurrent lifecycle workers per provider/size (default 1)
@@ -859,14 +861,18 @@ function failedSizeResult(definition, sizeMiBValue, options, operation, error) {
 }
 
 async function runProvider(definition, options, context) {
-  const availability = definition.availability(context.environment)
+  const availability = definition.availability(context.environment, context)
+  const requiredEnvVars =
+    typeof definition.requiredEnvVars === "function"
+      ? definition.requiredEnvVars(context)
+      : definition.requiredEnvVars || []
   const providerRun = {
     ...providerSummary(definition, options.chunkSizeBytes),
     provider: definition.id,
     chunkSizeBytes:
       definition.chunking.algorithm === "fixed-size" ? options.chunkSizeBytes : null,
     status: availability.configured ? "pending" : "skipped",
-    requiredEnvVars: definition.requiredEnvVars || [],
+    requiredEnvVars,
     missingConfiguration: availability.missing || [],
     ...(availability.source ? { oracleSource: availability.source } : {}),
     ...(availability.source
@@ -886,6 +892,16 @@ async function runProvider(definition, options, context) {
       failures: [],
       resource: "not-started",
     },
+    ...(options.layout === "compact"
+      ? {
+          layoutSelection: {
+            requested: "compact",
+            selected: null,
+            selectionEvidence: "provider-constructor-not-yet-accepted",
+            persistedMarkerEvidence: "not-observed-by-benchmark-runner",
+          },
+        }
+      : {}),
   }
   const sizeResults = []
 
@@ -921,6 +937,14 @@ async function runProvider(definition, options, context) {
       "provider setup",
     )
     providerRun.setupMs = performance.now() - setupStarted
+    if (options.layout === "compact") {
+      providerRun.layoutSelection = {
+        requested: "compact",
+        selected: "compact",
+        selectionEvidence: "createChunkedDriver-constructor-accepted",
+        persistedMarkerEvidence: "not-observed-by-benchmark-runner",
+      }
+    }
   } catch (error) {
     providerRun.setupMs = performance.now() - setupStarted
     providerRun.status = "failed"
@@ -1114,8 +1138,11 @@ export async function runBenchmark(options, environment = process.env) {
   }
 
   const runId = makeRunId()
-  if (options.layout === "inode" && selectedIds.some((id) => !id.startsWith("mount-rs-split-"))) {
-    throw usageError("inode layout requires mount-rs split storage providers")
+  if (
+    ["inode", "compact"].includes(options.layout) &&
+    selectedIds.some((id) => !id.startsWith("mount-rs-split-"))
+  ) {
+    throw usageError(`${options.layout} layout requires mount-rs split storage providers`)
   }
   const context = {
     layout: options.layout ?? "legacy",

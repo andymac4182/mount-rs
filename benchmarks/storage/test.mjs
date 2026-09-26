@@ -1,5 +1,7 @@
 import assert from "node:assert/strict"
+import { createRequire } from "node:module"
 import { readFile } from "node:fs/promises"
+import { fileURLToPath } from "node:url"
 
 import {
   validateArtifact,
@@ -17,7 +19,7 @@ import {
   withTimeout,
 } from "./errors.mjs"
 import { foundationDbMetadataOptions, providerById, providerSummary } from "./providers.mjs"
-import { cleanupOwnedPaths, parseArgs, runBenchmark, runSample, runSteadySample } from "./runner.mjs"
+import { cleanupOwnedPaths, helpText, parseArgs, runBenchmark, runSample, runSteadySample } from "./runner.mjs"
 import { computeStats, percentile, round, roundStats } from "./stats.mjs"
 
 async function testStats() {
@@ -136,6 +138,8 @@ async function testDeferredWriteCleanup() {
 
 async function testCli() {
   assert.equal(parseArgs(["--layout", "inode", "--workload", "steady-overwrite"]).layout, "inode")
+  assert.equal(parseArgs(["--layout", "compact"]).layout, "compact")
+  assert.match(helpText(), /--layout legacy\|inode\|compact/u)
   assert.equal(parseArgs(["--workload", "steady-overwrite"]).workload, "steady-overwrite")
   assert.throws(() => parseArgs(["--layout", "unknown"]), /layout/)
   assert.throws(() => parseArgs(["--workload", "unknown"]), /workload/)
@@ -172,6 +176,223 @@ async function testCli() {
   assert.equal(parseArgs(["--require-configured"]).requireConfigured, true)
   assert.throws(() => parseArgs(["--iterations", "0"]), /positive integer/)
   assert.throws(() => parseArgs(["--unknown"]), /unknown argument/)
+}
+
+async function testCompactRejectsNonSplitBeforeProviderIo() {
+  await assert.rejects(
+    runBenchmark(
+      {
+        ...parseArgs([]),
+        layout: "compact",
+        providers: ["mount-rs-memory"],
+      },
+      {},
+    ),
+    (error) => {
+      assert.equal(error.code, "BENCHMARK_USAGE")
+      assert.match(error.message, /compact layout requires mount-rs split storage providers/u)
+      return true
+    },
+  )
+}
+
+async function testSplitFactoryLayoutOptions() {
+  const capturePath = fileURLToPath(new URL("./capture-native.cjs", import.meta.url))
+  const previousNativePath = process.env.NAPI_RS_NATIVE_LIBRARY_PATH
+  process.env.NAPI_RS_NATIVE_LIBRARY_PATH = capturePath
+  try {
+    const environment = {
+      MOUNT_RS_PGLITE_DATABASE_URL: "postgres://pglite.example.test/storage",
+      MOUNT_RS_TIDB_URL: "mysql://tidb.example.test/storage",
+      MOUNT_RS_NAPI_FOUNDATIONDB: "1",
+      MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE: "/owned/fdb.cluster",
+      MOUNT_RS_NAPI_FOUNDATIONDB_SHARED_PROVIDER: "1",
+      MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX: "owned-authority",
+      MOUNT_RS_R2_ENDPOINT: "https://r2.example.test",
+      MOUNT_RS_R2_BUCKET: "bucket",
+      MOUNT_RS_R2_ACCESS_KEY_ID: "access-key",
+      MOUNT_RS_R2_SECRET_ACCESS_KEY: "secret-key",
+    }
+    const definitions = providerById(environment)
+    const splitProviders = [
+      "mount-rs-split-sqlite",
+      "mount-rs-split-pglite",
+      "mount-rs-split-pglite-r2",
+      "mount-rs-split-sqlite-r2",
+      "mount-rs-split-tidb-r2",
+      "mount-rs-split-foundationdb-r2",
+    ]
+    const require = createRequire(import.meta.url)
+    const capture = require(capturePath)
+
+    for (const layout of ["legacy", "inode", "compact"]) {
+      for (const provider of splitProviders) {
+        const before = capture.calls.length
+        const opened = await definitions.get(provider).create({
+          layout,
+          runId: `${layout}-${provider}`,
+          environment,
+          chunkSizeBytes: 65_536,
+        })
+        assert.equal(capture.calls.length, before + 1, `${provider} must construct one NAPI driver`)
+        const options = capture.calls.at(-1)
+        const selected = Object.fromEntries(
+          ["concurrentWrites", "inodeUpdates", "compactInodeUpdates"]
+            .filter((key) => key in options)
+            .map((key) => [key, options[key]]),
+        )
+        assert.deepEqual(
+          selected,
+          layout === "legacy"
+            ? {}
+            : layout === "inode"
+              ? { concurrentWrites: true, inodeUpdates: true }
+              : {
+                  concurrentWrites: true,
+                  inodeUpdates: true,
+                  compactInodeUpdates: true,
+                },
+          `${provider} ${layout} layout options`,
+        )
+        await opened.cleanup()
+      }
+    }
+  } finally {
+    if (previousNativePath === undefined) delete process.env.NAPI_RS_NATIVE_LIBRARY_PATH
+    else process.env.NAPI_RS_NATIVE_LIBRARY_PATH = previousNativePath
+  }
+}
+
+async function testFoundationDbAvailabilityFollowsSelectedLayout() {
+  const capturePath = fileURLToPath(new URL("./capture-native.cjs", import.meta.url))
+  const require = createRequire(import.meta.url)
+  const capture = require(capturePath)
+  const environment = {
+    MOUNT_RS_NAPI_FOUNDATIONDB: "1",
+    MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE: "/owned/fdb.cluster",
+    MOUNT_RS_NAPI_FOUNDATIONDB_SHARED_PROVIDER: "1",
+    MOUNT_RS_R2_ENDPOINT: "https://r2.example.test",
+    MOUNT_RS_R2_BUCKET: "bucket",
+    MOUNT_RS_R2_ACCESS_KEY_ID: "access-key",
+    MOUNT_RS_R2_SECRET_ACCESS_KEY: "secret-key",
+  }
+  const definition = providerById(environment).get("mount-rs-split-foundationdb-r2")
+
+  for (const layout of ["legacy", "inode", "compact"]) {
+    const availability = definition.availability(environment, { layout })
+    const requiredEnvVars =
+      typeof definition.requiredEnvVars === "function"
+        ? definition.requiredEnvVars({ layout })
+        : definition.requiredEnvVars
+    assert.equal(availability.configured, layout !== "legacy", `${layout} availability`)
+    assert.equal(
+      availability.missing.includes("MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX"),
+      layout === "legacy",
+      `${layout} availability prefix requirement`,
+    )
+    assert.equal(
+      requiredEnvVars.includes("MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX"),
+      layout === "legacy",
+      `${layout} artifact prefix requirement`,
+    )
+  }
+
+  const withPrefix = {
+    ...environment,
+    MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX: "owned-authority",
+  }
+  const configuredDefinition = providerById(withPrefix).get("mount-rs-split-foundationdb-r2")
+  for (const layout of ["legacy", "inode", "compact"]) {
+    assert.equal(
+      configuredDefinition.availability(withPrefix, { layout }).configured,
+      true,
+      `${layout} availability with prefix`,
+    )
+  }
+
+  const legacyCalls = capture.calls.length
+  const legacy = await runBenchmark(
+    parseArgs([
+      "--layout",
+      "legacy",
+      "--providers",
+      "mount-rs-split-foundationdb-r2",
+      "--sizes",
+      "1",
+      "--payload-bytes",
+      "1",
+      "--iterations",
+      "1",
+      "--require-configured",
+    ]),
+    environment,
+  )
+  assert.equal(capture.calls.length, legacyCalls, "legacy missing prefix must reject before NAPI I/O")
+  assert.equal(legacy.status, "failed")
+  assert.equal(legacy.counts.providersSkipped, 1)
+  assert.equal(legacy.counts.configurationFailures, 1)
+  assert.ok(
+    legacy.configurationFailures[0].missingConfiguration.includes(
+      "MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX",
+    ),
+  )
+
+  for (const layout of ["inode", "compact"]) {
+    const expectedError = Object.assign(new Error(`${layout} capability sentinel`), {
+      code: "CAPABILITY_SENTINEL",
+    })
+    capture.failNext(expectedError)
+    const before = capture.calls.length
+    const artifact = await runBenchmark(
+      parseArgs([
+        "--layout",
+        layout,
+        "--providers",
+        "mount-rs-split-foundationdb-r2",
+        "--sizes",
+        "1",
+        "--payload-bytes",
+        "1",
+        "--iterations",
+        "1",
+      ]),
+      environment,
+    )
+    assert.equal(capture.calls.length, before + 1, `${layout} must reach NAPI constructor`)
+    assert.equal(artifact.status, "failed", `${layout} capability failure must fail the run`)
+    assert.equal(artifact.counts.providersSkipped, 0)
+    assert.equal(artifact.counts.configurationFailures, 0)
+    assert.equal(artifact.providers[0].status, "failed")
+    assert.equal(artifact.providers[0].setupError.code, "CAPABILITY_SENTINEL")
+    assert.equal(
+      artifact.providers[0].requiredEnvVars.includes(
+        "MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX",
+      ),
+      false,
+    )
+  }
+}
+
+async function testCompactArtifactSeparatesSelectionFromPersistedProof() {
+  const artifact = await runBenchmark(
+    {
+      ...parseArgs([]),
+      layout: "compact",
+      providers: ["mount-rs-split-sqlite"],
+      sizes: [1],
+      payloadBytes: 1,
+      iterations: 1,
+      timeoutMs: 100,
+      cleanupTimeoutMs: 100,
+    },
+    {},
+  )
+  assert.deepEqual(artifact.providers[0].layoutSelection, {
+    requested: "compact",
+    selected: "compact",
+    selectionEvidence: "createChunkedDriver-constructor-accepted",
+    persistedMarkerEvidence: "not-observed-by-benchmark-runner",
+  })
 }
 
 async function testRequiredProviderConfiguration() {
@@ -591,6 +812,9 @@ assert.equal(foundationDbMetadataOptions(fdbConfig, { runId: "test", layout: "le
 const inodeFdb = foundationDbMetadataOptions(fdbConfig, { runId: "test", layout: "inode" })
 assert.equal(inodeFdb.leaseAuthority, "revision-cas")
 assert.equal("authorityPrefix" in inodeFdb, false)
+const compactFdb = foundationDbMetadataOptions(fdbConfig, { runId: "test", layout: "compact" })
+assert.equal(compactFdb.leaseAuthority, "revision-cas")
+assert.equal("authorityPrefix" in compactFdb, false)
 
 async function testSteadyOverwriteOracle() {
   const initial = Buffer.from([0x51, 1, 2, 3, 0xa7])
@@ -676,6 +900,10 @@ await testSteadyOverwriteOracle()
 await testStats()
 await testErrors()
 await testCli()
+await testCompactRejectsNonSplitBeforeProviderIo()
+await testSplitFactoryLayoutOptions()
+await testFoundationDbAvailabilityFollowsSelectedLayout()
+await testCompactArtifactSeparatesSelectionFromPersistedProof()
 await testRequiredProviderConfiguration()
 await testQualificationArtifact()
 await testEvidencePacket()
