@@ -439,6 +439,18 @@ on stderr, so use counters without slow logs for the throughput control.
 
 ## Read the profile
 
+For `benchmarks/storage/runner.mjs --layout compact`, the artifact must include
+a validated `layoutSelection.persistedReceipt` before timed I/O starts. The
+five fields report MRC5, an opaque backing identity, a decimal u64 structural
+generation and successful verification against the same opened block handle.
+The inspector queries persisted provider state; it does not infer format from
+constructor flags. `null` means validated non-MRC5, and proves no exact legacy
+format. Unsupported, malformed and failed queries fail the compact run and
+keep cleanup; an unsettled query defers provider shutdown. Inspection is outside
+the workload numerator and timed interval, allocates its receipt, and is neither
+an atomic snapshot nor a crash durability test. Existing legacy owned pilot
+results remain legacy evidence.
+
 Compare each family's phase counts and known bytes with acknowledged workload
 operations. High SDK attempts indicate retries or repeated filesystem work;
 high SQL calls per SDK operation indicate provider amplification. Catalog query

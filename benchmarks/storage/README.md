@@ -79,11 +79,15 @@ result can remain `ok` for a mixed local/provider matrix. A sequential run is
 explicit with `--concurrency 1`.
 
 Compact provider artifacts distinguish the requested and constructor-selected
-layout from physical metadata evidence. The benchmark records
-`selectionEvidence: "createChunkedDriver-constructor-accepted"` and
-`persistedMarkerEvidence: "not-observed-by-benchmark-runner"`; constructor
-acceptance does not claim that the runner directly inspected a persisted MRC5
-marker.
+layout from persisted metadata evidence. Before timed I/O, the benchmark calls
+`inspectCompactLayout()` on the opened filesystem, validates the fixed MRC5
+receipt and records it as `layoutSelection.persistedReceipt`. Its metadata mode
+and matching block authority are observed through the same provider handles;
+constructor acceptance remains separate `selectionEvidence`. Missing, non-MRC5,
+invalid or failed inspection rejects the compact run before workload calls, with
+normal cleanup. A pending inspection records deferred teardown and unresolved
+native work; it does not schedule automatic cleanup after later settlement.
+This query is not an atomic namespace snapshot or a crash durability proof.
 
 The PGlite script requires `pnpm --dir tests/pglite install --frozen-lockfile`
 and a built native addon. It starts an isolated real PGlite socket server,

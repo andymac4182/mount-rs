@@ -927,6 +927,11 @@ async function testCompactArtifactSeparatesSelectionFromPersistedProof() {
     selectionEvidence: "createChunkedDriver-constructor-accepted",
     persistedMarkerEvidence: "not-observed-by-benchmark-runner",
   })
+  // This constructor-capture fixture has no persisted provider or inspector.
+  assert.equal(artifact.status, "failed")
+  assert.equal(artifact.providers[0].layoutInspectionError.code, "COMPACT_LAYOUT_UNAVAILABLE")
+  assert.equal(artifact.providers[0].sizes[0].failures[0].operation, "layout-proof")
+  assert.equal(artifact.providers[0].cleanup.resource.status, "ok")
 }
 
 async function testRequiredProviderConfiguration() {

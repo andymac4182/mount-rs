@@ -129,6 +129,7 @@ module.exports = function install(binding) {
     "mknod",
     "shutdown",
     "reconcileBlocks",
+    "inspectCompactLayout",
     "checkoutScope",
     "checkinScope",
     "delegationStatus",

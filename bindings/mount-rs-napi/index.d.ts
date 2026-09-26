@@ -46,6 +46,13 @@ export declare class Filesystem {
    * before relying on shutdown to permit removal of backing files.
    */
   shutdown(): Promise<void>
+  /**
+   * Read persisted MRC5 authority through the selected chunked provider handles.
+   * Null means validated non-MRC5; it does not certify legacy or a default mode.
+   * Unsupported providers, nonchunked facades, and closed wrappers reject ENOTSUP.
+   * Call while unmounted, outside measured phases, after draining operations.
+   */
+  inspectCompactLayout(): Promise<JsCompactLayoutReceipt | null>
   /** Claim a directory for this direct driver session. Native handoff requires unmount/remount. */
   checkoutScope(path: string): Promise<JsDirectoryGrant>
   /** Close application handles before releasing a directory. This does not revoke kernel caches. */
@@ -1352,6 +1359,17 @@ export interface JsChunkedStoreOptions {
   region?: string
   accessKeyId?: string
   secretAccessKey?: string
+}
+
+/** Sanitized receipt from the selected handles' persisted compact authority. */
+export interface JsCompactLayoutReceipt {
+  schema: 'mount-rs.compact-layout-receipt.v1'
+  marker: 'MRC5'
+  /** Opaque physical backing identity, encoded as 32 lowercase hex characters. */
+  backingId: string
+  /** Decimal u64 string, preserving all 64 bits. */
+  structuralGeneration: string
+  blockAuthorityVerified: true
 }
 
 /** Integer authority identifiers are decimal strings to preserve all 64 bits. */

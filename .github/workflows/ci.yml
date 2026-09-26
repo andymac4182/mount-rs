@@ -872,6 +872,9 @@ jobs:
       - name: Verify bounded network test progress
         timeout-minutes: 1
         run: node --test --test-timeout=10000 bindings/mount-rs-napi/test/network-progress.test.mjs
+      - name: Verify persisted layout evidence controls
+        timeout-minutes: 1
+        run: node --test --test-timeout=10000 benchmarks/storage/compact-layout.test.mjs benchmarks/storage/compact-layout-runner.test.mjs bindings/mount-rs-napi/test/compact-layout-postlude.mjs
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
         with:
           version: 11
@@ -930,6 +933,9 @@ jobs:
       - name: Verify bounded network test progress
         timeout-minutes: 1
         run: node --test --test-timeout=10000 bindings/mount-rs-napi/test/network-progress.test.mjs
+      - name: Verify persisted layout evidence controls
+        timeout-minutes: 1
+        run: node --test --test-timeout=10000 benchmarks/storage/compact-layout.test.mjs benchmarks/storage/compact-layout-runner.test.mjs bindings/mount-rs-napi/test/compact-layout-postlude.mjs
       - name: Verify guarded backing observer and pilot controls
         timeout-minutes: 2
         run: |

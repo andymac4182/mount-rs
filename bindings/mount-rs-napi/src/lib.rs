@@ -4064,6 +4064,22 @@ async fn run_shutdown(
     }
 }
 
+/// Sanitized receipt from the selected handles' persisted compact authority.
+#[derive(Debug, PartialEq, Eq)]
+#[napi(object)]
+pub struct JsCompactLayoutReceipt {
+    #[napi(ts_type = "'mount-rs.compact-layout-receipt.v1'")]
+    pub schema: String,
+    #[napi(ts_type = "'MRC5'")]
+    pub marker: String,
+    /// Opaque physical backing identity, encoded as 32 lowercase hex characters.
+    pub backing_id: String,
+    /// Decimal u64 string, preserving all 64 bits.
+    pub structural_generation: String,
+    #[napi(ts_type = "true")]
+    pub block_authority_verified: bool,
+}
+
 /// Integer authority identifiers are decimal strings to preserve all 64 bits.
 #[napi(object)]
 pub struct JsDirectoryGrant {
@@ -4268,6 +4284,48 @@ impl Filesystem {
             .map_err(|_| to_js_error(FsError::new(ErrorCode::Eio)))?
             .clone()
             .ok_or_else(|| to_js_error(FsError::new(ErrorCode::Enotsup)))
+    }
+
+    /// Read persisted MRC5 authority through the selected chunked provider handles.
+    /// None means validated non-MRC5; it does not certify legacy or a default mode.
+    /// Unsupported providers, nonchunked facades, and closed wrappers reject ENOTSUP.
+    /// Call while unmounted, outside measured phases, after draining operations.
+    #[napi(js_name = "inspectCompactLayout")]
+    pub async fn inspect_compact_layout(&self) -> napi::Result<Option<JsCompactLayoutReceipt>> {
+        let _native_gate = self.unmounted_delegation_gate().await?;
+        let filesystem = self.delegated_filesystem()?;
+        let state = filesystem
+            .metadata_store()
+            .compact_inode_mode_state()
+            .await
+            .map_err(|error| {
+                to_js_error(
+                    FsError::new(error.code)
+                        .with_syscall("inspect compact layout")
+                        .with_message("compact metadata inspection failed"),
+                )
+            })?;
+        let Some(state) = state else {
+            return Ok(None);
+        };
+        filesystem
+            .block_store()
+            .verify_concurrent_backing(state.backing)
+            .await
+            .map_err(|error| {
+                to_js_error(
+                    FsError::new(error.code)
+                        .with_syscall("inspect compact layout")
+                        .with_message("compact block authority verification failed"),
+                )
+            })?;
+        Ok(Some(JsCompactLayoutReceipt {
+            schema: "mount-rs.compact-layout-receipt.v1".into(),
+            marker: "MRC5".into(),
+            backing_id: state.backing.to_hex(),
+            structural_generation: state.structural_generation.to_string(),
+            block_authority_verified: true,
+        }))
     }
 
     /// Claim a directory for this direct driver session. Native handoff requires unmount/remount.
@@ -5104,6 +5162,520 @@ pub async fn unmount_all() -> Vec<JsMountFailure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn compact_layout_sqlite_options(
+        path: &std::path::Path,
+        compact: bool,
+        inode: bool,
+    ) -> JsChunkedOptions {
+        let store = |name: &str| JsChunkedStoreOptions {
+            kind: "sqlite".into(),
+            uri: Some(path.join(name).to_string_lossy().into_owned()),
+            key: None,
+            durable: None,
+            lease_authority: None,
+            authority_prefix: None,
+            endpoint: None,
+            bucket: None,
+            region: None,
+            access_key_id: None,
+            secret_access_key: None,
+        };
+        JsChunkedOptions {
+            metadata: store("metadata.db"),
+            blocks: store("blocks.db"),
+            chunk_size: 16.0,
+            owner: Some("napi-layout-inspector".into()),
+            ttl_ms: None,
+            concurrent_writes: Some(inode),
+            inode_updates: Some(inode),
+            compact_inode_updates: Some(compact),
+            ownership_mode: None,
+            checkout_path: None,
+            uid: None,
+            gid: None,
+            umask: None,
+            root_mode: None,
+        }
+    }
+
+    #[cfg(unix)]
+    fn compact_layout_directory(label: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "mount-rs-napi-layout-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::create_dir(&path).unwrap();
+        path
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn compact_layout_inspector_reads_persisted_sqlite_and_fresh_reopen_bytes() {
+        block_on(async {
+            let path = compact_layout_directory("persisted");
+            let options = || compact_layout_sqlite_options(&path, true, true);
+            let first = create_chunked_driver(options()).await.unwrap();
+            let bytes = b"full persisted bytes spanning multiple chunks";
+            first
+                .write_file("/receipt-file".into(), Either::B(bytes.to_vec().into()))
+                .await
+                .unwrap();
+            let receipt = first.inspect_compact_layout().await.unwrap().unwrap();
+            assert_eq!(receipt.schema, "mount-rs.compact-layout-receipt.v1");
+            assert_eq!(receipt.marker, "MRC5");
+            assert_eq!(receipt.backing_id.len(), 32);
+            assert!(
+                receipt
+                    .backing_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            );
+            assert!(receipt.structural_generation.parse::<u64>().unwrap() > 0);
+            assert!(receipt.block_authority_verified);
+            eprintln!(
+                "COMPACT_LAYOUT_SQLITE_RECEIPT {}",
+                json!({
+                    "schema": receipt.schema,
+                    "marker": receipt.marker,
+                    "backingId": receipt.backing_id,
+                    "structuralGeneration": receipt.structural_generation,
+                    "blockAuthorityVerified": receipt.block_authority_verified,
+                })
+            );
+            first.shutdown().await.unwrap();
+            assert_eq!(
+                first.inspect_compact_layout().await.unwrap_err().reason,
+                to_js_error(FsError::new(ErrorCode::Enotsup)).reason
+            );
+            drop(first);
+
+            let second = create_chunked_driver(options()).await.unwrap();
+            assert_eq!(
+                second.inspect_compact_layout().await.unwrap().unwrap(),
+                receipt
+            );
+            let driver = second.driver().unwrap();
+            let handle = driver.open("/receipt-file", "r", 0).await.unwrap();
+            let mut actual = vec![0; bytes.len()];
+            assert_eq!(
+                handle.read(&mut actual, Some(0)).await.unwrap(),
+                bytes.len()
+            );
+            assert_eq!(&actual, bytes);
+            assert_eq!(
+                handle
+                    .read(&mut actual, Some(bytes.len() as u64))
+                    .await
+                    .unwrap(),
+                0
+            );
+            handle.close().await.unwrap();
+            driver.unlink("/receipt-file").await.unwrap();
+            drop(driver);
+            second.shutdown().await.unwrap();
+            drop(second);
+
+            let empty = create_chunked_driver(options()).await.unwrap();
+            assert!(
+                empty
+                    .driver()
+                    .unwrap()
+                    .readdir("/")
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                empty
+                    .inspect_compact_layout()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .backing_id,
+                receipt.backing_id
+            );
+            empty.shutdown().await.unwrap();
+            drop(empty);
+            std::fs::remove_dir_all(path).unwrap();
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn compact_layout_inspector_null_is_recognized_noncompact_only() {
+        block_on(async {
+            for inode in [false, true] {
+                let path = compact_layout_directory(if inode { "mrc4" } else { "legacy" });
+                let filesystem =
+                    create_chunked_driver(compact_layout_sqlite_options(&path, false, inode))
+                        .await
+                        .unwrap();
+                assert!(filesystem.inspect_compact_layout().await.unwrap().is_none());
+                filesystem.shutdown().await.unwrap();
+                drop(filesystem);
+                std::fs::remove_dir_all(path).unwrap();
+            }
+            let facade = Filesystem::memory();
+            assert_eq!(
+                facade.inspect_compact_layout().await.unwrap_err().reason,
+                to_js_error(FsError::new(ErrorCode::Enotsup)).reason
+            );
+            facade.shutdown().await.unwrap();
+        });
+    }
+
+    struct LayoutProbeMetadata {
+        inner: MemoryMetadataStore,
+        result: Mutex<CoreResult<Option<InodeModeState>>>,
+        ready: std::sync::atomic::AtomicBool,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl MetadataStore for LayoutProbeMetadata {
+        fn durable(&self) -> bool {
+            self.inner.durable()
+        }
+
+        fn compact_inode_mode_state<'a, 'async_trait>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<Option<InodeModeState>>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                std::future::poll_fn(|_| {
+                    if self.ready.load(std::sync::atomic::Ordering::Acquire) {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                })
+                .await;
+                self.result.lock().unwrap().clone()
+            })
+        }
+
+        fn load<'a, 'async_trait>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<LoadedMetadata>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.load()
+        }
+
+        fn acquire_writer<'a, 'b, 'async_trait>(
+            &'a self,
+            owner: &'b str,
+            ttl: Duration,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<WriterLease>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.acquire_writer(owner, ttl)
+        }
+
+        fn renew_writer<'a, 'b, 'async_trait>(
+            &'a self,
+            lease: &'b WriterLease,
+            ttl: Duration,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<WriterLease>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.renew_writer(lease, ttl)
+        }
+
+        fn release_writer<'a, 'b, 'async_trait>(
+            &'a self,
+            lease: &'b WriterLease,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.release_writer(lease)
+        }
+
+        fn publish<'a, 'b, 'async_trait>(
+            &'a self,
+            revision: u64,
+            lease: &'b WriterLease,
+            namespace: Namespace,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<u64>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.publish(revision, lease, namespace)
+        }
+
+        fn flush<'a, 'async_trait>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.flush()
+        }
+    }
+
+    struct LayoutProbeBlocks {
+        inner: MemoryBlockStore,
+        backing: ConcurrentBackingId,
+        error: Mutex<Option<FsError>>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl BlockStore for LayoutProbeBlocks {
+        fn durable(&self) -> bool {
+            self.inner.durable()
+        }
+
+        fn verify_concurrent_backing<'a, 'async_trait>(
+            &'a self,
+            expected: ConcurrentBackingId,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                if let Some(error) = self.error.lock().unwrap().clone() {
+                    return Err(error);
+                }
+                if expected != self.backing {
+                    return Err(layout_sensitive_error(ErrorCode::Estale));
+                }
+                Ok(())
+            })
+        }
+
+        fn put<'a, 'b, 'async_trait>(
+            &'a self,
+            bytes: &'b [u8],
+        ) -> Pin<Box<dyn Future<Output = CoreResult<BlockId>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.put(bytes)
+        }
+
+        fn get<'a, 'b, 'async_trait>(
+            &'a self,
+            id: &'b BlockId,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<Vec<u8>>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.get(id)
+        }
+
+        fn flush<'a, 'async_trait>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.flush()
+        }
+
+        fn delete<'a, 'b, 'async_trait>(
+            &'a self,
+            id: &'b BlockId,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.delete(id)
+        }
+    }
+
+    fn layout_sensitive_error(code: ErrorCode) -> FsError {
+        FsError::new(code)
+            .with_syscall("SELECT secret FROM private_table")
+            .with_path("mysql://user:password@private.example/volume")
+            .with_dest("secret-object-prefix")
+            .with_message("provider error includes password and private SQL")
+    }
+
+    fn layout_probe() -> (Filesystem, Arc<LayoutProbeMetadata>, Arc<LayoutProbeBlocks>) {
+        let backing = ConcurrentBackingId::from_bytes([0xce; 16]).unwrap();
+        let metadata = Arc::new(LayoutProbeMetadata {
+            inner: MemoryMetadataStore::new(),
+            result: Mutex::new(Ok(Some(InodeModeState {
+                backing,
+                structural_generation: u64::MAX,
+            }))),
+            ready: std::sync::atomic::AtomicBool::new(true),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let blocks = Arc::new(LayoutProbeBlocks {
+            inner: MemoryBlockStore::new(),
+            backing,
+            error: Mutex::new(None),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        // A legacy driver intentionally has no compact constructor selection:
+        // the inspector must use the selected provider handles, not options.
+        let chunked = block_on(ChunkedFs::open(
+            DynMetadataStore(metadata.clone()),
+            DynBlockStore(blocks.clone()),
+            ChunkedOptions::fixed("layout-probe", 16).unwrap(),
+        ))
+        .unwrap();
+        let close = chunked.clone();
+        let shutdown: Arc<ShutdownCallback> = Arc::new(move || {
+            let close = close.clone();
+            Box::pin(async move { close.shutdown().await })
+        });
+        let mut filesystem =
+            Filesystem::from_driver(Arc::new(chunked.clone()), Some(shutdown), None);
+        filesystem.delegation = Mutex::new(Some(chunked));
+        (filesystem, metadata, blocks)
+    }
+
+    #[test]
+    fn compact_layout_inspector_uses_same_handles_and_redacts_provider_errors() {
+        use std::sync::atomic::Ordering;
+        let (filesystem, metadata, blocks) = layout_probe();
+        let receipt = block_on(filesystem.inspect_compact_layout())
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.backing_id, "cececececececececececececececece");
+        assert_eq!(receipt.structural_generation, u64::MAX.to_string());
+        assert_eq!(metadata.calls.load(Ordering::Acquire), 1);
+        assert_eq!(blocks.calls.load(Ordering::Acquire), 1);
+
+        *metadata.result.lock().unwrap() = Ok(None);
+        assert!(
+            block_on(filesystem.inspect_compact_layout())
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(blocks.calls.load(Ordering::Acquire), 1);
+        for code in [ErrorCode::Eio, ErrorCode::Estale, ErrorCode::Enotsup] {
+            *metadata.result.lock().unwrap() = Err(layout_sensitive_error(code));
+            assert_eq!(
+                block_on(filesystem.inspect_compact_layout())
+                    .unwrap_err()
+                    .reason,
+                to_js_error(
+                    FsError::new(code)
+                        .with_syscall("inspect compact layout")
+                        .with_message("compact metadata inspection failed")
+                )
+                .reason
+            );
+            assert_eq!(blocks.calls.load(Ordering::Acquire), 1);
+        }
+        *metadata.result.lock().unwrap() = Ok(Some(InodeModeState {
+            backing: ConcurrentBackingId::from_bytes([0xcf; 16]).unwrap(),
+            structural_generation: 19,
+        }));
+        assert_eq!(
+            block_on(filesystem.inspect_compact_layout())
+                .unwrap_err()
+                .reason,
+            to_js_error(
+                FsError::new(ErrorCode::Estale)
+                    .with_syscall("inspect compact layout")
+                    .with_message("compact block authority verification failed")
+            )
+            .reason
+        );
+        *metadata.result.lock().unwrap() = Ok(Some(InodeModeState {
+            backing: blocks.backing,
+            structural_generation: 19,
+        }));
+        *blocks.error.lock().unwrap() = Some(layout_sensitive_error(ErrorCode::Eacces));
+        assert_eq!(
+            block_on(filesystem.inspect_compact_layout())
+                .unwrap_err()
+                .reason,
+            to_js_error(
+                FsError::new(ErrorCode::Eacces)
+                    .with_syscall("inspect compact layout")
+                    .with_message("compact block authority verification failed")
+            )
+            .reason
+        );
+        block_on(filesystem.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn compact_layout_inspector_shutdown_waits_and_cancellation_releases_handles() {
+        use std::sync::atomic::Ordering;
+        for cancel in [false, true] {
+            let (filesystem, metadata, blocks) = layout_probe();
+            metadata.ready.store(false, Ordering::Release);
+            let mut inspect = Box::pin(filesystem.inspect_compact_layout());
+            let mut shutdown = Box::pin(filesystem.shutdown());
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(inspect.as_mut().poll(&mut context).is_pending());
+            assert!(shutdown.as_mut().poll(&mut context).is_pending());
+            assert_eq!(metadata.calls.load(Ordering::Acquire), 1);
+            assert_eq!(blocks.calls.load(Ordering::Acquire), 0);
+            if !cancel {
+                metadata.ready.store(true, Ordering::Release);
+                let Poll::Ready(Ok(Some(receipt))) = inspect.as_mut().poll(&mut context) else {
+                    panic!("released inspection must complete");
+                };
+                assert!(receipt.block_authority_verified);
+            }
+            drop(inspect);
+            block_on(shutdown.as_mut()).unwrap();
+            drop(shutdown);
+            let metadata_calls = metadata.calls.load(Ordering::Acquire);
+            let block_calls = blocks.calls.load(Ordering::Acquire);
+            assert_eq!(block_calls, usize::from(!cancel));
+            assert_eq!(
+                block_on(filesystem.inspect_compact_layout())
+                    .unwrap_err()
+                    .reason,
+                to_js_error(FsError::new(ErrorCode::Enotsup)).reason
+            );
+            assert_eq!(metadata.calls.load(Ordering::Acquire), metadata_calls);
+            assert_eq!(blocks.calls.load(Ordering::Acquire), block_calls);
+            let metadata_weak = Arc::downgrade(&metadata);
+            let blocks_weak = Arc::downgrade(&blocks);
+            drop(metadata);
+            drop(blocks);
+            assert!(
+                metadata_weak.upgrade().is_none(),
+                "closed wrapper must not retain metadata"
+            );
+            assert!(
+                blocks_weak.upgrade().is_none(),
+                "closed wrapper must not retain blocks"
+            );
+            drop(filesystem);
+        }
+    }
 
     #[test]
     fn compact_option_implies_inode_and_concurrency_but_rejects_explicit_false() {

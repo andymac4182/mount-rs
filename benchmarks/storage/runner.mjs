@@ -27,6 +27,7 @@ import { computeStats, round, roundStats } from "./stats.mjs"
 import { finishPhase, logPhaseSummary, takePhaseSnapshot } from "./diagnostics.mjs"
 import { createRunnerObserverSession } from "./backing-observer.mjs"
 import { observePilotBinding } from "./owned-backing-pilot.mjs"
+import { observeCompactLayout } from "./compact-layout.mjs"
 
 export const REFERENCE_REVISION = "92fbbc9ba7739111899121195236acb4fc6a8bb5"
 export const FILE_SIZE_MIB = Object.freeze([1, 4, 10, 16])
@@ -1037,7 +1038,34 @@ async function runProvider(definition, options, context) {
     const ownedPaths = new Set()
     const pendingOperations = new Map()
     try {
-      for (const sizeMiBValue of options.sizes) {
+      let layoutReady = true
+      if (options.layout === "compact") {
+        // Query the opened handles before payload preparation and timed I/O.
+        // Keep this inside the cleanup region: even a rejected proof owns an
+        // opened provider, and a pending native query still forbids teardown.
+        try {
+          const persistedReceipt = await withTimeout(
+            () => observeCompactLayout(opened.filesystem),
+            options.timeoutMs,
+            "compact layout inspection",
+          )
+          providerRun.layoutSelection.persistedMarkerEvidence = "metadata-MRC5-and-matching-block-authority-observed"
+          providerRun.layoutSelection.persistedReceipt = persistedReceipt
+        } catch (error) {
+          layoutReady = false
+          providerRun.layoutInspectionError = errorRecord(error)
+          if (isTimeout(error)) {
+            observerOperationDeadlineFailed = true
+            const late = await waitForLateOperation(error, options.cleanupTimeoutMs)
+            providerRun.layoutInspectionLateOperation = late.status
+            if (late.status === "pending") {
+              pendingOperations.set(null, { operation: "compact layout inspection", promise: error.lateOperation })
+            }
+          }
+          sizeResults.push(...options.sizes.map((size) => failedSizeResult(definition, size, options, "layout-proof", error)))
+        }
+      }
+      for (const sizeMiBValue of layoutReady ? options.sizes : []) {
         const payloadBytes = options.payloadBytes ?? sizeMiBValue * 1024 * 1024
         let workloadSnapshot
         try {
