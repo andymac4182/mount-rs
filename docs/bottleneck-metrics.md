@@ -29,6 +29,40 @@ decimal strings for counters. The closed row registry and the instrumented-row
 coverage are separate: reserving a row does not prove that a provider records it.
 The object-store API sub-schema remains `mount-rs.object-store-api.v1`.
 
+## Follow the S3 provider network test
+
+The existing N-API S3 NodeFs/SQLite network concurrency test emits
+`network_test_progress ` records with schema `mount-rs.network-test-progress.v1`.
+Each case publishes at startup, at completion and on a cooperative five-second
+timer. Its first rejected request publishes immediately and freezes the receipt;
+late settlements cannot rewrite the pending counts. Non-request failures publish
+at completion. Logging performs no server or provider calls.
+
+Eight fixed rows distinguish concurrent and streamed PUT/GET fetches from their
+response-body promises. Each row counts issued, fulfilled, rejected and in-flight
+client promises. A fulfilled fetch can still have a failing HTTP status; these
+counters do not establish server acceptance, HTTP success or backend IOPS.
+The existing status, complete-byte equality and native request-stat assertions
+remain the success checks. Default concurrency remains 32 and request timeouts
+remain 15 seconds.
+Set `MOUNT_RS_S3_NETWORK_PROGRESS=0` for a disabled control; it returns before
+added resource reads, clocks, publication and scheduling.
+
+CPU fields are Node process deltas in microseconds. Current RSS includes the
+embedded native addon; peak RSS is the OS process-lifetime peak, including before
+the case baseline. These observations are non-atomic and do not prove application
+drain. CPU or memory of a separate backend service is outside this process scope.
+Resource, clock, timer and sink failures retain a fixed unavailable reason and
+preserve the test outcome. A stopped sink cannot publish its own failure; the
+local receipt still retains it.
+
+Each record is bounded to 4096 bytes including prefix/newline; each case allows
+at most 16 publication attempts. The observer stops publishing on sink errors or
+backpressure and does not retry them. Labels and failure categories are closed;
+records contain no object paths, bodies or arbitrary error strings. This logger
+is test-only and allocates at publication boundaries. It does not establish
+allocation-free request processing or resolve a timeout by itself.
+
 Rust allocation counters require the additional `allocation-profiling` test
 feature. They count the Rust System allocator, exclude foreign C allocators,
 and add atomic work to allocation paths. Resource-only builds report them as
