@@ -197,6 +197,7 @@ deployment, or release readiness.
 | `mount-rs-split-pglite` | mount-rs public NAPI | PGlite | PGlite | split stores | same PGlite URL variables |
 | `mount-rs-split-pglite-r2` | mount-rs public NAPI | PGlite | Cloudflare R2 | split stores | PGlite URL plus R2 endpoint/bucket/key variables |
 | `mount-rs-split-tidb-r2` | mount-rs public NAPI | TiDB | Cloudflare R2 | split stores | `MOUNT_RS_TIDB_URL` plus R2 endpoint/bucket/key variables |
+| `mount-rs-split-tidb-rustfs` | mount-rs public NAPI | TiDB | RustFS | split stores | TiDB URL plus explicit `MOUNT_RS_RUSTFS_*` settings below |
 | `mount-rs-split-foundationdb-r2` | mount-rs public NAPI | FoundationDB | Cloudflare R2 | split stores | FoundationDB N-API feature/cluster file plus R2 endpoint/bucket/key variables |
 | `mountx-memory` | actual mountx TypeScript | memory | memory | combined | `MOUNTX_SOURCE`, or pinned checkout at repo-local `vendor/mountx` |
 
@@ -219,6 +220,39 @@ only when deliberately measuring a volatile remote-block configuration;
 otherwise the requested R2 provider declares durable remote blocks. The runner records the configured
 remote region if `MOUNT_RS_R2_REGION` or `R2_REGION` is set, but never records
 credentials.
+
+The separate `mount-rs-split-tidb-rustfs` provider requires
+`MOUNT_RS_TIDB_URL` (or `TIDB_URL`) and all five RustFS settings:
+`MOUNT_RS_RUSTFS_ENDPOINT`, `MOUNT_RS_RUSTFS_BUCKET`,
+`MOUNT_RS_RUSTFS_REGION`, `MOUNT_RS_RUSTFS_ACCESS_KEY_ID` and
+`MOUNT_RS_RUSTFS_SECRET_ACCESS_KEY`. It always uses the explicit native
+`rustfs` constructor. RustFS configuration does not fall back to the R2
+variables. RustFS blocks are declared volatile by default; set
+`MOUNT_RS_RUSTFS_DURABLE=1` only when the service provides durable storage.
+TiDB retains its existing durable default (`MOUNT_RS_TIDB_DURABLE=0` selects
+volatile metadata). Both configured durability choices enter the receipt.
+The generic provider does not record RustFS region, endpoint or credentials
+in its summary.
+
+With those settings supplied and a current native addon selected, a profiled
+run uses the existing workload and diagnostic collection:
+
+```sh
+MOUNT_RS_PROFILE_IO=1 node benchmarks/storage/runner.mjs \
+  --providers mount-rs-split-tidb-rustfs --layout compact \
+  --sizes 1 --payload-bytes 4096 --iterations 400 --concurrency 64 \
+  --chunk-size-bytes 65536 --min-iops 1000 --require-configured \
+  --output rustfs-compact-results.json
+```
+
+The raw object API and local hashing/copy/cache-lock counters appear under
+`rustfs`, separately from R2. Their adapter calls are not physical IOPS or
+HTTP retry counts. Each invocation allocates distinct metadata/blob names;
+prior namespace absence remains unverified, and OS/remote cache state is
+uncontrolled. Shutdown closes the opened filesystem but does not purge its
+metadata rows or retained blobs. This generic run is not the controlled
+paired comparison described in
+[`2026-09-27-owned-layout-comparison.md`](../../docs/superpowers/plans/2026-09-27-owned-layout-comparison.md).
 
 PGlite and R2 rows are skipped with their missing variable names when the
 configuration is absent. A skip is not a live-credential result and is not a
