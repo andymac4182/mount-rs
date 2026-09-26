@@ -212,12 +212,68 @@ jobs:
           mkdir -p "$EVIDENCE_DIR"
           git status --porcelain=v1 --untracked-files=all > "$EVIDENCE_DIR/source-after.txt"
           python3 - <<'PY'
-          import os, pathlib, shutil
+          import json, os, pathlib, shutil, stat
           source = pathlib.Path(os.environ['MOUNT_RS_TEN_PROCESS_OUTPUT'])
           destination = pathlib.Path(os.environ['EVIDENCE_DIR'])
           for name in ['controller.json', 'receipt.json', 'resource.json', 'resource-initial.json', 'stop.json']:
               path = source / name
               if path.is_file() and not path.is_symlink(): shutil.copyfile(path, destination / name)
+          failure_path = source / 'rss-first-failure.json'
+          try:
+              fd = os.open(failure_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+          except FileNotFoundError:
+              fd = None
+          except OSError:
+              raise SystemExit('RSS first-failure artifact unavailable')
+          if fd is not None:
+              try:
+                  with os.fdopen(fd, 'rb') as stream:
+                      if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                          raise SystemExit('RSS first-failure artifact is not regular')
+                      data = stream.read(2049)
+              except OSError:
+                  raise SystemExit('RSS first-failure artifact read failed')
+              if len(data) > 2048:
+                  raise SystemExit('RSS first-failure artifact exceeds limit')
+              def closed_object(pairs):
+                  result = {}
+                  for key, value in pairs:
+                      if key in result:
+                          raise ValueError('duplicate field')
+                      result[key] = value
+                  return result
+              try:
+                  record = json.loads(data, object_pairs_hook=closed_object)
+              except (ValueError, UnicodeError, RecursionError):
+                  raise SystemExit('RSS first-failure artifact malformed')
+              fields = {'schema', 'producer', 'controller_pid', 'worker_pid', 'group', 'observed_ns', 'resource_sequence', 'candidate_role', 'candidate_pid', 'candidate_generation', 'candidate_node', 'site', 'category', 'retirement_poll', 'candidate_bytes'}
+              roles = {'controller', 'worker', 'server', 'catalog-apply'}
+              worker_sites = {'worker_frame_controller', 'worker_frame_worker', 'worker_frame_child', 'readiness_child', 'active_child', 'apply_target', 'apply_sibling', 'stop_target', 'stop_sibling', 'cleanup_child'}
+              categories = {'proc_status_read_failed', 'vmrss_field_missing', 'vmrss_value_missing', 'vmrss_value_invalid', 'rss_bytes_overflow', 'taskinfo_unavailable', 'parent_changed_before_sample', 'parent_changed_after_sample', 'sample_clock_before_failed', 'sample_clock_after_failed', 'retirement_poll_failed', 'unexpected_retirement', 'sample_timestamp_overflow', 'pid_rss_cap_exceeded', 'other_rss_error'}
+              polls = {'not_applicable', 'not_attempted', 'running', 'reaped_success', 'reaped_failure', 'poll_error'}
+              def integer(value, minimum=0, maximum=2**64-1):
+                  return type(value) is int and minimum <= value <= maximum
+              valid = type(record) is dict and set(record) == fields
+              if valid:
+                  valid = all(type(record[key]) is str for key in ['schema', 'producer', 'candidate_role', 'site', 'category', 'retirement_poll'])
+                  valid = valid and record['schema'] == 'mount-rs.cache-rss-failure.v1' and record['candidate_role'] in roles and record['category'] in categories and record['retirement_poll'] in polls
+                  valid = valid and record['producer'] == 'worker' and record['site'] in worker_sites
+                  valid = valid and all(integer(record[key], 1, 2**32-1) for key in ['controller_pid', 'worker_pid', 'group', 'candidate_pid'])
+                  valid = valid and integer(record['resource_sequence']) and integer(record['candidate_generation'])
+                  valid = valid and all(record[key] is None or integer(record[key]) for key in ['observed_ns', 'candidate_bytes'])
+                  if valid and record['candidate_role'] in {'controller', 'worker'}:
+                      valid = valid and record['candidate_generation'] == 0 and record['candidate_node'] is None and record['candidate_pid'] == record[record['candidate_role'] + '_pid']
+                  elif valid:
+                      valid = valid and record['candidate_generation'] > 0
+                      valid = valid and (integer(record['candidate_node'], 0, 9) if record['candidate_role'] == 'server' else record['candidate_node'] is None)
+              if not valid:
+                  raise SystemExit('RSS first-failure artifact contract rejected')
+              try:
+                  output_fd = os.open(destination / 'rss-first-failure.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                  with os.fdopen(output_fd, 'wb') as stream:
+                      stream.write(data)
+              except OSError:
+                  raise SystemExit('RSS first-failure artifact write failed')
           PY
           test ! -s "$EVIDENCE_DIR/source-after.txt"
       - name: Retain native qualification evidence on success or failure

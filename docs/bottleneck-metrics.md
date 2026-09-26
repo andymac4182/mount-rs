@@ -363,6 +363,37 @@ block operation counters remain unavailable, even when byte counters exist.
 Container block accounting, process disk bytes and shared host device counters
 are different observations; none establishes physical NAND IOPS.
 
+## Preserve the first cache RSS failure
+
+The native cache qualification controller retains the first fatal RSS
+observation using `mount-rs.cache-rss-failure.v1`. Its 15 fixed fields identify
+the owned run, candidate PID, role, generation and server index, sampling site,
+typed failure category and retirement result. The timestamp is null when that
+sampling path has no existing common-clock observation; recording adds no clock
+query. The resource sequence names the last published worker frame rather than
+inventing a frame for the failed sample. Records exclude paths, launch arguments,
+arbitrary error text and command output.
+
+An unavailable sample excused by the existing fresh reap of the same owned
+child leaves the failure latch empty. An unexcused failure is retained before
+discarding a candidate or rebuilding the roster. Later cleanup failures and
+successful samples cannot replace it. Controller supervision retains its own
+first record in `controller.json`; it preserves the existing polling and reap
+rules.
+
+The worker includes its record in `resource_evidence()` and attempts one
+`rss-first-failure.json` write, bounded to 2 KiB. Separate retention status is
+`not_attempted`, `written` or `write_failed`. A diagnostic write failure preserves
+the original RSS failure and cannot permit qualification. Healthy samples add
+no file write or extra sampling. Existing resource frame schemas, caps and
+deadlines remain unchanged.
+
+CI copies the optional worker file only after a bounded regular-file read,
+rejecting symlinks, special files, duplicate or unknown fields, invalid scalar
+types and enum values. An absent record is not a healthy-sampling assertion.
+This diagnostic locates a failed observation; it does not establish resource
+coverage, drain or successful cleanup.
+
 ## Slow-operation logging
 
 Set `MOUNT_RS_TRACE_STORAGE=1` for storage spans or

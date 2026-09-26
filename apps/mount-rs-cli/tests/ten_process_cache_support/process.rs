@@ -120,6 +120,239 @@ fn resource_write<T: Serialize>(root: &Path, name: &str, value: &T) -> Result<()
     drop(file);
     fs::rename(temporary, root.join(name)).map_err(|e| e.to_string())
 }
+const FIRST_RSS_CAP: usize = 2048;
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum RssCategory {
+    ProcStatusReadFailed,
+    VmrssFieldMissing,
+    VmrssValueMissing,
+    VmrssValueInvalid,
+    RssBytesOverflow,
+    TaskinfoUnavailable,
+    ParentChangedBeforeSample,
+    ParentChangedAfterSample,
+    SampleClockBeforeFailed,
+    SampleClockAfterFailed,
+    RetirementPollFailed,
+    UnexpectedRetirement,
+    SampleTimestampOverflow,
+    PidRssCapExceeded,
+    OtherRssError,
+}
+impl RssCategory {
+    fn permits_retirement(self) -> bool {
+        matches!(self, Self::VmrssFieldMissing | Self::TaskinfoUnavailable)
+    }
+}
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum RssSite {
+    WorkerFrameController,
+    WorkerFrameWorker,
+    WorkerFrameChild,
+    ReadinessChild,
+    ActiveChild,
+    ApplyTarget,
+    ApplySibling,
+    StopTarget,
+    StopSibling,
+    CleanupChild,
+    OuterController,
+    OuterWorker,
+}
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum RssPoll {
+    NotApplicable,
+    NotAttempted,
+    Running,
+    ReapedSuccess,
+    ReapedFailure,
+    PollError,
+}
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum RssRole {
+    Controller,
+    Worker,
+    Server,
+    CatalogApply,
+}
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RssProducer {
+    Worker,
+    Controller,
+}
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RssRetention {
+    NotAttempted,
+    Written,
+    WriteFailed,
+}
+#[derive(Clone, Copy)]
+struct RssCandidate {
+    role: RssRole,
+    pid: u32,
+    generation: u64,
+    node: Option<u8>,
+    site: RssSite,
+    category: RssCategory,
+    poll: RssPoll,
+    observed_ns: Option<u64>,
+    bytes: Option<u64>,
+}
+impl RssCandidate {
+    fn from_identity(
+        identity: &RssIdentity,
+        site: RssSite,
+        category: RssCategory,
+        poll: RssPoll,
+        observed_ns: Option<u64>,
+        bytes: Option<u64>,
+    ) -> Option<Self> {
+        if identity.pid == 0 {
+            return None;
+        }
+        let (role, node) = match identity.role.as_str() {
+            "controller" if identity.generation == 0 && identity.node == "controller" => {
+                (RssRole::Controller, None)
+            }
+            "worker" if identity.generation == 0 && identity.node == "worker" => {
+                (RssRole::Worker, None)
+            }
+            "catalog-apply" if identity.generation > 0 && identity.node == "catalog" => {
+                (RssRole::CatalogApply, None)
+            }
+            "server" if identity.generation > 0 => {
+                let node = identity.node.strip_prefix("node-")?.parse::<u8>().ok()?;
+                if node >= 10 || identity.node != format!("node-{node}") {
+                    return None;
+                }
+                (RssRole::Server, Some(node))
+            }
+            _ => return None,
+        };
+        Some(Self {
+            role,
+            pid: identity.pid,
+            generation: identity.generation,
+            node,
+            site,
+            category,
+            poll,
+            observed_ns,
+            bytes,
+        })
+    }
+}
+#[derive(Clone, Copy, Serialize)]
+struct FirstRssFailure {
+    schema: &'static str,
+    producer: RssProducer,
+    controller_pid: u32,
+    worker_pid: u32,
+    group: u32,
+    observed_ns: Option<u64>,
+    resource_sequence: u64,
+    candidate_role: RssRole,
+    candidate_pid: u32,
+    candidate_generation: u64,
+    candidate_node: Option<u8>,
+    site: RssSite,
+    category: RssCategory,
+    retirement_poll: RssPoll,
+    candidate_bytes: Option<u64>,
+}
+impl FirstRssFailure {
+    fn new(
+        run: &ResourceRun,
+        producer: RssProducer,
+        sequence: u64,
+        candidate: RssCandidate,
+    ) -> Self {
+        Self {
+            schema: "mount-rs.cache-rss-failure.v1",
+            producer,
+            controller_pid: run.controller_pid,
+            worker_pid: run.worker_pid,
+            group: run.group,
+            observed_ns: candidate.observed_ns,
+            resource_sequence: sequence,
+            candidate_role: candidate.role,
+            candidate_pid: candidate.pid,
+            candidate_generation: candidate.generation,
+            candidate_node: candidate.node,
+            site: candidate.site,
+            category: candidate.category,
+            retirement_poll: candidate.poll,
+            candidate_bytes: candidate.bytes,
+        }
+    }
+}
+#[derive(Debug)]
+struct RssReadError {
+    category: RssCategory,
+    message: String,
+    observed_ns: Option<u64>,
+    bytes: Option<u64>,
+}
+impl RssReadError {
+    fn new(category: RssCategory, message: impl Into<String>) -> Self {
+        Self {
+            category,
+            message: message.into(),
+            observed_ns: None,
+            bytes: None,
+        }
+    }
+    fn unavailable() -> Self {
+        #[cfg(target_os = "macos")]
+        let category = RssCategory::TaskinfoUnavailable;
+        #[cfg(not(target_os = "macos"))]
+        let category = RssCategory::VmrssFieldMissing;
+        Self::new(category, RSS_UNAVAILABLE)
+    }
+}
+// Unclassified injected/private errors remain Other; their strings never select a category.
+impl From<String> for RssReadError {
+    fn from(message: String) -> Self {
+        Self::new(RssCategory::OtherRssError, message)
+    }
+}
+impl From<&str> for RssReadError {
+    fn from(message: &str) -> Self {
+        Self::new(RssCategory::OtherRssError, message)
+    }
+}
+type RssReadResult<T> = std::result::Result<T, RssReadError>;
+struct RssAcquisition {
+    observation: RssObservation,
+    category: Option<RssCategory>,
+}
+impl From<RssObservation> for RssAcquisition {
+    fn from(observation: RssObservation) -> Self {
+        Self {
+            observation,
+            category: None,
+        }
+    }
+}
+impl RssAcquisition {
+    fn category(&self) -> Option<RssCategory> {
+        self.category.or_else(|| {
+            if self.observation.bytes.is_none() || self.observation.missing.is_some() {
+                Some(RssCategory::OtherRssError)
+            } else if self.observation.bytes.is_some_and(|v| v >= RSS_CAP) {
+                Some(RssCategory::PidRssCapExceeded)
+            } else {
+                None
+            }
+        })
+    }
+}
 fn supervisor_identity(role: &str, pid: u32) -> RssIdentity {
     RssIdentity {
         role: role.into(),
@@ -128,29 +361,44 @@ fn supervisor_identity(role: &str, pid: u32) -> RssIdentity {
         generation: 0,
     }
 }
-fn measured(identity: RssIdentity, verify_parent: bool) -> Result<RssObservation> {
-    let started_ns = monotonic_ns()?;
+fn measured(identity: RssIdentity, verify_parent: bool) -> RssReadResult<RssAcquisition> {
+    let started_ns = monotonic_ns()
+        .map_err(|error| RssReadError::new(RssCategory::SampleClockBeforeFailed, error))?;
     let sample = if verify_parent && unsafe { libc::getppid() } as u32 != identity.pid {
-        Err("controller parent relationship changed".into())
+        Err(RssReadError::new(
+            RssCategory::ParentChangedBeforeSample,
+            "controller parent relationship changed",
+        ))
     } else {
         rss(identity.pid)
     };
     let sample = if verify_parent && unsafe { libc::getppid() } as u32 != identity.pid {
-        Err("controller parent relationship changed during sample".into())
+        Err(RssReadError::new(
+            RssCategory::ParentChangedAfterSample,
+            "controller parent relationship changed during sample",
+        ))
     } else {
         sample
     };
-    let finished_ns = monotonic_ns()?;
-    let (bytes, missing) = match sample {
-        Ok(value) => (Some(value), None),
-        Err(error) => (None, Some(error)),
+    let finished_ns = monotonic_ns().map_err(|message| RssReadError {
+        category: RssCategory::SampleClockAfterFailed,
+        message,
+        observed_ns: Some(started_ns),
+        bytes: sample.as_ref().ok().copied(),
+    })?;
+    let (bytes, missing, category) = match sample {
+        Ok(value) => (Some(value), None, None),
+        Err(error) => (None, Some(error.message), Some(error.category)),
     };
-    Ok(RssObservation {
-        identity,
-        started_ns,
-        finished_ns,
-        bytes,
-        missing,
+    Ok(RssAcquisition {
+        observation: RssObservation {
+            identity,
+            started_ns,
+            finished_ns,
+            bytes,
+            missing,
+        },
+        category,
     })
 }
 struct ResourceMonitor {
@@ -162,6 +410,9 @@ struct ResourceMonitor {
     failure: Option<String>,
     stop_deadline_ns: Option<u64>,
     published_ns: u64,
+    published_sequence: u64,
+    first_rss_failure: Option<FirstRssFailure>,
+    first_rss_failure_retention: RssRetention,
 }
 impl ResourceMonitor {
     fn stop_requested(&mut self) -> Result<()> {
@@ -176,6 +427,28 @@ impl ResourceMonitor {
             return Err(format!("outer resource stop: {}", stop.reason));
         }
         Ok(())
+    }
+    fn remember_rss(&mut self, candidate: Option<RssCandidate>) {
+        if self.first_rss_failure.is_some() {
+            return;
+        }
+        let Some(candidate) = candidate else { return };
+        let record = FirstRssFailure::new(
+            &self.run,
+            RssProducer::Worker,
+            self.published_sequence,
+            candidate,
+        );
+        self.first_rss_failure = Some(record);
+        // Diagnostic retention is independent of the original fatal error and cleanup allowance.
+        self.first_rss_failure_retention = if serde_json::to_vec(&record)
+            .is_ok_and(|bytes| bytes.len() <= FIRST_RSS_CAP)
+            && resource_write(Path::new(&self.run.root), "rss-first-failure.json", &record).is_ok()
+        {
+            RssRetention::Written
+        } else {
+            RssRetention::WriteFailed
+        };
     }
     fn remember(&mut self, error: String) {
         self.failure.get_or_insert(error);
@@ -203,7 +476,7 @@ pub fn free_disk(path: &Path) -> Result<u64> {
 }
 const RSS_UNAVAILABLE: &str = "owned child RSS snapshot unavailable";
 #[cfg(target_os = "macos")]
-fn rss(pid: u32) -> Result<u64> {
+fn rss(pid: u32) -> RssReadResult<u64> {
     let mut info = std::mem::MaybeUninit::<libc::proc_taskinfo>::uninit();
     let size = std::mem::size_of::<libc::proc_taskinfo>();
     // Caller binds this PID to self, a verified parent, or a retained unreaped Child.
@@ -217,25 +490,30 @@ fn rss(pid: u32) -> Result<u64> {
         )
     };
     if got != size as libc::c_int {
-        return Err(RSS_UNAVAILABLE.into());
+        return Err(RssReadError::unavailable());
     }
     Ok(unsafe { info.assume_init() }.pti_resident_size)
 }
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
-fn rss(pid: u32) -> Result<u64> {
-    let text = fs::read_to_string(format!("/proc/{pid}/status")).map_err(|e| e.to_string())?;
+fn rss(pid: u32) -> RssReadResult<u64> {
+    let text = fs::read_to_string(format!("/proc/{pid}/status"))
+        .map_err(|e| RssReadError::new(RssCategory::ProcStatusReadFailed, e.to_string()))?;
+    parse_linux_rss(&text)
+}
+#[cfg(any(test, all(target_os = "linux", target_env = "gnu")))]
+fn parse_linux_rss(text: &str) -> RssReadResult<u64> {
     let row = text
         .lines()
         .find_map(|line| line.strip_prefix("VmRSS:"))
-        .ok_or(RSS_UNAVAILABLE)?;
+        .ok_or_else(|| RssReadError::new(RssCategory::VmrssFieldMissing, RSS_UNAVAILABLE))?;
     let kb: u64 = row
         .split_whitespace()
         .next()
-        .ok_or("missing RSS value")?
+        .ok_or_else(|| RssReadError::new(RssCategory::VmrssValueMissing, "missing RSS value"))?
         .parse()
-        .map_err(|_| "invalid RSS value")?;
+        .map_err(|_| RssReadError::new(RssCategory::VmrssValueInvalid, "invalid RSS value"))?;
     kb.checked_mul(1024)
-        .ok_or_else(|| "RSS counter overflow".into())
+        .ok_or_else(|| RssReadError::new(RssCategory::RssBytesOverflow, "RSS counter overflow"))
 }
 pub fn output(path: &Path, terminal: bool) -> Result<String> {
     let file = File::open(path).map_err(|e| e.to_string())?;
@@ -376,6 +654,7 @@ pub struct OwnedProcess {
     pub cache: Option<PathBuf>,
     terminal: bool,
     started: Instant,
+    first_rss_failure: Option<RssCandidate>,
 }
 struct ProcessSpec<'a> {
     node: String,
@@ -447,6 +726,7 @@ impl OwnedProcess {
             cache,
             terminal: false,
             started: Instant::now(),
+            first_rss_failure: None,
         })
     }
     fn poll_exit(&mut self) -> Result<()> {
@@ -476,40 +756,117 @@ impl OwnedProcess {
         }
         Ok(())
     }
-    fn sample_rss(&mut self) -> Result<()> {
-        self.sample_rss_with(&mut rss, &mut Child::try_wait)
-    }
+    #[cfg(test)]
     fn sample_rss_with(
         &mut self,
-        sample: &mut impl FnMut(u32) -> Result<u64>,
+        sample: &mut impl FnMut(u32) -> RssReadResult<u64>,
+        poll: &mut impl FnMut(&mut Child) -> std::io::Result<Option<std::process::ExitStatus>>,
+    ) -> Result<()> {
+        self.sample_rss_at_with(RssSite::CleanupChild, true, sample, poll)
+    }
+    fn remember_rss(
+        &mut self,
+        site: RssSite,
+        category: RssCategory,
+        poll: RssPoll,
+        observed_ns: Option<u64>,
+        bytes: Option<u64>,
+    ) {
+        if self.first_rss_failure.is_none() {
+            self.first_rss_failure = RssCandidate::from_identity(
+                &self.identity(),
+                site,
+                category,
+                poll,
+                observed_ns,
+                bytes,
+            );
+        }
+    }
+    fn sample_rss_at_with(
+        &mut self,
+        site: RssSite,
+        allow_retirement: bool,
+        sample: &mut impl FnMut(u32) -> RssReadResult<u64>,
         poll: &mut impl FnMut(&mut Child) -> std::io::Result<Option<std::process::ExitStatus>>,
     ) -> Result<()> {
         if self.terminal {
             return Ok(());
         }
         match sample(self.child.id()) {
-            Ok(value) => self.record_rss(value),
+            Ok(value) => self.record_rss(value).map_err(|error| {
+                self.remember_rss(
+                    site,
+                    error.category,
+                    RssPoll::NotAttempted,
+                    None,
+                    Some(value),
+                );
+                error.message
+            }),
             Err(error) => {
-                if error == RSS_UNAVAILABLE {
-                    // The owned Child, not an absent OS counter, establishes retirement.
-                    self.poll_exit_with(poll)?;
-                    if self.terminal {
-                        return Ok(());
+                let mut retirement = RssPoll::NotAttempted;
+                if error.category.permits_retirement() {
+                    if let Err(poll_error) = self.poll_exit_with(poll) {
+                        self.remember_rss(
+                            site,
+                            RssCategory::RetirementPollFailed,
+                            RssPoll::PollError,
+                            error.observed_ns,
+                            None,
+                        );
+                        return Err(poll_error);
                     }
+                    if self.terminal {
+                        if allow_retirement {
+                            return Ok(());
+                        }
+                        retirement = if self.receipt.success {
+                            RssPoll::ReapedSuccess
+                        } else {
+                            RssPoll::ReapedFailure
+                        };
+                        self.remember_rss(
+                            site,
+                            RssCategory::UnexpectedRetirement,
+                            retirement,
+                            error.observed_ns,
+                            None,
+                        );
+                        return Err(format!(
+                            "{} exited before requested stop",
+                            self.receipt.node
+                        ));
+                    }
+                    retirement = RssPoll::Running;
                 }
-                Err(error)
+                self.remember_rss(
+                    site,
+                    error.category,
+                    retirement,
+                    error.observed_ns,
+                    error.bytes,
+                );
+                Err(error.message)
             }
         }
     }
-    fn record_rss(&mut self, value: u64) -> Result<()> {
-        let stamp = u64::try_from(self.started.elapsed().as_nanos())
-            .map_err(|_| "sample timestamp overflow")?;
+    fn record_rss(&mut self, value: u64) -> RssReadResult<()> {
+        let stamp = u64::try_from(self.started.elapsed().as_nanos()).map_err(|_| {
+            RssReadError::new(
+                RssCategory::SampleTimestampOverflow,
+                "sample timestamp overflow",
+            )
+        })?;
         self.receipt.rss_samples += 1;
         self.receipt.rss_first_ns.get_or_insert(stamp);
         self.receipt.rss_last_ns = Some(stamp);
         self.receipt.max_rss_bytes = self.receipt.max_rss_bytes.max(value);
         if value >= RSS_CAP {
-            return Err("owned PID RSS cap exceeded".into());
+            return Err(RssReadError::new(
+                RssCategory::PidRssCapExceeded,
+                "owned PID RSS cap exceeded",
+            ));
         }
         Ok(())
     }
@@ -521,10 +878,16 @@ impl OwnedProcess {
             generation: self.receipt.generation,
         }
     }
-    fn sample(&mut self) -> Result<()> {
-        self.sample_with(&mut rss)
+    #[cfg(test)]
+    fn sample_with(&mut self, sample: &mut impl FnMut(u32) -> RssReadResult<u64>) -> Result<()> {
+        self.sample_at_with_poll(RssSite::ActiveChild, sample, &mut Child::try_wait)
     }
-    fn sample_with(&mut self, sample: &mut impl FnMut(u32) -> Result<u64>) -> Result<()> {
+    fn sample_at_with_poll(
+        &mut self,
+        site: RssSite,
+        sample: &mut impl FnMut(u32) -> RssReadResult<u64>,
+        poll: &mut impl FnMut(&mut Child) -> std::io::Result<Option<std::process::ExitStatus>>,
+    ) -> Result<()> {
         self.poll_exit()?;
         if self.terminal {
             return Err(format!(
@@ -532,7 +895,7 @@ impl OwnedProcess {
                 self.receipt.node
             ));
         }
-        self.sample_rss_with(sample, &mut Child::try_wait)?;
+        self.sample_rss_at_with(site, false, sample, poll)?;
         if self.terminal {
             return Err(format!(
                 "{} exited before requested stop",
@@ -652,6 +1015,9 @@ impl Fleet {
                 failure: None,
                 stop_deadline_ns: None,
                 published_ns: 0,
+                published_sequence: 0,
+                first_rss_failure: None,
+                first_rss_failure_retention: RssRetention::NotAttempted,
             },
         };
         // The first report is sampled with zero children before runtime or fixture construction.
@@ -687,7 +1053,9 @@ impl Fleet {
         json!({"clock":"CLOCK_MONOTONIC","cooperative_skewed":true,
             "aggregate_cap_bytes":RSS_CAP,"individual_cap_bytes":RSS_CAP,
             "max_observed_total_bytes":self.resources.max_total,"sequence":self.resources.sequence,
-            "failure":self.resources.failure,"last":self.resources.last})
+            "failure":self.resources.failure,"last":self.resources.last,
+            "first_rss_failure":self.resources.first_rss_failure,
+            "first_rss_failure_retention":self.resources.first_rss_failure_retention})
     }
     pub fn owned_cleanup_closed(&self) -> bool {
         self.processes.is_empty()
@@ -701,12 +1069,80 @@ impl Fleet {
                 .as_ref()
                 .is_some_and(|f| f.terminal && f.expected.len() == 2)
     }
+    fn sample_process(
+        &mut self,
+        index: usize,
+        site: RssSite,
+        allow_retirement: bool,
+    ) -> Result<()> {
+        self.sample_process_with(
+            index,
+            site,
+            allow_retirement,
+            &mut rss,
+            &mut Child::try_wait,
+        )
+    }
+    fn sample_process_with(
+        &mut self,
+        index: usize,
+        site: RssSite,
+        allow_retirement: bool,
+        sample: &mut impl FnMut(u32) -> RssReadResult<u64>,
+        poll: &mut impl FnMut(&mut Child) -> std::io::Result<Option<std::process::ExitStatus>>,
+    ) -> Result<()> {
+        let process = &mut self.processes[index];
+        let result = if allow_retirement {
+            process.sample_rss_at_with(site, true, sample, poll)
+        } else {
+            process.sample_at_with_poll(site, sample, poll)
+        };
+        self.resources.remember_rss(process.first_rss_failure);
+        result
+    }
     pub fn refresh_resources(&mut self, force: bool, terminal: bool) -> Result<()> {
         let result = self.sample_resources(force, terminal);
         if let Err(error) = &result {
             self.resources.remember(error.clone());
         }
         result
+    }
+    fn acquire_resource(
+        &mut self,
+        identity: &RssIdentity,
+        site: RssSite,
+        verify_parent: bool,
+        measure: &mut impl FnMut(RssIdentity, bool) -> RssReadResult<RssAcquisition>,
+    ) -> Result<RssAcquisition> {
+        let result = measure(identity.clone(), verify_parent);
+        match result {
+            Err(error) => {
+                self.resources.remember_rss(RssCandidate::from_identity(
+                    identity,
+                    site,
+                    error.category,
+                    RssPoll::NotAttempted,
+                    error.observed_ns,
+                    error.bytes,
+                ));
+                Err(error.message)
+            }
+            Ok(value) => {
+                if !matches!(site, RssSite::WorkerFrameChild)
+                    && let Some(category) = value.category()
+                {
+                    self.resources.remember_rss(RssCandidate::from_identity(
+                        identity,
+                        site,
+                        category,
+                        RssPoll::NotApplicable,
+                        Some(value.observation.finished_ns),
+                        value.observation.bytes,
+                    ));
+                }
+                Ok(value)
+            }
+        }
     }
     fn sample_resources(&mut self, force: bool, terminal: bool) -> Result<()> {
         self.sample_resources_with(force, terminal, &mut measured)
@@ -715,7 +1151,7 @@ impl Fleet {
         &mut self,
         force: bool,
         terminal: bool,
-        measure: &mut impl FnMut(RssIdentity, bool) -> Result<RssObservation>,
+        measure: &mut impl FnMut(RssIdentity, bool) -> RssReadResult<RssAcquisition>,
     ) -> Result<()> {
         if let Err(error) = self.resources.stop_requested() {
             self.resources.remember(error);
@@ -748,20 +1184,48 @@ impl Fleet {
                     .filter(|p| !p.terminal)
                     .map(OwnedProcess::identity),
             );
-            let mut observations = vec![
-                measure(expected[0].clone(), true)?,
-                measure(expected[1].clone(), false)?,
-            ];
+            let controller =
+                self.acquire_resource(&expected[0], RssSite::WorkerFrameController, true, measure)?;
+            let worker =
+                self.acquire_resource(&expected[1], RssSite::WorkerFrameWorker, false, measure)?;
+            let mut observations = vec![controller.observation, worker.observation];
             let mut retired_during_capture = false;
             for process in self.processes.iter_mut().filter(|p| !p.terminal) {
-                let observation = measure(process.identity(), false)?;
+                let identity = process.identity();
+                let acquisition = match measure(identity.clone(), false) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        self.resources.remember_rss(RssCandidate::from_identity(
+                            &identity,
+                            RssSite::WorkerFrameChild,
+                            error.category,
+                            RssPoll::NotAttempted,
+                            error.observed_ns,
+                            error.bytes,
+                        ));
+                        return Err(error.message);
+                    }
+                };
+                let category = acquisition.category();
+                let observation = acquisition.observation;
+                let mut retirement = RssPoll::NotAttempted;
                 if observation.bytes.is_none()
-                    && observation.missing.as_deref() == Some(RSS_UNAVAILABLE)
+                    && category.is_some_and(RssCategory::permits_retirement)
                 {
-                    process.poll_exit()?;
+                    if let Err(error) = process.poll_exit() {
+                        self.resources.remember_rss(RssCandidate::from_identity(
+                            &identity,
+                            RssSite::WorkerFrameChild,
+                            RssCategory::RetirementPollFailed,
+                            RssPoll::PollError,
+                            Some(observation.finished_ns),
+                            None,
+                        ));
+                        return Err(error);
+                    }
                     if process.terminal {
                         // Only the retiring child's unavailable sample may be discarded.
-                        // Keep failures in every earlier, still-owned observation sticky.
+                        // Keep earlier supervisor failures latched before this candidate is discarded.
                         if let Err(error) =
                             rss_totals(&expected[..observations.len()], &observations)
                         {
@@ -770,11 +1234,30 @@ impl Fleet {
                         retired_during_capture = true;
                         break;
                     }
+                    retirement = RssPoll::Running;
+                }
+                if let Some(category) = category {
+                    self.resources.remember_rss(RssCandidate::from_identity(
+                        &identity,
+                        RssSite::WorkerFrameChild,
+                        category,
+                        retirement,
+                        Some(observation.finished_ns),
+                        observation.bytes,
+                    ));
                 }
                 if let Some(bytes) = observation.bytes
                     && let Err(error) = process.record_rss(bytes)
                 {
-                    self.resources.remember(error);
+                    self.resources.remember_rss(RssCandidate::from_identity(
+                        &identity,
+                        RssSite::WorkerFrameChild,
+                        error.category,
+                        retirement,
+                        Some(observation.finished_ns),
+                        Some(bytes),
+                    ));
+                    self.resources.remember(error.message);
                 }
                 observations.push(observation);
             }
@@ -846,6 +1329,7 @@ impl Fleet {
                 self.resources.last.as_ref().ok_or("RSS frame missing")?,
             )?;
             self.resources.published_ns = finished_ns;
+            self.resources.published_sequence = self.resources.sequence;
         }
         match &self.resources.failure {
             Some(error) => Err(error.clone()),
@@ -858,13 +1342,16 @@ impl Fleet {
         generation
     }
     pub fn check(&mut self) -> Result<()> {
+        self.check_at(RssSite::ActiveChild)
+    }
+    fn check_at(&mut self, site: RssSite) -> Result<()> {
         self.refresh_resources(false, false)?;
         all_log_bytes(&self.root)?;
         if free_disk(&self.root)? < FREE_DISK_FLOOR {
             return Err("free disk below 64 GiB floor".into());
         }
-        for process in &mut self.processes {
-            process.sample()?;
+        for index in 0..self.processes.len() {
+            self.sample_process(index, site, false)?;
         }
         Ok(())
     }
@@ -937,7 +1424,7 @@ impl Fleet {
             if Instant::now() >= deadline {
                 return Err("CLI readiness deadline exhausted".into());
             }
-            self.check()?;
+            self.check_at(RssSite::ReadinessChild)?;
             let text = output(&self.processes[index].stdout, false)?;
             for line in text
                 .split_inclusive('\n')
@@ -993,13 +1480,13 @@ impl Fleet {
                 self.finish_process(index, deadline)?;
                 return Ok(());
             }
-            self.processes[index].sample_rss()?;
+            self.sample_process(index, RssSite::ApplyTarget, true)?;
             if self.processes[index].terminal {
                 return self.finish_process(index, deadline).map(|_| ());
             }
-            for (other, process) in self.processes.iter_mut().enumerate() {
+            for other in 0..self.processes.len() {
                 if other != index {
-                    process.sample()?;
+                    self.sample_process(other, RssSite::ApplySibling, false)?;
                 }
             }
             thread::sleep(Duration::from_millis(POLL_MS));
@@ -1052,12 +1539,16 @@ impl Fleet {
                     .ok_or("server bank missing")?;
                 return Ok(banks);
             }
-            for (other, process) in self.processes.iter_mut().enumerate() {
-                if other == index {
-                    process.sample_rss()?;
-                } else {
-                    process.sample()?;
-                }
+            for other in 0..self.processes.len() {
+                self.sample_process(
+                    other,
+                    if other == index {
+                        RssSite::StopTarget
+                    } else {
+                        RssSite::StopSibling
+                    },
+                    other == index,
+                )?;
             }
             if self.processes[index].terminal {
                 let banks = self
@@ -1116,16 +1607,16 @@ impl Fleet {
                         failure.get_or_insert(error);
                     }
                 } else {
-                    let process = &mut self.processes[index];
-                    if let Err(error) = process.sample_rss() {
+                    if let Err(error) = self.sample_process(index, RssSite::CleanupChild, true) {
                         failure.get_or_insert(error);
                     }
-                    if process.terminal {
+                    if self.processes[index].terminal {
                         if let Err(error) = self.finish_process(index, deadline) {
                             failure.get_or_insert(error);
                         }
                         continue;
                     }
+                    let process = &mut self.processes[index];
                     if Instant::now() >= force_at {
                         process.receipt.forced = true;
                         let _ = process.child.kill();
@@ -1213,13 +1704,71 @@ struct OuterResourceSample {
     observations: Vec<RssObservation>,
     limit_error: Option<String>,
 }
-fn outer_sample(root: &Path, run: &ResourceRun, sequence: u64) -> Result<OuterResourceSample> {
+fn outer_acquire(
+    run: &ResourceRun,
+    sequence: u64,
+    identity: RssIdentity,
+    site: RssSite,
+    first: &mut Option<FirstRssFailure>,
+    measure: &mut impl FnMut(RssIdentity, bool) -> RssReadResult<RssAcquisition>,
+) -> Result<RssObservation> {
+    let capture = measure(identity.clone(), false);
+    let (category, observed_ns, bytes) = match &capture {
+        Ok(value) => (
+            value.category(),
+            Some(value.observation.finished_ns),
+            value.observation.bytes,
+        ),
+        Err(error) => (Some(error.category), error.observed_ns, error.bytes),
+    };
+    if first.is_none()
+        && let Some(category) = category
+        && let Some(candidate) = RssCandidate::from_identity(
+            &identity,
+            site,
+            category,
+            RssPoll::NotApplicable,
+            observed_ns,
+            bytes,
+        )
+    {
+        *first = Some(FirstRssFailure::new(
+            run,
+            RssProducer::Controller,
+            sequence,
+            candidate,
+        ));
+    }
+    capture
+        .map(|value| value.observation)
+        .map_err(|error| error.message)
+}
+fn outer_sample(
+    root: &Path,
+    run: &ResourceRun,
+    sequence: u64,
+    first: &mut Option<FirstRssFailure>,
+) -> Result<OuterResourceSample> {
     let frame: ResourceFrame = resource_read(&root.join("resource.json"))?;
     frame.validate(run, sequence, monotonic_ns()?)?;
     // Replace producer supervisor samples; only child observations/subtotal cross the IPC seam.
     let supervisors = [
-        measured(supervisor_identity("controller", run.controller_pid), false)?,
-        measured(supervisor_identity("worker", run.worker_pid), false)?,
+        outer_acquire(
+            run,
+            frame.sequence,
+            supervisor_identity("controller", run.controller_pid),
+            RssSite::OuterController,
+            first,
+            &mut measured,
+        )?,
+        outer_acquire(
+            run,
+            frame.sequence,
+            supervisor_identity("worker", run.worker_pid),
+            RssSite::OuterWorker,
+            first,
+            &mut measured,
+        )?,
     ];
     let (totals, observations) =
         frame.recompose_observed(run, sequence, monotonic_ns()?, supervisors)?;
@@ -1309,9 +1858,10 @@ pub fn supervise() {
         group,
         reaped: false,
     };
-    let initial = json!({"schema":1,"complete":false,"worker_pid":group,"process_group":group,
+    let mut initial = json!({"schema":1,"complete":false,"worker_pid":group,"process_group":group,
         "supervisor_pid":std::process::id(),"worker_reaped":false,"forced":false,
         "failure":"controller did not reach a terminal receipt; retained ownership only",
+        "first_rss_failure":null,"first_rss_failure_retention":"not_attempted",
         "private_credential_cleanup":"pending; private key/token files must not be exported",
         "test_binary_sha256":binary_hash,"cli_binary_sha256":cli_hash});
     fs::write(
@@ -1329,6 +1879,8 @@ pub fn supervise() {
     let mut last_sequence = 0;
     let mut initial_observed = false;
     let mut last_resource = None;
+    let mut first_rss_failure = None;
+    let mut first_rss_failure_retention = RssRetention::NotAttempted;
     let status = loop {
         if Instant::now() >= deadline {
             panic!("worker reap budget exhausted; retained incomplete evidence");
@@ -1389,7 +1941,24 @@ pub fn supervise() {
             }
         }
         if initial_observed {
-            match outer_sample(&root, &run, last_sequence) {
+            let had_rss_failure = first_rss_failure.is_some();
+            let sampled = outer_sample(&root, &run, last_sequence, &mut first_rss_failure);
+            if !had_rss_failure && first_rss_failure.is_some() {
+                initial["first_rss_failure"] = serde_json::to_value(first_rss_failure).unwrap();
+                initial["first_rss_failure_retention"] =
+                    serde_json::to_value(RssRetention::Written).unwrap();
+                first_rss_failure_retention = if fs::write(
+                    root.join("controller.json"),
+                    serde_json::to_vec_pretty(&initial).unwrap(),
+                )
+                .is_ok()
+                {
+                    RssRetention::Written
+                } else {
+                    RssRetention::WriteFailed
+                };
+            }
+            match sampled {
                 Ok(OuterResourceSample {
                     frame,
                     totals,
@@ -1481,6 +2050,7 @@ pub fn supervise() {
         "owned_aggregate_max_observed_bytes":max_total,"resource_sample_count":sample_count,
         "resource_initial_observed":initial_observed,"resource_last_sequence":last_sequence,
         "resource_last":last_resource,"resource_clock":"CLOCK_MONOTONIC",
+        "first_rss_failure":first_rss_failure,"first_rss_failure_retention":first_rss_failure_retention,
         "resource_fresh_ns":RESOURCE_FRESH_NS,"resource_sampling":"cooperative sequential/skewed; not a hard bound",
         "owned_aggregate_rss_cap_bytes":RSS_CAP,"cooperative_poll_ms":POLL_MS,"failure":failure});
     fs::write(
@@ -1578,6 +2148,7 @@ mod tests {
                 cache: None,
                 terminal: false,
                 started: Instant::now(),
+                first_rss_failure: None,
             },
             input,
         )
@@ -1636,7 +2207,7 @@ mod tests {
                 assert_eq!(pid, owned_pid);
                 reads += 1;
                 release_inert_child(&mut input, pid)?;
-                Err("owned child RSS snapshot unavailable".into())
+                Err(RssReadError::unavailable())
             },
             &mut |child| {
                 assert_eq!(child.id(), owned_pid);
@@ -1669,7 +2240,7 @@ mod tests {
         let (mut process, mut input) = inert_process(directory.path());
         let result = process.sample_with(&mut |pid| {
             release_inert_child(&mut input, pid)?;
-            Err("owned child RSS snapshot unavailable".into())
+            Err(RssReadError::unavailable())
         });
         let terminal = process.terminal;
         cleanup_inert_child(&mut process);
@@ -1703,12 +2274,17 @@ mod tests {
             if bytes.is_none() {
                 discarded_finished = finished_ns;
             }
-            Ok(RssObservation {
-                identity,
-                started_ns,
-                finished_ns,
-                bytes,
-                missing,
+            Ok(RssAcquisition {
+                observation: RssObservation {
+                    identity,
+                    started_ns,
+                    finished_ns,
+                    bytes,
+                    missing,
+                },
+                category: bytes
+                    .is_none()
+                    .then(|| RssReadError::unavailable().category),
             })
         });
         let terminal = fleet.processes[0].terminal;
@@ -1751,6 +2327,9 @@ mod tests {
                 sequence: previous.sequence,
                 max_total: previous.max_total_bytes,
                 published_ns: now,
+                published_sequence: previous.sequence,
+                first_rss_failure: None,
+                first_rss_failure_retention: RssRetention::NotAttempted,
                 last: Some(previous),
                 failure: None,
                 stop_deadline_ns: None,
@@ -1758,26 +2337,455 @@ mod tests {
         }
     }
 
-    fn fixture_observation(identity: RssIdentity, unavailable: bool) -> Result<RssObservation> {
+    fn fixture_observation(
+        identity: RssIdentity,
+        unavailable: bool,
+    ) -> RssReadResult<RssAcquisition> {
         let now = monotonic_ns()?;
-        Ok(RssObservation {
-            identity,
-            started_ns: now,
-            finished_ns: now,
-            bytes: (!unavailable).then_some(4096),
-            missing: unavailable.then(|| RSS_UNAVAILABLE.into()),
+        Ok(RssAcquisition {
+            observation: RssObservation {
+                identity,
+                started_ns: now,
+                finished_ns: now,
+                bytes: (!unavailable).then_some(4096),
+                missing: unavailable.then(|| RSS_UNAVAILABLE.into()),
+            },
+            category: unavailable.then(|| RssReadError::unavailable().category),
         })
     }
 
+    #[test]
+    fn rss_first_failure_latches_owned_live_candidate_before_cleanup_or_good_frame() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, _input) = inert_process(directory.path());
+        process.receipt.node = "node-7".into();
+        let owned_pid = process.child.id();
+        let mut fleet = inert_resource_fleet(directory.path(), process);
+        let result = fleet.sample_resources_with(true, false, &mut |identity, _| {
+            let unavailable = identity.role == "server";
+            fixture_observation(identity, unavailable)
+        });
+        let first = fleet.resource_evidence()["first_rss_failure"].clone();
+        cleanup_inert_child(&mut fleet.processes[0]);
+        assert!(result.is_err());
+        assert_eq!(first["schema"], "mount-rs.cache-rss-failure.v1");
+        assert_eq!(first["candidate_pid"], owned_pid);
+        assert_eq!(first["candidate_role"], "server");
+        assert_eq!(first["candidate_node"], 7);
+        assert_eq!(first["candidate_generation"], 1);
+        assert_eq!(first["site"], "worker_frame_child");
+        assert_eq!(first["retirement_poll"], "running");
+        let _ = fleet.sample_resources_with(true, true, &mut |identity, _| {
+            fixture_observation(identity, false)
+        });
+        assert_eq!(fleet.resource_evidence()["first_rss_failure"], first);
+        assert!(directory.path().join("rss-first-failure.json").is_file());
+    }
+    #[test]
+    fn rss_first_failure_typed_linux_parsing_and_private_source_errors_do_not_select_from_strings()
+    {
+        for (text, category) in [
+            ("Name: private", RssCategory::VmrssFieldMissing),
+            ("VmRSS:", RssCategory::VmrssValueMissing),
+            ("VmRSS: SECRET_PATH", RssCategory::VmrssValueInvalid),
+            (
+                "VmRSS: 18446744073709551615 kB",
+                RssCategory::RssBytesOverflow,
+            ),
+        ] {
+            let error = parse_linux_rss(text).unwrap_err();
+            assert_eq!(error.category, category);
+        }
+        assert_eq!(parse_linux_rss("VmRSS: 8 kB").unwrap(), 8192);
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, _input) = inert_process(directory.path());
+        process.receipt.node = "node-2".into();
+        let mut fleet = inert_resource_fleet(directory.path(), process);
+        let mut polls = 0;
+        let result = fleet.sample_process_with(
+            0,
+            RssSite::ApplyTarget,
+            true,
+            &mut |_| {
+                Err(RssReadError::new(
+                    RssCategory::ProcStatusReadFailed,
+                    "PRIVATE_RSS_ERROR /secret/path VmRSS snapshot unavailable",
+                ))
+            },
+            &mut |_| {
+                polls += 1;
+                panic!("status-read error must not be retirement-excused")
+            },
+        );
+        cleanup_inert_child(&mut fleet.processes[0]);
+        assert_eq!(polls, 0);
+        assert!(result.unwrap_err().starts_with("PRIVATE_RSS_ERROR"));
+        let record = fleet.resource_evidence()["first_rss_failure"].clone();
+        assert_eq!(record["category"], "proc_status_read_failed");
+        assert_eq!(record["retirement_poll"], "not_attempted");
+        assert!(record["observed_ns"].is_null());
+        let bytes = fs::read(directory.path().join("rss-first-failure.json")).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(!text.contains("PRIVATE_RSS_ERROR") && !text.contains("/secret/path"));
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, _input) = inert_process(directory.path());
+        process.receipt.node = "node-6".into();
+        let result = process.sample_rss_at_with(
+            RssSite::CleanupChild,
+            true,
+            &mut |_| Err(RSS_UNAVAILABLE.into()),
+            &mut |_| panic!("error text must not select retirement"),
+        );
+        cleanup_inert_child(&mut process);
+        assert_eq!(result, Err(RSS_UNAVAILABLE.into()));
+        assert_eq!(
+            process.first_rss_failure.unwrap().category,
+            RssCategory::OtherRssError
+        );
+    }
+    #[test]
+    fn rss_first_failure_owned_direct_sites_and_poll_failure_are_exact() {
+        for site in [
+            RssSite::ReadinessChild,
+            RssSite::ActiveChild,
+            RssSite::ApplyTarget,
+            RssSite::ApplySibling,
+            RssSite::StopTarget,
+            RssSite::StopSibling,
+            RssSite::CleanupChild,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let (mut process, _input) = inert_process(directory.path());
+            process.receipt.node = "node-3".into();
+            process.receipt.generation = 42;
+            let pid = process.child.id();
+            let mut fleet = inert_resource_fleet(directory.path(), process);
+            let result = fleet.sample_process_with(
+                0,
+                site,
+                true,
+                &mut |actual| {
+                    assert_eq!(actual, pid);
+                    Err(RssReadError::unavailable())
+                },
+                &mut |child| {
+                    assert_eq!(child.id(), pid);
+                    Err(std::io::Error::other("PRIVATE_POLL_FAILURE"))
+                },
+            );
+            cleanup_inert_child(&mut fleet.processes[0]);
+            assert_eq!(result, Err("PRIVATE_POLL_FAILURE".into()));
+            let record = fleet.resources.first_rss_failure.unwrap();
+            assert_eq!(
+                (
+                    record.candidate_pid,
+                    record.candidate_node,
+                    record.candidate_generation
+                ),
+                (pid, Some(3), 42)
+            );
+            assert_eq!(
+                (record.site, record.category, record.retirement_poll),
+                (site, RssCategory::RetirementPollFailed, RssPoll::PollError)
+            );
+            let text = String::from_utf8(
+                fs::read(directory.path().join("rss-first-failure.json")).unwrap(),
+            )
+            .unwrap();
+            assert!(!text.contains("PRIVATE_POLL_FAILURE"));
+        }
+    }
+    #[test]
+    fn rss_first_failure_expected_reap_is_empty_and_active_reap_records_real_status() {
+        for expected in [true, false] {
+            for exit in [0, 7] {
+                let directory = tempfile::tempdir().unwrap();
+                let (mut process, mut input) = inert_process_status(directory.path(), exit);
+                process.receipt.node = "node-8".into();
+                let pid = process.child.id();
+                let mut fleet = inert_resource_fleet(directory.path(), process);
+                let site = if expected {
+                    RssSite::CleanupChild
+                } else {
+                    RssSite::ActiveChild
+                };
+                let result = fleet.sample_process_with(
+                    0,
+                    site,
+                    expected,
+                    &mut |pid| {
+                        release_inert_child(&mut input, pid)?;
+                        Err(RssReadError::unavailable())
+                    },
+                    &mut Child::try_wait,
+                );
+                assert!(fleet.processes[0].terminal && fleet.processes[0].receipt.reaped);
+                assert_eq!(fleet.processes[0].receipt.success, exit == 0);
+                if expected {
+                    assert!(result.is_ok());
+                    assert!(fleet.resources.first_rss_failure.is_none());
+                    assert!(!directory.path().join("rss-first-failure.json").exists());
+                    assert!(fleet.resources.stop_deadline_ns.is_none());
+                } else {
+                    assert!(result.unwrap_err().contains("exited before requested stop"));
+                    let first = fleet.resources.first_rss_failure.unwrap();
+                    assert_eq!(first.candidate_pid, pid);
+                    assert_eq!(first.category, RssCategory::UnexpectedRetirement);
+                    assert_eq!(
+                        first.retirement_poll,
+                        if exit == 0 {
+                            RssPoll::ReapedSuccess
+                        } else {
+                            RssPoll::ReapedFailure
+                        }
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn rss_first_failure_direct_error_preserves_existing_monitor_policy() {
+        for already_failed in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let (mut process, _input) = inert_process(directory.path());
+            process.receipt.node = "node-6".into();
+            let mut fleet = inert_resource_fleet(directory.path(), process);
+            if already_failed {
+                fleet.resources.failure = Some("earlier resource failure".into());
+                fleet.resources.stop_deadline_ns = Some(fleet.resources.outer_ns);
+            }
+            let failure_before = fleet.resources.failure.clone();
+            let deadline_before = fleet.resources.stop_deadline_ns;
+            let outer_before = fleet.resources.outer_ns;
+            let mut reads = 0;
+            let mut polls = 0;
+            let result = fleet.sample_process_with(
+                0,
+                RssSite::ActiveChild,
+                false,
+                &mut |_| {
+                    reads += 1;
+                    Err(RssReadError::unavailable())
+                },
+                &mut |child| {
+                    polls += 1;
+                    child.try_wait()
+                },
+            );
+            cleanup_inert_child(&mut fleet.processes[0]);
+            assert_eq!(result, Err(RSS_UNAVAILABLE.into()));
+            assert_eq!((reads, polls), (1, 1));
+            assert!(fleet.resources.first_rss_failure.is_some());
+            assert_eq!(fleet.resources.stop_deadline_ns, deadline_before);
+            assert_eq!(fleet.resources.failure, failure_before);
+            assert_eq!(fleet.resources.outer_ns, outer_before);
+        }
+    }
+    #[test]
+    fn rss_first_failure_write_error_is_sticky_and_cannot_replace_primary_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, _input) = inert_process(directory.path());
+        process.receipt.node = "node-0".into();
+        let mut fleet = inert_resource_fleet(directory.path(), process);
+        fleet.resources.sequence = 99; // A candidate is not necessarily published.
+        fs::create_dir(directory.path().join(".rss-first-failure.json.tmp")).unwrap();
+        let result = fleet.sample_process_with(
+            0,
+            RssSite::StopTarget,
+            true,
+            &mut |_| Err(RssReadError::unavailable()),
+            &mut Child::try_wait,
+        );
+        let first = fleet.resource_evidence()["first_rss_failure"].clone();
+        assert_eq!(result, Err(RSS_UNAVAILABLE.into()));
+        assert_eq!(first["resource_sequence"], 4);
+        assert_eq!(
+            fleet.resource_evidence()["first_rss_failure_retention"],
+            "write_failed"
+        );
+        fs::remove_dir(directory.path().join(".rss-first-failure.json.tmp")).unwrap();
+        let later = fleet.sample_process_with(
+            0,
+            RssSite::StopTarget,
+            true,
+            &mut |_| Ok(8192),
+            &mut Child::try_wait,
+        );
+        assert!(later.is_ok());
+        assert_eq!(fleet.resource_evidence()["first_rss_failure"], first);
+        assert_eq!(
+            fleet.resource_evidence()["first_rss_failure_retention"],
+            "write_failed"
+        );
+        assert!(!directory.path().join("rss-first-failure.json").exists());
+        cleanup_inert_child(&mut fleet.processes[0]);
+    }
+    #[test]
+    fn rss_first_failure_outer_source_is_typed_sticky_and_has_no_shared_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, _input) = inert_process(directory.path());
+        let pid = process.child.id();
+        let run = ResourceRun {
+            root: "PRIVATE_ROOT_SENTINEL".into(),
+            controller_pid: std::process::id(),
+            worker_pid: pid,
+            group: pid,
+        };
+        let mut first = None;
+        let result = outer_acquire(
+            &run,
+            9,
+            supervisor_identity("worker", pid),
+            RssSite::OuterWorker,
+            &mut first,
+            &mut |_, _| {
+                Err(RssReadError::new(
+                    RssCategory::SampleClockBeforeFailed,
+                    "PRIVATE_CLOCK_ERROR",
+                ))
+            },
+        );
+        assert_eq!(result.unwrap_err(), "PRIVATE_CLOCK_ERROR");
+        let record = serde_json::to_value(first).unwrap();
+        assert_eq!(record["producer"], "controller");
+        assert_eq!(record["candidate_pid"], pid);
+        assert_eq!(record["site"], "outer_worker");
+        assert_eq!(record["retirement_poll"], "not_applicable");
+        assert!(record["observed_ns"].is_null());
+        let _ = outer_acquire(
+            &run,
+            10,
+            supervisor_identity("controller", run.controller_pid),
+            RssSite::OuterController,
+            &mut first,
+            &mut |_, _| Err(RssReadError::unavailable()),
+        );
+        assert_eq!(serde_json::to_value(first).unwrap(), record);
+        let text = serde_json::to_string(&record).unwrap();
+        assert!(!text.contains("PRIVATE_ROOT_SENTINEL") && !text.contains("PRIVATE_CLOCK_ERROR"));
+        assert!(!directory.path().join("rss-first-failure.json").exists());
+        cleanup_inert_child(&mut process);
+    }
+    #[test]
+    fn rss_first_failure_cap_is_source_typed_and_success_has_no_diagnostic_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, _input) = inert_process(directory.path());
+        process.receipt.role = "catalog-apply".into();
+        process.receipt.node = "catalog".into();
+        let mut fleet = inert_resource_fleet(directory.path(), process);
+        assert!(
+            fleet
+                .sample_process_with(
+                    0,
+                    RssSite::ApplyTarget,
+                    true,
+                    &mut |_| Ok(4096),
+                    &mut Child::try_wait
+                )
+                .is_ok()
+        );
+        assert!(fleet.resources.first_rss_failure.is_none());
+        assert!(!directory.path().join("rss-first-failure.json").exists());
+        let result = fleet.sample_process_with(
+            0,
+            RssSite::ApplyTarget,
+            true,
+            &mut |_| Ok(RSS_CAP),
+            &mut Child::try_wait,
+        );
+        cleanup_inert_child(&mut fleet.processes[0]);
+        assert_eq!(result, Err("owned PID RSS cap exceeded".into()));
+        let record = fleet.resource_evidence()["first_rss_failure"].clone();
+        assert_eq!(record["category"], "pid_rss_cap_exceeded");
+        assert_eq!(record["candidate_role"], "catalog-apply");
+        assert_eq!(record["candidate_bytes"], RSS_CAP);
+        assert!(record["candidate_node"].is_null());
+    }
+    #[test]
+    fn rss_first_failure_pre_sample_exit_aggregate_and_malformed_frame_have_no_candidate() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, mut input) = inert_process(directory.path());
+        process.receipt.node = "node-4".into();
+        release_inert_child(&mut input, process.child.id()).unwrap();
+        let mut fleet = inert_resource_fleet(directory.path(), process);
+        let result = fleet.sample_process_with(
+            0,
+            RssSite::ActiveChild,
+            false,
+            &mut |_| panic!("pre-sample exit must not query RSS"),
+            &mut |_| panic!("no unavailable-sample recovery poll after pre-sample exit"),
+        );
+        assert!(result.unwrap_err().contains("exited before requested stop"));
+        assert!(fleet.resources.first_rss_failure.is_none());
+        assert!(fleet.resources.failure.is_none());
+        assert!(fleet.resources.stop_deadline_ns.is_none());
+        assert!(!directory.path().join("rss-first-failure.json").exists());
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, _input) = inert_process(directory.path());
+        process.receipt.node = "node-5".into();
+        let mut fleet = inert_resource_fleet(directory.path(), process);
+        let result = fleet.sample_resources_with(true, false, &mut |identity, _| {
+            let mut value = fixture_observation(identity, false)?;
+            value.observation.bytes = Some(RSS_CAP / 2);
+            Ok(value)
+        });
+        cleanup_inert_child(&mut fleet.processes[0]);
+        assert!(result.unwrap_err().contains("aggregate cap exceeded"));
+        assert!(fleet.resources.first_rss_failure.is_none());
+        assert!(!directory.path().join("rss-first-failure.json").exists());
+        fs::write(
+            directory.path().join("resource.json"),
+            b"PRIVATE_MALFORMED_FRAME",
+        )
+        .unwrap();
+        let mut first = None;
+        assert!(outer_sample(directory.path(), &fleet.resources.run, 0, &mut first).is_err());
+        assert!(first.is_none());
+    }
+    #[test]
+    fn rss_first_failure_max_wire_scalars_fit_two_kibibytes() {
+        let run = ResourceRun {
+            root: "PRIVATE_MAX_ROOT".into(),
+            controller_pid: u32::MAX - 2,
+            worker_pid: u32::MAX - 1,
+            group: u32::MAX - 1,
+        };
+        let candidate = RssCandidate {
+            role: RssRole::Server,
+            pid: u32::MAX,
+            generation: u64::MAX,
+            node: Some(9),
+            site: RssSite::WorkerFrameChild,
+            category: RssCategory::ParentChangedBeforeSample,
+            poll: RssPoll::NotAttempted,
+            observed_ns: Some(u64::MAX),
+            bytes: Some(u64::MAX),
+        };
+        let record = FirstRssFailure::new(&run, RssProducer::Worker, u64::MAX, candidate);
+        let bytes = serde_json::to_vec(&record).unwrap();
+        assert!(bytes.len() <= FIRST_RSS_CAP);
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value.as_object().unwrap().len(), 15);
+        assert_eq!(value["candidate_bytes"].as_u64(), Some(u64::MAX));
+        assert!(
+            !String::from_utf8(bytes.clone())
+                .unwrap()
+                .contains("PRIVATE_MAX_ROOT")
+        );
+        if let Some(path) = std::env::var_os("MOUNT_RS_RSS_FAILURE_TEST_FIXTURE") {
+            fs::write(path, bytes).unwrap();
+        }
+    }
     #[test]
     fn rss_retirement_unavailable_live_child_remains_a_failure() {
         let directory = tempfile::tempdir().unwrap();
         let (mut process, _input) = inert_process(directory.path());
         let mut polls = 0;
-        let result = process.sample_rss_with(&mut |_| Err(RSS_UNAVAILABLE.into()), &mut |child| {
-            polls += 1;
-            child.try_wait()
-        });
+        let result =
+            process.sample_rss_with(&mut |_| Err(RssReadError::unavailable()), &mut |child| {
+                polls += 1;
+                child.try_wait()
+            });
         let state = (
             process.terminal,
             process.receipt.reaped,
@@ -1795,11 +2803,12 @@ mod tests {
         let (mut process, _input) = inert_process(directory.path());
         let process_pid = process.child.id();
         let mut polls = 0;
-        let result = process.sample_rss_with(&mut |_| Err(RSS_UNAVAILABLE.into()), &mut |child| {
-            assert_eq!(child.id(), process_pid);
-            polls += 1;
-            Err(std::io::Error::other("injected owned exit poll failure"))
-        });
+        let result =
+            process.sample_rss_with(&mut |_| Err(RssReadError::unavailable()), &mut |child| {
+                assert_eq!(child.id(), process_pid);
+                polls += 1;
+                Err(std::io::Error::other("injected owned exit poll failure"))
+            });
         let state = (
             process.terminal,
             process.receipt.reaped,
@@ -1834,7 +2843,7 @@ mod tests {
         let result = process.sample_rss_with(
             &mut |pid| {
                 release_inert_child(&mut input, pid)?;
-                Err(RSS_UNAVAILABLE.into())
+                Err(RssReadError::unavailable())
             },
             &mut Child::try_wait,
         );
@@ -1953,6 +2962,11 @@ mod tests {
         cleanup_inert_child(&mut fleet.processes[0]);
         assert_eq!(result, Err("RSS snapshot unavailable".into()));
         assert_eq!(controller_reads, 2);
+        let first = fleet.resource_evidence()["first_rss_failure"].clone();
+        assert_eq!(first["candidate_role"], "controller");
+        assert_eq!(first["site"], "worker_frame_controller");
+        assert_eq!(first["retirement_poll"], "not_applicable");
+        assert_eq!(first["candidate_generation"], 0);
         assert_eq!(
             fleet.resources.failure.as_deref(),
             Some("RSS snapshot unavailable")
