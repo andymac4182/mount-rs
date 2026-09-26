@@ -66,6 +66,60 @@ It verifies collection and fresh content; its dimensions do not qualify the
 10,000-client production target. Existing resource floors, deadlines and cleanup
 requirements still apply. Use the full mode only with the required capacity.
 
+## Follow startup while it is running
+
+An `io-profiling` build with `MOUNT_RS_PROFILE_IO=1` also emits bounded
+`startup_diagnostics ` records using `mount-rs.startup.v1`. The fixed stages are
+configuration, catalog open/load/validation, TLS material, cache start, drive
+configuration/open, backing receipt, drive registration, listener bind,
+readiness and cleanup. Records contain stage attempts, terminal outcomes,
+in-flight counts, elapsed time, planned drives, completed opens and registered
+drives. They contain no drive names, file paths, tokens, issuer URLs or payloads.
+Rows form a fixed registry; unused rows do not establish producer coverage. In
+the CLI, catalog validation is included in catalog-load time, the backing-receipt
+row is unused, optional cache setup includes the no-cache case, and listener-bind
+time includes signal-handler preparation.
+
+The observer records stage changes and publishes at startup, readiness, failure
+and cleanup boundaries and every five seconds while an observed startup
+operation is stalled. The production-target workers
+also publish `startup-progress-gN.json` in their owned worker directories. The
+controller forwards validated observations from the current worker PID and
+generation. Running observations have a 15-second age limit and one second of
+permitted clock skew; readiness records are historical observations. These are
+progress observations, separate from the immutable phase
+metric receipts. Startup records have `banks_captured=false`; they do not claim
+to flush the storage banks or prove application drain.
+
+After workload configuration is validated, the controller emits
+`target_progress ` records using
+`mount-rs.target-progress.v1`, identifying the workload dimensions, verified
+source revision, current phase, observed free space, completed drive
+initializations and successful initial client connections. Connection counts
+advance after a successful connection and remain cumulative across replica
+refresh; live transport state stays in the QUIC bank. A last progress record can
+locate an interrupted
+run, but it cannot establish why the process stopped or whether the phase
+completed.
+
+The hosted full-target job streams only closed, scalar diagnostic records through
+`scripts/filter-startup-diagnostics.py`. The helper keeps a private raw log with
+mode `0600`, bounds the retained log to 64 MiB and continues draining after a
+filter or output failure. Raw runtime and worker logs are excluded from public
+artifacts. The filter binds the controller's PID, source revision and exact
+10-server/10,000-client/10,000-drive/5,000-partition/1,000-file workload. Missing
+terminal records, malformed records or incomplete accounting fail the logging
+gate. The original workload exit status remains the first failure reported;
+filter success is not workload qualification. Worker startup completeness also
+joins the existing target metric qualification gate, so a missing worker record
+cannot qualify merely because it never reached the filter.
+
+Readiness and observation completeness are separate. A service can report ready
+while an observer failure leaves `accounting_complete=false`; valid incomplete
+records can still be forwarded and the diagnostic gate fails. A forced kill can
+leave only the last periodic record. Do not infer a zero error count, a completed open or a
+successful cleanup from an absent terminal record.
+
 The ordinary server constructors keep the new observer disabled. Service
 embedders can explicitly use `RemoteServer::bind_with_diagnostics(..., true)` in
 an `io-profiling` build, retain `server.diagnostics()`, and call its `snapshot()`

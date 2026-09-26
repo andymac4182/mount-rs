@@ -43,6 +43,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697
         with:
           components: clippy
+      - name: Verify bounded startup and live progress controls
+        run: python3 -B scripts/test-filter-startup-diagnostics.py
       - run: ./scripts/cargo-shared test --locked -p mount-rs-service -p mount-rs-remote-protocol -p mount-rs-remote-client -p mount-rs-cli
       - run: ./scripts/cargo-shared clippy --locked -p mount-rs-service -p mount-rs-remote-protocol -p mount-rs-remote-client -p mount-rs-cli --all-targets -- -D warnings
       - name: Run bounded QUIC soak
@@ -256,6 +258,7 @@ jobs:
           git rev-parse HEAD > "$EVIDENCE_DIR/checkout-sha.txt"
           git status --porcelain=v1 --untracked-files=all > "$EVIDENCE_DIR/source-before.txt"
           test ! -s "$EVIDENCE_DIR/source-before.txt"
+          python3 -B scripts/test-filter-startup-diagnostics.py
           ./scripts/cargo-shared test --locked -p mount-rs-service --features resource-profiling \
             --test quic_production_target --no-run --message-format=json \
             > "$EVIDENCE_DIR/build.jsonl" 2> "$EVIDENCE_DIR/build.log"
@@ -265,25 +268,52 @@ jobs:
           artifacts = [json.loads(line) for line in (root / 'build.jsonl').read_text().splitlines()]
           tests = [v for v in artifacts if v.get('reason') == 'compiler-artifact' and v['target']['name'] == 'quic_production_target' and v.get('executable') and v['profile']['test']]
           if len(tests) != 1: raise SystemExit('exact production target executable identity unavailable')
-          receipt = {'checkout_sha': (root / 'checkout-sha.txt').read_text().strip(), 'features': tests[0]['features'], 'test_sha256': hashlib.sha256(pathlib.Path(tests[0]['executable']).read_bytes()).hexdigest()}
+          receipt = {'checkout_sha': (root / 'checkout-sha.txt').read_text().strip(), 'features': tests[0]['features'], 'test_sha256': hashlib.sha256(pathlib.Path(tests[0]['executable']).read_bytes()).hexdigest(), 'diagnostics_filter_sha256': hashlib.sha256(pathlib.Path('scripts/filter-startup-diagnostics.py').read_bytes()).hexdigest()}
           (root / 'build-receipt.json').write_text(json.dumps(receipt, sort_keys=True) + '\n')
           PY
       - name: Attempt the unchanged full target without a smaller fallback
         run: |
           set -euo pipefail
           unset MOUNT_RS_TARGET_INJECT MOUNT_RS_TRACE_STORAGE
-          status=0
-          ./scripts/bench-remote-production-target.sh > "$EVIDENCE_DIR/production-target.log" 2>&1 || status=$?
-          printf '%s\n' "$status" > "$EVIDENCE_DIR/production-target-exit-code.txt"
-          cat "$EVIDENCE_DIR/production-target.log"
-          if [ "$status" -ne 0 ]; then exit "$status"; fi
+          umask 077
+          private_log_dir="$RUNNER_TEMP/mount-rs-full-private"
+          mkdir -m 700 "$private_log_dir"
           python3 - <<'PY'
-          import json, os, pathlib, re
+          import hashlib, json, os, pathlib
+          build = json.loads((pathlib.Path(os.environ['EVIDENCE_DIR']) / 'build-receipt.json').read_text())
+          if hashlib.sha256(pathlib.Path('scripts/filter-startup-diagnostics.py').read_bytes()).hexdigest() != build['diagnostics_filter_sha256']:
+              raise SystemExit('diagnostics filter differs from clean build')
+          PY
+          set +e
+          ./scripts/bench-remote-production-target.sh 2>&1 \
+            | python3 -B scripts/filter-startup-diagnostics.py \
+                --private-log "$private_log_dir/production-target.log" \
+                --require-target-identity \
+                --expected-source-revision "$(cat "$EVIDENCE_DIR/checkout-sha.txt")" \
+                --expected-mode "$MOUNT_RS_TARGET_MODE" \
+                --expected-provider "$MOUNT_RS_TARGET_PROVIDER" \
+                --expected-servers 10 --expected-clients 10000 --expected-drives "$MOUNT_RS_TARGET_DRIVES" \
+                --expected-partitions 5000 --expected-files-per-drive "$MOUNT_RS_TARGET_FILES" \
+                --expected-phase-seconds "$MOUNT_RS_TARGET_SECONDS" \
+            | tee "$EVIDENCE_DIR/production-target-progress.log"
+          pipeline_status=( "${PIPESTATUS[@]}" )
+          set -e
+          printf '%s\n' "${pipeline_status[0]}" > "$EVIDENCE_DIR/production-target-exit-code.txt"
+          printf '%s\n' "${pipeline_status[1]}" > "$EVIDENCE_DIR/diagnostics-filter-exit-code.txt"
+          printf '%s\n' "${pipeline_status[2]}" > "$EVIDENCE_DIR/diagnostics-log-exit-code.txt"
+          if [ "${pipeline_status[0]}" -ne 0 ]; then exit "${pipeline_status[0]}"; fi
+          if [ "${pipeline_status[1]}" -ne 0 ]; then exit "${pipeline_status[1]}"; fi
+          if [ "${pipeline_status[2]}" -ne 0 ]; then exit "${pipeline_status[2]}"; fi
+          export MOUNT_RS_TARGET_PRIVATE_LOG="$private_log_dir/production-target.log"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re
           root = pathlib.Path(os.environ['EVIDENCE_DIR'])
-          log = (root / 'production-target.log').read_text()
+          log = pathlib.Path(os.environ['MOUNT_RS_TARGET_PRIVATE_LOG']).read_text()
           if not re.search(r'(?ms)^test production_target_controller \.\.\. .*?\bok\s*$', log) or not re.search(r'^test result: ok\. 1 passed; 0 failed; 0 ignored;', log, re.M): raise SystemExit('full controller must execute and pass exactly once')
           terminal = json.loads((pathlib.Path(os.environ['MOUNT_RS_TARGET_OUTPUT']) / 'terminal.json').read_text())
           build = json.loads((root / 'build-receipt.json').read_text())
+          if hashlib.sha256(pathlib.Path('scripts/filter-startup-diagnostics.py').read_bytes()).hexdigest() != build['diagnostics_filter_sha256']:
+              raise SystemExit('diagnostics filter differs from clean build')
           if terminal['source']['binary_sha256'] != build['test_sha256'] or terminal['source']['revision'] != build['checkout_sha'] or terminal['source']['checkout_status']:
               raise SystemExit('full runtime source or binary identity differs from clean build')
           PY
@@ -293,7 +323,7 @@ jobs:
           mkdir -p "$EVIDENCE_DIR"
           git status --porcelain=v1 --untracked-files=all > "$EVIDENCE_DIR/source-after.txt"
           test ! -s "$EVIDENCE_DIR/source-after.txt"
-      - name: Retain full target logs and public receipts even on preflight failure
+      - name: Retain sanitized target progress and public receipts even on preflight failure
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -305,7 +335,6 @@ jobs:
             ${{ env.MOUNT_RS_TARGET_OUTPUT }}/expected/*.json
             ${{ env.MOUNT_RS_TARGET_OUTPUT }}/worker-*/*.json
             ${{ env.MOUNT_RS_TARGET_OUTPUT }}/worker-*/metrics/*.json
-            ${{ env.MOUNT_RS_TARGET_OUTPUT }}/worker-*/worker.log
           if-no-files-found: error
           retention-days: 14
   owned-backing-pilot:

@@ -4,6 +4,7 @@ pub mod auth;
 pub mod catalog;
 pub mod dispatch;
 pub mod server;
+pub mod startup;
 
 mod transfer;
 

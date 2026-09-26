@@ -10,6 +10,7 @@ mod metrics;
 mod oracle;
 mod preflight;
 mod process;
+mod progress;
 #[allow(dead_code)]
 #[path = "../resource_profile.rs"]
 mod resource_profile;
@@ -74,6 +75,11 @@ pub async fn source_identity(commands: &mut command::Commands) -> Result<Value, 
         ("command.rs", include_bytes!("command.rs").as_slice()),
         ("timing.rs", include_bytes!("timing.rs").as_slice()),
         ("metrics.rs", include_bytes!("metrics.rs").as_slice()),
+        ("progress.rs", include_bytes!("progress.rs").as_slice()),
+        (
+            "../../../src/startup.rs",
+            include_bytes!("../../../src/startup.rs").as_slice(),
+        ),
         (
             "../../../src/server.rs",
             include_bytes!("../../../src/server.rs").as_slice(),
@@ -197,6 +203,7 @@ struct Journal {
     counts: Vec<Arc<Mutex<state::Counts>>>,
     enclosing_deadline: Instant,
     phase_deadline: Instant,
+    progress: progress::Progress,
 }
 impl Journal {
     fn flush(&mut self) -> Result<(), String> {
@@ -209,6 +216,7 @@ impl Journal {
         )
         .unwrap();
         self.value["updated_unix_ms"] = json!(utc_ms());
+        self.progress.observe(&self.value);
         let result = write_json(&self.output.join("terminal.json"), &self.value);
         span.finish(result.is_ok(), 0);
         result
@@ -282,6 +290,7 @@ async fn metric_boundary(
         collector.complete = false;
         return Err("metric boundary has pending or uncertain owned work".into());
     }
+    collector.complete &= fleet.startup_accounting_complete() && journal.progress.complete();
     let deadline = journal.phase_deadline;
     let result = tokio::time::timeout_at(
         deadline.into(),
@@ -372,6 +381,7 @@ pub async fn controller() -> Result<(), String> {
         counts: vec![],
         enclosing_deadline: setup_deadline,
         phase_deadline: setup_deadline,
+        progress: progress::Progress::disabled(),
     };
     journal.flush()?;
     let mut fleet = Fleet::new();
@@ -390,6 +400,8 @@ pub async fn controller() -> Result<(), String> {
         let setup = async {
             phase_metrics=Some(metrics::Collector::new()?);
             let config = Config::environment()?;
+            journal.progress = progress::Progress::new(mount_rs_core::diagnostics::profile::enabled(), &config);
+            journal.progress.start();
             journal.value["full_target"] = json!(config.full_target);
             journal.value["fault_injection"] = json!(std::env::var("MOUNT_RS_TARGET_INJECT").ok());
             if config.full_target && std::env::var_os("MOUNT_RS_TARGET_INJECT").is_some() {
@@ -404,11 +416,14 @@ pub async fn controller() -> Result<(), String> {
                     "mode":"MRC5"}
             );
             journal.value["source"] = source_identity(&mut commands).await?;
+            journal.progress.source(&journal.value["source"]);
             journal.flush()?;
             resources = Some(resources::Resources::start(
                 output.join("controller-resources.json"),
             )?);
-            if resources::disk_available()? < config::DISK_FLOOR {
+            let host_free_bytes = resources::disk_available()?;
+            journal.progress.capacity(host_free_bytes);
+            if host_free_bytes < config::DISK_FLOOR {
                 return Err("preflight refusal: host free disk below64GiB".into());
             }
             if config.provider == "tidb" {
@@ -556,6 +571,8 @@ pub async fn controller() -> Result<(), String> {
                 let lane = Lane::new(connection, drive, config.files);
                 journal.counts.push(lane.counts.clone());
                 lanes.push(lane);
+                journal.value["connected_clients"] = json!(lanes.len());
+                if journal.progress.observe(&journal.value) { journal.flush()?; }
             }
                 Ok::<_, String>(())
             }).await.map_err(|_| "signed connections inherited phase deadline")??;
@@ -1016,6 +1033,10 @@ pub async fn controller() -> Result<(), String> {
     journal.value["oracle_accounting"] = oracle_owner.accounting.snapshot();
     journal.value["initialization_accounting"] = initializer_owner.accounting.snapshot();
     journal.value["workload_complete"] = json!(result.is_ok());
+    if let Some(collector) = &mut phase_metrics {
+        collector.complete &= fleet.startup_accounting_complete() && journal.progress.complete();
+        journal.value["phase_metrics"] = collector.summary();
+    }
     journal.value["metrics_complete"] = json!(
         phase_metrics
             .as_ref()
@@ -1037,6 +1058,22 @@ pub async fn controller() -> Result<(), String> {
         "includes completed final metric publication and resource sampler; excludes this final journal encode/write; overlapping observer wall is not exclusive CPU"
     );
     journal.flush()?;
+    journal
+        .progress
+        .finish(success, journal.value["metrics_complete"] == true);
+    if success && metrics_required && !journal.progress.complete() {
+        journal.value["metrics_complete"] = json!(false);
+        journal.value["outcome"] = json!("incomplete");
+        journal.value["error"] = json!("controller diagnostic final publication incomplete");
+        // Preserve a failed qualification even if a second private receipt write also fails.
+        let retained = write_json(&output.join("terminal.json"), &journal.value);
+        return Err(if retained.is_ok() {
+            "controller diagnostic final publication incomplete"
+        } else {
+            "controller diagnostic final publication and retained receipt incomplete"
+        }
+        .into());
+    }
     if success {
         Ok(())
     } else {

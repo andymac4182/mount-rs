@@ -8,6 +8,9 @@ use mount_rs_service::{
     catalog::SqliteCatalog,
     dispatch::DriveDispatcher,
     server::{RemoteServer, RemoteServerOptions, RemoteTransferLimits},
+    startup::{
+        Identity as StartupIdentity, Snapshot as StartupSnapshot, Stage as StartupStage, Startup,
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -54,6 +57,8 @@ pub struct Ready {
     pub resources: Value,
     pub core_profile: Value,
     pub phase_metrics: Value,
+    #[serde(default)]
+    pub startup_diagnostics: Option<Value>,
 }
 pub struct OwnedChild {
     pub child: Child,
@@ -68,6 +73,9 @@ pub struct OwnedChild {
 pub struct Fleet {
     pub children: Vec<OwnedChild>,
     initial_backings: Option<Vec<String>>,
+    startup_complete: bool,
+    startup_next: Option<Instant>,
+    startup_seen: [Option<(u64, u64, u64)>; SERVERS],
 }
 impl Fleet {
     pub fn expect_initialized_backings(&mut self, values: Vec<String>) {
@@ -77,6 +85,9 @@ impl Fleet {
         Self {
             children: vec![],
             initial_backings: None,
+            startup_complete: true,
+            startup_next: None,
+            startup_seen: [None; SERVERS],
         }
     }
     pub fn launch(&mut self, private: &Path, output: &Path, index: usize) -> Result<(), String> {
@@ -131,6 +142,9 @@ impl Fleet {
     pub async fn ready(&mut self, private: &PrivateConfig, generation: u64) -> Result<(), String> {
         let end = Instant::now() + Duration::from_secs(600);
         loop {
+            if mount_rs_core::diagnostics::profile::enabled() {
+                self.project_startup(private, generation);
+            }
             self.check()?;
             let mut complete = 0;
             for c in &mut self.children {
@@ -144,6 +158,9 @@ impl Fleet {
                     continue;
                 }
                 validate_ready(&r, c.child.id(), c.server, generation, private)?;
+                if mount_rs_core::diagnostics::profile::enabled() {
+                    self.startup_complete &= ready_startup_complete(&r, private.config.drives);
+                }
                 c.ready = Some(r);
                 complete += 1;
             }
@@ -176,6 +193,63 @@ impl Fleet {
                 return Err("worker readiness timeout".into());
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    pub fn startup_accounting_complete(&self) -> bool {
+        self.startup_complete
+    }
+    fn project_startup(&mut self, private: &PrivateConfig, generation: u64) {
+        let now = Instant::now();
+        if self.startup_next.is_some_and(|next| now < next) {
+            return;
+        }
+        self.startup_next = Some(now + mount_rs_service::startup::PROGRESS_INTERVAL);
+        for child in &self.children {
+            let path = child
+                .root
+                .join(format!("startup-progress-g{generation}.json"));
+            let bytes = match read_startup_file(&path) {
+                Ok(Some(bytes)) => bytes,
+                Ok(None) => continue, // Early configuration has not yet learned its owned output directory.
+                Err(_) => {
+                    self.startup_complete = false;
+                    continue;
+                }
+            };
+            let mut snapshot = match owned_startup(
+                &bytes,
+                child.child.id(),
+                child.server,
+                generation,
+                private.config.drives,
+            ) {
+                Ok(snapshot) => snapshot,
+                Err(_) => {
+                    self.startup_complete = false;
+                    continue;
+                }
+            };
+            // Running observations must be no older than three publication periods,
+            // with at most one second of future wall-clock skew. Ready is historical.
+            let wall = super::utc_ms();
+            if snapshot.terminal_outcome == mount_rs_service::startup::Outcome::Running
+                && (snapshot.observed_unix_ms > wall.saturating_add(1000)
+                    || wall.saturating_sub(snapshot.observed_unix_ms) > 15_000)
+            {
+                snapshot.accounting_complete = false;
+            }
+            self.startup_complete &= snapshot.accounting_complete;
+            let key = (
+                snapshot.generation,
+                snapshot.observed_unix_ms,
+                snapshot.elapsed_ns,
+            );
+            if self.startup_seen[child.server] != Some(key) {
+                if Startup::write_record(&mut std::io::stderr().lock(), &snapshot).is_err() {
+                    self.startup_complete = false;
+                }
+                self.startup_seen[child.server] = Some(key);
+            }
         }
     }
     pub fn command(&self, command: &str, generation: u64) -> Result<(), String> {
@@ -244,6 +318,12 @@ impl Fleet {
                 errors.push(json!({"server":c.server,"pid":c.child.id(),"error":"reap unproven after bounded cleanup; process may remain"}));
             }
             let terminal = super::read_json(&c.root.join("terminal.json")).unwrap_or(Value::Null);
+            if mount_rs_core::diagnostics::profile::enabled() {
+                self.startup_complete &= c
+                    .ready
+                    .as_ref()
+                    .is_some_and(|ready| terminal_startup_complete(&terminal, ready));
+            }
             if !c.reaped || c.exited != Some(0) || terminal["clean"] != true {
                 errors.push(json!({"server":c.server,"error":"child exit or cleanup not clean","terminal":terminal}));
             }
@@ -361,12 +441,6 @@ async fn close_replicas(
     }
 }
 pub async fn worker() -> Result<(), String> {
-    let private = std::env::var_os("MOUNT_RS_TARGET_PRIVATE_CONFIG")
-        .ok_or("private worker config required")?;
-    let p: PrivateConfig =
-        serde_json::from_slice(&std::fs::read(private).map_err(|_| "private config unreadable")?)
-            .map_err(|_| "private config invalid")?;
-    p.config.validate()?;
     let index: usize = std::env::var("MOUNT_RS_TARGET_WORKER")
         .map_err(|_| "worker index missing")?
         .parse()
@@ -374,9 +448,68 @@ pub async fn worker() -> Result<(), String> {
     if index >= SERVERS {
         return Err("worker index outside owned fleet".into());
     }
+    let mut startup = Startup::new(
+        mount_rs_core::diagnostics::profile::enabled(),
+        StartupIdentity::worker(index, 0),
+    );
+    startup.publish(&mut |snapshot| Startup::write_record(&mut std::io::stderr().lock(), snapshot));
+    let mut startup_root = None;
+    let result = worker_observed(index, &mut startup, &mut startup_root).await;
+    if result.is_err() {
+        startup.finish_startup(false);
+        if startup
+            .snapshot()
+            .is_some_and(|snapshot| snapshot.cleanup_outcome.is_none())
+        {
+            let _ = startup.write_banks(&mut std::io::stderr().lock());
+        }
+        startup.publish(&mut |snapshot| match &startup_root {
+            Some(root) => publish_startup_progress(root, snapshot.generation, snapshot),
+            None => Startup::write_record(&mut std::io::stderr().lock(), snapshot),
+        });
+    }
+    result
+}
+async fn worker_observed(
+    index: usize,
+    startup: &mut Startup,
+    startup_root: &mut Option<PathBuf>,
+) -> Result<(), String> {
+    let p: PrivateConfig = startup
+        .observe(
+            StartupStage::Configuration,
+            async {
+                let private = std::env::var_os("MOUNT_RS_TARGET_PRIVATE_CONFIG")
+                    .ok_or("private worker config required")?;
+                let p: PrivateConfig = serde_json::from_slice(
+                    &std::fs::read(private).map_err(|_| "private config unreadable")?,
+                )
+                .map_err(|_| "private config invalid")?;
+                p.config.validate()?;
+                Ok::<_, String>(p)
+            },
+            &mut |snapshot| Startup::write_record(&mut std::io::stderr().lock(), snapshot),
+        )
+        .await?;
     let root = p.output.join(format!("worker-{index}"));
-    let mut resources = super::resources::Resources::start(root.join("resources.json"))?;
-    let context = mount_rs_sdk::StorageContext::new(16).map_err(|_| "storage context failed")?;
+    if startup.enabled() {
+        *startup_root = Some(root.clone());
+    }
+    startup.publish(&mut |snapshot| publish_startup_progress(&root, 0, snapshot));
+    let mut resources = startup
+        .observe(
+            StartupStage::Configuration,
+            async { super::resources::Resources::start(root.join("resources.json")) },
+            &mut |snapshot| publish_startup_progress(&root, 0, snapshot),
+        )
+        .await?;
+    let context = startup
+        .observe(
+            StartupStage::Configuration,
+            async { mount_rs_sdk::StorageContext::new(16).map_err(|_| "storage context failed") },
+            &mut |snapshot| publish_startup_progress(&root, 0, snapshot),
+        )
+        .await?;
     let mut filesystems = Vec::new();
     let mut server = None;
     let mut server_diagnostics = None;
@@ -389,10 +522,10 @@ pub async fn worker() -> Result<(), String> {
     let mut last_metric_sequence = 0;
     let metrics_root = root.join("metrics");
     let result = tokio::time::timeout(Duration::from_secs(2500), async {
+        startup.observe(StartupStage::Configuration, async {
         phase_metrics = Some(super::metrics::Local::new()?);
         std::fs::create_dir(&metrics_root)
             .map_err(|_| "worker metrics directory exists or unavailable")?;
-        let phase_metrics = phase_metrics.as_mut().ok_or("worker metric owner unavailable")?;
         if super::file_digest(&std::env::current_exe().map_err(|_| "executable unavailable")?)?
             != p.binary_digest
         {
@@ -402,17 +535,26 @@ pub async fn worker() -> Result<(), String> {
         {
             return Err("worker source mismatch".into());
         }
+        Ok::<_, String>(())
+        }, &mut |snapshot| publish_startup_progress(&root, 0, snapshot)).await?;
+        let phase_metrics = phase_metrics.as_mut().ok_or("worker metric owner unavailable")?;
         loop {
+            if generation != 0 {
+                *startup = Startup::new(mount_rs_core::diagnostics::profile::enabled(), StartupIdentity::worker(index, generation));
+            }
+            let mut startup_sink = |snapshot: &StartupSnapshot| publish_startup_progress(&root, generation, snapshot);
+            startup.publish(&mut startup_sink);
             resources.check()?;
             let catalog = Arc::new(
-                SqliteCatalog::open(&p.catalog)
-                    .await
-                    .map_err(|_| "worker catalog open failed")?,
+                startup.observe(StartupStage::CatalogOpen, async {
+                    SqliteCatalog::open(&p.catalog).await.map_err(|_| "worker catalog open failed")
+                }, &mut startup_sink).await?,
             );
-            let snapshot = catalog
-                .load_shared_current()
-                .await
-                .map_err(|_| "worker catalog read failed")?;
+            let snapshot = startup.observe(StartupStage::CatalogLoad, async {
+                catalog.load_shared_current().await.map_err(|_| "worker catalog read failed")
+            }, &mut startup_sink).await?;
+            startup.plan((p.config.drives / 2) as u64, p.config.drives as u64);
+            startup.observe(StartupStage::CatalogValidate, async {
             if super::digest(
                 &serde_json::to_vec(snapshot.as_ref())
                     .map_err(|_| "catalog serialization failed")?,
@@ -424,16 +566,18 @@ pub async fn worker() -> Result<(), String> {
             if snapshot.partitions != expected.partitions {
                 return Err("worker catalog shape differs".into());
             }
+            Ok::<_, String>(())
+            }, &mut startup_sink).await?;
             let mut dispatcher = DriveDispatcher::new(catalog.clone());
             let mut receipts = Vec::new();
             for drive in 0..p.config.drives {
                 resources.check()?;
-                let fs = p.backend.open(drive, &context).await?;
+                let fs = startup.observe(StartupStage::DriveOpen, p.backend.open(drive, &context), &mut startup_sink).await?;
                 let driver = fs.driver();
                 filesystems.push(fs);
                 opens += 1;
-                receipts.push(p.backend.receipt(drive).await?);
-                dispatcher
+                receipts.push(startup.observe(StartupStage::BackingReceipt, p.backend.receipt(drive), &mut startup_sink).await?);
+                startup.observe(StartupStage::DriveRegister, async { dispatcher
                     .register_definition(
                         &format!("partition-{}", drive / 2),
                         &format!("sandbox-{drive}"),
@@ -443,14 +587,15 @@ pub async fn worker() -> Result<(), String> {
                             .clone(),
                         driver,
                     )
-                    .map_err(|_| "worker registration failed")?;
+                    .map_err(|_| "worker registration failed") }, &mut startup_sink).await?;
+                startup.registered();
             }
             let auth = Arc::new(CatalogAuthenticator::with_key_source(
                 catalog,
                 Arc::new(Keys(p.jwk.clone())),
             ));
             server = Some(
-                RemoteServer::bind_with_diagnostics(
+                startup.observe(StartupStage::ListenerBind, RemoteServer::bind_with_diagnostics(
                     "127.0.0.1:0".parse().unwrap(),
                     vec![rustls::pki_types::CertificateDer::from(p.cert.clone())],
                     rustls::pki_types::PrivatePkcs8KeyDer::from(p.key.clone()).into(),
@@ -461,11 +606,11 @@ pub async fn worker() -> Result<(), String> {
                     },
                     RemoteTransferLimits::default(),
                     mount_rs_core::diagnostics::profile::enabled(),
-                )
-                .await
-                .map_err(|_| "worker TLS listener bind failed")?,
+                ), &mut startup_sink).await.map_err(|_| "worker TLS listener bind failed")?,
             );
             server_diagnostics=server.as_ref().unwrap().diagnostics();
+            startup.finish_startup(true);
+            startup.publish(&mut startup_sink);
             let startup_metrics = phase_metrics.capture(
                 super::metrics::identity(&p, std::process::id(), Some(index), generation, last_metric_sequence, "worker_startup", "ready"),
                 server_diagnostics.as_ref(), Value::Null,
@@ -485,6 +630,7 @@ pub async fn worker() -> Result<(), String> {
                 replicas: filesystems.len(),
                 receipts,
                 resources: resources.snapshot(),
+                startup_diagnostics: startup.snapshot().map(|value| serde_json::to_value(value).unwrap()),
                 phase_metrics: json!({"file":format!("metrics/startup-g{generation}.json"),"sha256":super::file_digest(&startup_path)?,"metrics_complete":startup_metrics["metrics_complete"]}),
                 core_profile: json!({
                         "enabled":mount_rs_core::diagnostics::profile::enabled(),
@@ -536,6 +682,12 @@ pub async fn worker() -> Result<(), String> {
     .await
     .map_err(|_| "worker lifetime deadline".to_string())
     .and_then(|x| x);
+    startup.finish_startup(result.is_ok());
+    startup.publish(&mut |snapshot| publish_startup_progress(&root, generation, snapshot));
+    if result.is_err() {
+        let _ = startup.write_banks(&mut std::io::stderr().lock());
+    }
+    let cleanup = startup.begin(StartupStage::Cleanup);
     let close = close_replicas(&mut server, &mut filesystems, &mut listener_closes).await;
     let context_close = tokio::time::timeout(Duration::from_secs(30), context.close()).await;
     let observer_close = commands.cleanup().await;
@@ -562,6 +714,13 @@ pub async fn worker() -> Result<(), String> {
             Ok(value)
         });
     let sampler_close = resources.finish().await;
+    let cleanup_ok = close.is_ok()
+        && matches!(context_close, Ok(Ok(())))
+        && sampler_close.is_ok()
+        && observer_close.is_ok();
+    cleanup.finish(cleanup_ok);
+    startup.finish_cleanup(cleanup_ok);
+    startup.publish(&mut |snapshot| publish_startup_progress(&root, generation, snapshot));
     let clean = result.is_ok()
         && close.is_ok()
         && matches!(context_close, Ok(Ok(())))
@@ -578,6 +737,7 @@ pub async fn worker() -> Result<(), String> {
                 "context_closed":matches!(context_close,
                     Ok(Ok(()))),
                 "phase_metrics":{"file":"metrics/terminal.json","capture_error":terminal_metrics.as_ref().err(),"metrics_complete":terminal_metrics.as_ref().ok().map(|m| &m["metrics_complete"])},
+                "startup_diagnostics":startup.snapshot(),
                 "replica_opens":opens,"sampler_shutdown_error":sampler_close.err(),"observer_close_error":observer_close.err(),"observer_processes":commands.receipts(),
                 "resources":resources.snapshot(),
                 "observer_accounting":super::metrics::observer().snapshot(),
@@ -594,6 +754,80 @@ pub async fn worker() -> Result<(), String> {
     } else {
         Err("worker incomplete; retained terminal receipt".into())
     }
+}
+fn read_startup_file(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    use std::{io::Read, os::unix::fs::OpenOptionsExt};
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other(
+            "startup observation is not an owned regular file",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(mount_rs_service::startup::RECORD_LIMIT + 1);
+    file.take((mount_rs_service::startup::RECORD_LIMIT + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > mount_rs_service::startup::RECORD_LIMIT {
+        return Err(std::io::Error::other("startup observation exceeds bound"));
+    }
+    Ok(Some(bytes))
+}
+fn owned_startup(
+    bytes: &[u8],
+    pid: u32,
+    index: usize,
+    generation: u64,
+    drives: usize,
+) -> std::io::Result<StartupSnapshot> {
+    let snapshot = StartupSnapshot::parse(bytes)?;
+    if snapshot.pid != pid
+        || snapshot.worker.map(usize::from) != Some(index)
+        || snapshot.generation != generation
+        || snapshot
+            .planned_drives
+            .is_some_and(|planned| planned != drives as u64)
+        || snapshot
+            .configured_partitions
+            .is_some_and(|partitions| partitions != (drives / 2) as u64)
+    {
+        return Err(std::io::Error::other(
+            "startup observation identity mismatch",
+        ));
+    }
+    Ok(snapshot)
+}
+fn ready_startup_complete(ready: &Ready, drives: usize) -> bool {
+    let Some(value) = &ready.startup_diagnostics else {
+        return false;
+    };
+    let Ok(bytes) = serde_json::to_vec(value) else {
+        return false;
+    };
+    owned_startup(&bytes, ready.pid, ready.server, ready.generation, drives).is_ok_and(|snapshot| {
+        snapshot.accounting_complete
+            && snapshot.terminal_outcome == mount_rs_service::startup::Outcome::Ready
+            && snapshot.planned_drives == Some(drives as u64)
+            && snapshot.registered_drives == drives as u64
+    })
+}
+fn publish_startup_progress(
+    root: &Path,
+    generation: u64,
+    snapshot: &StartupSnapshot,
+) -> std::io::Result<()> {
+    let path = root.join(format!("startup-progress-g{generation}.json"));
+    let pending = path.with_extension("pending");
+    let mut file = std::fs::File::create(&pending)?;
+    Startup::write_json(&mut file, snapshot)?;
+    std::fs::rename(&pending, &path)?;
+    Startup::write_record(&mut std::io::stderr().lock(), snapshot)
 }
 fn publish_ready(root: &Path, ready: &Ready) -> Result<(), String> {
     let value = serde_json::to_value(ready).map_err(|_| "readiness encoding failed")?;
@@ -621,6 +855,7 @@ fn example_ready() -> Ready {
         resources: super::resources::example_sample(123),
         core_profile: Value::Null,
         phase_metrics: Value::Null,
+        startup_diagnostics: None,
     }
 }
 #[test]
@@ -812,4 +1047,103 @@ async fn listener_timeout_retains_only_pending_handle_until_completion() {
     send.send(()).unwrap();
     assert!(owner.drain(Duration::from_secs(1)).await.is_err());
     assert!(owner.tasks.is_empty());
+}
+
+#[test]
+fn startup_progress_identity_bounds_and_incomplete_readiness_are_separate() {
+    let startup = Startup::new(true, StartupIdentity::worker(0, 2));
+    startup.plan(5, 10);
+    for _ in 0..10 {
+        startup.begin(StartupStage::DriveOpen).finish(true);
+        startup.registered();
+    }
+    startup.publish(&mut |_| Err(std::io::Error::other("observer unavailable")));
+    startup.finish_startup(true);
+    let snapshot = startup.snapshot().unwrap();
+    assert_eq!(
+        snapshot.terminal_outcome,
+        mount_rs_service::startup::Outcome::Ready
+    );
+    let bytes = serde_json::to_vec(&snapshot).unwrap();
+    assert!(owned_startup(&bytes, snapshot.pid, 0, 2, 10).is_ok());
+    for (pid, worker, generation, drives) in [
+        (snapshot.pid + 1, 0, 2, 10),
+        (snapshot.pid, 1, 2, 10),
+        (snapshot.pid, 0, 1, 10),
+        (snapshot.pid, 0, 2, 12),
+    ] {
+        assert!(owned_startup(&bytes, pid, worker, generation, drives).is_err());
+    }
+    let mut ready = example_ready();
+    ready.pid = snapshot.pid;
+    ready.generation = 2;
+    ready.startup_diagnostics = Some(serde_json::to_value(&snapshot).unwrap());
+    assert!(!ready_startup_complete(&ready, 10));
+    // Ready's product identity/content validation remains independent of the observer.
+    assert_eq!(ready.replicas, snapshot.open_success as usize);
+    ready.startup_diagnostics = None;
+    assert!(!ready_startup_complete(&ready, 10));
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("owned-startup.json");
+    assert!(read_startup_file(&path).unwrap().is_none());
+    std::fs::write(&path, &bytes).unwrap();
+    assert_eq!(read_startup_file(&path).unwrap().unwrap(), bytes);
+    std::fs::write(
+        &path,
+        vec![b' '; mount_rs_service::startup::RECORD_LIMIT + 1],
+    )
+    .unwrap();
+    assert!(read_startup_file(&path).is_err());
+}
+
+fn terminal_startup_complete(terminal: &Value, ready: &Ready) -> bool {
+    if terminal["pid"].as_u64() != Some(u64::from(ready.pid))
+        || terminal["server"].as_u64() != Some(ready.server as u64)
+    {
+        return false;
+    }
+    let Ok(bytes) = serde_json::to_vec(&terminal["startup_diagnostics"]) else {
+        return false;
+    };
+    owned_startup(
+        &bytes,
+        ready.pid,
+        ready.server,
+        ready.generation,
+        ready.replicas,
+    )
+    .is_ok_and(|snapshot| {
+        snapshot.accounting_complete
+            && snapshot.terminal_outcome == mount_rs_service::startup::Outcome::Ready
+            && snapshot.cleanup_outcome == Some(mount_rs_service::startup::CleanupOutcome::Success)
+            && snapshot.planned_drives == Some(ready.replicas as u64)
+    })
+}
+#[test]
+fn terminal_startup_publication_failure_cannot_reuse_ready_completeness() {
+    let startup = Startup::new(true, StartupIdentity::worker(0, 0));
+    startup.plan(5, 10);
+    for _ in 0..10 {
+        startup.begin(StartupStage::DriveOpen).finish(true);
+        startup.registered();
+    }
+    startup.finish_startup(true);
+    let mut ready = example_ready();
+    ready.pid = std::process::id();
+    ready.startup_diagnostics = startup.snapshot().map(|s| serde_json::to_value(s).unwrap());
+    assert!(ready_startup_complete(&ready, 10));
+    startup.begin(StartupStage::Cleanup).finish(true);
+    startup.finish_cleanup(true);
+    let complete = json!({"pid":ready.pid,"server":ready.server,"clean":true,"startup_diagnostics":startup.snapshot()});
+    assert!(terminal_startup_complete(&complete, &ready));
+    let mut wrong_generation = complete.clone();
+    wrong_generation["startup_diagnostics"]["generation"] = json!(1);
+    assert!(!terminal_startup_complete(&wrong_generation, &ready));
+    startup.publish(&mut |_| Err(std::io::Error::other("late publication failed")));
+    let terminal = json!({"pid":ready.pid,"server":ready.server,"clean":true,"startup_diagnostics":startup.snapshot()});
+    assert!(!terminal_startup_complete(&terminal, &ready));
+    assert_eq!(
+        terminal["clean"], true,
+        "product cleanup remains successful"
+    );
 }
