@@ -97,8 +97,18 @@ struct ServerProcess {
 }
 
 impl ServerProcess {
-    fn spawn(config: &Path) -> (Self, SocketAddr, SocketAddr) {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_mount-rs"))
+    fn spawn(config: &Path, diagnostics: bool) -> (Self, SocketAddr, SocketAddr) {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_mount-rs"));
+        if diagnostics {
+            command
+                .env("MOUNT_RS_PROFILE_IO", "1")
+                .env("MOUNT_RS_TRACE_SERVICE", "1");
+        } else {
+            command
+                .env_remove("MOUNT_RS_PROFILE_IO")
+                .env_remove("MOUNT_RS_TRACE_SERVICE");
+        }
+        let mut child = command
             .args(["serve-remote", "--config"])
             .arg(config)
             .stdout(Stdio::piped())
@@ -191,6 +201,166 @@ impl ServerProcess {
             "configured server stderr: {:?}",
             self.stderr.lock().unwrap()
         );
+    }
+
+    fn assert_diagnostics(&self, enabled: bool) {
+        assert!(self.stdout_thread.is_none() && self.stderr_thread.is_none());
+        assert!(
+            self.stdout
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|line| !line.starts_with("service_diagnostics "))
+        );
+        let stderr = self.stderr.lock().unwrap();
+        let records: Vec<_> = stderr
+            .iter()
+            .filter_map(|line| line.strip_prefix("service_diagnostics "))
+            .collect();
+        assert_eq!(
+            records.len(),
+            usize::from(enabled),
+            "unexpected service records: {stderr:?}"
+        );
+        if !enabled {
+            return;
+        }
+        assert!(records[0].len() + "service_diagnostics \n".len() <= 1024 * 1024);
+        let record: serde_json::Value = serde_json::from_str(records[0]).unwrap();
+        assert_eq!(record["schema"], "mount-rs.cli-service-diagnostics.v2");
+        assert_eq!(record["pid"].as_u64(), Some(u64::from(self.child.id())));
+        assert_eq!(record["transport"], "quic");
+        assert_eq!(record["capture_context"], "shutdown");
+        let snapshot = &record["snapshot"];
+        assert_eq!(snapshot["schema"], "mount-rs.service-quic.v1");
+        assert_eq!(snapshot["enabled"], true);
+        let entries = snapshot["entries"].as_array().unwrap();
+        let labels = [
+            "admission.connection",
+            "handshake.application",
+            "handshake.tls",
+            "auth.authenticate",
+            "request.application",
+            "request.read_incoming",
+            "admission.ingress",
+            "admission.egress",
+            "dispatch.control",
+            "dispatch.read",
+            "dispatch.write",
+            "response.encode",
+            "response.submit",
+            "session.cleanup",
+        ];
+        assert_eq!(entries.len(), labels.len());
+        for (entry, label) in entries.iter().zip(labels) {
+            assert_eq!(entry["name"], label);
+        }
+        for label in ["request.application", "dispatch.read", "dispatch.write"] {
+            let entry = entries.iter().find(|entry| entry["name"] == label).unwrap();
+            assert!(
+                entry["calls"].as_u64().unwrap() > 0,
+                "missing {label} calls"
+            );
+        }
+        let transport = &snapshot["transport"];
+        assert!(transport["registered_connections"].as_u64().unwrap() > 0);
+        assert!(transport["retired_connections"].as_u64().unwrap() > 0);
+        assert!(transport["retired"]["udp_tx_bytes"].as_u64().unwrap() > 0);
+        assert!(transport["retired"]["udp_rx_bytes"].as_u64().unwrap() > 0);
+        // Read the observer's own completeness envelope; endpoint closure alone
+        // does not establish request-task drain or passive QUIC quiescence.
+        for flag in [
+            "complete",
+            "counter_saturated",
+            "concurrent_activity",
+            "application_quiescent",
+        ] {
+            assert!(snapshot[flag].as_bool().is_some(), "missing {flag}");
+        }
+        assert!(transport["registry_complete"].as_bool().is_some());
+        assert!(transport["unobserved_connections"].as_u64().is_some());
+        assert!(transport["missing_final_samples"].as_u64().is_some());
+        let process = &record["process_diagnostics"];
+        assert_eq!(process["scope"], "process_cumulative");
+        assert_eq!(process["capture_atomic"], false);
+        assert_eq!(process["application_drain_proven"], false);
+        assert_eq!(process["storage"]["available"], true);
+        assert_eq!(process["profile"]["available"], true);
+        let storage = &process["storage"]["snapshot"];
+        let storage_entries = storage["entries"].as_array().unwrap();
+        let names = mount_rs_core::diagnostics::storage::operation_names();
+        assert_eq!(storage_entries.len(), 78);
+        for (entry, name) in storage_entries.iter().zip(names) {
+            assert_eq!(entry["name"], *name);
+            assert_eq!(entry["latency_log2_us"].as_array().unwrap().len(), 32);
+            for counter in ["in_flight", "returned_rows", "returned_row_observations"] {
+                assert!(entry[counter].as_u64().is_some());
+            }
+        }
+        assert!(storage["in_flight"].as_u64().is_some());
+        assert_eq!(
+            storage["forwarding_boxes"]["sites"],
+            "napi_dynamic_provider_forwarding_future"
+        );
+        assert!(storage_entries.iter().any(|entry| {
+            entry["name"].as_str().unwrap().starts_with("sdk.metadata.")
+                && entry["success"].as_u64().unwrap() > 0
+        }));
+        for name in ["sdk.blocks.put", "sdk.blocks.get"] {
+            let entry = storage_entries
+                .iter()
+                .find(|entry| entry["name"] == name)
+                .unwrap();
+            assert!(
+                entry["success"].as_u64().unwrap() > 0,
+                "missing {name} successes"
+            );
+            assert!(entry["bytes"].as_u64().unwrap() > 0, "missing {name} bytes");
+        }
+        let profile_entries = process["profile"]["snapshot"]["entries"]
+            .as_array()
+            .unwrap();
+        for name in [
+            "catalog.load",
+            "filesystem.gate_wait",
+            "provider.metadata.load",
+            "provider.blocks.put_bytes",
+            "provider.blocks.get_bytes",
+        ] {
+            let entry = profile_entries
+                .iter()
+                .find(|entry| entry["name"] == name)
+                .unwrap();
+            assert!(entry["calls"].as_u64().unwrap() > 0, "missing {name} calls");
+            if name.starts_with("provider.blocks.") {
+                assert!(entry["units"].as_u64().unwrap() > 0, "missing {name} units");
+            }
+        }
+        for (family, count) in [
+            ("sdk", 47),
+            ("tidb", 18),
+            ("napi_forwarding", 12),
+            ("pglite", 1),
+        ] {
+            assert_eq!(
+                process["coverage"][family]["rows"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                count
+            );
+        }
+        for name in [
+            "raw_object_store",
+            "http_attempts",
+            "physical_device_iops",
+            "process_cpu",
+            "process_rss",
+            "allocator_churn",
+        ] {
+            assert_eq!(process["unavailable"][name]["available"], false);
+            assert!(process["unavailable"][name].get("snapshot").is_none());
+        }
     }
 }
 
@@ -432,7 +602,7 @@ async fn configured_binary_selects_mrc5_for_signed_quic_and_websocket_reopen() {
         .to_string(),
     );
 
-    let (mut server, quic, websocket) = ServerProcess::spawn(&service_config);
+    let (mut server, quic, websocket) = ServerProcess::spawn(&service_config, true);
     for rejected in [&invalid_signature, &wrong_audience, &expired, &malformed] {
         assert!(
             connect(
@@ -506,6 +676,7 @@ async fn configured_binary_selects_mrc5_for_signed_quic_and_websocket_reopen() {
     .await;
     websocket_connection.close();
     server.clean_stop();
+    server.assert_diagnostics(cfg!(feature = "io-profiling"));
 
     let metadata_path = root.join("data-metadata.sqlite");
     let blocks_path = root.join("data-blocks.sqlite");
@@ -538,7 +709,8 @@ async fn configured_binary_selects_mrc5_for_signed_quic_and_websocket_reopen() {
     drop(blocks);
     drop(metadata);
 
-    let (mut reopened, reopen_quic, reopen_websocket) = ServerProcess::spawn(&service_config);
+    let (mut reopened, reopen_quic, reopen_websocket) =
+        ServerProcess::spawn(&service_config, false);
     let expected = [
         ("/quic.bin", quic_payload.as_slice()),
         ("/websocket.bin", websocket_payload.as_slice()),
@@ -572,6 +744,7 @@ async fn configured_binary_selects_mrc5_for_signed_quic_and_websocket_reopen() {
     )
     .await;
     reopened.clean_stop();
+    reopened.assert_diagnostics(false);
 
     let reopened_metadata = SqliteMetadataStore::open(&metadata_path).unwrap();
     let reopened_mode = reopened_metadata

@@ -72,6 +72,83 @@ an `io-profiling` build, retain `server.diagnostics()`, and call its `snapshot()
 at controlled boundaries. This is a local API, with no diagnostic network
 endpoint.
 
+The public `serve-remote` CLI selects the QUIC observer only when its
+default-off `io-profiling` feature is compiled and `MOUNT_RS_PROFILE_IO` is
+exactly `1`. The feature forwards `mount-rs-service/io-profiling` only. It does
+not add SDK or provider feature forwarding; the same environment value can
+independently select their existing runtime banks. A CLI build without this
+feature proves service-record absence, rather than absence of every observer
+or its process overhead.
+
+Build and run the public CLI using an isolated target directory:
+
+```sh
+CARGO_TARGET_DIR=/absolute/isolated-target \
+  ./scripts/cargo-shared build --locked -p mount-rs-cli --features io-profiling
+MOUNT_RS_PROFILE_IO=1 /absolute/isolated-target/debug/mount-rs \
+  serve-remote --config /absolute/service.json
+```
+
+After QUIC, WebSocket, filesystem runtime, storage context and cache cleanup,
+the CLI captures the local service and existing process banks and attempts one
+stderr line prefixed with
+`service_diagnostics `. Its envelope schema is
+`mount-rs.cli-service-diagnostics.v2`, with the server PID, `transport=quic`,
+`capture_context=shutdown` and the unchanged `mount-rs.service-quic.v1`
+snapshot. `transport=quic` describes this nested service snapshot. Added
+`process_diagnostics` banks cover instrumented work throughout the process,
+including SDK work shared by QUIC and WebSocket. The whole combined prefix,
+JSON and newline share one 1 MiB cap before output. Overflow or
+serialization failure produces a fixed `diagnostic_incomplete` record instead
+of partial snapshot JSON. Diagnostic serialization and output failures cannot
+replace the service or cleanup outcome. Stderr output can block at the OS;
+the outer process controller owns the deadline. Forced termination can leave
+no final snapshot, which remains an evidence gap.
+
+All snapshots contain raw JSON `uint64` numbers. Consumers need a lossless
+integer JSON parser for values above `2^53`, including nanosecond timestamps;
+ordinary JavaScript `JSON.parse` can lose precision. This service schema does
+not use the native storage v3 decimal-string counter representation.
+
+The service snapshot is cumulative over the QUIC server lifetime, with no phase
+export or diagnostic endpoint. The WebSocket listener remains outside the
+service observer's coverage. Preserve its completeness, saturation,
+activity, quiescence and registry-gap fields when interpreting it; endpoint
+closure does not establish application drain. Registry memory and capture cost
+are bounded by the configured `max_connections`. Profiling and any slow-log
+overhead remain part of the instrumented process measurements.
+
+The process section exports the existing typed storage and core profile
+snapshots only when their recorders are enabled. Disabled banks have
+`available=false`, `reason=observer_disabled` and no snapshot; they are not
+reported as measured zero. Its scope is `process_cumulative`, with
+`capture_atomic=false`, `application_drain_proven=false` and inclusive,
+overlapping wall durations. Global banks survive provider retirement without
+retaining stores or connections. They do not attribute totals to a particular
+drive or provider instance, and zero in-flight gauges do not prove drain.
+
+Storage retains all 78 ordered rows, outcomes, known successful payload bytes,
+returned rows and row-observation availability, global/per-row in-flight
+gauges, 32 latency buckets and forwarding-box provenance. Coverage labels are
+derived from the producer registry: 47 `sdk.*` erased-method rows, 18 `tidb.*`
+source-instrumented adapter rows, 12 NAPI `metadata.*`/`blocks.*` forwarding
+rows that this CLI does not use, and one `pglite.client_lock_wait` row selected
+only by that provider. Zero TiDB rows do not prove TiDB use or complete
+SQL/network coverage. Core profile rows retain fixed names, calls, elapsed
+nanoseconds and event-specific units.
+
+SDK block bytes describe successful known logical payloads; SDK metadata
+payload bytes are unavailable at this seam. Zero `returned_row_observations`
+means the returned-row count is unknown, not a measured empty result. A
+reserved row does not establish that its provider was used.
+
+This record explicitly marks raw object-store instance statistics, HTTP
+attempts, physical device IOPS, process CPU/RSS and allocator churn unavailable.
+It reads no extra provider handles or resource APIs. Aligned external resource
+receipts remain separate. These exports do not establish raw blob activity,
+full SQLite pager coverage, wire retries/bytes, backend server resources,
+phase-aligned amplification, throughput or capacity.
+
 The boundary observer reads only the current process for process disk bytes.
 Host device observations additionally require an explicit selection:
 

@@ -9,6 +9,7 @@ license = "Apache-2.0"
 [features]
 default = []
 local-oidc-fixture = []
+io-profiling = ["mount-rs-service/io-profiling"]
 observability = [
     "dep:mount-rs-observability",
     "mount-rs-http/observability",

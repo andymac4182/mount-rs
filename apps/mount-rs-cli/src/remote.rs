@@ -1,4 +1,7 @@
 //! Remote service bootstrap and provider configuration.
+#[path = "remote_diagnostics.rs"]
+mod diagnostics;
+
 use crate::{
     CliError,
     config::parse_config_str,
@@ -318,6 +321,7 @@ pub(crate) async fn serve(path: &Path) -> Result<(), CliError> {
         .map(|cache| crate::server_cache::ServerCache::start(cache, path))
         .transpose()?;
     let mut runtimes = Vec::new();
+    let mut observer = None;
     let result = async {
         let mut dispatcher = mount_rs_service::dispatch::DriveDispatcher::new(catalog.clone());
         for (partition_id, partition) in &snapshot.partitions {
@@ -392,13 +396,15 @@ pub(crate) async fn serve(path: &Path) -> Result<(), CliError> {
         } else {
             None
         };
-        let server = match mount_rs_service::server::RemoteServer::bind_with_options(
+        let server = match mount_rs_service::server::RemoteServer::bind_with_diagnostics(
             config.listen,
             certs,
             key,
             dispatcher,
             authenticator,
             server_options,
+            mount_rs_service::server::RemoteTransferLimits::default(),
+            diagnostics::enabled(std::env::var_os("MOUNT_RS_PROFILE_IO").as_deref()),
         )
         .await
         {
@@ -410,6 +416,7 @@ pub(crate) async fn serve(path: &Path) -> Result<(), CliError> {
                 return Err(CliError::runtime("cannot start remote service"));
             }
         };
+        observer = server.diagnostics();
         if let Some(websocket) = &websocket {
             println!(
                 "remote TLS websocket listening at {}",
@@ -437,7 +444,11 @@ pub(crate) async fn serve(path: &Path) -> Result<(), CliError> {
     if let Some(cache) = cache {
         cache.shutdown().await;
     }
-    result.and(shutdown_error.map_or(Ok(()), Err))
+    let outcome = result.and(shutdown_error.map_or(Ok(()), Err));
+    if let Some(observer) = observer {
+        diagnostics::emit(&observer);
+    }
+    outcome
 }
 
 pub(crate) async fn mount(path: &Path) -> Result<(), CliError> {
