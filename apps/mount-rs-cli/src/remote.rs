@@ -34,12 +34,88 @@ struct ServiceConfig {
     tidb_pool_max_connections: usize,
     #[serde(default)]
     cache: Option<crate::server_cache::CacheServiceConfig>,
+    #[cfg(all(feature = "local-oidc-fixture", debug_assertions))]
+    #[serde(default)]
+    local_oidc_fixture: Option<LocalOidcFixtureConfig>,
+}
+
+#[cfg(all(feature = "local-oidc-fixture", debug_assertions))]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalOidcFixtureConfig {
+    issuer: String,
+    audiences: Vec<String>,
+    jwks: PathBuf,
+}
+
+#[cfg(all(feature = "local-oidc-fixture", debug_assertions))]
+struct LocalOidcFixtureKeySource {
+    issuer: String,
+    audiences: Vec<String>,
+    verifier: mount_rs_service::auth::OidcVerifier,
+    rejection: mount_rs_service::auth::AuthError,
+}
+
+#[cfg(all(feature = "local-oidc-fixture", debug_assertions))]
+#[async_trait::async_trait]
+impl mount_rs_service::auth::OidcKeySource for LocalOidcFixtureKeySource {
+    async fn fetch(
+        &self,
+        issuer: &str,
+        audiences: &[String],
+    ) -> Result<mount_rs_service::auth::OidcVerifier, mount_rs_service::auth::AuthError> {
+        if issuer != self.issuer || audiences != self.audiences {
+            return Err(self.rejection.clone());
+        }
+        Ok(self.verifier.clone())
+    }
 }
 fn default_tidb_pool_max_connections() -> usize {
     16
 }
 fn default_connection_limit() -> usize {
     mount_rs_service::server::RemoteServerOptions::default().max_connections
+}
+
+#[cfg(all(feature = "local-oidc-fixture", debug_assertions))]
+fn local_oidc_fixture_key_source(
+    config: &ServiceConfig,
+    path: &Path,
+) -> Result<Option<Arc<dyn mount_rs_service::auth::OidcKeySource>>, CliError> {
+    let Some(fixture) = &config.local_oidc_fixture else {
+        return Ok(None);
+    };
+    if !config.listen.ip().is_loopback()
+        || config
+            .websocket_listen
+            .is_some_and(|address| !address.ip().is_loopback())
+    {
+        return Err(CliError::usage(
+            "local OIDC fixture requires every remote listener to use a loopback address",
+        ));
+    }
+    let jwks_path = relative(path, &fixture.jwks);
+    let metadata = std::fs::metadata(&jwks_path)
+        .map_err(|_| CliError::runtime("cannot read local OIDC fixture JWKS"))?;
+    if metadata.len() > 256 * 1024 {
+        return Err(CliError::usage("local OIDC fixture JWKS is too large"));
+    }
+    let jwks = std::fs::read_to_string(jwks_path)
+        .map_err(|_| CliError::runtime("cannot read local OIDC fixture JWKS"))?;
+    let verifier = mount_rs_service::auth::OidcVerifier::from_jwks_json(
+        &fixture.issuer,
+        &fixture.audiences,
+        &jwks,
+    )
+    .map_err(|_| CliError::usage("invalid local OIDC fixture policy or JWKS"))?;
+    let rejection = mount_rs_service::auth::OidcVerifier::new("", &[], Vec::new())
+        .expect_err("empty OIDC fixture policy is invalid");
+    Ok(Some(Arc::new(LocalOidcFixtureKeySource {
+        issuer: fixture.issuer.clone(),
+        audiences: fixture.audiences.clone(),
+        verifier,
+        rejection,
+    })))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -213,6 +289,8 @@ pub(crate) async fn serve(path: &Path) -> Result<(), CliError> {
     if let Some(cache) = &config.cache {
         cache.validate()?;
     }
+    #[cfg(all(feature = "local-oidc-fixture", debug_assertions))]
+    let local_oidc_fixture = local_oidc_fixture_key_source(&config, path)?;
     let context = mount_rs_sdk::StorageContext::new(config.tidb_pool_max_connections)?;
     let catalog = Arc::new(
         SqliteCatalog::open(relative(path, &config.catalog))
@@ -284,6 +362,15 @@ pub(crate) async fn serve(path: &Path) -> Result<(), CliError> {
                     .map_err(CliError::usage)?;
             }
         }
+        #[cfg(all(feature = "local-oidc-fixture", debug_assertions))]
+        let authenticator = Arc::new(match &local_oidc_fixture {
+            Some(source) => mount_rs_service::auth::CatalogAuthenticator::with_key_source(
+                catalog.clone(),
+                source.clone(),
+            ),
+            None => mount_rs_service::auth::CatalogAuthenticator::new(catalog.clone()),
+        });
+        #[cfg(not(all(feature = "local-oidc-fixture", debug_assertions)))]
         let authenticator = Arc::new(mount_rs_service::auth::CatalogAuthenticator::new(
             catalog.clone(),
         ));
@@ -529,6 +616,64 @@ mod tests {
         assert!(!directory.path().join("absent").exists());
     }
 
+    #[cfg(not(all(feature = "local-oidc-fixture", debug_assertions)))]
+    #[test]
+    fn normal_build_rejects_local_oidc_fixture_configuration() {
+        let value = serde_json::json!({
+            "version":1,"catalog":"catalog.sqlite","listen":"127.0.0.1:4433",
+            "certificate":"cert.pem","private_key":"key.pem",
+            "local_oidc_fixture":{
+                "issuer":"https://issuer.example.com","audiences":["mount-rs"],
+                "jwks":"fixture.jwks.json"
+            }
+        });
+        assert!(serde_json::from_value::<ServiceConfig>(value).is_err());
+    }
+
+    #[cfg(all(feature = "local-oidc-fixture", debug_assertions))]
+    #[test]
+    fn debug_feature_accepts_explicit_local_oidc_fixture_configuration() {
+        let value = serde_json::json!({
+            "version":1,"catalog":"catalog.sqlite","listen":"127.0.0.1:4433",
+            "certificate":"cert.pem","private_key":"key.pem",
+            "local_oidc_fixture":{
+                "issuer":"https://issuer.example.com","audiences":["mount-rs"],
+                "jwks":"fixture.jwks.json"
+            }
+        });
+        let config: ServiceConfig = serde_json::from_value(value).unwrap();
+        let fixture = config.local_oidc_fixture.unwrap();
+        assert_eq!(fixture.issuer, "https://issuer.example.com");
+        assert_eq!(fixture.audiences, ["mount-rs"]);
+        assert_eq!(fixture.jwks, Path::new("fixture.jwks.json"));
+    }
+
+    #[cfg(all(feature = "local-oidc-fixture", debug_assertions))]
+    #[tokio::test]
+    async fn debug_fixture_rejects_public_listener_before_opening_resources() {
+        for (listen, websocket) in [("0.0.0.0:0", "127.0.0.1:0"), ("127.0.0.1:0", "0.0.0.0:0")] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("service.json");
+            std::fs::write(
+                &path,
+                serde_json::json!({
+                    "version":1,"catalog":"absent/catalog.sqlite","listen":listen,
+                    "websocket_listen":websocket,
+                    "certificate":"absent.pem","private_key":"absent-key.pem",
+                    "local_oidc_fixture":{
+                        "issuer":"https://issuer.example.com","audiences":["mount-rs"],
+                        "jwks":"absent.jwks.json"
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let error = serve(&path).await.unwrap_err();
+            assert!(error.to_string().contains("loopback"), "{error}");
+            assert!(!directory.path().join("absent").exists());
+        }
+    }
+
     #[test]
     fn server_cache_configuration_selects_compiled_discovery() {
         let value = serde_json::json!({
@@ -604,5 +749,46 @@ mod tests {
             snapshot.partitions["blue"].drives["data"].driver,
             serde_json::json!({"kind":"memory"})
         );
+    }
+
+    #[tokio::test]
+    async fn operator_apply_rejects_compact_contradiction_before_catalog_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let document = directory.path().join("catalog.json");
+        let path = directory.path().join("apply.json");
+        std::fs::write(
+            &document,
+            serde_json::json!({
+                "revision":0,
+                "partitions":{"red":{"drives":{"data":{"driver":{
+                    "kind":"splitstore","storage":{
+                        "metadata":{"kind":"sqlite","path":"metadata.sqlite"},
+                        "blocks":{"kind":"sqlite","path":"blocks.sqlite"},
+                        "compact_inode_updates":true,
+                        "inode_updates":false
+                    }
+                }}}}},
+                "issuer_policies":{},"grants":{}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "version":1,"catalog":"absent/service.sqlite",
+                "document":"catalog.json","expected_revision":0
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let error = apply(&path).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("config.driver.storage.inode_updates"),
+            "{error}"
+        );
+        assert!(!directory.path().join("absent").exists());
     }
 }

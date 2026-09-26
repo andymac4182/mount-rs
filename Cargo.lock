@@ -1752,6 +1752,7 @@ name = "mount-rs-cli"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "libc",
  "mount-rs-auto",
  "mount-rs-blob-cache",
@@ -1762,9 +1763,12 @@ dependencies = [
  "mount-rs-nfs",
  "mount-rs-observability",
  "mount-rs-remote-client",
+ "mount-rs-remote-protocol",
  "mount-rs-sdk",
  "mount-rs-service",
  "mount-rs-sqlite",
+ "rcgen",
+ "ring",
  "rusqlite",
  "rustls",
  "rustls-pemfile",
