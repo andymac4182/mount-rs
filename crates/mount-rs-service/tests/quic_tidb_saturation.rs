@@ -56,6 +56,18 @@ fn reused_payload_buffer_preserves_original_pattern_and_marker() {
     }
 }
 
+#[test]
+fn payload_generation_finishes_before_operation_latency_starts() {
+    let mut bytes = vec![0; BYTES];
+    let mut prepared_at = None;
+    let start = start_after_payload(|| {
+        payload_into(&mut bytes, 2, 5, 7);
+        prepared_at = Some(Instant::now());
+    });
+    assert_eq!(bytes, payload(2, 5, 7));
+    assert!(start >= prepared_at.unwrap());
+}
+
 #[cfg(all(feature = "resource-profiling", unix))]
 #[path = "support/resource_profile.rs"]
 mod resource_profile;
@@ -155,6 +167,162 @@ fn valid_numeric_write(received: &Value) -> Result<(), String> {
         Err("partial or invalid write".into())
     }
 }
+
+const RUNNER_SOURCE_PATH: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/quic_tidb_saturation.rs");
+const BACKEND_SOURCE_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/support/saturation_backend.rs"
+);
+
+fn runner_source_digest(runner: &[u8], backend: &[u8]) -> String {
+    let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
+    digest.update(b"mount-rs-saturation-runner-sources-v1\0");
+    for (name, bytes) in [
+        (b"quic_tidb_saturation.rs".as_slice(), runner),
+        (b"support/saturation_backend.rs".as_slice(), backend),
+    ] {
+        digest.update(&(name.len() as u64).to_be_bytes());
+        digest.update(name);
+        digest.update(&(bytes.len() as u64).to_be_bytes());
+        digest.update(bytes);
+    }
+    digest
+        .finish()
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn require_matching_runner_source(compiled: &str, current: &str) -> Result<(), String> {
+    if compiled == current {
+        Ok(())
+    } else {
+        Err("runner source bytes changed since executable compilation".into())
+    }
+}
+
+fn source_binary_receipt() -> Result<Value, String> {
+    use std::io::Read;
+    let compiled_source_sha256 = runner_source_digest(
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/quic_tidb_saturation.rs"
+        )),
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/support/saturation_backend.rs"
+        )),
+    );
+    let current_source_sha256 = runner_source_digest(
+        &std::fs::read(RUNNER_SOURCE_PATH).map_err(|_| "runner source read failed")?,
+        &std::fs::read(BACKEND_SOURCE_PATH).map_err(|_| "backend source read failed")?,
+    );
+    require_matching_runner_source(&compiled_source_sha256, &current_source_sha256)?;
+    let executable = std::env::current_exe().map_err(|_| "executable path unavailable")?;
+    let mut input = std::fs::File::open(&executable).map_err(|_| "executable read failed")?;
+    let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = input
+            .read(&mut buffer)
+            .map_err(|_| "executable digest read failed")?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    let executable_sha256: String = digest
+        .finish()
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let source = std::process::Command::new("git")
+        .args(["-C", env!("CARGO_MANIFEST_DIR"), "rev-parse", "HEAD"])
+        .output()
+        .map_err(|_| "source revision probe failed")?;
+    if !source.status.success() {
+        return Err("source revision probe failed".into());
+    }
+    let checkout_revision = String::from_utf8(source.stdout)
+        .map_err(|_| "source revision invalid")?
+        .trim()
+        .to_owned();
+    if checkout_revision.len() != 40 {
+        return Err("source revision invalid".into());
+    }
+    let status = std::process::Command::new("git")
+        .args(["-C", env!("CARGO_MANIFEST_DIR"), "status", "--porcelain"])
+        .output()
+        .map_err(|_| "source status probe failed")?;
+    if !status.status.success() {
+        return Err("source status probe failed".into());
+    }
+    Ok(json!({
+        "executable":executable,
+        "executable_sha256":executable_sha256,
+        "checkout_revision_at_run":checkout_revision,
+        "checkout_dirty_at_run":!status.stdout.is_empty(),
+        "compiled_revision_env":option_env!("MOUNT_RS_SATURATION_SOURCE_REVISION"),
+        "compiled_runner_source_sha256":compiled_source_sha256,
+        "current_runner_source_sha256":current_source_sha256,
+        "features":{"resource_profiling":cfg!(feature="resource-profiling"),"allocation_profiling":cfg!(feature="allocation-profiling"),"foundationdb":cfg!(feature="saturation-foundationdb")},
+    }))
+}
+
+#[test]
+fn source_receipt_binds_compiled_and_current_runner_bytes() {
+    let receipt = source_binary_receipt().unwrap();
+    let compiled = receipt["compiled_runner_source_sha256"].as_str().unwrap();
+    let current = receipt["current_runner_source_sha256"].as_str().unwrap();
+    assert_eq!(compiled.len(), 64);
+    assert_eq!(compiled, current);
+    assert!(require_matching_runner_source(compiled, "different").is_err());
+}
+
+#[test]
+fn artifact_inode_options_match_effective_backend_mode() {
+    for (mode, inode, compact) in [
+        (backend::InodeMode::Legacy, false, false),
+        (backend::InodeMode::Inode, true, false),
+        (backend::InodeMode::Compact, true, true),
+    ] {
+        let fields = json!({
+            "requested_inode_mode":mode.label(),
+            "inode_updates":mode.inode_updates(),
+            "compact_inode_updates":mode.compact_inode_updates(),
+        });
+        assert_eq!(fields["inode_updates"], inode);
+        assert_eq!(fields["compact_inode_updates"], compact);
+    }
+}
+
+#[test]
+fn rejected_mode_receipt_or_owned_count_writes_failed_artifact() {
+    let directory = tempfile::tempdir().unwrap();
+    for (case, mode_error, count_error) in [
+        ("mode", Some("persisted marker mismatch"), None),
+        ("count", None, Some("owned SQL count failed")),
+    ] {
+        let path = directory.path().join(format!("{case}.json"));
+        let mut artifact = json!({"schema":"mount-rs-provider-saturation-v2"});
+        finalize_artifact_qualification(&mut artifact, 4, "passed", mode_error, count_error);
+        write_saturation_artifact(&artifact, Some(&path), case).unwrap();
+        for written in [&path, &directory.path().join(format!("{case}-{case}.json"))] {
+            let observed: Value = serde_json::from_slice(&std::fs::read(written).unwrap()).unwrap();
+            assert_eq!(observed["verification_status"], "failed", "{case}");
+            assert_eq!(observed["verified_files"], 0, "{case}");
+            assert_eq!(observed["file_verification_status"], "passed", "{case}");
+            assert_eq!(observed["persisted_mode_receipt_error"], json!(mode_error));
+            assert_eq!(
+                observed["owned_logical_sql_counts_error"],
+                json!(count_error)
+            );
+        }
+    }
+}
 #[test]
 fn diagnostic_codec_selection_and_numeric_oracles_are_explicit() {
     assert_eq!(Codec::parse("binary").unwrap(), Codec::Binary);
@@ -197,6 +365,11 @@ fn payload_into(bytes: &mut [u8], client: usize, lane: usize, seq: u64) {
         .expect("payload marker fits in stack buffer");
     let marker_len = cursor.position() as usize;
     bytes[..marker_len].copy_from_slice(&marker[..marker_len]);
+}
+
+fn start_after_payload(prepare: impl FnOnce()) -> Instant {
+    prepare();
+    Instant::now()
 }
 // Fixed 64-bucket logarithmic histogram, upper-bound microseconds; constant memory per worker.
 #[derive(Clone)]
@@ -307,10 +480,14 @@ async fn lane(
         let writing =
             matches!(mode, Mode::Write) || matches!(mode, Mode::Mixed) && seq.is_multiple_of(2);
         request.position = Some((block * BYTES) as u64);
-        if writing {
-            payload_into(&mut expected_bytes, client, lane, base + seq);
-        }
-        let start = Instant::now();
+        let start = start_after_payload(|| {
+            let (payload_lane, payload_sequence) = if writing {
+                (lane, base + seq)
+            } else {
+                expected[block]
+            };
+            payload_into(&mut expected_bytes, client, payload_lane, payload_sequence);
+        });
         let response=tokio::time::timeout(timeout,async {
             match codec {
                 Codec::Binary=>{
@@ -327,14 +504,6 @@ async fn lane(
         }).await;
         match response {
             Ok(Ok(reply)) => {
-                if !writing {
-                    payload_into(
-                        &mut expected_bytes,
-                        client,
-                        expected[block].0,
-                        expected[block].1,
-                    );
-                }
                 let valid = match (reply, writing) {
                     (IoReply::Count(count), true) => valid_write(count),
                     (IoReply::Count(count), false) => valid_read(count)
@@ -355,7 +524,7 @@ async fn lane(
                         result.last.push((block, base + seq));
                     }
                 } else {
-                    // Content generation and validation remain inside the read latency scope.
+                    // Read content validation remains inside the latency scope.
                     result.read.record(start.elapsed());
                 }
             }
@@ -524,6 +693,7 @@ async fn stage_observer(
     .map_err(|_| "datastore observer task failed".to_owned())?
 }
 async fn packet() -> Result<(), String> {
+    let binding = source_binary_receipt()?;
     let client_count = env_num(
         "MOUNT_RS_REMOTE_SATURATION_CLIENTS",
         DEFAULT_CLIENTS,
@@ -852,29 +1022,21 @@ async fn packet() -> Result<(), String> {
     let verification = if verification_run {
         if separate {
             async {
-                let mut result = Ok(());
                 for (client, b) in drive_backends.iter().take(active_clients).enumerate() {
-                    let fs = b.open(server_count).await?;
-                    let view = Loopback::from_arc(fs.driver());
-                    let actual = view
-                        .read_file(&format!("/saturation-{client}"))
-                        .await
-                        .map_err(|_| "separate fresh read failed")?;
-                    let want: Vec<u8> = expected[client]
-                        .iter()
-                        .flat_map(|(lane, seq)| payload(client, *lane, *seq))
-                        .collect();
-                    if actual != want {
-                        result = Err("separate drive content mismatch".into());
-                    }
-                    fs.shutdown()
-                        .await
-                        .map_err(|_| "separate fresh shutdown failed")?;
-                    if result.is_err() {
-                        break;
-                    }
+                    verify_one_separate_drive_with_shutdown(
+                        b,
+                        server_count,
+                        client,
+                        &expected[client],
+                        |fs| async move {
+                            fs.shutdown()
+                                .await
+                                .map_err(|_| "separate fresh shutdown failed".into())
+                        },
+                    )
+                    .await?;
                 }
-                result
+                Ok(())
             }
             .await
         } else {
@@ -892,7 +1054,63 @@ async fn packet() -> Result<(), String> {
     };
     let snapshot_verification =
         std::env::var("MOUNT_RS_REMOTE_SATURATION_SNAPSHOT_VERIFY").as_deref() == Ok("1");
-    let mut artifact = json!({"separate_drives":separate,"drive_count":if separate {client_count} else {1},"driver_replicas":if separate {client_count*server_count} else {server_count},"verification_method":if separate {"all fresh driver files"} else if snapshot_verification {"all stored files plus fresh driver sample"} else {"all fresh driver files"},"fresh_driver_sample_limit":if separate {active_clients} else if snapshot_verification {64} else {active_clients},"schema":"mount-rs-provider-saturation-v2","inode_updates":std::env::var("MOUNT_RS_REMOTE_SATURATION_INODE_UPDATES").as_deref()==Ok("1"),"provider":backend.name,"provider_identity":backend.identity,"provider_version":backend.version,"volume_key":key,"clients":client_count,"active_clients":active_clients,"servers":server_count,"offline_empty_file_preseed":preseed,"setup_concurrency":setup_concurrency,"setup_seconds":setup_seconds,"driver_setup_seconds":driver_setup_seconds,"parallel_server_startup":separate,"drives_provisioned_before_startup":provision,"provisioning_seconds":provisioning_seconds,"dataset_bytes":active_clients*blocks*BYTES,"namespace_bytes":namespace_bytes,"topology":topology,"debug_assertions":cfg!(debug_assertions),"build_profile":if cfg!(debug_assertions){"debug"}else{"release"},"warmup_seconds":warmup,"nominal_stage_seconds":seconds,"configured_modes":modes.iter().map(|m|format!("{m:?}")).collect::<Vec<_>>(),"audit_logging":"enabled; request audit cost included","latency_histogram":"power-of-two microsecond upper bounds","stages":reports,"failed_phase":failed_phase,"verification_status":verification_status,"verified_files":if verification_status=="passed"{active_clients}else{0},"work_error":work.as_ref().err(),"cleanup_error":cleanup.as_ref().err(),"verification_error":verification.as_ref().err()});
+    let mut artifact = json!({"separate_drives":separate,"drive_count":if separate {client_count} else {1},"driver_replicas":if separate {client_count*server_count} else {server_count},"verification_method":if separate && snapshot_verification {"all stored and fresh driver files"} else if separate {"all fresh driver files"} else if snapshot_verification {"all stored files plus fresh driver sample"} else {"all fresh driver files"},"fresh_driver_sample_limit":if separate {active_clients} else if snapshot_verification {64} else {active_clients},"schema":"mount-rs-provider-saturation-v2","inode_updates":backend.inode_mode.inode_updates(),"compact_inode_updates":backend.inode_mode.compact_inode_updates(),"provider":backend.name,"provider_identity":backend.identity,"provider_version":backend.version,"volume_key":key,"clients":client_count,"active_clients":active_clients,"servers":server_count,"offline_empty_file_preseed":preseed,"setup_concurrency":setup_concurrency,"setup_seconds":setup_seconds,"driver_setup_seconds":driver_setup_seconds,"parallel_server_startup":separate,"drives_provisioned_before_startup":provision,"provisioning_seconds":provisioning_seconds,"dataset_bytes":active_clients*blocks*BYTES,"namespace_bytes":namespace_bytes,"topology":topology,"debug_assertions":cfg!(debug_assertions),"build_profile":if cfg!(debug_assertions){"debug"}else{"release"},"warmup_seconds":warmup,"nominal_stage_seconds":seconds,"configured_modes":modes.iter().map(|m|format!("{m:?}")).collect::<Vec<_>>(),"audit_logging":"enabled; request audit cost included","latency_histogram":"power-of-two microsecond upper bounds","stages":reports,"failed_phase":failed_phase,"verification_status":verification_status,"verified_files":if verification_status=="passed"{active_clients}else{0},"work_error":work.as_ref().err(),"cleanup_error":cleanup.as_ref().err(),"verification_error":verification.as_ref().err()});
+    artifact["requested_inode_mode"] = json!(backend.inode_mode.label());
+    artifact["inode_mode_selector_env"] = json!({
+        "MOUNT_RS_REMOTE_SATURATION_INODE_UPDATES":std::env::var("MOUNT_RS_REMOTE_SATURATION_INODE_UPDATES").ok(),
+        "MOUNT_RS_REMOTE_SATURATION_COMPACT_INODE_UPDATES":std::env::var("MOUNT_RS_REMOTE_SATURATION_COMPACT_INODE_UPDATES").ok(),
+    });
+    artifact["source_binary_binding"] = binding;
+    let mut mode_receipt_error = None;
+    if verification_run && (backend.name == "tidb" || backend.name == "sqlite") {
+        let mut receipts = vec![];
+        if separate {
+            for (index, owned) in drive_backends.iter().enumerate() {
+                match owned.persisted_mode_receipt().await {
+                    Ok(receipt) => receipts.push(json!({"drive_index":index,"mode":receipt})),
+                    Err(error) => {
+                        mode_receipt_error = Some(error);
+                        break;
+                    }
+                }
+            }
+        } else {
+            match backend.persisted_mode_receipt().await {
+                Ok(receipt) => receipts.push(json!({"drive_index":0,"mode":receipt})),
+                Err(error) => mode_receipt_error = Some(error),
+            }
+        }
+        artifact["persisted_mode_receipts"] = json!(receipts);
+    }
+    if let Some(error) = &mode_receipt_error {
+        artifact["persisted_mode_receipt_error"] = json!(error);
+    }
+    #[cfg(all(feature = "resource-profiling", unix))]
+    let mut owned_count_error = None;
+    #[cfg(all(feature = "resource-profiling", unix))]
+    if verification_run && backend.name == "tidb" {
+        let mut counts = vec![];
+        if separate {
+            for (index, owned) in drive_backends.iter().enumerate() {
+                match owned.owned_counts().await {
+                    Ok(value) => counts.push(json!({"drive_index":index,"counts":value})),
+                    Err(error) => {
+                        owned_count_error = Some(error);
+                        break;
+                    }
+                }
+            }
+        } else {
+            match backend.owned_counts().await {
+                Ok(value) => counts.push(json!({"drive_index":0,"counts":value})),
+                Err(error) => owned_count_error = Some(error),
+            }
+        }
+        artifact["owned_logical_sql_counts"] = json!(counts);
+        if let Some(error) = &owned_count_error {
+            artifact["owned_logical_sql_counts_error"] = json!(error);
+        }
+    }
     artifact["wire_protocol_version"] = json!(2);
     artifact["wire_io"] = json!(codec.label());
     artifact["read_buffers"] = json!("binary lane reuses per-lane buffer");
@@ -900,14 +1118,114 @@ async fn packet() -> Result<(), String> {
     artifact["numeric_diagnostic_scope"] =
         json!("current v2 control envelope; no compatibility fallback");
     artifact["encoding_timing"] = json!(
-        "request construction and serialization included; payload generation excluded equally"
+        "wire request construction and serialization, response validation, and read content comparison included; payload generation excluded before both read and write latency timestamps"
     );
     artifact["tidb_pool"] = json!({"scope":"per server per exact connection identity", "max_connections":tidb_pool_max_connections,"schema_initialization":"once per context and role"});
     let limits = mount_rs_service::server::RemoteTransferLimits::default();
     artifact["server_admission"] = json!({"scope":"per server, shared across all connections","active_data_operations":limits.active_data_operations,"active_control_operations":limits.active_control_operations,"data_bytes_each_direction":limits.data_bytes,"reserved_control_bytes_each_direction":limits.control_bytes,"quic_bidi_streams_per_connection":40});
-    if let Ok(path) = std::env::var("MOUNT_RS_REMOTE_TIDB_SATURATION_OUTPUT") {
-        let path = std::path::PathBuf::from(path);
-        let bytes = serde_json::to_vec_pretty(&artifact).unwrap();
+    #[cfg(all(feature = "resource-profiling", unix))]
+    let owned_count_error_ref = owned_count_error.as_deref();
+    #[cfg(not(all(feature = "resource-profiling", unix)))]
+    let owned_count_error_ref = None;
+    finalize_artifact_qualification(
+        &mut artifact,
+        active_clients,
+        verification_status,
+        mode_receipt_error.as_deref(),
+        owned_count_error_ref,
+    );
+    let output =
+        std::env::var_os("MOUNT_RS_REMOTE_TIDB_SATURATION_OUTPUT").map(std::path::PathBuf::from);
+    write_saturation_artifact(&artifact, output.as_deref(), &key)?;
+    work?;
+    cleanup?;
+    if let Some(error) = mode_receipt_error {
+        return Err(error);
+    }
+    #[cfg(all(feature = "resource-profiling", unix))]
+    if let Some(error) = owned_count_error {
+        return Err(error);
+    }
+    verification
+}
+
+async fn verify_one_separate_drive_with_shutdown<F, Fut>(
+    backend: &backend::Backend,
+    server_count: usize,
+    client: usize,
+    expected: &[(usize, u64)],
+    shutdown: F,
+) -> Result<(), String>
+where
+    F: FnOnce(mount_rs_sdk::Filesystem) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    let fs = backend.open(server_count).await?;
+    let view = Loopback::from_arc(fs.driver());
+    let verified = async {
+        let actual = view
+            .read_file(&format!("/saturation-{client}"))
+            .await
+            .map_err(|_| "separate fresh read failed")?;
+        let want: Vec<u8> = expected
+            .iter()
+            .flat_map(|(lane, seq)| payload(client, *lane, *seq))
+            .collect();
+        if actual != want {
+            return Err("separate drive content mismatch".into());
+        }
+        if std::env::var("MOUNT_RS_REMOTE_SATURATION_SNAPSHOT_VERIFY").as_deref() == Ok("1") {
+            backend
+                .verify_stored_files_from(client, &[expected.to_vec()])
+                .await?;
+        }
+        Ok(())
+    }
+    .await;
+    let closed = shutdown(fs).await;
+    closed?;
+    verified
+}
+
+fn finalize_artifact_qualification(
+    artifact: &mut Value,
+    active_clients: usize,
+    file_verification_status: &str,
+    mode_receipt_error: Option<&str>,
+    owned_count_error: Option<&str>,
+) {
+    artifact["file_verification_status"] = json!(file_verification_status);
+    let qualification_status = if mode_receipt_error.is_some()
+        || owned_count_error.is_some()
+        || !artifact["work_error"].is_null()
+        || !artifact["cleanup_error"].is_null()
+        || !artifact["verification_error"].is_null()
+    {
+        "failed"
+    } else {
+        file_verification_status
+    };
+    artifact["verification_status"] = json!(qualification_status);
+    artifact["verified_files"] = json!(if qualification_status == "passed" {
+        active_clients
+    } else {
+        0
+    });
+    if let Some(error) = mode_receipt_error {
+        artifact["persisted_mode_receipt_error"] = json!(error);
+    }
+    if let Some(error) = owned_count_error {
+        artifact["owned_logical_sql_counts_error"] = json!(error);
+    }
+}
+
+fn write_saturation_artifact(
+    artifact: &Value,
+    path: Option<&std::path::Path>,
+    key: &str,
+) -> Result<(), String> {
+    if let Some(path) = path {
+        let bytes = serde_json::to_vec_pretty(artifact).unwrap();
         let stem = path
             .file_stem()
             .and_then(|s| s.to_str())
@@ -917,10 +1235,9 @@ async fn packet() -> Result<(), String> {
             .map_err(|e| format!("retained artifact write failed: {e}"))?;
         std::fs::write(path, bytes).map_err(|e| format!("artifact write failed: {e}"))?;
     }
-    work?;
-    cleanup?;
-    verification
+    Ok(())
 }
+
 async fn verify(
     backend: &backend::Backend,
     server_count: usize,
