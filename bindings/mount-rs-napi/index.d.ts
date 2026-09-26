@@ -877,6 +877,12 @@ export declare class WebdavStreamResponse {
 export declare function basename(path: string): string
 
 export declare function createChunkedDriver(options: JsChunkedOptions): Promise<Filesystem>
+/**
+ * Observe one TiDB namespace and RustFS prefix before creating a filesystem.
+ * May initialize shared SQL schemas. Returns separate API observations without
+ * reserving either scope, after bounded, confirmed TiDB pool shutdown.
+ */
+export declare function inspectSplitNamespacePresence(metadata: JsChunkedStoreOptions, blocks: JsChunkedStoreOptions): Promise<string>
 /** Versioned, read-only JSON snapshot. Counters are exact decimal strings. */
 export declare function storageDiagnostics(): string
 

@@ -216,14 +216,14 @@ pub struct TidbDiagnosticCoverage {
 pub const TIDB_DIAGNOSTIC_COVERAGE: TidbDiagnosticCoverage = TidbDiagnosticCoverage {
     schema: "mount-rs-tidb-client-diagnostic-coverage-v1",
     status: "source_sites_instrumented",
-    pool_checkout_sites: 34,
+    pool_checkout_sites: 35,
     session_configure_sites: 1,
     schema_initialize_sites: 1,
     metadata_open_sites: 1,
     transaction_begin_sites: 3,
     transaction_commit_sites: 1,
     transaction_rollback_sites: 5,
-    sql_statement_sites: 56,
+    sql_statement_sites: 57,
     operations: &[
         "tidb.pool.checkout",
         "tidb.session.configure",
@@ -313,6 +313,13 @@ const BLOCK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_tidb_blocks (
     bytes LONGBLOB NOT NULL,
     PRIMARY KEY (volume_key, id)
 )";
+
+const NAMESPACE_PRESENCE_SQL: &str = "SELECT
+    EXISTS(SELECT 1 FROM mount_rs_tidb_metadata WHERE volume_key=?),
+    EXISTS(SELECT 1 FROM mount_rs_tidb_inodes WHERE volume_key=?),
+    EXISTS(SELECT 1 FROM mount_rs_tidb_compact_guards WHERE volume_key=?),
+    EXISTS(SELECT 1 FROM mount_rs_tidb_block_authority WHERE volume_key=?),
+    EXISTS(SELECT 1 FROM mount_rs_tidb_blocks WHERE volume_key=?)";
 
 /// Options shared by independently connected metadata and block stores.
 ///
@@ -541,6 +548,30 @@ struct TidbPoolInner {
     closed: AtomicBool,
 }
 
+/// Presence observed for one exact volume key in the provider's fixed tables.
+///
+/// These flags do not reserve the key or establish that it has never been used.
+/// Another writer can change the rows after inspection returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TidbNamespacePresence {
+    pub metadata: bool,
+    pub inodes: bool,
+    pub compact_guards: bool,
+    pub block_authority: bool,
+    pub blocks: bool,
+}
+
+impl TidbNamespacePresence {
+    /// Whether the inspection observed no rows in any of the five tables.
+    pub fn is_absent(&self) -> bool {
+        !self.metadata
+            && !self.inodes
+            && !self.compact_guards
+            && !self.block_authority
+            && !self.blocks
+    }
+}
+
 /// Explicit service-owned pool for one complete connection identity.
 ///
 /// Credentials, database, TLS and session options are parsed once. Every
@@ -584,8 +615,7 @@ impl TidbPoolContext {
         })))
     }
 
-    async fn database(&self, options: TidbStorageOptions, metadata: bool) -> Result<Database> {
-        options.validate()?;
+    async fn ensure_schema(&self, metadata: bool) -> Result<()> {
         self.require_open()?;
         let cell = if metadata {
             &self.0.metadata_schema
@@ -611,7 +641,54 @@ impl TidbPoolContext {
             .await
         })
         .await?;
+        self.require_open()
+    }
+
+    /// Inspect one exact, validated volume key before opening metadata or blocks.
+    ///
+    /// This prepares the provider's shared schemas with DDL and additive upgrades;
+    /// opening a session also performs the usual verified session SET statements.
+    /// It inserts no namespace, inode, guard, authority, or block rows. One fixed
+    /// parameterized SELECT observes all five row families in one statement.
+    /// The result is an observation, not a reservation: later writers can race it.
+    /// Callers remain responsible for closing this context on every outcome.
+    pub async fn inspect_namespace_presence(
+        &self,
+        volume_key: &str,
+    ) -> Result<TidbNamespacePresence> {
+        validate_scope(volume_key, "TiDB volume key")?;
+        self.ensure_schema(true).await?;
+        self.ensure_schema(false).await?;
+        let mut connection = self
+            .0
+            .pool
+            .get_conn_observed()
+            .await
+            .map_err(|e| db_error("inspect TiDB namespace presence", e))?;
         self.require_open()?;
+        let row: Option<(bool, bool, bool, bool, bool)> = connection
+            .exec_first_observed(
+                StorageOperation::TidbSqlMetadataRead,
+                NAMESPACE_PRESENCE_SQL,
+                (volume_key, volume_key, volume_key, volume_key, volume_key),
+            )
+            .await
+            .map_err(|e| db_error("inspect TiDB namespace presence", e))?;
+        let (metadata, inodes, compact_guards, block_authority, blocks) =
+            row.ok_or_else(|| backend_error("TiDB namespace presence query returned no row"))?;
+        self.require_open()?;
+        Ok(TidbNamespacePresence {
+            metadata,
+            inodes,
+            compact_guards,
+            block_authority,
+            blocks,
+        })
+    }
+
+    async fn database(&self, options: TidbStorageOptions, metadata: bool) -> Result<Database> {
+        options.validate()?;
+        self.ensure_schema(metadata).await?;
         if metadata {
             let mut connection = self
                 .0

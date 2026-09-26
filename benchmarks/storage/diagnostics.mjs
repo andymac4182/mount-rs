@@ -124,8 +124,8 @@ export const STORAGE_OPERATION_FAMILIES = {
 }
 export const TIDB_DIAGNOSTIC_COVERAGE = {
   schema: "mount-rs-tidb-client-diagnostic-coverage-v1", status: "source_sites_instrumented",
-  pool_checkout_sites: "34", session_configure_sites: "1", schema_initialize_sites: "1", metadata_open_sites: "1",
-  transaction_begin_sites: "3", transaction_commit_sites: "1", transaction_rollback_sites: "5", sql_statement_sites: "56",
+  pool_checkout_sites: "35", session_configure_sites: "1", schema_initialize_sites: "1", metadata_open_sites: "1",
+  transaction_begin_sites: "3", transaction_commit_sites: "1", transaction_rollback_sites: "5", sql_statement_sites: "57",
   operations: ["tidb.pool.checkout", "tidb.session.configure", "tidb.open.schema", "tidb.open.metadata_row", "tidb.tx.begin.metadata", "tidb.tx.begin.inode", "tidb.tx.begin.compact_read", "tidb.tx.commit", "tidb.tx.rollback", "tidb.sql.session", "tidb.sql.ddl", "tidb.sql.metadata_read", "tidb.sql.metadata_write", "tidb.sql.inode_read", "tidb.sql.inode_write", "tidb.sql.block_read", "tidb.sql.block_write", "tidb.sql.flush_probe"],
   sql_returned_rows_scope: "successful SELECT Option/Vec results only; exec_iter affected_rows excluded",
   sql_payload_bytes_scope: "successful block INSERT submitted bytes and block-body SELECT returned bytes only; other SQL payload bytes unavailable",

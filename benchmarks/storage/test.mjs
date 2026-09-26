@@ -36,8 +36,8 @@ const storageFamilyMeasurement = {
 const storageInstrumentedOperations = [...STORAGE_OPERATION_NAMES]
 const tidbCoverageMeasurement = {
   schema: "mount-rs-tidb-client-diagnostic-coverage-v1", status: "source_sites_instrumented",
-  pool_checkout_sites: "34", session_configure_sites: "1", schema_initialize_sites: "1", metadata_open_sites: "1",
-  transaction_begin_sites: "3", transaction_commit_sites: "1", transaction_rollback_sites: "5", sql_statement_sites: "56",
+  pool_checkout_sites: "35", session_configure_sites: "1", schema_initialize_sites: "1", metadata_open_sites: "1",
+  transaction_begin_sites: "3", transaction_commit_sites: "1", transaction_rollback_sites: "5", sql_statement_sites: "57",
   operations: STORAGE_OPERATION_NAMES.filter((name) => name.startsWith("tidb.")),
   sql_returned_rows_scope: "successful SELECT Option/Vec results only; exec_iter affected_rows excluded",
   sql_payload_bytes_scope: "successful block INSERT submitted bytes and block-body SELECT returned bytes only; other SQL payload bytes unavailable",
@@ -468,8 +468,8 @@ async function testStorageFamilyMetadata() {
   assert.equal(JSON.stringify(malformedCoverage).includes("secret-payload-category"), false, "invalid coverage must not retain arbitrary labels")
   const alteredSitesBefore = structuredClone(before)
   const alteredSitesAfter = structuredClone(after)
-  alteredSitesBefore.measurement.tidb_coverage.pool_checkout_sites = "35"
-  alteredSitesAfter.measurement.tidb_coverage.pool_checkout_sites = "35"
+  alteredSitesBefore.measurement.tidb_coverage.pool_checkout_sites = "36"
+  alteredSitesAfter.measurement.tidb_coverage.pool_checkout_sites = "36"
   assert.equal(deltaNativeSnapshots(alteredSitesBefore, alteredSitesAfter).complete, false, "equal endpoints cannot silently alter static coverage")
   const lines = []
   const originalWrite = process.stderr.write

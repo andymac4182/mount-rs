@@ -862,6 +862,9 @@ jobs:
             tests::live_rustfs_diagnostics_register_export_and_retire_without_backend_io -- --ignored --exact
           MOUNT_RS_PROFILE_IO=0 ./scripts/cargo-shared test --locked -p mount-rs-napi --lib \
             tests::disabled_rustfs_diagnostics_do_not_register_instances -- --ignored --exact
+      - name: Verify native split namespace presence controls
+        timeout-minutes: 5
+        run: ./scripts/cargo-shared test --locked -p mount-rs-napi --lib namespace_presence::tests
 
   windows-node:
     runs-on: windows-latest
@@ -889,6 +892,9 @@ jobs:
       - name: Verify explicit RustFS benchmark configuration
         timeout-minutes: 1
         run: node --test --test-timeout=10000 benchmarks/storage/rustfs-provider.test.mjs
+      - name: Verify split namespace presence receipt controls
+        timeout-minutes: 1
+        run: node --test --test-timeout=10000 benchmarks/storage/namespace-presence.test.mjs bindings/mount-rs-napi/test/namespace-presence-postlude.test.mjs
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
         with:
           version: 11
@@ -912,6 +918,7 @@ jobs:
           node bindings/mount-rs-napi/test/factories.mjs
           node bindings/mount-rs-napi/test/chunked.mjs
           node bindings/mount-rs-napi/test/shutdown-lifecycle.mjs
+          node bindings/mount-rs-napi/test/namespace-presence.mjs
       - name: Verify Windows virtual filesystem consumers and declarations
         run: |
           pnpm --dir bindings/mount-rs-virtual-fs install --frozen-lockfile --ignore-scripts
@@ -956,6 +963,9 @@ jobs:
       - name: Verify explicit RustFS benchmark configuration
         timeout-minutes: 1
         run: node --test --test-timeout=10000 benchmarks/storage/rustfs-provider.test.mjs
+      - name: Verify split namespace presence receipt controls
+        timeout-minutes: 1
+        run: node --test --test-timeout=10000 benchmarks/storage/namespace-presence.test.mjs bindings/mount-rs-napi/test/namespace-presence-postlude.test.mjs
       - name: Verify guarded backing observer and pilot controls
         timeout-minutes: 2
         run: |
@@ -978,6 +988,9 @@ jobs:
         env:
           CARGOFLAGS: --locked
         run: pnpm --dir bindings/mount-rs-napi build
+      - name: Verify native namespace presence configuration rejection
+        timeout-minutes: 1
+        run: node bindings/mount-rs-napi/test/namespace-presence.mjs
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" pnpm --dir bindings/mount-rs-napi test
       - name: Verify real just-bash and Mastra consumers
         timeout-minutes: 5

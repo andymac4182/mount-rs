@@ -4,6 +4,7 @@ pub mod fuse_session;
 pub mod js_driver;
 pub mod kv_binding;
 pub mod memory_factory;
+mod namespace_presence;
 pub mod nfs_codec;
 pub mod p9_codec;
 pub mod servers;
@@ -4888,6 +4889,18 @@ fn resolve_chunked_inode_selection(
 }
 
 #[napi]
+/// Observe a TiDB namespace and configured RustFS prefix before filesystem
+/// construction. Shared schema DDL/session setup is permitted; namespace
+/// rows and blob objects are not created. The JSON receipt is observational,
+/// with separate capture times and no reservation or atomic exclusion.
+pub async fn inspect_split_namespace_presence(
+    metadata: JsChunkedStoreOptions,
+    blocks: JsChunkedStoreOptions,
+) -> napi::Result<String> {
+    namespace_presence::inspect(metadata, blocks).await
+}
+
+#[napi]
 pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Filesystem> {
     let (ownership_mode, _) =
         chunked_ownership_mode(options.ownership_mode.as_deref(), options.concurrent_writes)?;
@@ -7152,8 +7165,8 @@ mod tests {
         );
         let coverage = &snapshot["measurement"]["tidb_coverage"];
         assert_eq!(coverage["status"], "source_sites_instrumented");
-        assert_eq!(coverage["pool_checkout_sites"], "34");
-        assert_eq!(coverage["sql_statement_sites"], "56");
+        assert_eq!(coverage["pool_checkout_sites"], "35");
+        assert_eq!(coverage["sql_statement_sites"], "57");
         assert_eq!(
             coverage["operations"],
             json!(mount_rs_tidb::TIDB_DIAGNOSTIC_COVERAGE.operations)

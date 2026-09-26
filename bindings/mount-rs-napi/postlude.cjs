@@ -203,6 +203,28 @@ module.exports = function install(binding) {
     })
   }
 
+  const nativeInspectSplitNamespacePresence = binding.inspectSplitNamespacePresence
+  if (typeof nativeInspectSplitNamespacePresence === "function" && !nativeInspectSplitNamespacePresence.__mountRsWrapped) {
+    function inspectSplitNamespacePresence(...args) {
+      let result
+      try {
+        result = nativeInspectSplitNamespacePresence.apply(binding, args)
+      } catch (error) {
+        throw structuredError(error)
+      }
+      return Promise.resolve(result).catch((error) => {
+        throw structuredError(error)
+      })
+    }
+    Object.defineProperty(inspectSplitNamespacePresence, "__mountRsWrapped", { value: true })
+    Object.defineProperty(binding, "inspectSplitNamespacePresence", {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: inspectSplitNamespacePresence,
+    })
+  }
+
   // FoundationDB's native client network belongs to the Node process, not
   // one Filesystem. Keep this terminal operation synchronous and preserve the
   // same structured EBUSY/ENOTSUP errors as the async provider factories.
