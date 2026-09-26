@@ -1,7 +1,10 @@
 //! Diagnostic-only allocator and process counters. Never enabled in production.
 #[path = "device_io.rs"]
 pub mod device_io;
+#[path = "resource_profile/sqlite_heap.rs"]
+mod sqlite_memory;
 use serde::Serialize;
+use sqlite_memory::heap as sqlite_heap;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 #[cfg(feature = "allocation-profiling")]
 use std::{
@@ -200,40 +203,6 @@ pub struct Snapshot {
     live_bytes: u64,
     network: Vec<Network>,
     os_io: device_io::Snapshot,
-}
-
-fn sqlite_heap() -> Result<(u64, u64), &'static str> {
-    let mut current = 0;
-    let mut peak = 0;
-    // SQLite owns the counters and synchronizes access; reset=0 leaves its
-    // lifetime high-water mark unchanged. Both output pointers are valid.
-    let status = unsafe {
-        rusqlite::ffi::sqlite3_status64(
-            rusqlite::ffi::SQLITE_STATUS_MEMORY_USED,
-            &mut current,
-            &mut peak,
-            0,
-        )
-    };
-    if status != rusqlite::ffi::SQLITE_OK {
-        return Err("SQLite memory counters unavailable");
-    }
-    Ok((
-        u64::try_from(current).map_err(|_| "negative SQLite heap usage")?,
-        u64::try_from(peak).map_err(|_| "negative SQLite heap peak")?,
-    ))
-}
-
-#[test]
-fn sqlite_foreign_heap_is_observed_separately_from_rust_allocations() {
-    let before = sqlite_heap().unwrap().0;
-    let connection = rusqlite::Connection::open_in_memory().unwrap();
-    connection.execute_batch("CREATE TABLE heap_probe (payload BLOB); INSERT INTO heap_probe VALUES (zeroblob(4096));").unwrap();
-    let during = sqlite_heap().unwrap();
-    assert!(during.0 >= before + 4096);
-    assert!(during.1 >= during.0);
-    drop(connection);
-    assert!(sqlite_heap().unwrap().0 < during.0);
 }
 
 #[cfg(target_os = "macos")]

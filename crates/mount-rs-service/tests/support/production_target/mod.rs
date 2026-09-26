@@ -104,6 +104,10 @@ pub async fn source_identity(commands: &mut command::Commands) -> Result<Value, 
             include_bytes!("../resource_profile.rs").as_slice(),
         ),
         (
+            "../resource_profile/sqlite_heap.rs",
+            include_bytes!("../resource_profile/sqlite_heap.rs").as_slice(),
+        ),
+        (
             "../device_io.rs",
             include_bytes!("../device_io.rs").as_slice(),
         ),

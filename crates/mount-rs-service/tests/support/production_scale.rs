@@ -91,6 +91,10 @@ fn production_target_count_caps_still_reject_overflow() {
 async fn catalog_shape_and_authorization_profile() {
     use mount_rs_service::catalog::SqliteCatalog;
     use std::time::Instant;
+    assert!(
+        mount_rs_core::diagnostics::profile::enabled(),
+        "catalog profile must be enabled"
+    );
     let directory = tempfile::tempdir().unwrap();
     let mut rows = Vec::new();
     for clients in [10, 100, 1_000, 10_000] {
@@ -99,7 +103,12 @@ async fn catalog_shape_and_authorization_profile() {
                 .await
                 .unwrap();
         let snapshot = target_catalog(clients);
-        let document_bytes = serde_json::to_vec(&snapshot).unwrap().len();
+        let encoded = serde_json::to_vec(&snapshot).unwrap();
+        let document_bytes = encoded.len();
+        let document_digest = {
+            use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+            URL_SAFE_NO_PAD.encode(ring::digest::digest(&ring::digest::SHA256, &encoded).as_ref())
+        };
         catalog.compare_and_swap(0, snapshot).await.unwrap();
         // Drain setup/CAS counters on all eight exact round-robin handles.
         for _ in 0..8 {
@@ -110,6 +119,7 @@ async fn catalog_shape_and_authorization_profile() {
         let partition = format!("partition-{}", (clients - 1) / 2);
         let drive = format!("sandbox-{}", clients - 1);
         let before = mount_rs_core::diagnostics::profile::snapshot();
+        let diagnostics_before = catalog.read_diagnostics();
         #[cfg(all(feature = "resource-profiling", unix))]
         let resources_before = super::resource_profile::Snapshot::capture_process().unwrap();
         let started = Instant::now();
@@ -131,13 +141,62 @@ async fn catalog_shape_and_authorization_profile() {
         let profile = mount_rs_core::diagnostics::profile::snapshot()
             .delta(&before)
             .expect("profile counter invalid");
+        let loads = profile
+            .entries
+            .iter()
+            .find(|entry| entry.name == "catalog.load")
+            .expect("forty positive authoritative load observations required");
+        assert_eq!(loads.calls, 40);
         let query = profile
             .entries
             .iter()
-            .find(|entry| entry.name == "catalog.query_document_bytes")
-            .expect("enable MOUNT_RS_PROFILE_IO=1 for actual catalog counters");
-        assert_eq!(query.calls, 40);
-        assert_eq!(query.units, document_bytes as u64 * 40);
+            .find(|entry| entry.name == "catalog.query_document_bytes");
+        #[cfg(unix)]
+        {
+            let diagnostics_after = catalog.read_diagnostics();
+            assert!(diagnostics_before.enabled && diagnostics_after.enabled);
+            assert!(
+                diagnostics_after
+                    .slot_observations
+                    .iter()
+                    .zip(diagnostics_before.slot_observations)
+                    .all(|(after, before)| after > &before),
+                "all actual eight pool handles must be observed"
+            );
+            assert_eq!(
+                diagnostics_after.certified_cache_hits - diagnostics_before.certified_cache_hits,
+                40
+            );
+            assert_eq!(
+                diagnostics_after.full_blob_queries - diagnostics_before.full_blob_queries,
+                0
+            );
+            assert_eq!(
+                diagnostics_after.full_blob_returned_bytes
+                    - diagnostics_before.full_blob_returned_bytes,
+                0
+            );
+            assert_eq!(
+                diagnostics_after.pager_sample_calls - diagnostics_before.pager_sample_calls,
+                40
+            );
+            assert_eq!(
+                diagnostics_after.pager_sample_available
+                    - diagnostics_before.pager_sample_available,
+                40,
+                "successful pager sampling required"
+            );
+            assert_eq!(query.map_or(0, |entry| entry.calls), 0);
+            assert_eq!(query.map_or(0, |entry| entry.units), 0);
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = diagnostics_before;
+            let query =
+                query.expect("non-Unix full-row control requires positive query observation");
+            assert_eq!(query.calls, 40);
+            assert_eq!(query.units, document_bytes as u64 * 40);
+        }
         #[cfg(all(feature = "resource-profiling", unix))]
         let resources = super::resource_profile::Snapshot::capture_process()
             .unwrap()
@@ -145,9 +204,10 @@ async fn catalog_shape_and_authorization_profile() {
             .unwrap();
         #[cfg(not(all(feature = "resource-profiling", unix)))]
         let resources = serde_json::Value::Null;
-        rows.push(json!({"clients":clients,"partitions":clients/2,"drives":clients,"grants":clients,"queries":40,"document_bytes":document_bytes,"elapsed_us":elapsed.as_micros(),"profile":profile,"resources":resources}));
+        let diagnostics_after = catalog.read_diagnostics();
+        rows.push(json!({"clients":clients,"partitions":clients/2,"drives":clients,"grants":clients,"authoritative_loads":40,"full_blob_query_calls":query.map_or(0, |entry| entry.calls),"returned_document_bytes":query.map_or(0, |entry| entry.units),"document_bytes":document_bytes,"document_sha256_base64url":document_digest,"elapsed_us":elapsed.as_micros(),"read_diagnostics_before":diagnostics_before,"read_diagnostics_after":diagnostics_after,"profile":profile,"resources":resources}));
     }
-    let artifact = json!({"schema":"mount-rs-catalog-shape-profile-v1","source_revision":std::env::var("MOUNT_RS_PRODUCTION_SOURCE_REVISION").expect("source revision required"),"build_profile":if cfg!(debug_assertions){"debug"}else{"release"},"scope":"one process, minimal fixture descriptors, authoritative SQLite catalog calls plus exact authorization; no network/filesystem/connection capacity claim; instrumentation affects throughput","allocation_profile":cfg!(feature="allocation-profiling"),"rows":rows});
+    let artifact = json!({"schema":"mount-rs-catalog-shape-profile-v2","source_revision":std::env::var("MOUNT_RS_PRODUCTION_SOURCE_REVISION").expect("source revision required"),"build_profile":if cfg!(debug_assertions){"debug"}else{"release"},"scope":"one process, minimal fixture descriptors, authoritative catalog loads plus local SQLite API and pager observations; no network/filesystem/connection capacity or physical I/O claim; instrumentation affects throughput; full-row positive control is private same-loader unit test","allocation_profile":cfg!(feature="allocation-profiling"),"rows":rows});
     let output = std::env::var("MOUNT_RS_PRODUCTION_CATALOG_PROFILE_OUTPUT")
         .expect("retained output required");
     std::fs::write(output, serde_json::to_vec_pretty(&artifact).unwrap()).unwrap();

@@ -1,6 +1,5 @@
 //! Versioned service metadata, separate from filesystem namespace metadata.
 
-#[cfg(feature = "io-profiling")]
 use mount_rs_core::diagnostics::profile;
 use mount_rs_core::diagnostics::profile::{Event, Span};
 
@@ -258,19 +257,154 @@ pub struct SqliteCatalog {
 
 struct CatalogConnections {
     path: PathBuf,
-    current: Mutex<Option<CachedSnapshot>>,
+    current: Mutex<CacheState>,
     #[cfg(unix)]
     identity: FileIdentity,
     #[cfg(unix)]
-    connections: Vec<Mutex<Connection>>,
+    connections: Vec<Mutex<PooledConnection>>,
     #[cfg(unix)]
     next: AtomicUsize,
+    #[cfg(unix)]
+    diagnostics: CatalogReadCounters,
+    #[cfg(all(test, unix))]
+    observed_slots: [AtomicUsize; CONNECTION_POOL_SIZE],
+    #[cfg(all(test, unix))]
+    test_hook: Mutex<Option<CatalogTestHook>>,
+    #[cfg(all(test, unix))]
+    test_cas_fault: std::sync::atomic::AtomicU8,
 }
 
 struct CachedSnapshot {
     revision: i64,
     document: Box<[u8]>,
     snapshot: Arc<CatalogSnapshot>,
+}
+
+struct CacheState {
+    current: Option<CachedSnapshot>,
+    generation: u64,
+    exhausted: bool,
+}
+
+impl CacheState {
+    fn new() -> Self {
+        Self {
+            current: None,
+            generation: 0,
+            exhausted: false,
+        }
+    }
+
+    // Certificates from all handles become invalid without locking those handles.
+    // Exhaustion permanently fails closed instead of allowing an epoch ABA.
+    fn invalidate(&mut self) {
+        self.current = None;
+        match self.generation.checked_add(1) {
+            Some(next) => self.generation = next,
+            None => self.exhausted = true,
+        }
+    }
+
+    fn select(
+        &mut self,
+        revision: i64,
+        document: &[u8],
+    ) -> Result<Arc<CatalogSnapshot>, CatalogError> {
+        if self.exhausted {
+            return Err(CatalogError::Invalid("catalog cache generation exhausted"));
+        }
+        if let Some(cached) = self.current.as_ref()
+            && cached.revision == revision
+            && cached.document.as_ref() == document
+        {
+            return Ok(Arc::clone(&cached.snapshot));
+        }
+        let next = self
+            .generation
+            .checked_add(1)
+            .ok_or(CatalogError::Invalid("catalog cache generation exhausted"))?;
+        let snapshot = shared_snapshot(&mut self.current, revision, document)?;
+        self.generation = next;
+        Ok(snapshot)
+    }
+}
+
+#[cfg(unix)]
+struct PooledConnection {
+    id: usize,
+    connection: Connection,
+    certificate: Option<CacheCertificate>,
+}
+
+#[cfg(unix)]
+struct CacheCertificate {
+    connection_id: usize,
+    data_version: i64,
+    generation: u64,
+    // Retention makes control-block identity exact and prevents address reuse.
+    snapshot: Arc<CatalogSnapshot>,
+}
+
+/// Per-catalog, local client observations. These are SQLite API and logical
+/// BLOB counts, not server, pager, device, or physical flash operations.
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct CatalogReadDiagnostics {
+    pub enabled: bool,
+    pub token_probe_calls: u64,
+    pub token_probe_errors: u64,
+    pub certified_cache_hits: u64,
+    pub full_blob_queries: u64,
+    pub full_blob_returned_bytes: u64,
+    pub pager_sample_calls: u64,
+    pub pager_sample_available: u64,
+    /// Fixed eight-slot Unix pool observations, enabled with local profiling.
+    #[cfg(unix)]
+    pub slot_observations: [u64; CONNECTION_POOL_SIZE],
+}
+
+#[cfg(unix)]
+struct CatalogReadCounters {
+    token_probe_calls: std::sync::atomic::AtomicU64,
+    token_probe_errors: std::sync::atomic::AtomicU64,
+    certified_cache_hits: std::sync::atomic::AtomicU64,
+    full_blob_queries: std::sync::atomic::AtomicU64,
+    full_blob_returned_bytes: std::sync::atomic::AtomicU64,
+    pager_sample_calls: std::sync::atomic::AtomicU64,
+    pager_sample_available: std::sync::atomic::AtomicU64,
+    slot_observations: [std::sync::atomic::AtomicU64; CONNECTION_POOL_SIZE],
+}
+
+#[cfg(unix)]
+impl CatalogReadCounters {
+    fn new() -> Self {
+        Self {
+            token_probe_calls: std::sync::atomic::AtomicU64::new(0),
+            token_probe_errors: std::sync::atomic::AtomicU64::new(0),
+            certified_cache_hits: std::sync::atomic::AtomicU64::new(0),
+            full_blob_queries: std::sync::atomic::AtomicU64::new(0),
+            full_blob_returned_bytes: std::sync::atomic::AtomicU64::new(0),
+            pager_sample_calls: std::sync::atomic::AtomicU64::new(0),
+            pager_sample_available: std::sync::atomic::AtomicU64::new(0),
+            slot_observations: std::array::from_fn(|_| std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+
+    fn snapshot(&self) -> CatalogReadDiagnostics {
+        use std::sync::atomic::Ordering::Relaxed;
+        CatalogReadDiagnostics {
+            enabled: profile::enabled(),
+            token_probe_calls: self.token_probe_calls.load(Relaxed),
+            token_probe_errors: self.token_probe_errors.load(Relaxed),
+            certified_cache_hits: self.certified_cache_hits.load(Relaxed),
+            full_blob_queries: self.full_blob_queries.load(Relaxed),
+            full_blob_returned_bytes: self.full_blob_returned_bytes.load(Relaxed),
+            pager_sample_calls: self.pager_sample_calls.load(Relaxed),
+            pager_sample_available: self.pager_sample_available.load(Relaxed),
+            slot_observations: std::array::from_fn(|index| {
+                self.slot_observations[index].load(Relaxed)
+            }),
+        }
+    }
 }
 
 // The caller holds the single catalog cache lock while querying its authoritative row.
@@ -296,6 +430,226 @@ fn shared_snapshot(
         snapshot: Arc::clone(&snapshot),
     });
     Ok(snapshot)
+}
+
+#[derive(Clone, Copy)]
+enum CatalogReadMode {
+    Conditional,
+    #[cfg(test)]
+    FullRow,
+}
+
+#[cfg(all(test, unix))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CatalogTestPoint {
+    ReaderAfterConnection,
+    BeforeProbe,
+    AfterProbe,
+    AfterSelect,
+    AfterPostProbe,
+    CasAfterInvalidate,
+    CasBeforeCommit,
+    CasAfterCommit,
+    CasComplete,
+}
+
+#[cfg(all(test, unix))]
+type CatalogTestHook = Arc<dyn Fn(CatalogTestPoint) + Send + Sync>;
+
+#[cfg(all(test, unix))]
+const CAS_FAIL_BEFORE_COMMIT: u8 = 1;
+#[cfg(all(test, unix))]
+const CAS_LOST_RESULT_AFTER_COMMIT: u8 = 2;
+
+#[cfg(unix)]
+fn data_version(
+    connection: &Connection,
+    counters: &CatalogReadCounters,
+) -> Result<i64, CatalogError> {
+    if profile::enabled() {
+        counters.token_probe_calls.fetch_add(1, Ordering::Relaxed);
+    }
+    let token = connection.query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0));
+    match token {
+        Ok(value) if value >= 0 => Ok(value),
+        Ok(_) => {
+            if profile::enabled() {
+                counters.token_probe_errors.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(CatalogError::Invalid("catalog data_version invalid"))
+        }
+        Err(error) => {
+            if profile::enabled() {
+                counters.token_probe_errors.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(error.into())
+        }
+    }
+}
+
+#[cfg(unix)]
+fn select_full_row(
+    connection: &Connection,
+    cache: &mut CacheState,
+    counters: &CatalogReadCounters,
+) -> Result<Arc<CatalogSnapshot>, CatalogError> {
+    let mut query_profile = Span::new(Event::CatalogQuery);
+    if profile::enabled() {
+        counters.full_blob_queries.fetch_add(1, Ordering::Relaxed);
+    }
+    let mut statement = connection.prepare_cached(
+        "SELECT revision, length(document), document FROM service_catalog WHERE singleton = 1",
+    )?;
+    let row = statement
+        .query_row([], |row| {
+            let length: i64 = row.get(1)?;
+            if length < 0 || length > MAX_DOCUMENT_BYTES as i64 {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            let document = match row.get_ref(2)? {
+                rusqlite::types::ValueRef::Blob(document) => document,
+                _ => return Err(rusqlite::Error::InvalidQuery),
+            };
+            if document.len() != length as usize {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            query_profile.set_units(document.len() as u64);
+            if profile::enabled() {
+                counters
+                    .full_blob_returned_bytes
+                    .fetch_add(document.len() as u64, Ordering::Relaxed);
+            }
+            Ok(cache.select(row.get(0)?, document))
+        })
+        .optional()?;
+    // Release/reset the row statement before a later token probe. A live
+    // statement or read transaction must not pin the older SQLite snapshot.
+    drop(statement);
+    row.ok_or(CatalogError::Invalid("catalog row missing"))?
+}
+
+#[cfg(unix)]
+fn sample_pager(connection: &Connection, counters: &CatalogReadCounters) {
+    #[cfg(feature = "io-profiling")]
+    if profile::enabled() {
+        counters.pager_sample_calls.fetch_add(1, Ordering::Relaxed);
+        let sample = mount_rs_sqlite::connection_page_diagnostics(connection, true);
+        match sample.ok().and_then(|pages| {
+            Some((
+                pages["pager"]["cache_hits"].as_u64()?,
+                pages["pager"]["cache_misses"].as_u64()?,
+                pages["pager"]["page_writes"].as_u64()?,
+            ))
+        }) {
+            Some((hits, misses, writes)) => {
+                profile::add(Event::CatalogPagerHits, hits);
+                profile::add(Event::CatalogPagerMisses, misses);
+                profile::add(Event::CatalogPagerWrites, writes);
+                counters
+                    .pager_sample_available
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            None => profile::add(Event::CatalogPagerUnavailable, 1),
+        }
+    }
+    #[cfg(not(feature = "io-profiling"))]
+    let _ = (connection, counters);
+}
+
+#[cfg(unix)]
+fn load_shared_blocking(
+    shared: &CatalogConnections,
+    mode: CatalogReadMode,
+) -> Result<Arc<CatalogSnapshot>, CatalogError> {
+    let mut pooled = match shared.connection() {
+        Ok(connection) => connection,
+        Err(error) => {
+            shared.invalidate_after_connection_error();
+            return Err(error);
+        }
+    };
+    #[cfg(test)]
+    shared.fire_test_hook(CatalogTestPoint::ReaderAfterConnection);
+    // Always connection -> shared cache. CAS uses the same order and keeps the
+    // cache lock through commit/rollback, including cancelled async waiters.
+    let mut cache = shared
+        .current
+        .lock()
+        .map_err(|_| CatalogError::Invalid("catalog snapshot unavailable"))?;
+    let result = (|| {
+        if cache.exhausted {
+            return Err(CatalogError::Invalid("catalog cache generation exhausted"));
+        }
+        shared.verify_backing()?;
+        if !pooled.connection.is_autocommit() {
+            return Err(CatalogError::Invalid(
+                "catalog connection has active transaction",
+            ));
+        }
+        #[cfg(test)]
+        shared.fire_test_hook(CatalogTestPoint::BeforeProbe);
+        #[cfg(test)]
+        if matches!(mode, CatalogReadMode::FullRow) {
+            let snapshot = select_full_row(&pooled.connection, &mut cache, &shared.diagnostics)?;
+            pooled.certificate = None;
+            sample_pager(&pooled.connection, &shared.diagnostics);
+            shared.verify_backing()?;
+            return Ok(snapshot);
+        }
+        let before = data_version(&pooled.connection, &shared.diagnostics)?;
+        #[cfg(test)]
+        shared.fire_test_hook(CatalogTestPoint::AfterProbe);
+        if matches!(mode, CatalogReadMode::Conditional)
+            && let (Some(cached), Some(certificate)) =
+                (cache.current.as_ref(), pooled.certificate.as_ref())
+            && certificate.connection_id == pooled.id
+            && certificate.data_version == before
+            && certificate.generation == cache.generation
+            && Arc::ptr_eq(&certificate.snapshot, &cached.snapshot)
+        {
+            let snapshot = Arc::clone(&cached.snapshot);
+            sample_pager(&pooled.connection, &shared.diagnostics);
+            shared.verify_backing()?;
+            if profile::enabled() {
+                shared
+                    .diagnostics
+                    .certified_cache_hits
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            return Ok(snapshot);
+        }
+        let snapshot = select_full_row(&pooled.connection, &mut cache, &shared.diagnostics)?;
+        #[cfg(test)]
+        shared.fire_test_hook(CatalogTestPoint::AfterSelect);
+        if !pooled.connection.is_autocommit() {
+            return Err(CatalogError::Invalid(
+                "catalog read snapshot remained active",
+            ));
+        }
+        let after = data_version(&pooled.connection, &shared.diagnostics)?;
+        if before == after && matches!(mode, CatalogReadMode::Conditional) {
+            pooled.certificate = Some(CacheCertificate {
+                connection_id: pooled.id,
+                data_version: after,
+                generation: cache.generation,
+                snapshot: Arc::clone(&snapshot),
+            });
+        } else {
+            // The SELECT was authoritative at its observation point, but a
+            // concurrent commit prevents reusable certification of this row.
+            pooled.certificate = None;
+        }
+        #[cfg(test)]
+        shared.fire_test_hook(CatalogTestPoint::AfterPostProbe);
+        sample_pager(&pooled.connection, &shared.diagnostics);
+        shared.verify_backing()?;
+        Ok(snapshot)
+    })();
+    if result.is_err() {
+        pooled.certificate = None;
+        cache.invalidate();
+    }
+    result
 }
 
 #[cfg(unix)]
@@ -326,6 +680,14 @@ impl Drop for CatalogConnections {
 
 #[cfg(unix)]
 impl CatalogConnections {
+    #[cfg(test)]
+    fn fire_test_hook(&self, point: CatalogTestPoint) {
+        let hook = self.test_hook.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook(point);
+        }
+    }
+
     fn verify_backing(&self) -> Result<(), CatalogError> {
         let _profile = Span::new(Event::CatalogBackingVerify);
         if file_identity(&self.path)? != self.identity {
@@ -334,19 +696,93 @@ impl CatalogConnections {
         Ok(())
     }
 
-    fn connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>, CatalogError> {
+    fn connection(&self) -> Result<std::sync::MutexGuard<'_, PooledConnection>, CatalogError> {
         let index = self.next.fetch_add(1, Ordering::Relaxed) % self.connections.len();
         let wait_profile = Span::new(Event::CatalogPoolWait);
         let connection = self.connections[index]
             .lock()
             .map_err(|_| CatalogError::Invalid("catalog connection unavailable"))?;
         drop(wait_profile);
-        self.verify_backing()?;
+        if profile::enabled() {
+            self.diagnostics.slot_observations[index].fetch_add(1, Ordering::Relaxed);
+        }
+        #[cfg(test)]
+        self.observed_slots[index].fetch_add(1, Ordering::Relaxed);
         Ok(connection)
+    }
+
+    fn invalidate_after_connection_error(&self) {
+        // No connection lock is held on this error path. A poisoned cache lock
+        // makes every later read fail closed independently.
+        if let Ok(mut cache) = self.current.lock() {
+            cache.invalidate();
+        }
     }
 }
 
 impl SqliteCatalog {
+    async fn load_shared_mode(
+        &self,
+        mode: CatalogReadMode,
+    ) -> Result<Arc<CatalogSnapshot>, CatalogError> {
+        let _load_profile = Span::new(Event::CatalogLoad);
+        let queue_profile = Span::new(Event::CatalogQueue);
+        let shared = Arc::clone(&self.shared);
+        tokio::task::spawn_blocking(move || {
+            drop(queue_profile);
+            #[cfg(unix)]
+            {
+                load_shared_blocking(&shared, mode)
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = mode;
+                let connection = connect(&shared.path)?;
+                let mut cache = shared
+                    .current
+                    .lock()
+                    .map_err(|_| CatalogError::Invalid("catalog snapshot unavailable"))?;
+                let result = (|| {
+                    let mut query_profile = Span::new(Event::CatalogQuery);
+                    let mut statement = connection.prepare_cached(
+                        "SELECT revision, length(document), document FROM service_catalog WHERE singleton = 1",
+                    )?;
+                    let row = statement.query_row([], |row| {
+                        let length: i64 = row.get(1)?;
+                        if length < 0 || length > MAX_DOCUMENT_BYTES as i64 {
+                            return Err(rusqlite::Error::InvalidQuery);
+                        }
+                        let document = match row.get_ref(2)? {
+                            rusqlite::types::ValueRef::Blob(document) => document,
+                            _ => return Err(rusqlite::Error::InvalidQuery),
+                        };
+                        if document.len() != length as usize {
+                            return Err(rusqlite::Error::InvalidQuery);
+                        }
+                        query_profile.set_units(document.len() as u64);
+                        cache.select(row.get(0)?, document)
+                    }).optional()?;
+                    let snapshot = row.ok_or(CatalogError::Invalid("catalog row missing"))??;
+                    drop(statement);
+                    Ok(snapshot)
+                })();
+                if result.is_err() {
+                    cache.invalidate();
+                }
+                drop(cache);
+                let _close_profile = Span::new(Event::CatalogClose);
+                drop(connection);
+                result
+            }
+        })
+        .await?
+    }
+
+    #[cfg(all(test, unix))]
+    async fn load_shared_full_control(&self) -> Result<Arc<CatalogSnapshot>, CatalogError> {
+        self.load_shared_mode(CatalogReadMode::FullRow).await
+    }
+
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, CatalogError> {
         let path = path.as_ref().to_path_buf();
         validate_catalog_path(&path)?;
@@ -374,8 +810,12 @@ impl SqliteCatalog {
                 return Err(CatalogError::Invalid("catalog backing file changed"));
             }
             let mut connections = Vec::with_capacity(CONNECTION_POOL_SIZE);
-            connections.push(Mutex::new(connection));
-            for _ in 1..CONNECTION_POOL_SIZE {
+            connections.push(Mutex::new(PooledConnection {
+                id: 0,
+                connection,
+                certificate: None,
+            }));
+            for id in 1..CONNECTION_POOL_SIZE {
                 if file_identity(&setup_path)? != identity {
                     return Err(CatalogError::Invalid("catalog backing file changed"));
                 }
@@ -383,20 +823,31 @@ impl SqliteCatalog {
                 if file_identity(&setup_path)? != identity {
                     return Err(CatalogError::Invalid("catalog backing file changed"));
                 }
-                connections.push(Mutex::new(connection));
+                connections.push(Mutex::new(PooledConnection {
+                    id,
+                    connection,
+                    certificate: None,
+                }));
             }
             Ok(CatalogConnections {
                 path: setup_path,
-                current: Mutex::new(None),
+                current: Mutex::new(CacheState::new()),
                 identity,
                 connections,
                 next: AtomicUsize::new(0),
+                diagnostics: CatalogReadCounters::new(),
+                #[cfg(test)]
+                observed_slots: std::array::from_fn(|_| AtomicUsize::new(0)),
+                #[cfg(test)]
+                test_hook: Mutex::new(None),
+                #[cfg(test)]
+                test_cas_fault: std::sync::atomic::AtomicU8::new(0),
             })
             }
             #[cfg(not(unix))]
             {
                 drop(connection);
-                Ok(CatalogConnections { path: setup_path, current: Mutex::new(None) })
+                Ok(CatalogConnections { path: setup_path, current: Mutex::new(CacheState::new()) })
             }
         })
         .await??;
@@ -420,7 +871,23 @@ impl SqliteCatalog {
     ) -> Result<u64, CatalogError> {
         <Self as CatalogStore>::compare_and_swap(self, expected_revision, next).await
     }
+
+    #[must_use]
+    pub fn read_diagnostics(&self) -> CatalogReadDiagnostics {
+        #[cfg(unix)]
+        {
+            self.shared.diagnostics.snapshot()
+        }
+        #[cfg(not(unix))]
+        {
+            CatalogReadDiagnostics::default()
+        }
+    }
 }
+
+#[cfg(all(test, unix))]
+#[path = "catalog/conditional_read_tests.rs"]
+mod conditional_read_tests;
 
 #[async_trait]
 impl CatalogStore for SqliteCatalog {
@@ -431,70 +898,7 @@ impl CatalogStore for SqliteCatalog {
     }
 
     async fn load_shared_current(&self) -> Result<Arc<CatalogSnapshot>, CatalogError> {
-        let _load_profile = Span::new(Event::CatalogLoad);
-        let queue_profile = Span::new(Event::CatalogQueue);
-        let shared = Arc::clone(&self.shared);
-        tokio::task::spawn_blocking(move || {
-            drop(queue_profile);
-            #[cfg(unix)]
-            let connection = shared.connection()?;
-            #[cfg(not(unix))]
-            let connection = connect(&shared.path)?;
-            // Serialize selection with the query so an older concurrent read cannot
-            // overwrite a newer cached document. The row itself is read every time.
-            let mut current = shared.current.lock()
-                .map_err(|_| CatalogError::Invalid("catalog snapshot unavailable"))?;
-            let mut query_profile = Span::new(Event::CatalogQuery);
-            let mut statement = connection.prepare_cached(
-                "SELECT revision, length(document), document FROM service_catalog WHERE singleton = 1",
-            )?;
-            let row = statement.query_row([], |row| {
-                let length: i64 = row.get(1)?;
-                if length < 0 || length > MAX_DOCUMENT_BYTES as i64 {
-                    return Err(rusqlite::Error::InvalidQuery);
-                }
-                let document = match row.get_ref(2)? {
-                    rusqlite::types::ValueRef::Blob(document) => document,
-                    _ => return Err(rusqlite::Error::InvalidQuery),
-                };
-                if document.len() != length as usize {
-                    return Err(rusqlite::Error::InvalidQuery);
-                }
-                query_profile.set_units(document.len() as u64);
-                Ok(shared_snapshot(&mut current, row.get(0)?, document))
-            }).optional()?;
-            let result = row.ok_or(CatalogError::Invalid("catalog row missing"))?;
-            drop(statement);
-            drop(current);
-            drop(query_profile);
-            #[cfg(feature = "io-profiling")]
-            if profile::enabled() {
-                let sample = mount_rs_sqlite::connection_page_diagnostics(&connection, true);
-                match sample.ok().and_then(|pages| {
-                    Some((
-                        pages["pager"]["cache_hits"].as_u64()?,
-                        pages["pager"]["cache_misses"].as_u64()?,
-                        pages["pager"]["page_writes"].as_u64()?,
-                    ))
-                }) {
-                    Some((hits, misses, writes)) => {
-                        profile::add(Event::CatalogPagerHits, hits);
-                        profile::add(Event::CatalogPagerMisses, misses);
-                        profile::add(Event::CatalogPagerWrites, writes);
-                    }
-                    None => profile::add(Event::CatalogPagerUnavailable, 1),
-                }
-            }
-            #[cfg(unix)]
-            shared.verify_backing()?;
-            #[cfg(not(unix))]
-            {
-                let _close_profile = Span::new(Event::CatalogClose);
-                drop(connection);
-            }
-            result
-        })
-        .await?
+        self.load_shared_mode(CatalogReadMode::Conditional).await
     }
 
     async fn compare_and_swap(
@@ -515,45 +919,106 @@ impl CatalogStore for SqliteCatalog {
         let shared = Arc::clone(&self.shared);
         tokio::task::spawn_blocking(move || {
             #[cfg(unix)]
-            let mut connection = shared.connection()?;
+            let mut connection = match shared.connection() {
+                Ok(connection) => connection,
+                Err(error) => {
+                    shared.invalidate_after_connection_error();
+                    return Err(error);
+                }
+            };
             #[cfg(not(unix))]
             let mut connection = connect(&shared.path)?;
-            let transaction =
-                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let previous: i64 = transaction.query_row(
-                "SELECT revision FROM service_catalog WHERE singleton = 1",
-                [],
-                |row| row.get(0),
-            )?;
-            if u64::try_from(previous).ok() != Some(expected_revision) {
-                return Err(CatalogError::Conflict);
-            }
-            let prior_document: Vec<u8> = transaction.query_row(
-                "SELECT document FROM service_catalog WHERE singleton=1",
-                [],
-                |row| row.get(0),
-            )?;
-            let prior = decode_snapshot(previous, &prior_document)?;
-            for (id, partition) in &prior.partitions {
-                if !next.partitions.contains_key(id)
-                    && (!partition.drives.is_empty()
-                        || prior.grants.values().any(|g| g.partition_id == *id))
-                {
-                    return Err(CatalogError::Invalid(
-                        "Partition must be empty before deletion",
-                    ));
+            let mut cache = shared
+                .current
+                .lock()
+                .map_err(|_| CatalogError::Invalid("catalog snapshot unavailable"))?;
+            // The blocking closure owns both locks through commit/rollback and
+            // backing verification. Cancelling the async waiter cannot publish
+            // a stale certificate during an in-progress own mutation.
+            cache.invalidate();
+            #[cfg(unix)]
+            {
+                connection.certificate = None;
+                if cache.exhausted {
+                    return Err(CatalogError::Invalid("catalog cache generation exhausted"));
                 }
             }
-            let revision_sql =
-                i64::try_from(revision).map_err(|_| CatalogError::Invalid("revision overflow"))?;
-            transaction.execute(
-                "UPDATE service_catalog SET revision = ?1, document = ?2 WHERE singleton = 1",
-                params![revision_sql, document],
-            )?;
-            transaction.commit()?;
-            #[cfg(unix)]
-            shared.verify_backing()?;
-            Ok(revision)
+            #[cfg(all(test, unix))]
+            shared.fire_test_hook(CatalogTestPoint::CasAfterInvalidate);
+            let result = (|| {
+                #[cfg(unix)]
+                {
+                    shared.verify_backing()?;
+                    if !connection.connection.is_autocommit() {
+                        return Err(CatalogError::Invalid(
+                            "catalog connection has active transaction",
+                        ));
+                    }
+                }
+                #[cfg(unix)]
+                let transaction = connection
+                    .connection
+                    .transaction_with_behavior(TransactionBehavior::Immediate)?;
+                #[cfg(not(unix))]
+                let transaction =
+                    connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let previous: i64 = transaction.query_row(
+                    "SELECT revision FROM service_catalog WHERE singleton = 1",
+                    [],
+                    |row| row.get(0),
+                )?;
+                if u64::try_from(previous).ok() != Some(expected_revision) {
+                    return Err(CatalogError::Conflict);
+                }
+                let prior_document: Vec<u8> = transaction.query_row(
+                    "SELECT document FROM service_catalog WHERE singleton=1",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let prior = decode_snapshot(previous, &prior_document)?;
+                for (id, partition) in &prior.partitions {
+                    if !next.partitions.contains_key(id)
+                        && (!partition.drives.is_empty()
+                            || prior.grants.values().any(|g| g.partition_id == *id))
+                    {
+                        return Err(CatalogError::Invalid(
+                            "Partition must be empty before deletion",
+                        ));
+                    }
+                }
+                let revision_sql = i64::try_from(revision)
+                    .map_err(|_| CatalogError::Invalid("revision overflow"))?;
+                transaction.execute(
+                    "UPDATE service_catalog SET revision = ?1, document = ?2 WHERE singleton = 1",
+                    params![revision_sql, document],
+                )?;
+                #[cfg(all(test, unix))]
+                {
+                    shared.fire_test_hook(CatalogTestPoint::CasBeforeCommit);
+                    if shared.test_cas_fault.load(Ordering::Relaxed) == CAS_FAIL_BEFORE_COMMIT {
+                        shared.test_cas_fault.store(0, Ordering::Relaxed);
+                        return Err(CatalogError::Invalid("injected precommit failure"));
+                    }
+                }
+                transaction.commit()?;
+                #[cfg(all(test, unix))]
+                {
+                    shared.fire_test_hook(CatalogTestPoint::CasAfterCommit);
+                    if shared.test_cas_fault.load(Ordering::Relaxed) == CAS_LOST_RESULT_AFTER_COMMIT
+                    {
+                        shared.test_cas_fault.store(0, Ordering::Relaxed);
+                        return Err(CatalogError::Invalid("injected lost commit result"));
+                    }
+                }
+                #[cfg(unix)]
+                shared.verify_backing()?;
+                Ok(revision)
+            })();
+            #[cfg(all(test, unix))]
+            shared.fire_test_hook(CatalogTestPoint::CasComplete);
+            // `cache` remains held until the transaction has committed, failed,
+            // or rolled back via Drop, and final backing validation is done.
+            result
         })
         .await?
     }
