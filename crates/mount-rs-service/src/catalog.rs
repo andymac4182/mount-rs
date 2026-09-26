@@ -436,7 +436,7 @@ fn shared_snapshot(
 #[derive(Clone, Copy)]
 enum CatalogReadMode {
     Conditional,
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     FullRow,
 }
 
