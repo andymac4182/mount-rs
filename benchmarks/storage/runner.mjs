@@ -26,6 +26,7 @@ import {
 import { computeStats, round, roundStats } from "./stats.mjs"
 import { finishPhase, logPhaseSummary, takePhaseSnapshot } from "./diagnostics.mjs"
 import { createRunnerObserverSession } from "./backing-observer.mjs"
+import { observePilotBinding } from "./owned-backing-pilot.mjs"
 
 export const REFERENCE_REVISION = "92fbbc9ba7739111899121195236acb4fc6a8bb5"
 export const FILE_SIZE_MIB = Object.freeze([1, 4, 10, 16])
@@ -918,6 +919,28 @@ async function runProvider(definition, options, context) {
         timeoutMs: context.observerHookTimeoutMs,
       })
     : null
+  const selectedResourceWindow = context.backingObserverWindow === "workload"
+  const workloadName = `workload-${options.payloadBytes ?? options.sizes[0] * 1024 * 1024}bytes`
+  if (selectedResourceWindow) providerRun.backingResourceCoverage = {
+    create: "not_selected", [workloadName]: "not_started", cleanup: "not_selected", shutdown: "not_selected",
+  }
+  const selectedHookIssues = new Set()
+  const resourceBegin = async (name) => {
+    if (!observer || selectedResourceWindow && name !== workloadName) return
+    await observer.begin(name)
+    if (selectedResourceWindow) {
+      providerRun.backingResourceCoverage[name] = "incomplete"
+      if (observer.receipt().events.at(-1)?.status !== "ok") selectedHookIssues.add(name)
+    }
+  }
+  const resourceEnd = async (name, ...metadata) => {
+    if (!observer || selectedResourceWindow && name !== workloadName) return
+    await observer.end(name, ...metadata)
+    if (selectedResourceWindow) {
+      if (observer.receipt().events.at(-1)?.status !== "ok") selectedHookIssues.add(name)
+      providerRun.backingResourceCoverage[name] = selectedHookIssues.has(name) ? "incomplete" : "captured"
+    }
+  }
   let observerNativeQuiescent = null
   let observerCleanupComplete = false
   let observerOwnedOperationsSettled = false
@@ -979,7 +1002,7 @@ async function runProvider(definition, options, context) {
     }
 
     let opened
-    if (observer) await observer.begin("create")
+    if (observer) await resourceBegin("create")
     const setupStarted = performance.now()
     const setupSnapshot = phaseSnapshot?.()
     try {
@@ -988,9 +1011,10 @@ async function runProvider(definition, options, context) {
         options.timeoutMs,
         "provider setup",
       )
+      if (context.backingPilotIdentity) providerRun.backingPilotIdentity = await observePilotBinding(context.backingPilotIdentity)
       providerRun.setupMs = performance.now() - setupStarted
       const createPhase = recordPhase("create", setupSnapshot)
-      if (observer) await observer.end("create", !context.diagnosticPriorPending, null, 0, nativeEvidenceState(createPhase))
+      if (observer) await resourceEnd("create", !context.diagnosticPriorPending, null, 0, nativeEvidenceState(createPhase))
       if (options.layout === "compact") {
         providerRun.layoutSelection = {
           requested: "compact",
@@ -1002,7 +1026,7 @@ async function runProvider(definition, options, context) {
     } catch (error) {
       providerRun.setupMs = performance.now() - setupStarted
       const createPhase = recordPhase("create", setupSnapshot, false)
-      if (observer) await observer.end("create", false, null, 0, nativeEvidenceState(createPhase), isTimeout(error))
+      if (observer) await resourceEnd("create", false, null, 0, nativeEvidenceState(createPhase), isTimeout(error))
       providerRun.status = "failed"
       providerRun.setupError = errorRecord(error)
       providerRun.sizes = options.sizes.map((size) => failedSizeResult(definition, size, options, "setup", error))
@@ -1022,7 +1046,7 @@ async function runProvider(definition, options, context) {
             options.payloadBytes ?? sizeMiBValue * 1024 * 1024,
             options.payloadSeed,
           )
-          if (observer) await observer.begin(`workload-${payloadBytes}bytes`)
+          if (observer) await resourceBegin(`workload-${payloadBytes}bytes`)
           workloadSnapshot = phaseSnapshot?.()
           const result = await runSize(
             definition,
@@ -1038,19 +1062,19 @@ async function runProvider(definition, options, context) {
           const workloadPhase = recordPhase(`workload-${payloadBytes}bytes`, workloadSnapshot, pendingOperations.size === 0, result.summary?.elapsedMs)
           if (observer) {
             observerOperationDeadlineFailed ||= result.summary?.timeoutCount > 0
-            await observer.end(`workload-${payloadBytes}bytes`, pendingOperations.size === 0 && !context.diagnosticPriorPending, result.summary?.elapsedMs, pendingOperations.size, noteWorkloadEvidence(workloadPhase), result.summary?.timeoutCount > 0)
+            await resourceEnd(`workload-${payloadBytes}bytes`, pendingOperations.size === 0 && !context.diagnosticPriorPending, result.summary?.elapsedMs, pendingOperations.size, noteWorkloadEvidence(workloadPhase), result.summary?.timeoutCount > 0)
           }
         } catch (error) {
           sizeResults.push(failedSizeResult(definition, sizeMiBValue, options, "benchmark", error))
           const workloadPhase = recordPhase(`workload-${payloadBytes}bytes`, workloadSnapshot, pendingOperations.size === 0)
           if (observer) {
             observerOperationDeadlineFailed ||= isTimeout(error)
-            await observer.end(`workload-${payloadBytes}bytes`, pendingOperations.size === 0 && !context.diagnosticPriorPending, null, pendingOperations.size, noteWorkloadEvidence(workloadPhase), isTimeout(error))
+            await resourceEnd(`workload-${payloadBytes}bytes`, pendingOperations.size === 0 && !context.diagnosticPriorPending, null, pendingOperations.size, noteWorkloadEvidence(workloadPhase), isTimeout(error))
           }
         }
       }
     } finally {
-      if (observer) await observer.begin("cleanup")
+      if (observer) await resourceBegin("cleanup")
       const cleanupSnapshot = phaseSnapshot?.()
       const pathCleanup = await cleanupOwnedPaths(
         opened.filesystem,
@@ -1065,10 +1089,10 @@ async function runProvider(definition, options, context) {
       const cleanupPhase = recordPhase("cleanup", cleanupSnapshot, pendingOperations.size === 0 && pathCleanup.failures.length === 0)
       if (observer) {
         observerTerminalNativeNonquiescent ||= nativeEvidenceState(cleanupPhase) === "nonquiescent"
-        await observer.end("cleanup", pendingOperations.size === 0 && pathCleanup.failures.length === 0 && !context.diagnosticPriorPending, null, pendingOperations.size, nativeEvidenceState(cleanupPhase))
+        await resourceEnd("cleanup", pendingOperations.size === 0 && pathCleanup.failures.length === 0 && !context.diagnosticPriorPending, null, pendingOperations.size, nativeEvidenceState(cleanupPhase))
       }
 
-      if (observer) await observer.begin("shutdown")
+      if (observer) await resourceBegin("shutdown")
       const resourceCleanupStarted = performance.now()
       const shutdownSnapshot = phaseSnapshot?.()
       if (pendingOperations.size > 0) {
@@ -1112,7 +1136,7 @@ async function runProvider(definition, options, context) {
       const shutdownPhase = recordPhase("shutdown", shutdownSnapshot, pendingOperations.size === 0 && providerRun.cleanup.resource.status === "ok")
       if (observer) {
         observerTerminalNativeNonquiescent ||= nativeEvidenceState(shutdownPhase) === "nonquiescent"
-        await observer.end("shutdown", pendingOperations.size === 0 && providerRun.cleanup.resource.status === "ok" && !context.diagnosticPriorPending, null, pendingOperations.size, nativeEvidenceState(shutdownPhase))
+        await resourceEnd("shutdown", pendingOperations.size === 0 && providerRun.cleanup.resource.status === "ok" && !context.diagnosticPriorPending, null, pendingOperations.size, nativeEvidenceState(shutdownPhase))
       }
     }
 
@@ -1249,6 +1273,10 @@ export async function runBenchmark(options, environment = process.env, providerD
     throw usageError(`unknown provider(s): ${unknown.join(", ")}`)
   }
 
+  if (runtime.backingObserverWindow !== undefined && (runtime.backingObserverWindow !== "workload" ||
+      !runtime.backingObserver || selectedIds.length !== 1 || options.sizes.length !== 1)) {
+    throw usageError("selected backing resource window requires one observer, provider and size")
+  }
   const runId = makeRunId()
   if (
     ["inode", "compact"].includes(options.layout) &&
@@ -1266,6 +1294,8 @@ export async function runBenchmark(options, environment = process.env, providerD
       backingObserver: runtime.backingObserver,
       observerClock: runtime.observerClock,
       observerHookTimeoutMs: runtime.observerHookTimeoutMs,
+      backingObserverWindow: runtime.backingObserverWindow,
+      backingPilotIdentity: runtime.backingPilotIdentity,
     } : {}),
   }
   const providerRuns = []
