@@ -5,7 +5,7 @@ const MAX_REQUESTS = 257
 const MAX_RESPONSE_BYTES = 1_048_576
 const CID = /^[a-f0-9]{64}$/
 const INSPECT = /^\/v1\.(4[1-9]|5[01])\/containers\/([a-f0-9]{64})\/json$/
-const STATS = /^\/v1\.(4[1-9]|5[01])\/containers\/([a-f0-9]{64})\/stats\?stream=false$/
+const STATS = /^\/v1\.(4[1-9]|5[01])\/containers\/([a-f0-9]{64})\/stats\?stream=true$/
 
 class EngineTransportError extends Error {
   constructor(code) {
@@ -15,6 +15,9 @@ class EngineTransportError extends Error {
 }
 
 const failure = (code) => new EngineTransportError(code)
+
+/** Closed typed classification; arbitrary response/error text is never forwarded. */
+export const isBackingEngineResponseLimit = (error) => error instanceof EngineTransportError && error.code === "engine_response_bytes_cap"
 
 function validateRoute(input, cids) {
   if (input === null || typeof input !== "object") throw failure("engine_request_contract")
@@ -63,11 +66,13 @@ export function createBackingEngineTransport(input) {
     active.add(key)
     dispatched++
     const { path, signal, maxResponseBytes } = input
+    const streamedStats = STATS.test(path)
     let outgoing
     let incoming
     let headersSettled = false
     let finished = false
     let bodyError = null
+    let retirement, incomingClosed = false, outgoingClosed = false
     let rejectHeaders
     let onOutgoingError, onOutgoingClose, onIncomingError, onIncomingClose
 
@@ -92,21 +97,37 @@ export function createBackingEngineTransport(input) {
       if (!stream.destroyed) stream.destroy()
     }
 
+    function waitForClose(target, alreadyClosed = false) {
+      if (!target || alreadyClosed || target.closed === true) return Promise.resolve()
+      return new Promise((resolve) => {
+        const ignoreError = () => {}
+        const close = () => { target.off("error", ignoreError); resolve() }
+        target.on("error", ignoreError)
+        target.once("close", close)
+      })
+    }
     function finish() {
-      if (finished) return
+      if (finished) return retirement
       finished = true
-      active.delete(key)
       signal.removeEventListener("abort", abort)
+      const socket = streamedStats ? outgoing?.socket : undefined
+      if (streamedStats) {
+        // Keep the CID pinned until actual owned close events, not destroy() calls.
+        retirement = Promise.all([waitForClose(incoming, incomingClosed), waitForClose(outgoing, outgoingClosed), waitForClose(socket)]).then(() => { active.delete(key) })
+      } else active.delete(key)
       if (incoming && !incoming.destroyed) incoming.destroy()
       if (outgoing && !outgoing.destroyed) outgoing.destroy()
+      if (socket && !socket.destroyed) socket.destroy()
+      return retirement
     }
     function fail(code) {
       const error = failure(code)
       bodyError ??= error
       if (!headersSettled) {
         headersSettled = true
-        finish()
-        rejectHeaders(error)
+        const pendingRetirement = finish()
+        if (pendingRetirement) pendingRetirement.then(() => rejectHeaders(error))
+        else rejectHeaders(error)
       } else {
         finish()
       }
@@ -125,8 +146,9 @@ export function createBackingEngineTransport(input) {
             discardLate(stream)
             return
           }
-          onIncomingError = () => fail(signal.aborted ? "engine_aborted" : "engine_transport_io")
+          onIncomingError = () => { if (!finished) fail(signal.aborted ? "engine_aborted" : "engine_transport_io") }
           onIncomingClose = () => {
+            incomingClosed = true
             if (!finished && stream.complete !== true && !stream.readableEnded) fail(signal.aborted ? "engine_aborted" : "engine_transport_io")
             detachIncoming()
           }
@@ -138,8 +160,9 @@ export function createBackingEngineTransport(input) {
           headersSettled = true
           resolve({ status: 200, body: body() })
         })
-        onOutgoingError = () => fail(signal.aborted ? "engine_aborted" : "engine_transport_io")
+        onOutgoingError = () => { if (!finished) fail(signal.aborted ? "engine_aborted" : "engine_transport_io") }
         onOutgoingClose = () => {
+          outgoingClosed = true
           if (!headersSettled) fail(signal.aborted ? "engine_aborted" : "engine_transport_io")
           detachOutgoing()
         }
@@ -169,7 +192,7 @@ export function createBackingEngineTransport(input) {
       } catch (error) {
         throw error instanceof EngineTransportError ? error : failure(signal.aborted ? "engine_aborted" : "engine_transport_io")
       } finally {
-        finish()
+        await finish()
       }
     }
     return response

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto"
+import { isBackingEngineResponseLimit } from "./backing-engine-transport.mjs"
 
 const UINT64_MAX = 18_446_744_073_709_551_615n
 const LABEL_KEYS = new Set(["mount-rs.tidb.run", "mount-rs.foundationdb.run", "com.mount-rs.ozone-test", "com.mount-rs.ozone-test-run", "com.mount-rs.rustfs-test", "com.mount-rs.rustfs-test-run"])
@@ -13,7 +14,7 @@ class ObserverFault extends Error {
   constructor(code, identityIssue) { super(code); this.code = code; this.identityIssue = identityIssue }
 }
 const fault = (code, identityIssue) => { throw new ObserverFault(code, identityIssue) }
-const issueCode = (error) => error instanceof ObserverFault ? error.code : "observer_transport_failure"
+const issueCode = (error) => error instanceof ObserverFault ? error.code : isBackingEngineResponseLimit(error) ? "response_bytes_cap" : "observer_transport_failure"
 const issueCodes = (error) => error instanceof ObserverFault && error.code === "stats_identity" && ["stats_identity_missing", "stats_identity_type", "stats_identity_mismatch"].includes(error.identityIssue)
   ? [error.code, error.identityIssue] : [issueCode(error)]
 const defaultClock = () => ({ now: () => performance.now(), utc: () => new Date().toISOString(), cpu: () => process.cpuUsage(), setTimeout, clearTimeout })
@@ -55,6 +56,34 @@ export function parseEngineJSON(text) {
   } catch (error) {
     if (error instanceof ObserverFault) throw error
     fault("response_json")
+  }
+}
+
+// Incremental byte framing preserves numeric tokens and split UTF-8 exactly.
+// Storage/work are bounded by the caller's received-byte cap.
+function firstJSONObject() {
+  const nesting = []
+  let started = false, string = false, escaped = false
+  return (chunk) => {
+    for (let offset = 0; offset < chunk.byteLength; offset++) {
+      const byte = chunk[offset]
+      if (!started) {
+        if (byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d) continue
+        if (byte !== 0x7b) fault("stats_frame_object")
+        started = true; nesting.push(0x7d); continue
+      }
+      if (string) {
+        if (escaped) escaped = false
+        else if (byte === 0x5c) escaped = true
+        else if (byte === 0x22) string = false
+      } else if (byte === 0x22) string = true
+      else if (byte === 0x7b || byte === 0x5b) nesting.push(byte === 0x7b ? 0x7d : 0x5d)
+      else if (byte === 0x7d || byte === 0x5d) {
+        if (nesting.pop() !== byte) fault("stats_frame_syntax")
+        if (nesting.length === 0) return offset + 1
+      }
+    }
+    return null
   }
 }
 
@@ -268,7 +297,7 @@ export function createBackingObserver({ allowlist, transport, clock = defaultClo
   const started = clock.now(), ownerDeadline = started + limits.ownerTimeoutMs
   const identities = new Map(), active = new Map(), lastStats = new Map(), phases = new Map(), captures = new Set()
   const issues = new Set(), journal = []
-  const cost = { requests: 0, response_bytes: 0, wall_ms: 0, cpu_user_us: 0, cpu_system_us: 0, peak_in_flight: 0 }
+  const cost = { requests: 0, response_bytes: 0, wall_ms: 0, cpu_user_us: 0, cpu_system_us: 0, peak_in_flight: 0, headers_received: 0, first_frames_received: 0, streamed_iterators_retired: 0, consumed_trailing_bytes: 0 }
   let version, negotiation, finalizing, closed = false, stopped = false, boundaries = 0, droppedEntries = 0, journalBytes = 0, terminal, finalizedAt, finalReceipt
   let claimedBy, finalizedBy
   const issue = (error) => { for (const code of issueCodes(error)) issues.add(code) }
@@ -288,7 +317,7 @@ export function createBackingObserver({ allowlist, transport, clock = defaultClo
     if (dispatch >= deadline) { stopped = true; fault("owner_deadline") }
     const controller = new AbortController()
     cost.requests += 1
-    const handle = { controller, utc: clock.utc() }
+    const handle = { controller, utc: clock.utc(), stage: "headers", stage_started: dispatch, headers_ms: null, first_frame_ms: null, retired_ms: null }
     active.set(key, handle)
     cost.peak_in_flight = Math.max(cost.peak_in_flight, active.size)
     let work
@@ -298,22 +327,32 @@ export function createBackingObserver({ allowlist, transport, clock = defaultClo
           const response = await transport.request({ method: "GET", path, cid, signal: controller.signal, maxResponseBytes: limits.maxResponseBytes })
           if (controller.signal.aborted) fault("observer_aborted")
           if (response?.status !== 200 || !response.body?.[Symbol.asyncIterator]) fault("response_status_or_body")
+          handle.headers_ms = clock.now(); handle.stage = "body"; handle.stage_started = clock.now(); cost.headers_received += 1
           const chunks = [], hash = createHash("sha256")
-          let bytes = 0
+          const frame = cid && path.endsWith("/stats?stream=true") ? firstJSONObject() : null
+          let bytes = 0, frameBytes = 0, complete = false
           for await (const chunk of response.body) {
             if (controller.signal.aborted) fault("observer_aborted")
             if (clock.now() > deadline) { controller.abort(new ObserverFault("request_deadline")); fault("request_deadline") }
             if (!(chunk instanceof Uint8Array)) fault("response_chunk")
             bytes += chunk.byteLength; cost.response_bytes += chunk.byteLength
             if (bytes > limits.maxResponseBytes) { controller.abort(new ObserverFault("response_bytes_cap")); fault("response_bytes_cap") }
-            hash.update(chunk); chunks.push(Buffer.from(chunk))
+            const end = frame?.(chunk), selected = end === null || end === undefined ? chunk : chunk.subarray(0, end)
+            hash.update(selected); chunks.push(Buffer.from(selected)); frameBytes += selected.byteLength
+            if (end !== null && end !== undefined) {
+              complete = true; handle.first_frame_ms = clock.now(); handle.stage = "retirement"; handle.stage_started = clock.now()
+              cost.first_frames_received += 1; cost.consumed_trailing_bytes += chunk.byteLength - end
+              break
+            }
           }
-          return { value: parseEngineJSON(Buffer.concat(chunks).toString("utf8")), sha256: hash.digest("hex"), bytes }
+          if (frame && !complete) fault("stats_frame_incomplete")
+          if (frame) { handle.retired_ms = clock.now(); cost.streamed_iterators_retired += 1 }
+          return { value: parseEngineJSON(Buffer.concat(chunks).toString("utf8")), sha256: hash.digest("hex"), bytes, frame_bytes: frameBytes }
         })()
         work.then(() => { if (active.get(key) === handle) active.delete(key) }, () => { if (active.get(key) === handle) active.delete(key) })
         return work
       }, clock, deadline, controller, parentSignal)
-      return { ...value, window: { dispatch_ms: dispatch, response_ms: clock.now(), dispatch_utc: handle.utc, response_utc: clock.utc() } }
+      return { ...value, window: { dispatch_ms: dispatch, headers_ms: handle.headers_ms, first_frame_ms: handle.first_frame_ms, retired_ms: handle.retired_ms, response_ms: clock.now(), dispatch_utc: handle.utc, response_utc: clock.utc() } }
     } catch (error) {
       controller.abort()
       if (!work) active.delete(key)
@@ -336,7 +375,7 @@ export function createBackingObserver({ allowlist, transport, clock = defaultClo
       if (input.Os !== "linux") fault("unsupported_platform")
       if (minimum > maximum) fault("unsupported_api_version")
       version = `1.${maximum}`
-      append({ type: "version", api_version: version, mode: "stream=false", platform: "linux", body_sha256: response.sha256 })
+      append({ type: "version", api_version: version, mode: "stream=true;first-frame", platform: "linux", body_sha256: response.sha256 })
     })()
     await negotiation
   }
@@ -372,9 +411,9 @@ export function createBackingObserver({ allowlist, transport, clock = defaultClo
         if (identities.has(entry.cid) && JSON.stringify(identities.get(entry.cid)) !== JSON.stringify(identity)) fault("identity_drift")
         identities.set(entry.cid, identity)
         lastStats.set(entry.cid, clock.now())
-        const sampled = await request(`/v${version}/containers/${entry.cid}/stats?stream=false`, entry.cid, metadata.signal)
+        const sampled = await request(`/v${version}/containers/${entry.cid}/stats?stream=true`, entry.cid, metadata.signal)
         const stats = projectStats(sampled.value, entry.cid, limits.maxDeviceEntries, limits.maxNetworkInterfaces)
-        return { sample: { cid: entry.cid, identity, stats, inspect_body_sha256: inspected.sha256, stats_body_sha256: sampled.sha256, inspect_window: inspected.window, stats_window: sampled.window } }
+        return { sample: { cid: entry.cid, identity, stats, inspect_body_sha256: inspected.sha256, stats_body_sha256: sampled.sha256, stats_frame_bytes: sampled.frame_bytes, stats_received_bytes: sampled.bytes, inspect_window: inspected.window, stats_window: sampled.window } }
       } catch (error) { return { error } }
     }))
     for (const result of results) {
@@ -408,7 +447,9 @@ export function createBackingObserver({ allowlist, transport, clock = defaultClo
   }
   function receipt() {
     if (finalReceipt) return structuredClone(finalReceipt)
-    return structuredClone({ schema: "mount-rs.backing-observer.v1", complete: issues.size === 0 && droppedEntries === 0 && Boolean(terminal), api_version: version ?? null, allowlist: expected, caps: limits, journal, journal_bytes: journalBytes, dropped_entries: droppedEntries, issues: [...issues], terminal: terminal ? { ...terminal, safe_to_continue_pair: terminal.safe_to_continue_pair && issues.size === 0 } : null, cost: { ...cost, in_flight: active.size, owner_lifetime_ms: Math.max(0, (finalizedAt ?? clock.now()) - started), wall_scope: "inclusive_request_windows; concurrent_windows_overlap; not_exclusive_hook_wall", cpu_scope: "inclusive_process_cpu_during_observer_calls; overlapping_work_not_isolated" }, daemon_overhead: "unisolated", retention: "selected_projections_and_raw_body_sha256; raw_bodies_discarded" })
+    const pending_stages = { headers: { count: 0, age_ms: 0 }, body: { count: 0, age_ms: 0 }, retirement: { count: 0, age_ms: 0 } }
+    for (const handle of active.values()) { const stage = pending_stages[handle.stage]; stage.count += 1; stage.age_ms += Math.max(0, (finalizedAt ?? clock.now()) - handle.stage_started) }
+    return structuredClone({ schema: "mount-rs.backing-observer.v1", complete: issues.size === 0 && droppedEntries === 0 && Boolean(terminal), api_version: version ?? null, allowlist: expected, caps: limits, journal, journal_bytes: journalBytes, dropped_entries: droppedEntries, issues: [...issues], terminal: terminal ? { ...terminal, safe_to_continue_pair: terminal.safe_to_continue_pair && issues.size === 0 } : null, cost: { ...cost, in_flight: active.size, pending_stages, response_bytes_scope: "adapter_yielded_bytes_including_consumed_same_chunk_tail; rejected_overflow_chunks_unavailable; not_wire_bytes", owner_lifetime_ms: Math.max(0, (finalizedAt ?? clock.now()) - started), wall_scope: "inclusive_request_windows; concurrent_windows_overlap; not_exclusive_hook_wall", cpu_scope: "inclusive_process_cpu_during_observer_calls; overlapping_work_not_isolated" }, daemon_overhead: "unisolated", retention: "selected_projections_and_raw_version_inspect_or_first_stats_frame_sha256; consumed_trailing_bytes_counted_discarded; raw_bodies_discarded" })
   }
   const observer = {
     captureBoundary, receipt, finalize,

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict"
+import { createHash } from "node:crypto"
 import { EventEmitter } from "node:events"
+import http from "node:http"
 import { PassThrough } from "node:stream"
 import test from "node:test"
 import { createBackingObserver, createRunnerObserverSession } from "./backing-observer.mjs"
@@ -78,6 +80,233 @@ function errorCode(code) {
   return (error) => error?.code === code && error.message === code && !String(error).includes(secret) && !String(error).includes(socketPath)
 }
 
+function streamedFixture(chunks, { end = false, caps = {}, ignoreRetirement = false, holdSocket = false, allowlistedCids = [cid] } = {}) {
+  const clock = controlledClock(), fake = fakeHttp({ auto: false }), statsRequests = []
+  const owned = { cid, role: "member", labels: { "mount-rs.tidb.run": "owned-run" } }
+  const requestImpl = (requestOptions, onResponse) => {
+    const request = fake.requestImpl(requestOptions, onResponse)
+    request.end = () => queueMicrotask(async () => {
+      if (requestOptions.path.includes("/stats?")) {
+        statsRequests.push(request)
+        request.fixtureBodyBytes = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)
+        if (ignoreRetirement) request.destroy = () => { request.destroyed = true; return request }
+        if (holdSocket) { request.socket = new EventEmitter(); request.socket.destroyed = false; request.socket.destroy = () => { request.socket.destroyed = true; return request.socket } }
+        const response = request.respond({ chunks: [], end: false })
+        for (const chunk of chunks) {
+          if (response.destroyed) break
+          response.write(chunk)
+          await new Promise((resolve) => setImmediate(resolve))
+        }
+        if (end && !response.destroyed) response.end()
+        return
+      }
+      const value = requestOptions.path === "/version" ? { ApiVersion: "1.48", MinAPIVersion: "1.24", Os: "linux" }
+        : { Id: requestOptions.path.split("/")[3], Image: `sha256:${"c".repeat(64)}`, RestartCount: 0, State: { Running: true, StartedAt: "2026-09-26T00:00:00Z" }, Config: { Labels: owned.labels } }
+      const body = Buffer.from(JSON.stringify(value))
+      request.fixtureBodyBytes = body.byteLength
+      request.respond({ chunks: [body] })
+    })
+    return request
+  }
+  const adapter = moduleUnderTest.createBackingEngineTransport({ socketPath, allowlistedCids, requestImpl })
+  const observer = createBackingObserver({ allowlist: [owned], transport: adapter, clock, caps })
+  return { clock, fake, observer, adapter, statsRequests }
+}
+
+const frameText = () => JSON.stringify({ id: cid, read: "2026-09-26T00:00:01Z", cpu_stats: { cpu_usage: { total_usage: "18446744073709551615" } }, nested: [{ text: 'brace } quote " slash \\ newline\n é', list: [1, { a: true }] }] }).replace('"18446744073709551615"', "18446744073709551615")
+
+async function boundedCapture(fixture, id = "frame") {
+  let settled = false
+  const pending = fixture.observer.captureBoundary({ id, kind: "phase" })
+  pending.then(() => { settled = true }, () => { settled = true })
+  for (let turn = 0; turn < 1024 && !settled; turn++) await new Promise((resolve) => setImmediate(resolve))
+  if (!settled) fixture.clock.advance(2001)
+  return await pending
+}
+
+test("streamed first frame completes without newline or EOF and retires the exact owned request", async () => {
+  const text = ` \n${frameText()}`, bytes = Buffer.from(text)
+  const fragments = [...bytes].map((byte) => Buffer.from([byte]))
+  const fixture = streamedFixture(fragments)
+  const boundary = await boundedCapture(fixture)
+  assert.equal(boundary.complete, true)
+  assert.equal(boundary.samples[0].stats.cpu_usage_ns, "18446744073709551615")
+  assert.equal(boundary.samples[0].stats_body_sha256, createHash("sha256").update(bytes).digest("hex"))
+  const request = fixture.statsRequests[0]
+  assert.equal(fixture.fake.calls.at(-1).options.path, `/v1.48/containers/${cid}/stats?stream=true`)
+  assert.equal(request.destroyed, true)
+  assert.equal(request.response.closed, true)
+  assert.equal(request.listenerCount("error"), 0)
+  assert.equal(request.listenerCount("close"), 0)
+  assert.equal(fixture.observer.receipt().cost.in_flight, 0)
+  const window = boundary.samples[0].stats_window
+  assert.ok(window.dispatch_ms <= window.headers_ms && window.headers_ms <= window.first_frame_ms && window.first_frame_ms <= window.retired_ms && window.retired_ms <= window.response_ms)
+  assert.match(fixture.observer.receipt().journal[0].mode, /stream=true.*first/)
+  fixture.clock.advance(1000)
+  assert.equal((await boundedCapture(fixture, "replacement")).complete, true)
+  assert.equal(fixture.statsRequests.length, 2, "the same CID is reusable only after exact retirement")
+})
+
+test("first frame ignores a coalesced later frame but counts and caps every received byte", async () => {
+  assert.equal(moduleUnderTest.isBackingEngineResponseLimit({ code: "engine_response_bytes_cap" }), false)
+  const selected = frameText(), trailing = `\n{"private":"${secret}", invalid later frame`
+  const raw = Buffer.from(selected + trailing), fixture = streamedFixture([raw])
+  const boundary = await boundedCapture(fixture)
+  assert.equal(boundary.complete, true)
+  assert.equal(boundary.samples[0].stats_body_sha256, createHash("sha256").update(selected).digest("hex"))
+  assert.equal(fixture.observer.receipt().cost.response_bytes, fixture.fake.calls.reduce((sum, item) => sum + item.request.fixtureBodyBytes, 0))
+  assert.equal(fixture.observer.receipt().cost.consumed_trailing_bytes, Buffer.byteLength(trailing))
+  assert.equal(boundary.samples[0].stats_frame_bytes, Buffer.byteLength(selected))
+  assert.equal(boundary.samples[0].stats_received_bytes, raw.byteLength)
+  assert.equal(JSON.stringify(fixture.observer.receipt()).includes(secret), false)
+  for (const delta of [0, 1]) {
+    const cap = 4096, payload = Buffer.from(selected + " ".repeat(cap + delta - Buffer.byteLength(selected)))
+    const limited = streamedFixture([payload], { caps: { maxResponseBytes: cap } })
+    assert.equal((await boundedCapture(limited, `cap-${delta}`)).complete, delta === 0)
+    assert.equal(limited.statsRequests[0].destroyed, true)
+    if (delta === 1) {
+      assert.ok(limited.observer.receipt().issues.includes("response_bytes_cap"))
+      const calls = limited.fake.calls.length
+      limited.clock.advance(1000)
+      assert.equal((await boundedCapture(limited, "after-cap")).complete, false)
+      assert.equal(limited.fake.calls.length, calls, "a real transport byte cap must stop later dispatch")
+    }
+  }
+})
+
+test("invalid, partial and nonobject first streamed frames cannot be repaired by later JSON", async () => {
+  for (const text of ["", " \n", "[]", "true", '{"broken":}', '{"broken":', `{]${frameText()}`, `{"id":7}${frameText()}`]) {
+    const fixture = streamedFixture([Buffer.from(text)], { end: true })
+    const boundary = await boundedCapture(fixture)
+    assert.equal(boundary.complete, false, text)
+    assert.equal(boundary.samples.length, 0)
+    assert.equal(fixture.observer.receipt().cost.in_flight, 0)
+  }
+})
+
+test("ignored streamed retirement remains pending and incomplete at the original deadline", async () => {
+  const fixture = streamedFixture([Buffer.from(frameText())], { ignoreRetirement: true })
+  let settled = false
+  const capture = fixture.observer.captureBoundary({ id: "ignored-retirement", kind: "phase" })
+  capture.then(() => { settled = true })
+  await settleDispatch()
+  try {
+    assert.equal(settled, false, "first-frame receipt cannot precede owned request retirement")
+    assert.equal(fixture.observer.receipt().cost.in_flight, 1)
+    fixture.clock.advance(2001)
+    assert.equal((await capture).complete, false)
+    const final = await fixture.observer.finalize({ status: "failed" })
+    assert.equal(final.cost.in_flight, 1)
+    assert.equal(final.complete, false)
+    assert.equal(final.cost.pending_stages.retirement.count, 1)
+    assert.equal(final.cost.first_frames_received, 1)
+    assert.equal(final.cost.streamed_iterators_retired, 0)
+  } finally {
+    fixture.statsRequests[0].emit("close")
+    await settleDispatch()
+  }
+})
+
+test("partial streamed body exposes fixed body-wait evidence and cancellation retains no payload", async () => {
+  const fixture = streamedFixture([Buffer.from('{"unfinished":"')])
+  const capture = fixture.observer.captureBoundary({ id: "partial-body", kind: "phase" })
+  await settleDispatch()
+  fixture.clock.advance(500)
+  const pending = fixture.observer.receipt().cost
+  assert.equal(pending.headers_received, 3)
+  assert.equal(pending.first_frames_received, 0)
+  assert.deepEqual(pending.pending_stages.body, { count: 1, age_ms: 500 })
+  assert.equal(pending.pending_stages.headers.count, 0)
+  const final = await fixture.observer.finalize({ status: "failed" })
+  assert.equal((await capture).complete, false)
+  assert.equal(final.complete, false)
+  await settleDispatch()
+  assert.equal(fixture.statsRequests[0].response.closed, true)
+  assert.equal(fixture.statsRequests[0].destroyed, true)
+  assert.equal(JSON.stringify(final).includes("unfinished"), false)
+})
+
+test("streamed retirement pins only its owned CID and cancellation cannot accept its eventual frame", async () => {
+  const fixture = streamedFixture([Buffer.from(frameText())], { ignoreRetirement: true, holdSocket: true, allowlistedCids: [cid, otherCid] })
+  const controller = new AbortController(), capture = fixture.observer.captureBoundary({ id: "delayed-close", kind: "phase", signal: controller.signal })
+  await settleDispatch()
+  const request = fixture.statsRequests[0]
+  try {
+    const live = fixture.observer.receipt().cost
+    assert.equal(live.first_frames_received, 1)
+    assert.equal(live.streamed_iterators_retired, 0)
+    assert.equal(live.pending_stages.retirement.count, 1)
+    await assert.rejects(fixture.adapter.request(options({ path: `/v1.48/containers/${cid}/stats?stream=true`, cid })), errorCode("engine_request_contract"))
+    const sibling = await fixture.adapter.request(options({ path: `/v1.48/containers/${otherCid}/json`, cid: otherCid, maxResponseBytes: 4096 }))
+    assert.equal(JSON.parse((await collect(sibling.body)).toString()).Id, otherCid)
+    controller.abort(new Error(secret))
+    const boundary = await capture
+    assert.equal(boundary.complete, false)
+    assert.ok(boundary.issues.includes("observer_aborted"))
+    const final = await fixture.observer.finalize({ status: "failed" })
+    assert.equal(final.cost.in_flight, 1)
+    request.emit("close")
+    await assert.rejects(fixture.adapter.request(options({ path: `/v1.48/containers/${cid}/json`, cid })), errorCode("engine_request_contract"))
+    request.socket.emit("close")
+    await settleDispatch()
+    const replacement = await fixture.adapter.request(options({ path: `/v1.48/containers/${cid}/json`, cid, maxResponseBytes: 4096 }))
+    request.emit("close")
+    await assert.rejects(fixture.adapter.request(options({ path: `/v1.48/containers/${cid}/json`, cid })), errorCode("engine_request_contract"))
+    await collect(replacement.body)
+    assert.deepEqual(fixture.observer.receipt(), final)
+    assert.equal(JSON.stringify(final).includes(secret), false)
+  } finally { request.emit("close"); request.socket.emit("close"); await settleDispatch() }
+})
+
+test("a delayed streamed close remains a deadline failure even before its timer callback runs", async () => {
+  const fixture = streamedFixture([Buffer.from(frameText())], { ignoreRetirement: true })
+  const capture = fixture.observer.captureBoundary({ id: "late-close", kind: "phase" })
+  await settleDispatch()
+  fixture.clock.advance(2001, false)
+  fixture.statsRequests[0].emit("close")
+  const boundary = await capture
+  assert.equal(boundary.complete, false)
+  assert.ok(boundary.issues.includes("request_deadline"))
+  assert.equal(boundary.samples.length, 0)
+  assert.equal(fixture.observer.receipt().cost.in_flight, 0)
+  assert.equal(fixture.observer.receipt().cost.streamed_iterators_retired, 1)
+})
+
+test("owned loopback first-frame capture waits for the actual client response request and socket closes", { timeout: 4000 }, async () => {
+  const owned = { cid, role: "member", labels: { "mount-rs.tidb.run": "owned-run" } }, clients = [], serverSockets = new Set()
+  const server = http.createServer((request, response) => {
+    response.writeHead(200, { "Content-Type": "application/json" })
+    if (request.url === "/version") response.end(JSON.stringify({ ApiVersion: "1.48", MinAPIVersion: "1.24", Os: "linux" }))
+    else if (request.url.endsWith("/json")) response.end(JSON.stringify({ Id: cid, Image: `sha256:${"c".repeat(64)}`, RestartCount: 0, State: { Running: true, StartedAt: "2026-09-26T00:00:00Z" }, Config: { Labels: owned.labels } }))
+    else { assert.equal(request.url, `/v1.48/containers/${cid}/stats?stream=true`); response.write(frameText()) }
+  })
+  server.on("connection", (socket) => { serverSockets.add(socket); socket.once("close", () => serverSockets.delete(socket)) })
+  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve) })
+  const port = server.address().port
+  const requestImpl = (requestOptions, callback) => {
+    const request = http.request({ ...requestOptions, socketPath: undefined, host: "127.0.0.1", port }, (response) => { request.observedResponse = response; callback(response) })
+    clients.push(request); return request
+  }
+  const adapter = moduleUnderTest.createBackingEngineTransport({ socketPath, allowlistedCids: [cid], requestImpl })
+  const observer = createBackingObserver({ allowlist: [owned], transport: adapter })
+  try {
+    assert.equal((await observer.captureBoundary({ id: "loopback", kind: "phase" })).complete, true)
+    const streamed = clients.at(-1)
+    assert.equal(streamed.closed, true)
+    assert.equal(streamed.observedResponse.closed, true)
+    assert.equal(streamed.socket.closed, true)
+    assert.equal(streamed.socket.destroyed, true)
+    const replacement = await adapter.request(options({ path: `/v1.48/containers/${cid}/json`, cid, maxResponseBytes: 4096 }))
+    assert.equal(JSON.parse((await collect(replacement.body)).toString()).Id, cid)
+    assert.equal(observer.receipt().cost.pending_stages.retirement.count, 0)
+  } finally {
+    for (const request of clients) request.destroy()
+    for (const socket of serverSockets) socket.destroy()
+    await new Promise((resolve) => server.close(resolve))
+  }
+  assert.equal(serverSockets.size, 0)
+})
+
 function controlledClock() {
   let now = 0, next = 0
   const timers = new Map()
@@ -85,7 +314,7 @@ function controlledClock() {
     now: () => now, utc: () => new Date(1_800_000_000_000 + now).toISOString(), cpu: () => ({ user: now * 10, system: now }),
     setTimeout(callback, ms) { const id = ++next; timers.set(id, { callback, at: now + ms }); return id },
     clearTimeout(id) { timers.delete(id) },
-    advance(ms) { now += ms; for (const [id, timer] of [...timers]) if (timer.at <= now) { timers.delete(id); timer.callback() } },
+    advance(ms, fire = true) { now += ms; if (fire) for (const [id, timer] of [...timers]) if (timer.at <= now) { timers.delete(id); timer.callback() } },
     timers,
   }
 }
@@ -107,26 +336,21 @@ function controlledBacking(count = 8) {
   }
   const transport = moduleUnderTest.createBackingEngineTransport({ socketPath, allowlistedCids: allowlist.map((entry) => entry.cid), requestImpl })
   const observer = createBackingObserver({ allowlist, transport, clock })
-  function primeStatsFrame(ms = 100) {
-    clock.advance(ms)
-    // Standard stream=false discards its first sampled frame internally.
-    for (const held of pendingStats) { assert.equal(held.frames, 0); held.frames = 1 }
-  }
   function releaseStats(ms = 1000, transform = (value) => value) {
     const held = pendingStats.splice(0)
     clock.advance(ms)
     for (const { request, options: requestOptions, frames } of held.reverse()) {
-      assert.equal(frames, 1, "the standard API returns its second sampled frame")
+      assert.equal(frames, 0, "the streamed API exposes its first sampled frame")
       const id = requestOptions.path.split("/")[3]
       const value = { ...(requestOptions.path.includes("one-shot=true") ? {} : { id }), read: new Date(1_800_000_000_000 + clock.now()).toISOString(),
         cpu_stats: { cpu_usage: { total_usage: clock.now() } },
         blkio_stats: { io_service_bytes_recursive: [{ major: 8, minor: 0, op: "Read", value: clock.now() }], io_serviced_recursive: [{ major: 8, minor: 0, op: "Read", value: clock.now() }] },
         networks: { eth0: { rx_bytes: clock.now(), tx_bytes: clock.now() } } }
-      request.respond({ chunks: [Buffer.from(JSON.stringify(transform(value, id)))] })
+      request.respond({ chunks: [Buffer.from(JSON.stringify(transform(value, id)))], end: false })
     }
     return held
   }
-  return { clock, fake, allowlist, observer, transport, pendingStats, primeStatsFrame, releaseStats }
+  return { clock, fake, allowlist, observer, transport, pendingStats, releaseStats }
 }
 
 async function settleDispatch() {
@@ -150,13 +374,13 @@ test("construction is inert and one allowed GET streams exact bytes", async () =
   assert.equal(fake.calls[0].request.destroyed, true)
 })
 
-test("exact owned inspect and standard non-streaming stats paths pass at both API bounds", async () => {
+test("exact owned inspect and streamed stats paths pass at both API bounds", async () => {
   const fake = fakeHttp()
   const adapter = transport(fake, [cid, otherCid])
   const paths = [
     [`/v1.41/containers/${cid}/json`, cid],
-    [`/v1.41/containers/${cid}/stats?stream=false`, cid],
-    [`/v1.51/containers/${otherCid}/stats?stream=false`, otherCid],
+    [`/v1.41/containers/${cid}/stats?stream=true`, cid],
+    [`/v1.51/containers/${otherCid}/stats?stream=true`, otherCid],
   ]
   for (const [path, ownedCid] of paths) {
     const response = await adapter.request(options({ path, cid: ownedCid }))
@@ -181,7 +405,8 @@ test("foreign, malformed and alternate routes never dispatch", async () => {
     { path: `/v1.41/containers/${cid}/stats?stream=false&one-shot=true`, cid },
     { path: `/v1.41/containers/${cid}/stats?stream=false&one-shot=false`, cid },
     { path: `/v1.41/containers/${cid}/stats?stream=false&extra=1`, cid },
-    { path: `/v1.41/containers/${cid}/stats?stream=true`, cid },
+    { path: `/v1.41/containers/${cid}/stats?stream=false`, cid },
+    { path: `/v1.41/containers/${cid}/stats?stream=true&extra=1`, cid },
     { path: `/v1.41/containers/${cid}/json#fragment`, cid },
     { path: "/_ping" }, { maxResponseBytes: 1_048_577 },
   ]
@@ -212,29 +437,29 @@ test("the observer requests server-identified stats through the exact production
   const boundary = await observer.captureBoundary({ id: "selected", kind: "phase" })
   assert.equal(boundary.complete, true, "server ID must be observed rather than supplied by the observer")
   assert.equal(boundary.samples[0].stats.cid, cid)
-  assert.equal(fake.calls.at(-1).options.path, `/v1.48/containers/${cid}/stats?stream=false`)
-  assert.equal(observer.receipt().journal[0].mode, "stream=false")
+  assert.equal(fake.calls.at(-1).options.path, `/v1.48/containers/${cid}/stats?stream=true`)
+  assert.equal(observer.receipt().journal[0].mode, "stream=true;first-frame")
   assert.equal(fake.calls.length, 3, "no discovery or identity-repair request is permitted")
 })
 
-test("eight owned peers share two sampled frames and fold replies in canonical order", async () => {
+test("eight owned peers capture first sampled frames and fold replies in canonical order", async () => {
   const fixture = controlledBacking()
-  const { observer, clock, allowlist, fake, pendingStats, primeStatsFrame, releaseStats } = fixture
+  const { observer, clock, allowlist, fake, pendingStats, releaseStats } = fixture
   const session = createRunnerObserverSession(observer, { provider: "controlled", runId: "parallel", clock })
   const begin = session.begin("selected")
   await settleDispatch()
   const count = pendingStats.length
   if (count !== 8) { clock.advance(2001); await begin; assert.equal(count, 8, "all peers must await their server responses concurrently") }
   assert.equal(observer.receipt().journal.filter((entry) => entry.type === "boundary").length, 0, "IDs have not arrived yet")
-  primeStatsFrame()
-  assert.equal(observer.receipt().journal.filter((entry) => entry.type === "boundary").length, 0, "the first sampled frame is discarded by the server")
+  assert.equal(observer.receipt().cost.headers_received, 9)
+  assert.equal(observer.receipt().cost.pending_stages.headers.count, 8)
+  assert.equal(observer.receipt().cost.first_frames_received, 0)
   releaseStats()
   await begin
   assert.equal(session.receipt().events[0].status, "ok")
   const end = session.end("selected", true, 50, 0, "complete")
   await settleDispatch()
   assert.equal(pendingStats.length, 8)
-  primeStatsFrame()
   releaseStats()
   await end
   await session.finalize({ status: "ok", native_quiescent: true, owned_operations_settled: true, native_profiling_enabled: true, workload_native_evidence_complete: true, cleanup_complete: true })
@@ -244,13 +469,16 @@ test("eight owned peers share two sampled frames and fold replies in canonical o
   assert.equal(backing.journal.find((entry) => entry.type === "interval").complete, true)
   assert.equal(fake.calls.filter((entry) => entry.options.path === "/version").length, 1)
   assert.equal(fake.calls.length, 33)
-  assert.equal(backing.cost.wall_ms, 17600, "request waits overlap; do not sum them as exclusive observer wall time")
+  assert.equal(backing.cost.wall_ms, 16000, "request waits overlap; do not sum them as exclusive observer wall time")
   assert.equal(backing.cost.peak_in_flight, 8)
   assert.equal(backing.cost.in_flight, 0)
+  assert.equal(backing.cost.first_frames_received, 16)
+  assert.equal(backing.cost.streamed_iterators_retired, 16)
+  assert.equal(backing.cost.headers_received, 33)
   assert.match(backing.cost.wall_scope, /inclusive.*overlap/)
   assert.match(backing.cost.cpu_scope, /inclusive.*overlap/)
-  assert.equal(receipt.events[0].wall_ms, 1100)
-  assert.equal(receipt.events[1].wall_ms, 1100)
+  assert.equal(receipt.events[0].wall_ms, 1000)
+  assert.equal(receipt.events[1].wall_ms, 1000)
   assert.equal(clock.timers.size, 0)
 })
 
@@ -261,7 +489,6 @@ test("one failed peer retains successful sibling samples without leaking failed 
   const count = fixture.pendingStats.length
   if (count !== 8) { fixture.clock.advance(2001); await capture; assert.equal(count, 8) }
   const failed = fixture.allowlist[3].cid
-  fixture.primeStatsFrame()
   fixture.releaseStats(1000, (value, id) => id === failed ? { ...value, id: secret } : value)
   const boundary = await capture
   assert.equal(boundary.complete, false)
@@ -270,15 +497,13 @@ test("one failed peer retains successful sibling samples without leaking failed 
   assert.equal(JSON.stringify(fixture.observer.receipt()).includes(secret), false)
 })
 
-test("a delayed second sampled frame preserves the parallel deadline and retires all requests", async () => {
+test("a delayed first sampled frame preserves the parallel deadline and retires all requests", async () => {
   const fixture = controlledBacking()
   const session = createRunnerObserverSession(fixture.observer, { provider: "controlled", runId: "aborted", clock: fixture.clock })
   const begin = session.begin("selected")
   await settleDispatch()
   const count = fixture.pendingStats.length
-  fixture.primeStatsFrame(1000)
-  assert.equal(session.receipt().events.length, 0, "the first frame cannot finish the hook")
-  fixture.clock.advance(1001)
+  fixture.clock.advance(2001)
   await begin
   await session.finalize({ status: "ok", cleanup_complete: true })
   assert.equal(count, 8)
@@ -332,7 +557,7 @@ test("transport bounds parallelism at sixteen owned CIDs and one request per CID
   for (const promise of pending) promise.catch(() => {})
   try { assert.equal(fake.calls.length, 16) }
   catch (error) { controllers.forEach((controller) => controller.abort()); await Promise.allSettled(pending); throw error }
-  await assert.rejects(adapter.request(options({ path: `/v1.48/containers/${cids[0]}/stats?stream=false`, cid: cids[0] })), errorCode("engine_request_contract"))
+  await assert.rejects(adapter.request(options({ path: `/v1.48/containers/${cids[0]}/stats?stream=true`, cid: cids[0] })), errorCode("engine_request_contract"))
   await assert.rejects(adapter.request(options()), errorCode("engine_request_contract"))
   const foreign = "f".repeat(64)
   await assert.rejects(adapter.request(options({ path: `/v1.48/containers/${foreign}/json`, cid: foreign })), errorCode("engine_request_contract"))

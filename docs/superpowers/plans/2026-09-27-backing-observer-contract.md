@@ -4,7 +4,7 @@
 
 **Goal:** Correct the bounded observer's stats request and documented block counter dialect while retaining strict identity checks and unavailable counter semantics.
 
-**Architecture:** The observer negotiates once before bounded fanout across distinct owned CIDs, with each CID's inspect then `/stats?stream=false` sequence kept serial. Replies fold in canonical allowlist order. Each response must still echo the full CID. Block operation names use a closed mapping from `read`/`write` and `Read`/`Write` to canonical keys. Fixed identity fault flags distinguish absent, wrong-type and mismatched response IDs without retaining their values.
+**Architecture:** The observer negotiates once before bounded fanout across distinct owned CIDs, with each CID's inspection then `/stats?stream=true` capture kept serial. It selects the first complete JSON frame and awaits owned response/request/socket retirement before success or CID reuse. Replies fold in canonical allowlist order. Each response must still echo the full CID. Block operation names use a closed mapping from `read`/`write` and `Read`/`Write` to canonical keys. Fixed identity fault flags distinguish absent, wrong-type and mismatched response IDs without retaining their values.
 
 **Tech Stack:** Node 24.18.0, native `node:test`, injected inert HTTP and clock fixtures.
 
@@ -28,7 +28,7 @@ The [cgroup-v2 builder](https://github.com/moby/moby/blob/v28.0.0/daemon/stats_u
 - Unknown block counters stay `null`/incomplete; no physical IOPS claim and no manufactured zeros.
 - Execute only guarded offline tests. No actual Engine, native addon, backing provisioner or production controller.
 
-## Options and timing trade-off
+## Initial non-streaming repair and timing trade-off
 
 The chosen standard non-streaming endpoint asks the server to emit its own ID and preserves strict validation. Its [normal path discards the first update and returns the second](https://github.com/moby/moby/blob/v28.0.0/daemon/stats.go#L60). The [collector](https://github.com/moby/moby/blob/v28.0.0/daemon/stats/collector.go#L78) wakes on subscriptions, iterates registered containers, publishes and sleeps for its configured interval; [daemon initialization configures one second](https://github.com/moby/moby/blob/v28.0.0/daemon/daemon.go#L952). Subscription timing, collection cost and missed initial iterations can bring two frames to or beyond the 2,000 ms hook bound. Parallel capture removes the serial eight-peer multiplier, but cannot guarantee the bound. A controlled 100 ms first frame plus 1,000 ms second frame succeeds; a 1,000 ms first frame plus delayed 1,001 ms second frame fails honestly. These are inert contracts, not measured Engine cadence.
 
@@ -38,7 +38,7 @@ Finalization aborts owned requests and waits for logical capture wrappers to ret
 
 Accepting absent IDs or injecting the expected ID would weaken evidence and is excluded. Deadline changes remain excluded. Missing physical operation fields can still prevent full qualification after the request and scheduling fix.
 
-### Task1: Standard stats request
+### Task1: Initial standard stats request
 
 **Files:** Transport and observer modules and their existing tests.
 
@@ -56,7 +56,7 @@ const STATS = /^\/v1\.(4[1-9]|5[01])\/containers\/([a-f0-9]{64})\/stats\?stream=
 const sampled = await request(`/v${version}/containers/${entry.cid}/stats?stream=false`, entry.cid, metadata.signal)
 ```
 
-### Task2: Counter dialect and failure diagnosis
+### Task2: Initial counter dialect and failure diagnosis
 
 **Files:** Observer module and its existing test.
 
@@ -66,7 +66,7 @@ const sampled = await request(`/v${version}/containers/${entry.cid}/stats?stream
 - [x] Add RED external/concurrent finalization and ignored-abort controls, then retire bounded wrappers and preserve unresolved underlying work and primary cancellation reasons.
 - [x] Add RED all-digit numeric stats/inspect IDs and numeric ownership-label controls; preserve their original JSON types while retaining lossless numeric counters.
 - [x] Reproduce the combined-gate hang with the actual guarded selected-workload test; update only its obsolete one-shot request expectation and observe the same two controls finish successfully.
-- [ ] Run all relevant capture benchmark/observer/transport/pilot/checker suites; inspect terminal output, syntax and scoped diff.
+- [x] Run the initial combined five-file observer/transport/pilot/entry/checker gate (150 passed) and inspect terminal output, syntax and scoped diff.
 - [x] Freeze exact source and focused validation log hashes for independent review. Root stages and commits only reviewed paths after the joint gate and review.
 
 The counter mapping is:
@@ -91,10 +91,28 @@ NAPI_RS_NATIVE_LIBRARY_PATH="$PWD/benchmarks/storage/capture-native.cjs" \
 
 Unset `NAPI_RS_FORCE_WASI`, `NAPI_RS_WASI_FLAVOR`, `NODE_PATH` and `NODE_OPTIONS` before testing. The fixture transport never connects to a socket. Retained raw diagnosis and test logs remain in a task-owned 0700 temporary directory with 0600 files.
 
-Focused final gate: 75 tests passed, zero failed/cancelled, on Node 24.18.0. Earlier RED controls observed the original request/identity/dialect/parallel failures, two real finalization gaps and numeric identity-type collisions. Four owned JavaScript files pass syntax checks and the scoped diff passes whitespace checks. The joint whole Node gate and independent source/security review are pending root coordination before commit.
+Initial focused gate: 75 tests passed, zero failed/cancelled, on Node 24.18.0. Earlier RED controls observed the original request/identity/dialect/parallel failures, two real finalization gaps and numeric identity-type collisions. Four owned JavaScript files passed syntax checks and the scoped diff passed whitespace checks. The initial combined gate subsequently passed 150 tests and its exact source freeze received independent source/security acceptance. The later streamed restoration below has its own gates.
 
 The first combined Node gate timed out after 180 seconds. A bounded selected-workload reproduction under the original capture/native/network guards also timed out after 15 seconds. Its fake HTTP response exposed headers, then asserted the obsolete `stream=false&one-shot=true` path before ending the body. Updating only that fixture matcher to `stream=false` made the same two controls pass with terminal exit 0 in 0.245 seconds. Both launches recorded their actual Popen PID/process group; the timed-out launch terminated only its owned group. No production finalization change was needed for this integration failure. Root will repeat the combined gate against the six-path freeze.
 
 ## Acceptance limits
 
 Green inert tests establish the authored request, parser and deadline contracts. Hosted Engine response identity, actual sampling cadence, cgroup metric availability, overhead and resource qualification still require a separately authorized run. No allocation, full-target capacity or physical-device saturation verdict follows from this slice.
+
+## Streamed first-frame restoration
+
+The later pilot at committed `71526346dc9bdf2d7cdd5df2f9bb7d5f927e56b4` completed 1,200 logical operations, but its begin hook reached the unchanged two-second deadline with only one of eight stats samples and no complete end boundary. This motivates removing the second-frame wait; the actual host Engine revision is unavailable, so the pinned implementation is contract evidence rather than a unique run RCA or a measured improvement.
+
+Use only `GET /v1.<negotiated>/containers/<owned-full-CID>/stats?stream=true`. The pinned [normal Moby path](https://github.com/moby/moby/blob/v28.0.0/daemon/stats.go#L46) supplies the full CID and cumulative `CPUStats` in its first streamed frame; the observer uses cumulative counters across its own boundaries and does not require `precpu_stats`. Keep inspection and version responses unchanged. In the observer, scan bounded raw bytes for exactly the first JSON object, tracking fragmented strings, escapes and nested arrays/objects across chunks. Enforce the existing one-MiB received-byte limit before scanning, count consumed trailing bytes, hash only the selected first-frame bytes, and parse/project them with the existing strict raw identity types and lossless counters. Reject incomplete, malformed, non-object or oversized frames. Never consume or interpret a second frame as the selected observation.
+
+After the first complete frame, close the exact iterator and deliberately destroy and await retirement of the adapter-owned response/request/socket before returning success or releasing that CID. [Node 24.18 request destruction](https://nodejs.org/download/release/v24.18.0/docs/api/http.html#requestdestroyerror) emits close and destroys the request's socket; the adapter also waits for its exact socket's close. Keep late-error listeners until the owned close events retire them. An ignored close or abort remains pending and incomplete under the existing request/hook deadlines; it cannot create a zero-in-flight terminal result.
+
+Fixed diagnostics record successful header/first-frame/retirement timestamps, header and first-frame counts, iterator retirements and current header/body/retirement wait counts/ages. They retain no new raw identity, headers or error payloads. `response_bytes` counts adapter-yielded bytes, including a received chunk's discarded trailing portion; overflow chunks rejected by the adapter are unavailable to that counter, and it is not a wire-byte measurement. A closed typed adapter byte-limit fault maps to the existing `response_bytes_cap` stop rule; arbitrary error bodies cannot supply that classification.
+
+- [x] Add production-linked fragmented first-frame, escaped/nested JSON, trailing-frame, incomplete/invalid/oversized body, exact-identity and deadline RED controls.
+- [x] Add actual adapter retirement/same-CID reuse, ignored close/abort and late-response controls; keep the exact 16-CID and request/journal caps.
+- [x] Implement the fixed streamed route, bounded first-frame selection and awaited owned retirement; update the transferred pilot fixture expectation to that exact route.
+- [x] Run one guarded combined Node gate including transport, observer, pilot, entry, verifier and the pure benchmark suite, with retained actual Popen/process-group identity and deadline cleanup.
+- [ ] Freeze source/log hashes and obtain independent source review. Root owns publication and a separately authorized hosted rerun.
+
+The first-frame RED gate had two actual failures and two passing negative controls. The implementation then passed four targeted controls and the initial 80-test focused gate. Read-only source review identified a real adapter-byte-limit classification gap; its production-linked RED control failed, then the closed typed mapping passed all three cap/delayed-retirement controls. The final combined six-file gate passed 159 tests with zero failures, cancellations or skips, including the pure benchmark harness's terminal PASS, in 2.485 seconds. Its actual Popen-owned process group was absent before log hashing. One fixture uses only an owned loopback HTTP server to verify actual client response/request/socket closure; other Engine interactions are inert. These gates run no Engine, native addon, backing provisioner or Cargo command.

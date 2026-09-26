@@ -325,18 +325,32 @@ benchmark path.
 ## Observe owned backing resources
 
 The owned-backing pilot samples only its configured container identities. It
-requests standard non-streaming Engine stats, requires the observed full
-container ID, and retains the existing image, ownership, start and restart
-checks. Missing identity makes capture incomplete. Missing counters remain
-unavailable and can prevent interval qualification; expected identities and
-zero counters are never substituted.
+requests streaming Engine stats and selects the first complete JSON object,
+requires the observed full container ID, and retains the existing image,
+ownership, start and restart checks. Missing identity makes capture incomplete.
+Missing counters remain unavailable and can prevent interval qualification;
+expected identities and zero counters are never substituted.
 
 Capture runs in parallel across at most 16 owned containers, with inspection and
 stats requests serial within each container. Replies remain in the configured
-order. The standard API discards its first sample and returns the second;
-parallel capture removes the serial sampling multiplier but cannot guarantee
-completion within the unchanged two-second hook deadline. Late sampling remains
-incomplete.
+order. Selecting the first streamed frame avoids the non-streaming API's forced
+second sample. Success waits for the exact response, request and assigned socket
+to close before releasing that container's request slot. Inspection, first-frame
+delivery or retirement can still exceed the unchanged two-second hook deadline;
+late or unretired requests remain incomplete.
+
+The one-MiB response cap applies to chunks yielded by the adapter, including any
+coalesced trailing frame. An overflow chunk rejected by the adapter has
+unavailable byte accounting; these are not wire bytes. The retained stats digest
+covers only the selected first-frame prefix through its closing brace, including
+leading whitespace. Ordinary version and inspection responses retain their
+whole-body EOF semantics.
+
+Fixed diagnostics count received headers, first frames, retired streamed
+iterators and consumed trailing bytes. Pending header, body and retirement
+stages report bounded counts and ages; successful captures retain their stage
+timestamps. They contain no raw headers or arbitrary errors. Missing retirement
+never becomes a fabricated terminal observation.
 
 The enclosing hook records wall and process CPU cost once. Summed per-request
 costs include overlapping windows and must not be treated as exclusive time.

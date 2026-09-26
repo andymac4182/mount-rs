@@ -237,7 +237,7 @@ test("inspect identity is projected before retention and drift is rejected", asy
   assert.match(interval.attribution, /descriptive/)
   assert.equal(transport.requests.every((request) => request.method === "GET"), true)
   assert.equal(transport.requests.some((request) => /containers\/json/.test(request.path)), false)
-  assert.match(transport.requests.at(-1).path, /stats\?stream=false$/)
+  assert.match(transport.requests.at(-1).path, /stats\?stream=true$/)
   for (const edits of [{ Id: secondCid }, { Image: `sha256:${"d".repeat(64)}` }, { RestartCount: 1 }, { State: { Running: false, StartedAt: "2026-09-26T00:00:00Z" } }, { Config: { Labels: { "mount-rs.tidb.run": "foreign" } } }]) {
     fakeClock.advance(1000)
     transport.request = async () => ({ status: 200, body: (async function* () { yield Buffer.from(inspect(cid, edits)) })() })

@@ -180,7 +180,7 @@ function engineResponse(path, clock) {
     HostConfig: { Memory: 0, MemorySwap: -1, NanoCpus: 0, CpuQuota: -1, CpuPeriod: 0, CpuShares: 0, CpusetCpus: "", PidsLimit: 0 },
     Mounts: [{ Source: "EXCLUDED_MOCK_SECRET" }],
   }
-  assert.match(path, /\/stats\?stream=false$/)
+  assert.match(path, /\/stats\?stream=true$/)
   return {
     id: cid, read: clock.utc(),
     cpu_stats: { cpu_usage: { total_usage: 1000 + clock.now() * 1000 }, system_cpu_usage: 1000 + clock.now() * 10000, online_cpus: 4 },
