@@ -46,3 +46,38 @@ page store, the native lifecycle through private operation callbacks, and the
 public JavaScript error/receipt adapters. They provide no live TiDB/RustFS
 absence or throughput evidence. The regular CI controls keep those evidence
 levels separate.
+
+## Isolated layout arm and runner evidence
+
+`createOwnedLayoutArm` pins a private TiDB/RustFS configuration and a fresh owned
+cohort. Before handing its original filesystem to the timed runner, it checks
+absence, constructs with all three layout flags explicitly false or true,
+checks an empty root, and writes, syncs and closes a fixed 4096-byte canary.
+Compact arms query the persisted MRC5 receipt. A legacy `null` observation
+establishes recognized non-MRC5 state, rather than an exact legacy marker.
+
+The arm captures the drained layout and awaits original shutdown once. It then
+opens two fresh handles from configuration: the first verifies all canary bytes
+and EOF, removes the canary and closes; the second verifies the persisted layout
+and empty logical root before closing. Compact backing identity must remain
+stable. Structural generation can increase across filesystem mutations and must
+match exactly across a drained-to-fresh-reopen boundary. Failed or pending
+shutdown cannot permit another reopen.
+
+`assessOwnedLayoutRunnerOutcome` separately checks the original fixed
+400-iteration, 64-concurrency, 4096-byte workload, its 1200 successful operations
+and 400 verified reads, every sample, cleanup and original status/failure set.
+It validates the explicit RustFS diagnostic family, compact proof when selected,
+native quiescence and independently recomputes the backing interval. Sparse
+samples, accessors, inconsistent counters and incomplete observations refuse
+continuation. The projection retains fixed categories and numbers, excluding
+credentials, raw errors and layout identities.
+
+`floor_qualified` and `runner_safe_to_continue` are separate fields. A sole
+original `IOPS_TARGET_NOT_MET` failure keeps the original failed status and
+unqualified floor. It can be safe to collect another arm only if all other
+runner evidence passes. The enclosing comparison must still verify arm
+persistence, native identity, fixture ownership and identity across arms, and
+stop on uncertain work. These helpers add no operation timeout or capacity
+override. Their tests use modeled evidence; no live paired performance result
+is implied.

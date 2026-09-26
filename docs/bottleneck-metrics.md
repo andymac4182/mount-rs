@@ -55,21 +55,52 @@ Exit remains observable after readiness. Elapsed milliseconds use the parent
 monotonic clock. Payloads, arguments, environment values, paths and arbitrary
 error or signal text are excluded.
 
-Cargo runs with `--quiet`, so these records explicitly leave compilation and
-application entry unobserved. A spawn proves that the Cargo child started;
-readiness is a separate boundary. The unchanged startup watchdog is 120 seconds.
-Logging does not add retries, alter readiness parsing or establish why a stall
-occurred.
+The application also writes `mount-rs.http-oracle-startup.v1` records at eight
+fixed boundaries: async main body entry, S3 create start/completion, WebDAV
+create start/completion, WebDAV listen start/completion and readiness publication.
+Their elapsed milliseconds start inside the application. The parent relays only
+validated, bounded records from the existing stderr handler; its original error
+collection remains intact. The application PID is self-reported and can differ
+from the Cargo PID. This is not an OS identity check.
 
-The observer permits at most 16 records, each at most 512 UTF-8 bytes including
-the newline. Clock failures produce a fixed unavailable reason; sink errors or
-partial writes stop publication with no retry. These observations preserve the
-fixture's outcome and child cleanup policy. Pure event controls validate the
-logging contract; an actual hosted fixture run is still needed to observe a
-startup failure with this logger.
+Cargo runs with `--quiet`, so compilation and Tokio initialization before the
+async main body remain unobserved. The launcher uses `scripts/cargo-shared run
+--locked`; CI prebuilds the same example with the same wrapper and default
+profile. This removes a source-visible target mismatch. It does not establish
+that the mismatch caused the earlier Intel timeout. The startup watchdog remains
+120 seconds. Logging adds no retry or change to readiness parsing.
+
+The parent observer, application observer and child-record relay each permit at
+most 16 records of 512 UTF-8 bytes including the newline. The relay rejects
+oversized, malformed and unknown records without forwarding raw stderr. Clock
+failures produce a fixed unavailable reason; sink errors or partial writes stop
+publication with no retry. These observations preserve the fixture's outcome and
+child cleanup policy. Pure controls and Rust helper tests validate the logging
+contract; an actual hosted fixture run is still needed for startup evidence.
 Publication uses a synchronous stderr write: byte and attempt caps do not bound
 sink latency, and logging can delay parent event handling. A failed sink's fixed
 reason remains in the helper receipt; the launcher does not consume that receipt.
+
+## Follow the PGlite fixture startup
+
+Direct execution of `tests/pglite/server.mjs` writes
+`mount-rs.pglite-startup.v1` records. Library imports keep reporting disabled
+before diagnostic clock or sink calls. Fifteen fixed stages locate module body
+entry, the two ordered pinned package imports, configuration, cleanup shim
+installation, engine creation, socket construction/start and readiness
+publication. They use the Node process PID and elapsed monotonic milliseconds
+from the first observed stage. Earlier Node startup remains unobserved.
+
+The logger allows 16 attempts and 512 UTF-8 bytes per record, reserving one
+attempt for observer unavailability. It excludes paths, connection settings,
+credentials and arbitrary errors. Clock and sink failures stop reporting;
+synchronous output has no sink-latency guarantee. The helper's local receipt
+retains publication failures, but the server does not consume it.
+
+The existing readiness line, 30-second Rust helper deadline, process outcome and
+cleanup stay in place. No Cargo process runs inside this Node fixture. A last
+checkpoint can locate a startup stall; it cannot prove its cause or successful
+cleanup. Pure import/operation controls do not start the engine or socket.
 
 ## Follow the S3 provider network test
 

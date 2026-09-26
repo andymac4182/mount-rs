@@ -9,6 +9,9 @@
 use std::io::{self, Read, Write};
 use std::sync::Arc;
 
+#[path = "support/http_fixture_progress.rs"]
+mod http_fixture_progress;
+
 use async_trait::async_trait;
 use mount_rs_core::{Capabilities, DirEntry, FileHandle, FsDriver, MkdirOptions, Stats};
 use mount_rs_memfs::MemoryFs;
@@ -115,7 +118,10 @@ impl FsDriver for FixedMtimeDriver {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut progress = http_fixture_progress::Progress::new();
+    progress.observe(http_fixture_progress::Stage::MainBodyEntered);
     let credentials = Credentials::new(ACCESS_KEY, SECRET_KEY);
+    progress.observe(http_fixture_progress::Stage::S3CreateStarted);
     let s3 = create_s3_server(
         FixedMtimeDriver::new(MemoryFs::empty()),
         S3ServerOptions::default(),
@@ -123,12 +129,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(REGION.to_owned()),
     )
     .await?;
+    progress.observe(http_fixture_progress::Stage::S3CreateCompleted);
 
+    progress.observe(http_fixture_progress::Stage::WebdavCreateStarted);
     let webdav = create_webdav_server(
         Arc::new(FixedMtimeDriver::new(MemoryFs::empty())),
         WebdavServerOptions::default().with_credentials(WEBDAV_USER, WEBDAV_PASSWORD),
     )?;
+    progress.observe(http_fixture_progress::Stage::WebdavCreateCompleted);
+    progress.observe(http_fixture_progress::Stage::WebdavListenStarted);
     webdav.listen().await?;
+    progress.observe(http_fixture_progress::Stage::WebdavListenCompleted);
 
     println!(
         "MOUNT_RS_HTTP_ORACLE_READY {}",
@@ -138,6 +149,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
     );
     io::stdout().flush()?;
+    progress.observe(http_fixture_progress::Stage::ReadyPublished);
 
     // A blocking stdin read is isolated from the Tokio workers. The harness
     // closes the pipe after the differential run, which gives both servers a

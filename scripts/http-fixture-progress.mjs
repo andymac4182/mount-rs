@@ -134,3 +134,123 @@ export function attachHttpFixtureProgress(child, lines, progress) {
   lines.once("line", () => progress.observe("stdout_seen"));
   child.stderr.once("data", () => progress.observe("stderr_seen"));
 }
+
+const CHILD_STAGES = new Set([
+  "main_body_entered", "s3_create_started", "s3_create_completed",
+  "webdav_create_started", "webdav_create_completed", "webdav_listen_started",
+  "webdav_listen_completed", "ready_published", "observer_unavailable",
+]);
+const CHILD_KEYS = new Set([
+  "schema", "pid", "scope", "stage", "sequence", "elapsed_ms",
+  "availability", "reason", "compiler_observation",
+]);
+const CHILD_REASONS = new Set(["clock_invalid", "clock_regressed", "publication_cap"]);
+
+// These are closed child self-reports, not an OS verification of the child PID.
+// Keep raw stderr in the existing launcher collector; relay only fixed records.
+export function createHttpCheckpointRelay({ write = defaultWrite } = {}) {
+  const buffer = Buffer.alloc(MAX_RECORD_BYTES - 1);
+  const seen = new Set();
+  let length = 0;
+  let oversized = false;
+  let available = true;
+  let reason = null;
+  let attempted = 0;
+  let successful = 0;
+  let refused = 0;
+  let selfReportedPid = null;
+  let previousSequence = 0;
+  let previousElapsed = null;
+  let childUnavailable = false;
+
+  function refuse() {
+    refused++;
+  }
+
+  function acceptLine() {
+    let record;
+    try {
+      record = JSON.parse(buffer.toString("utf8", 0, length));
+    } catch {
+      refuse();
+      return;
+    }
+    const validObject = record !== null && typeof record === "object" && !Array.isArray(record);
+    if (!validObject || Object.keys(record).length !== CHILD_KEYS.size || Object.keys(record).some((key) => !CHILD_KEYS.has(key))) {
+      refuse();
+      return;
+    }
+    const validElapsed = Number.isSafeInteger(record.elapsed_ms) && record.elapsed_ms >= 0;
+    const unavailableRecord = record.stage === "observer_unavailable" && record.availability === "unavailable" && CHILD_REASONS.has(record.reason);
+    const observedRecord = record.stage !== "observer_unavailable" && record.availability === "observed" && record.reason === null && validElapsed;
+    if (record.schema !== "mount-rs.http-oracle-startup.v1" || record.scope !== "application_async_main_body" || record.compiler_observation !== "unobserved" ||
+        !Number.isSafeInteger(record.pid) || record.pid <= 0 || record.pid > 0xffff_ffff ||
+        !Number.isSafeInteger(record.sequence) || record.sequence <= previousSequence || record.sequence > MAX_RECORDS ||
+        !CHILD_STAGES.has(record.stage) || seen.has(record.stage) || childUnavailable ||
+        (selfReportedPid !== null && record.pid !== selfReportedPid) ||
+        (!validElapsed && !(unavailableRecord && record.elapsed_ms === null)) ||
+        (previousElapsed !== null && (record.elapsed_ms === null || record.elapsed_ms < previousElapsed)) ||
+        (!unavailableRecord && !observedRecord)) {
+      refuse();
+      return;
+    }
+    const line = `${JSON.stringify(record)}\n`;
+    if (Buffer.byteLength(line, "utf8") > MAX_RECORD_BYTES) {
+      refuse();
+      return;
+    }
+    if (attempted >= MAX_RECORDS) {
+      available = false;
+      reason = "publication_cap";
+      return;
+    }
+    attempted++;
+    try {
+      if (write(line) === false) {
+        available = false;
+        reason = "sink_short_write";
+        return;
+      }
+    } catch {
+      available = false;
+      reason = "sink_failed";
+      return;
+    }
+    successful++;
+    selfReportedPid ??= record.pid;
+    previousSequence = record.sequence;
+    previousElapsed = record.elapsed_ms;
+    childUnavailable = unavailableRecord;
+    seen.add(record.stage);
+  }
+
+  return {
+    push(chunk) {
+      if (!available) return;
+      if (!(chunk instanceof Uint8Array)) {
+        refuse();
+        return;
+      }
+      for (const byte of chunk) {
+        if (byte === 10) {
+          if (oversized) refuse();
+          else if (length > 0) acceptLine();
+          length = 0;
+          oversized = false;
+          if (!available) return;
+        } else if (!oversized) {
+          if (length === buffer.length) {
+            oversized = true;
+            length = 0;
+          } else {
+            buffer[length++] = byte;
+          }
+        }
+      }
+    },
+    receipt: () => Object.freeze({
+      available, reason, attempted_records: attempted, successful_writes: successful,
+      refused_records: refused, self_reported_pid: selfReportedPid,
+    }),
+  };
+}

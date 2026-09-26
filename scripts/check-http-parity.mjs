@@ -25,7 +25,7 @@ import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { once } from "node:events";
 import assert from "node:assert/strict";
-import { createHttpFixtureProgress, attachHttpFixtureProgress } from "./http-fixture-progress.mjs";
+import { createHttpFixtureProgress, attachHttpFixtureProgress, createHttpCheckpointRelay } from "./http-fixture-progress.mjs";
 
 const repo = fileURLToPath(new URL("..", import.meta.url));
 const source = process.env.MOUNTX_SOURCE;
@@ -586,8 +586,8 @@ async function startRust() {
   const progress = createHttpFixtureProgress();
   progress.observe("launch_requested");
   const child = spawn(
-    process.env.CARGO ?? "cargo",
-    ["run", "--quiet", "--example", "http_oracle", "--"],
+    fileURLToPath(new URL("./cargo-shared", import.meta.url)),
+    ["run", "--locked", "--quiet", "--example", "http_oracle", "--"],
     {
       cwd: repo,
       env: { ...process.env, CARGO_TERM_COLOR: "never", RUST_BACKTRACE: "1" },
@@ -596,7 +596,11 @@ async function startRust() {
   );
   const lines = createInterface({ input: child.stdout });
   const errors = [];
-  child.stderr.on("data", (chunk) => errors.push(String(chunk)));
+  const relay = createHttpCheckpointRelay();
+  child.stderr.on("data", (chunk) => {
+    errors.push(String(chunk));
+    relay.push(chunk);
+  });
   attachHttpFixtureProgress(child, lines, progress);
   const ready = await new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
