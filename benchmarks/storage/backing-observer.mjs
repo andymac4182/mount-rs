@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto"
 
 const UINT64_MAX = 18_446_744_073_709_551_615n
-const LABEL_KEYS = new Set(["mount-rs.tidb.run", "mount-rs.foundationdb.run", "com.mount-rs.ozone-test", "com.mount-rs.ozone-test-run"])
-const HARD_CAPS = Object.freeze({ maxContainers: 16, maxRequests: 257, maxBoundaries: 64, maxResponseBytes: 1_048_576, maxDeviceEntries: 128, maxJournalBytes: 8_388_608, requestTimeoutMs: 2000, ownerTimeoutMs: 60_000 })
-const METRICS = ["cpu_usage_ns", "block_bytes", "block_operations"]
+const LABEL_KEYS = new Set(["mount-rs.tidb.run", "mount-rs.foundationdb.run", "com.mount-rs.ozone-test", "com.mount-rs.ozone-test-run", "com.mount-rs.rustfs-test", "com.mount-rs.rustfs-test-run"])
+const MAX_EXPECTED_LABELS = 4
+const HARD_CAPS = Object.freeze({ maxContainers: 16, maxRequests: 257, maxBoundaries: 64, maxResponseBytes: 1_048_576, maxDeviceEntries: 128, maxNetworkInterfaces: 32, maxJournalBytes: 8_388_608, requestTimeoutMs: 2000, ownerTimeoutMs: 60_000 })
+const METRICS = ["cpu_usage_ns", "block_bytes", "block_operations", "network_rx_bytes", "network_tx_bytes"]
 const LIMIT_KEYS = ["Memory", "MemorySwap", "NanoCpus", "CpuQuota", "CpuPeriod", "CpuShares", "PidsLimit"]
 // Exact factory identity, original projections and session ownership stay private.
 const FACTORY_OBSERVERS = new WeakMap()
@@ -61,11 +62,14 @@ function allowlistEntries(allowlist, maxContainers = HARD_CAPS.maxContainers) {
     if (!/^[a-f0-9]{64}$/.test(entry?.cid || "") || cids.has(entry.cid)) fault("allowlist_cid")
     const role = name(entry.role)
     if (roles.has(role)) fault("allowlist_role")
-    const labels = Object.entries(entry.labels || {})
-    if (labels.length < 1 || labels.length > LABEL_KEYS.size) fault("ownership_labels")
+    const expectedLabels = entry.labels || {}
+    const labels = Object.entries(expectedLabels)
+    if (labels.length < 1 || labels.length > MAX_EXPECTED_LABELS) fault("ownership_labels")
     for (const [key, value] of labels) {
       if (!LABEL_KEYS.has(key) || typeof value !== "string" || !/^[a-zA-Z0-9_.:-]{1,160}$/.test(value)) fault("ownership_labels")
     }
+    const rustfs = Object.hasOwn(expectedLabels, "com.mount-rs.rustfs-test") || Object.hasOwn(expectedLabels, "com.mount-rs.rustfs-test-run")
+    if (rustfs && (!Object.hasOwn(expectedLabels, "com.mount-rs.rustfs-test") || !Object.hasOwn(expectedLabels, "com.mount-rs.rustfs-test-run"))) fault("ownership_labels")
     cids.add(entry.cid); roles.add(role)
     return { cid: entry.cid, role, labels: Object.fromEntries(labels.sort(([a], [b]) => a.localeCompare(b))) }
   })
@@ -77,6 +81,7 @@ export function projectInspect(input, expected) {
   if (input?.Id !== expected.cid || !/^sha256:[a-f0-9]{64}$/.test(input.Image || "")) fault("inspect_identity")
   if (input.State?.Running !== true) fault("container_not_running")
   timestamp(input.State.StartedAt)
+  if (Object.hasOwn(expected.labels, "com.mount-rs.rustfs-test") && Object.hasOwn(input.Config?.Labels || {}, "com.mount-rs.rustfs-test-purpose")) fault("rustfs_service_purpose")
   const labels = {}
   for (const [key, value] of Object.entries(expected.labels)) {
     if (input.Config?.Labels?.[key] !== value) fault("ownership_mismatch")
@@ -106,7 +111,24 @@ function deviceCounters(entries, maxEntries) {
   return selected.size ? Object.fromEntries([...selected].sort(([a], [b]) => a.localeCompare(b))) : null
 }
 
-export function projectStats(input, cid, maxEntries = HARD_CAPS.maxDeviceEntries) {
+function networkCounters(input, maximum) {
+  if (!Number.isSafeInteger(maximum) || maximum < 1 || maximum > HARD_CAPS.maxNetworkInterfaces) fault("network_interfaces_cap")
+  if (input === undefined || input === null) return { network_rx_bytes: null, network_tx_bytes: null }
+  if (typeof input !== "object" || Array.isArray(input)) fault("network_shape")
+  const entries = Object.entries(input)
+  if (entries.length > maximum) fault("network_interfaces_cap")
+  if (!entries.length) return { network_rx_bytes: null, network_tx_bytes: null }
+  const rx = [], tx = []
+  for (const [key, value] of entries.sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
+    if (!/^[A-Za-z][A-Za-z0-9_.-]{0,14}$/.test(key) || ["constructor", "prototype"].includes(key)) fault("network_interface_key")
+    if (!value || typeof value !== "object" || Array.isArray(value)) fault("network_shape")
+    rx.push([key, optionalUint(value.rx_bytes)])
+    tx.push([key, optionalUint(value.tx_bytes)])
+  }
+  return { network_rx_bytes: Object.fromEntries(rx), network_tx_bytes: Object.fromEntries(tx) }
+}
+
+export function projectStats(input, cid, maxEntries = HARD_CAPS.maxDeviceEntries, maxNetworkInterfaces = HARD_CAPS.maxNetworkInterfaces) {
   if (input?.id !== cid) fault("stats_identity")
   const cpu = input.cpu_stats || {}
   return {
@@ -119,6 +141,7 @@ export function projectStats(input, cid, maxEntries = HARD_CAPS.maxDeviceEntries
     memory: { usage_bytes: optionalUint(input.memory_stats?.usage), limit_bytes: optionalUint(input.memory_stats?.limit), semantics: "api_gauges; not_cli_cache_adjusted" },
     block_bytes: deviceCounters(input.blkio_stats?.io_service_bytes_recursive, maxEntries),
     block_operations: deviceCounters(input.blkio_stats?.io_serviced_recursive, maxEntries),
+    ...networkCounters(input.networks, maxNetworkInterfaces),
   }
 }
 
@@ -136,10 +159,11 @@ function metricDelta(before, after, metric, elapsed) {
   const first = before[metric], last = after[metric]
   if (!first || !last) fault("metric_unavailable")
   const keys = Object.keys(first)
-  if (JSON.stringify(keys) !== JSON.stringify(Object.keys(last))) fault("device_keys_changed")
-  const devices = Object.fromEntries(keys.map((key) => [key, subtract(first[key], last[key])]))
-  const value = Object.values(devices).reduce((sum, item) => sum + BigInt(item), 0n).toString()
-  return { complete: true, value, devices, rate: { numerator: value, denominator_ns: elapsed, seconds_scale: "1000000000" } }
+  const network = metric === "network_rx_bytes" || metric === "network_tx_bytes"
+  if (JSON.stringify(keys) !== JSON.stringify(Object.keys(last))) fault(network ? "interface_keys_changed" : "device_keys_changed")
+  const items = Object.fromEntries(keys.map((key) => [key, subtract(first[key], last[key])]))
+  const value = Object.values(items).reduce((sum, item) => sum + BigInt(item), 0n).toString()
+  return { complete: true, value, ...(network ? { interfaces: items } : { devices: items }), rate: { numerator: value, denominator_ns: elapsed, seconds_scale: "1000000000" } }
 }
 function indexedSamples(boundary, allowed) {
   const index = new Map()
@@ -185,7 +209,7 @@ export function summarizeInterval(allowlist, before, after, metadata = {}) {
     const partial = containers.reduce((sum, entry) => sum + BigInt(entry.metrics[metric].value ?? "0"), 0n).toString()
     return [metric, { complete: missing.length === 0, total: missing.length ? null : partial, partial_total: partial, missing_members: missing }]
   }))
-  return { schema: "mount-rs.backing-interval.v1", kind: metadata.kind === "idle" ? "idle" : "phase", complete: Object.values(metrics).every((metric) => metric.complete), workload_elapsed_ms: Number.isFinite(metadata.workload_elapsed_ms) ? metadata.workload_elapsed_ms : null, attribution: "descriptive enclosing container accounting; no idle subtraction or physical-device attribution", containers, metrics, endpoints: { before: skew(before), after: skew(after) }, cpu_percentage_aggregate: "unavailable_for_different_windows" }
+  return { schema: "mount-rs.backing-interval.v1", kind: metadata.kind === "idle" ? "idle" : "phase", complete: Object.values(metrics).every((metric) => metric.complete), workload_elapsed_ms: Number.isFinite(metadata.workload_elapsed_ms) ? metadata.workload_elapsed_ms : null, attribution: "descriptive enclosing container accounting; no idle subtraction or physical-device attribution", network_attribution: "container_interface_accounting; client_server_and_virtual_interfaces_may_count_same_traffic_multiple_times; no_physical_link_or_flow_attribution", containers, metrics, endpoints: { before: skew(before), after: skew(after) }, cpu_percentage_aggregate: "unavailable_for_different_windows" }
 }
 
 async function deadlineCall(operation, clock, deadline, controller, parentSignal) {
@@ -328,7 +352,7 @@ export function createBackingObserver({ allowlist, transport, clock = defaultClo
         identities.set(entry.cid, identity)
         lastStats.set(entry.cid, clock.now())
         const sampled = await request(`/v${version}/containers/${entry.cid}/stats?stream=false&one-shot=true`, entry.cid, metadata.signal)
-        const stats = projectStats(sampled.value, entry.cid, limits.maxDeviceEntries)
+        const stats = projectStats(sampled.value, entry.cid, limits.maxDeviceEntries, limits.maxNetworkInterfaces)
         boundary.samples.push({ cid: entry.cid, identity, stats, inspect_body_sha256: inspected.sha256, stats_body_sha256: sampled.sha256, inspect_window: inspected.window, stats_window: sampled.window })
       } catch (error) { issue(error); boundary.complete = false; boundary.issues.push(issueCode(error)) }
     }

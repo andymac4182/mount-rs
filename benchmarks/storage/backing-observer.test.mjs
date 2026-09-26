@@ -744,3 +744,180 @@ for (const method of ["captureBoundary", "beginPhase", "endPhase", "finalize"]) 
     assert.equal(serialized.includes('"capability":'), false)
   })
 }
+
+const withNetwork = (raw, options) => stats(options).replace('"additive_unknown":', `"networks":${raw},"additive_unknown":`)
+const networkSample = (raw, id = cid, second = 0) => ({ cid: id, stats: api().projectStats(api().parseEngineJSON(withNetwork(raw, { id, second })), id) })
+const networkInterval = (before, after, allowlist = [owned]) => api().summarizeInterval(allowlist, { samples: before }, { samples: after })
+
+test("network byte projection and interval preserve exact direction counters", () => {
+  const first = networkSample('{"eth1":{"rx_bytes":0,"tx_bytes":0},"eth0":{"rx_bytes":9007199254740993,"tx_bytes":0}}')
+  const last = networkSample('{"eth0":{"rx_bytes":9007199254740994,"tx_bytes":0},"eth1":{"rx_bytes":0,"tx_bytes":0}}', cid, 1)
+  assert.deepEqual(first.stats.network_rx_bytes, { eth0: "9007199254740993", eth1: "0" })
+  assert.deepEqual(first.stats.network_tx_bytes, { eth0: "0", eth1: "0" })
+  const interval = networkInterval([first], [last])
+  assert.equal(interval.metrics.network_rx_bytes.total, "1")
+  assert.equal(interval.metrics.network_tx_bytes.total, "0")
+  assert.deepEqual(interval.containers[0].metrics.network_rx_bytes.interfaces, { eth0: "1", eth1: "0" })
+  assert.equal(interval.containers[0].metrics.network_rx_bytes.rate.denominator_ns, "1000000000")
+  assert.match(interval.network_attribution, /client_server.*same_traffic_multiple_times/)
+  assert.match(interval.network_attribution, /no_physical_link_or_flow_attribution/)
+})
+
+test("missing network and independent missing directions never become observed zero", () => {
+  const { projectStats, parseEngineJSON } = api()
+  for (const raw of [stats(), withNetwork("null"), withNetwork("{}")]) {
+    const projected = projectStats(parseEngineJSON(raw), cid)
+    assert.equal(projected.network_rx_bytes, null)
+    assert.equal(projected.network_tx_bytes, null)
+    const interval = networkInterval([{ cid, stats: projected }], [networkSample('{"eth0":{"rx_bytes":0,"tx_bytes":0}}', cid, 1)])
+    assert.equal(interval.metrics.network_rx_bytes.total, null)
+    assert.equal(interval.metrics.network_tx_bytes.total, null)
+  }
+  for (const missing of ["", '"rx_bytes":null,']) {
+    const first = networkSample(`{"eth0":{${missing}"tx_bytes":0}}`)
+    const last = networkSample('{"eth0":{"rx_bytes":0,"tx_bytes":0}}', cid, 1)
+    assert.deepEqual(first.stats.network_rx_bytes, { eth0: null })
+    const interval = networkInterval([first], [last])
+    assert.equal(interval.metrics.network_rx_bytes.total, null)
+    assert.equal(interval.containers[0].metrics.network_rx_bytes.issue, "metric_unavailable")
+    assert.equal(interval.metrics.network_tx_bytes.total, "0")
+    assert.equal(interval.metrics.network_tx_bytes.complete, true)
+  }
+})
+
+test("network interface changes and direction resets reject without invalidating other metrics", () => {
+  const first = networkSample('{"eth0":{"rx_bytes":7,"tx_bytes":0}}')
+  for (const raw of ['{"eth1":{"rx_bytes":8,"tx_bytes":0}}', '{"eth0":{"rx_bytes":8,"tx_bytes":0},"eth1":{"rx_bytes":0,"tx_bytes":0}}']) {
+    const interval = networkInterval([first], [networkSample(raw, cid, 1)])
+    assert.equal(interval.metrics.network_rx_bytes.total, null)
+    assert.equal(interval.containers[0].metrics.network_rx_bytes.issue, "interface_keys_changed")
+    assert.equal(interval.containers[0].metrics.network_tx_bytes.issue, "interface_keys_changed")
+    assert.equal(interval.metrics.cpu_usage_ns.complete, true)
+  }
+  const reset = networkInterval([first], [networkSample('{"eth0":{"rx_bytes":6,"tx_bytes":0}}', cid, 1)])
+  assert.equal(reset.containers[0].metrics.network_rx_bytes.issue, "counter_reset")
+  assert.equal(reset.metrics.network_rx_bytes.total, null)
+  assert.equal(reset.metrics.network_tx_bytes.total, "0")
+})
+
+test("network totals retain exact sums beyond uint64 and separate missing CID aggregates", () => {
+  const zero = '{"eth0":{"rx_bytes":0,"tx_bytes":0},"eth1":{"rx_bytes":0,"tx_bytes":0}}'
+  const maximum = '{"eth0":{"rx_bytes":18446744073709551615,"tx_bytes":0},"eth1":{"rx_bytes":18446744073709551615,"tx_bytes":0}}'
+  const first = [networkSample(zero), networkSample(zero, secondCid)]
+  const last = [networkSample(maximum, cid, 1), networkSample(maximum, secondCid, 1)]
+  const exact = networkInterval(first, last, [owned, secondOwned])
+  assert.equal(exact.containers[0].metrics.network_rx_bytes.value, "36893488147419103230")
+  assert.equal(exact.metrics.network_rx_bytes.total, "73786976294838206460")
+  assert.equal(exact.metrics.network_rx_bytes.partial_total, "73786976294838206460")
+  assert.equal(exact.metrics.network_tx_bytes.total, "0")
+  const partial = networkInterval([networkSample('{"eth0":{"rx_bytes":0,"tx_bytes":0}}'), networkSample('{"eth0":{"tx_bytes":0}}', secondCid)], [networkSample('{"eth0":{"rx_bytes":2,"tx_bytes":0}}', cid, 1), networkSample('{"eth0":{"tx_bytes":0}}', secondCid, 1)], [owned, secondOwned])
+  assert.equal(partial.metrics.network_rx_bytes.total, null)
+  assert.equal(partial.metrics.network_rx_bytes.partial_total, "2")
+  assert.deepEqual(partial.metrics.network_rx_bytes.missing_members, [secondCid])
+  assert.equal(partial.metrics.network_tx_bytes.total, "0")
+})
+
+test("network interface count has a hard 32 ceiling and caller limits only lower it", () => {
+  const { projectStats, parseEngineJSON } = api()
+  const interfaces = (count) => JSON.stringify(Object.fromEntries(Array.from({ length: count }, (_, index) => [`eth${index}`, { rx_bytes: 0, tx_bytes: 0 }])))
+  assert.equal(Object.keys(projectStats(parseEngineJSON(withNetwork(interfaces(32))), cid).network_rx_bytes).length, 32)
+  assert.throws(() => projectStats(parseEngineJSON(withNetwork(interfaces(33))), cid), /network_interfaces_cap/)
+  assert.throws(() => projectStats(parseEngineJSON(withNetwork(interfaces(2))), cid, 128, 1), /network_interfaces_cap/)
+  for (const maximum of [0, 33, 1.5]) assert.throws(() => projectStats(parseEngineJSON(stats()), cid, 128, maximum), /network_interfaces_cap/)
+  assert.throws(() => factory(clock(), { request() {} }, [owned], { maxNetworkInterfaces: 33 }), /observer_cap/)
+})
+
+test("unsafe network keys, malformed objects and invalid selected uint64 values reject", () => {
+  const { projectStats, parseEngineJSON } = api()
+  for (const key of ["10.0.0.1", "eth0:1", "../eth0", "eth0 secret", "éth0", "a".repeat(16), "constructor", "prototype", "__proto__"]) {
+    const raw = `{"${key}":{"rx_bytes":0,"tx_bytes":0}}`
+    assert.throws(() => projectStats(parseEngineJSON(withNetwork(raw)), cid), /network_interface_key/)
+  }
+  for (const raw of ['[]', '"network"', '{"eth0":null}', '{"eth0":[]}']) assert.throws(() => projectStats(parseEngineJSON(withNetwork(raw)), cid), /network_shape/)
+  for (const token of ["-1", "1.5", "1e3", "18446744073709551616", '"01"']) {
+    assert.throws(() => projectStats(parseEngineJSON(withNetwork(`{"eth0":{"rx_bytes":${token},"tx_bytes":0}}`)), cid), /invalid_counter/)
+  }
+})
+
+test("network projection drops addresses and additive fields before bounded journal retention", async () => {
+  const { projectStats, parseEngineJSON } = api()
+  const raw = `{"lo":{"rx_bytes":0,"tx_bytes":0,"rx_packets":123,"endpoint_id":"${secret}","address":"${secret}"}}`
+  const projected = projectStats(parseEngineJSON(withNetwork(raw)), cid)
+  assert.deepEqual(projected.network_rx_bytes, { lo: "0" })
+  assert.equal(JSON.stringify(projected).includes(secret), false)
+  assert.equal(JSON.stringify(projected).includes("rx_packets"), false)
+  const fakeClock = clock()
+  const transport = transportFor(fakeClock, (request) => request.path.includes("/stats?") ? { status: 200, body: (async function* () { yield Buffer.from(withNetwork(`{"${secret}":{"rx_bytes":0,"tx_bytes":0}}`)) })() } : undefined)
+  const observer = factory(fakeClock, transport)
+  assert.equal((await observer.captureBoundary({ id: "unsafe-key", kind: "phase" })).complete, false)
+  await observer.finalize(positiveTerminal)
+  assert.ok(observer.receipt().issues.includes("network_interface_key"))
+  assert.equal(JSON.stringify(observer.receipt()).includes(secret), false)
+})
+
+test("factory network observations reach runner evidence without expanding native proof", async () => {
+  const fakeClock = clock()
+  let samples = 0
+  const transport = transportFor(fakeClock, (request) => {
+    if (!request.path.includes("/stats?")) return
+    const raw = withNetwork(`{"eth0":{"rx_bytes":${9007199254740993n + BigInt(samples)},"tx_bytes":null,"address":"${secret}"}}`, { second: Math.floor(fakeClock.now() / 1000) })
+    samples += 1
+    return { status: 200, body: (async function* () { yield Buffer.from(raw) })() }
+  })
+  const result = await runBenchmark(options(), {}, provider({ tick: () => fakeClock.advance(1000) }), { backingObserver: factory(fakeClock, transport), observerClock: fakeClock })
+  const wrapper = result.providers[0].backingObserver
+  const boundary = wrapper.backing_evidence.journal.find((entry) => entry.type === "boundary" && entry.id === "create:begin")
+  assert.deepEqual(boundary.samples[0].stats.network_rx_bytes, { eth0: "9007199254740993" })
+  assert.deepEqual(boundary.samples[0].stats.network_tx_bytes, { eth0: null })
+  assert.equal(boundary.samples[0].identity.cid, cid)
+  assert.equal(boundary.samples[0].stats_window.dispatch_ms, 0)
+  const interval = wrapper.backing_evidence.journal.find((entry) => entry.type === "interval")
+  assert.equal(interval.metrics.network_rx_bytes.total, "1")
+  assert.equal(interval.metrics.network_tx_bytes.total, null)
+  assert.equal(wrapper.terminal.native_quiescent, null)
+  assert.equal(wrapper.terminal.safe_to_continue_pair, false)
+  assert.equal(JSON.stringify(wrapper).includes(secret), false)
+})
+
+test("wide network observations respect existing receipt bounds and lowerable factory cap", async () => {
+  const fakeClock = clock()
+  const raw = JSON.stringify(Object.fromEntries(Array.from({ length: 32 }, (_, index) => [`eth${index}`, { rx_bytes: "18446744073709551615", tx_bytes: "18446744073709551615" }])))
+  const transport = transportFor(fakeClock, (request) => request.path.includes("/stats?") ? { status: 200, body: (async function* () { yield Buffer.from(withNetwork(raw, { second: Math.floor(fakeClock.now() / 1000) })) })() } : undefined)
+  const observer = factory(fakeClock, transport, [owned], { maxJournalBytes: 8192 })
+  await observer.captureBoundary({ id: "network-first", kind: "phase" })
+  fakeClock.advance(1000)
+  await observer.captureBoundary({ id: "network-last", kind: "phase" })
+  await observer.finalize(positiveTerminal)
+  const receipt = observer.receipt()
+  assert.equal(receipt.caps.maxNetworkInterfaces, 32)
+  assert.ok(receipt.dropped_entries > 0)
+  assert.ok(receipt.issues.includes("journal_bytes_cap"))
+  assert.ok(Buffer.byteLength(JSON.stringify(receipt)) <= 8192)
+  assert.equal(receipt.terminal.safe_to_continue_pair, false)
+  const lowered = factory(fakeClock, transport, [owned], { maxNetworkInterfaces: 1 })
+  assert.equal((await lowered.captureBoundary({ id: "lowered", kind: "phase" })).complete, false)
+  assert.ok(lowered.receipt().issues.includes("network_interfaces_cap"))
+})
+
+const rustfsLabels = { "com.mount-rs.rustfs-test": "mount-rs-rustfs-test", "com.mount-rs.rustfs-test-run": "owned-run" }
+const rustfsOwned = { cid, role: "rustfs", labels: rustfsLabels }
+
+test("RustFS direct service ownership projects only its exact expected label pair", () => {
+  const { projectInspect, parseEngineJSON } = api()
+  const projected = projectInspect(parseEngineJSON(inspect(cid, { Config: { Env: [secret], Labels: { ...rustfsLabels, ignored: secret } } })), rustfsOwned)
+  assert.deepEqual(projected.labels, rustfsLabels)
+  assert.equal(projected.cid, cid)
+  assert.equal(projected.role, "rustfs")
+  assert.equal(JSON.stringify(projected).includes(secret), false)
+})
+
+test("RustFS qualification rejects cleanup helpers, missing pairs and ownership mismatches", () => {
+  const { projectInspect, parseEngineJSON } = api()
+  const raw = (labels) => parseEngineJSON(inspect(cid, { Config: { Labels: labels } }))
+  for (const key of Object.keys(rustfsLabels)) assert.throws(() => factory(clock(), { request() {} }, [{ ...rustfsOwned, labels: { [key]: rustfsLabels[key] } }]), /ownership_labels/)
+  for (const purpose of ["cleanup", "other", null]) assert.throws(() => projectInspect(raw({ ...rustfsLabels, "com.mount-rs.rustfs-test-purpose": purpose }), rustfsOwned), /rustfs_service_purpose/)
+  assert.throws(() => projectInspect(raw({ ...rustfsLabels, "com.mount-rs.rustfs-test-run": "different" }), rustfsOwned), /ownership_mismatch/)
+  assert.throws(() => projectInspect(raw({ "com.mount-rs.rustfs-test": "mount-rs-rustfs-test" }), rustfsOwned), /ownership_mismatch/)
+  const fiveLabels = { ...rustfsLabels, "mount-rs.tidb.run": "run", "mount-rs.foundationdb.run": "run", "com.mount-rs.ozone-test": "run" }
+  assert.throws(() => factory(clock(), { request() {} }, [{ ...rustfsOwned, labels: fiveLabels }]), /ownership_labels/)
+})

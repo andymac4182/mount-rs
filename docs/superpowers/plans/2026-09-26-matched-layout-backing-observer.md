@@ -28,7 +28,13 @@ persisted markers, full capacity, cache causality or formal correctness.
 The caller supplies unique full 64-hex CIDs, unique roles and nonempty expected
 ownership labels. Approved label keys are `mount-rs.tidb.run`,
 `mount-rs.foundationdb.run`, `com.mount-rs.ozone-test` and
-`com.mount-rs.ozone-test-run`. A labelled volume/network does not establish
+`com.mount-rs.ozone-test-run`, plus the existing direct RustFS keys
+`com.mount-rs.rustfs-test` and `com.mount-rs.rustfs-test-run`. Expected labels remain
+bounded to four per CID. RustFS qualification requires both keys and rejects a
+`com.mount-rs.rustfs-test-purpose` label before retention, excluding the fixture's
+separate cleanup helper. Exact caller-issued service CID/run values remain required;
+these labels alone do not establish a benchmark's backing endpoint binding.
+A labelled volume/network does not establish
 container ownership; current FDB server creation requires a later explicit seam.
 
 Only GET `/version` and versioned inspect/stats routes for pinned CIDs are
@@ -39,7 +45,7 @@ return a status plus an async iterable of byte chunks; it never receives secrets
 or a socket path from this helper.
 
 Hard ceilings (caller may lower them): 16 containers, 257 requests, 64 boundaries,
-1MiB per response, 128 device entries per metric, 8MiB total receipt,
+1MiB per response, 128 device entries per metric, 32 network interfaces, 8MiB total receipt,
 2s request deadline and 60s owner lifetime. Samples of the same CID are at least
 1s apart; an early endpoint is unavailable instead of delaying the workload.
 This includes immediately adjacent phase boundaries: an end followed by the next
@@ -80,6 +86,32 @@ Observer receipt completeness means bounded identity/sampling/journal/finalizati
 completed; each interval/metric separately declares accounting availability.
 Unavailable cgroup2 operation counters never become observed zero or throughput.
 
+Network selection is only `networks` interface `rx_bytes` and `tx_bytes`, in
+separate maps of exact uint64 decimal inputs. Missing/null/empty networks remains
+unavailable; stable explicit zeros are observed zero. Each direction may be null
+independently. Interface names use a fixed ASCII policy of one letter followed by
+up to 14 letters/digits/underscore/dot/hyphen; reserved names reject. Names are
+sorted without alias normalization. The lowerable hard ceiling is 32 interfaces.
+Unsafe/malformed keys or counters fail with fixed issues; addresses, packets,
+endpoint IDs and additive network fields are discarded before journal retention.
+
+Per-direction intervals require stable interface keys and monotonic known
+counters. Missing values, changed keys and resets invalidate that CID's direction;
+other directions/metrics may remain available. Complete directions retain exact
+per-interface deltas and read-ns ratios. Derived sums use arbitrary precision
+decimal strings beyond uint64 without wrapping; inputs remain bounded uint64.
+Existing CID aggregates retain separate partial totals/null complete totals.
+Network absence affects metric availability separately from bounded receipt
+completeness. There is no per-interface partial interval subtotal or aggregate
+bandwidth across unlike sample windows.
+
+Network attribution is container-interface accounting. Client/server and virtual
+interfaces may count the same traffic more than once; rx and tx remain separate.
+Loopback is descriptive, and names/counters alone do not prove continuous
+interface lifetime after same-name replacement. No physical link/flow identity,
+payload classification, saturation, throughput ranking or bottleneck cause is
+established by these observations.
+
 Retain daemon read timestamps at nanosecond precision and local monotonic/UTC
 dispatch/response endpoints. Endpoint skew and enclosing windows are distinct
 from the unchanged measured workload interval. Idle-labelled endpoints are
@@ -113,7 +145,7 @@ the transport, provider, public hook metadata or serialized evidence. Future idl
 coordination inside a claimed session requires a separately approved protocol.
 
 The final wrapper receipt contains a frozen clone of the bounded selected helper
-receipt: identity/limits, CPU/memory/blkio samples, exact counter deltas, endpoint
+receipt: identity/limits, CPU/memory/blkio and selected network-byte samples, exact counter deltas, endpoint
 time basis, partial/null availability, journal, terminal and observer costs. Its
 serialized bytes must fit the factory's registered ceiling. Size/read failure
 omits the failed body; helper incompleteness remains bounded partial evidence and
@@ -168,8 +200,10 @@ a later explicit lease after independent acceptance.
 
 ## Implementation checkpoint
 
-The explicit-capture suite includes the original 24 adversarial controls plus
-13 factory export/ownership controls. Actual factory-to-runner retention RED
+The accepted base explicit-capture suite includes the original 24 adversarial
+controls plus 13 factory export/ownership controls. The network extension retains
+those exact 37 controls and adds 11 projection/availability/ownership controls,
+with an actual 37-pass/11-fail source-first RED before implementation. Actual factory-to-runner retention RED
 and independent stale/shared/reused/no-op hook REDs precede the export correction.
 The export controls exercise selected CPU/memory/blkio, exact >2^53 observations
 and one-unit deltas, identity/time/hash provenance, missing operation availability,
@@ -187,6 +221,14 @@ metadata, and called diagnostics. They cannot support a no-addon claim; no store
 or backend activity is reconstructed from them. They remain retained unchanged.
 The read-only `historical-loader-audit.md` records this limitation.
 
+Network controls cover exact numeric tokens above 2^53 and one-unit deltas, sums
+beyond uint64, independent null/zero directions, key change/reset, partial CID
+aggregation, cap lowering, unsafe keys/selected counters, dropped additive fields,
+factory-to-runner retention and bounded journals. RustFS controls qualify only
+the direct service label pair and reject cleanup purpose/missing/mismatched labels.
+All transport/counter and terminal inputs are injected; synthetic native metadata
+is not real native proof or real network/physical-flow evidence.
+
 Final guarded GREEN receipts and exact final source identities are frozen under
 `/private/tmp/mount-rs-backing-observer-evidence-20260926` (immutable v1) and
 `/private/tmp/mount-rs-backing-observer-v2-export-evidence-20260926` (narrow export
@@ -198,6 +240,9 @@ force/flavor and NODE_PATH. The suite rejects real `.node` loads before benchmar
 calls, then asserts the binding marker and empty native require cache. No real
 addon, Engine, socket, backing fixture or matched benchmark was executed by the
 final guarded controls. Independent acceptance remains separate.
+The narrow network correction is separately frozen under
+`/private/tmp/mount-rs-backing-observer-network-evidence-20260926`; accepted v2 and
+historical packets remain unchanged. No Engine adapter or real request is included.
 
 Primary semantics: [Docker API versions](https://docs.docker.com/reference/api/engine/),
 [one-shot version history](https://docs.docker.com/reference/api/engine/version-history/),
