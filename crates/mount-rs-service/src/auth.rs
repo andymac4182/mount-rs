@@ -606,7 +606,7 @@ impl crate::server::Authenticator for CatalogAuthenticator {
         )
         .map_err(|_| ())?;
         let claimed_issuer = unverified.get("iss").and_then(Value::as_str).ok_or(())?;
-        let catalog = self.catalog.load_current().await.map_err(|_| ())?;
+        let catalog = self.catalog.load_shared_current().await.map_err(|_| ())?;
         let partition = catalog.partitions.get(partition_id).ok_or(())?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
