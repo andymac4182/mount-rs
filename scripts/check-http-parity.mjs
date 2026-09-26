@@ -25,6 +25,7 @@ import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { once } from "node:events";
 import assert from "node:assert/strict";
+import { createHttpFixtureProgress, attachHttpFixtureProgress } from "./http-fixture-progress.mjs";
 
 const repo = fileURLToPath(new URL("..", import.meta.url));
 const source = process.env.MOUNTX_SOURCE;
@@ -582,6 +583,8 @@ async function fetchS3(base, method, pathAndQuery, options = {}) {
 }
 
 async function startRust() {
+  const progress = createHttpFixtureProgress();
+  progress.observe("launch_requested");
   const child = spawn(
     process.env.CARGO ?? "cargo",
     ["run", "--quiet", "--example", "http_oracle", "--"],
@@ -594,8 +597,12 @@ async function startRust() {
   const lines = createInterface({ input: child.stdout });
   const errors = [];
   child.stderr.on("data", (chunk) => errors.push(String(chunk)));
+  attachHttpFixtureProgress(child, lines, progress);
   const ready = await new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error(`Rust fixture did not start\n${errors.join("")}`)), 120_000);
+    const timeout = setTimeout(() => {
+      progress.observe("watchdog_expired");
+      reject(new Error(`Rust fixture did not start\n${errors.join("")}`));
+    }, 120_000);
     const onExit = (code, signal) => {
       clearTimeout(timeout);
       reject(new Error(`Rust fixture exited ${code ?? signal}\n${errors.join("")}`));
@@ -606,7 +613,9 @@ async function startRust() {
       if (!line.startsWith(prefix)) return;
       clearTimeout(timeout);
       child.off("exit", onExit);
-      resolve(JSON.parse(line.slice(prefix.length)));
+      const value = JSON.parse(line.slice(prefix.length));
+      progress.observe("ready_received");
+      resolve(value);
     });
   });
   return { child, ready, errors, lines };

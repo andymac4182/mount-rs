@@ -22,6 +22,11 @@ export const OBJECT_STORE_LOCAL_MEASUREMENT = {
   latency_max: "cumulative_per_instance; exact_phase_max_unavailable", adapter_compression: "not_used",
   excluded: ["backing_marker_prepare_and_verify", "concurrent_prefix_probes", "qualification_and_preflight", "unregistered_rust_factories_and_mount_r2", "client_internal_work", "cache_key_and_lru_work", "upload_claim_setup"],
 }
+export const RUSTFS_LOCAL_MEASUREMENT = {
+  ...OBJECT_STORE_LOCAL_MEASUREMENT,
+  scope: "live_registered_split_rustfs_block_store_instances",
+  excluded: OBJECT_STORE_LOCAL_MEASUREMENT.excluded.map((name) => name === "unregistered_rust_factories_and_mount_r2" ? "unregistered_rustfs_factories" : name),
+}
 const logicalR2Fields = ["puts", "gets", "deletes", "reconciles", "successes", "errors", "duration_ms_total", "bytes_read", "bytes_written", "conditional_conflicts", "id_collision_exhausted", "retry_exhausted", "cache_hits"]
 export const STORAGE_OPERATION_NAMES = [
   "metadata.load",
@@ -136,6 +141,17 @@ const rawMeasurement = {
   returned_bytes: "successful_body_materialization_before_integrity_validation",
   latency_max: "cumulative_per_instance; exact_phase_max_unavailable", reconcile_listing: "unavailable",
   excluded: ["backing_marker_prepare_and_verify", "concurrent_prefix_probes", "qualification_and_preflight", "unregistered_rust_factories_and_mount_r2", "internal_client_retries"],
+}
+export const RUSTFS_API_MEASUREMENT = {
+  ...rawMeasurement,
+  scope: "live_registered_split_rustfs_block_store_instances",
+  excluded: rawMeasurement.excluded.map((name) => name === "unregistered_rust_factories_and_mount_r2" ? "unregistered_rustfs_factories" : name),
+}
+
+function objectStoreFamily(family) {
+  if (family === "r2") return { name: "R2", api: rawMeasurement, local: OBJECT_STORE_LOCAL_MEASUREMENT }
+  if (family === "rustfs") return { name: "RustFS", api: RUSTFS_API_MEASUREMENT, local: RUSTFS_LOCAL_MEASUREMENT }
+  invalid("object-store diagnostic family unavailable")
 }
 const histogramIntervals = Array.from({ length: 32 }, (_, bucket) => bucket === 0
   ? { lower_inclusive_us: "0", upper_exclusive_us: "1" }
@@ -301,8 +317,8 @@ function validateLocalSnapshot(local) {
   if (integer(local.in_flight, true) !== 0n) invalid("local operation crossed phase boundary")
   validateLocalRows(local.entries)
 }
-export function validateLocalPhaseDiagnostics(local, measurement) {
-  if (!isDeepStrictEqual(measurement, OBJECT_STORE_LOCAL_MEASUREMENT)) invalid("local phase measurement metadata unavailable")
+export function validateLocalPhaseDiagnostics(local, measurement, family = "r2") {
+  if (!isDeepStrictEqual(measurement, objectStoreFamily(family).local)) invalid("local phase measurement metadata unavailable")
   if (!object(local) || local.status !== "observed" || local.complete !== true || local.schema !== localSchema || local.scope !== rawScope) invalid("local phase schema or availability unavailable")
   if (local.saturated_start !== false || local.saturated_end !== false || integer(local.in_flight_start, true) !== 0n || integer(local.in_flight_end, true) !== 0n) invalid("local phase saturation or boundary unavailable")
   validateLocalRows(local.entries, true)
@@ -320,10 +336,11 @@ function localObservation(local) {
         latency_log2_us: Array.from({ length: 32 }, (_, index) => counter(row?.latency_log2_us?.[index])) }
     }) }
 }
-function localDelta(before, after, beforeMeasurement, afterMeasurement, opened) {
+function localDelta(before, after, beforeMeasurement, afterMeasurement, opened, family = "r2") {
   if (!object(after) || !opened && !object(before)) return { status: "unavailable", complete: false, issues: [before === null && after === null ? "local diagnostics disabled" : "local diagnostics unavailable or changed availability"] }
   try {
-    if (!isDeepStrictEqual(beforeMeasurement, OBJECT_STORE_LOCAL_MEASUREMENT) || !isDeepStrictEqual(afterMeasurement, OBJECT_STORE_LOCAL_MEASUREMENT)) invalid("local measurement metadata unavailable")
+    const expected = objectStoreFamily(family).local
+    if (!isDeepStrictEqual(beforeMeasurement, expected) || !isDeepStrictEqual(afterMeasurement, expected)) invalid("local measurement metadata unavailable")
     if (!opened) validateLocalSnapshot(before)
     validateLocalSnapshot(after)
     const old = before ?? { saturated: false, in_flight: "0", entries: OBJECT_STORE_LOCAL_NAMES.map((name) => ({ name, ...Object.fromEntries([...localFields, "latency_max_ns"].map((field) => [field, "0"])), latency_log2_us: Array(32).fill("0") })) }
@@ -336,8 +353,9 @@ function localDelta(before, after, beforeMeasurement, afterMeasurement, opened) 
     return { status: "invalid", complete: false, issues: [error instanceof DiagnosticValidationError ? error.message : "invalid local diagnostic shape"], observations: { before: localObservation(before), after: localObservation(after) } }
   }
 }
-function r2Delta(before, after, beforeLocalMeasurement, afterLocalMeasurement) {
-  if (before?.scope !== "process_live_instances" || after?.scope !== before.scope || before.available === false || after.available === false || before.internal_successful_retries !== "unavailable" || after.internal_successful_retries !== "unavailable") invalid("R2 registry metadata unavailable")
+function objectStoreDelta(before, after, beforeLocalMeasurement, afterLocalMeasurement, family = "r2") {
+  const { name } = objectStoreFamily(family)
+  if (before?.scope !== "process_live_instances" || after?.scope !== before.scope || before.available === false || after.available === false || before.internal_successful_retries !== "unavailable" || after.internal_successful_retries !== "unavailable") invalid(`${name} registry metadata unavailable`)
   const previous = instanceMap(before.instances)
   const current = instanceMap(after.instances)
   for (const entry of [...previous.values(), ...current.values()]) {
@@ -348,7 +366,7 @@ function r2Delta(before, after, beforeLocalMeasurement, afterLocalMeasurement) {
   return { scope: "process_live_instances", instance_ids_start: [...previous.keys()], instance_ids_end: [...current.keys()], instances: after.instances.map((entry) => {
     const old = previous.get(entry.id)
     return { id: entry.id, opened_during_phase: !old, raw_api: rawDelta(old?.raw_api, entry.raw_api),
-      local_work: localDelta(old?.local_work, entry.local_work, beforeLocalMeasurement, afterLocalMeasurement, !old),
+      local_work: localDelta(old?.local_work, entry.local_work, beforeLocalMeasurement, afterLocalMeasurement, !old, family),
       ...Object.fromEntries(logicalR2Fields.map((field) => [field, subtract(entry[field], old?.[field])])) }
   }), missing_instance_ids: missing, complete: missing.length === 0, internal_successful_retries: "unavailable" }
 }
@@ -371,6 +389,20 @@ function sanitizedObservations(before, after) {
     ...Object.fromEntries(fields.map((field) => [field, counter(entry?.[field])])),
     latency_log2_us: array(entry?.latency_log2_us, 32, counter),
   }))
+  const registry = (value) => ({ scope: value?.scope === "process_live_instances" ? "process_live_instances" : "unavailable",
+    available: value?.available !== false && Array.isArray(value?.instances),
+    instances: array(value?.instances, 32, (entry) => ({
+      id: counter(entry?.id), ...Object.fromEntries(logicalR2Fields.map((field) => [field, counter(entry?.[field])])),
+      raw_api: object(entry?.raw_api) ? {
+        schema: entry.raw_api.schema === rawSchema ? rawSchema : "unavailable",
+        scope: entry.raw_api.scope === rawScope ? rawScope : "unavailable",
+        saturated: typeof entry.raw_api.saturated === "boolean" ? entry.raw_api.saturated : "unavailable",
+        in_flight: counter(entry.raw_api.in_flight), pending_claims: counter(entry.raw_api.pending_claims),
+        claims: Object.fromEntries(claimFields.map((field) => [field, counter(entry.raw_api.claims?.[field])])),
+        entries: rows(entry.raw_api.entries, rawNames, [...rawFields, "latency_max_ns"]),
+      } : { unavailable: entry?.raw_api === null ? "null" : "missing" },
+      local_work: localObservation(entry?.local_work),
+    })) })
   const snapshot = (value) => {
     if (!object(value)) return { available: false }
     return {
@@ -387,22 +419,14 @@ function sanitizedObservations(before, after) {
         tidb_coverage: isDeepStrictEqual(value.measurement?.tidb_coverage, TIDB_DIAGNOSTIC_COVERAGE) ? structuredClone(TIDB_DIAGNOSTIC_COVERAGE) : "unavailable",
         r2_api: isDeepStrictEqual(value.measurement?.r2_api, rawMeasurement) ? structuredClone(rawMeasurement) : "unavailable",
         r2_local: isDeepStrictEqual(value.measurement?.r2_local, OBJECT_STORE_LOCAL_MEASUREMENT) ? structuredClone(OBJECT_STORE_LOCAL_MEASUREMENT) : "unavailable",
+        ...(Object.hasOwn(value, "rustfs") ? {
+          rustfs_api: isDeepStrictEqual(value.measurement?.rustfs_api, RUSTFS_API_MEASUREMENT) ? structuredClone(RUSTFS_API_MEASUREMENT) : "unavailable",
+          rustfs_local: isDeepStrictEqual(value.measurement?.rustfs_local, RUSTFS_LOCAL_MEASUREMENT) ? structuredClone(RUSTFS_LOCAL_MEASUREMENT) : "unavailable",
+        } : {}),
         latency_histogram: isDeepStrictEqual(value.measurement?.latency_histogram, { unit: "microseconds", intervals: histogramIntervals }) ? { unit: "microseconds", intervals: histogramIntervals } : "unavailable" },
       storage: { in_flight: counter(value.storage?.in_flight), entries: rows(value.storage?.entries, storageNames, ["calls", "success", "error", "cancelled", "bytes", "returned_rows", "returned_row_observations", "in_flight", "elapsed_ns"]) },
-      r2: { scope: value.r2?.scope === "process_live_instances" ? "process_live_instances" : "unavailable",
-        available: value.r2?.available !== false && Array.isArray(value.r2?.instances),
-        instances: array(value.r2?.instances, 32, (entry) => ({
-          id: counter(entry?.id), ...Object.fromEntries(logicalR2Fields.map((field) => [field, counter(entry?.[field])])),
-          raw_api: object(entry?.raw_api) ? {
-            schema: entry.raw_api.schema === rawSchema ? rawSchema : "unavailable",
-            scope: entry.raw_api.scope === rawScope ? rawScope : "unavailable",
-            saturated: typeof entry.raw_api.saturated === "boolean" ? entry.raw_api.saturated : "unavailable",
-            in_flight: counter(entry.raw_api.in_flight), pending_claims: counter(entry.raw_api.pending_claims),
-            claims: Object.fromEntries(claimFields.map((field) => [field, counter(entry.raw_api.claims?.[field])])),
-            entries: rows(entry.raw_api.entries, rawNames, [...rawFields, "latency_max_ns"]),
-          } : { unavailable: entry?.raw_api === null ? "null" : "missing" },
-          local_work: localObservation(entry?.local_work),
-        })) },
+      r2: registry(value.r2),
+      ...(Object.hasOwn(value, "rustfs") ? { rustfs: registry(value.rustfs) } : {}),
     }
   }
   const observations = { before: snapshot(before), after: snapshot(after) }
@@ -425,7 +449,7 @@ export function deltaNativeSnapshots(before, after) {
   try {
     if (before.schema_version !== NATIVE_DIAGNOSTICS_SCHEMA || after.schema_version !== before.schema_version || before.enabled !== true || after.enabled !== true) invalid("diagnostic version or enabled state changed")
     if (before.scope !== "process" || after.scope !== before.scope || before.quiescent_snapshot_required !== true || after.quiescent_snapshot_required !== true || before.elapsed_semantics !== "inclusive_wall_nanoseconds" || after.elapsed_semantics !== before.elapsed_semantics) invalid("native diagnostic scope changed")
-    const withoutLocal = (measurement) => object(measurement) ? Object.fromEntries(Object.entries(measurement).filter(([name]) => name !== "r2_local")) : measurement
+    const withoutLocal = (measurement) => object(measurement) ? Object.fromEntries(Object.entries(measurement).filter(([name]) => !["r2_local", "rustfs_local"].includes(name))) : measurement
     if (!before.measurement || !isDeepStrictEqual(withoutLocal(before.measurement), withoutLocal(after.measurement)) ||
         !isDeepStrictEqual(after.measurement.latency_histogram, { unit: "microseconds", intervals: histogramIntervals }) ||
         after.measurement.storage_calls !== STORAGE_CALL_SEMANTICS ||
@@ -462,7 +486,12 @@ export function deltaNativeSnapshots(before, after) {
     validateStorageRows(storage.entries, true)
     const profile = { entries: entriesDelta(before.profile.entries, after.profile.entries, "name", ["calls", "elapsed_ns", "units"]) }
     const sqlite = connectionDelta(before.sqlite.connections, after.sqlite.connections)
-    const r2 = r2Delta(before.r2, after.r2, before.measurement.r2_local, after.measurement.r2_local)
+    const r2 = objectStoreDelta(before.r2, after.r2, before.measurement.r2_local, after.measurement.r2_local)
+    let rustfs
+    if (Object.hasOwn(before, "rustfs") || Object.hasOwn(after, "rustfs")) {
+      if (after.measurement.rustfs !== "live_store_logical_calls_and_cache_hits; not_http_attempts" || !isDeepStrictEqual(after.measurement.rustfs_api, RUSTFS_API_MEASUREMENT)) invalid("RustFS measurement metadata changed")
+      rustfs = objectStoreDelta(before.rustfs, after.rustfs, before.measurement.rustfs_local, after.measurement.rustfs_local, "rustfs")
+    }
     const issues = []
     if (typeof storage.in_flight_start !== "string" || typeof storage.in_flight_end !== "string" ||
         !decimal.test(storage.in_flight_start) || !decimal.test(storage.in_flight_end)) invalid("invalid in-flight gauge")
@@ -470,19 +499,24 @@ export function deltaNativeSnapshots(before, after) {
     if (storage.entries.some((entry) => integer(entry.in_flight_start) !== 0n || integer(entry.in_flight_end) !== 0n)) issues.push("instrumented storage row crossed phase boundary")
     if (!sqlite.complete) issues.push("SQLite connection closed during phase")
     if (!r2.complete) issues.push("R2 instance closed during phase")
+    if (rustfs && !rustfs.complete) issues.push("RustFS instance closed during phase")
     const result = { schema_version: NATIVE_DIAGNOSTICS_SCHEMA, complete: issues.length === 0, issues,
       measurement: { ...Object.fromEntries(["storage_calls", "storage_bytes", "storage_rows", "storage_operations", "storage_families", "storage_instrumented_operations", "tidb_coverage", "storage_duration", "latency_histogram", "forwarding_boxes", "profile", "sqlite", "r2", "r2_api", "unavailable"].map((field) => [field, after.measurement[field]])),
-        r2_local: isDeepStrictEqual(after.measurement.r2_local, OBJECT_STORE_LOCAL_MEASUREMENT) ? structuredClone(OBJECT_STORE_LOCAL_MEASUREMENT) : "unavailable" },
+        r2_local: isDeepStrictEqual(after.measurement.r2_local, OBJECT_STORE_LOCAL_MEASUREMENT) ? structuredClone(OBJECT_STORE_LOCAL_MEASUREMENT) : "unavailable",
+        ...(rustfs ? { rustfs: after.measurement.rustfs, rustfs_api: structuredClone(RUSTFS_API_MEASUREMENT),
+          rustfs_local: isDeepStrictEqual(after.measurement.rustfs_local, RUSTFS_LOCAL_MEASUREMENT) ? structuredClone(RUSTFS_LOCAL_MEASUREMENT) : "unavailable" } : {}) },
       backend_waits: after.backend_waits, http_attempts: after.http_attempts,
-      physical_device_iops: after.physical_device_iops, storage, profile, sqlite, r2 }
+      physical_device_iops: after.physical_device_iops, storage, profile, sqlite, r2, ...(rustfs ? { rustfs } : {}) }
     return retainIncompleteEvidence(result, before, after)
   } catch (error) { return { complete: false, issues: [error instanceof DiagnosticValidationError ? error.message : "invalid native diagnostic shape"], observations: sanitizedObservations(before, after) } }
 }
 
 // The artifact gate validates processed evidence independently of complete=true.
-export function validateRawPhaseDiagnostics(phase) {
+export function validateRawPhaseDiagnostics(phase, family = "r2") {
+  const { name, api } = objectStoreFamily(family)
   if (!object(phase) || phase.quiescent !== true || !object(phase.native)) invalid("workload diagnostics unavailable or not quiescent")
   const native = phase.native
+  if (family === "rustfs" && native.measurement?.rustfs !== "live_store_logical_calls_and_cache_hits; not_http_attempts") invalid("workload RustFS logical measurement metadata changed")
   if (native.schema_version !== NATIVE_DIAGNOSTICS_SCHEMA || native.complete !== true || !Array.isArray(native.issues) || native.issues.length !== 0) invalid("workload native diagnostics incomplete")
   if (integer(native.storage?.in_flight_start) !== 0n || integer(native.storage?.in_flight_end) !== 0n) invalid("workload global storage operation pending")
   validateStorageRows(native.storage?.entries, true)
@@ -490,18 +524,18 @@ export function validateRawPhaseDiagnostics(phase) {
       !isDeepStrictEqual(native.measurement?.storage_operations, storageNames) || !isDeepStrictEqual(native.measurement?.storage_families, STORAGE_OPERATION_FAMILIES) ||
       !isDeepStrictEqual(native.measurement?.storage_instrumented_operations, STORAGE_INSTRUMENTED_OPERATION_NAMES) ||
       !isDeepStrictEqual(native.measurement?.tidb_coverage, TIDB_DIAGNOSTIC_COVERAGE)) invalid("workload storage measurement metadata changed")
-  if (!isDeepStrictEqual(native.measurement?.r2_api, rawMeasurement) || !isDeepStrictEqual(native.measurement?.latency_histogram, { unit: "microseconds", intervals: histogramIntervals })) invalid("workload raw measurement metadata changed")
-  const r2 = native.r2
-  if (!object(r2) || r2.scope !== "process_live_instances" || r2.complete !== true || r2.internal_successful_retries !== "unavailable" || !Array.isArray(r2.missing_instance_ids) || r2.missing_instance_ids.length !== 0) invalid("workload R2 registry incomplete")
+  if (!isDeepStrictEqual(native.measurement?.[`${family}_api`], api) || !isDeepStrictEqual(native.measurement?.latency_histogram, { unit: "microseconds", intervals: histogramIntervals })) invalid("workload raw measurement metadata changed")
+  const r2 = native[family]
+  if (!object(r2) || r2.scope !== "process_live_instances" || r2.complete !== true || r2.internal_successful_retries !== "unavailable" || !Array.isArray(r2.missing_instance_ids) || r2.missing_instance_ids.length !== 0) invalid(`workload ${name} registry incomplete`)
   const instances = instanceMap(r2.instances)
-  if (instances.size === 0) invalid("workload R2 registry empty")
+  if (instances.size === 0) invalid(`workload ${name} registry empty`)
   const expectedIds = [...instances.keys()]
   for (const ids of [r2.instance_ids_start, r2.instance_ids_end]) {
-    if (!Array.isArray(ids) || ids.length !== instances.size || new Set(ids).size !== ids.length || !ids.every((id) => expectedIds.includes(id))) invalid("workload R2 identities changed")
+    if (!Array.isArray(ids) || ids.length !== instances.size || new Set(ids).size !== ids.length || !ids.every((id) => expectedIds.includes(id))) invalid(`workload ${name} identities changed`)
     ids.forEach((id) => integer(id, true))
   }
   for (const instance of instances.values()) {
-    if (instance.opened_during_phase !== false) invalid("workload R2 instance opened during phase")
+    if (instance.opened_during_phase !== false) invalid(`workload ${name} instance opened during phase`)
     for (const field of logicalR2Fields) integer(instance[field])
     const raw = instance.raw_api
     if (!object(raw) || raw.schema !== rawSchema || raw.scope !== rawScope || raw.saturated_start !== false || raw.saturated_end !== false) invalid("workload raw API schema or saturation unavailable")
@@ -531,9 +565,11 @@ export function takePhaseSnapshot(nativeSnapshot, samplers = {
 export function finishPhase(name, before, after, quiescent = true) {
   const delta = before.native && after.native ? deltaNativeSnapshots(before.native, after.native) : { complete: false, issues: ["native diagnostics unavailable"] }
   if (!quiescent) { delta.complete = false; delta.issues.push("native operations crossed phase boundary") }
-  if (name.startsWith("workload-") && delta.r2?.instances.some((instance) => instance.opened_during_phase)) {
-    delta.complete = false
-    delta.issues.push("R2 instance opened during workload phase")
+  for (const family of ["r2", "rustfs"]) {
+    if (name.startsWith("workload-") && delta[family]?.instances.some((instance) => instance.opened_during_phase)) {
+      delta.complete = false
+      delta.issues.push(`${objectStoreFamily(family).name} instance opened during workload phase`)
+    }
   }
   retainIncompleteEvidence(delta, before.native, after.native)
   const cpu = { user_us: String(after.cpuStart.user - before.cpuEnd.user), system_us: String(after.cpuStart.system - before.cpuEnd.system) }
@@ -553,14 +589,19 @@ export function logPhaseSummary(phase) {
     const rows = entries.filter((entry) => semantics.operations.includes(entry.name))
     return [name, { ...coverage, ...Object.fromEntries(["calls", "bytes", "error", "cancelled", "elapsed_ns", "returned_rows", "returned_row_observations"].map((field) => [field, rows.reduce((sum, entry) => sum + BigInt(entry[field]), 0n).toString()])) }]
   }))
-  const instances = Array.isArray(phase.native.r2?.instances) ? phase.native.r2.instances : []
-  const observedLocal = instances.flatMap((instance) => {
-    try { return [validateLocalPhaseDiagnostics(instance.local_work, phase.native.measurement?.r2_local)] } catch { return [] }
-  })
-  const localWork = { status: observedLocal.length ? observedLocal.length === instances.length ? "observed" : "partial" : "unavailable",
-    observed_instances: observedLocal.length, unavailable_instances: instances.length - observedLocal.length,
-    scope: "inclusive_local_wall_time; concurrent_spans_overlap; copy_bytes_are_not_network_bytes; not_cpu_or_device_iops" }
-  if (observedLocal.length) localWork.entries = OBJECT_STORE_LOCAL_NAMES.map((name, index) => ({ name,
-    ...Object.fromEntries(localFields.map((field) => [field, observedLocal.reduce((sum, local) => sum + BigInt(local.entries[index][field]), 0n).toString()])) }))
-  process.stderr.write(`MOUNT_RS_STORAGE_PHASE ${JSON.stringify({ name: phase.name, complete: phase.native.complete, elapsed_ms: phase.elapsed_ms, families, local_work: localWork, scope: "inclusive_instrumented_operations; families_overlap; bytes_only_known_payload; rows_only_known_observations; not_application_or_device_iops" })}\n`)
+  const localSummary = (family) => {
+    const instances = Array.isArray(phase.native[family]?.instances) ? phase.native[family].instances : []
+    const observedLocal = instances.flatMap((instance) => {
+      try { return [validateLocalPhaseDiagnostics(instance.local_work, phase.native.measurement?.[`${family}_local`], family)] } catch { return [] }
+    })
+    const summary = { status: observedLocal.length ? observedLocal.length === instances.length ? "observed" : "partial" : "unavailable",
+      observed_instances: observedLocal.length, unavailable_instances: instances.length - observedLocal.length,
+      scope: "inclusive_local_wall_time; concurrent_spans_overlap; copy_bytes_are_not_network_bytes; not_cpu_or_device_iops" }
+    if (observedLocal.length) summary.entries = OBJECT_STORE_LOCAL_NAMES.map((name, index) => ({ name,
+      ...Object.fromEntries(localFields.map((field) => [field, observedLocal.reduce((sum, local) => sum + BigInt(local.entries[index][field]), 0n).toString()])) }))
+    return summary
+  }
+  process.stderr.write(`MOUNT_RS_STORAGE_PHASE ${JSON.stringify({ name: phase.name, complete: phase.native.complete, elapsed_ms: phase.elapsed_ms, families,
+    local_work: localSummary("r2"), ...(Object.hasOwn(phase.native, "rustfs") ? { rustfs_local_work: localSummary("rustfs") } : {}),
+    scope: "inclusive_instrumented_operations; families_overlap; bytes_only_known_payload; rows_only_known_observations; not_application_or_device_iops" })}\n`)
 }

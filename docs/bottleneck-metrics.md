@@ -29,6 +29,48 @@ decimal strings for counters. The closed row registry and the instrumented-row
 coverage are separate: reserving a row does not prove that a provider records it.
 The object-store API sub-schema remains `mount-rs.object-store-api.v1`.
 
+Registered split R2 and RustFS block stores have separate `r2` and `rustfs`
+families. Each exposes logical calls/cache hits, ten raw adapter rows, upload
+leader/follower claims and seven local work rows. Measurement fields identify
+the corresponding provider scope. Equal instance IDs in different families do
+not identify the same store. Weak registrations retire after the last handle
+drops; an instance that disappears across a phase leaves that phase incomplete.
+Marker verification and qualification probes remain outside these blob banks.
+
+The benchmark retains RustFS deltas and emits `rustfs_local_work` separately in
+its existing `MOUNT_RS_STORAGE_PHASE` summaries. A required raw workload proof
+selects the explicit `rustfs` family and rejects an absent or empty registry.
+Older observations without that family do not establish zero RustFS traffic.
+This export reuses the existing recorders; constructor registration and JSON
+publication can allocate. It adds no new per-operation recording sites.
+
+## Follow the HTTP parity fixture startup
+
+`scripts/check-http-parity.mjs` emits JSON records with schema
+`mount-rs.http-fixture-progress.v1`. Seven parent-observed events distinguish
+launch requested, Cargo child spawned, first complete stdout line or stderr
+chunk, valid
+readiness received, the existing watchdog expired and the Cargo child exited.
+Exit remains observable after readiness. Elapsed milliseconds use the parent
+monotonic clock. Payloads, arguments, environment values, paths and arbitrary
+error or signal text are excluded.
+
+Cargo runs with `--quiet`, so these records explicitly leave compilation and
+application entry unobserved. A spawn proves that the Cargo child started;
+readiness is a separate boundary. The unchanged startup watchdog is 120 seconds.
+Logging does not add retries, alter readiness parsing or establish why a stall
+occurred.
+
+The observer permits at most 16 records, each at most 512 UTF-8 bytes including
+the newline. Clock failures produce a fixed unavailable reason; sink errors or
+partial writes stop publication with no retry. These observations preserve the
+fixture's outcome and child cleanup policy. Pure event controls validate the
+logging contract; an actual hosted fixture run is still needed to observe a
+startup failure with this logger.
+Publication uses a synchronous stderr write: byte and attempt caps do not bound
+sink latency, and logging can delay parent event handling. A failed sink's fixed
+reason remains in the helper receipt; the launcher does not consume that receipt.
+
 ## Follow the S3 provider network test
 
 The existing N-API S3 NodeFs/SQLite network concurrency test emits

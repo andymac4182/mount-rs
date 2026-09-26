@@ -86,6 +86,16 @@ struct R2DiagnosticEntry {
 static R2_DIAGNOSTICS: OnceLock<Mutex<Vec<R2DiagnosticEntry>>> = OnceLock::new();
 static NEXT_R2_DIAGNOSTIC_ID: AtomicU64 = AtomicU64::new(1);
 
+struct RustFsDiagnosticEntry {
+    id: u64,
+    store: Weak<RustFsBlockStore>,
+}
+static RUSTFS_DIAGNOSTICS: OnceLock<Mutex<Vec<RustFsDiagnosticEntry>>> = OnceLock::new();
+static NEXT_RUSTFS_DIAGNOSTIC_ID: AtomicU64 = AtomicU64::new(1);
+
+// Both providers re-export the same immutable object-store block stats type.
+type ObjectStoreDiagnosticStats = mount_rs_r2::R2BlockStoreStats;
+
 fn r2_diagnostics() -> Value {
     let Some(registry) = R2_DIAGNOSTICS.get() else {
         return json!({"scope":"process_live_instances","instances":[],"internal_successful_retries":"unavailable"});
@@ -98,13 +108,31 @@ fn r2_diagnostics() -> Value {
         let Some(store) = entry.store.upgrade() else {
             return false;
         };
-        instances.push(r2_instance_diagnostics(entry.id, store.stats()));
+        instances.push(object_store_instance_diagnostics(entry.id, store.stats()));
         true
     });
     json!({"scope":"process_live_instances","instances":instances,"internal_successful_retries":"unavailable"})
 }
 
-fn r2_instance_diagnostics(id: u64, stats: mount_rs_r2::R2BlockStoreStats) -> Value {
+fn rustfs_diagnostics() -> Value {
+    let Some(registry) = RUSTFS_DIAGNOSTICS.get() else {
+        return json!({"scope":"process_live_instances","instances":[],"internal_successful_retries":"unavailable"});
+    };
+    let Ok(mut entries) = registry.lock() else {
+        return json!({"scope":"process_live_instances","available":false,"reason":"registry_unavailable"});
+    };
+    let mut instances = Vec::new();
+    entries.retain(|entry| {
+        let Some(store) = entry.store.upgrade() else {
+            return false;
+        };
+        instances.push(object_store_instance_diagnostics(entry.id, store.stats()));
+        true
+    });
+    json!({"scope":"process_live_instances","instances":instances,"internal_successful_retries":"unavailable"})
+}
+
+fn object_store_instance_diagnostics(id: u64, stats: ObjectStoreDiagnosticStats) -> Value {
     json!({"id":id,"puts":stats.puts,"gets":stats.gets,
     "deletes":stats.deletes,"reconciles":stats.reconciles,
     "successes":stats.successes,"errors":stats.errors,
@@ -148,6 +176,33 @@ fn r2_local_measurement() -> Value {
         "latency_max":"cumulative_per_instance; exact_phase_max_unavailable",
         "adapter_compression":"not_used",
         "excluded":["backing_marker_prepare_and_verify","concurrent_prefix_probes","qualification_and_preflight","unregistered_rust_factories_and_mount_r2","client_internal_work","cache_key_and_lru_work","upload_claim_setup"]
+    })
+}
+
+fn rustfs_local_measurement() -> Value {
+    json!({
+        "schema":"mount-rs.object-store-local.v1","scope":"live_registered_split_rustfs_block_store_instances",
+        "calls":"fixed_local_adapter_work_invocations; not_backend_requests_or_allocations",
+        "duration":"inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap",
+        "input_bytes":"entered_digest_encoding_and_copy_input; waits_zero",
+        "output_bytes":"completed_digest_32_id_65_and_actual_copy_bytes; waits_zero",
+        "cache_lock_scope":"mutex_acquisition_including_wait; excludes_lock_hold_and_lru_work",
+        "latency_max":"cumulative_per_instance; exact_phase_max_unavailable",
+        "adapter_compression":"not_used",
+        "excluded":["backing_marker_prepare_and_verify","concurrent_prefix_probes","qualification_and_preflight","unregistered_rustfs_factories","client_internal_work","cache_key_and_lru_work","upload_claim_setup"]
+    })
+}
+
+fn rustfs_api_measurement() -> Value {
+    json!({
+        "schema":"mount-rs.object-store-api.v1","scope":"live_registered_split_rustfs_block_store_instances",
+        "calls":"object_store_adapter_method_invocations; not_http_attempts_or_internal_retries",
+        "duration":"inclusive_wall_nanoseconds_at_invoked_adapter_await; excludes_argument_preparation",
+        "upload_bytes":"attempted=submitted_payload; confirmed=put_opts_ok_only",
+        "returned_bytes":"successful_body_materialization_before_integrity_validation",
+        "latency_max":"cumulative_per_instance; exact_phase_max_unavailable",
+        "reconcile_listing":"unavailable",
+        "excluded":["backing_marker_prepare_and_verify","concurrent_prefix_probes","qualification_and_preflight","unregistered_rustfs_factories","internal_client_retries"]
     })
 }
 
@@ -256,6 +311,7 @@ pub fn storage_diagnostics() -> String {
         "profile":profile::snapshot(),
         "sqlite":sqlite,
         "r2":r2_diagnostics(),
+        "rustfs":rustfs_diagnostics(),
         "backend_waits":{"pglite_client_lock":"instrumented","tidb_pool":"instrumented_inclusive_checkout_including_lazy_connect_and_session_configuration"},
         "http_attempts":"unavailable",
         "physical_device_iops":"unavailable",
@@ -295,6 +351,9 @@ pub fn storage_diagnostics() -> String {
                 "excluded":["backing_marker_prepare_and_verify","concurrent_prefix_probes","qualification_and_preflight","unregistered_rust_factories_and_mount_r2","internal_client_retries"]
             },
             "r2_local":r2_local_measurement(),
+            "rustfs":"live_store_logical_calls_and_cache_hits; not_http_attempts",
+            "rustfs_api":rustfs_api_measurement(),
+            "rustfs_local":rustfs_local_measurement(),
             "unavailable":{
                 "http_attempts":"unavailable",
                 "internal_successful_retries":"unavailable",
@@ -3194,7 +3253,17 @@ async fn build_block_store(
             let blocks =
                 RustFsBlockStore::from_config(&config, prefix, options.durable.unwrap_or(false))
                     .map_err(to_js_error)?;
-            Ok((Arc::new(blocks), None))
+            let blocks = Arc::new(blocks);
+            if storage::enabled()
+                && let Ok(mut entries) = RUSTFS_DIAGNOSTICS.get_or_init(Mutex::default).lock()
+            {
+                entries.retain(|entry| entry.store.strong_count() != 0);
+                entries.push(RustFsDiagnosticEntry {
+                    id: NEXT_RUSTFS_DIAGNOSTIC_ID.fetch_add(1, Ordering::Relaxed),
+                    store: Arc::downgrade(&blocks),
+                });
+            }
+            Ok((blocks, None))
         }
         other => Err(config_error(format!("unknown block backend: {other}"))),
     }
@@ -6620,7 +6689,7 @@ mod tests {
         local.entries[0].input_bytes = u64::MAX;
         local.entries[0].output_bytes = 9_007_199_254_740_993;
         local.entries[0].latency_log2_us[31] = u64::MAX;
-        let mut actual_instance = r2_instance_diagnostics(u64::MAX, stats);
+        let mut actual_instance = object_store_instance_diagnostics(u64::MAX, stats);
         stringify_counters(&mut actual_instance);
         assert_eq!(actual_instance["id"], "18446744073709551615");
         assert_eq!(
@@ -6681,11 +6750,348 @@ mod tests {
             true,
         )
         .unwrap();
-        let actual_instance = r2_instance_diagnostics(1, unregistered.stats());
+        let actual_instance = object_store_instance_diagnostics(1, unregistered.stats());
         assert_eq!(actual_instance["raw_api"], Value::Null);
         assert_eq!(actual_instance["local_work"], Value::Null);
         eprintln!(
             "NATIVE_LOCAL_DISABLED_CONTROL registered_instances=0 raw_api=null local_work=null service_calls=0"
+        );
+    }
+
+    fn inert_diagnostic_store_options(kind: &str, prefix: &str) -> JsChunkedStoreOptions {
+        JsChunkedStoreOptions {
+            kind: kind.to_owned(),
+            uri: None,
+            key: Some(prefix.to_owned()),
+            durable: None,
+            lease_authority: None,
+            authority_prefix: None,
+            endpoint: Some("http://127.0.0.1:9878".to_owned()),
+            bucket: Some("private-rustfs-diagnostic-bucket".to_owned()),
+            region: (kind == "rustfs").then(|| "private-diagnostic-region".to_owned()),
+            access_key_id: Some("private-rustfs-diagnostic-key".to_owned()),
+            secret_access_key: Some("private-rustfs-diagnostic-secret".to_owned()),
+        }
+    }
+
+    fn assert_zero_object_store_diagnostic_instance(instance: &Value) {
+        assert!(instance["id"].as_str().unwrap().parse::<u64>().unwrap() > 0);
+        for field in [
+            "puts",
+            "gets",
+            "deletes",
+            "reconciles",
+            "successes",
+            "errors",
+            "duration_ms_total",
+            "duration_ms_max",
+            "bytes_read",
+            "bytes_written",
+            "conditional_conflicts",
+            "id_collision_exhausted",
+            "retry_exhausted",
+            "cache_hits",
+        ] {
+            assert_eq!(instance[field], "0", "initial logical {field}");
+        }
+        let raw = &instance["raw_api"];
+        assert_eq!(raw["schema"], "mount-rs.object-store-api.v1");
+        assert_eq!(raw["scope"], "one_object_store_block_store_instance");
+        assert_eq!(raw["saturated"], false);
+        assert_eq!(raw["in_flight"], "0");
+        assert_eq!(raw["pending_claims"], "0");
+        let claims = raw["claims"].as_object().unwrap();
+        assert_eq!(claims.len(), 8);
+        for field in [
+            "leader_claims",
+            "leader_success",
+            "leader_error",
+            "leader_cancelled",
+            "follower_claims",
+            "follower_success",
+            "follower_error",
+            "follower_cancelled",
+        ] {
+            assert_eq!(claims[field], "0");
+        }
+        let rows = raw["entries"].as_array().unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "put_opts.block_create",
+                "get.block_read",
+                "body_read.block_read",
+                "get.conflict_verify",
+                "body_read.conflict_verify",
+                "get.migration",
+                "body_read.migration",
+                "head.direct_delete",
+                "delete.direct",
+                "delete.reconcile",
+            ]
+        );
+        for row in rows {
+            for field in [
+                "calls",
+                "success",
+                "error",
+                "cancelled",
+                "elapsed_ns",
+                "latency_max_ns",
+                "attempted_bytes",
+                "confirmed_bytes",
+                "returned_bytes",
+            ] {
+                assert_eq!(row[field], "0");
+            }
+            assert_eq!(row["latency_log2_us"], json!(vec!["0"; 32]));
+        }
+        let local = &instance["local_work"];
+        assert_eq!(local["schema"], "mount-rs.object-store-local.v1");
+        assert_eq!(local["scope"], "one_object_store_block_store_instance");
+        assert_eq!(local["saturated"], false);
+        assert_eq!(local["in_flight"], "0");
+        let rows = local["entries"].as_array().unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "sha256.digest",
+                "block_id.encode",
+                "copy.upload_payload",
+                "copy.cache_insert",
+                "copy.return_vec",
+                "cache.lock_acquire",
+                "put.follower_wait",
+            ]
+        );
+        for row in rows {
+            for field in [
+                "calls",
+                "success",
+                "error",
+                "cancelled",
+                "elapsed_ns",
+                "latency_max_ns",
+                "input_bytes",
+                "output_bytes",
+            ] {
+                assert_eq!(row[field], "0");
+            }
+            assert_eq!(row["latency_log2_us"], json!(vec!["0"; 32]));
+        }
+    }
+
+    #[test]
+    #[ignore = "run isolated with MOUNT_RS_PROFILE_IO=1 and --ignored --exact"]
+    fn live_rustfs_diagnostics_register_export_and_retire_without_backend_io() {
+        assert!(storage::enabled(), "run with MOUNT_RS_PROFILE_IO=1");
+        let options = inert_diagnostic_store_options("rustfs", "private-rustfs-diagnostic-prefix");
+        let (blocks, _) = block_on(build_block_store(&options))
+            .expect("RustFS construction does not invoke a backend method");
+        let exported = storage_diagnostics();
+        let snapshot: Value = serde_json::from_str(&exported).unwrap();
+        assert!(
+            snapshot["rustfs"].is_object(),
+            "enabled split RustFS constructor must export its separate registry"
+        );
+        assert_eq!(
+            snapshot["schema_version"],
+            "mount-rs.storage-diagnostics.v3"
+        );
+        assert_eq!(snapshot["rustfs"]["scope"], "process_live_instances");
+        assert_eq!(
+            snapshot["rustfs"]["internal_successful_retries"],
+            "unavailable"
+        );
+        let instances = snapshot["rustfs"]["instances"].as_array().unwrap();
+        assert_eq!(instances.len(), 1);
+        assert_zero_object_store_diagnostic_instance(&instances[0]);
+        assert_eq!(snapshot["r2"]["instances"], json!([]));
+        assert_eq!(
+            snapshot["measurement"]["rustfs"],
+            "live_store_logical_calls_and_cache_hits; not_http_attempts"
+        );
+        assert_eq!(
+            snapshot["measurement"]["rustfs_api"],
+            json!({
+                "schema":"mount-rs.object-store-api.v1","scope":"live_registered_split_rustfs_block_store_instances",
+                "calls":"object_store_adapter_method_invocations; not_http_attempts_or_internal_retries",
+                "duration":"inclusive_wall_nanoseconds_at_invoked_adapter_await; excludes_argument_preparation",
+                "upload_bytes":"attempted=submitted_payload; confirmed=put_opts_ok_only",
+                "returned_bytes":"successful_body_materialization_before_integrity_validation",
+                "latency_max":"cumulative_per_instance; exact_phase_max_unavailable",
+                "reconcile_listing":"unavailable",
+                "excluded":["backing_marker_prepare_and_verify","concurrent_prefix_probes","qualification_and_preflight","unregistered_rustfs_factories","internal_client_retries"]
+            })
+        );
+        assert_eq!(
+            snapshot["measurement"]["rustfs_local"],
+            json!({
+                "schema":"mount-rs.object-store-local.v1","scope":"live_registered_split_rustfs_block_store_instances",
+                "calls":"fixed_local_adapter_work_invocations; not_backend_requests_or_allocations",
+                "duration":"inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap",
+                "input_bytes":"entered_digest_encoding_and_copy_input; waits_zero",
+                "output_bytes":"completed_digest_32_id_65_and_actual_copy_bytes; waits_zero",
+                "cache_lock_scope":"mutex_acquisition_including_wait; excludes_lock_hold_and_lru_work",
+                "latency_max":"cumulative_per_instance; exact_phase_max_unavailable",
+                "adapter_compression":"not_used",
+                "excluded":["backing_marker_prepare_and_verify","concurrent_prefix_probes","qualification_and_preflight","unregistered_rustfs_factories","client_internal_work","cache_key_and_lru_work","upload_claim_setup"]
+            })
+        );
+        for private in [
+            "private-rustfs-diagnostic-prefix",
+            "private-rustfs-diagnostic-bucket",
+            "private-rustfs-diagnostic-key",
+            "private-rustfs-diagnostic-secret",
+            "private-diagnostic-region",
+            "127.0.0.1",
+        ] {
+            assert!(
+                !exported.contains(private),
+                "private constructor label leaked"
+            );
+        }
+
+        // Exercise the production projection with constructor stats and boundary
+        // values in a copied snapshot; the live counter bank is untouched.
+        let unregistered = RustFsBlockStore::from_config(
+            &RustFsConfig {
+                endpoint: options.endpoint.clone().unwrap(),
+                bucket: options.bucket.clone().unwrap(),
+                region: options.region.clone().unwrap(),
+                access_key_id: options.access_key_id.clone().unwrap(),
+                secret_access_key: options.secret_access_key.clone().unwrap(),
+            },
+            "private-unregistered-rustfs-prefix",
+            false,
+        )
+        .unwrap();
+        let mut stats = unregistered.stats();
+        stats.bytes_written = u64::MAX;
+        let raw = stats.raw_api.as_mut().unwrap();
+        raw.claims.leader_claims = 9_007_199_254_740_993;
+        raw.entries[0].attempted_bytes = u64::MAX;
+        let local = stats.local_work.as_mut().unwrap();
+        local.entries[0].input_bytes = u64::MAX;
+        local.entries[0].output_bytes = 9_007_199_254_740_993;
+        local.entries[0].latency_log2_us[31] = u64::MAX;
+        let mut projected = object_store_instance_diagnostics(u64::MAX, stats);
+        stringify_counters(&mut projected);
+        assert_eq!(projected["id"], "18446744073709551615");
+        assert_eq!(projected["bytes_written"], "18446744073709551615");
+        assert_eq!(
+            projected["raw_api"]["claims"]["leader_claims"],
+            "9007199254740993"
+        );
+        assert_eq!(
+            projected["raw_api"]["entries"][0]["attempted_bytes"],
+            "18446744073709551615"
+        );
+        assert_eq!(
+            projected["local_work"]["entries"][0]["input_bytes"],
+            "18446744073709551615"
+        );
+        assert_eq!(
+            projected["local_work"]["entries"][0]["output_bytes"],
+            "9007199254740993"
+        );
+        assert_eq!(
+            projected["local_work"]["entries"][0]["latency_log2_us"][31],
+            "18446744073709551615"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&storage_diagnostics()).unwrap()["rustfs"]["instances"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1,
+            "direct RustFS factories remain outside the registration scope"
+        );
+
+        let first_id = instances[0]["id"].clone();
+        let retained = blocks.clone();
+        drop(blocks);
+        assert_eq!(
+            serde_json::from_str::<Value>(&storage_diagnostics()).unwrap()["rustfs"],
+            snapshot["rustfs"],
+            "the exported identity survives while its constructor Arc is retained"
+        );
+        let (second, _) = block_on(build_block_store(&inert_diagnostic_store_options(
+            "rustfs",
+            "private-second-rustfs-prefix",
+        )))
+        .unwrap();
+        let with_second: Value = serde_json::from_str(&storage_diagnostics()).unwrap();
+        let second_instances = with_second["rustfs"]["instances"].as_array().unwrap();
+        assert_eq!(second_instances.len(), 2);
+        let second_id = second_instances[1]["id"].clone();
+        assert_ne!(first_id, second_id);
+        let (r2, _) = block_on(build_block_store(&inert_diagnostic_store_options(
+            "r2",
+            "private-independent-r2-prefix",
+        )))
+        .unwrap();
+        let with_r2: Value = serde_json::from_str(&storage_diagnostics()).unwrap();
+        assert_eq!(
+            with_r2["rustfs"], with_second["rustfs"],
+            "R2 construction cannot enter or change RustFS diagnostics"
+        );
+        assert_eq!(with_r2["r2"]["instances"].as_array().unwrap().len(), 1);
+        assert_zero_object_store_diagnostic_instance(&with_r2["r2"]["instances"][0]);
+        drop(retained);
+        let retired: Value = serde_json::from_str(&storage_diagnostics()).unwrap();
+        assert_eq!(retired["rustfs"]["instances"].as_array().unwrap().len(), 1);
+        assert_eq!(retired["rustfs"]["instances"][0]["id"], second_id);
+        assert_eq!(retired["r2"], with_r2["r2"]);
+        drop(second);
+        let empty: Value = serde_json::from_str(&storage_diagnostics()).unwrap();
+        assert_eq!(empty["rustfs"]["instances"], json!([]));
+        assert_eq!(empty["r2"], with_r2["r2"]);
+        drop(r2);
+        assert_eq!(
+            serde_json::from_str::<Value>(&storage_diagnostics()).unwrap()["r2"]["instances"],
+            json!([])
+        );
+        eprintln!("NATIVE_RUSTFS_CONSTRUCTOR_JSON {exported}");
+    }
+
+    #[test]
+    #[ignore = "run isolated with MOUNT_RS_PROFILE_IO unset and --ignored --exact"]
+    fn disabled_rustfs_diagnostics_do_not_register_instances() {
+        assert!(!storage::enabled(), "run with MOUNT_RS_PROFILE_IO unset");
+        let options = inert_diagnostic_store_options("rustfs", "private-disabled-rustfs-prefix");
+        let (_blocks, _) = block_on(build_block_store(&options)).unwrap();
+        let snapshot: Value = serde_json::from_str(&storage_diagnostics()).unwrap();
+        assert!(
+            snapshot["rustfs"].is_object(),
+            "disabled RustFS export must retain explicit family availability"
+        );
+        assert_eq!(snapshot["rustfs"]["instances"], json!([]));
+        assert_eq!(snapshot["r2"]["instances"], json!([]));
+        let unregistered = RustFsBlockStore::from_config(
+            &RustFsConfig {
+                endpoint: options.endpoint.unwrap(),
+                bucket: options.bucket.unwrap(),
+                region: options.region.unwrap(),
+                access_key_id: options.access_key_id.unwrap(),
+                secret_access_key: options.secret_access_key.unwrap(),
+            },
+            "private-disabled-unregistered-rustfs-prefix",
+            false,
+        )
+        .unwrap();
+        let stats = unregistered.stats();
+        assert!(stats.raw_api.is_none());
+        assert!(stats.local_work.is_none());
+        let projected = object_store_instance_diagnostics(1, stats);
+        assert_eq!(projected["raw_api"], Value::Null);
+        assert_eq!(projected["local_work"], Value::Null);
+        eprintln!(
+            "NATIVE_RUSTFS_DISABLED_CONTROL registered_instances=0 raw_api=null local_work=null constructor_only=true"
         );
     }
 

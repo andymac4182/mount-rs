@@ -854,6 +854,14 @@ jobs:
           ./scripts/cargo-shared test -p mount-rs-cli --features observability --locked
           ./scripts/cargo-shared check -p mount-rs-napi --features observability --locked
           ./scripts/cargo-shared clippy -p mount-rs-observability --all-features --all-targets --locked -- -D warnings
+      - name: Verify isolated RustFS diagnostic export controls
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          MOUNT_RS_PROFILE_IO=1 ./scripts/cargo-shared test --locked -p mount-rs-napi --lib \
+            tests::live_rustfs_diagnostics_register_export_and_retire_without_backend_io -- --ignored --exact
+          MOUNT_RS_PROFILE_IO=0 ./scripts/cargo-shared test --locked -p mount-rs-napi --lib \
+            tests::disabled_rustfs_diagnostics_do_not_register_instances -- --ignored --exact
 
   windows-node:
     runs-on: windows-latest
@@ -872,6 +880,9 @@ jobs:
       - name: Verify bounded network test progress
         timeout-minutes: 1
         run: node --test --test-timeout=10000 bindings/mount-rs-napi/test/network-progress.test.mjs
+      - name: Verify bounded HTTP fixture progress
+        timeout-minutes: 1
+        run: node --test --test-timeout=10000 scripts/http-fixture-progress.test.mjs
       - name: Verify persisted layout evidence controls
         timeout-minutes: 1
         run: node --test --test-timeout=10000 benchmarks/storage/compact-layout.test.mjs benchmarks/storage/compact-layout-runner.test.mjs bindings/mount-rs-napi/test/compact-layout-postlude.mjs
@@ -933,6 +944,9 @@ jobs:
       - name: Verify bounded network test progress
         timeout-minutes: 1
         run: node --test --test-timeout=10000 bindings/mount-rs-napi/test/network-progress.test.mjs
+      - name: Verify bounded HTTP fixture progress
+        timeout-minutes: 1
+        run: node --test --test-timeout=10000 scripts/http-fixture-progress.test.mjs
       - name: Verify persisted layout evidence controls
         timeout-minutes: 1
         run: node --test --test-timeout=10000 benchmarks/storage/compact-layout.test.mjs benchmarks/storage/compact-layout-runner.test.mjs bindings/mount-rs-napi/test/compact-layout-postlude.mjs

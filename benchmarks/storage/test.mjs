@@ -21,7 +21,7 @@ import {
 import { foundationDbMetadataOptions, providerById, providerSummary } from "./providers.mjs"
 import { cleanupOwnedPaths, helpText, parseArgs, runBenchmark, runSample, runSteadySample } from "./runner.mjs"
 import { computeStats, percentile, round, roundStats } from "./stats.mjs"
-import { deltaNativeSnapshots, takePhaseSnapshot, finishPhase, logPhaseSummary, STORAGE_OPERATION_NAMES, STORAGE_CALL_SEMANTICS, STORAGE_BYTE_SEMANTICS, STORAGE_ROW_SEMANTICS } from "./diagnostics.mjs"
+import { deltaNativeSnapshots, takePhaseSnapshot, finishPhase, logPhaseSummary, validateRawPhaseDiagnostics, validateLocalPhaseDiagnostics, STORAGE_OPERATION_NAMES, STORAGE_CALL_SEMANTICS, STORAGE_BYTE_SEMANTICS, STORAGE_ROW_SEMANTICS } from "./diagnostics.mjs"
 
 const storageFamilyMeasurement = {
   napi_provider: { operations: STORAGE_OPERATION_NAMES.filter((name) => name.startsWith("metadata.") || name.startsWith("blocks.")), calls: "napi_dynamic_provider_method_invocations", bytes: "known_successful_block_put_input_and_get_or_migration_payload_bytes; metadata_bytes_unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
@@ -80,6 +80,116 @@ function localWorkSnapshot(calls) {
   const snapshot = diagnosticSnapshot(calls, "7", [instance])
   snapshot.measurement.r2_local = structuredClone(localWorkMeasurement)
   return snapshot
+}
+
+function rustfsSnapshot(calls) {
+  const snapshot = localWorkSnapshot(calls)
+  snapshot.rustfs = structuredClone(snapshot.r2)
+  snapshot.r2.instances = []
+  snapshot.measurement.rustfs = snapshot.measurement.r2
+  for (const kind of ["api", "local"]) {
+    const measurement = structuredClone(snapshot.measurement[`r2_${kind}`])
+    measurement.scope = "live_registered_split_rustfs_block_store_instances"
+    measurement.excluded = measurement.excluded.map((name) => name === "unregistered_rust_factories_and_mount_r2" ? "unregistered_rustfs_factories" : name)
+    snapshot.measurement[`rustfs_${kind}`] = measurement
+  }
+  return snapshot
+}
+
+async function testRustFsPhaseDiagnostics() {
+  const before = rustfsSnapshot(2), after = rustfsSnapshot(5)
+  const delta = deltaNativeSnapshots(before, after)
+  assert.equal(delta.complete, true)
+  assert.ok(delta.rustfs, "the RustFS registry must have its own measured family")
+  assert.equal(delta.rustfs.instances[0].raw_api.entries[0].calls, "3")
+  assert.equal(delta.rustfs.instances[0].raw_api.entries[0].confirmed_bytes, "12288")
+  assert.equal(delta.rustfs.instances[0].local_work.entries[0].input_bytes, "12288")
+  assert.equal(delta.rustfs.instances[0].local_work.entries[0].output_bytes, "96")
+  assert.equal(delta.rustfs.instances[0].local_work.entries[0].latency_max_ns_start, "1000")
+  assert.deepEqual(delta.r2.instances, [], "RustFS must not appear as an R2 instance")
+  assert.deepEqual(validateRawPhaseDiagnostics({ quiescent: true, native: delta }, "rustfs"), ["19"])
+  for (const value of [undefined, "PRIVATE_LOGICAL_METADATA"]) {
+    const processed = structuredClone(delta)
+    if (value === undefined) delete processed.measurement.rustfs
+    else processed.measurement.rustfs = value
+    assert.throws(() => validateRawPhaseDiagnostics({ quiescent: true, native: processed }, "rustfs"), /logical measurement/u)
+  }
+  validateLocalPhaseDiagnostics(delta.rustfs.instances[0].local_work, delta.measurement.rustfs_local, "rustfs")
+  assert.throws(() => validateRawPhaseDiagnostics({ quiescent: true, native: delta }), /registry empty/u)
+  assert.throws(() => validateRawPhaseDiagnostics({ quiescent: true, native: delta }, "PRIVATE_FAMILY"), /family/u)
+  assert.throws(() => validateLocalPhaseDiagnostics(delta.rustfs.instances[0].local_work, delta.measurement.r2_local, "rustfs"), /metadata/u)
+
+  const mixedBefore = rustfsSnapshot(2), mixedAfter = rustfsSnapshot(5)
+  mixedBefore.r2 = localWorkSnapshot(7).r2
+  mixedAfter.r2 = localWorkSnapshot(8).r2
+  const mixed = deltaNativeSnapshots(mixedBefore, mixedAfter)
+  assert.equal(mixed.r2.instances[0].raw_api.entries[0].calls, "1")
+  assert.equal(mixed.rustfs.instances[0].raw_api.entries[0].calls, "3", "equal numeric IDs in different registries are separate")
+
+  for (const [name, mutate] of [
+    ["missing endpoint", (value) => { delete value.rustfs }],
+    ["retirement", (value) => { value.rustfs.instances = [] }],
+    ["duplicate ID", (value) => { value.rustfs.instances.push(structuredClone(value.rustfs.instances[0])) }],
+    ["raw reset", (value) => { value.rustfs.instances[0].raw_api.entries[0].calls = "1" }],
+    ["pending raw", (value) => { value.rustfs.instances[0].raw_api.in_flight = "1" }],
+    ["raw saturation", (value) => { value.rustfs.instances[0].raw_api.saturated = true }],
+    ["wrong metadata", (value) => { value.measurement.rustfs_api.scope = "PRIVATE_SCOPE" }],
+  ]) {
+    const malformed = structuredClone(after)
+    mutate(malformed)
+    const result = deltaNativeSnapshots(before, malformed)
+    assert.equal(result.complete, false, name)
+    assert.throws(() => validateRawPhaseDiagnostics({ quiescent: true, native: result }, "rustfs"), undefined, name)
+    assert.doesNotMatch(JSON.stringify(result), /PRIVATE_SCOPE/u)
+  }
+  const missingBefore = structuredClone(before)
+  delete missingBefore.rustfs
+  assert.equal(deltaNativeSnapshots(missingBefore, after).complete, false)
+  const emptyBefore = rustfsSnapshot(0), emptyAfter = rustfsSnapshot(0)
+  emptyBefore.rustfs.instances = []; emptyAfter.rustfs.instances = []
+  assert.throws(() => validateRawPhaseDiagnostics({ quiescent: true, native: deltaNativeSnapshots(emptyBefore, emptyAfter) }, "rustfs"), /registry empty/u)
+
+  const localUnavailable = structuredClone(after)
+  localUnavailable.rustfs.instances[0].local_work = null
+  const unavailable = deltaNativeSnapshots(before, localUnavailable)
+  assert.equal(unavailable.complete, true, "optional local absence cannot replace raw evidence")
+  assert.equal(unavailable.rustfs.instances[0].local_work.complete, false)
+  validateRawPhaseDiagnostics({ quiescent: true, native: unavailable }, "rustfs")
+  const malicious = structuredClone(after)
+  malicious.rustfs.instances[0].id = "PRIVATE_ID"
+  malicious.rustfs.instances[0].raw_api.entries[0].name = "PRIVATE_ROW"
+  malicious.rustfs.instances[0].raw_api.entries[0].calls = "PRIVATE_COUNTER"
+  malicious.rustfs.instances[0].secret = "PRIVATE_CONFIG"
+  const sanitized = deltaNativeSnapshots(before, malicious)
+  assert.equal(sanitized.complete, false)
+  assert.ok(sanitized.observations.after.rustfs, "incomplete observations keep a separate sanitized family")
+  assert.doesNotMatch(JSON.stringify(sanitized), /PRIVATE_(?:ID|ROW|COUNTER|CONFIG)/u)
+
+  const largeBefore = rustfsSnapshot(2), largeAfter = rustfsSnapshot(5)
+  for (const field of ["attempted_bytes", "confirmed_bytes"]) {
+    largeBefore.rustfs.instances[0].raw_api.entries[0][field] = "9007199254740993"
+    largeAfter.rustfs.instances[0].raw_api.entries[0][field] = "9007199254745090"
+  }
+  assert.equal(deltaNativeSnapshots(largeBefore, largeAfter).rustfs.instances[0].raw_api.entries[0].attempted_bytes, "4097")
+  const old = deltaNativeSnapshots(localWorkSnapshot(2), localWorkSnapshot(5))
+  assert.equal(Object.hasOwn(old, "rustfs"), false, "legacy snapshot shape remains unchanged")
+  const endpoint = (native) => ({ started: 0, ended: 0, cpuStart: { user: 0, system: 0 }, cpuEnd: { user: 0, system: 0 }, resourcesStart: { voluntaryContextSwitches: 0, involuntaryContextSwitches: 0 }, resourcesEnd: { voluntaryContextSwitches: 0, involuntaryContextSwitches: 0 }, memory: {}, native })
+  const newlyOpened = rustfsSnapshot(0)
+  newlyOpened.rustfs.instances = []
+  assert.equal(finishPhase("create", endpoint(newlyOpened), endpoint(after)).native.complete, true)
+  const crossed = finishPhase("workload-4096bytes", endpoint(newlyOpened), endpoint(after))
+  assert.equal(crossed.native.complete, false)
+  assert.ok(crossed.native.issues.includes("RustFS instance opened during workload phase"))
+  const records = []
+  const originalWrite = process.stderr.write
+  process.stderr.write = (line) => { records.push(JSON.parse(line.slice("MOUNT_RS_STORAGE_PHASE ".length))); return true }
+  try {
+    logPhaseSummary({ name: "workload-rustfs-control", elapsed_ms: 1, native: mixed })
+    logPhaseSummary({ name: "workload-old-control", elapsed_ms: 1, native: old })
+  } finally { process.stderr.write = originalWrite }
+  assert.equal(records[0].local_work.entries[0].calls, "1")
+  assert.equal(records[0].rustfs_local_work.entries[0].calls, "3")
+  assert.equal(Object.hasOwn(records[1], "rustfs_local_work"), false)
 }
 
 async function testObjectStoreLocalPhaseDiagnostics() {
@@ -1581,7 +1691,7 @@ async function testSteadyGenerationsRejectDroppedWrites() {
 }
 if (process.argv.includes("--diagnostics-only")) {
   const failures = []
-  for (const test of [testStorageDriverFieldDeltas, testStorageFamilyMetadata, testStoragePhaseDiagnostics, testRawObjectStorePhaseDiagnostics, testObjectStoreLocalPhaseDiagnostics, testRawQualificationArtifact, testQualificationProviderCoverage, testObserverEndpointsExcludeSnapshotWork, testQualificationArtifact]) {
+  for (const test of [testStorageDriverFieldDeltas, testStorageFamilyMetadata, testStoragePhaseDiagnostics, testRawObjectStorePhaseDiagnostics, testObjectStoreLocalPhaseDiagnostics, testRustFsPhaseDiagnostics, testRawQualificationArtifact, testQualificationProviderCoverage, testObserverEndpointsExcludeSnapshotWork, testQualificationArtifact]) {
     try { await test(); console.log(`${test.name}: PASS`) }
     catch (error) { failures.push(test.name); console.error(`${test.name}: FAIL`, error) }
   }
@@ -1596,6 +1706,7 @@ await testStorageDriverFieldDeltas()
 await testStorageFamilyMetadata()
 await testRawObjectStorePhaseDiagnostics()
 await testObjectStoreLocalPhaseDiagnostics()
+await testRustFsPhaseDiagnostics()
 await testObserverEndpointsExcludeSnapshotWork()
 await testOzoneMetricsReachAllNodeProcesses()
 await testErrors()
