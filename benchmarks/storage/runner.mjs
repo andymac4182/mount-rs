@@ -25,6 +25,7 @@ import {
 } from "./providers.mjs"
 import { computeStats, round, roundStats } from "./stats.mjs"
 import { finishPhase, logPhaseSummary, takePhaseSnapshot } from "./diagnostics.mjs"
+import { createRunnerObserverSession } from "./backing-observer.mjs"
 
 export const REFERENCE_REVISION = "92fbbc9ba7739111899121195236acb4fc6a8bb5"
 export const FILE_SIZE_MIB = Object.freeze([1, 4, 10, 16])
@@ -909,165 +910,244 @@ async function runProvider(definition, options, context) {
       : {}),
   }
   const sizeResults = []
+  const observer = context.backingObserver
+    ? createRunnerObserverSession(context.backingObserver, {
+        provider: definition.id,
+        runId: context.runId,
+        clock: context.observerClock,
+        timeoutMs: context.observerHookTimeoutMs,
+      })
+    : null
+  let observerNativeQuiescent = null
+  let observerCleanupComplete = false
+  let observerOwnedOperationsSettled = false
+  let observerWorkloadObserved = false
+  let observerWorkloadNativeComplete = diagnosticEnabled ? true : null
+  let observerWorkloadNonquiescent = false
+  let observerTerminalNativeNonquiescent = false
+  let observerOperationDeadlineFailed = false
   const recordPhase = (name, before, quiescent = true, measuredElapsedMs = null) => {
-    if (!phaseSnapshot || !before) return
+    if (!phaseSnapshot || !before) return null
     const phase = finishPhase(name, before, phaseSnapshot(), quiescent && !context.diagnosticPriorPending)
     if (context.diagnosticPriorPending) phase.native.issues.push("prior provider cleanup or native operation incomplete")
     if (measuredElapsedMs !== null) phase.benchmark_measured_elapsed_ms = measuredElapsedMs
     providerRun.storageDiagnostics.phases.push(phase)
     try { logPhaseSummary(phase) } catch { /* Diagnostics must not replace provider cleanup. */ }
+    return phase
+  }
+  const nativeEvidenceState = (phase) => {
+    if (!diagnosticEnabled) return "unobserved"
+    if (phase?.native.complete === true) return "complete"
+    if (phase?.native.issues?.some((issue) => [
+      "instrumented storage operation crossed phase boundary",
+      "instrumented storage row crossed phase boundary",
+      "raw operation or claim crossed phase boundary",
+      "native operations crossed phase boundary",
+    ].includes(issue))) return "nonquiescent"
+    return "unavailable"
+  }
+  const noteWorkloadEvidence = (phase) => {
+    observerWorkloadObserved = true
+    const state = nativeEvidenceState(phase)
+    if (diagnosticEnabled && state !== "complete") observerWorkloadNativeComplete = false
+    if (state === "nonquiescent") observerWorkloadNonquiescent = true
+    return state
   }
 
-  if (availability.revisionMismatch) {
-    providerRun.status = "failed"
-    providerRun.oracleRevisionMismatch = true
-    providerRun.revisionFailure = availability.reason
-    providerRun.sizes = options.sizes.map((size) =>
-      failedSizeResult(
-        definition,
-        size,
-        options,
-        "oracle-revision",
-        new Error(availability.reason),
-      ),
-    )
-    return { providerRun, sizeResults: providerRun.sizes }
-  }
-
-  if (!availability.configured) {
-    providerRun.skipReason = availability.reason || "provider configuration is absent"
-    providerRun.sizes = options.sizes.map((size) => skippedSizeResult(definition, size, options, availability))
-    providerRun.status = "skipped"
-    return { providerRun, sizeResults: providerRun.sizes }
-  }
-
-  let opened
-  const setupStarted = performance.now()
-  const setupSnapshot = phaseSnapshot?.()
   try {
-    opened = await withTimeout(
-      () => definition.create({ ...context, options }),
-      options.timeoutMs,
-      "provider setup",
-    )
-    providerRun.setupMs = performance.now() - setupStarted
-    recordPhase("create", setupSnapshot)
-    if (options.layout === "compact") {
-      providerRun.layoutSelection = {
-        requested: "compact",
-        selected: "compact",
-        selectionEvidence: "createChunkedDriver-constructor-accepted",
-        persistedMarkerEvidence: "not-observed-by-benchmark-runner",
-      }
-    }
-  } catch (error) {
-    providerRun.setupMs = performance.now() - setupStarted
-    recordPhase("create", setupSnapshot, false)
-    providerRun.status = "failed"
-    providerRun.setupError = errorRecord(error)
-    providerRun.sizes = options.sizes.map((size) => failedSizeResult(definition, size, options, "setup", error))
-    if (isTimeout(error)) context.diagnosticPriorPending = true
-    return { providerRun, sizeResults: providerRun.sizes }
-  }
-
-  const ownedPaths = new Set()
-  const pendingOperations = new Map()
-  try {
-    for (const sizeMiBValue of options.sizes) {
-      const payloadBytes = options.payloadBytes ?? sizeMiBValue * 1024 * 1024
-      let workloadSnapshot
-      try {
-        // Payload allocation and hashing happen before the first timed write.
-        const payload = makePayload(
-          options.payloadBytes ?? sizeMiBValue * 1024 * 1024,
-          options.payloadSeed,
-        )
-        workloadSnapshot = phaseSnapshot?.()
-        const result = await runSize(
+    if (availability.revisionMismatch) {
+      providerRun.status = "failed"
+      providerRun.oracleRevisionMismatch = true
+      providerRun.revisionFailure = availability.reason
+      providerRun.sizes = options.sizes.map((size) =>
+        failedSizeResult(
           definition,
-          opened.filesystem,
+          size,
           options,
-          context,
-          sizeMiBValue,
-          payload,
-          ownedPaths,
-          pendingOperations,
-        )
-        sizeResults.push(result)
-        recordPhase(`workload-${payloadBytes}bytes`, workloadSnapshot, pendingOperations.size === 0, result.summary?.elapsedMs)
-      } catch (error) {
-        sizeResults.push(failedSizeResult(definition, sizeMiBValue, options, "benchmark", error))
-        recordPhase(`workload-${payloadBytes}bytes`, workloadSnapshot, pendingOperations.size === 0)
-      }
+          "oracle-revision",
+          new Error(availability.reason),
+        ),
+      )
+      return { providerRun, sizeResults: providerRun.sizes }
     }
-  } finally {
-    const cleanupSnapshot = phaseSnapshot?.()
-    const pathCleanup = await cleanupOwnedPaths(
-      opened.filesystem,
-      ownedPaths,
-      pendingOperations,
-      options.cleanupTimeoutMs,
-    )
-    providerRun.cleanup.pathsAttempted = pathCleanup.attempted
-    providerRun.cleanup.remainingPaths = pathCleanup.remaining
-    providerRun.cleanup.failures = pathCleanup.failures
-    providerRun.cleanup.pendingOperations = pathCleanup.pendingOperations
-    recordPhase("cleanup", cleanupSnapshot, pendingOperations.size === 0 && pathCleanup.failures.length === 0)
 
-    const resourceCleanupStarted = performance.now()
-    const shutdownSnapshot = phaseSnapshot?.()
-    if (pendingOperations.size > 0) {
-      providerRun.cleanup.resource = {
-        status: "deferred",
-        ms: performance.now() - resourceCleanupStarted,
-        reason: "provider shutdown deferred while a timed-out native operation remains pending",
-        pendingOperations: [...pendingOperations].map(([path, pending]) => ({
-          path,
-          operation: pending.operation,
-        })),
+    if (!availability.configured) {
+      providerRun.skipReason = availability.reason || "provider configuration is absent"
+      providerRun.sizes = options.sizes.map((size) => skippedSizeResult(definition, size, options, availability))
+      providerRun.status = "skipped"
+      return { providerRun, sizeResults: providerRun.sizes }
+    }
+
+    let opened
+    if (observer) await observer.begin("create")
+    const setupStarted = performance.now()
+    const setupSnapshot = phaseSnapshot?.()
+    try {
+      opened = await withTimeout(
+        () => definition.create({ ...context, options }),
+        options.timeoutMs,
+        "provider setup",
+      )
+      providerRun.setupMs = performance.now() - setupStarted
+      const createPhase = recordPhase("create", setupSnapshot)
+      if (observer) await observer.end("create", !context.diagnosticPriorPending, null, 0, nativeEvidenceState(createPhase))
+      if (options.layout === "compact") {
+        providerRun.layoutSelection = {
+          requested: "compact",
+          selected: "compact",
+          selectionEvidence: "createChunkedDriver-constructor-accepted",
+          persistedMarkerEvidence: "not-observed-by-benchmark-runner",
+        }
       }
-    } else {
-      try {
-        await withTimeout(opened.cleanup(), options.cleanupTimeoutMs, "provider cleanup")
+    } catch (error) {
+      providerRun.setupMs = performance.now() - setupStarted
+      const createPhase = recordPhase("create", setupSnapshot, false)
+      if (observer) await observer.end("create", false, null, 0, nativeEvidenceState(createPhase), isTimeout(error))
+      providerRun.status = "failed"
+      providerRun.setupError = errorRecord(error)
+      providerRun.sizes = options.sizes.map((size) => failedSizeResult(definition, size, options, "setup", error))
+      if (isTimeout(error)) context.diagnosticPriorPending = true
+      return { providerRun, sizeResults: providerRun.sizes }
+    }
+
+    const ownedPaths = new Set()
+    const pendingOperations = new Map()
+    try {
+      for (const sizeMiBValue of options.sizes) {
+        const payloadBytes = options.payloadBytes ?? sizeMiBValue * 1024 * 1024
+        let workloadSnapshot
+        try {
+          // Payload allocation and hashing happen before the first timed write.
+          const payload = makePayload(
+            options.payloadBytes ?? sizeMiBValue * 1024 * 1024,
+            options.payloadSeed,
+          )
+          if (observer) await observer.begin(`workload-${payloadBytes}bytes`)
+          workloadSnapshot = phaseSnapshot?.()
+          const result = await runSize(
+            definition,
+            opened.filesystem,
+            options,
+            context,
+            sizeMiBValue,
+            payload,
+            ownedPaths,
+            pendingOperations,
+          )
+          sizeResults.push(result)
+          const workloadPhase = recordPhase(`workload-${payloadBytes}bytes`, workloadSnapshot, pendingOperations.size === 0, result.summary?.elapsedMs)
+          if (observer) {
+            observerOperationDeadlineFailed ||= result.summary?.timeoutCount > 0
+            await observer.end(`workload-${payloadBytes}bytes`, pendingOperations.size === 0 && !context.diagnosticPriorPending, result.summary?.elapsedMs, pendingOperations.size, noteWorkloadEvidence(workloadPhase), result.summary?.timeoutCount > 0)
+          }
+        } catch (error) {
+          sizeResults.push(failedSizeResult(definition, sizeMiBValue, options, "benchmark", error))
+          const workloadPhase = recordPhase(`workload-${payloadBytes}bytes`, workloadSnapshot, pendingOperations.size === 0)
+          if (observer) {
+            observerOperationDeadlineFailed ||= isTimeout(error)
+            await observer.end(`workload-${payloadBytes}bytes`, pendingOperations.size === 0 && !context.diagnosticPriorPending, null, pendingOperations.size, noteWorkloadEvidence(workloadPhase), isTimeout(error))
+          }
+        }
+      }
+    } finally {
+      if (observer) await observer.begin("cleanup")
+      const cleanupSnapshot = phaseSnapshot?.()
+      const pathCleanup = await cleanupOwnedPaths(
+        opened.filesystem,
+        ownedPaths,
+        pendingOperations,
+        options.cleanupTimeoutMs,
+      )
+      providerRun.cleanup.pathsAttempted = pathCleanup.attempted
+      providerRun.cleanup.remainingPaths = pathCleanup.remaining
+      providerRun.cleanup.failures = pathCleanup.failures
+      providerRun.cleanup.pendingOperations = pathCleanup.pendingOperations
+      const cleanupPhase = recordPhase("cleanup", cleanupSnapshot, pendingOperations.size === 0 && pathCleanup.failures.length === 0)
+      if (observer) {
+        observerTerminalNativeNonquiescent ||= nativeEvidenceState(cleanupPhase) === "nonquiescent"
+        await observer.end("cleanup", pendingOperations.size === 0 && pathCleanup.failures.length === 0 && !context.diagnosticPriorPending, null, pendingOperations.size, nativeEvidenceState(cleanupPhase))
+      }
+
+      if (observer) await observer.begin("shutdown")
+      const resourceCleanupStarted = performance.now()
+      const shutdownSnapshot = phaseSnapshot?.()
+      if (pendingOperations.size > 0) {
         providerRun.cleanup.resource = {
-          status: "ok",
+          status: "deferred",
           ms: performance.now() - resourceCleanupStarted,
+          reason: "provider shutdown deferred while a timed-out native operation remains pending",
+          pendingOperations: [...pendingOperations].map(([path, pending]) => ({
+            path,
+            operation: pending.operation,
+          })),
         }
-      } catch (error) {
-        if (isTimeout(error)) {
-          const late = await waitForLateOperation(error, options.cleanupTimeoutMs)
+      } else {
+        try {
+          await withTimeout(opened.cleanup(), options.cleanupTimeoutMs, "provider cleanup")
           providerRun.cleanup.resource = {
-            // Late completion establishes cleanup, but does not erase the
-            // configured deadline failure from the run's success criteria.
-            status: late.status === "pending" ? "pending" : "failed",
-            cleanupCompleted: late.status === "fulfilled",
+            status: "ok",
             ms: performance.now() - resourceCleanupStarted,
-            error: errorRecord(error),
-            lateOperation: late.status,
           }
-        } else {
-          providerRun.cleanup.resource = {
-            status: "failed",
-            ms: performance.now() - resourceCleanupStarted,
-            error: errorRecord(error),
+        } catch (error) {
+          if (isTimeout(error)) {
+            const late = await waitForLateOperation(error, options.cleanupTimeoutMs)
+            providerRun.cleanup.resource = {
+              // Late completion establishes cleanup, but does not erase the
+              // configured deadline failure from the run's success criteria.
+              status: late.status === "pending" ? "pending" : "failed",
+              cleanupCompleted: late.status === "fulfilled",
+              ms: performance.now() - resourceCleanupStarted,
+              error: errorRecord(error),
+              lateOperation: late.status,
+            }
+          } else {
+            providerRun.cleanup.resource = {
+              status: "failed",
+              ms: performance.now() - resourceCleanupStarted,
+              error: errorRecord(error),
+            }
           }
         }
       }
+      const shutdownPhase = recordPhase("shutdown", shutdownSnapshot, pendingOperations.size === 0 && providerRun.cleanup.resource.status === "ok")
+      if (observer) {
+        observerTerminalNativeNonquiescent ||= nativeEvidenceState(shutdownPhase) === "nonquiescent"
+        await observer.end("shutdown", pendingOperations.size === 0 && providerRun.cleanup.resource.status === "ok" && !context.diagnosticPriorPending, null, pendingOperations.size, nativeEvidenceState(shutdownPhase))
+      }
     }
-    recordPhase("shutdown", shutdownSnapshot, pendingOperations.size === 0 && providerRun.cleanup.resource.status === "ok")
-  }
 
-  const hasResultFailure = sizeResults.some((result) => result.status === "failed")
-  const hasCleanupFailure =
-    providerRun.cleanup.remainingPaths > 0 ||
-    providerRun.cleanup.failures.length > 0 ||
-    providerRun.cleanup.resource.status !== "ok"
-  providerRun.status = hasResultFailure || hasCleanupFailure ? "failed" : "ok"
-  providerRun.sizes = sizeResults
-  if (pendingOperations.size > 0 || providerRun.cleanup.resource.status !== "ok" || providerRun.cleanup.failures.length > 0) {
-    context.diagnosticPriorPending = true
+    const hasResultFailure = sizeResults.some((result) => result.status === "failed")
+    const hasCleanupFailure =
+      providerRun.cleanup.remainingPaths > 0 ||
+      providerRun.cleanup.failures.length > 0 ||
+      providerRun.cleanup.resource.status !== "ok"
+    providerRun.status = hasResultFailure || hasCleanupFailure ? "failed" : "ok"
+    providerRun.sizes = sizeResults
+    if (pendingOperations.size > 0 || providerRun.cleanup.resource.status !== "ok" || providerRun.cleanup.failures.length > 0) {
+      context.diagnosticPriorPending = true
+    }
+    observerOwnedOperationsSettled = pendingOperations.size === 0 && !context.diagnosticPriorPending
+    if (!observerWorkloadObserved) observerWorkloadNativeComplete = null
+    observerNativeQuiescent = !observerOwnedOperationsSettled || observerWorkloadNonquiescent || observerTerminalNativeNonquiescent ? false
+      : observerWorkloadNativeComplete === true && !observerOperationDeadlineFailed ? true : null
+    observerCleanupComplete = !hasCleanupFailure
+    return { providerRun, sizeResults }
+  } finally {
+    if (observer) {
+      await observer.finalize({
+        status: providerRun.status === "pending" ? "failed" : providerRun.status,
+        native_quiescent: observerNativeQuiescent,
+        owned_operations_settled: observerOwnedOperationsSettled,
+        workload_native_evidence_complete: observerWorkloadObserved ? observerWorkloadNativeComplete : null,
+        native_profiling_enabled: diagnosticEnabled,
+        operation_deadline_failed: observerOperationDeadlineFailed,
+        cleanup_complete: observerCleanupComplete,
+        prior_native_uncertainty: context.diagnosticPriorPending,
+        quiescence_scope: diagnosticEnabled ? "runner_workload_native_diagnostics_and_owned_operation_settlement" : "runner_owned_operations_only; native_workload_proof_unobserved",
+      })
+      providerRun.backingObserver = observer.receipt()
+    }
   }
-  return { providerRun, sizeResults }
 }
 
 async function gitMetadata(directory) {
@@ -1158,7 +1238,7 @@ async function environmentRecord(options, environment) {
   }
 }
 
-export async function runBenchmark(options, environment = process.env, providerDefinitions) {
+export async function runBenchmark(options, environment = process.env, providerDefinitions, runtime = {}) {
   // Native profiling is latched on first module use. Set the opt-in before
   // provider discovery or a phase snapshot can load the addon.
   if (environment.MOUNT_RS_PROFILE_IO === "1") process.env.MOUNT_RS_PROFILE_IO = "1"
@@ -1182,6 +1262,11 @@ export async function runBenchmark(options, environment = process.env, providerD
     environment,
     chunkSizeBytes: options.chunkSizeBytes,
     diagnosticPriorPending: false,
+    ...(runtime.backingObserver ? {
+      backingObserver: runtime.backingObserver,
+      observerClock: runtime.observerClock,
+      observerHookTimeoutMs: runtime.observerHookTimeoutMs,
+    } : {}),
   }
   const providerRuns = []
   const results = []
