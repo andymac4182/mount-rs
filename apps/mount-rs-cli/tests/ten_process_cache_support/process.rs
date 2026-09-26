@@ -36,6 +36,59 @@ pub fn native_deadline(stamp: u64) -> Result<Instant> {
     let common_now = monotonic_ns()?;
     anchored_deadline(anchor, common_now, stamp)
 }
+
+fn binary_digest_reader(
+    reader: &mut impl Read,
+    progress: &mut impl FnMut() -> Result<()>,
+) -> Result<String> {
+    let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut bytes = [0u8; 64 * 1024];
+    loop {
+        progress()?;
+        let length = match reader.read(&mut bytes) {
+            Ok(length) => length,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error.to_string()),
+        };
+        digest.update(&bytes[..length]);
+        progress()?;
+        if length == 0 {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let mut encoded = String::with_capacity(64);
+            for byte in digest.finish().as_ref() {
+                encoded.push(HEX[(byte >> 4) as usize] as char);
+                encoded.push(HEX[(byte & 0x0f) as usize] as char);
+            }
+            return Ok(encoded);
+        }
+    }
+}
+fn binary_digest_file(path: &Path, progress: &mut impl FnMut() -> Result<()>) -> Result<String> {
+    let mut file = File::open(path).map_err(|e| e.to_string())?;
+    let before = file.metadata().map_err(|e| e.to_string())?;
+    let digest = binary_digest_reader(&mut file, progress)?;
+    let after = file.metadata().map_err(|e| e.to_string())?;
+    let current = fs::metadata(path).map_err(|e| e.to_string())?;
+    let identity = |value: &fs::Metadata| {
+        (
+            value.dev(),
+            value.ino(),
+            value.len(),
+            value.mtime(),
+            value.mtime_nsec(),
+            value.ctime(),
+            value.ctime_nsec(),
+        )
+    };
+    if !before.is_file()
+        || identity(&before) != identity(&after)
+        || identity(&before) != identity(&current)
+    {
+        return Err("binary changed during attestation".into());
+    }
+    progress()?;
+    Ok(digest)
+}
 fn resource_read<T: DeserializeOwned>(path: &Path) -> Result<T> {
     let mut bytes = Vec::new();
     File::open(path)
@@ -265,7 +318,11 @@ fn catalog_identity(path: &Path) -> Result<Option<CatalogIdentity>> {
         document_sha256: sha256(&body),
     }))
 }
-fn launch_binding(config: &Path, role: &str) -> Result<LaunchBinding> {
+fn launch_binding(
+    config: &Path,
+    role: &str,
+    progress: &mut impl FnMut() -> Result<()>,
+) -> Result<LaunchBinding> {
     let config = config.canonicalize().map_err(|e| e.to_string())?;
     let bytes = bounded_file(&config)?;
     let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
@@ -280,7 +337,7 @@ fn launch_binding(config: &Path, role: &str) -> Result<LaunchBinding> {
     let cli = PathBuf::from(env!("CARGO_BIN_EXE_mount-rs"))
         .canonicalize()
         .map_err(|e| e.to_string())?;
-    let cli_hash = sha256(&fs::read(&cli).map_err(|e| e.to_string())?);
+    let cli_hash = binary_digest_file(&cli, progress)?;
     let expected_cli_hash = std::env::var("MOUNT_RS_TEN_PROCESS_CLI_SHA256")
         .map_err(|_| "supervisor CLI hash missing")?;
     if cli_hash != expected_cli_hash {
@@ -329,7 +386,12 @@ struct ProcessSpec<'a> {
     cache: Option<PathBuf>,
 }
 impl OwnedProcess {
-    fn start(root: &Path, spec: ProcessSpec<'_>, deadline: Instant) -> Result<Self> {
+    fn start(
+        root: &Path,
+        spec: ProcessSpec<'_>,
+        deadline: Instant,
+        progress: &mut impl FnMut() -> Result<()>,
+    ) -> Result<Self> {
         let ProcessSpec {
             node,
             generation,
@@ -342,7 +404,7 @@ impl OwnedProcess {
         if Instant::now() >= deadline {
             return Err("expired process start deadline".into());
         }
-        let launch = launch_binding(config, role)?;
+        let launch = launch_binding(config, role, progress)?;
         let stem = format!("{role}-{node}-{generation}");
         let (stdout, stderr, out, err) = streams(root, &stem)?;
         if Instant::now() >= deadline {
@@ -474,6 +536,7 @@ impl OwnedProcess {
     fn finish(
         &mut self,
         deadline: Instant,
+        progress: &mut impl FnMut() -> Result<()>,
     ) -> Result<Option<std::collections::BTreeMap<String, Bank>>> {
         if !self.terminal {
             return Err("cannot finish an unreaped process".into());
@@ -488,7 +551,7 @@ impl OwnedProcess {
         self.reuse()?;
         let binding = &mut self.receipt.launch;
         if sha256(&bounded_file(Path::new(&binding.config_path))?) != binding.config_sha256
-            || sha256(&fs::read(&binding.cli_binary_path).map_err(|e| e.to_string())?)
+            || binary_digest_file(Path::new(&binding.cli_binary_path), progress)?
                 != binding.cli_binary_sha256
         {
             return Err("launched config or CLI binary changed during generation".into());
@@ -715,6 +778,44 @@ impl Fleet {
         }
         Ok(())
     }
+    fn attestation_progress(&mut self, deadline: Instant) -> Result<()> {
+        if Instant::now() >= deadline {
+            return Err("binary attestation deadline exhausted".into());
+        }
+        self.resources.stop_requested()?;
+        if let Some(error) = &self.resources.failure {
+            return Err(error.clone());
+        }
+        if monotonic_ns()?.saturating_sub(self.resources.published_ns) >= POLL_MS * 1_000_000 {
+            // Hashing must not starve exact owned-process sampling/publication.
+            self.refresh_resources(false, false)?;
+        }
+        if Instant::now() >= deadline {
+            return Err("late binary attestation progress".into());
+        }
+        Ok(())
+    }
+    fn finish_process(
+        &mut self,
+        index: usize,
+        deadline: Instant,
+    ) -> Result<Option<std::collections::BTreeMap<String, Bank>>> {
+        if !self.processes[index].terminal {
+            return Err("cannot retire an unreaped process".into());
+        }
+        // The process is physically reaped, so remove its numeric identity before sampling.
+        let mut process = self.processes.remove(index);
+        let evidence = process.finish(deadline, &mut || self.attestation_progress(deadline));
+        if let Ok(Some(rows)) = &evidence {
+            self.banks.push(json!({"node":process.receipt.node,"generation":process.receipt.generation,
+                "pid":process.receipt.pid,"scope":"cumulative generation shutdown logical counters",
+                "launch":process.receipt.launch,"maintenance_quiescence":"unavailable","rows":rows}));
+        }
+        // Retain ownership/proof failures too; no callback error can discard a receipt.
+        self.retired.push(process.receipt.clone());
+        let publication = self.refresh_resources(true, self.processes.is_empty());
+        evidence.and_then(|value| publication.map(|()| value))
+    }
     pub fn launch(
         &mut self,
         node: usize,
@@ -724,8 +825,9 @@ impl Fleet {
         cache: &Path,
         deadline: Instant,
     ) -> Result<SocketAddr> {
+        let root = self.root.clone();
         let process = OwnedProcess::start(
-            &self.root,
+            &root,
             ProcessSpec {
                 node: format!("node-{node}"),
                 generation,
@@ -736,6 +838,7 @@ impl Fleet {
                 cache: Some(cache.into()),
             },
             deadline,
+            &mut || self.attestation_progress(deadline),
         )?;
         self.processes.push(process);
         self.refresh_resources(true, false)?;
@@ -771,8 +874,9 @@ impl Fleet {
     }
     pub fn apply(&mut self, config: &Path, deadline: Instant) -> Result<()> {
         let generation = self.generation();
+        let root = self.root.clone();
         let process = OwnedProcess::start(
-            &self.root,
+            &root,
             ProcessSpec {
                 node: "catalog".into(),
                 generation,
@@ -783,6 +887,7 @@ impl Fleet {
                 cache: None,
             },
             deadline,
+            &mut || self.attestation_progress(deadline),
         )?;
         self.processes.push(process);
         self.refresh_resources(true, false)?;
@@ -795,10 +900,7 @@ impl Fleet {
             self.refresh_resources(false, false)?;
             self.processes[index].poll_exit()?;
             if self.processes[index].terminal {
-                self.processes[index].finish(deadline)?;
-                let process = self.processes.remove(index);
-                self.retired.push(process.receipt.clone());
-                self.refresh_resources(true, false)?;
+                self.finish_process(index, deadline)?;
                 return Ok(());
             }
             self.processes[index].sample_rss()?;
@@ -852,15 +954,9 @@ impl Fleet {
             }
             self.processes[index].poll_exit()?;
             if self.processes[index].terminal {
-                let banks = self.processes[index]
-                    .finish(deadline)?
+                let banks = self
+                    .finish_process(index, deadline)?
                     .ok_or("server bank missing")?;
-                let process = self.processes.remove(index);
-                self.banks.push(json!({"node":process.receipt.node,"generation":process.receipt.generation,
-                    "pid":process.receipt.pid,"scope":"cumulative generation shutdown logical counters",
-                    "launch":process.receipt.launch,"maintenance_quiescence":"unavailable","rows":banks}));
-                self.retired.push(process.receipt.clone());
-                self.refresh_resources(true, false)?;
                 return Ok(banks);
             }
             for (other, process) in self.processes.iter_mut().enumerate() {
@@ -913,22 +1009,15 @@ impl Fleet {
                 failure.get_or_insert("disk floor lost during cleanup".into());
             }
             for index in (0..self.processes.len()).rev() {
-                let process = &mut self.processes[index];
-                if let Err(error) = process.poll_exit() {
+                if let Err(error) = self.processes[index].poll_exit() {
                     failure.get_or_insert(error);
                 }
-                if process.terminal {
-                    let evidence = process.finish(deadline);
-                    match evidence {
-                            Ok(Some(rows)) => self.banks.push(json!({"node":process.receipt.node,
-                                "generation":process.receipt.generation,"pid":process.receipt.pid,
-                                "scope":"cumulative generation shutdown logical counters",
-                                "launch":process.receipt.launch,"maintenance_quiescence":"unavailable","rows":rows})),
-                            Ok(None) => {}, Err(error) => { failure.get_or_insert(error); }
-                        }
-                    let process = self.processes.remove(index);
-                    self.retired.push(process.receipt.clone());
+                if self.processes[index].terminal {
+                    if let Err(error) = self.finish_process(index, deadline) {
+                        failure.get_or_insert(error);
+                    }
                 } else {
+                    let process = &mut self.processes[index];
                     if let Err(error) = process.sample_rss() {
                         failure.get_or_insert(error);
                     }
@@ -1072,8 +1161,17 @@ pub fn supervise() {
     let sentinel_address = sentinel.local_addr().expect("sentinel address");
     let (out_path, err_path, out, err) = streams(&root, "worker").expect("worker capture");
     let executable = std::env::current_exe().expect("test binary");
-    let binary = fs::read(&executable).expect("test binary attestation");
-    let cli = fs::read(env!("CARGO_BIN_EXE_mount-rs")).expect("CLI binary attestation");
+    let mut progress = || {
+        if Instant::now() >= deadline {
+            Err("expired supervisor attestation budget".into())
+        } else {
+            Ok(())
+        }
+    };
+    let binary_hash =
+        binary_digest_file(&executable, &mut progress).expect("test binary attestation");
+    let cli_hash = binary_digest_file(Path::new(env!("CARGO_BIN_EXE_mount-rs")), &mut progress)
+        .expect("CLI binary attestation");
     assert!(Instant::now() < deadline, "expired supervisor start budget");
     let child = Command::new(&executable)
         .args(["--ignored", "--exact", "native_worker", "--nocapture"])
@@ -1084,7 +1182,7 @@ pub fn supervise() {
             "MOUNT_RS_TEN_PROCESS_SUPERVISOR",
             std::process::id().to_string(),
         )
-        .env("MOUNT_RS_TEN_PROCESS_CLI_SHA256", sha256(&cli))
+        .env("MOUNT_RS_TEN_PROCESS_CLI_SHA256", &cli_hash)
         .env(
             "MOUNT_RS_TEN_PROCESS_SENTINEL",
             sentinel_address.to_string(),
@@ -1110,7 +1208,7 @@ pub fn supervise() {
         "supervisor_pid":std::process::id(),"worker_reaped":false,"forced":false,
         "failure":"controller did not reach a terminal receipt; retained ownership only",
         "private_credential_cleanup":"pending; private key/token files must not be exported",
-        "test_binary_sha256":sha256(&binary),"cli_binary_sha256":sha256(&cli)});
+        "test_binary_sha256":binary_hash,"cli_binary_sha256":cli_hash});
     fs::write(
         root.join("controller.json"),
         serde_json::to_vec_pretty(&initial).unwrap(),
@@ -1270,7 +1368,7 @@ pub fn supervise() {
     let capture = output(&out_path, true).and_then(|_| output(&err_path, true));
     let controller = json!({"schema":1,"scope":"SQLite public CLI debug local OIDC fixture",
         "worker_pid":group,"process_group":group,"supervisor_pid":std::process::id(),
-        "test_binary_sha256":sha256(&binary),"cli_binary_sha256":sha256(&cli),
+        "test_binary_sha256":binary_hash,"cli_binary_sha256":cli_hash,
         "debug_assertions":cfg!(debug_assertions),"local_oidc_fixture":cfg!(feature="local-oidc-fixture"),
         "forced":forced,"worker_reaped":true,"worker_success":status.success(),
         "group_gone":group_gone,"unrelated_sentinel_retained":sentinel_owned,
@@ -1302,4 +1400,197 @@ pub fn supervise() {
         "qualification incomplete; inspect {}",
         retained.display()
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        cell::{Cell, RefCell},
+        io::Cursor,
+        rc::Rc,
+    };
+
+    fn resource_frame(now: u64) -> ResourceFrame {
+        let expected = vec![
+            supervisor_identity("controller", 10),
+            supervisor_identity("worker", 20),
+        ];
+        ResourceFrame {
+            schema: 1,
+            run: ResourceRun {
+                root: "/private/tmp/owned-attestation-model".into(),
+                controller_pid: 10,
+                worker_pid: 20,
+                group: 20,
+            },
+            sequence: 1,
+            started_ns: now,
+            finished_ns: now,
+            observations: expected
+                .iter()
+                .map(|identity| RssObservation {
+                    identity: identity.clone(),
+                    started_ns: now,
+                    finished_ns: now,
+                    bytes: Some(4096),
+                    missing: None,
+                })
+                .collect(),
+            expected,
+            total_bytes: Some(8192),
+            child_bytes: Some(0),
+            max_total_bytes: 8192,
+            error: None,
+            terminal: false,
+        }
+    }
+
+    struct SlowReader {
+        bytes: Cursor<Vec<u8>>,
+        now: Rc<Cell<u64>>,
+        frame: Rc<RefCell<ResourceFrame>>,
+    }
+    impl Read for SlowReader {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            let now = self.now.get() + 200_000_000;
+            self.now.set(now);
+            let frame = self.frame.borrow();
+            frame
+                .validate(&frame.run, frame.sequence, now)
+                .map_err(std::io::Error::other)?;
+            let limit = out.len().min(4096);
+            self.bytes.read(&mut out[..limit])
+        }
+    }
+
+    #[test]
+    fn binary_attestation_keeps_the_owned_resource_frame_fresh_during_slow_reads() {
+        let bytes = vec![0xa5; 128 * 1024];
+        let now = Rc::new(Cell::new(1));
+        let frame = Rc::new(RefCell::new(resource_frame(1)));
+        let mut reader = SlowReader {
+            bytes: Cursor::new(bytes.clone()),
+            now: now.clone(),
+            frame: frame.clone(),
+        };
+        let mut progress = || {
+            *frame.borrow_mut() = resource_frame(now.get());
+            Ok(())
+        };
+        let result = binary_digest_reader(&mut reader, &mut progress);
+        assert_eq!(
+            result,
+            Ok(sha256(&bytes)),
+            "binary attestation must publish while reading, before the unchanged one-second guard expires"
+        );
+        assert!(now.get() > RESOURCE_FRESH_NS);
+    }
+
+    struct CountedReader {
+        bytes: Cursor<Vec<u8>>,
+        reads: usize,
+        max_request: usize,
+    }
+    impl Read for CountedReader {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            self.reads += 1;
+            self.max_request = self.max_request.max(out.len());
+            self.bytes.read(out)
+        }
+    }
+
+    #[test]
+    fn binary_attestation_bounds_reads_and_preserves_the_complete_digest() {
+        let bytes = vec![0x35; 3 * 64 * 1024 + 17];
+        let mut reader = CountedReader {
+            bytes: Cursor::new(bytes.clone()),
+            reads: 0,
+            max_request: 0,
+        };
+        let digest = binary_digest_reader(&mut reader, &mut || Ok(())).unwrap();
+        assert_eq!(digest, sha256(&bytes));
+        assert_eq!(reader.max_request, 64 * 1024);
+        assert_eq!(reader.reads, 5);
+    }
+
+    #[test]
+    fn binary_attestation_stops_without_another_read_after_progress_failure() {
+        let mut reader = CountedReader {
+            bytes: Cursor::new(vec![0x72; 2 * 64 * 1024]),
+            reads: 0,
+            max_request: 0,
+        };
+        let mut progress_calls = 0;
+        let result = binary_digest_reader(&mut reader, &mut || {
+            progress_calls += 1;
+            if progress_calls == 2 {
+                Err("owned outer stop".into())
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(result, Err("owned outer stop".into()));
+        assert_eq!(reader.reads, 1);
+    }
+
+    #[test]
+    fn binary_attestation_rejects_a_file_changed_while_streaming() {
+        use std::io::Write;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("owned-binary");
+        fs::write(&path, vec![0x33; 2 * 64 * 1024]).unwrap();
+        let mut progress_calls = 0;
+        let result = binary_digest_file(&path, &mut || {
+            progress_calls += 1;
+            if progress_calls == 2 {
+                OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .unwrap()
+                    .write_all(&[0x99])
+                    .unwrap();
+            }
+            Ok(())
+        });
+        assert_eq!(result, Err("binary changed during attestation".into()));
+    }
+
+    #[test]
+    fn binary_attestation_rejects_same_path_replacement_while_streaming() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("owned-binary");
+        let replacement = directory.path().join("replacement");
+        let bytes = vec![0x33; 2 * 64 * 1024];
+        fs::write(&path, &bytes).unwrap();
+        fs::write(&replacement, &bytes).unwrap();
+        let mut progress_calls = 0;
+        let result = binary_digest_file(&path, &mut || {
+            progress_calls += 1;
+            if progress_calls == 2 {
+                fs::rename(&replacement, &path).unwrap();
+            }
+            Ok(())
+        });
+        assert_eq!(result, Err("binary changed during attestation".into()));
+    }
+
+    #[test]
+    fn binary_attestation_does_not_read_after_an_expired_deadline() {
+        let mut reader = CountedReader {
+            bytes: Cursor::new(vec![0x42; 4096]),
+            reads: 0,
+            max_request: 0,
+        };
+        let deadline = Instant::now();
+        let result = binary_digest_reader(&mut reader, &mut || {
+            if Instant::now() >= deadline {
+                Err("binary attestation deadline exhausted".into())
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(result, Err("binary attestation deadline exhausted".into()));
+        assert_eq!(reader.reads, 0);
+    }
 }
