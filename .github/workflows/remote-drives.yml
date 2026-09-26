@@ -248,7 +248,7 @@ jobs:
                   raise SystemExit('RSS first-failure artifact malformed')
               fields = {'schema', 'producer', 'controller_pid', 'worker_pid', 'group', 'observed_ns', 'resource_sequence', 'candidate_role', 'candidate_pid', 'candidate_generation', 'candidate_node', 'site', 'category', 'retirement_poll', 'candidate_bytes'}
               roles = {'controller', 'worker', 'server', 'catalog-apply'}
-              worker_sites = {'worker_frame_controller', 'worker_frame_worker', 'worker_frame_child', 'readiness_child', 'active_child', 'apply_target', 'apply_sibling', 'stop_target', 'stop_sibling', 'cleanup_child'}
+              worker_sites = {'worker_frame_controller', 'worker_frame_worker', 'worker_frame_child', 'worker_frame_stop_requested_child', 'readiness_child', 'active_child', 'apply_target', 'apply_sibling', 'stop_target', 'stop_sibling', 'cleanup_child'}
               categories = {'proc_status_read_failed', 'vmrss_field_missing', 'vmrss_value_missing', 'vmrss_value_invalid', 'rss_bytes_overflow', 'taskinfo_unavailable', 'parent_changed_before_sample', 'parent_changed_after_sample', 'sample_clock_before_failed', 'sample_clock_after_failed', 'retirement_poll_failed', 'unexpected_retirement', 'sample_timestamp_overflow', 'pid_rss_cap_exceeded', 'other_rss_error'}
               polls = {'not_applicable', 'not_attempted', 'running', 'reaped_success', 'reaped_failure', 'poll_error'}
               def integer(value, minimum=0, maximum=2**64-1):

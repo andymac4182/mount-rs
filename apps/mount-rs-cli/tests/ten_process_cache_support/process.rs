@@ -151,6 +151,7 @@ enum RssSite {
     WorkerFrameController,
     WorkerFrameWorker,
     WorkerFrameChild,
+    WorkerFrameStopRequestedChild,
     ReadinessChild,
     ActiveChild,
     ApplyTarget,
@@ -653,6 +654,7 @@ pub struct OwnedProcess {
     peer: Option<SocketAddr>,
     pub cache: Option<PathBuf>,
     terminal: bool,
+    stop_requested: bool,
     started: Instant,
     first_rss_failure: Option<RssCandidate>,
 }
@@ -725,6 +727,7 @@ impl OwnedProcess {
             peer,
             cache,
             terminal: false,
+            stop_requested: false,
             started: Instant::now(),
             first_rss_failure: None,
         })
@@ -753,6 +756,9 @@ impl OwnedProcess {
         }
         if unsafe { libc::kill(self.child.id() as libc::pid_t, value) } != 0 {
             return Err(std::io::Error::last_os_error().to_string());
+        }
+        if value == libc::SIGINT {
+            self.stop_requested = true;
         }
         Ok(())
     }
@@ -1192,12 +1198,17 @@ impl Fleet {
             let mut retired_during_capture = false;
             for process in self.processes.iter_mut().filter(|p| !p.terminal) {
                 let identity = process.identity();
+                let site = if process.stop_requested {
+                    RssSite::WorkerFrameStopRequestedChild
+                } else {
+                    RssSite::WorkerFrameChild
+                };
                 let acquisition = match measure(identity.clone(), false) {
                     Ok(value) => value,
                     Err(error) => {
                         self.resources.remember_rss(RssCandidate::from_identity(
                             &identity,
-                            RssSite::WorkerFrameChild,
+                            site,
                             error.category,
                             RssPoll::NotAttempted,
                             error.observed_ns,
@@ -1215,7 +1226,7 @@ impl Fleet {
                     if let Err(error) = process.poll_exit() {
                         self.resources.remember_rss(RssCandidate::from_identity(
                             &identity,
-                            RssSite::WorkerFrameChild,
+                            site,
                             RssCategory::RetirementPollFailed,
                             RssPoll::PollError,
                             Some(observation.finished_ns),
@@ -1239,7 +1250,7 @@ impl Fleet {
                 if let Some(category) = category {
                     self.resources.remember_rss(RssCandidate::from_identity(
                         &identity,
-                        RssSite::WorkerFrameChild,
+                        site,
                         category,
                         retirement,
                         Some(observation.finished_ns),
@@ -1251,7 +1262,7 @@ impl Fleet {
                 {
                     self.resources.remember_rss(RssCandidate::from_identity(
                         &identity,
-                        RssSite::WorkerFrameChild,
+                        site,
                         error.category,
                         retirement,
                         Some(observation.finished_ns),
@@ -2094,8 +2105,21 @@ mod tests {
         root: &Path,
         status: u8,
     ) -> (OwnedProcess, Option<std::process::ChildStdin>) {
+        inert_process_script(root, &format!("printf ready; read release; exit {status}"))
+    }
+
+    fn inert_process_ignoring_sigint(
+        root: &Path,
+    ) -> (OwnedProcess, Option<std::process::ChildStdin>) {
+        inert_process_script(root, "trap '' INT; printf ready; read release; exit 0")
+    }
+
+    fn inert_process_script(
+        root: &Path,
+        script: &str,
+    ) -> (OwnedProcess, Option<std::process::ChildStdin>) {
         let mut child = Command::new("/bin/sh")
-            .args(["-c", &format!("printf ready; read release; exit {status}")])
+            .args(["-c", script])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -2147,6 +2171,7 @@ mod tests {
                 peer: None,
                 cache: None,
                 terminal: false,
+                stop_requested: false,
                 started: Instant::now(),
                 first_rss_failure: None,
             },
@@ -2189,6 +2214,16 @@ mod tests {
             process.terminal = true;
             process.receipt.reaped = true;
             process.receipt.success = status.success();
+        }
+    }
+
+    fn with_reaped_inert_children(fleet: &mut Fleet, check: impl FnOnce(&mut Fleet)) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check(fleet)));
+        for process in &mut fleet.processes {
+            cleanup_inert_child(process);
+        }
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
         }
     }
 
@@ -2380,6 +2415,156 @@ mod tests {
         });
         assert_eq!(fleet.resource_evidence()["first_rss_failure"], first);
         assert!(directory.path().join("rss-first-failure.json").is_file());
+    }
+    #[test]
+    fn rss_first_failure_frame_stop_intent_requires_successful_owned_sigint() {
+        for signal in [0, libc::c_int::MAX, libc::SIGINT] {
+            for failure in ["missing", "cap", "read"] {
+                let directory = tempfile::tempdir().unwrap();
+                let (mut process, _input) = inert_process_ignoring_sigint(directory.path());
+                process.receipt.node = "node-7".into();
+                let owned_pid = process.child.id();
+                let mut fleet = inert_resource_fleet(directory.path(), process);
+                with_reaped_inert_children(&mut fleet, |fleet| {
+                    let signal_result = fleet.processes[0].signal(signal);
+                    assert_eq!(signal_result.is_ok(), signal != libc::c_int::MAX);
+                    // A later successful non-stop signal must not reset a recorded request.
+                    fleet.processes[0].signal(0).unwrap();
+                    let mut child_reads = 0;
+                    let result = fleet.sample_resources_with(true, false, &mut |identity, _| {
+                        if identity.role != "server" {
+                            return fixture_observation(identity, false);
+                        }
+                        assert_eq!(identity.pid, owned_pid);
+                        child_reads += 1;
+                        match failure {
+                            "missing" => fixture_observation(identity, true),
+                            "cap" => {
+                                let mut value = fixture_observation(identity, false)?;
+                                value.observation.bytes = Some(RSS_CAP);
+                                Ok(value)
+                            }
+                            _ => Err(RssReadError::new(
+                                RssCategory::ProcStatusReadFailed,
+                                "PRIVATE_READ_FAILURE",
+                            )),
+                        }
+                    });
+                    let first = fleet.resource_evidence()["first_rss_failure"].clone();
+                    let frame = fleet.resources.last.as_ref().unwrap();
+                    if failure != "read" {
+                        assert!(frame.error.is_some());
+                        if failure == "missing" {
+                            assert_eq!((frame.total_bytes, frame.child_bytes), (None, None));
+                        }
+                        assert_eq!(frame.expected.len(), 3);
+                    }
+                    assert!(result.is_err());
+                    assert_eq!(child_reads, 1);
+                    assert_eq!(first.as_object().unwrap().len(), 15);
+                    assert_eq!(first["candidate_pid"], owned_pid);
+                    assert_eq!(first["candidate_node"], 7);
+                    assert_eq!(first["candidate_generation"], 1);
+                    assert_eq!(
+                        first["site"],
+                        if signal == libc::SIGINT {
+                            "worker_frame_stop_requested_child"
+                        } else {
+                            "worker_frame_child"
+                        }
+                    );
+                    match failure {
+                        "missing" => {
+                            assert_eq!(
+                                first["category"],
+                                serde_json::to_value(RssReadError::unavailable().category).unwrap()
+                            );
+                            assert_eq!(first["retirement_poll"], "running");
+                            assert!(first["candidate_bytes"].is_null());
+                        }
+                        "cap" => {
+                            assert_eq!(first["category"], "pid_rss_cap_exceeded");
+                            assert_eq!(first["retirement_poll"], "not_attempted");
+                            assert_eq!(first["candidate_bytes"], RSS_CAP);
+                        }
+                        _ => {
+                            assert_eq!(first["category"], "proc_status_read_failed");
+                            assert_eq!(first["retirement_poll"], "not_attempted");
+                            assert!(first["candidate_bytes"].is_null());
+                        }
+                    }
+                    let retained =
+                        fs::read(directory.path().join("rss-first-failure.json")).unwrap();
+                    assert!(retained.len() <= FIRST_RSS_CAP);
+                    assert_eq!(
+                        serde_json::from_slice::<serde_json::Value>(&retained).unwrap(),
+                        first
+                    );
+                    assert!(
+                        !String::from_utf8(retained)
+                            .unwrap()
+                            .contains("PRIVATE_READ_FAILURE")
+                    );
+                });
+            }
+        }
+    }
+    #[test]
+    fn rss_first_failure_requested_child_does_not_label_sibling_or_replace_first_record() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut requested, _requested_input) = inert_process_ignoring_sigint(directory.path());
+        requested.receipt.node = "node-0".into();
+        let (mut sibling, _sibling_input) = inert_process_ignoring_sigint(directory.path());
+        sibling.receipt.node = "node-1".into();
+        sibling.receipt.generation = 2;
+        let sibling_pid = sibling.child.id();
+        let mut fleet = inert_resource_fleet(directory.path(), requested);
+        fleet.processes.push(sibling);
+        with_reaped_inert_children(&mut fleet, |fleet| {
+            fleet.processes[0].signal(libc::SIGINT).unwrap();
+            let result = fleet.sample_resources_with(true, false, &mut |identity, _| {
+                let unavailable = identity.pid == sibling_pid;
+                fixture_observation(identity, unavailable)
+            });
+            let first = fleet.resource_evidence()["first_rss_failure"].clone();
+            let retained = fs::read(directory.path().join("rss-first-failure.json")).unwrap();
+            assert!(result.is_err());
+            assert_eq!(first["candidate_pid"], sibling_pid);
+            assert_eq!(first["site"], "worker_frame_child");
+            assert_eq!(first["retirement_poll"], "running");
+            fleet.processes[1].signal(libc::SIGINT).unwrap();
+            let later = fleet.sample_resources_with(true, false, &mut |identity, _| {
+                fixture_observation(identity, false)
+            });
+            assert!(later.is_err());
+            assert_eq!(fleet.resource_evidence()["first_rss_failure"], first);
+            assert_eq!(
+                fs::read(directory.path().join("rss-first-failure.json")).unwrap(),
+                retained
+            );
+        });
+    }
+    #[test]
+    fn rss_stop_intent_does_not_allow_unexpected_active_retirement() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, mut input) = inert_process_ignoring_sigint(directory.path());
+        process.receipt.node = "node-2".into();
+        let mut fleet = inert_resource_fleet(directory.path(), process);
+        with_reaped_inert_children(&mut fleet, |fleet| {
+            let process = &mut fleet.processes[0];
+            process.signal(libc::SIGINT).unwrap();
+            let result = process.sample_with(&mut |pid| {
+                release_inert_child(&mut input, pid)?;
+                Err(RssReadError::unavailable())
+            });
+            assert_eq!(result, Err("node-2 exited before requested stop".into()));
+            assert!(process.terminal && process.receipt.reaped && process.receipt.success);
+            let first = process.first_rss_failure.unwrap();
+            assert_eq!(first.site, RssSite::ActiveChild);
+            assert_eq!(first.category, RssCategory::UnexpectedRetirement);
+            assert_eq!(first.poll, RssPoll::ReapedSuccess);
+            assert!(process.signal(libc::SIGINT).is_err());
+        });
     }
     #[test]
     fn rss_first_failure_typed_linux_parsing_and_private_source_errors_do_not_select_from_strings()
@@ -2767,6 +2952,15 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value.as_object().unwrap().len(), 15);
         assert_eq!(value["candidate_bytes"].as_u64(), Some(u64::MAX));
+        let requested = FirstRssFailure {
+            site: RssSite::WorkerFrameStopRequestedChild,
+            ..record
+        };
+        let requested_bytes = serde_json::to_vec(&requested).unwrap();
+        assert!(requested_bytes.len() <= FIRST_RSS_CAP);
+        let requested_value: serde_json::Value = serde_json::from_slice(&requested_bytes).unwrap();
+        assert_eq!(requested_value.as_object().unwrap().len(), 15);
+        assert_eq!(requested_value["site"], "worker_frame_stop_requested_child");
         assert!(
             !String::from_utf8(bytes.clone())
                 .unwrap()
