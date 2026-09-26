@@ -106,7 +106,20 @@ fn r2_diagnostics() -> Value {
             "bytes_read":stats.bytes_read,"bytes_written":stats.bytes_written,
             "conditional_conflicts":stats.conditional_conflicts,
             "id_collision_exhausted":stats.id_collision_exhausted,
-            "retry_exhausted":stats.retry_exhausted,"cache_hits":stats.cache_hits}));
+            "retry_exhausted":stats.retry_exhausted,"cache_hits":stats.cache_hits,
+            "raw_api":stats.raw_api.map(|raw| json!({
+                "schema":raw.schema,"scope":raw.scope,"saturated":raw.saturated,
+                "in_flight":raw.in_flight,"pending_claims":raw.pending_claims,
+                "claims":{"leader_claims":raw.claims.leader_claims,"leader_success":raw.claims.leader_success,
+                    "leader_error":raw.claims.leader_error,"leader_cancelled":raw.claims.leader_cancelled,
+                    "follower_claims":raw.claims.follower_claims,"follower_success":raw.claims.follower_success,
+                    "follower_error":raw.claims.follower_error,"follower_cancelled":raw.claims.follower_cancelled},
+                "entries":raw.entries.iter().map(|entry| json!({"name":entry.name,
+                    "calls":entry.calls,"success":entry.success,"error":entry.error,"cancelled":entry.cancelled,
+                    "elapsed_ns":entry.elapsed_ns,"latency_max_ns":entry.latency_max_ns,
+                    "attempted_bytes":entry.attempted_bytes,"confirmed_bytes":entry.confirmed_bytes,
+                    "returned_bytes":entry.returned_bytes,"latency_log2_us":entry.latency_log2_us})).collect::<Vec<_>>()
+            }))}));
         true
     });
     json!({"scope":"process_live_instances","instances":instances,"internal_successful_retries":"unavailable"})
@@ -134,7 +147,7 @@ pub fn storage_diagnostics() -> String {
         }
     }
     let mut value = json!({
-        "schema_version":"mount-rs.storage-diagnostics.v1",
+        "schema_version":"mount-rs.storage-diagnostics.v2",
         "enabled":storage::enabled(),
         "scope":"process",
         "quiescent_snapshot_required":true,
@@ -166,6 +179,16 @@ pub fn storage_diagnostics() -> String {
             "profile":"existing_core_profile_counters",
             "sqlite":"live_connection_pager_and_sql_category_counters; pager_bytes_are_page_size_estimates",
             "r2":"live_store_logical_calls_and_cache_hits; not_http_attempts",
+            "r2_api":{
+                "schema":"mount-rs.object-store-api.v1","scope":"live_registered_split_r2_block_store_instances",
+                "calls":"object_store_adapter_method_invocations; not_http_attempts_or_internal_retries",
+                "duration":"inclusive_wall_nanoseconds_at_invoked_adapter_await; excludes_argument_preparation",
+                "upload_bytes":"attempted=submitted_payload; confirmed=put_opts_ok_only",
+                "returned_bytes":"successful_body_materialization_before_integrity_validation",
+                "latency_max":"cumulative_per_instance; exact_phase_max_unavailable",
+                "reconcile_listing":"unavailable",
+                "excluded":["backing_marker_prepare_and_verify","concurrent_prefix_probes","qualification_and_preflight","unregistered_rust_factories_and_mount_r2","internal_client_retries"]
+            },
             "unavailable":{
                 "http_attempts":"unavailable",
                 "internal_successful_retries":"unavailable",
@@ -5732,12 +5755,141 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "run isolated with MOUNT_RS_PROFILE_IO=1 and --ignored --exact"]
+    fn live_r2_raw_diagnostics_require_exact_fields() {
+        assert!(storage::enabled(), "run with MOUNT_RS_PROFILE_IO=1");
+        let options = JsChunkedStoreOptions {
+            kind: "r2".to_owned(),
+            uri: None,
+            key: Some("private-test-prefix".to_owned()),
+            durable: None,
+            lease_authority: None,
+            authority_prefix: None,
+            endpoint: Some("http://127.0.0.1:9878".to_owned()),
+            bucket: Some("private-test-bucket".to_owned()),
+            region: None,
+            access_key_id: Some("private-test-key".to_owned()),
+            secret_access_key: Some("private-test-secret".to_owned()),
+        };
+        let (_blocks, _) = block_on(build_block_store(&options))
+            .expect("R2 construction and registration requires zero service calls");
+        let exported = storage_diagnostics();
+        let snapshot: Value = serde_json::from_str(&exported).unwrap();
+        let instance = &snapshot["r2"]["instances"][0];
+        assert!(
+            instance["raw_api"].is_object(),
+            "enabled live R2 instance must export raw_api"
+        );
+        assert_eq!(
+            snapshot["schema_version"],
+            "mount-rs.storage-diagnostics.v2"
+        );
+        assert!(instance["id"].is_string());
+        assert_eq!(instance["raw_api"]["entries"][0]["calls"], "0");
+        assert_eq!(
+            instance["raw_api"]["schema"],
+            "mount-rs.object-store-api.v1"
+        );
+        assert_eq!(
+            instance["raw_api"]["scope"],
+            "one_object_store_block_store_instance"
+        );
+        assert_eq!(instance["raw_api"]["saturated"], false);
+        assert_eq!(instance["raw_api"]["pending_claims"], "0");
+        assert_eq!(instance["raw_api"]["in_flight"], "0");
+        let names = instance["raw_api"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "put_opts.block_create",
+                "get.block_read",
+                "body_read.block_read",
+                "get.conflict_verify",
+                "body_read.conflict_verify",
+                "get.migration",
+                "body_read.migration",
+                "head.direct_delete",
+                "delete.direct",
+                "delete.reconcile"
+            ]
+        );
+        let claims = instance["raw_api"]["claims"].as_object().unwrap();
+        assert_eq!(claims.len(), 8);
+        for field in [
+            "leader_claims",
+            "leader_success",
+            "leader_error",
+            "leader_cancelled",
+            "follower_claims",
+            "follower_success",
+            "follower_error",
+            "follower_cancelled",
+        ] {
+            assert_eq!(claims[field], "0");
+        }
+        assert_eq!(snapshot["r2"]["scope"], "process_live_instances");
+        assert_eq!(
+            snapshot["measurement"]["r2_api"]["scope"],
+            "live_registered_split_r2_block_store_instances"
+        );
+        assert_eq!(
+            snapshot["measurement"]["r2_api"]["reconcile_listing"],
+            "unavailable"
+        );
+        assert_eq!(
+            snapshot["measurement"]["r2_api"]["latency_max"],
+            "cumulative_per_instance; exact_phase_max_unavailable"
+        );
+        for row in instance["raw_api"]["entries"].as_array().unwrap() {
+            for field in [
+                "calls",
+                "success",
+                "error",
+                "cancelled",
+                "elapsed_ns",
+                "latency_max_ns",
+                "attempted_bytes",
+                "confirmed_bytes",
+                "returned_bytes",
+            ] {
+                assert_eq!(row[field], "0");
+            }
+            assert_eq!(
+                row["latency_log2_us"].as_array().unwrap(),
+                &vec![json!("0"); 32]
+            );
+        }
+        let mut extremes = json!({"id":u64::MAX,"claims":{"leader_claims":9_007_199_254_740_993_u64},"latency_log2_us":[u64::MAX]});
+        stringify_counters(&mut extremes);
+        assert_eq!(extremes["id"], "18446744073709551615");
+        assert_eq!(extremes["claims"]["leader_claims"], "9007199254740993");
+        assert_eq!(extremes["latency_log2_us"][0], "18446744073709551615");
+        for private in [
+            "private-test-prefix",
+            "private-test-bucket",
+            "private-test-key",
+            "private-test-secret",
+            "127.0.0.1",
+        ] {
+            assert!(!exported.contains(private));
+        }
+        // Fixed counters/metadata only; retained to check the actual serializer
+        // contract against the Node consumer without any backing-store I/O.
+        eprintln!("NATIVE_R2_RAW_JSON {exported}");
+    }
+
+    #[test]
     fn native_storage_snapshot_serializes_exact_decimal_counters() {
         let json = storage_diagnostics();
         let snapshot: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(
             snapshot["schema_version"],
-            "mount-rs.storage-diagnostics.v1"
+            "mount-rs.storage-diagnostics.v2"
         );
         assert!(snapshot["storage"]["entries"][0]["calls"].is_string());
         assert!(snapshot["storage"]["forwarding_boxes"]["calls"].is_string());

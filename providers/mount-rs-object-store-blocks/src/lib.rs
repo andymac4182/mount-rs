@@ -1,8 +1,17 @@
 //! Immutable byte blocks backed by an [\`object_store::ObjectStore\`].
 //!
 //! This adapter deliberately does not store namespace metadata or a snapshot
-//! manifest. Each successful \`put\` is one provider-confirmed object upload;
-//! metadata providers remain responsible for publishing references to it.
+//! manifest. A successful \`put\` may share a coalesced upload or verify an
+//! existing immutable object; raw `put_opts` success confirms an accepted upload.
+//! Metadata providers remain responsible for publishing references to blocks.
+
+mod raw_metrics;
+use raw_metrics::{Api, Claim, ClaimSpan, RawSpan, RawState};
+pub use raw_metrics::{
+    RAW_API_NAMES, RAW_API_SCHEMA, RAW_API_SCOPE, RawApiClaims, RawApiEntry, RawApiSnapshot,
+};
+#[cfg(test)]
+mod raw_metrics_tests;
 
 mod qualification;
 pub use qualification::{
@@ -338,10 +347,13 @@ pub struct ObjectStoreBlockStoreStats {
     pub retry_exhausted: u64,
     pub cache_hits: u64,
     pub error_classes: BTreeMap<ObjectStoreBlockStoreErrorClass, u64>,
+    /// Detailed adapter API counters, absent when profiling was disabled at construction.
+    pub raw_api: Option<RawApiSnapshot>,
 }
 
 #[derive(Default)]
 struct ObjectStoreBlockStoreStatsState {
+    raw: Option<Box<RawState>>,
     puts: AtomicU64,
     gets: AtomicU64,
     deletes: AtomicU64,
@@ -484,6 +496,7 @@ impl ObjectStoreBlockStoreStatsState {
             retry_exhausted: load(&self.retry_exhausted),
             cache_hits: load(&self.cache_hits),
             error_classes,
+            raw_api: self.raw.as_deref().map(RawState::snapshot),
         }
     }
 }
@@ -869,7 +882,11 @@ impl ObjectStoreBlockStore {
             store,
             prefix: validate_prefix(&prefix.into())?,
             durable,
-            stats: Arc::new(ObjectStoreBlockStoreStatsState::default()),
+            stats: Arc::new(ObjectStoreBlockStoreStatsState {
+                raw: mount_rs_core::diagnostics::storage::enabled()
+                    .then(|| Box::new(RawState::default())),
+                ..Default::default()
+            }),
             cache: Arc::new(ObjectStoreBlockCache::default()),
             inflight_puts: Arc::new(Mutex::new(HashMap::new())),
         })
@@ -928,17 +945,14 @@ impl ObjectStoreBlockStore {
         path: &ObjectPath,
         started: Instant,
     ) -> Result<()> {
-        let result = self
-            .store
-            .put_opts(
-                path,
-                PutPayload::from(bytes.to_vec()),
-                PutOptions {
-                    mode: PutMode::Create,
-                    ..Default::default()
-                },
-            )
-            .await;
+        let payload = PutPayload::from(bytes.to_vec());
+        let options = PutOptions {
+            mode: PutMode::Create,
+            ..Default::default()
+        };
+        let mut raw = RawSpan::new(self.stats.raw.as_deref(), Api::Put, bytes.len() as u64);
+        let result = self.store.put_opts(path, payload, options).await;
+        raw.result(&result, bytes.len() as u64, 0);
         match result {
             Ok(_) => {
                 self.cache.insert(&id.0, bytes);
@@ -952,17 +966,29 @@ impl ObjectStoreBlockStore {
             Err(object_store::Error::AlreadyExists { .. })
             | Err(object_store::Error::Precondition { .. }) => {
                 self.stats.conditional_conflict();
-                let existing = match self.store.get(path).await {
-                    Ok(result) => match result.bytes().await {
-                        Ok(bytes) => bytes,
-                        Err(error) => {
-                            self.cache.remove(&id.0);
-                            self.stats.error(started, &error);
-                            return Err(backend_error(format!(
-                                "verify object-store block: {error}"
-                            )));
+                let mut raw = RawSpan::new(self.stats.raw.as_deref(), Api::ConflictGet, 0);
+                let result = self.store.get(path).await;
+                raw.result(&result, 0, 0);
+                let existing = match result {
+                    Ok(result) => {
+                        let mut raw = RawSpan::new(self.stats.raw.as_deref(), Api::ConflictBody, 0);
+                        let result = result.bytes().await;
+                        raw.result(
+                            &result,
+                            0,
+                            result.as_ref().map_or(0, |bytes| bytes.len() as u64),
+                        );
+                        match result {
+                            Ok(bytes) => bytes,
+                            Err(error) => {
+                                self.cache.remove(&id.0);
+                                self.stats.error(started, &error);
+                                return Err(backend_error(format!(
+                                    "verify object-store block: {error}"
+                                )));
+                            }
                         }
-                    },
+                    }
                     Err(error) => {
                         self.cache.remove(&id.0);
                         self.stats.error(started, &error);
@@ -999,14 +1025,24 @@ impl BlockStore for ObjectStoreBlockStore {
         let path = self.object_path(id)?;
         // Migration must check the current remote bytes rather than a cached
         // value from an earlier successful read in this process.
-        let result = self.store.get(&path).await.map_err(|error| match error {
+        let mut raw = RawSpan::new(self.stats.raw.as_deref(), Api::MigrationGet, 0);
+        let result = self.store.get(&path).await;
+        raw.result(&result, 0, 0);
+        let result = result.map_err(|error| match error {
             object_store::Error::NotFound { .. } => map_get_error(error),
             error => FsError::backend(format!(
                 "object-store migration block read failed ({:?})",
                 classify_error(&error)
             )),
         })?;
-        let bytes = result.bytes().await.map_err(|error| {
+        let mut raw = RawSpan::new(self.stats.raw.as_deref(), Api::MigrationBody, 0);
+        let bytes = result.bytes().await;
+        raw.result(
+            &bytes,
+            0,
+            bytes.as_ref().map_or(0, |bytes| bytes.len() as u64),
+        );
+        let bytes = bytes.map_err(|error| {
             FsError::backend(format!(
                 "object-store migration block read failed ({:?})",
                 classify_error(&error)
@@ -1025,18 +1061,25 @@ impl BlockStore for ObjectStoreBlockStore {
         let id = BlockId(block_id(bytes));
         let path = self.object_path(&id)?;
         match self.claim_put(&id.0) {
-            InFlightPutClaim::Follower(receiver) => match wait_for_inflight_put(receiver).await {
-                Ok(()) => {
-                    self.stats.success(started, 0, bytes.len() as u64);
-                    Ok(id)
+            InFlightPutClaim::Follower(receiver) => {
+                let mut claim = ClaimSpan::new(self.stats.raw.as_deref(), Claim::Follower);
+                let result = wait_for_inflight_put(receiver).await;
+                claim.result(&result);
+                match result {
+                    Ok(()) => {
+                        self.stats.success(started, 0, bytes.len() as u64);
+                        Ok(id)
+                    }
+                    Err(error) => {
+                        self.stats.logical_error(started);
+                        Err(error)
+                    }
                 }
-                Err(error) => {
-                    self.stats.logical_error(started);
-                    Err(error)
-                }
-            },
+            }
             InFlightPutClaim::Leader(guard) => {
+                let mut claim = ClaimSpan::new(self.stats.raw.as_deref(), Claim::Leader);
                 let result = self.put_remote(&id, bytes, &path, started).await;
+                claim.result(&result);
                 match result {
                     Ok(()) => {
                         guard.finish(Ok(()));
@@ -1059,14 +1102,24 @@ impl BlockStore for ObjectStoreBlockStore {
             self.stats.success(started, bytes.len() as u64, 0);
             return Ok(bytes);
         }
-        let result = match self.store.get(&path).await {
+        let mut raw = RawSpan::new(self.stats.raw.as_deref(), Api::Get, 0);
+        let result = self.store.get(&path).await;
+        raw.result(&result, 0, 0);
+        let result = match result {
             Ok(result) => result,
             Err(error) => {
                 self.stats.error(started, &error);
                 return Err(map_get_error(error));
             }
         };
-        match result.bytes().await {
+        let mut raw = RawSpan::new(self.stats.raw.as_deref(), Api::Body, 0);
+        let result = result.bytes().await;
+        raw.result(
+            &result,
+            0,
+            result.as_ref().map_or(0, |bytes| bytes.len() as u64),
+        );
+        match result {
             Ok(bytes) => {
                 if id.0.len() == 1 + CONTENT_BLOCK_ID_HEX_CHARS && block_id(&bytes) != id.0 {
                     self.cache.remove(&id.0);
@@ -1096,11 +1149,17 @@ impl BlockStore for ObjectStoreBlockStore {
     async fn delete(&self, id: &BlockId) -> Result<()> {
         let path = self.object_path(id)?;
         let started = self.stats.start(BlockOperation::Delete);
-        if let Err(error) = self.store.head(&path).await {
+        let mut raw = RawSpan::new(self.stats.raw.as_deref(), Api::Head, 0);
+        let result = self.store.head(&path).await;
+        raw.result(&result, 0, 0);
+        if let Err(error) = result {
             self.stats.error(started, &error);
             return Err(map_not_found(error));
         }
-        match self.store.delete(&path).await {
+        let mut raw = RawSpan::new(self.stats.raw.as_deref(), Api::Delete, 0);
+        let result = self.store.delete(&path).await;
+        raw.result(&result, 0, 0);
+        match result {
             Ok(()) => {
                 self.cache.remove(&id.0);
                 self.stats.success(started, 0, 0);
@@ -1176,7 +1235,10 @@ impl BlockStore for ObjectStoreBlockStore {
                 }
                 ReconcileCandidate::Delete => {}
             }
-            match self.store.delete(&object.location).await {
+            let mut raw = RawSpan::new(self.stats.raw.as_deref(), Api::ReconcileDelete, 0);
+            let result = self.store.delete(&object.location).await;
+            raw.result(&result, 0, 0);
+            match result {
                 Ok(()) | Err(object_store::Error::NotFound { .. }) => {
                     self.cache.remove(&id.expect("validated direct block ID").0);
                     report.deleted = report.deleted.saturating_add(1);

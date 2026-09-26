@@ -23,14 +23,44 @@ import { cleanupOwnedPaths, helpText, parseArgs, runBenchmark, runSample, runSte
 import { computeStats, percentile, round, roundStats } from "./stats.mjs"
 import { deltaNativeSnapshots, takePhaseSnapshot, finishPhase } from "./diagnostics.mjs"
 
-async function testStoragePhaseDiagnostics() {
-  const snapshot = (calls, connectionId = "7") => ({
-    schema_version: "mount-rs.storage-diagnostics.v1", enabled: true,
+const rawApiNames = ["put_opts.block_create", "get.block_read", "body_read.block_read", "get.conflict_verify", "body_read.conflict_verify", "get.migration", "body_read.migration", "head.direct_delete", "delete.direct", "delete.reconcile"]
+const rawApiMeasurement = {
+  schema: "mount-rs.object-store-api.v1", scope: "live_registered_split_r2_block_store_instances",
+  calls: "object_store_adapter_method_invocations; not_http_attempts_or_internal_retries",
+  duration: "inclusive_wall_nanoseconds_at_invoked_adapter_await; excludes_argument_preparation",
+  upload_bytes: "attempted=submitted_payload; confirmed=put_opts_ok_only",
+  returned_bytes: "successful_body_materialization_before_integrity_validation",
+  latency_max: "cumulative_per_instance; exact_phase_max_unavailable", reconcile_listing: "unavailable",
+  excluded: ["backing_marker_prepare_and_verify", "concurrent_prefix_probes", "qualification_and_preflight", "unregistered_rust_factories_and_mount_r2", "internal_client_retries"],
+}
+
+function rawApiInstance(calls, id = "19") {
+  return {
+    id, puts: String(calls), gets: "0", deletes: "0", reconciles: "0", successes: String(calls), errors: "0",
+    duration_ms_total: "0", duration_ms_max: "0", bytes_read: "0", bytes_written: String(calls * 4096),
+    conditional_conflicts: "0", id_collision_exhausted: "0", retry_exhausted: "0", cache_hits: "0",
+    raw_api: {
+      schema: "mount-rs.object-store-api.v1", scope: "one_object_store_block_store_instance",
+      saturated: false, in_flight: "0", pending_claims: "0",
+      claims: { leader_claims: String(calls), leader_success: String(calls), leader_error: "0", leader_cancelled: "0", follower_claims: "0", follower_success: "0", follower_error: "0", follower_cancelled: "0" },
+      entries: rawApiNames.map((name, index) => {
+        const count = index === 0 ? calls : 0
+        return { name, calls: String(count), success: String(count), error: "0", cancelled: "0", elapsed_ns: String(count * 1000), attempted_bytes: String(count * 4096), confirmed_bytes: String(count * 4096), returned_bytes: "0", latency_max_ns: count ? "1000" : "0", latency_log2_us: ["0", String(count), ...Array(30).fill("0")] }
+      }),
+    },
+  }
+}
+
+function diagnosticSnapshot(calls, connectionId = "7", instances = []) {
+  return {
+    schema_version: "mount-rs.storage-diagnostics.v2", enabled: true, scope: "process", quiescent_snapshot_required: true, elapsed_semantics: "inclusive_wall_nanoseconds",
     measurement: { storage_calls: "logical_provider_calls", storage_bytes: "successful_payload_bytes_at_provider_boundary",
       storage_duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap",
       forwarding_boxes: "enabled_napi_dynamic_provider_box_pin_site_calls_and_requested_future_object_bytes; excludes_allocator_overhead_and_other_allocations",
+      profile: "existing_core_profile_counters",
       sqlite: "live_connection_pager_and_sql_category_counters; pager_bytes_are_page_size_estimates",
       r2: "live_store_logical_calls_and_cache_hits; not_http_attempts",
+      r2_api: structuredClone(rawApiMeasurement),
       unavailable: { http_attempts: "unavailable", internal_successful_retries: "unavailable", physical_device_iops: "unavailable", tidb_pool_wait: "unavailable", native_allocation_count: "unavailable", js_allocation_count: "unavailable" },
       latency_histogram: { unit: "microseconds", intervals: Array.from({ length: 32 }, (_, bucket) => bucket === 0
         ? { lower_inclusive_us: "0", upper_exclusive_us: "1" }
@@ -42,14 +72,19 @@ async function testStoragePhaseDiagnostics() {
     storage: { in_flight: "0", forwarding_boxes: { sites: "napi_dynamic_provider_forwarding_future", calls: String(calls), requested_object_bytes: String(calls * 80) }, entries: [{ name: "blocks.put", calls: String(calls), success: String(calls), error: "0", cancelled: "0", bytes: String(calls * 4096), elapsed_ns: String(calls * 1000), latency_log2_us: [String(calls), ...Array(31).fill("0")] }] },
     profile: { entries: [{ name: "filesystem.gate_wait", calls: String(calls), elapsed_ns: String(calls * 50), units: "0" }] },
     sqlite: { connections: [{ connection_id: connectionId, pager: { cache_hits: String(calls), cache_misses: "0", page_writes: String(calls), cache_spills: "0" }, page_size: "4096", pager_read_bytes_estimate: "0", pager_write_bytes_estimate: String(calls * 4096), sql_statements: String(calls), sql_categories: { SELECT: String(calls) } }] },
-    r2: { instances: [], internal_successful_retries: "unavailable" },
-  })
+    r2: { scope: "process_live_instances", instances, internal_successful_retries: "unavailable" },
+  }
+}
+
+async function testStoragePhaseDiagnostics() {
+  const snapshot = diagnosticSnapshot
   const delta = deltaNativeSnapshots(snapshot(2), snapshot(5))
   assert.equal(delta.complete, true)
   assert.equal(delta.storage?.entries?.[0]?.bytes, "12288")
   assert.equal(delta.storage.forwarding_boxes.calls, "3")
   assert.equal(delta.storage.forwarding_boxes.requested_object_bytes, "240")
   assert.equal(delta.measurement.storage_duration, "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap")
+  assert.equal(delta.measurement.profile, "existing_core_profile_counters")
   assert.equal(delta.backend_waits.tidb_pool, "unavailable")
   assert.equal(delta.profile.entries[0].elapsed_ns, "150")
   assert.equal(delta.sqlite.connections[0].pager.page_writes, "3")
@@ -72,6 +107,137 @@ async function testStoragePhaseDiagnostics() {
   const resetBoxes = snapshot(5)
   resetBoxes.storage.forwarding_boxes.calls = "1"
   assert.equal(deltaNativeSnapshots(snapshot(2), resetBoxes).complete, false)
+}
+
+async function testRawObjectStorePhaseDiagnostics() {
+  const snapshot = (calls) => diagnosticSnapshot(calls, "7", [rawApiInstance(calls)])
+  const delta = deltaNativeSnapshots(snapshot(2), snapshot(5))
+  assert.equal(delta.complete, true)
+  assert.equal(delta.schema_version, "mount-rs.storage-diagnostics.v2")
+  assert.equal(delta.r2.scope, "process_live_instances")
+  assert.deepEqual(delta.r2.instance_ids_start, ["19"])
+  assert.deepEqual(delta.r2.instance_ids_end, ["19"])
+  assert.equal(delta.r2.instances[0].opened_during_phase, false)
+  const raw = delta.r2.instances[0].raw_api
+  assert.equal(raw.schema, "mount-rs.object-store-api.v1")
+  assert.equal(raw.scope, "one_object_store_block_store_instance")
+  assert.equal(raw.in_flight_start, "0")
+  assert.equal(raw.pending_claims_end, "0")
+  assert.equal(raw.claims.leader_claims, "3")
+  assert.equal(raw.entries[0].calls, "3")
+  assert.equal(raw.entries[0].confirmed_bytes, "12288")
+  assert.equal(raw.entries[0].latency_max_ns_start, "1000")
+  assert.equal(raw.entries[0].latency_max_ns_end, "1000")
+  assert.equal(raw.entries[0].exact_phase_max_ns, "unavailable")
+  assert.deepEqual(raw.entries[0].latency_log2_us, ["0", "3", ...Array(30).fill("0")])
+  const advanced = snapshot(5)
+  advanced.r2.instances[0].raw_api.entries[0].latency_max_ns = "1500"
+  const maximum = deltaNativeSnapshots(snapshot(2), advanced).r2.instances[0].raw_api.entries[0]
+  assert.equal(maximum.latency_max_ns_end, "1500", "a cumulative maximum must never be subtracted")
+  assert.equal(maximum.exact_phase_max_ns, "unavailable")
+  const unchanged = deltaNativeSnapshots(snapshot(2), snapshot(2)).r2.instances[0].raw_api.entries[0]
+  assert.equal(unchanged.calls, "0")
+  assert.equal(unchanged.latency_max_ns_end, "1000", "an idle phase retains its lifetime maximum")
+
+  const semanticBefore = diagnosticSnapshot(0, "7", [rawApiInstance(0)])
+  const uncertain = diagnosticSnapshot(2, "7", [rawApiInstance(2)])
+  const uncertainRaw = uncertain.r2.instances[0].raw_api
+  Object.assign(uncertainRaw.entries[0], { success: "0", error: "1", cancelled: "1", confirmed_bytes: "0" })
+  Object.assign(uncertainRaw.claims, { leader_success: "0", leader_error: "1", leader_cancelled: "1" })
+  assert.equal(deltaNativeSnapshots(semanticBefore, uncertain).complete, true, "errors and cancellation retain attempted bytes without confirming writes")
+  const integrityFailure = diagnosticSnapshot(1, "7", [rawApiInstance(1)])
+  const integrityRaw = integrityFailure.r2.instances[0].raw_api
+  Object.assign(integrityRaw.claims, { leader_success: "0", leader_error: "1" })
+  Object.assign(integrityRaw.entries[0], { success: "0", error: "1", confirmed_bytes: "0" })
+  for (const index of [3, 4]) Object.assign(integrityRaw.entries[index], { calls: "1", success: "1", elapsed_ns: "1000", latency_max_ns: "1000", latency_log2_us: ["0", "1", ...Array(30).fill("0")] })
+  integrityRaw.entries[4].returned_bytes = "4096"
+  const integrityDelta = deltaNativeSnapshots(semanticBefore, integrityFailure)
+  assert.equal(integrityDelta.complete, true, "successful raw body bytes remain observable after claim integrity failure")
+  assert.equal(integrityDelta.r2.instances[0].raw_api.entries[4].returned_bytes, "4096")
+  const followers = diagnosticSnapshot(5, "7", [rawApiInstance(2)])
+  Object.assign(followers.r2.instances[0].raw_api.claims, { leader_success: "1", leader_error: "1", follower_claims: "3", follower_success: "2", follower_error: "1" })
+  Object.assign(followers.r2.instances[0].raw_api.entries[0], { success: "1", error: "1", confirmed_bytes: "4096" })
+  const followerDelta = deltaNativeSnapshots(semanticBefore, followers)
+  assert.equal(followerDelta.complete, true, "followers need not invoke an additional raw API method")
+  assert.equal(followerDelta.r2.instances[0].raw_api.entries[0].calls, "2")
+  assert.equal(followerDelta.r2.instances[0].raw_api.claims.follower_claims, "3")
+
+  const badCases = [
+    ["missing raw", (value) => { delete value.r2.instances[0].raw_api }],
+    ["null raw", (value) => { value.r2.instances[0].raw_api = null }],
+    ["number counter", (value) => { value.r2.instances[0].raw_api.entries[0].calls = 5 }],
+    ["noncanonical decimal", (value) => { value.r2.instances[0].raw_api.entries[0].calls = "05" }],
+    ["u64 overflow", (value) => { value.r2.instances[0].raw_api.entries[0].elapsed_ns = "18446744073709551616" }],
+    ["saturated endpoint", (value) => { value.r2.instances[0].raw_api.saturated = true }],
+    ["saturated counter", (value) => { value.r2.instances[0].raw_api.entries[0].elapsed_ns = "18446744073709551615" }],
+    ["missing saturation", (value) => { delete value.r2.instances[0].raw_api.saturated }],
+    ["counter reset", (value) => { value.r2.instances[0].raw_api.entries[0].attempted_bytes = "1" }],
+    ["maximum reset", (value) => { value.r2.instances[0].raw_api.entries[0].latency_max_ns = "999" }],
+    ["duplicate instance", (value) => { value.r2.instances.push(structuredClone(value.r2.instances[0])) }],
+    ["number identity", (value) => { value.r2.instances[0].id = 19 }],
+    ["dropped instance", (value) => { value.r2.instances = [] }],
+    ["missing registry", (value) => { delete value.r2.instances }],
+    ["registry unavailable", (value) => { value.r2.available = false }],
+    ["row order", (value) => { value.r2.instances[0].raw_api.entries.reverse() }],
+    ["row name", (value) => { value.r2.instances[0].raw_api.entries[0].name = "put_opts.secret-key" }],
+    ["row missing", (value) => { value.r2.instances[0].raw_api.entries.pop() }],
+    ["row outcomes", (value) => { value.r2.instances[0].raw_api.entries[0].success = "4" }],
+    ["histogram shape", (value) => { value.r2.instances[0].raw_api.entries[0].latency_log2_us.pop() }],
+    ["histogram total", (value) => { value.r2.instances[0].raw_api.entries[0].latency_log2_us[1] = "4" }],
+    ["claim outcomes", (value) => { value.r2.instances[0].raw_api.claims.leader_success = "4" }],
+    ["claim missing", (value) => { delete value.r2.instances[0].raw_api.claims.follower_cancelled }],
+    ["raw in flight", (value) => { value.r2.instances[0].raw_api.in_flight = "1" }],
+    ["pending claims", (value) => { value.r2.instances[0].raw_api.pending_claims = "1" }],
+    ["byte applicability", (value) => { value.r2.instances[0].raw_api.entries[1].returned_bytes = "1" }],
+    ["unconfirmed success bytes", (value) => { value.r2.instances[0].raw_api.entries[0].confirmed_bytes = "999999" }],
+    ["metadata change", (value) => { value.measurement.r2_api.reconcile_listing = "instrumented" }],
+    ["native scope change", (value) => { value.scope = "private-backend" }],
+    ["schema v1", (value) => { value.schema_version = "mount-rs.storage-diagnostics.v1" }],
+  ]
+  for (const [label, mutate] of badCases) {
+    const after = snapshot(5)
+    mutate(after)
+    const incomplete = deltaNativeSnapshots(snapshot(2), after)
+    assert.equal(incomplete.complete, false, label)
+    assert.ok(incomplete.observations?.before && incomplete.observations?.after, `${label}: preserve sanitized endpoint observations`)
+  }
+  const malformedBaseline = snapshot(2)
+  malformedBaseline.r2.instances[0].raw_api.claims.follower_claims = "1"
+  assert.equal(deltaNativeSnapshots(malformedBaseline, snapshot(5)).complete, false, "validate the baseline itself")
+  const malicious = snapshot(5)
+  malicious.r2.instances[0].id = "https://user:secret@example.test/key"
+  malicious.r2.instances[0].raw_api.entries[0].name = "private-key"
+  malicious.r2.instances[0].raw_api.entries[0].elapsed_ns = "private-counter"
+  malicious.measurement.private_url = "https://secret@example.test"
+  malicious.r2.error = "private-error"
+  const evidence = JSON.stringify(deltaNativeSnapshots(snapshot(2), malicious))
+  for (const secret of ["secret", "private-key", "private-counter", "private-error", "private_url", "https:"]) assert.equal(evidence.includes(secret), false, secret)
+  const privateBefore = snapshot(2)
+  const privateAfter = snapshot(5)
+  for (const value of [privateBefore, privateAfter]) {
+    value.storage.entries[0].name = "private-storage-label"
+    value.profile.entries[0].name = "private-profile-label"
+    value.sqlite.connections[0].sql_categories = { "private-sql-label": "1" }
+  }
+  privateAfter.storage.in_flight = "1"
+  const partial = JSON.stringify(deltaNativeSnapshots(privateBefore, privateAfter))
+  for (const secret of ["private-storage-label", "private-profile-label", "private-sql-label"]) assert.equal(partial.includes(secret), false, secret)
+  const oversized = snapshot(5)
+  oversized.r2.instances = Array.from({ length: 100 }, (_, index) => rawApiInstance(5, String(index + 1)))
+  oversized.r2.instances[0].raw_api.entries[0].calls = "invalid"
+  assert.equal(deltaNativeSnapshots(snapshot(2), oversized).observations.truncated, true)
+
+  const samplers = { now: () => 0, cpu: () => ({ user: 0, system: 0 }), resources: () => ({ voluntaryContextSwitches: 0, involuntaryContextSwitches: 0 }), memory: () => ({ rss: 0 }) }
+  const endpoint = (value) => takePhaseSnapshot(() => JSON.stringify(value), samplers)
+  const openedBefore = diagnosticSnapshot(2)
+  assert.equal(finishPhase("create", endpoint(openedBefore), endpoint(snapshot(5))).native.complete, true)
+  const workload = finishPhase("workload-4096bytes", endpoint(openedBefore), endpoint(snapshot(5)))
+  assert.equal(workload.native.complete, false, "a measured workload requires stable instances")
+  assert.equal(workload.native.r2.instances[0].opened_during_phase, true)
+  assert.ok(workload.native.observations)
+  const shutdown = finishPhase("shutdown", endpoint(snapshot(2)), endpoint(diagnosticSnapshot(5)))
+  assert.equal(shutdown.native.complete, false)
+  assert.deepEqual(shutdown.native.r2.missing_instance_ids, ["19"])
 }
 
 async function testObserverEndpointsExcludeSnapshotWork() {
@@ -666,6 +832,147 @@ async function testQualificationArtifact() {
   )
 }
 
+function rawQualificationArtifact(providers = ["mount-rs-split-sqlite-r2"], sizes = [1]) {
+  const artifact = qualificationArtifact(providers)
+  artifact.config.storageDiagnosticsEnabled = true
+  artifact.config.sizesMiB = sizes
+  artifact.config.payloadSizesBytes = sizes.map(() => W26_IOPS_PROFILE.payloadBytes)
+  const definitions = providerById({})
+  for (const provider of artifact.providers) {
+    Object.assign(provider, providerSummary(definitions.get(provider.provider)))
+    const original = provider.sizes[0]
+    provider.sizes = sizes.map((sizeMiB) => ({ ...structuredClone(original), sizeMiB, fileSizeBytes: 4096, writePayloadBytes: 4096 }))
+    provider.storageDiagnostics = { enabled: true, scope: "process; quiescent boundaries required", phases: sizes.map(() => {
+      const native = diagnosticSnapshot(3, "7", [rawApiInstance(3)])
+      native.complete = true
+      native.issues = []
+      native.storage.in_flight_start = "0"
+      native.storage.in_flight_end = "0"
+      Object.assign(native.r2, { complete: true, instance_ids_start: ["19"], instance_ids_end: ["19"], missing_instance_ids: [] })
+      for (const instance of native.r2.instances) {
+        instance.opened_during_phase = false
+        const raw = instance.raw_api
+        Object.assign(raw, { in_flight_start: "0", in_flight_end: "0", pending_claims_start: "0", pending_claims_end: "0", saturated_start: false, saturated_end: false })
+        delete raw.in_flight
+        delete raw.pending_claims
+        delete raw.saturated
+        for (const row of raw.entries) {
+          Object.assign(row, { latency_max_ns_start: row.latency_max_ns, latency_max_ns_end: row.latency_max_ns, exact_phase_max_ns: "unavailable" })
+          delete row.latency_max_ns
+        }
+      }
+      return { name: "workload-4096bytes", quiescent: true, native }
+    }) }
+  }
+  return artifact
+}
+
+async function testQualificationProviderCoverage() {
+  const expected = ["mount-rs-split-sqlite-r2", "mount-rs-split-pglite-r2"]
+  const omittedPglite = rawQualificationArtifact(expected)
+  omittedPglite.providers[1] = structuredClone(omittedPglite.providers[0])
+  const retained = JSON.stringify(omittedPglite)
+  assert.throws(
+    () => validateArtifact(omittedPglite, { providers: expected }),
+    /providers-do-not-match-requested-provider-set/,
+    "duplicate valid SQLite records must not replace required PGlite throughput and raw evidence",
+  )
+  assert.equal(JSON.stringify(omittedPglite), retained, "failed coverage must preserve the artifact")
+  const complete = rawQualificationArtifact(expected, [1, 4])
+  complete.providers.reverse()
+  assert.doesNotThrow(() => validateArtifact(complete, { providers: expected }), "distinct providers retain full coverage regardless of artifact order")
+  assert.doesNotThrow(() => validateArtifact(qualificationArtifact(expected), { providers: expected }), "default provider coverage remains valid")
+  assert.throws(() => validateArtifact(rawQualificationArtifact(), { providers: [expected[0], expected[0]] }), /providers-must-contain-unique-providers/)
+}
+
+async function testRawQualificationArtifact() {
+  const options = { providers: ["mount-rs-split-sqlite-r2"] }
+  const missing = qualificationArtifact()
+  missing.config.storageDiagnosticsEnabled = true
+  assert.throws(() => validateArtifact(missing, options), /diagnostic/, "opt-in throughput alone must not pass")
+  assert.deepEqual(validateArtifact(rawQualificationArtifact(), options), validateArtifact(qualificationArtifact(), options))
+  assert.doesNotThrow(() => validateArtifact(rawQualificationArtifact(options.providers, [1, 4]), options), "repeated workload names represent distinct configured results")
+  const providerEnabled = rawQualificationArtifact()
+  delete providerEnabled.config.storageDiagnosticsEnabled
+  assert.doesNotThrow(() => validateArtifact(providerEnabled, options))
+  const phase = (value) => value.providers[0].storageDiagnostics.phases[0]
+  const row = (value) => phase(value).native.r2.instances[0].raw_api.entries[0]
+  const badCases = [
+    ["missing diagnostics", (value) => { delete value.providers[0].storageDiagnostics }],
+    ["config true/provider false", (value) => { value.providers[0].storageDiagnostics.enabled = false }],
+    ["malformed config flag", (value) => { value.config.storageDiagnosticsEnabled = "true" }],
+    ["malformed provider flag", (value) => { value.providers[0].storageDiagnostics.enabled = 1 }],
+    ["missing provider metadata", (value) => { delete value.providers[0].blockProvider }],
+    ["changed provider metadata", (value) => { value.providers[0].metadataProvider = "memory" }],
+    ["missing workload", (value) => { value.providers[0].storageDiagnostics.phases = [] }],
+    ["duplicate workload occurrence", (value) => { value.providers[0].storageDiagnostics.phases.push(structuredClone(phase(value))) }],
+    ["wrong workload name", (value) => { phase(value).name = "workload-8192bytes" }],
+    ["size mismatch", (value) => { value.providers[0].sizes[0].sizeMiB = 4 }],
+    ["payload mismatch", (value) => { value.providers[0].sizes[0].fileSizeBytes = 8192 }],
+    ["not quiescent", (value) => { phase(value).quiescent = false }],
+    ["incomplete native", (value) => { phase(value).native.complete = false }],
+    ["native issues", (value) => { phase(value).native.issues = ["pending operation"] }],
+    ["global storage in flight", (value) => { phase(value).native.storage.in_flight_start = "1" }],
+    ["global numeric gauge", (value) => { phase(value).native.storage.in_flight_end = 0 }],
+    ["native v1", (value) => { phase(value).native.schema_version = "mount-rs.storage-diagnostics.v1" }],
+    ["empty registry", (value) => { phase(value).native.r2.instances = [] }],
+    ["duplicate identity", (value) => { phase(value).native.r2.instances.push(structuredClone(phase(value).native.r2.instances[0])) }],
+    ["new identity", (value) => { phase(value).native.r2.instances[0].opened_during_phase = true }],
+    ["changed start identity", (value) => { phase(value).native.r2.instance_ids_start = ["20"] }],
+    ["missing identity", (value) => { phase(value).native.r2.missing_instance_ids = ["20"] }],
+    ["missing raw", (value) => { delete phase(value).native.r2.instances[0].raw_api }],
+    ["missing raw row", (value) => { phase(value).native.r2.instances[0].raw_api.entries.pop() }],
+    ["raw row order", (value) => { phase(value).native.r2.instances[0].raw_api.entries.reverse() }],
+    ["raw numeric counter", (value) => { row(value).calls = 3 }],
+    ["raw outcomes", (value) => { row(value).success = "2" }],
+    ["raw histogram", (value) => { row(value).latency_log2_us[1] = "2" }],
+    ["raw maximum reset", (value) => { row(value).latency_max_ns_start = "1001" }],
+    ["raw maximum exceeds phase elapsed", (value) => { row(value).latency_max_ns_end = "3001" }],
+    ["zero calls advance maximum", (value) => { Object.assign(row(value), { calls: "0", success: "0", elapsed_ns: "0", attempted_bytes: "0", confirmed_bytes: "0", latency_log2_us: Array(32).fill("0"), latency_max_ns_end: "1001" }) }],
+    ["zero calls retain submitted bytes", (value) => { Object.assign(row(value), { calls: "0", success: "0", elapsed_ns: "0", attempted_bytes: "1", confirmed_bytes: "0", latency_log2_us: Array(32).fill("0") }) }],
+    ["invented phase maximum", (value) => { row(value).exact_phase_max_ns = "1000" }],
+    ["raw bytes", (value) => { row(value).confirmed_bytes = "999999" }],
+    ["raw byte applicability", (value) => { phase(value).native.r2.instances[0].raw_api.entries[1].returned_bytes = "1" }],
+    ["raw in flight", (value) => { phase(value).native.r2.instances[0].raw_api.in_flight_start = "1" }],
+    ["raw pending claims", (value) => { phase(value).native.r2.instances[0].raw_api.pending_claims_end = "1" }],
+    ["raw claim outcomes", (value) => { phase(value).native.r2.instances[0].raw_api.claims.follower_claims = "1" }],
+    ["raw saturation", (value) => { phase(value).native.r2.instances[0].raw_api.saturated_end = true }],
+    ["raw metadata", (value) => { phase(value).native.measurement.r2_api.reconcile_listing = "instrumented" }],
+  ]
+  for (const [label, mutate] of badCases) {
+    const value = rawQualificationArtifact()
+    mutate(value)
+    const retained = JSON.stringify(value)
+    assert.throws(() => validateArtifact(value, options), /diagnostic/, label)
+    assert.equal(JSON.stringify(value), retained, `${label}: verifier must preserve failed artifacts`)
+  }
+  const changedAcrossWorkloads = rawQualificationArtifact(options.providers, [1, 4])
+  const second = changedAcrossWorkloads.providers[0].storageDiagnostics.phases[1].native.r2
+  second.instances[0].id = "20"
+  second.instance_ids_start = ["20"]
+  second.instance_ids_end = ["20"]
+  assert.throws(() => validateArtifact(changedAcrossWorkloads, options), /diagnostic/)
+  const floor = rawQualificationArtifact()
+  floor.providers[0].sizes[0].summary.iops = 999
+  assert.throws(() => validateArtifact(floor, options), /iops-below-1000/)
+  const mixed = rawQualificationArtifact(["mount-rs-split-sqlite-r2", "mount-rs-split-pglite-r2"])
+  delete mixed.config.storageDiagnosticsEnabled
+  mixed.providers[1].storageDiagnostics.enabled = false
+  assert.throws(() => validateArtifact(mixed, { providers: mixed.providers.map((value) => value.provider) }), /diagnostic/)
+  const nonR2 = rawQualificationArtifact(["mount-rs-memory"])
+  nonR2.providers[0].storageDiagnostics.phases[0].native.r2.instances = []
+  nonR2.providers[0].storageDiagnostics.phases[0].native.r2.instance_ids_start = []
+  nonR2.providers[0].storageDiagnostics.phases[0].native.r2.instance_ids_end = []
+  assert.doesNotThrow(() => validateArtifact(nonR2, { providers: ["mount-rs-memory"] }))
+  const integrated = rawQualificationArtifact()
+  const samplers = { now: () => 0, cpu: () => ({ user: 0, system: 0 }), resources: () => ({ voluntaryContextSwitches: 0, involuntaryContextSwitches: 0 }), memory: () => ({ rss: 0 }) }
+  const endpoint = (calls) => takePhaseSnapshot(() => JSON.stringify(diagnosticSnapshot(calls, "7", [rawApiInstance(calls)])), samplers)
+  integrated.providers[0].storageDiagnostics.phases = [finishPhase("workload-4096bytes", endpoint(2), endpoint(5))]
+  assert.doesNotThrow(() => validateArtifact(integrated, options), "actual extraction and artifact validation agree")
+  integrated.providers[0].storageDiagnostics.phases = [finishPhase("workload-4096bytes", endpoint(2), endpoint(2))]
+  assert.doesNotThrow(() => validateArtifact(integrated, options), "zero phase calls do not erase the cumulative maximum")
+}
+
 async function testEvidencePacket() {
   const packet = {
     expectedRevision: W26_TEST_REVISION,
@@ -999,10 +1306,20 @@ async function testSteadyGenerationsRejectDroppedWrites() {
     "iteration 256/concurrency 256 and same-lane 1/257 must reject dropped writes",
   )
 }
+if (process.argv.includes("--diagnostics-only")) {
+  const failures = []
+  for (const test of [testStoragePhaseDiagnostics, testRawObjectStorePhaseDiagnostics, testRawQualificationArtifact, testQualificationProviderCoverage, testObserverEndpointsExcludeSnapshotWork, testQualificationArtifact]) {
+    try { await test(); console.log(`${test.name}: PASS`) }
+    catch (error) { failures.push(test.name); console.error(`${test.name}: FAIL`, error) }
+  }
+  if (failures.length) process.exitCode = 1
+  else console.log("storage diagnostic unit tests: PASS")
+} else {
 await testSteadyGenerationsRejectDroppedWrites()
 await testSteadyOverwriteOracle()
 await testStats()
 await testStoragePhaseDiagnostics()
+await testRawObjectStorePhaseDiagnostics()
 await testObserverEndpointsExcludeSnapshotWork()
 await testOzoneMetricsReachAllNodeProcesses()
 await testErrors()
@@ -1013,6 +1330,8 @@ await testFoundationDbAvailabilityFollowsSelectedLayout()
 await testCompactArtifactSeparatesSelectionFromPersistedProof()
 await testRequiredProviderConfiguration()
 await testQualificationArtifact()
+await testRawQualificationArtifact()
+await testQualificationProviderCoverage()
 await testEvidencePacket()
 await testProductionRolloutContract()
 await testW26WorkflowKeepsProvenanceClean()
@@ -1021,3 +1340,4 @@ await testOzoneProviderMatrix()
 await testDeferredWriteCleanup()
 await testPendingProviderInvalidatesFollowingPhaseAttribution()
 console.log("storage benchmark unit tests: PASS")
+}
