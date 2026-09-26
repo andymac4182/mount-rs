@@ -727,3 +727,103 @@ retain exact identities, raw hashes, counters and limitations.
 [The retention manifest](benchmarks/remote-production-qualification-20260925/task4-release-retention-manifest.json)
 binds their independent reviews. The TiDB VM remains below its qualification
 memory floor, and the 10,000-client target remains unqualified.
+
+## Independent server-process execution slice
+
+The distinct invocation is documented in
+[remote client scaling](remote-client-scaling.md#independent-process-production-target-entrypoint).
+The full requested dimensions remain executable configuration, while the old
+10/25-Drive bounded checkpoint and its rejection of 10,000 remain unchanged.
+A configuration acceptance test, process smoke, or smaller SQLite control does
+not qualify the full target or establish TiDB/cross-host capacity.
+
+The controller keeps launched child handles through startup, workload,
+timeout and cleanup. Readiness binds launched PID, index, generation, endpoint,
+catalog digest, compiled runner-source digest, executable hash, backend prefix,
+MRC5/backing receipts and sampled process resources. Per-generation readiness
+receipts preserve startup and refreshed replicas separately. Workers close their
+old replicas before opening refreshed ones; the fresh byte oracle separately
+retains its driver/context/handle owners across cancellation.
+
+Artifacts distinguish namespace, payload, fresh verification, routes/scope,
+steady I/O, revocation and cleanup. Request identities and attempted,
+acknowledged, failed and uncertain counts are retained per client. Only a
+matching acknowledged mutation updates expected length, block generation or
+namespace. Unknown operations are never replayed. Terminal expected-state files
+preserve the independent tuple-seeded oracle without serializing the full ledger
+on every request. One-second journals and 100 ms process samples record their
+observation costs and limitations.
+
+Population and fresh-verification phases stop at 600 seconds; enclosing async
+work stops at 1,800 seconds; protocol requests stop at 30 seconds. Worker startup
+shares one 600-second setup bound with source identity, provider preflight,
+catalog publication and launch. Child shutdown/reap has a 95-second bound,
+reserving its final five seconds for forced termination and observed reap;
+client endpoint, oracle and terminal expected-state receipt stages each have a
+30-second bound. Audit observation has a separate 30-second window; sampler
+stop and observer subprocess reap each allow one second, and preflight SQL
+disconnect allows ten seconds. Receipt/hash/audit filesystem operations use
+cooperative post-operation deadline checks: blocked OS I/O cannot be forcibly
+interrupted, and late observations mark the result incomplete. No child or
+sampler Drop path performs an unbounded wait. Forced termination, missing drain
+proof, uncertain work or
+resource observation failure leaves an incomplete result. Each owned process
+must stay below 24 GiB RSS and host free disk must remain at least 64 GiB.
+Summed per-process peaks are explicitly not a simultaneous aggregate peak.
+
+With `MOUNT_RS_PROFILE_IO=1` and the script's resource-profiling feature, each
+worker retains direct service-SDK core counter snapshots at readiness and
+terminal. These are not NAPI request-recorder measurements. Dispatcher security
+audit behavior is unchanged: per-request audit log counts/bytes are retained,
+and audit/journal/sample I/O and CPU are included in phase wall time. RPC latency
+histograms exclude payload generation but include transport/server processing;
+active-cycle throughput is measured before idle liveness probes. Separate idle
+probe time/count and total phase elapsed retain that observation cost. Process
+samples explicitly mark transport unavailable; separate per-stage controller
+connection boundary deltas cover active work plus idle probes. Server transport
+counters remain unavailable. Cycle throughput and RPC acknowledgements use
+distinct units. There is no
+physical-IOPS or global-allocation inference. Local fixture signing, loopback
+transport, dirty-checkout native results, clean committed CI and full target
+qualification remain separate evidence scopes.
+
+The current preserved TiDB Docker VM is below the existing memory floor. This
+execution slice provides no override and makes no full qualification claim.
+Later TiDB ramps, runtime/cache optimization, platform/transport gates and final
+branch acceptance remain separate work.
+
+The independent-process runner initializes each empty MRC5 Drive sequentially
+within the same 600-second setup budget before launching workers. It records
+root-only membership, persistent nonzero backing identity, initialized count,
+progress, elapsed time and explicit filesystem/context close outcomes. Namespace
+files and payload bytes are still created online after all ten workers are
+ready. This is preprovisioned steady-state setup. A current MRC5 concurrent
+first-open `ESTALE` was observed in the unprovisioned fault control; sequential
+initialization isolates that startup failure and does not fix or qualify
+parallel virgin startup. A shared root cause with historical inode-transition
+`ESTALE` has not been established. Comparisons with the earlier control must
+retain this setup difference, and do not establish a storage throughput win.
+
+Successful sampler shutdown requires a final OS capture and persisted terminal
+sample from the sampler thread within the existing one-second completion bound.
+Prior errors remain sticky; a final cap violation remains recorded and fails the
+run. Controller aggregate peaks are computed after this final capture and match
+the terminal receipts. The invocation script uses explicit conditional checks,
+so Python optimization cannot remove terminal success validation.
+
+Sampler finish also checks the wall deadline after completed join and validation.
+A caller resumed after the one-second deadline conservatively reports incomplete,
+even if the sampler thread completed earlier; no late scheduling success is inferred.
+
+
+The final dirty-checkout SQLite control on 2026-09-26 completed with ten server
+processes, ten Drives/five Partitions and 1,000 mixed files per Drive, with all
+sixteen one-second diagnostic stages. It created 10,000 files/62,832,640 bytes
+online, passed both fresh every-byte oracles, 100 routes and 10 revocation denials;
+all ten workers exited 0, were reaped and retained successful final resource
+samples, with no cleanup errors. The final membership contained 10,000 files and
+62,849,024 bytes after acknowledged append/truncate. Work elapsed 179.254 seconds;
+security audit 87,743 events/14,135,645 log bytes remained enabled and included in
+work cost. This uses sequential empty-root setup and includes preexisting dirty
+runtime changes; it is not a clean committed result, a comparison proving a
+storage speedup, parallel virgin-start qualification or full-target capacity.
