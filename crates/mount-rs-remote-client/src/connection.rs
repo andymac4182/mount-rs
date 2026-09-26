@@ -15,6 +15,10 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::credentials::{CredentialSource, SecretToken};
+use crate::decisions::{
+    QuicFailure, QuicFailureDecision, TransactionCompletion, classify_quic_failure,
+    finish_io_completion,
+};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const RENEW_MARGIN_SECONDS: i64 = 60;
@@ -85,6 +89,21 @@ struct QuicTransport {
     version: u16,
 }
 
+// Once a stream is acquired, dropping a caller may leave a committed operation
+// without its acknowledgment. Close the connection rather than reusing it.
+struct QuicTransaction<'a> {
+    transport: &'a QuicTransport,
+    completion: TransactionCompletion,
+}
+
+impl Drop for QuicTransaction<'_> {
+    fn drop(&mut self) {
+        if self.completion.destroy_on_drop() {
+            self.transport.close();
+        }
+    }
+}
+
 #[async_trait]
 impl Transport for QuicTransport {
     fn version(&self) -> u16 {
@@ -96,6 +115,10 @@ impl Transport for QuicTransport {
             .open_bi()
             .await
             .map_err(|_| ClientError::Transport)?;
+        let mut transaction = QuicTransaction {
+            transport: self,
+            completion: TransactionCompletion::default(),
+        };
         write_frame(&mut send, &message)
             .await
             .map_err(|_| ClientError::Transport)?;
@@ -106,6 +129,7 @@ impl Transport for QuicTransport {
         recv.read_to_end(0)
             .await
             .map_err(|_| ClientError::Protocol)?;
+        transaction.completion.complete_response();
         Ok(response)
     }
 
@@ -120,6 +144,10 @@ impl Transport for QuicTransport {
             .open_bi()
             .await
             .map_err(|_| ClientError::Transport)?;
+        let mut transaction = QuicTransaction {
+            transport: self,
+            completion: TransactionCompletion::default(),
+        };
         binary::write_request(&mut send, id, request, buffer.len(), None)
             .await
             .map_err(|_| ClientError::Protocol)?;
@@ -130,6 +158,7 @@ impl Transport for QuicTransport {
         recv.read_to_end(0)
             .await
             .map_err(|_| ClientError::Protocol)?;
+        transaction.completion.complete_response();
         result.map_err(|e| ClientError::Remote(e.code))
     }
     async fn write(
@@ -143,6 +172,10 @@ impl Transport for QuicTransport {
             .open_bi()
             .await
             .map_err(|_| ClientError::Transport)?;
+        let mut transaction = QuicTransaction {
+            transport: self,
+            completion: TransactionCompletion::default(),
+        };
         binary::write_request(&mut send, id, request, 0, Some(data))
             .await
             .map_err(|_| ClientError::Protocol)?;
@@ -153,6 +186,7 @@ impl Transport for QuicTransport {
         recv.read_to_end(0)
             .await
             .map_err(|_| ClientError::Protocol)?;
+        transaction.completion.complete_response();
         result.map_err(|e| ClientError::Remote(e.code))
     }
 
@@ -376,23 +410,25 @@ impl RemoteConnection {
         )
         .await
         .map_err(|_| {
-            if received.load(Ordering::Acquire) {
-                QuicEstablishment::Fatal(ClientError::Transport)
-            } else {
-                QuicEstablishment::Unavailable
-            }
+            QuicEstablishment::from(classify_quic_failure(
+                received.load(Ordering::Acquire),
+                QuicFailure::Deadline,
+            ))
         })?
-        .map_err(|error| match error {
-            quinn::ConnectionError::TimedOut if !received.load(Ordering::Acquire) => {
-                QuicEstablishment::Unavailable
-            }
-            quinn::ConnectionError::ConnectionClosed(ref close)
-                if close.error_code == quinn::TransportErrorCode::CONNECTION_REFUSED
-                    && !received.load(Ordering::Acquire) =>
-            {
-                QuicEstablishment::Unavailable
-            }
-            _ => QuicEstablishment::Fatal(ClientError::Authentication),
+        .map_err(|error| {
+            let failure = match error {
+                quinn::ConnectionError::TimedOut => QuicFailure::TimedOut,
+                quinn::ConnectionError::ConnectionClosed(ref close)
+                    if close.error_code == quinn::TransportErrorCode::CONNECTION_REFUSED =>
+                {
+                    QuicFailure::Refused
+                }
+                _ => QuicFailure::Other,
+            };
+            QuicEstablishment::from(classify_quic_failure(
+                received.load(Ordering::Acquire),
+                failure,
+            ))
         })?;
         let handshake = connection
             .handshake_data()
@@ -538,22 +574,11 @@ impl RemoteConnection {
         result: Result<Result<usize, ClientError>, tokio::time::error::Elapsed>,
         limit: usize,
     ) -> Result<usize, ClientError> {
-        match result {
-            Ok(Ok(count)) if count <= limit => Ok(count),
-            Ok(Ok(_)) => {
-                self.close();
-                Err(ClientError::Protocol)
-            }
-            Ok(Err(e @ ClientError::Remote(_))) => Err(e),
-            Ok(Err(e)) => {
-                self.close();
-                Err(e)
-            }
-            Err(_) => {
-                self.close();
-                Err(ClientError::Transport)
-            }
+        let (result, close) = finish_io_completion(result.ok(), limit);
+        if close {
+            self.close();
         }
+        result
     }
 
     async fn renew_if_needed(&self) -> Result<(), ClientError> {
@@ -625,6 +650,15 @@ fn token_exp(token: &SecretToken) -> i64 {
 enum QuicEstablishment {
     Unavailable,
     Fatal(ClientError),
+}
+impl From<QuicFailureDecision> for QuicEstablishment {
+    fn from(decision: QuicFailureDecision) -> Self {
+        match decision {
+            QuicFailureDecision::Unavailable => Self::Unavailable,
+            QuicFailureDecision::Transport => Self::Fatal(ClientError::Transport),
+            QuicFailureDecision::Authentication => Self::Fatal(ClientError::Authentication),
+        }
+    }
 }
 impl From<ClientError> for QuicEstablishment {
     fn from(error: ClientError) -> Self {

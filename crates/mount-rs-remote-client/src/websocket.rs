@@ -1,5 +1,6 @@
 //! Serialized, verifying TLS WebSocket transport. No reconnect or request replay.
 use crate::connection::{ClientError, Transport};
+use crate::decisions::TransactionCompletion;
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use mount_rs_remote_protocol::{
@@ -94,7 +95,7 @@ impl WebSocketTransport {
         let mut transaction = Transaction {
             socket: guard,
             shutdown: &self.shutdown,
-            complete: false,
+            completion: TransactionCompletion::default(),
         };
         let socket = transaction.socket.as_mut().ok_or(ClientError::Transport)?;
         let result = tokio::select! {
@@ -123,7 +124,9 @@ impl WebSocketTransport {
                 Ok(bytes)
             } => result,
         };
-        transaction.complete = result.is_ok();
+        if result.is_ok() {
+            transaction.completion.complete_response();
+        }
         result
     }
 }
@@ -132,11 +135,11 @@ impl WebSocketTransport {
 struct Transaction<'a> {
     socket: tokio::sync::MutexGuard<'a, Option<Socket>>,
     shutdown: &'a watch::Sender<bool>,
-    complete: bool,
+    completion: TransactionCompletion,
 }
 impl Drop for Transaction<'_> {
     fn drop(&mut self) {
-        if !self.complete {
+        if self.completion.destroy_on_drop() {
             self.socket.take();
             self.shutdown.send_replace(true);
         }

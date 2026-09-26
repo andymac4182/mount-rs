@@ -30,10 +30,13 @@ use serde_json::json;
 
 struct TestAuthenticator;
 
+const TOKEN: &str = "dmFsaWQ.e30.c2ln";
+const UNEXPIRED_TOKEN: &str = "dmFsaWQ.eyJleHAiOjkyMjMzNzIwMzY4NTQ3NzU4MDd9.c2ln";
+
 #[async_trait]
 impl Authenticator for TestAuthenticator {
     async fn authenticate(&self, bearer: &str, _: &str) -> Result<SessionIdentity, ()> {
-        if bearer != "dmFsaWQ.e30.c2ln" {
+        if !matches!(bearer, TOKEN | UNEXPIRED_TOKEN) {
             return Err(());
         }
         Ok(SessionIdentity {
@@ -53,6 +56,7 @@ struct CommitThenWait {
     commits: Arc<AtomicUsize>,
     committed: Arc<tokio::sync::Notify>,
     closes: Arc<AtomicUsize>,
+    release: Option<Arc<tokio::sync::Notify>>,
 }
 
 struct CommitHandle {
@@ -60,6 +64,7 @@ struct CommitHandle {
     commits: Arc<AtomicUsize>,
     committed: Arc<tokio::sync::Notify>,
     closes: Arc<AtomicUsize>,
+    release: Option<Arc<tokio::sync::Notify>>,
 }
 #[async_trait]
 impl FileHandle for CommitHandle {
@@ -78,10 +83,15 @@ impl FileHandle for CommitHandle {
         Ok(())
     }
     async fn write(&self, data: &[u8], position: Option<u64>) -> FsResult<usize> {
-        self.handle.write(data, position).await?;
+        let count = self.handle.write(data, position).await?;
         self.commits.fetch_add(1, Ordering::SeqCst);
         self.committed.notify_one();
-        std::future::pending().await
+        if let Some(release) = &self.release {
+            release.notified().await;
+            Ok(count)
+        } else {
+            std::future::pending().await
+        }
     }
 }
 
@@ -102,6 +112,7 @@ impl FsDriver for CommitThenWait {
             commits: self.commits.clone(),
             committed: self.committed.clone(),
             closes: self.closes.clone(),
+            release: self.release.clone(),
         }))
     }
     async fn write_file(&self, path: &str, data: &[u8]) -> FsResult<()> {
@@ -132,6 +143,21 @@ async fn websocket_uncertain_binary_write_commits_once_without_replay() {
 async fn cancelled_websocket_write_fails_closed_without_replay() {
     uncertain_write(true, true, true).await;
 }
+
+#[tokio::test]
+async fn cancelled_quic_generic_write_fails_closed_without_replay() {
+    uncertain_write(false, false, true).await;
+}
+
+#[tokio::test]
+async fn cancelled_quic_binary_write_fails_closed_without_replay() {
+    uncertain_write(true, false, true).await;
+}
+
+#[tokio::test]
+async fn cancelled_websocket_request_before_socket_acquisition_preserves_active_transaction() {
+    write_case(true, true, false, true).await;
+}
 enum TestServer {
     Quic(RemoteServer),
     WebSocket(WebSocketServer),
@@ -151,6 +177,10 @@ impl TestServer {
     }
 }
 async fn uncertain_write(binary: bool, websocket: bool, cancel_caller: bool) {
+    write_case(binary, websocket, cancel_caller, false).await;
+}
+
+async fn write_case(binary: bool, websocket: bool, cancel_caller: bool, cancel_queued: bool) {
     let directory = tempfile::tempdir().unwrap();
     let catalog = Arc::new(
         SqliteCatalog::open(directory.path().join("catalog.sqlite"))
@@ -189,6 +219,7 @@ async fn uncertain_write(binary: bool, websocket: bool, cancel_caller: bool) {
         commits: Arc::new(AtomicUsize::new(0)),
         committed: Arc::new(tokio::sync::Notify::new()),
         closes: Arc::new(AtomicUsize::new(0)),
+        release: cancel_queued.then(|| Arc::new(tokio::sync::Notify::new())),
     });
     let mut dispatcher = DriveDispatcher::new(catalog);
     dispatcher
@@ -227,7 +258,15 @@ async fn uncertain_write(binary: bool, websocket: bool, cancel_caller: bool) {
     let mut roots = rustls::RootCertStore::empty();
     roots.add(cert).unwrap();
     let token_path = directory.path().join("token");
-    std::fs::write(&token_path, "dmFsaWQ.e30.c2ln").unwrap();
+    std::fs::write(
+        &token_path,
+        if cancel_queued {
+            UNEXPIRED_TOKEN
+        } else {
+            TOKEN
+        },
+    )
+    .unwrap();
     let connection = RemoteConnection::connect_with_transport(
         server.local_addr(),
         "localhost",
@@ -243,6 +282,18 @@ async fn uncertain_write(binary: bool, websocket: bool, cancel_caller: bool) {
     .await
     .unwrap();
     assert_eq!(connection.protocol_version(), 2);
+    // Fully decoded filesystem errors complete the exchange and must preserve
+    // this transport for the following valid open/write transaction.
+    if binary {
+        assert!(matches!(
+            connection.write("data", u64::MAX, Some(0), &[1]).await,
+            Err(ClientError::Remote(code)) if code == "EBADF",
+        ));
+        assert!(matches!(
+            connection.read("data", u64::MAX, Some(0), &mut [0]).await,
+            Err(ClientError::Remote(code)) if code == "EBADF",
+        ));
+    }
     let handle = if binary {
         Some(
             connection
@@ -293,7 +344,44 @@ async fn uncertain_write(binary: bool, websocket: bool, cancel_caller: bool) {
         [1, 2, 3]
     );
     let closes_before_shutdown = backend.closes.load(Ordering::SeqCst);
-    if cancel_caller {
+    if cancel_queued {
+        // The unexpired fixture token avoids credential I/O or renewal here.
+        // The committed write still owns the WebSocket mutex, so polling this
+        // request reaches and waits on socket acquisition before cancellation.
+        let mut queued = Box::pin(connection.request(
+            "data",
+            Operation {
+                name: OperationName::Stat,
+                body: json!({"path":"/"}),
+            },
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(queued.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(queued);
+        backend.release.as_ref().unwrap().notify_one();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), request)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_ok()
+        );
+        assert!(
+            connection
+                .request(
+                    "data",
+                    Operation {
+                        name: OperationName::Stat,
+                        body: json!({"path":"/"}),
+                    },
+                )
+                .await
+                .is_ok()
+        );
+    } else if cancel_caller {
         request.abort();
         assert!(request.await.unwrap_err().is_cancelled());
     } else {
@@ -307,21 +395,23 @@ async fn uncertain_write(binary: bool, websocket: bool, cancel_caller: bool) {
         ));
     }
     assert_eq!(backend.commits.load(Ordering::SeqCst), 1);
-    assert!(matches!(
-        tokio::time::timeout(
-            Duration::from_secs(3),
-            connection.request(
-                "data",
-                Operation {
-                    name: OperationName::Stat,
-                    body: json!({"path":"/"})
-                }
+    if !cancel_queued {
+        assert!(matches!(
+            tokio::time::timeout(
+                Duration::from_secs(3),
+                connection.request(
+                    "data",
+                    Operation {
+                        name: OperationName::Stat,
+                        body: json!({"path":"/"})
+                    }
+                )
             )
-        )
-        .await
-        .expect("cancelled socket must fail closed immediately"),
-        Err(ClientError::Transport)
-    ));
+            .await
+            .expect("cancelled socket must fail closed immediately"),
+            Err(ClientError::Transport)
+        ));
+    }
     assert_eq!(backend.commits.load(Ordering::SeqCst), 1);
     server.close().await;
     assert_eq!(
