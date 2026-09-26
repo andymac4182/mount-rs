@@ -102,6 +102,57 @@ locate an interrupted
 run, but it cannot establish why the process stopped or whether the phase
 completed.
 
+The production-target controller also forwards `resource_progress ` records
+using `mount-rs.resource-progress.v1`, from its existing 100 ms process sampler.
+Each record has 29 fixed fields and a 2 KiB limit including prefix and newline.
+Publication follows the existing five-second progress cadence and phase
+boundaries; it adds no process sampler or device query. An ordinary disabled
+publication path returns before added sample reads, cloning, clocks or
+serialization.
+
+| Resource scalar | Meaning |
+| --- | --- |
+| `cpu_user_us`, `cpu_system_us` | Cumulative CPU microseconds since the sampler baseline |
+| `rss_current_bytes` | Current process RSS |
+| `rss_lifetime_peak_bytes` | OS peak over the whole process lifetime, including before the sampler baseline |
+| `rss_peak_bytes` | Existing maximum of observed current RSS and OS lifetime peak |
+| `minimum_host_free_bytes` | Minimum observed filesystem availability at `/System/Volumes/Data` on macOS or `/` elsewhere |
+| `block_inputs`, `block_outputs` | Raw `getrusage` block accounting counts; these are neither bytes nor physical IOPS |
+| `process_disk_read_bytes`, `process_disk_write_bytes` | Null, with `not_captured_by_sampler`; this sampler leaves process disk accounting disabled |
+
+The envelope binds the controller and owned process PID, worker index, verified
+source revision, source digest, binary digest and current phase. Nullable
+`generation_context` identifies an accepted startup or readiness context at
+publication; the resource sample itself does not carry generation identity.
+Counters remain cumulative across replica reopen generations. Digests pinned
+by the log filter establish consistency within the stream; separately joined
+source and binary artifacts establish the build identity.
+
+`observed_unix_ms` is the sampler's wall timestamp after capture;
+`published_unix_ms` is the later projection time. `sample_interval_ms=100` is
+the configured interval, rather than a measured sampling gap. The existing
+ten-second freshness rule remains in force. The baseline has no recorded
+timestamp, so these records do not directly report average CPU cores or prove
+continuous 100 ms coverage. Separate process lifetime peaks must not be summed
+as a simultaneous fleet peak.
+
+Before resource coverage is expected during early worker configuration, an
+absent file produces no resource record. Once coverage is expected, missing,
+malformed, stale, foreign-PID or failed observations produce a fixed
+unavailable reason and null sample measurements. Historical values from a
+failed sample are not projected as current. Unavailable records and output
+failures leave publication incomplete. `terminal_sample=true` identifies a
+terminal capture; it does not alone establish sampler join, application drain
+or successful cleanup.
+
+During cleanup, the controller accepts a worker's fresh terminal sample at an
+owned polling or reap boundary. It then retains that observation as historical
+coverage, instead of rereading accepted terminal or retired workers as current
+samples after later cleanup work. CPU/RSS coverage ends at the sampler's
+terminal capture; earlier observation failures remain incomplete. The new
+resource-file reader requires a regular file, rejects symlinks and special
+files, and bounds reads to 16 KiB before projection.
+
 The hosted full-target job streams only closed, scalar diagnostic records through
 `scripts/filter-startup-diagnostics.py`. The helper keeps a private raw log with
 mode `0600`, bounds the retained log to 64 MiB and continues draining after a
@@ -113,6 +164,12 @@ gate. The original workload exit status remains the first failure reported;
 filter success is not workload qualification. Worker startup completeness also
 joins the existing target metric qualification gate, so a missing worker record
 cannot qualify merely because it never reached the filter.
+The filter additionally checks the resource schema, process associations,
+phase and source identity, lossless integer ranges and cumulative counter
+regressions. Its summary schema is `mount-rs.startup-log-filter.v2`, with a
+`resource_records` count. Unavailable resource records remain printable while
+failing the filter. Raw sampler errors, paths and nested process receipts are
+excluded from these public records.
 
 Readiness and observation completeness are separate. A service can report ready
 while an observer failure leaves `accounting_complete=false`; valid incomplete

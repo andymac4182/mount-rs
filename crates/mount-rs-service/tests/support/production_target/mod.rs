@@ -205,6 +205,29 @@ struct Journal {
     phase_deadline: Instant,
     progress: progress::Progress,
 }
+fn project_resource_progress(
+    fleet: &mut Fleet,
+    resources: &resources::Resources,
+    progress: &mut progress::Progress,
+    boundary: bool,
+) {
+    if boundary {
+        progress.resource_boundary();
+    }
+    if !progress.resources_due() {
+        return;
+    }
+    progress.resource(
+        progress::ResourceOwner {
+            pid: std::process::id(),
+            worker: None,
+            generation_context: None,
+        },
+        || Ok(Some(resources.snapshot())),
+    );
+    fleet.project_resources(progress);
+    progress.resources_done();
+}
 impl Journal {
     fn flush(&mut self) -> Result<(), String> {
         let span = metrics::observer().begin("journal_publication");
@@ -270,6 +293,7 @@ async fn supervised<T>(
                 fleet.check()?;
                 journal.value["controller_resources"]=resources.snapshot();
                 journal.flush()?;
+                project_resource_progress(fleet, resources, &mut journal.progress, false);
                 }
                 }
     }
@@ -311,6 +335,7 @@ async fn metric_boundary(
     }
     journal.value["phase_metrics"] = collector.summary();
     journal.flush()?;
+    project_resource_progress(fleet, resources, &mut journal.progress, true);
     if Instant::now() >= deadline {
         collector.complete = false;
         return Err("metric publication exceeded inherited phase deadline".into());
@@ -421,6 +446,7 @@ pub async fn controller() -> Result<(), String> {
             resources = Some(resources::Resources::start(
                 output.join("controller-resources.json"),
             )?);
+            project_resource_progress(&mut fleet, resources.as_ref().unwrap(), &mut journal.progress, true);
             let host_free_bytes = resources::disk_available()?;
             journal.progress.capacity(host_free_bytes);
             if host_free_bytes < config::DISK_FLOOR {
@@ -447,6 +473,7 @@ pub async fn controller() -> Result<(), String> {
                 prefix: format!("production-target-{}-{}", std::process::id(), utc_ms()),
             };
             journal.phase("empty_drive_initialization")?;
+            project_resource_progress(&mut fleet, resources.as_ref().unwrap(), &mut journal.progress, false);
             initialization_start = Some(Instant::now());
             journal.value["initialization"] = json!({"scope":"sequential empty MRC5 roots/backings before steady-state workers; no namespace/payload preseed; parallel virgin-start unqualified","complete":false,"initialized_drives":0,"cleanup_confirmed":false});
             let mut last_progress = Instant::now();
@@ -458,6 +485,7 @@ pub async fn controller() -> Result<(), String> {
                 journal.value["initialization"]["elapsed_seconds"] = json!(initialization_start.unwrap().elapsed().as_secs_f64());
                 if last_progress.elapsed() >= Duration::from_secs(1) {
                     journal.flush()?;
+                    project_resource_progress(&mut fleet, resources.as_ref().unwrap(), &mut journal.progress, false);
                     last_progress = Instant::now();
                 }
             }
@@ -518,7 +546,7 @@ pub async fn controller() -> Result<(), String> {
                     return Err("injected partial startup failure".into());
                 }
             }
-            fleet.ready(&private, 0).await?;
+            fleet.ready(&private, 0, &mut journal.progress, resources.as_ref().unwrap()).await?;
             metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resources.as_ref().unwrap(),&mut journal,("worker_setup","after_ready"),&initializer_owner).await?;
             journal.value["workers"] = json!(fleet.receipts());
             journal.flush()?;
@@ -572,7 +600,10 @@ pub async fn controller() -> Result<(), String> {
                 journal.counts.push(lane.counts.clone());
                 lanes.push(lane);
                 journal.value["connected_clients"] = json!(lanes.len());
-                if journal.progress.observe(&journal.value) { journal.flush()?; }
+                if journal.progress.observe(&journal.value) {
+                    journal.flush()?;
+                    project_resource_progress(&mut fleet, resource, &mut journal.progress, false);
+                }
             }
                 Ok::<_, String>(())
             }).await.map_err(|_| "signed connections inherited phase deadline")??;
@@ -619,7 +650,7 @@ pub async fn controller() -> Result<(), String> {
                 lane.connection.close(0u32.into(), b"replica refresh");
             }
             fleet.command("reopen", 1)?;
-            tokio::time::timeout_at(journal.phase_deadline.into(), fleet.ready(&private, 1))
+            tokio::time::timeout_at(journal.phase_deadline.into(), fleet.ready(&private, 1, &mut journal.progress, resource))
                 .await.map_err(|_| "replica refresh inherited phase deadline")??;
             metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("refresh_replicas","after_ready"),&oracle_owner).await?;
 
@@ -890,7 +921,10 @@ pub async fn controller() -> Result<(), String> {
     if let Some(start) = initialization_start {
         journal.value["initialization"]["elapsed_seconds"] = json!(start.elapsed().as_secs_f64());
     }
-    let mut cleanup = fleet.cleanup().await;
+    journal.progress.cleanup_context();
+    let mut cleanup = fleet
+        .cleanup(resources.as_ref(), &mut journal.progress)
+        .await;
     match initializer_owner.close().await {
         Ok(()) => {
             if journal.value["initialization"].is_object() {
@@ -1026,6 +1060,12 @@ pub async fn controller() -> Result<(), String> {
     if let Some(r) = &resources {
         journal.value["controller_resources"] = r.snapshot();
     }
+    journal.value["last_work_phase"] = journal.value["phase"].clone();
+    journal.value["phase"] = json!("terminal");
+    journal.progress.observe(&journal.value);
+    if let Some(r) = &resources {
+        project_resource_progress(&mut fleet, r, &mut journal.progress, true);
+    }
     journal.value["aggregate_owned_resources"] = json!({
             "sum_individual_peak_rss_bytes":worker_receipts.iter().filter_map(|w|w["resources"]["peak_rss_bytes"].as_u64()).sum::<u64>()+resources.as_ref().and_then(|r|r.snapshot()["peak_rss_bytes"].as_u64()).unwrap_or(0),
             "scope":"sum of separately sampled process peaks; not a simultaneous aggregate peak; no host or Docker attribution"}
@@ -1045,7 +1085,6 @@ pub async fn controller() -> Result<(), String> {
             && initializer_owner.accounting.complete()
     );
     journal.value["cleanup_errors"] = json!(cleanup);
-    journal.value["last_work_phase"] = journal.value["phase"].clone();
     let workload_success = result.is_ok() && cleanup.is_empty();
     let metrics_required = mount_rs_core::diagnostics::profile::enabled();
     let success =

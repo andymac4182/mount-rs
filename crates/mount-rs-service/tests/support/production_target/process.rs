@@ -76,6 +76,10 @@ pub struct Fleet {
     startup_complete: bool,
     startup_next: Option<Instant>,
     startup_seen: [Option<(u64, u64, u64)>; SERVERS],
+    resource_expected: [bool; SERVERS],
+    resource_terminal_accepted: [bool; SERVERS],
+    resource_generation: Option<u64>,
+    resource_generation_seen: [Option<u64>; SERVERS],
 }
 impl Fleet {
     pub fn expect_initialized_backings(&mut self, values: Vec<String>) {
@@ -88,6 +92,10 @@ impl Fleet {
             startup_complete: true,
             startup_next: None,
             startup_seen: [None; SERVERS],
+            resource_expected: [false; SERVERS],
+            resource_terminal_accepted: [false; SERVERS],
+            resource_generation: None,
+            resource_generation_seen: [None; SERVERS],
         }
     }
     pub fn launch(&mut self, private: &Path, output: &Path, index: usize) -> Result<(), String> {
@@ -139,11 +147,20 @@ impl Fleet {
         }
         Ok(())
     }
-    pub async fn ready(&mut self, private: &PrivateConfig, generation: u64) -> Result<(), String> {
+    pub async fn ready(
+        &mut self,
+        private: &PrivateConfig,
+        generation: u64,
+        progress: &mut super::progress::Progress,
+        resources: &super::resources::Resources,
+    ) -> Result<(), String> {
+        self.resource_generation = Some(generation);
         let end = Instant::now() + Duration::from_secs(600);
         loop {
-            if mount_rs_core::diagnostics::profile::enabled() {
-                self.project_startup(private, generation);
+            if mount_rs_core::diagnostics::profile::enabled()
+                && self.project_startup(private, generation)
+            {
+                super::project_resource_progress(self, resources, progress, true);
             }
             self.check()?;
             let mut complete = 0;
@@ -161,6 +178,7 @@ impl Fleet {
                 if mount_rs_core::diagnostics::profile::enabled() {
                     self.startup_complete &= ready_startup_complete(&r, private.config.drives);
                 }
+                self.resource_expected[c.server] = true;
                 c.ready = Some(r);
                 complete += 1;
             }
@@ -198,10 +216,10 @@ impl Fleet {
     pub fn startup_accounting_complete(&self) -> bool {
         self.startup_complete
     }
-    fn project_startup(&mut self, private: &PrivateConfig, generation: u64) {
+    fn project_startup(&mut self, private: &PrivateConfig, generation: u64) -> bool {
         let now = Instant::now();
         if self.startup_next.is_some_and(|next| now < next) {
-            return;
+            return false;
         }
         self.startup_next = Some(now + mount_rs_service::startup::PROGRESS_INTERVAL);
         for child in &self.children {
@@ -239,6 +257,10 @@ impl Fleet {
                 snapshot.accounting_complete = false;
             }
             self.startup_complete &= snapshot.accounting_complete;
+            // Configuration includes the sampler and source/binary checks. This remains
+            // true across reopen, because its sampler baseline belongs to this Child.
+            self.resource_expected[child.server] |=
+                snapshot.stages[StartupStage::Configuration as usize].success >= 4;
             let key = (
                 snapshot.generation,
                 snapshot.observed_unix_ms,
@@ -247,10 +269,62 @@ impl Fleet {
             if self.startup_seen[child.server] != Some(key) {
                 if Startup::write_record(&mut std::io::stderr().lock(), &snapshot).is_err() {
                     self.startup_complete = false;
+                } else {
+                    self.resource_generation_seen[child.server] = Some(snapshot.generation);
                 }
                 self.startup_seen[child.server] = Some(key);
             }
         }
+        true
+    }
+    pub fn project_resources(&mut self, progress: &mut super::progress::Progress) {
+        self.project_resources_with(progress, |progress, owner, root| {
+            progress.resource(owner, || read_resource_file(&root.join("resources.json")))
+        });
+    }
+    fn resource_owner(&self, child: &OwnedChild) -> super::progress::ResourceOwner {
+        let context = self.resource_generation_seen[child.server]
+            .filter(|generation| Some(*generation) == self.resource_generation);
+        super::progress::ResourceOwner {
+            pid: child.child.id(),
+            worker: Some(child.server),
+            generation_context: context,
+        }
+    }
+    fn project_resources_with(
+        &mut self,
+        progress: &mut super::progress::Progress,
+        mut project: impl FnMut(
+            &mut super::progress::Progress,
+            super::progress::ResourceOwner,
+            &Path,
+        ) -> bool,
+    ) {
+        if !progress.resources_due() {
+            return;
+        }
+        for child in &self.children {
+            if !self.resource_expected[child.server]
+                || child.reaped
+                || self.resource_terminal_accepted[child.server]
+            {
+                continue; // Unconfigured or completed observation coverage is not a live sample.
+            }
+            let accepted = project(progress, self.resource_owner(child), &child.root);
+            self.resource_terminal_accepted[child.server] |= accepted;
+        }
+    }
+    fn project_reaped_resource(&mut self, index: usize, progress: &mut super::progress::Progress) {
+        let child = &self.children[index];
+        if !self.resource_expected[child.server] || self.resource_terminal_accepted[child.server] {
+            return;
+        }
+        progress.resource_boundary();
+        let accepted = progress.terminal_resource(self.resource_owner(child), || {
+            read_resource_file(&child.root.join("resources.json"))
+        });
+        self.resource_terminal_accepted[child.server] |= accepted;
+        progress.resources_done();
     }
     pub fn command(&self, command: &str, generation: u64) -> Result<(), String> {
         for c in &self.children {
@@ -264,11 +338,36 @@ impl Fleet {
         }
         Ok(())
     }
-    pub async fn cleanup(&mut self) -> Vec<Value> {
-        self.cleanup_bounded(Duration::from_secs(90), Duration::from_secs(95))
-            .await
+    pub async fn cleanup(
+        &mut self,
+        resources: Option<&super::resources::Resources>,
+        progress: &mut super::progress::Progress,
+    ) -> Vec<Value> {
+        self.cleanup_observed(
+            Duration::from_secs(90),
+            Duration::from_secs(95),
+            resources,
+            progress,
+        )
+        .await
     }
+    #[cfg(test)]
     async fn cleanup_bounded(&mut self, grace: Duration, total: Duration) -> Vec<Value> {
+        self.cleanup_observed(
+            grace,
+            total,
+            None,
+            &mut super::progress::Progress::disabled(),
+        )
+        .await
+    }
+    async fn cleanup_observed(
+        &mut self,
+        grace: Duration,
+        total: Duration,
+        resources: Option<&super::resources::Resources>,
+        progress: &mut super::progress::Progress,
+    ) -> Vec<Value> {
         let started = Instant::now();
         let force_at = started + grace.min(total);
         let deadline = started + total;
@@ -283,20 +382,36 @@ impl Fleet {
                 errors.push(json!({"server":c.server,"error":"shutdown command failed"}));
             }
         }
+        for index in 0..self.children.len() {
+            if self.children[index].reaped {
+                self.project_reaped_resource(index, progress);
+            }
+        }
         loop {
-            for c in &mut self.children {
+            for index in 0..self.children.len() {
+                let c = &mut self.children[index];
+                let mut newly_reaped = false;
                 if !c.reaped {
                     match c.child.try_wait() {
-                        Ok(Some(status)) => c.record_status(status),
+                        Ok(Some(status)) => {
+                            c.record_status(status);
+                            newly_reaped = true;
+                        }
                         Ok(None) => {}
                         Err(_) => {}
                     }
+                }
+                if newly_reaped {
+                    // Capture required coverage at the real owned reap boundary, before
+                    // later terminal/oracle work can age a completed sampler receipt.
+                    self.project_reaped_resource(index, progress);
                 }
             }
             if self.children.iter().all(|c| c.reaped) {
                 break;
             }
-            if Instant::now() >= force_at {
+            let cleanup_tick = Instant::now();
+            if cleanup_tick >= force_at {
                 for c in &mut self.children {
                     if !c.reaped && !c.forced {
                         c.forced = true;
@@ -307,6 +422,22 @@ impl Fleet {
             }
             if Instant::now() >= deadline {
                 break;
+            }
+            // Reuse the established public 5s cadence and this cleanup's existing clock.
+            progress.resource_tick(cleanup_tick);
+            if progress.resources_due() {
+                if let Some(resources) = resources {
+                    progress.resource(
+                        super::progress::ResourceOwner {
+                            pid: std::process::id(),
+                            worker: None,
+                            generation_context: None,
+                        },
+                        || Ok(Some(resources.snapshot())),
+                    );
+                }
+                self.project_resources(progress);
+                progress.resources_done();
             }
             tokio::time::sleep(
                 Duration::from_millis(10).min(deadline.saturating_duration_since(Instant::now())),
@@ -347,6 +478,310 @@ impl Fleet {
             })
             .collect()
     }
+}
+// The process-only sampler receipt has a fixed shape (no per-client/device rows).
+// 16KiB leaves ample headroom for all u64 fields while bounding hostile observations.
+const RESOURCE_RECEIPT_LIMIT: usize = 16 * 1024;
+fn read_resource_file(path: &Path) -> Result<Option<Value>, String> {
+    use std::{io::Read, os::unix::fs::OpenOptionsExt};
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("resource receipt invalid".into()),
+    };
+    if !file
+        .metadata()
+        .map_err(|_| "resource receipt invalid")?
+        .is_file()
+    {
+        return Err("resource receipt invalid".into());
+    }
+    let mut bytes = Vec::with_capacity(RESOURCE_RECEIPT_LIMIT + 1);
+    file.take((RESOURCE_RECEIPT_LIMIT + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "resource receipt invalid")?;
+    if bytes.len() > RESOURCE_RECEIPT_LIMIT {
+        return Err("resource receipt invalid".into());
+    }
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|_| "resource receipt invalid".into())
+}
+#[test]
+fn resource_progress_owned_expectation_and_generation_context_do_not_reset_sampler() {
+    let root = tempfile::tempdir().unwrap();
+    let child = Command::new("/bin/sh")
+        .args(["-c", "read ignored || true"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let mut fleet = Fleet::new();
+    fleet.children.push(OwnedChild {
+        child,
+        server: 0,
+        ready: None,
+        exited: None,
+        reaped: false,
+        signal: None,
+        forced: false,
+        root: root.path().to_path_buf(),
+    });
+    let mut progress = super::progress::Progress::new(
+        true,
+        &Config {
+            full_target: false,
+            drives: 10,
+            files: 2,
+            seconds: 1,
+            provider: "sqlite".into(),
+        },
+    );
+    progress.source(&json!({"revision":"a".repeat(40),"checkout_status":"","digest":"b".repeat(64),"binary_sha256":"c".repeat(64)}));
+    fleet.project_resources_with(&mut progress, |_, _, _| {
+        panic!("sampler not yet configured")
+    });
+    fleet.resource_expected[0] = true;
+    fleet.resource_generation = Some(0);
+    fleet.resource_generation_seen[0] = Some(0);
+    let mut records = Vec::new();
+    fleet.project_resources_with(&mut progress, |_, owner, path| {
+        assert_eq!(path, root.path());
+        records.push((owner.pid, owner.worker, owner.generation_context));
+        false
+    });
+    fleet.resource_generation = Some(1);
+    fleet.project_resources_with(&mut progress, |_, owner, _| {
+        records.push((owner.pid, owner.worker, owner.generation_context));
+        false
+    });
+    fleet.resource_generation_seen[0] = Some(1);
+    fleet.project_resources_with(&mut progress, |_, owner, _| {
+        records.push((owner.pid, owner.worker, owner.generation_context));
+        false
+    });
+    assert_eq!(
+        records,
+        vec![
+            (pid, Some(0), Some(0)),
+            (pid, Some(0), None),
+            (pid, Some(0), Some(1))
+        ]
+    );
+    assert!(fleet.resource_expected[0]);
+    fleet.project_resources_with(&mut progress, |_, _, _| true);
+    assert!(fleet.resource_terminal_accepted[0]);
+    fleet.project_resources_with(&mut progress, |_, _, _| {
+        panic!("accepted terminal is historical even while Child remains live")
+    });
+    let mut disabled = super::progress::Progress::disabled();
+    fleet.project_resources_with(&mut disabled, |_, _, _| {
+        panic!("disabled worker source read")
+    });
+    fleet.children[0].child.stdin.take();
+    let status = fleet.children[0].child.wait().unwrap();
+    fleet.children[0].record_status(status);
+    assert!(fleet.children[0].reaped);
+    fleet.project_resources_with(&mut progress, |_, _, _| {
+        panic!("reaped worker must not be reread after delayed terminal work")
+    });
+    progress.finish(false, false);
+}
+#[tokio::test]
+async fn resource_progress_cleanup_captures_owned_terminal_once_and_preserves_live_stale_failures()
+{
+    for pre_recorded_reap in [false, true] {
+        for terminal in [Some(true), Some(false), None] {
+            let root = tempfile::tempdir().unwrap();
+            let child = Command::new("/bin/sh")
+                .args(["-c", "read ignored || true"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let pid = child.id();
+            let mut fleet = Fleet::new();
+            fleet.children.push(OwnedChild {
+                child,
+                server: 0,
+                ready: None,
+                exited: None,
+                reaped: false,
+                signal: None,
+                forced: false,
+                root: root.path().to_owned(),
+            });
+            fleet.resource_expected[0] = true;
+            let mut progress = super::progress::Progress::new(
+                true,
+                &Config {
+                    full_target: false,
+                    drives: 10,
+                    files: 2,
+                    seconds: 1,
+                    provider: "sqlite".into(),
+                },
+            );
+            progress.source(&json!({"revision":"a".repeat(40),"checkout_status":"","digest":"b".repeat(64),"binary_sha256":"c".repeat(64)}));
+            progress.cleanup_context();
+            let path = root.path().join("resources.json");
+            let mut sample = json!({"pid":pid,"samples":2,"sample_interval_ms":100,
+            "observed_unix_ms":super::utc_ms(),"terminal_sample":terminal,
+            "peak_rss_bytes":4096,"minimum_host_free_bytes":super::config::DISK_FLOOR,"error":null,
+            "process_delta":{"cpu_user_us":3,"cpu_system_us":2,"rss_end_bytes":2048,
+                "lifetime_peak_rss_bytes":4096,"block_inputs":5,"block_outputs":7}});
+            super::write_json(&path, &sample).unwrap();
+            // Exercise both an earlier owned reap and cleanup's actual try_wait reap.
+            fleet.children[0].child.stdin.take();
+            if pre_recorded_reap {
+                let status = fleet.children[0].child.wait().unwrap();
+                fleet.children[0].record_status(status);
+            } else {
+                assert!(!fleet.children[0].reaped);
+                assert_eq!(fleet.children[0].exited, None);
+            }
+            let errors = fleet
+                .cleanup_observed(
+                    Duration::from_secs(1),
+                    Duration::from_secs(2),
+                    None,
+                    &mut progress,
+                )
+                .await;
+            assert!(fleet.children[0].reaped);
+            assert!(
+                !errors.is_empty(),
+                "resource observation does not forge private clean/drain evidence"
+            );
+            assert_eq!(fleet.resource_terminal_accepted[0], terminal == Some(true));
+            assert_eq!(progress.complete(), terminal == Some(true));
+            if terminal == Some(true) {
+                // Model >10s later terminal/oracle work by aging the persisted sample.
+                sample["observed_unix_ms"] = json!(super::utc_ms() - 10001);
+                super::write_json(&path, &sample).unwrap();
+                progress.resource_boundary();
+                fleet.project_resources_with(&mut progress, |_, _, _| {
+                    panic!("accepted reaped terminal reread")
+                });
+                assert!(progress.complete());
+            }
+            progress.finish(false, false);
+        }
+    }
+    // A still-live worker with an old observation must remain a real failure.
+    let root = tempfile::tempdir().unwrap();
+    let child = Command::new("/bin/sh")
+        .args(["-c", "read ignored || true"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut fleet = Fleet::new();
+    let pid = child.id();
+    fleet.children.push(OwnedChild {
+        child,
+        server: 0,
+        ready: None,
+        exited: None,
+        reaped: false,
+        signal: None,
+        forced: false,
+        root: root.path().to_owned(),
+    });
+    fleet.resource_expected[0] = true;
+    let mut progress = super::progress::Progress::new(
+        true,
+        &Config {
+            full_target: false,
+            drives: 10,
+            files: 2,
+            seconds: 1,
+            provider: "sqlite".into(),
+        },
+    );
+    progress.source(&json!({"revision":"a".repeat(40),"checkout_status":"","digest":"b".repeat(64),"binary_sha256":"c".repeat(64)}));
+    super::write_json(
+        &root.path().join("resources.json"),
+        &json!({"pid":pid,"error":null,
+        "observed_unix_ms":super::utc_ms()-10001}),
+    )
+    .unwrap();
+    fleet.project_resources(&mut progress);
+    assert!(!progress.complete());
+    assert!(!fleet.resource_terminal_accepted[0]);
+    fleet.children[0].child.stdin.take();
+    let status = fleet.children[0].child.wait().unwrap();
+    fleet.children[0].record_status(status);
+    progress.finish(false, false);
+}
+#[test]
+fn resource_progress_file_reader_distinguishes_absent_and_malformed_owned_receipts() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("resources.json");
+    assert!(read_resource_file(&path).unwrap().is_none());
+    std::fs::write(&path, b"PRIVATE_MALFORMED_SAMPLE").unwrap();
+    assert_eq!(
+        read_resource_file(&path).unwrap_err(),
+        "resource receipt invalid"
+    );
+    super::write_json(&path, &json!({"pid":123})).unwrap();
+    assert_eq!(read_resource_file(&path).unwrap().unwrap()["pid"], 123);
+}
+#[test]
+fn resource_progress_reader_rejects_symlink_fifo_and_oversize_owned_sources() {
+    use std::{
+        io::Write,
+        os::unix::fs::{OpenOptionsExt, symlink},
+    };
+    let root = tempfile::tempdir().unwrap();
+    let regular = root.path().join("regular");
+    std::fs::write(&regular, b"{}").unwrap();
+    assert!(read_resource_file(&regular).unwrap().is_some());
+    let link = root.path().join("link");
+    symlink(&regular, &link).unwrap();
+    let symlink_rejected = read_resource_file(&link).is_err();
+    let oversized = root.path().join("oversized");
+    let mut bytes = b"{}".to_vec();
+    bytes.resize(RESOURCE_RECEIPT_LIMIT, b' ');
+    std::fs::write(&oversized, &bytes).unwrap();
+    assert!(read_resource_file(&oversized).unwrap().is_some());
+    bytes.push(b' ');
+    std::fs::write(&oversized, &bytes).unwrap();
+    let oversized_rejected = read_resource_file(&oversized).is_err();
+    let fifo = root.path().join("fifo");
+    let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let mut writer = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&fifo)
+        .unwrap();
+    writer.write_all(b"{}").unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(20));
+        drop(writer);
+    });
+    let started = Instant::now();
+    let result = read_resource_file(&fifo);
+    release.join().unwrap();
+    assert!(
+        symlink_rejected && oversized_rejected && result.is_err(),
+        "symlink, oversized and special files must be rejected: {symlink_rejected}/{oversized_rejected}/{}",
+        result.is_err()
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "special file read must not block"
+    );
 }
 impl OwnedChild {
     fn record_status(&mut self, status: std::process::ExitStatus) {

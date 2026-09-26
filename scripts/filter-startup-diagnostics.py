@@ -13,6 +13,7 @@ MAX_LOG_BYTES = 64 * 1024 * 1024
 U64_MAX = (1 << 64) - 1
 STARTUP_PREFIX = b"startup_diagnostics "
 TARGET_PREFIX = b"target_progress "
+RESOURCE_PREFIX = b"resource_progress "
 STAGES = (
     "configuration", "catalog_open", "catalog_load", "catalog_validate",
     "tls_material", "cache_start", "drive_config", "drive_open", "backing_receipt",
@@ -46,6 +47,23 @@ IDENTITY_FIELDS = (
     "mode", "provider", "servers", "clients", "drives", "partitions", "files_per_drive", "phase_seconds",
 )
 REVISION = re.compile(r"[0-9a-f]{40}\Z")
+DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+RESOURCE_FIELDS = frozenset((
+    "schema", "controller_pid", "source_revision", "source_digest", "binary_sha256", "role",
+    "pid", "worker", "generation_context", "phase", "observed_unix_ms", "published_unix_ms",
+    "samples", "sample_interval_ms", "terminal_sample", "available", "reason", "counter_scope",
+    "cpu_user_us", "cpu_system_us", "rss_current_bytes", "rss_lifetime_peak_bytes", "rss_peak_bytes",
+    "minimum_host_free_bytes", "block_inputs", "block_outputs", "process_disk_read_bytes",
+    "process_disk_write_bytes", "process_disk_bytes_reason",
+))
+RESOURCE_MEASUREMENTS = (
+    "cpu_user_us", "cpu_system_us", "rss_current_bytes", "rss_lifetime_peak_bytes", "rss_peak_bytes",
+    "minimum_host_free_bytes", "block_inputs", "block_outputs",
+)
+RESOURCE_SAMPLE_FIELDS = ("observed_unix_ms", "samples", "terminal_sample", *RESOURCE_MEASUREMENTS)
+RESOURCE_REASONS = frozenset((
+    "missing_sample", "invalid_sample", "stale_sample", "foreign_pid", "resource_validation_failed",
+))
 
 
 class Rejected(Exception):
@@ -169,11 +187,55 @@ def validate_target(record):
         require(record["outcome"] != "success" or record["accounting_complete"], "invalid_accounting")
 
 
+def validate_resource(record):
+    exact_fields(record, RESOURCE_FIELDS)
+    require(record["schema"] == "mount-rs.resource-progress.v1")
+    for field in ("controller_pid", "pid"):
+        unsigned(record[field], (1 << 32) - 1, 1)
+    for field, pattern in (("source_revision", REVISION), ("source_digest", DIGEST),
+                           ("binary_sha256", DIGEST)):
+        require(type(record[field]) is str and pattern.fullmatch(record[field]))
+    enumeration(record["role"], ("controller", "worker"))
+    if record["role"] == "controller":
+        require(record["worker"] is None and record["generation_context"] is None)
+        require(record["pid"] == record["controller_pid"], "resource_identity_mismatch")
+    else:
+        unsigned(record["worker"], 9)
+        nullable_unsigned(record["generation_context"])
+        require(record["pid"] != record["controller_pid"], "resource_identity_mismatch")
+    enumeration(record["phase"], TARGET_PHASES)
+    unsigned(record["published_unix_ms"], minimum=1)
+    unsigned(record["sample_interval_ms"], 100, 100)
+    require(record["counter_scope"] == "sampler_baseline_cumulative_process")
+    require(record["process_disk_read_bytes"] is None and record["process_disk_write_bytes"] is None
+            and record["process_disk_bytes_reason"] == "not_captured_by_sampler")
+    boolean(record["available"])
+    if not record["available"]:
+        enumeration(record["reason"], RESOURCE_REASONS)
+        require(all(record[field] is None for field in RESOURCE_SAMPLE_FIELDS))
+        return
+    require(record["reason"] is None)
+    unsigned(record["samples"], minimum=1)
+    if record["terminal_sample"] is None:
+        require(record["samples"] == 1)
+    else:
+        boolean(record["terminal_sample"])
+    unsigned(record["observed_unix_ms"], minimum=1)
+    require(record["observed_unix_ms"] <= record["published_unix_ms"]
+            and record["published_unix_ms"] - record["observed_unix_ms"] <= 10000)
+    for field in RESOURCE_MEASUREMENTS:
+        unsigned(record[field])
+    require(record["rss_peak_bytes"] >= max(record["rss_current_bytes"], record["rss_lifetime_peak_bytes"]))
+
+
 def parse_line(raw):
     if raw.startswith(STARTUP_PREFIX):
         prefix, limit, validator = STARTUP_PREFIX, 16 * 1024, validate_startup
     elif raw.startswith(TARGET_PREFIX):
         prefix, limit, validator = TARGET_PREFIX, 4 * 1024, validate_target
+    elif raw.startswith(RESOURCE_PREFIX):
+        # Include the newline stripped by the framing loop in this contract.
+        prefix, limit, validator = RESOURCE_PREFIX, 2047, validate_resource
     else:
         return None
     require(len(raw) <= limit, "record_limit_exceeded")
@@ -219,10 +281,82 @@ class TargetIdentity:
         return self.pid is not None and self.verified and self.terminal
 
 
+class ResourceIdentity:
+    """Bounded in-stream associations; source artifacts still need a separate digest join."""
+
+    def __init__(self):
+        self.controller_pid = None
+        self.revision = None
+        self.phase = None
+        self.terminal = False
+        self.digests = None
+        self.workers = {}
+        self.startups = {}
+        self.previous = {}
+
+    def target(self, record):
+        if record["event"] == "controller_start":
+            require(self.controller_pid is None, "resource_identity_mismatch")
+            self.controller_pid = record["pid"]
+        if self.controller_pid is not None:
+            require(record["pid"] == self.controller_pid, "resource_identity_mismatch")
+            self.phase = record["phase"]
+            if record["event"] == "source_verified":
+                require(self.revision is None, "resource_identity_mismatch")
+                self.revision = record["source_revision"]
+            if self.revision is not None:
+                require(record["source_revision"] == self.revision, "resource_identity_mismatch")
+            self.terminal |= record["event"] == "terminal"
+
+    def startup(self, record):
+        worker = record["worker"]
+        if worker is None:
+            return
+        previous = self.startups.get(worker)
+        if previous is not None:
+            require(record["pid"] == previous[0] and record["generation"] >= previous[1],
+                    "resource_identity_mismatch")
+        if worker in self.workers:
+            require(record["pid"] == self.workers[worker], "resource_identity_mismatch")
+        self.startups[worker] = (record["pid"], record["generation"])
+
+    def accept(self, record):
+        require(self.revision is not None and not self.terminal
+                and record["controller_pid"] == self.controller_pid
+                and record["source_revision"] == self.revision
+                and record["phase"] == self.phase, "resource_identity_mismatch")
+        digests = (record["source_digest"], record["binary_sha256"])
+        require(self.digests is None or self.digests == digests, "resource_identity_mismatch")
+        worker, pid = record["worker"], record["pid"]
+        if worker is not None:
+            require(worker not in self.workers or self.workers[worker] == pid, "resource_identity_mismatch")
+            require(all(index == worker or other != pid for index, other in self.workers.items()),
+                    "resource_identity_mismatch")
+            startup = self.startups.get(worker)
+            require(startup is None or startup[0] == pid, "resource_identity_mismatch")
+            context = record["generation_context"]
+            if context is not None:
+                require(self.startups.get(worker) == (pid, context), "resource_identity_mismatch")
+        previous = self.previous.get(pid)
+        if record["available"] and previous is not None:
+            for field in ("samples", "cpu_user_us", "cpu_system_us", "block_inputs", "block_outputs",
+                          "rss_peak_bytes", "rss_lifetime_peak_bytes"):
+                require(record[field] >= previous[field], "resource_counter_regressed")
+            require(record["minimum_host_free_bytes"] <= previous["minimum_host_free_bytes"],
+                    "resource_counter_regressed")
+            require(previous["terminal_sample"] is not True or record["terminal_sample"] is True,
+                    "resource_counter_regressed")
+        self.digests = digests
+        if worker is not None:
+            self.workers[worker] = pid
+        if record["available"]:
+            self.previous[pid] = record
+
+
 def summary():
-    return dict(schema="mount-rs.startup-log-filter.v1", status="ok", first_issue=None,
+    return dict(schema="mount-rs.startup-log-filter.v2", status="ok", first_issue=None,
                 input_bytes=0, private_log_bytes=0, startup_records=0, target_records=0,
-                ignored_lines=0, identity_verified=False)
+                resource_records=0, ignored_lines=0, identity_verified=False)
 
 
 def filter_stream(source, private, public, *, expected_target=None,
@@ -232,6 +366,7 @@ def filter_stream(source, private, public, *, expected_target=None,
     discarding = False
     private_failed = public_failed = False
     identity = TargetIdentity(expected_target) if expected_target is not None else None
+    resource_identity = ResourceIdentity()
     read = source.read1 if hasattr(source, "read1") else source.read
 
     def issue(reason):
@@ -249,7 +384,15 @@ def filter_stream(source, private, public, *, expected_target=None,
             prefix, record = parsed
             if identity is not None and prefix == TARGET_PREFIX.decode("ascii"):
                 identity.accept(record)
-            if not record["accounting_complete"]:
+            if prefix == TARGET_PREFIX.decode("ascii"):
+                resource_identity.target(record)
+            elif prefix == STARTUP_PREFIX.decode("ascii"):
+                resource_identity.startup(record)
+            else:
+                resource_identity.accept(record)
+            if prefix == RESOURCE_PREFIX.decode("ascii") and not record["available"]:
+                issue("resource_observation_unavailable")
+            elif prefix != RESOURCE_PREFIX.decode("ascii") and not record["accounting_complete"]:
                 issue("diagnostic_accounting_incomplete")
             if public_failed:
                 return
@@ -258,7 +401,9 @@ def filter_stream(source, private, public, *, expected_target=None,
             if written is not None and written != len(output):
                 raise OSError()
             public.flush()
-            field = "startup_records" if prefix == STARTUP_PREFIX.decode("ascii") else "target_records"
+            field = {STARTUP_PREFIX.decode("ascii"): "startup_records",
+                     TARGET_PREFIX.decode("ascii"): "target_records",
+                     RESOURCE_PREFIX.decode("ascii"): "resource_records"}[prefix]
             result[field] += 1
         except Rejected as error:
             issue(error.args[0])

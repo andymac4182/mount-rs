@@ -4,12 +4,14 @@
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import selectors
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 
@@ -71,6 +73,34 @@ def line(record, prefix="startup_diagnostics "):
 
 def target_line(record):
     return line(record, "target_progress ")
+
+
+def resource(role="controller"):
+    return dict(
+        schema="mount-rs.resource-progress.v1", controller_pid=3456,
+        source_revision=REVISION, source_digest="b" * 64, binary_sha256="c" * 64,
+        role=role, pid=3456 if role == "controller" else 1234,
+        worker=None if role == "controller" else 0,
+        generation_context=None if role == "controller" else 1, phase="preflight",
+        observed_unix_ms=1000, published_unix_ms=1010, samples=1,
+        sample_interval_ms=100, terminal_sample=None, available=True, reason=None,
+        counter_scope="sampler_baseline_cumulative_process", cpu_user_us=5,
+        cpu_system_us=2, rss_current_bytes=100, rss_lifetime_peak_bytes=120,
+        rss_peak_bytes=120, minimum_host_free_bytes=1 << 36,
+        block_inputs=1, block_outputs=2, process_disk_read_bytes=None,
+        process_disk_write_bytes=None, process_disk_bytes_reason="not_captured_by_sampler",
+    )
+
+
+def resource_line(record):
+    return line(record, "resource_progress ")
+
+
+def resource_stream(*records, worker=False):
+    header = target_line(target()) + target_line(target("source_verified"))
+    if worker:
+        header += line(startup())
+    return header + b"".join(resource_line(record) for record in records) + target_line(target("terminal"))
 
 
 class FragmentedInput(io.BytesIO):
@@ -424,6 +454,248 @@ class FilterTests(unittest.TestCase):
             self.assertEqual(result.stdout, line(startup()))
             self.assertNotIn(SECRET.encode(), result.stdout + result.stderr)
             self.assertEqual(json.loads(result.stderr)["first_issue"], "invalid_json")
+
+    def test_resource_records_bind_header_and_are_forwarded_losslessly(self):
+        record = resource()
+        record.update(cpu_user_us=FILTER.U64_MAX, block_outputs=FILTER.U64_MAX,
+                      observed_unix_ms=FILTER.U64_MAX - 1, published_unix_ms=FILTER.U64_MAX)
+        payload = resource_stream(record)
+        result, private, public = self.run_filter(payload, expected=EXPECTED,
+                                                source_class=FragmentedInput)
+        self.assertEqual(result.get("resource_records", 0), 1,
+                         "the resource observation must be forwarded, not silently ignored")
+        self.assertEqual(result["schema"], "mount-rs.startup-log-filter.v2")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["resource_records"], 1)
+        self.assertTrue(result["identity_verified"])
+        self.assertEqual(private.getvalue(), payload)
+        self.assertEqual(public.getvalue().encode(), payload)
+
+    def test_resource_requires_verified_header_even_without_expected_arguments(self):
+        for payload in (resource_line(resource()),
+                        target_line(target()) + resource_line(resource()),
+                        target_line(target("source_verified")) + resource_line(resource())):
+            result, _, public = self.assert_rejected(payload)
+            self.assertEqual(result["first_issue"], "resource_identity_mismatch")
+            self.assertNotIn("resource_progress", public.getvalue())
+
+    def test_worker_generation_requires_startup_pid_and_generation_context(self):
+        record = resource("worker")
+        result, _, _ = self.run_filter(resource_stream(record, worker=True), expected=EXPECTED)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["resource_records"], 1)
+        self.assert_rejected(resource_stream(record), expected=EXPECTED)
+        record["generation_context"] = None
+        result, _, _ = self.run_filter(resource_stream(record), expected=EXPECTED)
+        self.assertEqual(result["status"], "ok")
+        record["generation_context"] = 2
+        self.assert_rejected(resource_stream(record, worker=True), expected=EXPECTED)
+
+    def test_resource_identity_source_binary_pid_role_and_phase_drift_fail_closed(self):
+        for field, value in (("controller_pid", 9000), ("source_revision", "d" * 40),
+                             ("source_digest", "d" * 64), ("binary_sha256", "d" * 64),
+                             ("pid", 9999), ("phase", "worker_setup")):
+            with self.subTest(field=field):
+                changed = resource()
+                changed[field] = value
+                result, _, public = self.assert_rejected(resource_stream(resource(), changed),
+                                                        expected=EXPECTED)
+                self.assertEqual(result["resource_records"], 1)
+                self.assertNotIn(SECRET, public.getvalue())
+
+    def test_resource_worker_pid_roster_and_startup_drift_are_bounded(self):
+        valid = resource("worker")
+        invalid = resource("worker")
+        invalid.update(pid=9999, generation_context=None)
+        self.assert_rejected(resource_stream(valid, invalid, worker=True), expected=EXPECTED)
+        changed = startup()
+        changed["pid"] = 9999
+        header = target_line(target()) + target_line(target("source_verified")) + line(startup())
+        self.assert_rejected(header + resource_line(valid) + line(changed) +
+                             resource_line(valid) + target_line(target("terminal")), expected=EXPECTED)
+
+    def test_resource_first_binding_cannot_replace_an_earlier_startup_identity(self):
+        header = target_line(target()) + target_line(target("source_verified")) + line(startup())
+        changed_startup = startup()
+        changed_startup.update(pid=9999, generation=2)
+        changed = resource("worker")
+        changed.update(pid=9999, generation_context=2)
+        self.assert_rejected(header + line(changed_startup) + resource_line(changed) +
+                             target_line(target("terminal")), expected=EXPECTED)
+        changed_startup.update(pid=1234, generation=0)
+        changed.update(pid=1234, generation_context=0)
+        self.assert_rejected(header + line(changed_startup) + resource_line(changed) +
+                             target_line(target("terminal")), expected=EXPECTED)
+        changed.update(pid=9999, generation_context=None)
+        self.assert_rejected(header + resource_line(changed) + target_line(target("terminal")),
+                             expected=EXPECTED)
+
+    def test_resource_os_lifetime_peak_cannot_regress_behind_a_retained_sampled_peak(self):
+        first = resource()
+        first.update(samples=2, terminal_sample=False)
+        changed = dict(first)
+        changed.update(samples=3, rss_lifetime_peak_bytes=119)
+        result, _, _ = self.assert_rejected(resource_stream(first, changed), expected=EXPECTED)
+        self.assertEqual(result["first_issue"], "resource_counter_regressed")
+
+    def test_resource_closed_fields_enums_types_and_unavailable_disk_are_private(self):
+        changes = (("secret", SECRET), ("reason", SECRET), ("role", SECRET),
+                   ("counter_scope", SECRET), ("process_disk_bytes_reason", SECRET),
+                   ("worker", 0), ("generation_context", 0), ("cpu_user_us", True),
+                   ("cpu_system_us", -1), ("block_inputs", 1 << 64), ("block_outputs", "2"),
+                   ("samples", 0), ("sample_interval_ms", 1), ("terminal_sample", 1),
+                   ("available", 1), ("process_disk_read_bytes", 0),
+                   ("process_disk_write_bytes", 0), ("published_unix_ms", 0),
+                   ("observed_unix_ms", 1011), ("published_unix_ms", 11001),
+                   ("rss_peak_bytes", 99), ("source_digest", "B" * 64))
+        for field, value in changes:
+            with self.subTest(field=field):
+                record = resource()
+                record[field] = value
+                self.assert_rejected(resource_stream(record), expected=EXPECTED)
+        record = resource()
+        record["samples"] = 2
+        self.assert_rejected(resource_stream(record), expected=EXPECTED)
+
+    def test_resource_unavailable_is_printable_but_invalidates_filter(self):
+        fields = ("observed_unix_ms", "samples", "terminal_sample", "cpu_user_us", "cpu_system_us",
+                  "rss_current_bytes", "rss_lifetime_peak_bytes", "rss_peak_bytes",
+                  "minimum_host_free_bytes", "block_inputs", "block_outputs")
+        for reason in ("missing_sample", "invalid_sample", "stale_sample", "foreign_pid",
+                       "resource_validation_failed"):
+            with self.subTest(reason=reason):
+                record = resource()
+                record.update(available=False, reason=reason, **dict.fromkeys(fields))
+                result, _, public = self.assert_rejected(resource_stream(record), expected=EXPECTED)
+                self.assertEqual(result["first_issue"], "resource_observation_unavailable")
+                self.assertEqual(result["resource_records"], 1)
+                self.assertIn(resource_line(record).decode(), public.getvalue())
+                record["rss_current_bytes"] = 0
+                result, _, public = self.assert_rejected(resource_stream(record), expected=EXPECTED)
+                self.assertEqual(result["resource_records"], 0)
+
+    def test_resource_duplicate_key_oversize_and_partial_eof_fail_and_keep_draining(self):
+        valid = resource_line(resource())
+        cases = (valid.replace(b'"samples":1', b'"samples":1,"samples":1'),
+                 valid[:-1] + b" " * 2048 + b"\n", valid[:-1])
+        for payload in cases:
+            with self.subTest(size=len(payload)):
+                header = target_line(target()) + target_line(target("source_verified"))
+                self.assert_rejected(header + payload)
+        record = resource()
+        record["secret"] = SECRET
+        payload = resource_stream(record, resource())
+        result, private, public = self.assert_rejected(payload, expected=EXPECTED)
+        self.assertEqual(result["resource_records"], 1)
+        self.assertEqual(private.getvalue(), payload)
+
+    def test_resource_limit_counts_prefix_and_newline_at_the_exact_boundary(self):
+        original = resource_line(resource())
+        exact = original[:-1] + b" " * (2048 - len(original)) + b"\n"
+        self.assertEqual(len(exact), 2048)
+        header = target_line(target()) + target_line(target("source_verified"))
+        result, _, public = self.run_filter(header + exact + target_line(target("terminal")),
+                                            expected=EXPECTED)
+        self.assertEqual(result["status"], "ok")
+        self.assertIn(original.decode(), public.getvalue())
+        over = exact[:-1] + b" \n"
+        self.assertEqual(len(over), 2049)
+        result, _, public = self.assert_rejected(header + over + target_line(target("terminal")),
+                                                expected=EXPECTED)
+        self.assertEqual(result["first_issue"], "record_limit_exceeded")
+        self.assertEqual(result["resource_records"], 0)
+
+    def test_resource_cumulative_counter_regressions_do_not_reset_on_generation_change(self):
+        first = resource("worker")
+        first.update(samples=2, terminal_sample=False)
+        for field in ("samples", "cpu_user_us", "cpu_system_us", "block_inputs", "block_outputs",
+                      "rss_peak_bytes"):
+            with self.subTest(field=field):
+                changed = dict(first)
+                changed[field] -= 1
+                self.assert_rejected(resource_stream(first, changed, worker=True), expected=EXPECTED)
+        changed = dict(first)
+        changed["minimum_host_free_bytes"] += 1
+        self.assert_rejected(resource_stream(first, changed, worker=True), expected=EXPECTED)
+        changed = dict(first)
+        changed.update(generation_context=2, samples=3, cpu_user_us=4)
+        next_startup = startup()
+        next_startup["generation"] = 2
+        header = target_line(target()) + target_line(target("source_verified")) + line(startup())
+        self.assert_rejected(header + resource_line(first) + line(next_startup) +
+                             resource_line(changed) + target_line(target("terminal")), expected=EXPECTED)
+
+    def test_resource_writer_failure_keeps_raw_stream_private_and_drains(self):
+        payload = resource_stream(resource())
+        result, private, _ = self.run_filter(payload, expected=EXPECTED, public=BrokenOutput())
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(private.getvalue(), payload)
+
+    def test_resource_context_can_advance_without_resetting_the_sampler(self):
+        first = resource("worker")
+        changed = dict(first)
+        changed.update(generation_context=2, samples=2, terminal_sample=False,
+                       cpu_user_us=6, rss_current_bytes=90)
+        next_startup = startup()
+        next_startup["generation"] = 2
+        header = target_line(target()) + target_line(target("source_verified")) + line(startup())
+        payload = header + resource_line(first) + line(next_startup) + resource_line(changed)
+        payload += target_line(target("terminal"))
+        result, _, public = self.run_filter(payload, expected=EXPECTED)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["resource_records"], 2)
+        self.assertEqual(public.getvalue().encode(), payload)
+
+    def test_resource_cli_forwarding_is_visible_before_producer_eof(self):
+        with tempfile.TemporaryDirectory() as directory:
+            private = Path(directory) / "resource.log"
+            process = subprocess.Popen(
+                [sys.executable, str(HELPER), "--private-log", str(private)],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                bufsize=0,
+            )
+            try:
+                payload = target_line(target()) + target_line(target("source_verified"))
+                payload += resource_line(resource())
+                process.stdin.write(payload)
+                process.stdin.flush()
+                emitted = bytearray()
+                os.set_blocking(process.stdout.fileno(), False)
+                deadline = time.monotonic() + 1
+                with selectors.DefaultSelector() as selector:
+                    selector.register(process.stdout, selectors.EVENT_READ)
+                    # A partial-frame regression cannot block while producer stdin is open.
+                    while emitted.count(b"\n") < 3:
+                        remaining = deadline - time.monotonic()
+                        self.assertGreater(remaining, 0)
+                        self.assertTrue(selector.select(timeout=remaining))
+                        try:
+                            chunk = os.read(process.stdout.fileno(), 8192)
+                        except BlockingIOError:
+                            continue
+                        self.assertTrue(chunk)
+                        emitted.extend(chunk)
+                        self.assertLessEqual(len(emitted), len(payload))
+                os.set_blocking(process.stdout.fileno(), True)
+                self.assertEqual(bytes(emitted), payload)
+                self.assertIsNone(process.poll())
+                self.assertEqual(private.read_bytes(), payload)
+                final = target_line(target("terminal"))
+                process.stdin.write(final)
+                process.stdin.close()
+                process.wait(timeout=2)
+                self.assertEqual(process.returncode, 0)
+                self.assertEqual(process.stdout.read(), final)
+                summary = json.loads(process.stderr.read())
+                self.assertEqual(summary["resource_records"], 1)
+                self.assertEqual(summary["schema"], "mount-rs.startup-log-filter.v2")
+                self.assertEqual(stat.S_IMODE(private.stat().st_mode), 0o600)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=2)
+                for stream in (process.stdin, process.stdout, process.stderr):
+                    stream.close()
 
 
 if __name__ == "__main__":
