@@ -786,7 +786,9 @@ fn required(name: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
     use mount_rs_core::{Loopback, storage::MetadataStore};
+    #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
     use mount_rs_sqlite::SqliteMetadataStore;
 
     static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -819,6 +821,7 @@ mod tests {
         }
     }
 
+    #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
     #[tokio::test]
     async fn compact_selector_opens_mrc5_and_stored_oracle_checks_every_byte() {
         let _lock = ENV_LOCK.lock().await;
@@ -848,6 +851,7 @@ mod tests {
         assert!(backend.verify_stored_files(&[vec![(0, 2)]]).await.is_err());
     }
 
+    #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
     #[tokio::test]
     async fn inode_selector_preserves_mrc4_stored_oracle() {
         let _lock = ENV_LOCK.lock().await;
@@ -871,6 +875,7 @@ mod tests {
         assert!(backend.verify_stored_files(&[vec![(0, 2)]]).await.is_err());
     }
 
+    #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
     #[tokio::test]
     async fn separate_fresh_read_failure_still_shuts_down_opened_filesystem() {
         use std::sync::{
