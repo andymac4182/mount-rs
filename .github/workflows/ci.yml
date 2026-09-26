@@ -924,6 +924,17 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
+      - name: Verify guarded backing observer and pilot controls
+        timeout-minutes: 2
+        run: |
+          env -u NAPI_RS_FORCE_WASI -u NAPI_RS_WASI_FLAVOR -u NODE_PATH \
+            -u MOUNT_RS_PROFILE_IO -u MOUNT_RS_TRACE_STORAGE \
+            NAPI_RS_NATIVE_LIBRARY_PATH="$GITHUB_WORKSPACE/benchmarks/storage/capture-native.cjs" \
+            node --test --test-concurrency=1 --test-timeout=10000 \
+            benchmarks/storage/backing-observer.test.mjs \
+            benchmarks/storage/backing-engine-transport.test.mjs \
+            benchmarks/storage/owned-backing-pilot.test.mjs \
+            scripts/verify-owned-backing-pilot.test.mjs
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
         with:
           version: 11

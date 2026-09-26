@@ -8,10 +8,27 @@ on:
         description: Run the release-mode TiDB Drive saturation benchmark
         type: boolean
         default: false
+      native_qualification:
+        description: Run signed CLI and supervised ten-process SQLite cache qualification
+        type: boolean
+        default: false
+      production_target:
+        description: Attempt the unchanged full 10000-client SQLite production target
+        type: boolean
+        default: false
+      owned_backing_pilot:
+        description: Run the owned durable TiDB and RustFS native backing pilot
+        type: boolean
+        default: false
+      owned_engine_socket:
+        description: Explicit owned backing pilot Engine socket; requires /var/run/docker.sock
+        type: string
+        default: ''
 permissions:
   contents: read
 jobs:
   protocol:
+    if: github.event_name != 'workflow_dispatch' || !(inputs.native_qualification || inputs.production_target || inputs.owned_backing_pilot)
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
@@ -34,6 +51,7 @@ jobs:
           name: remote-quic-soak-${{ matrix.os }}
           path: remote-quic-soak.log
   native-linux:
+    if: github.event_name != 'workflow_dispatch' || !(inputs.native_qualification || inputs.production_target || inputs.owned_backing_pilot)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -45,6 +63,7 @@ jobs:
       - name: Qualify two Drives through the existing Linux NFS adapter
         run: sudo env PATH="$PATH" CARGO_HOME="$HOME/.cargo" RUSTUP_HOME="$HOME/.rustup" CARGO_TARGET_DIR=/tmp/mount-rs-remote-target MOUNT_RS_REMOTE_NATIVE_NFS=1 ./scripts/cargo-shared test --locked -p mount-rs-remote-client --test quic_mount -- --nocapture
   formal:
+    if: github.event_name != 'workflow_dispatch' || !(inputs.native_qualification || inputs.production_target || inputs.owned_backing_pilot)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -58,7 +77,7 @@ jobs:
       - name: Verify each remote decision separately
         run: ./scripts/verify-remote-formal
   tidb-scale:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && !(inputs.native_qualification || inputs.production_target || inputs.owned_backing_pilot)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -75,7 +94,7 @@ jobs:
           name: remote-tidb-scale
           path: remote-tidb-scale.log
   tidb-saturation:
-    if: github.event_name == 'workflow_dispatch' && inputs.tidb_saturation
+    if: github.event_name == 'workflow_dispatch' && inputs.tidb_saturation && !(inputs.native_qualification || inputs.production_target || inputs.owned_backing_pilot)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -94,3 +113,311 @@ jobs:
           path: |
             remote-tidb-saturation.log
             remote-tidb-saturation*.json
+  native-qualification:
+    if: github.event_name == 'workflow_dispatch' && inputs.native_qualification
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+        lane: [signed-default, signed-profiled, cache]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 100
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_BUILD_JOBS: '1'
+      QUALIFICATION_LANE: ${{ matrix.lane }}
+      MOUNT_RS_TEN_PROCESS_RUN: '1'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697
+      - name: Bind clean source and select one native test
+        run: |
+          set -euo pipefail
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/mount-rs-native-target-$QUALIFICATION_LANE"
+          export EVIDENCE_DIR="$RUNNER_TEMP/mount-rs-native-evidence-$QUALIFICATION_LANE"
+          export MOUNT_RS_TEN_PROCESS_OUTPUT="$RUNNER_TEMP/mount-rs-cache-private"
+          printf 'CARGO_TARGET_DIR=%s\nEVIDENCE_DIR=%s\nMOUNT_RS_TEN_PROCESS_OUTPUT=%s\n' "$CARGO_TARGET_DIR" "$EVIDENCE_DIR" "$MOUNT_RS_TEN_PROCESS_OUTPUT" >> "$GITHUB_ENV"
+          mkdir -m 700 "$EVIDENCE_DIR"
+          git rev-parse HEAD > "$EVIDENCE_DIR/checkout-sha.txt"
+          git status --porcelain=v1 --untracked-files=all > "$EVIDENCE_DIR/source-before.txt"
+          test ! -s "$EVIDENCE_DIR/source-before.txt"
+          case "$QUALIFICATION_LANE" in
+            signed-default) features=local-oidc-fixture; target=configured_remote_compact; selected=configured_binary_selects_mrc5_for_signed_quic_and_websocket_reopen ;;
+            signed-profiled) features=io-profiling,local-oidc-fixture; target=configured_remote_compact; selected=configured_binary_selects_mrc5_for_signed_quic_and_websocket_reopen ;;
+            cache) features=local-oidc-fixture; target=ten_process_cache; selected=ten_process_sqlite_cache_qualification ;;
+            *) exit 2 ;;
+          esac
+          printf 'QUALIFICATION_FEATURES=%s\nQUALIFICATION_TARGET=%s\nQUALIFICATION_TEST=%s\n' "$features" "$target" "$selected" >> "$GITHUB_ENV"
+      - name: Build the exact debug native test and retain binary identity
+        run: |
+          set -euo pipefail
+          ./scripts/cargo-shared test --locked -p mount-rs-cli --features "$QUALIFICATION_FEATURES" \
+            --test "$QUALIFICATION_TARGET" --no-run --message-format=json \
+            > "$EVIDENCE_DIR/build.jsonl" 2> "$EVIDENCE_DIR/build.log"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib
+          root = pathlib.Path(os.environ['EVIDENCE_DIR'])
+          artifacts = [json.loads(line) for line in (root / 'build.jsonl').read_text().splitlines()]
+          tests = [v for v in artifacts if v.get('reason') == 'compiler-artifact' and v['target']['name'] == os.environ['QUALIFICATION_TARGET'] and v.get('executable') and v['profile']['test']]
+          if len(tests) != 1: raise SystemExit('exact native test executable identity unavailable')
+          digest = lambda p: hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
+          receipt = {'checkout_sha': (root / 'checkout-sha.txt').read_text().strip(), 'features': tests[0]['features'], 'debug_assertions': tests[0]['profile']['debug_assertions'], 'test_sha256': digest(tests[0]['executable']), 'cli_sha256': digest(pathlib.Path(os.environ['CARGO_TARGET_DIR']) / 'debug/mount-rs')}
+          if receipt['debug_assertions'] is not True: raise SystemExit('debug native fixture required')
+          (root / 'build-receipt.json').write_text(json.dumps(receipt, sort_keys=True) + '\n')
+          PY
+      - name: Run one exact signed test or the existing cache supervisor
+        run: |
+          set -euo pipefail
+          unset MOUNT_RS_PROFILE_IO MOUNT_RS_TRACE_SERVICE MOUNT_RS_TRACE_STORAGE
+          args=(--exact --nocapture --test-threads=1)
+          if [ "$QUALIFICATION_LANE" = cache ]; then args+=(--ignored); fi
+          status=0
+          ./scripts/cargo-shared test --locked -p mount-rs-cli --features "$QUALIFICATION_FEATURES" \
+            --test "$QUALIFICATION_TARGET" "$QUALIFICATION_TEST" -- "${args[@]}" \
+            > "$EVIDENCE_DIR/native.log" 2>&1 || status=$?
+          printf '%s\n' "$status" > "$EVIDENCE_DIR/native-exit-code.txt"
+          cat "$EVIDENCE_DIR/native.log"
+          if [ "$status" -ne 0 ]; then exit "$status"; fi
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          root = pathlib.Path(os.environ['EVIDENCE_DIR'])
+          log = (root / 'native.log').read_text()
+          selected = re.escape(os.environ['QUALIFICATION_TEST'])
+          if not re.search(r'(?ms)^test ' + selected + r' \.\.\. .*?\bok\s*$', log) or not re.search(r'^test result: ok\. 1 passed; 0 failed; 0 ignored;', log, re.M):
+              raise SystemExit('one exact native test must execute and pass; zero tests cannot qualify')
+          if os.environ['QUALIFICATION_LANE'] == 'cache':
+              private = pathlib.Path(os.environ['MOUNT_RS_TEN_PROCESS_OUTPUT'])
+              receipt = json.loads((private / 'receipt.json').read_text())
+              controller = json.loads((private / 'controller.json').read_text())
+              build = json.loads((root / 'build-receipt.json').read_text())
+              if receipt.get('complete') is not True or receipt.get('owned_cleanup_closed') is not True or controller.get('forced') is not False or controller.get('failure') is not None:
+                  raise SystemExit('cache qualification or owned cleanup incomplete')
+              if not all(controller.get(k) is True for k in ['worker_reaped', 'worker_success', 'group_gone', 'unrelated_sentinel_retained', 'resource_initial_observed']) or controller.get('resource_sample_count', 0) <= 0:
+                  raise SystemExit('cache supervisor ownership or resource evidence incomplete')
+              if controller['test_binary_sha256'] != build['test_sha256'] or controller['cli_binary_sha256'] != build['cli_sha256']:
+                  raise SystemExit('cache runtime binary identity differs from build')
+          PY
+      - name: Retain controlled cache receipts and final source state
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE_DIR"
+          git status --porcelain=v1 --untracked-files=all > "$EVIDENCE_DIR/source-after.txt"
+          python3 - <<'PY'
+          import os, pathlib, shutil
+          source = pathlib.Path(os.environ['MOUNT_RS_TEN_PROCESS_OUTPUT'])
+          destination = pathlib.Path(os.environ['EVIDENCE_DIR'])
+          for name in ['controller.json', 'receipt.json', 'resource.json', 'resource-initial.json', 'stop.json']:
+              path = source / name
+              if path.is_file() and not path.is_symlink(): shutil.copyfile(path, destination / name)
+          PY
+          test ! -s "$EVIDENCE_DIR/source-after.txt"
+      - name: Retain native qualification evidence on success or failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: remote-native-${{ matrix.os }}-${{ matrix.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.EVIDENCE_DIR }}
+          if-no-files-found: error
+          retention-days: 14
+  production-target:
+    if: github.event_name == 'workflow_dispatch' && inputs.production_target
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_BUILD_JOBS: '1'
+      MOUNT_RS_TARGET_MODE: full
+      MOUNT_RS_TARGET_PROVIDER: sqlite
+      MOUNT_RS_TARGET_DRIVES: '10000'
+      MOUNT_RS_TARGET_FILES: '1000'
+      MOUNT_RS_TARGET_SECONDS: '30'
+      MOUNT_RS_PROFILE_IO: '1'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697
+      - name: Build full target from clean source and bind executable identity
+        run: |
+          set -euo pipefail
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/mount-rs-full-target"
+          export EVIDENCE_DIR="$RUNNER_TEMP/mount-rs-full-evidence"
+          export MOUNT_RS_TARGET_OUTPUT="$RUNNER_TEMP/mount-rs-full-output"
+          printf 'CARGO_TARGET_DIR=%s\nEVIDENCE_DIR=%s\nMOUNT_RS_TARGET_OUTPUT=%s\n' "$CARGO_TARGET_DIR" "$EVIDENCE_DIR" "$MOUNT_RS_TARGET_OUTPUT" >> "$GITHUB_ENV"
+          mkdir -m 700 "$EVIDENCE_DIR"
+          test ! -e "$MOUNT_RS_TARGET_OUTPUT"
+          git rev-parse HEAD > "$EVIDENCE_DIR/checkout-sha.txt"
+          git status --porcelain=v1 --untracked-files=all > "$EVIDENCE_DIR/source-before.txt"
+          test ! -s "$EVIDENCE_DIR/source-before.txt"
+          ./scripts/cargo-shared test --locked -p mount-rs-service --features resource-profiling \
+            --test quic_production_target --no-run --message-format=json \
+            > "$EVIDENCE_DIR/build.jsonl" 2> "$EVIDENCE_DIR/build.log"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib
+          root = pathlib.Path(os.environ['EVIDENCE_DIR'])
+          artifacts = [json.loads(line) for line in (root / 'build.jsonl').read_text().splitlines()]
+          tests = [v for v in artifacts if v.get('reason') == 'compiler-artifact' and v['target']['name'] == 'quic_production_target' and v.get('executable') and v['profile']['test']]
+          if len(tests) != 1: raise SystemExit('exact production target executable identity unavailable')
+          receipt = {'checkout_sha': (root / 'checkout-sha.txt').read_text().strip(), 'features': tests[0]['features'], 'test_sha256': hashlib.sha256(pathlib.Path(tests[0]['executable']).read_bytes()).hexdigest()}
+          (root / 'build-receipt.json').write_text(json.dumps(receipt, sort_keys=True) + '\n')
+          PY
+      - name: Attempt the unchanged full target without a smaller fallback
+        run: |
+          set -euo pipefail
+          unset MOUNT_RS_TARGET_INJECT MOUNT_RS_TRACE_STORAGE
+          status=0
+          ./scripts/bench-remote-production-target.sh > "$EVIDENCE_DIR/production-target.log" 2>&1 || status=$?
+          printf '%s\n' "$status" > "$EVIDENCE_DIR/production-target-exit-code.txt"
+          cat "$EVIDENCE_DIR/production-target.log"
+          if [ "$status" -ne 0 ]; then exit "$status"; fi
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          root = pathlib.Path(os.environ['EVIDENCE_DIR'])
+          log = (root / 'production-target.log').read_text()
+          if not re.search(r'(?ms)^test production_target_controller \.\.\. .*?\bok\s*$', log) or not re.search(r'^test result: ok\. 1 passed; 0 failed; 0 ignored;', log, re.M): raise SystemExit('full controller must execute and pass exactly once')
+          terminal = json.loads((pathlib.Path(os.environ['MOUNT_RS_TARGET_OUTPUT']) / 'terminal.json').read_text())
+          build = json.loads((root / 'build-receipt.json').read_text())
+          if terminal['source']['binary_sha256'] != build['test_sha256'] or terminal['source']['revision'] != build['checkout_sha'] or terminal['source']['checkout_status']:
+              raise SystemExit('full runtime source or binary identity differs from clean build')
+          PY
+      - name: Verify final source state
+        if: always()
+        run: |
+          mkdir -p "$EVIDENCE_DIR"
+          git status --porcelain=v1 --untracked-files=all > "$EVIDENCE_DIR/source-after.txt"
+          test ! -s "$EVIDENCE_DIR/source-after.txt"
+      - name: Retain full target logs and public receipts even on preflight failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: remote-full-target-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.EVIDENCE_DIR }}
+            ${{ env.MOUNT_RS_TARGET_OUTPUT }}/*.json
+            ${{ env.MOUNT_RS_TARGET_OUTPUT }}/metrics/*.json
+            ${{ env.MOUNT_RS_TARGET_OUTPUT }}/expected/*.json
+            ${{ env.MOUNT_RS_TARGET_OUTPUT }}/worker-*/*.json
+            ${{ env.MOUNT_RS_TARGET_OUTPUT }}/worker-*/metrics/*.json
+            ${{ env.MOUNT_RS_TARGET_OUTPUT }}/worker-*/worker.log
+          if-no-files-found: error
+          retention-days: 14
+  owned-backing-pilot:
+    if: github.event_name == 'workflow_dispatch' && inputs.owned_backing_pilot
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_BUILD_JOBS: '1'
+      OWNED_ENGINE_SOCKET: ${{ inputs.owned_engine_socket }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
+        with:
+          version: 11
+      - name: Require explicit local Engine and create private capability
+        run: |
+          set -euo pipefail
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/mount-rs-pilot-target"
+          export PILOT_PRIVATE="$RUNNER_TEMP/mount-rs-owned-pilot"
+          printf 'CARGO_TARGET_DIR=%s\nPILOT_PRIVATE=%s\n' "$CARGO_TARGET_DIR" "$PILOT_PRIVATE" >> "$GITHUB_ENV"
+          test "$OWNED_ENGINE_SOCKET" = /var/run/docker.sock
+          test -S "$OWNED_ENGINE_SOCKET"
+          umask 077
+          mkdir -m 700 "$PILOT_PRIVATE"
+          python3 - <<'PY'
+          import json, os, pathlib
+          path = pathlib.Path(os.environ['PILOT_PRIVATE']) / 'engine.json'
+          with path.open('x') as file: json.dump({'socket_path': os.environ['OWNED_ENGINE_SOCKET']}, file)
+          path.chmod(0o600)
+          PY
+      - name: Install the public Node SDK test addon
+        run: pnpm --dir bindings/mount-rs-napi install --frozen-lockfile
+      - name: Build one locked release addon outside the clean checkout
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          napi_stage="$RUNNER_TEMP/mount-rs-pilot-napi-stage"
+          mkdir -m 700 "$napi_stage"
+          status=0
+          pnpm --dir bindings/mount-rs-napi exec napi build \
+            --platform --release --no-js --output-dir "$napi_stage" -- --locked \
+            > "$PILOT_PRIVATE/build.log" 2>&1 || status=$?
+          printf 'Owned backing pilot addon build exit status: %s\n' "$status"
+          if [ "$status" -ne 0 ]; then cat "$PILOT_PRIVATE/build.log"; exit "$status"; fi
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          export NAPI_STAGE="$napi_stage"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          candidates = list(pathlib.Path(os.environ['NAPI_STAGE']).glob('*.node'))
+          if len(candidates) != 1 or not candidates[0].is_file() or candidates[0].is_symlink(): raise SystemExit('exactly one staged native addon required')
+          sources = ['scripts/test-rustfs.sh', 'scripts/test-tidb.sh', 'benchmarks/storage/runner.mjs', 'benchmarks/storage/owned-backing-pilot.mjs', 'benchmarks/storage/owned-backing-pilot.test.mjs', 'benchmarks/storage/README.md']
+          digest = lambda p: hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
+          receipt = {'schema': 'mount-rs.hosted-native-build.v1', 'checkout_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), 'source_clean': True, 'locked': True, 'release': True, 'no_js': True, 'build_exit_code': 0, 'native_sha256': digest(candidates[0]), 'source_sha256': {p: digest(p) for p in sources}}
+          (pathlib.Path(os.environ['PILOT_PRIVATE']) / 'build.json').write_text(json.dumps(receipt, sort_keys=True) + '\n')
+          with open(os.environ['GITHUB_ENV'], 'a') as file: file.write('NAPI_RS_NATIVE_LIBRARY_PATH=' + str(candidates[0]) + '\n')
+          PY
+      - name: Observe selected Engine capacity and run the fixed owned pilot
+        run: |
+          set -euo pipefail
+          unset DOCKER_CONTEXT DOCKER_TLS DOCKER_TLS_VERIFY DOCKER_CERT_PATH NAPI_RS_FORCE_WASI NAPI_RS_WASI_FLAVOR NODE_PATH NODE_OPTIONS
+          unset MOUNT_RS_TRACE_STORAGE MOUNT_RS_TRACE_SERVICE MOUNT_RS_RUSTFS_COMBO_TRACE
+          unset MOUNT_RS_TIDB_URL TIDB_URL MOUNT_RS_R2_ENDPOINT R2_ENDPOINT MOUNT_RS_R2_BUCKET R2_BUCKET
+          unset MOUNT_RS_R2_ACCESS_KEY_ID R2_ACCESS_KEY_ID MOUNT_RS_R2_SECRET_ACCESS_KEY R2_SECRET_ACCESS_KEY
+          unset MOUNT_RS_R2_REGION R2_REGION MOUNT_RS_R2_SESSION_TOKEN R2_SESSION_TOKEN MOUNT_RS_TIDB_TLS_URL MOUNT_RS_TIDB_DOCKER_PLATFORM
+          unset MOUNT_RS_TIDB_COMPOSITION_COMMAND MOUNT_RS_TIDB_NODE_PREFIX MOUNT_RS_TIDB_RUSTFS_PREFIX
+          export DOCKER_HOST="unix://$OWNED_ENGINE_SOCKET"
+          status=0
+          python3 scripts/rustfs-bounded-docker.py 30 hosted-capacity docker info --format '{{.MemTotal}} {{.NCPU}}' \
+            > "$PILOT_PRIVATE/capacity.txt" 2> "$PILOT_PRIVATE/capacity.log" || status=$?
+          export CAPACITY_EXIT_CODE="$status"
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          root = pathlib.Path(os.environ['PILOT_PRIVATE'])
+          status = int(os.environ['CAPACITY_EXIT_CODE'])
+          rows = [line.split() for line in (root / 'capacity.txt').read_text().splitlines() if re.fullmatch(r'[0-9]+ [0-9]+', line)]
+          memory, cpus = (map(int, rows[0]) if status == 0 and len(rows) == 1 else (None, None))
+          qualified = memory is not None and memory >= 10737418240 and cpus >= 4
+          (root / 'capacity.json').write_text(json.dumps({'schema': 'mount-rs.hosted-engine-capacity.v1', 'memory_bytes': memory, 'cpu_count': cpus, 'min_memory_bytes': 10737418240, 'min_cpu_count': 4, 'qualified': qualified, 'exit_code': status}, sort_keys=True) + '\n')
+          if not qualified: raise SystemExit('selected Engine does not meet the unchanged 10 GiB and four CPU floors')
+          PY
+          export MOUNT_RS_BACKING_PILOT=1 MOUNT_RS_RUSTFS_COMBO_ONLY=1 MOUNT_RS_PROFILE_IO=1
+          export MOUNT_RS_BACKING_ENGINE_CAPABILITY="$PILOT_PRIVATE/engine.json" MOUNT_RS_BACKING_PILOT_OUTPUT="$PILOT_PRIVATE/pilot.json"
+          export RUSTFS_COMBO_COMMAND='./scripts/test-tidb.sh' RUSTFS_COMBO_TIMEOUT_SECONDS=900
+          export MOUNT_RS_TIDB_NAPI=1 MOUNT_RS_TIDB_IOPS=1 MOUNT_RS_TIDB_TOPOLOGY=durable MOUNT_RS_TIDB_ALLOW_UNDERPROVISIONED=0
+          export MOUNT_RS_TIDB_IOPS_SIZE_MIB=1 MOUNT_RS_TIDB_IOPS_PAYLOAD_BYTES=4096 MOUNT_RS_TIDB_IOPS_ITERATIONS=400 MOUNT_RS_TIDB_IOPS_CONCURRENCY=64 MOUNT_RS_TIDB_IOPS_MIN=1000
+          status=0
+          ./scripts/test-rustfs.sh > "$PILOT_PRIVATE/fixture.log" 2>&1 || status=$?
+          printf 'Owned backing pilot wrapper exit status: %s\n' "$status"
+          source_status=0
+          test -z "$(git status --porcelain=v1 --untracked-files=all)" || source_status=$?
+          if [ "$status" -ne 0 ]; then exit "$status"; fi
+          exit "$source_status"
+      - name: Verify observed pilot artifact and native build join
+        if: always()
+        run: |
+          if [ -f "$PILOT_PRIVATE/pilot.json" ]; then
+            node scripts/verify-owned-backing-pilot.mjs "$PILOT_PRIVATE/pilot.json" "$PILOT_PRIVATE/build.json"
+          else
+            echo 'Owned backing pilot artifact unavailable' >&2
+            exit 1
+          fi
+      - name: Retain sanitized pilot and fixed source, addon, and capacity receipts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: remote-owned-backing-pilot-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.PILOT_PRIVATE }}/pilot.json
+            ${{ env.PILOT_PRIVATE }}/build.json
+            ${{ env.PILOT_PRIVATE }}/capacity.json
+          if-no-files-found: error
+          retention-days: 14
