@@ -4,6 +4,7 @@ use mount_rs_core::delegation::{
     DirectoryGrant,
 };
 use mount_rs_core::diagnostics::profile::{self, Event};
+use mount_rs_core::diagnostics::storage::{Operation as StorageOperation, Span as StorageSpan};
 use mount_rs_core::storage::{
     BlockId, BlockStore, ConcurrentBackingId, ConcurrentModeState, InodeId, InodeMetadataSnapshot,
     InodeModeState, InodeVersion, LoadedInode, LoadedMetadata, MetadataStore, Namespace,
@@ -11,13 +12,177 @@ use mount_rs_core::storage::{
     validate_inode_publication, validate_node_kind,
 };
 use mount_rs_core::{ErrorCode, FsError, Result, backend_error};
-use mysql_async::prelude::Queryable;
+use mysql_async::prelude::{AsQuery, FromRow, Queryable, StatementLike};
 use mysql_async::{
     Conn, Error as MysqlError, IsolationLevel, Opts, OptsBuilder, Params, Pool, Transaction, TxOpts,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
+use tokio::sync::OnceCell;
+
+async fn observe_checkout_future<T, E, F>(future: F) -> std::result::Result<T, E>
+where
+    F: Future<Output = std::result::Result<T, E>>,
+{
+    observe_result_future(StorageOperation::TidbPoolCheckout, future, 0).await
+}
+
+async fn observe_result_future<T, E, F>(
+    operation: StorageOperation,
+    future: F,
+    bytes: u64,
+) -> std::result::Result<T, E>
+where
+    F: Future<Output = std::result::Result<T, E>>,
+{
+    let mut span = StorageSpan::new(operation);
+    let result = future.await;
+    if result.is_ok() {
+        span.finish_success(bytes);
+    } else {
+        span.finish_error();
+    }
+    result
+}
+
+async fn observe_first_future<T, E, F, B>(
+    operation: StorageOperation,
+    future: F,
+    logical_bytes: B,
+) -> std::result::Result<Option<T>, E>
+where
+    F: Future<Output = std::result::Result<Option<T>, E>>,
+    B: FnOnce(&Option<T>) -> u64,
+{
+    let mut span = StorageSpan::new(operation);
+    let result = future.await;
+    match &result {
+        Ok(row) => span.finish_success_with_rows(logical_bytes(row), u64::from(row.is_some())),
+        Err(_) => span.finish_error(),
+    }
+    result
+}
+
+async fn observe_rows_future<T, E, F>(
+    operation: StorageOperation,
+    future: F,
+) -> std::result::Result<Vec<T>, E>
+where
+    F: Future<Output = std::result::Result<Vec<T>, E>>,
+{
+    let mut span = StorageSpan::new(operation);
+    let result = future.await;
+    match &result {
+        Ok(rows) => span.finish_success_with_rows(0, rows.len() as u64),
+        Err(_) => span.finish_error(),
+    }
+    result
+}
+
+trait TimedPool {
+    async fn get_conn_observed(&self) -> std::result::Result<Conn, MysqlError>;
+}
+
+impl TimedPool for Pool {
+    async fn get_conn_observed(&self) -> std::result::Result<Conn, MysqlError> {
+        observe_checkout_future(self.get_conn()).await
+    }
+}
+
+trait TimedSql: Queryable {
+    async fn query_drop_observed<Q>(
+        &mut self,
+        operation: StorageOperation,
+        query: Q,
+    ) -> std::result::Result<(), MysqlError>
+    where
+        Q: AsQuery + Send,
+    {
+        observe_result_future(operation, self.query_drop(query), 0).await
+    }
+
+    async fn query_first_observed<T, Q>(
+        &mut self,
+        operation: StorageOperation,
+        query: Q,
+    ) -> std::result::Result<Option<T>, MysqlError>
+    where
+        Q: AsQuery + Send,
+        T: FromRow + Send + 'static,
+    {
+        observe_first_future(operation, self.query_first(query), |_| 0).await
+    }
+
+    async fn exec_drop_observed<S, P>(
+        &mut self,
+        operation: StorageOperation,
+        statement: S,
+        params: P,
+    ) -> std::result::Result<(), MysqlError>
+    where
+        S: StatementLike,
+        P: Into<Params> + Send,
+    {
+        observe_result_future(operation, self.exec_drop(statement, params), 0).await
+    }
+
+    async fn exec_first_observed<T, S, P>(
+        &mut self,
+        operation: StorageOperation,
+        statement: S,
+        params: P,
+    ) -> std::result::Result<Option<T>, MysqlError>
+    where
+        S: StatementLike,
+        P: Into<Params> + Send,
+        T: FromRow + Send + 'static,
+    {
+        observe_first_future(operation, self.exec_first(statement, params), |_| 0).await
+    }
+
+    async fn exec_first_bytes_observed<S, P>(
+        &mut self,
+        operation: StorageOperation,
+        statement: S,
+        params: P,
+    ) -> std::result::Result<Option<Vec<u8>>, MysqlError>
+    where
+        S: StatementLike,
+        P: Into<Params> + Send,
+    {
+        observe_first_future(
+            operation,
+            self.exec_first(statement, params),
+            |row: &Option<Vec<u8>>| row.as_ref().map_or(0, |bytes| bytes.len() as u64),
+        )
+        .await
+    }
+
+    async fn exec_observed<T, S, P>(
+        &mut self,
+        operation: StorageOperation,
+        statement: S,
+        params: P,
+    ) -> std::result::Result<Vec<T>, MysqlError>
+    where
+        S: StatementLike,
+        P: Into<Params> + Send,
+        T: FromRow + Send + 'static,
+    {
+        observe_rows_future(operation, self.exec(statement, params)).await
+    }
+}
+impl<T: Queryable + ?Sized> TimedSql for T {}
+
+#[cfg(test)]
+#[path = "storage_metrics_tests.rs"]
+mod storage_metrics_tests;
 
 /// A conservative default below TiDB's default single-entry and packet
 /// limits. Deployments that raise the corresponding TiDB/TiKV limits may
@@ -26,6 +191,73 @@ pub const DEFAULT_MAX_BLOCK_BYTES: usize = 4 * 1024 * 1024;
 
 /// Namespace JSON is kept below the same conservative single-entry limit.
 pub const DEFAULT_MAX_NAMESPACE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Source-site coverage for the opt-in, process-local TiDB client recorder.
+/// These counts are static call sites, not calls, server work, or device I/O.
+#[derive(Clone, Copy, Debug)]
+pub struct TidbDiagnosticCoverage {
+    pub schema: &'static str,
+    pub status: &'static str,
+    pub pool_checkout_sites: u32,
+    pub session_configure_sites: u32,
+    pub schema_initialize_sites: u32,
+    pub metadata_open_sites: u32,
+    pub transaction_begin_sites: u32,
+    pub transaction_commit_sites: u32,
+    pub transaction_rollback_sites: u32,
+    pub sql_statement_sites: u32,
+    pub operations: &'static [&'static str],
+    pub sql_returned_rows_scope: &'static str,
+    pub sql_payload_bytes_scope: &'static str,
+    pub pool_checkout_scope: &'static str,
+    pub unavailable: &'static [&'static str],
+}
+
+pub const TIDB_DIAGNOSTIC_COVERAGE: TidbDiagnosticCoverage = TidbDiagnosticCoverage {
+    schema: "mount-rs-tidb-client-diagnostic-coverage-v1",
+    status: "source_sites_instrumented",
+    pool_checkout_sites: 34,
+    session_configure_sites: 1,
+    schema_initialize_sites: 1,
+    metadata_open_sites: 1,
+    transaction_begin_sites: 3,
+    transaction_commit_sites: 1,
+    transaction_rollback_sites: 5,
+    sql_statement_sites: 56,
+    operations: &[
+        "tidb.pool.checkout",
+        "tidb.session.configure",
+        "tidb.open.schema",
+        "tidb.open.metadata_row",
+        "tidb.tx.begin.metadata",
+        "tidb.tx.begin.inode",
+        "tidb.tx.begin.compact_read",
+        "tidb.tx.commit",
+        "tidb.tx.rollback",
+        "tidb.sql.session",
+        "tidb.sql.ddl",
+        "tidb.sql.metadata_read",
+        "tidb.sql.metadata_write",
+        "tidb.sql.inode_read",
+        "tidb.sql.inode_write",
+        "tidb.sql.block_read",
+        "tidb.sql.block_write",
+        "tidb.sql.flush_probe",
+    ],
+    sql_returned_rows_scope: "successful SELECT Option/Vec results only; exec_iter affected_rows excluded",
+    sql_payload_bytes_scope: "successful block INSERT submitted bytes and block-body SELECT returned bytes only; other SQL payload bytes unavailable",
+    pool_checkout_scope: "pool.get_conn await includes possible lazy connection and session setup; queue-only wait unavailable",
+    unavailable: &[
+        "pool_queue_only_wait",
+        "separate_driver_connect_handshake",
+        "server_sql_execution_time",
+        "transaction_lifetime_and_implicit_drop_rollback",
+        "affected_rows",
+        "other_sql_payload_bytes",
+        "sql_wire_bytes_and_client_internal_retries",
+        "tikv_and_physical_device_io",
+    ],
+};
 
 const MAX_SCOPE_CHARS: usize = 255;
 const BLOCK_ID_LENGTH: usize = 65;
@@ -147,6 +379,7 @@ struct Database {
     durable: bool,
     max_block_bytes: usize,
     max_namespace_bytes: usize,
+    shared_context: Option<Arc<TidbPoolInner>>,
 }
 
 impl Database {
@@ -180,52 +413,17 @@ impl Database {
             durable: options.durable,
             max_block_bytes: options.max_block_bytes,
             max_namespace_bytes: options.max_namespace_bytes,
+            shared_context: None,
         };
 
         let mut connection = database
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|error| db_error("connect to TiDB", error))?;
-        connection
-            .query_drop(schema)
-            .await
-            .map_err(|error| db_error("initialize TiDB schema", error))?;
+        initialize_schema(&mut connection, schema, ensure_metadata_row).await?;
         if ensure_metadata_row {
-            connection
-                .query_drop(INODE_SCHEMA)
-                .await
-                .map_err(|error| db_error("initialize TiDB inode schema", error))?;
-            // Additive upgrades retain the existing lease row and namespace.
-            // New columns remain NULL until an explicit enrollment/migration.
-            for statement in [
-                "ALTER TABLE mount_rs_tidb_metadata ADD COLUMN IF NOT EXISTS delegation LONGTEXT NULL",
-                "ALTER TABLE mount_rs_tidb_metadata ADD COLUMN IF NOT EXISTS write_mode VARBINARY(4) NULL",
-                "ALTER TABLE mount_rs_tidb_metadata ADD COLUMN IF NOT EXISTS backing_id VARBINARY(32) NULL",
-                "ALTER TABLE mount_rs_tidb_metadata ADD INDEX IF NOT EXISTS idx_mount_rs_volume_revision (volume_key, revision)",
-                "ALTER TABLE mount_rs_tidb_metadata ADD INDEX IF NOT EXISTS idx_mount_rs_volume_revision_mode (volume_key, revision, write_mode)",
-                "ALTER TABLE mount_rs_tidb_metadata ADD INDEX IF NOT EXISTS idx_mount_rs_inode_authority (volume_key, revision, write_mode, backing_id, owner, fence, expires)",
-            ] {
-                connection
-                    .query_drop(statement)
-                    .await
-                    .map_err(|error| db_error("upgrade TiDB metadata schema", error))?;
-            }
-            connection
-                .exec_drop(
-                    "INSERT INTO mount_rs_tidb_metadata
-                        (volume_key, revision, namespace, owner, fence, expires)
-                     VALUES (?, 0, NULL, NULL, 0, 0)
-                     ON DUPLICATE KEY UPDATE volume_key=volume_key",
-                    (&database.volume_key,),
-                )
-                .await
-                .map_err(|error| db_error("initialize TiDB metadata row", error))?;
-        } else {
-            connection
-                .query_drop(BLOCK_AUTHORITY_SCHEMA)
-                .await
-                .map_err(|error| db_error("initialize TiDB block authority schema", error))?;
+            initialize_metadata_row(&mut connection, &database.volume_key).await?;
         }
         Ok(database)
     }
@@ -240,21 +438,221 @@ impl Database {
     async fn acknowledgement_barrier(&self) -> Result<()> {
         let mut connection = self
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|error| db_error("flush TiDB acknowledgement round trip", error))?;
         connection
-            .query_drop("SELECT 1")
+            .query_drop_observed(StorageOperation::TidbSqlFlushProbe, "SELECT 1")
             .await
             .map_err(|error| db_error("flush TiDB acknowledgement round trip", error))
     }
 
     async fn close(&self) -> Result<()> {
+        if self.shared_context.is_some() {
+            return Ok(());
+        }
         self.pool
             .clone()
             .disconnect()
             .await
             .map_err(|error| db_error("close TiDB connection pool", error))
+    }
+}
+
+async fn initialize_schema(
+    connection: &mut Conn,
+    schema: &str,
+    ensure_metadata_row: bool,
+) -> Result<()> {
+    observe_result_future(
+        StorageOperation::TidbSchemaInitialize,
+        initialize_schema_inner(connection, schema, ensure_metadata_row),
+        0,
+    )
+    .await
+}
+
+async fn initialize_schema_inner(
+    connection: &mut Conn,
+    schema: &str,
+    ensure_metadata_row: bool,
+) -> Result<()> {
+    connection
+        .query_drop_observed(StorageOperation::TidbSqlDdl, schema)
+        .await
+        .map_err(|error| db_error("initialize TiDB schema", error))?;
+    if ensure_metadata_row {
+        connection
+            .query_drop_observed(StorageOperation::TidbSqlDdl, INODE_SCHEMA)
+            .await
+            .map_err(|error| db_error("initialize TiDB inode schema", error))?;
+        compact::initialize(connection).await?;
+        // Additive upgrades retain the existing lease row and namespace.
+        // New columns remain NULL until an explicit enrollment/migration.
+        for statement in [
+            "ALTER TABLE mount_rs_tidb_metadata ADD COLUMN IF NOT EXISTS delegation LONGTEXT NULL",
+            "ALTER TABLE mount_rs_tidb_metadata ADD COLUMN IF NOT EXISTS write_mode VARBINARY(4) NULL",
+            "ALTER TABLE mount_rs_tidb_metadata ADD COLUMN IF NOT EXISTS backing_id VARBINARY(32) NULL",
+            "ALTER TABLE mount_rs_tidb_metadata ADD INDEX IF NOT EXISTS idx_mount_rs_volume_revision (volume_key, revision)",
+            "ALTER TABLE mount_rs_tidb_metadata ADD INDEX IF NOT EXISTS idx_mount_rs_volume_revision_mode (volume_key, revision, write_mode)",
+            "ALTER TABLE mount_rs_tidb_metadata ADD INDEX IF NOT EXISTS idx_mount_rs_inode_authority (volume_key, revision, write_mode, backing_id, owner, fence, expires)",
+        ] {
+            connection
+                .query_drop_observed(StorageOperation::TidbSqlDdl, statement)
+                .await
+                .map_err(|error| db_error("upgrade TiDB metadata schema", error))?;
+        }
+    } else {
+        connection
+            .query_drop_observed(StorageOperation::TidbSqlDdl, BLOCK_AUTHORITY_SCHEMA)
+            .await
+            .map_err(|error| db_error("initialize TiDB block authority schema", error))?;
+    }
+    Ok(())
+}
+async fn initialize_metadata_row(connection: &mut Conn, volume_key: &str) -> Result<()> {
+    observe_result_future(
+        StorageOperation::TidbMetadataOpen,
+        initialize_metadata_row_inner(connection, volume_key),
+        0,
+    )
+    .await
+}
+
+async fn initialize_metadata_row_inner(connection: &mut Conn, volume_key: &str) -> Result<()> {
+    connection
+        .exec_drop_observed(
+            StorageOperation::TidbSqlMetadataWrite,
+            "INSERT INTO mount_rs_tidb_metadata
+                        (volume_key, revision, namespace, owner, fence, expires)
+                     VALUES (?, 0, NULL, NULL, 0, 0)
+                     ON DUPLICATE KEY UPDATE volume_key=volume_key",
+            (volume_key,),
+        )
+        .await
+        .map_err(|error| db_error("initialize TiDB metadata row", error))?;
+    Ok(())
+}
+
+struct TidbPoolInner {
+    pool: Pool,
+    metadata_schema: OnceCell<()>,
+    block_schema: OnceCell<()>,
+    closed: AtomicBool,
+}
+
+/// Explicit service-owned pool for one complete connection identity.
+///
+/// Credentials, database, TLS and session options are parsed once. Every
+/// connection retains the same verified session hook as private stores. Store
+/// close only releases its caller's lifecycle; call `close` on this context
+/// after all filesystems have shut down. No process-global pool is retained.
+#[derive(Clone)]
+pub struct TidbPoolContext(Arc<TidbPoolInner>);
+impl TidbPoolContext {
+    pub fn new(url: &str, max_connections: usize) -> Result<Self> {
+        if max_connections == 0 {
+            return Err(
+                FsError::new(ErrorCode::Einval).with_message("TiDB pool maximum must be positive")
+            );
+        }
+        // mysql_async's minimum is its retained idle bound when idle TTL is
+        // zero (the default), not an eager connection count. Retain every
+        // lazily opened session within this service's cap; min=0 would discard
+        // each returned session and repeat connection/session initialization.
+        let constraints = mysql_async::PoolConstraints::new(max_connections, max_connections)
+            .ok_or_else(|| {
+                FsError::new(ErrorCode::Einval).with_message("TiDB pool maximum must be positive")
+            })?;
+        let opts = Opts::from_url(url)
+            .map_err(|error| db_error("parse TiDB URL", MysqlError::Url(error)))?;
+        let pool_options = opts
+            .pool_opts()
+            .clone()
+            .with_reset_connection(false)
+            .with_constraints(constraints);
+        let pool = Pool::new(
+            OptsBuilder::from_opts(opts)
+                .pool_opts(pool_options)
+                .after_connect(|connection| Box::pin(configure_pessimistic_session(connection))),
+        );
+        Ok(Self(Arc::new(TidbPoolInner {
+            pool,
+            metadata_schema: OnceCell::new(),
+            block_schema: OnceCell::new(),
+            closed: AtomicBool::new(false),
+        })))
+    }
+
+    async fn database(&self, options: TidbStorageOptions, metadata: bool) -> Result<Database> {
+        options.validate()?;
+        self.require_open()?;
+        let cell = if metadata {
+            &self.0.metadata_schema
+        } else {
+            &self.0.block_schema
+        };
+        cell.get_or_try_init(|| async {
+            let mut connection = self
+                .0
+                .pool
+                .get_conn_observed()
+                .await
+                .map_err(|e| db_error("initialize TiDB context", e))?;
+            initialize_schema(
+                &mut connection,
+                if metadata {
+                    METADATA_SCHEMA
+                } else {
+                    BLOCK_SCHEMA
+                },
+                metadata,
+            )
+            .await
+        })
+        .await?;
+        self.require_open()?;
+        if metadata {
+            let mut connection = self
+                .0
+                .pool
+                .get_conn_observed()
+                .await
+                .map_err(|e| db_error("open TiDB context volume", e))?;
+            initialize_metadata_row(&mut connection, &options.volume_key).await?;
+        }
+        self.require_open()?;
+        Ok(Database {
+            pool: self.0.pool.clone(),
+            volume_key: options.volume_key,
+            durable: options.durable,
+            max_block_bytes: options.max_block_bytes,
+            max_namespace_bytes: options.max_namespace_bytes,
+            shared_context: Some(self.0.clone()),
+        })
+    }
+    fn require_open(&self) -> Result<()> {
+        if self.0.closed.load(Ordering::SeqCst) {
+            Err(FsError::new(ErrorCode::Estale).with_message("TiDB pool context is closed"))
+        } else {
+            Ok(())
+        }
+    }
+    pub async fn metadata(&self, options: TidbStorageOptions) -> Result<TidbMetadataStore> {
+        self.database(options, true).await.map(TidbMetadataStore)
+    }
+    pub async fn blocks(&self, options: TidbStorageOptions) -> Result<TidbBlockStore> {
+        self.database(options, false).await.map(TidbBlockStore)
+    }
+    /// Permanently close this service's pool, after all driver shutdowns.
+    pub async fn close(&self) -> Result<()> {
+        self.0.closed.store(true, Ordering::SeqCst);
+        self.0
+            .pool
+            .clone()
+            .disconnect()
+            .await
+            .map_err(|e| db_error("close TiDB context", e))
     }
 }
 
@@ -277,8 +675,10 @@ impl TidbMetadataStore {
         ))
     }
 
-    /// Stop this store's pool. It is idempotent from the caller's point of
-    /// view; subsequent operations return a backend connection error.
+    /// Stop a privately connected store's pool. Context-backed stores leave
+    /// their shared pool alive; the service must close its TidbPoolContext
+    /// after every filesystem shutdown. Private close is idempotent and
+    /// subsequent operations return a backend connection error.
     pub async fn close(&self) -> Result<()> {
         self.0.close().await
     }
@@ -303,6 +703,8 @@ impl TidbBlockStore {
         ))
     }
 
+    /// Close private resources. Context-backed resources remain owned by
+    /// TidbPoolContext until the service explicitly closes that context.
     pub async fn close(&self) -> Result<()> {
         self.0.close().await
     }
@@ -344,6 +746,9 @@ impl ConcurrentRow {
                 Ok(ConcurrentModeState::Mrc2(backing_from_bytes(id)?))
             }
             (Some(mode), _) if mode == BOUND_CONCURRENT_WRITE_MODE.as_bytes() => Err(stale()),
+            // MRC4 fences this legacy protocol before any legacy publication.
+            // Exact inode authority is verified separately by inode_mode_state.
+            (Some(b"MRC4" | b"MRC5"), _) => Err(stale()),
             _ => Err(backend_error(
                 "TiDB concurrent mode, backing ID, and fence disagree",
             )),
@@ -376,7 +781,8 @@ async fn concurrent_row<C: Queryable>(
     volume_key: &str,
 ) -> Result<ConcurrentRow> {
     let row: Option<ConcurrentSqlRow> = connection
-        .exec_first(
+        .exec_first_observed(
+            StorageOperation::TidbSqlMetadataRead,
             "SELECT revision, namespace IS NULL, write_mode, backing_id, owner, fence, expires
          FROM mount_rs_tidb_metadata WHERE volume_key=?",
             (volume_key,),
@@ -403,18 +809,37 @@ fn concurrent_busy(operation: &str) -> FsError {
 async fn configure_pessimistic_session(
     connection: &mut Conn,
 ) -> std::result::Result<(), MysqlError> {
+    observe_result_future(
+        StorageOperation::TidbSessionConfigure,
+        configure_pessimistic_session_inner(connection),
+        0,
+    )
+    .await
+}
+
+async fn configure_pessimistic_session_inner(
+    connection: &mut Conn,
+) -> std::result::Result<(), MysqlError> {
     // A server's GLOBAL autocommit=0 must not turn an acknowledged statement
     // publication into a connection-local, uncommitted transaction.
-    connection.query_drop("SET SESSION autocommit=1").await?;
+    connection
+        .query_drop_observed(StorageOperation::TidbSqlSession, "SET SESSION autocommit=1")
+        .await?;
     let autocommit: Option<i64> = connection
-        .query_first("SELECT @@SESSION.autocommit")
+        .query_first_observed(
+            StorageOperation::TidbSqlSession,
+            "SELECT @@SESSION.autocommit",
+        )
         .await?;
     require_autocommit(autocommit).map_err(|error| MysqlError::Other(Box::new(error)))?;
     // TiDB Cloud Starter/Essential may expose tidb_txn_mode as a read-only
     // variable. In that case the provider must verify the effective value,
     // never infer it from the deployment name.
     match connection
-        .query_drop("SET SESSION tidb_txn_mode='pessimistic'")
+        .query_drop_observed(
+            StorageOperation::TidbSqlSession,
+            "SET SESSION tidb_txn_mode='pessimistic'",
+        )
         .await
     {
         Ok(()) => {}
@@ -422,15 +847,24 @@ async fn configure_pessimistic_session(
         Err(error) => return Err(error),
     }
     let mode: Option<String> = connection
-        .query_first("SELECT @@SESSION.tidb_txn_mode")
+        .query_first_observed(
+            StorageOperation::TidbSqlSession,
+            "SELECT @@SESSION.tidb_txn_mode",
+        )
         .await?;
     require_pessimistic_mode(mode.as_deref())
         .map_err(|error| MysqlError::Other(Box::new(error)))?;
     connection
-        .query_drop("SET SESSION transaction_isolation='REPEATABLE-READ'")
+        .query_drop_observed(
+            StorageOperation::TidbSqlSession,
+            "SET SESSION transaction_isolation='REPEATABLE-READ'",
+        )
         .await?;
     let isolation: Option<String> = connection
-        .query_first("SELECT @@SESSION.transaction_isolation")
+        .query_first_observed(
+            StorageOperation::TidbSqlSession,
+            "SELECT @@SESSION.transaction_isolation",
+        )
         .await?;
     require_repeatable_read_isolation(isolation.as_deref())
         .map_err(|error| MysqlError::Other(Box::new(error)))
@@ -441,10 +875,13 @@ async fn begin_pessimistic(connection: &mut Conn) -> Result<Transaction<'_>> {
     // Keep the driver's transaction guard so cancellation and early-return
     // paths are rolled back before a pooled connection is reused.
     let options = TxOpts::default();
-    connection
-        .start_transaction(options)
-        .await
-        .map_err(|error| db_error("begin TiDB transaction", error))
+    observe_result_future(
+        StorageOperation::TidbBeginMetadata,
+        connection.start_transaction(options),
+        0,
+    )
+    .await
+    .map_err(|error| db_error("begin TiDB transaction", error))
 }
 
 fn require_pessimistic_mode(mode: Option<&str>) -> Result<()> {
@@ -479,7 +916,7 @@ fn require_repeatable_read_isolation(isolation: Option<&str>) -> Result<()> {
 }
 
 async fn rollback_and<T>(transaction: Transaction<'_>, error: FsError) -> Result<T> {
-    let _ = transaction.rollback().await;
+    let _ = observe_result_future(StorageOperation::TidbRollback, transaction.rollback(), 0).await;
     Err(error)
 }
 
@@ -495,13 +932,13 @@ fn ambiguous_commit_error(operation: &str, error: &MysqlError) -> FsError {
 }
 
 async fn commit(transaction: Transaction<'_>, operation: &str) -> Result<()> {
-    transaction
-        .commit()
+    observe_result_future(StorageOperation::TidbCommit, transaction.commit(), 0)
         .await
         .map_err(|error| ambiguous_commit_error(operation, &error))
 }
 
 async fn changed_query<C, P>(
+    sql_operation: StorageOperation,
     connection: &mut C,
     statement: &str,
     params: P,
@@ -511,16 +948,26 @@ where
     C: Queryable,
     P: Into<Params> + Send,
 {
-    let result = connection
-        .exec_iter(statement, params)
-        .await
-        .map_err(|error| db_error(operation, error))?;
-    let changed = result.affected_rows();
+    let mut span = StorageSpan::new(sql_operation);
+    let result = async {
+        let result = connection
+            .exec_iter(statement, params)
+            .await
+            .map_err(|error| db_error(operation, error))?;
+        let changed = result.affected_rows();
+        result
+            .drop_result()
+            .await
+            .map_err(|error| db_error(operation, error))?;
+        Ok(changed)
+    }
+    .await;
+    if result.is_ok() {
+        span.finish_success(0);
+    } else {
+        span.finish_error();
+    }
     result
-        .drop_result()
-        .await
-        .map_err(|error| db_error(operation, error))?;
-    Ok(changed)
 }
 
 fn autocommit_error(operation: &str, error: MysqlError) -> FsError {
@@ -537,6 +984,7 @@ fn autocommit_error(operation: &str, error: MysqlError) -> FsError {
 }
 
 async fn changed_autocommit_query<P>(
+    sql_operation: StorageOperation,
     connection: &mut Conn,
     statement: &str,
     params: P,
@@ -545,16 +993,26 @@ async fn changed_autocommit_query<P>(
 where
     P: Into<Params> + Send,
 {
-    let result = connection
-        .exec_iter(statement, params)
-        .await
-        .map_err(|error| autocommit_error(operation, error))?;
-    let changed = result.affected_rows();
+    let mut span = StorageSpan::new(sql_operation);
+    let result = async {
+        let result = connection
+            .exec_iter(statement, params)
+            .await
+            .map_err(|error| autocommit_error(operation, error))?;
+        let changed = result.affected_rows();
+        result
+            .drop_result()
+            .await
+            .map_err(|error| autocommit_error(operation, error))?;
+        Ok(changed)
+    }
+    .await;
+    if result.is_ok() {
+        span.finish_success(0);
+    } else {
+        span.finish_error();
+    }
     result
-        .drop_result()
-        .await
-        .map_err(|error| autocommit_error(operation, error))?;
-    Ok(changed)
 }
 
 async fn locked_lease_row<C: Queryable>(
@@ -562,7 +1020,8 @@ async fn locked_lease_row<C: Queryable>(
     volume_key: &str,
 ) -> Result<Option<LeaseRow>> {
     let row: Option<(Option<String>, i64, i64, i64)> = connection
-        .exec_first(
+        .exec_first_observed(
+            StorageOperation::TidbSqlMetadataRead,
             format!(
                 "SELECT owner, fence, expires, {NOW_MS}
                  FROM mount_rs_tidb_metadata
@@ -589,7 +1048,8 @@ async fn locked_publish_row<C: Queryable>(
     volume_key: &str,
 ) -> Result<Option<(u64, LeaseRow)>> {
     let row: Option<(i64, Option<String>, i64, i64, i64)> = connection
-        .exec_first(
+        .exec_first_observed(
+            StorageOperation::TidbSqlMetadataRead,
             format!(
                 "SELECT revision, owner, fence, expires, {NOW_MS}
                  FROM mount_rs_tidb_metadata
@@ -689,7 +1149,46 @@ fn block_id(bytes: &[u8]) -> BlockId {
     BlockId(encoded)
 }
 
+fn mysql_numeric_error_fields<'a>(
+    operation: &str,
+    error: &'a MysqlError,
+) -> (&'static str, Option<u16>, Option<&'a str>) {
+    let operation = match operation {
+        "get TiDB block" => "block_get",
+        "load TiDB inode" => "inode_load",
+        "load TiDB inode snapshot" => "inode_snapshot",
+        "load TiDB metadata" | "conditionally load TiDB metadata" => "metadata_load",
+        "insert TiDB inode guard" | "lock TiDB structural guards" => "structural_guard",
+        _ => "other",
+    };
+    match error {
+        MysqlError::Server(server) => (
+            operation,
+            Some(server.code),
+            (server.state.len() == 5
+                && server
+                    .state
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit()))
+            .then_some(server.state.as_str()),
+        ),
+        _ => (operation, None, None),
+    }
+}
+
 fn db_error(operation: &str, error: MysqlError) -> FsError {
+    if std::env::var_os("MOUNT_RS_READ_FAILURE_DIAGNOSTICS").is_some() {
+        let (operation_class, server_code, sql_state) =
+            mysql_numeric_error_fields(operation, &error);
+        let utc_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|time| time.as_millis());
+        eprintln!(
+            "{}",
+            serde_json::json!({"event":"tidb_numeric_failure", "utc_unix_ms":utc_unix_ms, "operation_class":operation_class,"server_code":server_code,"sql_state":sql_state})
+        );
+    }
     let detail = mysql_error_detail(&error);
     if is_retryable_conflict(&error) {
         return FsError::new(ErrorCode::Eagain)
@@ -786,12 +1285,12 @@ impl TidbMetadataStore {
         let mut conn = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|e| db_error("connect TiDB delegation", e))?;
         let mut tx = begin_pessimistic(&mut conn).await?;
         #[allow(clippy::type_complexity)]
-        let row: Option<(i64,Option<String>,Option<Vec<u8>>,Option<Vec<u8>>,Option<Vec<u8>>,i64,i64,Option<String>)> = tx.exec_first(
+        let row: Option<(i64,Option<String>,Option<Vec<u8>>,Option<Vec<u8>>,Option<Vec<u8>>,i64,i64,Option<String>)> = tx.exec_first_observed(StorageOperation::TidbSqlMetadataRead,
             "SELECT revision, namespace, write_mode, backing_id, owner, fence, expires, delegation FROM mount_rs_tidb_metadata WHERE volume_key=? FOR UPDATE",(&self.0.volume_key,)).await.map_err(|e| db_error("lock TiDB delegation",e))?;
         let (revision, namespace, mode, backing, owner, fence, expires, raw) =
             row.ok_or_else(|| backend_error("missing TiDB delegation row"))?;
@@ -918,7 +1417,7 @@ impl TidbMetadataStore {
             return Err(FsError::new(ErrorCode::Efbig));
         }
         if !inspect {
-            tx.exec_drop("UPDATE mount_rs_tidb_metadata SET revision=?,namespace=?,write_mode='MRC3',backing_id=?,owner=NULL,fence=?,expires=0,delegation=? WHERE volume_key=?",
+            tx.exec_drop_observed(StorageOperation::TidbSqlMetadataWrite, "UPDATE mount_rs_tidb_metadata SET revision=?,namespace=?,write_mode='MRC3',backing_id=?,owner=NULL,fence=?,expires=0,delegation=? WHERE volume_key=?",
               (signed(revision,"delegation revision")?,json,state.backing.to_hex(),CONCURRENT_FENCE_SENTINEL,authority,&self.0.volume_key)).await.map_err(|e|db_error("write TiDB delegation",e))?;
         }
         commit(tx, "delegation").await?;
@@ -935,10 +1434,13 @@ async fn begin_inode_write(connection: &mut Conn) -> Result<Transaction<'_>> {
     // read root authority from a fresh statement snapshot, not start_ts.
     let mut options = TxOpts::default();
     options.with_isolation_level(IsolationLevel::ReadCommitted);
-    connection
-        .start_transaction(options)
-        .await
-        .map_err(|e| db_error("begin TiDB inode publication", e))
+    observe_result_future(
+        StorageOperation::TidbBeginInode,
+        connection.start_transaction(options),
+        0,
+    )
+    .await
+    .map_err(|e| db_error("begin TiDB inode publication", e))
 }
 
 fn inode_authority(
@@ -998,10 +1500,14 @@ async fn compact_inode_authority_row<C: Queryable>(
     volume: &str,
     backing: ConcurrentBackingId,
 ) -> Result<InodeModeState> {
-    let row: Option<InodeAuthoritySqlRow> =
-        conn.exec_first(INODE_AUTHORITY_SQL, (volume,))
-            .await
-            .map_err(|e| db_error("read compact TiDB inode authority", e))?;
+    let row: Option<InodeAuthoritySqlRow> = conn
+        .exec_first_observed(
+            StorageOperation::TidbSqlInodeRead,
+            INODE_AUTHORITY_SQL,
+            (volume,),
+        )
+        .await
+        .map_err(|e| db_error("read compact TiDB inode authority", e))?;
     compact_inode_authority(row.ok_or_else(stale)?, Some(backing))
 }
 
@@ -1029,30 +1535,73 @@ fn decode_inode(row: InodeSqlRow, generation: u64) -> Result<(InodeId, LoadedIno
     ))
 }
 
+#[path = "compact.rs"]
+mod compact;
+#[path = "inode_batch.rs"]
+mod inode_batch;
+
 async fn replace_inode_guards(
     tx: &mut Transaction<'_>,
     volume: &str,
     generation: u64,
     namespace: &Namespace,
 ) -> Result<()> {
-    tx.exec_drop(
+    let budget = inode_batch::budget(tx).await?;
+    tx.exec_drop_observed(
+        StorageOperation::TidbSqlInodeWrite,
         "DELETE FROM mount_rs_tidb_inodes WHERE volume_key=?",
         (volume,),
     )
     .await
     .map_err(|e| db_error("replace TiDB inode guards", e))?;
-    for (&inode, node) in &namespace.nodes {
-        let json = serde_json::to_string(node).map_err(backend_error)?;
-        profile::add(Event::InodeSerialized, json.len() as u64);
-        tx.exec_drop("INSERT INTO mount_rs_tidb_inodes (volume_key,inode,generation,revision,node) VALUES (?,?,?,0,?)",
-            (volume, signed(inode,"inode ID")?, signed(generation,"inode generation")?, json)).await
-            .map_err(|e| db_error("insert TiDB inode guard",e))?;
-    }
-    Ok(())
+    inode_batch::insert(tx, volume, generation, namespace, budget).await
 }
 
 #[async_trait]
 impl MetadataStore for TidbMetadataStore {
+    fn compact_inode_capability(&self) -> mount_rs_core::storage::compact::CompactInodeCapability {
+        mount_rs_core::storage::compact::CompactInodeCapability::V1
+    }
+    async fn compact_inode_mode_state(&self) -> Result<Option<InodeModeState>> {
+        self.compact_inspect().await
+    }
+    async fn prepare_compact_inode_mode(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        self.compact_prepare(backing, expected_revision).await
+    }
+    async fn load_compact_snapshot(
+        &self,
+        backing: ConcurrentBackingId,
+    ) -> Result<mount_rs_core::storage::compact::CompactSnapshot> {
+        self.compact_snapshot(backing).await
+    }
+    async fn load_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+    ) -> Result<mount_rs_core::storage::compact::LoadedCompactInode> {
+        self.compact_load(backing, inode).await
+    }
+    async fn publish_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+        generation: u64,
+        expected: mount_rs_core::storage::compact::PhysicalInodeIdentity,
+        node: NodeMetadata,
+    ) -> Result<mount_rs_core::storage::compact::LoadedCompactInode> {
+        self.compact_publish_inode(backing, inode, generation, expected, node)
+            .await
+    }
+    async fn publish_compact_structure(
+        &self,
+        delta: &mount_rs_core::storage::compact::CompactStructuralDelta,
+    ) -> Result<mount_rs_core::storage::compact::CompactPublication> {
+        self.compact_publish_structure(delta).await
+    }
     fn durable(&self) -> bool {
         self.0.durable
     }
@@ -1068,11 +1617,12 @@ impl MetadataStore for TidbMetadataStore {
         let mut connection = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|error| db_error("load TiDB metadata", error))?;
         let row: Option<(i64, Option<String>, Option<Vec<u8>>)> = connection
-            .exec_first(
+            .exec_first_observed(
+                StorageOperation::TidbSqlMetadataRead,
                 "SELECT revision, namespace, write_mode
                  FROM mount_rs_tidb_metadata
                  WHERE volume_key=?",
@@ -1083,7 +1633,7 @@ impl MetadataStore for TidbMetadataStore {
         let Some((revision, namespace, mode)) = row else {
             return Err(backend_error("TiDB metadata row is missing"));
         };
-        if mode.as_deref() == Some(b"MRC4") {
+        if matches!(mode.as_deref(), Some(b"MRC4" | b"MRC5")) {
             return Err(stale());
         }
         let revision = nonnegative(revision, "metadata revision")?;
@@ -1103,11 +1653,15 @@ impl MetadataStore for TidbMetadataStore {
         let mut conn = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|e| db_error("read TiDB inode mode", e))?;
         let row: Option<InodeAuthoritySqlRow> = conn
-            .exec_first(INODE_AUTHORITY_SQL, (&self.0.volume_key,))
+            .exec_first_observed(
+                StorageOperation::TidbSqlInodeRead,
+                INODE_AUTHORITY_SQL,
+                (&self.0.volume_key,),
+            )
             .await
             .map_err(|e| db_error("read TiDB inode mode", e))?;
         let row = row.ok_or_else(stale)?;
@@ -1130,7 +1684,7 @@ impl MetadataStore for TidbMetadataStore {
         let mut conn = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|e| db_error("prepare TiDB inode mode", e))?;
         let mut tx = begin_inode_write(&mut conn).await?;
@@ -1146,7 +1700,8 @@ impl MetadataStore for TidbMetadataStore {
             return rollback_and(tx, stale()).await;
         }
         let json: String = tx
-            .exec_first(
+            .exec_first_observed(
+                StorageOperation::TidbSqlMetadataRead,
                 "SELECT namespace FROM mount_rs_tidb_metadata WHERE volume_key=?",
                 (&self.0.volume_key,),
             )
@@ -1161,13 +1716,33 @@ impl MetadataStore for TidbMetadataStore {
             return rollback_and(tx, FsError::new(ErrorCode::Efbig)).await;
         }
         replace_inode_guards(&mut tx, &self.0.volume_key, generation, &namespace).await?;
-        tx.exec_drop(
+        tx.exec_drop_observed(StorageOperation::TidbSqlMetadataWrite,
             "UPDATE mount_rs_tidb_metadata SET write_mode='MRC4',revision=?,namespace=? WHERE volume_key=?",
             (generation_sql,wrapped,&self.0.volume_key),
         )
         .await
         .map_err(|e| db_error("enroll TiDB inode mode", e))?;
         commit(tx, "enroll inode mode").await
+    }
+
+    async fn load_inode_snapshot_if_changed(
+        &self,
+        backing: ConcurrentBackingId,
+        known: Option<u64>,
+    ) -> Result<Option<InodeMetadataSnapshot>> {
+        // The compact probe validates authority atomically. A changed response
+        // comes from a separately coherent, fully validated snapshot.
+        let state = self.inode_mode_state().await?.ok_or_else(stale)?;
+        if state.backing != backing
+            || state.structural_generation == 0
+            || known.is_some_and(|generation| generation > state.structural_generation)
+        {
+            return Err(stale());
+        }
+        if known == Some(state.structural_generation) {
+            return Ok(None);
+        }
+        Ok(Some(self.load_inode_snapshot(backing).await?))
     }
 
     async fn load_inode_snapshot(
@@ -1177,7 +1752,7 @@ impl MetadataStore for TidbMetadataStore {
         let mut conn = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|e| db_error("load TiDB inode snapshot", e))?;
         let mut tx = begin_pessimistic(&mut conn).await?;
@@ -1186,7 +1761,8 @@ impl MetadataStore for TidbMetadataStore {
             Some(backing),
         )?;
         let json: String = tx
-            .exec_first(
+            .exec_first_observed(
+                StorageOperation::TidbSqlMetadataRead,
                 "SELECT namespace FROM mount_rs_tidb_metadata WHERE volume_key=?",
                 (&self.0.volume_key,),
             )
@@ -1194,7 +1770,7 @@ impl MetadataStore for TidbMetadataStore {
             .map_err(|e| db_error("load TiDB inode snapshot", e))?
             .ok_or_else(stale)?;
         let mut namespace = decode_inode_namespace(json.as_bytes())?;
-        let rows: Vec<InodeSqlRow> = tx.exec("SELECT inode,generation,revision,node FROM mount_rs_tidb_inodes WHERE volume_key=? ORDER BY inode",(&self.0.volume_key,)).await
+        let rows: Vec<InodeSqlRow> = tx.exec_observed(StorageOperation::TidbSqlInodeRead, "SELECT inode,generation,revision,node FROM mount_rs_tidb_inodes WHERE volume_key=? ORDER BY inode",(&self.0.volume_key,)).await
             .map_err(|e| db_error("load TiDB inode guards",e))?;
         let mut inode_revisions = BTreeMap::new();
         for row in rows {
@@ -1212,7 +1788,7 @@ impl MetadataStore for TidbMetadataStore {
             inode_revisions,
         };
         snapshot.validate()?;
-        tx.rollback()
+        observe_result_future(StorageOperation::TidbRollback, tx.rollback(), 0)
             .await
             .map_err(|e| db_error("finish TiDB inode snapshot", e))?;
         Ok(snapshot)
@@ -1246,7 +1822,7 @@ impl MetadataStore for TidbMetadataStore {
         let mut conn = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|e| db_error("load TiDB inode", e))?;
         type ReadRow = (
@@ -1264,7 +1840,8 @@ impl MetadataStore for TidbMetadataStore {
         // One statement snapshot checks compact authority and the selected
         // guard. CASE suppresses unchanged JSON on the MySQL wire entirely.
         let row: Option<ReadRow> = conn
-            .exec_first(
+            .exec_first_observed(
+                StorageOperation::TidbSqlInodeRead,
                 INODE_READ_SQL,
                 (
                     known_generation,
@@ -1338,13 +1915,13 @@ impl MetadataStore for TidbMetadataStore {
         let mut conn = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|e| db_error("publish TiDB inode", e))?;
         // READ COMMITTED makes the nonlocking root read fresh after waiting for
         // the selected guard. File writers never lock or write the root key.
         let mut tx = begin_inode_write(&mut conn).await?;
-        let row: Option<InodeSqlRow> = tx.exec_first("SELECT inode,generation,revision,node FROM mount_rs_tidb_inodes WHERE volume_key=? AND inode=? FOR UPDATE",(&self.0.volume_key,inode_sql)).await
+        let row: Option<InodeSqlRow> = tx.exec_first_observed(StorageOperation::TidbSqlInodeRead, "SELECT inode,generation,revision,node FROM mount_rs_tidb_inodes WHERE volume_key=? AND inode=? FOR UPDATE",(&self.0.volume_key,inode_sql)).await
             .map_err(|e| db_error("lock TiDB inode guard",e))?;
         let mode = compact_inode_authority_row(&mut tx, &self.0.volume_key, backing).await?;
         // A structural unlink may have removed the guard while the caller
@@ -1360,7 +1937,8 @@ impl MetadataStore for TidbMetadataStore {
             return rollback_and(tx, FsError::new(ErrorCode::Eagain)).await;
         }
         validate_inode_publication(inode, &original.node, &node)?;
-        tx.exec_drop(
+        tx.exec_drop_observed(
+            StorageOperation::TidbSqlInodeWrite,
             "UPDATE mount_rs_tidb_inodes SET revision=?,node=? WHERE volume_key=? AND inode=?",
             (next_sql, json, &self.0.volume_key, inode_sql),
         )
@@ -1398,7 +1976,7 @@ impl MetadataStore for TidbMetadataStore {
         let mut conn = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|e| db_error("publish TiDB structure", e))?;
         let mut tx = begin_inode_write(&mut conn).await?;
@@ -1407,7 +1985,7 @@ impl MetadataStore for TidbMetadataStore {
             .ok_or_else(stale)?;
         // Every existing inode is locked, including guards for deleted inodes.
         // Thus no earlier or later file publication can be folded away.
-        let rows: Vec<InodeSqlRow> = tx.exec("SELECT inode,generation,revision,node FROM mount_rs_tidb_inodes WHERE volume_key=? ORDER BY inode FOR UPDATE",(&self.0.volume_key,)).await
+        let rows: Vec<InodeSqlRow> = tx.exec_observed(StorageOperation::TidbSqlInodeRead, "SELECT inode,generation,revision,node FROM mount_rs_tidb_inodes WHERE volume_key=? ORDER BY inode FOR UPDATE",(&self.0.volume_key,)).await
             .map_err(|e| db_error("lock TiDB structural guards",e))?;
         let mode = inode_authority(
             &concurrent_row(&mut tx, &self.0.volume_key).await?,
@@ -1429,7 +2007,8 @@ impl MetadataStore for TidbMetadataStore {
         }
         // Detect missing known guards against the old structural membership.
         let old_json: String = tx
-            .exec_first(
+            .exec_first_observed(
+                StorageOperation::TidbSqlMetadataRead,
                 "SELECT namespace FROM mount_rs_tidb_metadata WHERE volume_key=?",
                 (&self.0.volume_key,),
             )
@@ -1443,7 +2022,8 @@ impl MetadataStore for TidbMetadataStore {
         old.nodes = authoritative_nodes;
         old.validate()?;
         replace_inode_guards(&mut tx, &self.0.volume_key, next, &namespace).await?;
-        tx.exec_drop(
+        tx.exec_drop_observed(
+            StorageOperation::TidbSqlMetadataWrite,
             "UPDATE mount_rs_tidb_metadata SET revision=?,namespace=? WHERE volume_key=?",
             (next_sql, json, &self.0.volume_key),
         )
@@ -1508,21 +2088,25 @@ impl MetadataStore for TidbMetadataStore {
         let mut connection = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|error| db_error("conditionally load TiDB metadata", error))?;
         // The secondary index covers this header query without fetching the
         // primary row's large namespace value from TiKV. A changed revision
         // goes through the existing validated full load on a fresh snapshot.
         let revision: Option<(i64, Option<Vec<u8>>)> = connection
-            .exec_first(REVISION_PROBE_SQL, (&self.0.volume_key,))
+            .exec_first_observed(
+                StorageOperation::TidbSqlMetadataRead,
+                REVISION_PROBE_SQL,
+                (&self.0.volume_key,),
+            )
             .await
             .map_err(|error| db_error("conditionally load TiDB metadata", error))?;
         let Some((revision, mode)) = revision else {
             return Err(backend_error("TiDB metadata row is missing"));
         };
         let revision = nonnegative(revision, "metadata revision")?;
-        if mode.as_deref() == Some(b"MRC4") {
+        if matches!(mode.as_deref(), Some(b"MRC4" | b"MRC5")) {
             return Err(stale());
         }
         if revision == known_revision as u64 {
@@ -1536,7 +2120,7 @@ impl MetadataStore for TidbMetadataStore {
         let mut connection = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|error| db_error("read TiDB concurrent mode", error))?;
         concurrent_row(&mut connection, &self.0.volume_key)
@@ -1548,7 +2132,7 @@ impl MetadataStore for TidbMetadataStore {
         let mut connection = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|error| db_error("preflight new bound TiDB metadata", error))?;
         let row = concurrent_row(&mut connection, &self.0.volume_key).await?;
@@ -1563,10 +2147,11 @@ impl MetadataStore for TidbMetadataStore {
         let mut connection = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|error| db_error("prepare bound concurrent TiDB metadata", error))?;
         let changed = changed_autocommit_query(
+            StorageOperation::TidbSqlMetadataWrite,
             &mut connection,
             "UPDATE mount_rs_tidb_metadata SET write_mode=?, backing_id=?, fence=?
              WHERE volume_key=? AND write_mode IS NULL AND backing_id IS NULL
@@ -1604,7 +2189,7 @@ impl MetadataStore for TidbMetadataStore {
         let mut connection = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|error| db_error("acquire TiDB writer", error))?;
         let mut transaction = begin_pessimistic(&mut connection).await?;
@@ -1652,6 +2237,7 @@ impl MetadataStore for TidbMetadataStore {
             Err(error) => return rollback_and(transaction, error).await,
         };
         let changed = match changed_query(
+            StorageOperation::TidbSqlMetadataWrite,
             &mut transaction,
             "UPDATE mount_rs_tidb_metadata
              SET owner=?, fence=?, expires=?
@@ -1691,7 +2277,7 @@ impl MetadataStore for TidbMetadataStore {
         let mut connection = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|error| db_error("renew TiDB writer", error))?;
         let mut transaction = begin_pessimistic(&mut connection).await?;
@@ -1719,6 +2305,7 @@ impl MetadataStore for TidbMetadataStore {
             Err(error) => return rollback_and(transaction, error).await,
         };
         let changed = match changed_query(
+            StorageOperation::TidbSqlMetadataWrite,
             &mut transaction,
             &format!(
                 "UPDATE mount_rs_tidb_metadata SET expires=?
@@ -1757,7 +2344,7 @@ impl MetadataStore for TidbMetadataStore {
         let mut connection = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|error| db_error("release TiDB writer", error))?;
         let mut transaction = begin_pessimistic(&mut connection).await?;
@@ -1777,6 +2364,7 @@ impl MetadataStore for TidbMetadataStore {
             return rollback_and(transaction, stale()).await;
         }
         let changed = match changed_query(
+            StorageOperation::TidbSqlMetadataWrite,
             &mut transaction,
             &format!(
                 "UPDATE mount_rs_tidb_metadata SET owner=NULL, expires=0
@@ -1822,7 +2410,7 @@ impl MetadataStore for TidbMetadataStore {
         let mut connection = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|error| db_error("publish TiDB metadata", error))?;
         // A conditional UPDATE is already an atomic single-statement
@@ -1831,6 +2419,7 @@ impl MetadataStore for TidbMetadataStore {
         // path below. The predicate carries the full lease and revision fence;
         // no row lock is needed on the successful path.
         let changed = changed_autocommit_query(
+            StorageOperation::TidbSqlMetadataWrite,
             &mut connection,
             &format!(
                 "UPDATE mount_rs_tidb_metadata
@@ -1900,13 +2489,14 @@ impl MetadataStore for TidbMetadataStore {
         let mut connection = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|error| db_error("publish bound TiDB metadata", error))?;
         // TiDB may retry its own single-statement autocommit internally. The
         // revision predicate still permits exactly one committed publication.
         // An unknown acknowledgement is never replayed by this provider.
         let changed = changed_autocommit_query(
+            StorageOperation::TidbSqlMetadataWrite,
             &mut connection,
             "UPDATE mount_rs_tidb_metadata SET revision=?, namespace=?
              WHERE volume_key=? AND revision=? AND write_mode=? AND backing_id=?
@@ -1954,10 +2544,11 @@ impl MetadataStore for TidbMetadataStore {
         let mut connection = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|error| db_error("migrate MRC1 TiDB metadata", error))?;
         let changed = changed_autocommit_query(
+            StorageOperation::TidbSqlMetadataWrite,
             &mut connection,
             "UPDATE mount_rs_tidb_metadata SET write_mode=?, backing_id=?
              WHERE volume_key=? AND revision=? AND write_mode=? AND backing_id IS NULL
@@ -1992,7 +2583,7 @@ impl MetadataStore for TidbMetadataStore {
         let mut connection = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|error| db_error("preflight MRC1 TiDB metadata", error))?;
         let row = concurrent_row(&mut connection, &self.0.volume_key).await?;
@@ -2022,19 +2613,23 @@ impl BlockStore for TidbBlockStore {
         let mut connection = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|error| db_error("prepare TiDB block authority", error))?;
         // The server generates the candidate, avoiding a client-local identity
         // or a dependency on which pool/host first opens the backing scope.
         let candidate: String = connection
-            .query_first("SELECT LOWER(REPLACE(UUID(), '-', ''))")
+            .query_first_observed(
+                StorageOperation::TidbSqlBlockWrite,
+                "SELECT LOWER(REPLACE(UUID(), '-', ''))",
+            )
             .await
             .map_err(|error| db_error("generate TiDB block authority", error))?
             .ok_or_else(|| backend_error("TiDB UUID query returned no row"))?;
         ConcurrentBackingId::from_hex(&candidate)
             .map_err(|_| backend_error("TiDB generated an invalid block authority ID"))?;
         changed_autocommit_query(
+            StorageOperation::TidbSqlBlockWrite,
             &mut connection,
             "INSERT INTO mount_rs_tidb_block_authority (volume_key, backing_id) VALUES (?, ?)
              ON DUPLICATE KEY UPDATE volume_key=volume_key",
@@ -2043,7 +2638,8 @@ impl BlockStore for TidbBlockStore {
         )
         .await?;
         let actual: Option<Vec<u8>> = connection
-            .exec_first(
+            .exec_first_observed(
+                StorageOperation::TidbSqlBlockRead,
                 "SELECT backing_id FROM mount_rs_tidb_block_authority WHERE volume_key=?",
                 (&self.0.volume_key,),
             )
@@ -2059,11 +2655,12 @@ impl BlockStore for TidbBlockStore {
         let mut connection = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|error| db_error("verify TiDB block authority", error))?;
         let actual: Option<Vec<u8>> = connection
-            .exec_first(
+            .exec_first_observed(
+                StorageOperation::TidbSqlBlockRead,
                 "SELECT backing_id FROM mount_rs_tidb_block_authority WHERE volume_key=?",
                 (&self.0.volume_key,),
             )
@@ -2095,35 +2692,53 @@ impl BlockStore for TidbBlockStore {
         let mut connection = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|error| db_error("put TiDB block", error))?;
         // The duplicate branch updates only the key. It can never replace
         // bytes written by an older layout, even when two writers race.
-        let result = connection
-            .exec_iter(
-                "INSERT INTO mount_rs_tidb_blocks (volume_key, id, bytes)
-                 VALUES (?, ?, ?)
-                 ON DUPLICATE KEY UPDATE id=id",
-                (&self.0.volume_key, &id.0, bytes.to_vec()),
-            )
-            .await
-            .map_err(|error| db_error("put TiDB block", error))?;
-        // A new row is unambiguous: the server reports one affected row and
-        // the bytes in the INSERT are the bytes now protected by the primary
-        // key. Duplicate/no-op and server-specific affected-row results keep
-        // the read-back collision check below; never treat those as verified
-        // merely because the write statement succeeded.
-        let inserted = result.affected_rows() == 1;
-        result
-            .drop_result()
-            .await
-            .map_err(|error| db_error("finish TiDB block put", error))?;
+        let mut sql_span = StorageSpan::new(StorageOperation::TidbSqlBlockWrite);
+        let inserted = async {
+            let result = connection
+                .exec_iter(
+                    "INSERT INTO mount_rs_tidb_blocks (volume_key, id, bytes)
+                     VALUES (?, ?, ?)
+                     ON DUPLICATE KEY UPDATE id=id",
+                    (&self.0.volume_key, &id.0, bytes.to_vec()),
+                )
+                .await
+                .map_err(|error| db_error("put TiDB block", error))?;
+            // A new row is unambiguous: the server reports one affected row and
+            // the bytes in the INSERT are the bytes now protected by the primary
+            // key. Duplicate/no-op and server-specific affected-row results keep
+            // the read-back collision check below; never treat those as verified
+            // merely because the write statement succeeded.
+            let inserted = result.affected_rows() == 1;
+            result
+                .drop_result()
+                .await
+                .map_err(|error| db_error("finish TiDB block put", error))?;
+            Ok(inserted)
+        }
+        .await;
+        let inserted = match inserted {
+            Ok(inserted) => {
+                // Submitted application bytes, including a duplicate/no-op;
+                // this does not claim newly persisted bytes.
+                sql_span.finish_success(bytes.len() as u64);
+                inserted
+            }
+            Err(error) => {
+                sql_span.finish_error();
+                return Err(error);
+            }
+        };
         if inserted {
             return Ok(id);
         }
         let existing: Option<Vec<u8>> = connection
-            .exec_first(
+            .exec_first_bytes_observed(
+                StorageOperation::TidbSqlBlockRead,
                 "SELECT bytes FROM mount_rs_tidb_blocks
                  WHERE volume_key=? AND id=?",
                 (&self.0.volume_key, &id.0),
@@ -2142,11 +2757,12 @@ impl BlockStore for TidbBlockStore {
         let mut connection = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|error| db_error("get TiDB block", error))?;
         connection
-            .exec_first(
+            .exec_first_bytes_observed(
+                StorageOperation::TidbSqlBlockRead,
                 "SELECT bytes FROM mount_rs_tidb_blocks
                  WHERE volume_key=? AND id=?",
                 (&self.0.volume_key, &id.0),
@@ -2165,11 +2781,12 @@ impl BlockStore for TidbBlockStore {
         let mut connection = self
             .0
             .pool
-            .get_conn()
+            .get_conn_observed()
             .await
             .map_err(|error| db_error("delete TiDB block", error))?;
         connection
-            .exec_drop(
+            .exec_drop_observed(
+                StorageOperation::TidbSqlBlockWrite,
                 "DELETE FROM mount_rs_tidb_blocks WHERE volume_key=? AND id=?",
                 (&self.0.volume_key, &id.0),
             )
@@ -2333,6 +2950,82 @@ mod tests {
         assert!(store.load_if_changed(1).await.is_err());
         assert!(store.concurrent_mode_state().await.is_err());
         let stale_snapshot = store.load_inode_snapshot(backing).await.unwrap();
+        // Dedicated volume: restore every authority field after each negative.
+        for (assignment, restore) in [
+            ("write_mode='MRC2'", "write_mode='MRC4'"),
+            ("owner='unexpected'", "owner=NULL"),
+            ("fence=1", "fence=9223372036854775807"),
+            ("expires=1", "expires=0"),
+            ("revision=0", "revision=2"),
+        ] {
+            let mut connection = store.0.pool.get_conn().await.unwrap();
+            connection
+                .exec_drop(
+                    format!("UPDATE mount_rs_tidb_metadata SET {assignment} WHERE volume_key=?"),
+                    (&key,),
+                )
+                .await
+                .unwrap();
+            drop(connection);
+            assert!(
+                store
+                    .load_inode_snapshot_if_changed(backing, Some(2))
+                    .await
+                    .is_err(),
+                "{assignment}"
+            );
+            let mut connection = store.0.pool.get_conn().await.unwrap();
+            connection
+                .exec_drop(
+                    format!("UPDATE mount_rs_tidb_metadata SET {restore} WHERE volume_key=?"),
+                    (&key,),
+                )
+                .await
+                .unwrap();
+        }
+
+        assert!(
+            store
+                .load_inode_snapshot_if_changed(backing, Some(stale_snapshot.structural_generation))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .load_inode_snapshot_if_changed(backing, None)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .load_inode_snapshot_if_changed(backing, Some(0))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .load_inode_snapshot_if_changed(
+                    backing,
+                    Some(stale_snapshot.structural_generation + 1)
+                )
+                .await
+                .is_err()
+        );
+        let wrong_backing =
+            mount_rs_core::storage::ConcurrentBackingId::from_bytes([0xe7; 16]).unwrap();
+        assert!(
+            store
+                .load_inode_snapshot_if_changed(
+                    wrong_backing,
+                    Some(stale_snapshot.structural_generation)
+                )
+                .await
+                .is_err()
+        );
+
         let first = store.load_inode(backing, root + 1).await.unwrap();
         let second = other.load_inode(backing, root + 2).await.unwrap();
         let mut first_node = first.node.clone();
@@ -2392,6 +3085,16 @@ mod tests {
             }
         );
         let before_unlink = store.load_inode_snapshot(backing).await.unwrap();
+        assert_eq!(
+            store
+                .load_inode_snapshot_if_changed(backing, Some(2))
+                .await
+                .unwrap()
+                .unwrap()
+                .structural_generation,
+            3
+        );
+
         let removed = store.load_inode(backing, root + 2).await.unwrap();
         let mut unlinked = before_unlink.namespace;
         unlinked.nodes.remove(&(root + 2));
@@ -2574,6 +3277,185 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn context_pool_creation_is_lazy_and_rejects_zero_bound() {
+        let url = "mysql://unused@127.0.0.1:1/unused";
+        assert!(TidbPoolContext::new(url, 0).is_err());
+        for maximum in [1, 2, 16] {
+            let context = TidbPoolContext::new(url, maximum).unwrap();
+            assert_eq!(
+                context
+                    .0
+                    .pool
+                    .metrics()
+                    .connection_count
+                    .load(Ordering::SeqCst),
+                0
+            );
+            assert_eq!(
+                context
+                    .0
+                    .pool
+                    .metrics()
+                    .connections_in_pool
+                    .load(Ordering::SeqCst),
+                0
+            );
+            context.close().await.unwrap();
+            assert!(context.0.pool.get_conn().await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an actual TiDB service and MOUNT_RS_TIDB_URL"]
+    async fn actual_tidb_context_reuses_connection_after_sequential_provider_operations() {
+        let url = std::env::var("MOUNT_RS_TIDB_URL").unwrap();
+        let key = format!(
+            "context-reuse-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let context = TidbPoolContext::new(&url, 1).unwrap();
+        let metadata = context
+            .metadata(TidbStorageOptions::new(&key))
+            .await
+            .unwrap();
+        let blocks = context.blocks(TidbStorageOptions::new(&key)).await.unwrap();
+        let metrics = context.0.pool.metrics();
+        let mut ids = Vec::new();
+        for _ in 0..4 {
+            // Exercise both production provider roles before reacquiring the
+            // sole session; sharing an Arc alone does not establish reuse.
+            metadata.load().await.unwrap();
+            metadata.flush().await.unwrap();
+            let id = blocks.put(b"owned sequential reuse oracle").await.unwrap();
+            assert_eq!(
+                blocks.get(&id).await.unwrap(),
+                b"owned sequential reuse oracle"
+            );
+            blocks.delete(&id).await.unwrap();
+            let mut connection = context.0.pool.get_conn().await.unwrap();
+            ids.push(
+                connection
+                    .query_first::<u64, _>("SELECT CONNECTION_ID()")
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+            let recycled = metrics.connection_returned_to_pool.load(Ordering::SeqCst)
+                + metrics
+                    .discarded_superfluous_connection
+                    .load(Ordering::SeqCst);
+            drop(connection);
+            // Wait for the actual recycler decision, rather than relying on
+            // the next checkout winning a scheduling race against recycling.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while metrics.connection_returned_to_pool.load(Ordering::SeqCst)
+                    + metrics
+                        .discarded_superfluous_connection
+                        .load(Ordering::SeqCst)
+                    <= recycled
+                {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        let discarded = metrics
+            .discarded_superfluous_connection
+            .load(Ordering::SeqCst);
+        let mut cleanup = context.0.pool.get_conn().await.unwrap();
+        cleanup
+            .exec_drop(
+                "DELETE FROM mount_rs_tidb_metadata WHERE volume_key=?",
+                (&key,),
+            )
+            .await
+            .unwrap();
+        drop(cleanup);
+        context.close().await.unwrap();
+        eprintln!("sequential provider CONNECTION_IDs={ids:?}; discarded_before_close={discarded}");
+        assert!(
+            ids.iter().all(|id| *id == ids[0]),
+            "sequential provider operations recreated sessions: {ids:?}"
+        );
+        assert_eq!(
+            discarded, 0,
+            "bounded live sessions must remain reusable until context close"
+        );
+        assert!(context.0.pool.get_conn().await.is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an actual TiDB service and MOUNT_RS_TIDB_URL"]
+    async fn actual_tidb_context_enforces_session_bound_and_verified_reuse() {
+        let url = std::env::var("MOUNT_RS_TIDB_URL").unwrap();
+        let context = TidbPoolContext::new(&url, 2).unwrap();
+        let mut first = context.0.pool.get_conn().await.unwrap();
+        let second = context.0.pool.get_conn().await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), context.0.pool.get_conn())
+                .await
+                .is_err()
+        );
+        let settings: (String, String, u8) = first
+            .query_first("SELECT @@tidb_txn_mode, @@transaction_isolation, @@autocommit")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(settings.0.to_ascii_lowercase(), "pessimistic");
+        assert_eq!(settings.1.to_ascii_uppercase(), "REPEATABLE-READ");
+        assert_eq!(settings.2, 1);
+        drop(first);
+        second.disconnect().await.unwrap();
+        let mut reused = context.0.pool.get_conn().await.unwrap();
+        let enabled: u8 = reused
+            .query_first("SELECT @@autocommit")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(enabled, 1);
+        let old_id: u64 = reused
+            .query_first("SELECT CONNECTION_ID()")
+            .await
+            .unwrap()
+            .unwrap();
+        reused.disconnect().await.unwrap();
+        let mut reconnected = context.0.pool.get_conn().await.unwrap();
+        let settings: (String, String, u8, u64) = reconnected
+            .query_first(
+                "SELECT @@tidb_txn_mode, @@transaction_isolation, @@autocommit, CONNECTION_ID()",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(settings.0.to_ascii_lowercase(), "pessimistic");
+        assert_eq!(settings.1.to_ascii_uppercase(), "REPEATABLE-READ");
+        assert_eq!(settings.2, 1);
+        assert_ne!(settings.3, old_id);
+        drop(reconnected);
+        context.close().await.unwrap();
+        assert!(context.0.pool.get_conn().await.is_err());
+    }
+
+    #[test]
+    fn inode_mode_fences_legacy_inspectors_with_known_stale_authority() {
+        let mut row = pristine_concurrent_row();
+        row.mode = Some(b"MRC4".to_vec());
+        row.backing = Some(
+            ConcurrentBackingId::from_bytes([4; 16])
+                .unwrap()
+                .to_hex()
+                .into_bytes(),
+        );
+        row.fence = CONCURRENT_FENCE_SENTINEL;
+        assert_eq!(row.mode_state().unwrap_err().code, ErrorCode::Estale);
+    }
+
     #[test]
     fn concurrent_markers_require_canonical_identity_and_exhausted_legacy_fence() {
         let mut row = pristine_concurrent_row();
@@ -2697,6 +3579,39 @@ mod tests {
         assert!(expiry(u64::MAX, 1).is_err());
         assert!(nonnegative(-1, "metadata fence").is_err());
         assert!(signed(u64::MAX, "metadata fence").is_err());
+    }
+
+    #[test]
+    fn numeric_failure_diagnostic_excludes_server_text_and_unknown_operation() {
+        let error = MysqlError::Server(ServerError {
+            code: 1205,
+            message: "password SQL SELECT payload mysql://private".into(),
+            state: "HY000".into(),
+        });
+        let fields = mysql_numeric_error_fields("get TiDB block", &error);
+        assert_eq!(fields, ("block_get", Some(1205), Some("HY000")));
+        let output = format!("{fields:?}");
+        for forbidden in ["password", "SELECT", "payload", "private", "mysql://"] {
+            assert!(!output.contains(forbidden));
+        }
+        assert_eq!(
+            mysql_numeric_error_fields("password SQL", &error).0,
+            "other"
+        );
+        let malformed = MysqlError::Server(ServerError {
+            code: 42,
+            message: "secret".into(),
+            state: "secret-state".into(),
+        });
+        assert_eq!(
+            mysql_numeric_error_fields("get TiDB block", &malformed).2,
+            None
+        );
+        let disconnected = MysqlError::Driver(DriverError::ConnectionClosed);
+        assert_eq!(
+            mysql_numeric_error_fields("get TiDB block", &disconnected),
+            ("block_get", None, None)
+        );
     }
 
     #[test]

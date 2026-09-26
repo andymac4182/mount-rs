@@ -20,11 +20,15 @@ use mount_rs_core::driver::{
 use mount_rs_core::error::{ErrorCode, FsError, Result};
 use mount_rs_core::handle::OpenFlags;
 use mount_rs_core::path::{is_path_inside, normalize_path, split_path};
+use mount_rs_core::storage::compact::{
+    CompactInodeCapability, CompactSnapshot, CompactStructuralDelta, PhysicalInodeIdentity,
+    StructuralScope, ValidatedCompactStructure,
+};
 use mount_rs_core::storage::{
     BlockExtent, BlockReconcileReport, BlockStore, CheckoutRequest, ConcurrentBackingId,
     ConcurrentModeState, DelegatedCheckin, DelegatedPublish, DirectoryGrant, FileLayout, InodeId,
-    InodeVersion, MetadataStore, NAMESPACE_FORMAT_VERSION, Namespace, NodeData, NodeMetadata,
-    WriterLease,
+    InodeMetadataSnapshot, InodeVersion, MetadataStore, NAMESPACE_FORMAT_VERSION, Namespace,
+    NodeData, NodeMetadata, WriterLease,
 };
 use mount_rs_core::types::{
     Capabilities, DirEntry, FileType, MkdirOptions, S_IFDIR, S_IFMT, S_IFREG, Stats, StatsFs,
@@ -120,6 +124,9 @@ pub struct ChunkedOptions {
     pub concurrent_writes: bool,
     /// Opt in to independently versioned inode publication.
     pub inode_updates: bool,
+    /// Explicit compact MRC5 inode layout. Disabling this leaves any selected
+    /// MRC4 inode-updates option unchanged.
+    pub compact_inode_updates: bool,
     pub writeback: bool,
     pub delegated: bool,
     pub checkout_path: Option<String>,
@@ -137,6 +144,7 @@ impl ChunkedOptions {
             lease_ttl: DEFAULT_LEASE_TTL,
             concurrent_writes: false,
             inode_updates: false,
+            compact_inode_updates: false,
             writeback: false,
             delegated: false,
             checkout_path: None,
@@ -170,6 +178,15 @@ impl ChunkedOptions {
     pub fn with_inode_updates(mut self, enabled: bool) -> Self {
         self.inode_updates = enabled;
         if enabled {
+            self.concurrent_writes = true;
+        }
+        self
+    }
+
+    pub fn with_compact_inode_updates(mut self, enabled: bool) -> Self {
+        self.compact_inode_updates = enabled;
+        if enabled {
+            self.inode_updates = true;
             self.concurrent_writes = true;
         }
         self
@@ -221,7 +238,32 @@ impl Default for ChunkedOptions {
     }
 }
 
+#[cfg(test)]
+#[derive(Default)]
+struct PreparationPause {
+    entered: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+
 type AsyncGateGuard<'a> = tokio::sync::MutexGuard<'a, ()>;
+
+/// A gate-owned coherent Full capture is operation-scoped, including early
+/// errors and no-op reads. Drop the temporary guard mirror before releasing
+/// the gate so an idle filesystem retains only namespace and identities.
+struct OperationGateGuard<'a> {
+    _guard: AsyncGateGuard<'a>,
+    state: &'a Mutex<RuntimeState>,
+}
+
+impl Drop for OperationGateGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.state.lock()
+            && let Some(compact) = state.compact.as_mut()
+        {
+            compact.pending_full = None;
+        }
+    }
+}
 
 #[derive(Clone)]
 struct AsyncGate {
@@ -240,10 +282,47 @@ impl AsyncGate {
     }
 }
 
+/// Authority captured under the state mutex alongside the source body. A
+/// projected revision alone cannot distinguish two different old-epoch bodies.
+#[derive(Clone, Copy)]
+struct CapturedInodeVersion {
+    logical: InodeVersion,
+    physical: Option<PhysicalInodeIdentity>,
+}
+
+impl CapturedInodeVersion {
+    fn capture(state: &RuntimeState, inode: InodeId) -> Result<Self> {
+        let physical = state
+            .compact
+            .as_ref()
+            .map(|compact| {
+                compact
+                    .physical
+                    .get(&inode)
+                    .copied()
+                    .ok_or_else(stale_inode_structure)
+            })
+            .transpose()?;
+        let logical = if let Some(identity) = physical {
+            identity.logical_version(state.persisted_revision)?
+        } else {
+            InodeVersion {
+                structural_generation: state.persisted_revision,
+                inode_revision: *state
+                    .inode_revisions
+                    .get(&inode)
+                    .ok_or_else(|| FsError::new(ErrorCode::Eio))?,
+            }
+        };
+        Ok(Self { logical, physical })
+    }
+}
+
 struct RuntimeState {
     namespace: Arc<Namespace>,
     inode_revisions: BTreeMap<InodeId, u64>,
     selected_inodes: HashMap<InodeId, Arc<NodeMetadata>>,
+    compact: Option<CompactRuntime>,
     /// Local operation generation, incremented for every staged mutation.
     revision: u64,
     /// Provider CAS revision; local generations must never be used for fencing.
@@ -262,6 +341,14 @@ struct RuntimeState {
     orphans: HashMap<InodeId, NodeMetadata>,
     failure: Option<FsError>,
     closed: bool,
+}
+
+struct CompactRuntime {
+    structure: ValidatedCompactStructure,
+    physical: BTreeMap<InodeId, PhysicalInodeIdentity>,
+    /// Scoped to one gate-owned Full operation; discarded on publication or
+    /// before a subsequent full capture. Never retained as an idle mirror.
+    pending_full: Option<CompactSnapshot>,
 }
 
 enum ReadLayoutSnapshot {
@@ -568,6 +655,8 @@ where
     lease_renewed: AtomicBool,
     preparing_mutations: Arc<AtomicUsize>,
     mutations: Mutex<MutationQueue>,
+    #[cfg(test)]
+    preparation_pause: Mutex<Option<Arc<PreparationPause>>>,
 }
 
 /// A filesystem driver composed from one metadata provider and one block
@@ -598,6 +687,208 @@ where
     M: MetadataStore + 'static,
     B: BlockStore + 'static,
 {
+    async fn operation_gate(&self) -> OperationGateGuard<'_> {
+        OperationGateGuard {
+            _guard: self.inner.gate.lock().await,
+            state: &self.inner.state,
+        }
+    }
+    fn from_compact_snapshot(
+        metadata: Arc<M>,
+        blocks: Arc<B>,
+        options: ChunkedOptions,
+        backing: ConcurrentBackingId,
+        snapshot: CompactSnapshot,
+    ) -> Result<Self> {
+        if snapshot.anchor.backing != backing {
+            return Err(FsError::new(ErrorCode::Estale));
+        }
+        let generation = snapshot.anchor.generation;
+        let (namespace, physical, structure) = snapshot.into_validated_namespace()?;
+        Ok(Self {
+            inner: Arc::new(ChunkedInner {
+                metadata,
+                blocks,
+                concurrent_backing: Some(backing),
+                delegation: Mutex::new(None),
+                delegation_generation: std::sync::atomic::AtomicU64::new(0),
+                pending_checkout: Mutex::new(None),
+                delegation_draining: AtomicBool::new(false),
+                options,
+                gate: AsyncGate::new(),
+                lifecycle: tokio::sync::RwLock::new(()),
+                state: Mutex::new(RuntimeState {
+                    namespace: Arc::new(namespace),
+                    inode_revisions: BTreeMap::new(),
+                    selected_inodes: HashMap::new(),
+                    compact: Some(CompactRuntime {
+                        structure,
+                        physical,
+                        pending_full: None,
+                    }),
+                    revision: generation,
+                    persisted_revision: generation,
+                    pending_namespace: false,
+                    next_fd: 3,
+                    open_refs: HashMap::new(),
+                    pending_atime: HashMap::new(),
+                    orphans: HashMap::new(),
+                    failure: None,
+                    closed: false,
+                }),
+                lease: Mutex::new(None),
+                lease_gate: AsyncGate::new(),
+                lease_renewed: AtomicBool::new(false),
+                preparing_mutations: Arc::new(AtomicUsize::new(0)),
+                mutations: Mutex::new(MutationQueue::new()),
+                #[cfg(test)]
+                preparation_pause: Mutex::new(None),
+            }),
+        })
+    }
+
+    async fn open_compact(metadata: M, blocks: B, options: ChunkedOptions) -> Result<Self> {
+        if metadata.compact_inode_capability() != CompactInodeCapability::V1 {
+            return Err(FsError::new(ErrorCode::Enotsup));
+        }
+        let metadata = Arc::new(metadata);
+        let blocks = Arc::new(blocks);
+        for attempt in 0..MAX_CONCURRENT_CAS_RETRIES {
+            if let Some(mode) = metadata.compact_inode_mode_state().await? {
+                blocks.verify_concurrent_backing(mode.backing).await?;
+                let snapshot = metadata.load_compact_snapshot(mode.backing).await?;
+                if snapshot.anchor.generation != mode.structural_generation {
+                    if snapshot.anchor.backing == mode.backing
+                        && snapshot.anchor.generation > mode.structural_generation
+                    {
+                        concurrent_cas_backoff(attempt, &options.owner).await;
+                        continue;
+                    }
+                    return Err(FsError::new(ErrorCode::Estale));
+                }
+                return Self::from_compact_snapshot(
+                    metadata,
+                    blocks,
+                    options,
+                    mode.backing,
+                    snapshot,
+                );
+            }
+            // A recognized noncompact state is not itself enrollment consent.
+            // Keep the established MRC3/MRC4/MRC1 inspectors and fresh-volume
+            // preflight before any claim of block authority.
+            let inode_mode = match metadata.inode_mode_state().await {
+                Ok(mode) => mode,
+                Err(error)
+                    if matches!(error.code, ErrorCode::Estale | ErrorCode::Enotsup)
+                        && metadata.compact_inode_mode_state().await?.is_some() =>
+                {
+                    concurrent_cas_backoff(attempt, &options.owner).await;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if inode_mode.is_some() {
+                return Err(FsError::new(ErrorCode::Ebusy)
+                    .with_message("MRC4 requires explicit offline migration"));
+            }
+            let concurrent_mode = match metadata.concurrent_mode_state().await {
+                Ok(mode) => mode,
+                Err(error)
+                    if matches!(error.code, ErrorCode::Estale | ErrorCode::Enotsup)
+                        && metadata.compact_inode_mode_state().await?.is_some() =>
+                {
+                    concurrent_cas_backoff(attempt, &options.owner).await;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let backing = match concurrent_mode {
+                ConcurrentModeState::Mrc2(backing) => {
+                    blocks.verify_concurrent_backing(backing).await?;
+                    backing
+                }
+                ConcurrentModeState::Mrc1 => {
+                    return Err(FsError::new(ErrorCode::Ebusy)
+                        .with_message("MRC1 requires explicit offline migration"));
+                }
+                ConcurrentModeState::Legacy => {
+                    match metadata.preflight_new_bound_mode().await {
+                        Ok(()) => {}
+                        Err(error)
+                            if matches!(error.code, ErrorCode::Estale | ErrorCode::Enotsup)
+                                && metadata.compact_inode_mode_state().await?.is_some() =>
+                        {
+                            concurrent_cas_backoff(attempt, &options.owner).await;
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                    let backing = blocks.prepare_concurrent_backing().await?;
+                    match metadata.prepare_bound_concurrent_mode(backing).await {
+                        Ok(()) => {}
+                        Err(error) if error.code == ErrorCode::Eagain => {
+                            concurrent_cas_backoff(attempt, &options.owner).await;
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                    blocks.verify_concurrent_backing(backing).await?;
+                    backing
+                }
+            };
+            let loaded = match metadata.load().await {
+                Ok(loaded) => loaded,
+                Err(error)
+                    if matches!(error.code, ErrorCode::Estale | ErrorCode::Enotsup)
+                        && metadata.compact_inode_mode_state().await?.is_some() =>
+                {
+                    concurrent_cas_backoff(attempt, &options.owner).await;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            loaded.validate()?;
+            let revision = match loaded.namespace {
+                Some(_) => loaded.revision,
+                None if loaded.revision == 0 => {
+                    let root = initial_namespace(&options)?;
+                    root.validate()?;
+                    blocks.flush().await?;
+                    blocks.verify_concurrent_backing(backing).await?;
+                    match metadata.publish_bound_if_revision(backing, 0, root).await {
+                        Ok(revision) => {
+                            if !metadata.publish_includes_flush_barrier() {
+                                metadata.flush().await?;
+                            }
+                            revision
+                        }
+                        Err(error) if error.code == ErrorCode::Eagain => {
+                            concurrent_cas_backoff(attempt, &options.owner).await;
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                None => return Err(FsError::backend("metadata revision has no namespace")),
+            };
+            match metadata.prepare_compact_inode_mode(backing, revision).await {
+                Ok(()) => {
+                    if !metadata.publish_includes_flush_barrier() {
+                        metadata.flush().await?;
+                    }
+                }
+                Err(error) if error.code == ErrorCode::Eagain => {
+                    concurrent_cas_backoff(attempt, &options.owner).await;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(FsError::new(ErrorCode::Eagain)
+            .with_message("another writer repeatedly changed compact enrollment"))
+    }
+
     async fn open_delegated(metadata: M, blocks: B, options: ChunkedOptions) -> Result<Self> {
         if !options.concurrent_writes || options.writeback {
             return Err(FsError::new(ErrorCode::Einval)
@@ -670,6 +961,7 @@ where
                 state: Mutex::new(RuntimeState {
                     inode_revisions: BTreeMap::new(),
                     selected_inodes: HashMap::new(),
+                    compact: None,
                     namespace: Arc::new(namespace),
                     revision: loaded.revision,
                     persisted_revision: loaded.revision,
@@ -686,6 +978,8 @@ where
                 lease_renewed: AtomicBool::new(false),
                 preparing_mutations: Arc::new(AtomicUsize::new(0)),
                 mutations: Mutex::new(MutationQueue::new()),
+                #[cfg(test)]
+                preparation_pause: Mutex::new(None),
             }),
         };
         if let Some(path) = checkout {
@@ -739,7 +1033,7 @@ where
             return Err(FsError::new(ErrorCode::Enotsup));
         }
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.inner.gate.lock().await;
+        let _gate = self.operation_gate().await;
         drop(gate_profile);
         self.refresh_concurrent_namespace().await?;
         self.local_grant()
@@ -753,7 +1047,7 @@ where
         }
         let _lifecycle = self.inner.lifecycle.write().await;
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.inner.gate.lock().await;
+        let _gate = self.operation_gate().await;
         drop(gate_profile);
         if self.local_grant()?.is_some() {
             return Err(
@@ -880,7 +1174,7 @@ where
         }
         let _lifecycle = self.inner.lifecycle.write().await;
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.inner.gate.lock().await;
+        let _gate = self.operation_gate().await;
         drop(gate_profile);
         let Some(grant) = self.local_grant()? else {
             return Ok(());
@@ -1017,11 +1311,67 @@ where
         Err(FsError::new(ErrorCode::Eacces).with_message("inode is outside checked-out directory"))
     }
 
+    // Recovery is a read-only recognition of an already established authority.
+    // In particular this never creates a missing block marker or replays a write.
+    async fn verified_inode_startup(
+        metadata: &M,
+        blocks: &B,
+        expected: Option<ConcurrentBackingId>,
+    ) -> Result<
+        Option<(
+            ConcurrentBackingId,
+            mount_rs_core::storage::InodeMetadataSnapshot,
+        )>,
+    > {
+        let Some(mode) = metadata.inode_mode_state().await? else {
+            return Ok(None);
+        };
+        if expected.is_some_and(|backing| backing != mode.backing) {
+            return Err(FsError::new(ErrorCode::Estale));
+        }
+        blocks.verify_concurrent_backing(mode.backing).await?;
+        let snapshot = metadata.load_inode_snapshot(mode.backing).await?;
+        snapshot.validate()?;
+        Ok(Some((mode.backing, snapshot)))
+    }
+
+    async fn startup_concurrent_mode(
+        metadata: &M,
+        blocks: &B,
+        inode_updates: bool,
+    ) -> Result<ConcurrentModeState> {
+        match metadata.concurrent_mode_state().await {
+            Ok(mode) => Ok(mode),
+            Err(error) => {
+                // Older provider inspectors may report EIO for MRC4. This is
+                // a read, so independently verifying exact MRC4 is safe; no
+                // mutating operation's ambiguous failure enters this path.
+                if inode_updates
+                    && let Some((backing, _)) =
+                        Self::verified_inode_startup(metadata, blocks, None).await?
+                {
+                    return Ok(ConcurrentModeState::Mrc2(backing));
+                }
+                Err(error)
+            }
+        }
+    }
+
     /// Open the current namespace. The default mode acquires a fenced writer
     /// lease; opt-in concurrent mode prepares the provider's revision-CAS
     /// protocol. An empty metadata store is initialized with an empty root
     /// directory through the selected publication path.
     pub async fn open(metadata: M, blocks: B, options: ChunkedOptions) -> Result<Self> {
+        if options.compact_inode_updates
+            && (!options.inode_updates
+                || !options.concurrent_writes
+                || options.delegated
+                || options.writeback
+                || options.checkout_path.is_some())
+        {
+            return Err(FsError::new(ErrorCode::Einval)
+                .with_message("compact inode updates require shared write-through inode updates"));
+        }
         if let Some(path) = &options.checkout_path {
             validate_checkout_path(path)?;
             if !options.delegated {
@@ -1040,6 +1390,9 @@ where
             return Err(FsError::new(ErrorCode::Einval)
                 .with_message("shared ownership cannot enable writeback"));
         }
+        if options.compact_inode_updates {
+            return Self::open_compact(metadata, blocks, options).await;
+        }
         if options.delegated {
             return Self::open_delegated(metadata, blocks, options).await;
         }
@@ -1054,50 +1407,87 @@ where
             } else {
                 None
             };
-            let backing = if let Some(mode) = &inode_mode {
-                blocks.verify_concurrent_backing(mode.backing).await?;
-                mode.backing
-            } else {
-                match metadata.concurrent_mode_state().await? {
-                    ConcurrentModeState::Mrc2(id) => {
-                        blocks.verify_concurrent_backing(id).await?;
-                        metadata.prepare_bound_concurrent_mode(id).await?;
-                        id
-                    }
-                    ConcurrentModeState::Mrc1 => {
-                        return Err(FsError::new(ErrorCode::Ebusy)
-                            .with_syscall("migrate MRC1 backing")
-                            .with_message("stop old mounts and run migrate-concurrent-backing"));
-                    }
-                    ConcurrentModeState::Legacy => {
-                        match metadata.preflight_new_bound_mode().await {
-                            Ok(()) => {
-                                let id = blocks.prepare_concurrent_backing().await?;
-                                metadata.prepare_bound_concurrent_mode(id).await?;
-                                blocks.verify_concurrent_backing(id).await?;
-                                id
-                            }
-                            Err(error) => {
-                                // A peer may enroll MRC2 after the Legacy inspection.
-                                // Reuse its authority only through the established
-                                // read-only block verification path.
-                                let ConcurrentModeState::Mrc2(id) =
-                                    metadata.concurrent_mode_state().await?
-                                else {
-                                    return Err(error);
-                                };
-                                blocks.verify_concurrent_backing(id).await?;
-                                metadata.prepare_bound_concurrent_mode(id).await?;
-                                id
+            let mut expected_backing = inode_mode.as_ref().map(|mode| mode.backing);
+            let backing_result = async {
+                Ok(if let Some(mode) = &inode_mode {
+                    blocks.verify_concurrent_backing(mode.backing).await?;
+                    mode.backing
+                } else {
+                    match Self::startup_concurrent_mode(
+                        metadata.as_ref(),
+                        blocks.as_ref(),
+                        options.inode_updates,
+                    )
+                    .await?
+                    {
+                        ConcurrentModeState::Mrc2(id) => {
+                            expected_backing = Some(id);
+                            blocks.verify_concurrent_backing(id).await?;
+                            metadata.prepare_bound_concurrent_mode(id).await?;
+                            id
+                        }
+                        ConcurrentModeState::Mrc1 => {
+                            return Err(FsError::new(ErrorCode::Ebusy)
+                                .with_syscall("migrate MRC1 backing")
+                                .with_message(
+                                    "stop old mounts and run migrate-concurrent-backing",
+                                ));
+                        }
+                        ConcurrentModeState::Legacy => {
+                            match metadata.preflight_new_bound_mode().await {
+                                Ok(()) => {
+                                    let id = blocks.prepare_concurrent_backing().await?;
+                                    expected_backing = Some(id);
+                                    metadata.prepare_bound_concurrent_mode(id).await?;
+                                    blocks.verify_concurrent_backing(id).await?;
+                                    id
+                                }
+                                Err(error) => {
+                                    // A peer may enroll MRC2 after the Legacy inspection.
+                                    // Reuse its authority only through the established
+                                    // read-only block verification path.
+                                    let ConcurrentModeState::Mrc2(id) =
+                                        Self::startup_concurrent_mode(
+                                            metadata.as_ref(),
+                                            blocks.as_ref(),
+                                            options.inode_updates,
+                                        )
+                                        .await?
+                                    else {
+                                        return Err(error);
+                                    };
+                                    expected_backing = Some(id);
+                                    blocks.verify_concurrent_backing(id).await?;
+                                    metadata.prepare_bound_concurrent_mode(id).await?;
+                                    id
+                                }
                             }
                         }
                     }
+                })
+            }
+            .await;
+            let backing = match backing_result {
+                Ok(backing) => backing,
+                Err(error)
+                    if options.inode_updates
+                        && matches!(error.code, ErrorCode::Estale | ErrorCode::Enotsup) =>
+                {
+                    Self::verified_inode_startup(
+                        metadata.as_ref(),
+                        blocks.as_ref(),
+                        expected_backing,
+                    )
+                    .await?
+                    .ok_or(error)?
+                    .0
                 }
+                Err(error) => return Err(error),
             };
             // Two clients may initialize one fresh volume together. Only one
             // CAS publishes its root; the loser reloads the winner's root.
             for attempt in 0..MAX_CONCURRENT_CAS_RETRIES {
-                let established_inode_mode = if options.inode_updates {
+                let mut established_inode_mode = if options.inode_updates {
                     metadata.inode_mode_state().await?
                 } else {
                     None
@@ -1109,7 +1499,24 @@ where
                         namespace: Some(snapshot.namespace),
                     }
                 } else {
-                    metadata.load().await?
+                    match metadata.load().await {
+                        Ok(loaded) => loaded,
+                        Err(error) if options.inode_updates && error.code == ErrorCode::Estale => {
+                            let (_, snapshot) = Self::verified_inode_startup(
+                                metadata.as_ref(),
+                                blocks.as_ref(),
+                                Some(backing),
+                            )
+                            .await?
+                            .ok_or(error)?;
+                            established_inode_mode = metadata.inode_mode_state().await?;
+                            mount_rs_core::storage::LoadedMetadata {
+                                revision: snapshot.structural_generation,
+                                namespace: Some(snapshot.namespace),
+                            }
+                        }
+                        Err(error) => return Err(error),
+                    }
                 };
                 loaded.validate()?;
                 let (namespace, revision) = match loaded.namespace {
@@ -1133,6 +1540,18 @@ where
                                 concurrent_cas_backoff(attempt, &options.owner).await;
                                 continue;
                             }
+                            Err(error)
+                                if options.inode_updates && error.code == ErrorCode::Estale =>
+                            {
+                                Self::verified_inode_startup(
+                                    metadata.as_ref(),
+                                    blocks.as_ref(),
+                                    Some(backing),
+                                )
+                                .await?
+                                .ok_or(error)?;
+                                continue;
+                            }
                             Err(error) => return Err(error),
                         }
                     }
@@ -1148,6 +1567,15 @@ where
                             Ok(()) => {}
                             Err(error) if error.code == ErrorCode::Eagain => {
                                 continue;
+                            }
+                            Err(error) if error.code == ErrorCode::Estale => {
+                                Self::verified_inode_startup(
+                                    metadata.as_ref(),
+                                    blocks.as_ref(),
+                                    Some(backing),
+                                )
+                                .await?
+                                .ok_or(error)?;
                             }
                             Err(error) => return Err(error),
                         }
@@ -1177,6 +1605,7 @@ where
                         state: Mutex::new(RuntimeState {
                             inode_revisions,
                             selected_inodes: HashMap::new(),
+                            compact: None,
                             namespace: Arc::new(namespace),
                             revision,
                             persisted_revision: revision,
@@ -1193,6 +1622,8 @@ where
                         lease_renewed: AtomicBool::new(false),
                         preparing_mutations: Arc::new(AtomicUsize::new(0)),
                         mutations: Mutex::new(MutationQueue::new()),
+                        #[cfg(test)]
+                        preparation_pause: Mutex::new(None),
                     }),
                 });
             }
@@ -1257,6 +1688,7 @@ where
                 state: Mutex::new(RuntimeState {
                     inode_revisions: BTreeMap::new(),
                     selected_inodes: HashMap::new(),
+                    compact: None,
                     namespace: Arc::new(namespace.clone()),
                     revision: loaded.revision,
                     persisted_revision: loaded.revision,
@@ -1273,6 +1705,8 @@ where
                 lease_renewed: AtomicBool::new(false),
                 preparing_mutations: Arc::new(AtomicUsize::new(0)),
                 mutations: Mutex::new(MutationQueue::new()),
+                #[cfg(test)]
+                preparation_pause: Mutex::new(None),
             }),
         };
 
@@ -1308,7 +1742,7 @@ where
         // from starting while this writer is queued.
         let _lifecycle = self.inner.lifecycle.write().await;
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.inner.gate.lock().await;
+        let _gate = self.operation_gate().await;
         drop(gate_profile);
         // A failed publication fails the coordinator closed. Pending atime
         // state must not be published after that boundary: snapshot() will
@@ -1385,7 +1819,7 @@ where
         }
         let _lifecycle = self.inner.lifecycle.write().await;
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.inner.gate.lock().await;
+        let _gate = self.operation_gate().await;
         drop(gate_profile);
         self.validate_lease().await?;
         self.drain_writeback().await?;
@@ -1431,6 +1865,23 @@ where
         }
         if state.closed {
             return Err(FsError::new(ErrorCode::Ebadf).with_message("filesystem is closed"));
+        }
+        if self.inner.options.compact_inode_updates {
+            let base = state
+                .compact
+                .as_ref()
+                .and_then(|compact| compact.pending_full.as_ref())
+                .ok_or_else(|| {
+                    FsError::new(ErrorCode::Eio)
+                        .with_message("compact Full operation has no coherent captured base")
+                })?;
+            let mut namespace = base.namespace()?;
+            for (inode, atime_ms) in &state.pending_atime {
+                if let Some(node) = namespace.nodes.get_mut(inode) {
+                    node.stats.atime_ms = node.stats.atime_ms.max(*atime_ms);
+                }
+            }
+            return Ok((namespace, state.revision));
         }
         let _profile = Span::new(Event::Snapshot).units(state.namespace.nodes.len() as u64);
         let mut namespace = state.namespace.as_ref().clone();
@@ -1495,32 +1946,242 @@ where
         Ok(())
     }
 
-    async fn refresh_selected_inode(&self, inode: InodeId) -> Result<()> {
+    fn install_compact_snapshot(
+        &self,
+        snapshot: CompactSnapshot,
+        captured_revision: u64,
+        pending_full: Option<CompactSnapshot>,
+    ) -> Result<()> {
+        if Some(snapshot.anchor.backing) != self.inner.concurrent_backing {
+            return Err(self.fail_closed(stale_inode_structure()));
+        }
+        let (namespace, physical, structure) = snapshot
+            .into_validated_namespace()
+            .map_err(|error| self.fail_closed(error))?;
+        let mut state = self.lock_state()?;
+        if state.revision != captured_revision {
+            return Err(FsError::new(ErrorCode::Eagain));
+        }
+        if structure.anchor().generation < state.persisted_revision {
+            drop(state);
+            return Err(self.fail_closed(stale_inode_structure()));
+        }
+        let previous = state.compact.as_ref().ok_or_else(stale_inode_structure)?;
+        let generation = structure.anchor().generation;
+        let check = (|| -> Result<()> {
+            if generation == state.persisted_revision {
+                validate_cached_namespace(&state.namespace, &namespace)?;
+            }
+            for (&inode, &old) in &previous.physical {
+                let Some(&new) = physical.get(&inode) else {
+                    continue;
+                };
+                if new.incarnation != old.incarnation
+                    || (new.epoch, new.revision) < (old.epoch, old.revision)
+                {
+                    return Err(stale_inode_structure());
+                }
+                if new == old {
+                    let prior = state
+                        .selected_inodes
+                        .get(&inode)
+                        .map(|node| node.as_ref())
+                        .or_else(|| state.namespace.nodes.get(&inode))
+                        .ok_or_else(stale_inode_structure)?;
+                    if prior != &namespace.nodes[&inode] {
+                        return Err(stale_inode_structure());
+                    }
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = check {
+            drop(state);
+            return Err(self.fail_closed(error));
+        }
+        retain_open_detached(&mut state, &namespace);
+        state.namespace = Arc::new(namespace);
+        state.persisted_revision = generation;
+        state.revision = state
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        state.selected_inodes.clear();
+        state.inode_revisions.clear();
+        state.compact = Some(CompactRuntime {
+            structure,
+            physical,
+            pending_full,
+        });
+        Ok(())
+    }
+
+    async fn refresh_compact_structure_for_read(&self) -> Result<bool> {
         self.check_inode_runtime()?;
         let backing = self
             .inner
             .concurrent_backing
             .ok_or_else(|| FsError::new(ErrorCode::Eio))?;
-        // Match the existing concurrent read contract: metadata freshness
-        // surrounds block I/O. Backing verification belongs to open and
-        // publication; actual block reads use the existing provider path.
-        // Avoid adding a block-authority transaction at each freshness check.
-        let known = {
+        let (root, revision, generation) = {
+            let state = self.lock_state()?;
+            (
+                state.namespace.root,
+                state.revision,
+                state.persisted_revision,
+            )
+        };
+        self.inner
+            .blocks
+            .verify_concurrent_backing(backing)
+            .await
+            .map_err(|error| self.fail_closed(error))?;
+        let loaded = self
+            .inner
+            .metadata
+            .load_compact_inode(backing, root)
+            .await
+            .map_err(|error| self.fail_closed(error))?;
+        if loaded.generation != generation {
+            let snapshot = self
+                .inner
+                .metadata
+                .load_compact_snapshot(backing)
+                .await
+                .map_err(|error| self.fail_closed(error))?;
+            self.install_compact_snapshot(snapshot, revision, None)?;
+            return Ok(false);
+        }
+        let state = self.lock_state()?;
+        if state.revision != revision {
+            return Ok(false);
+        }
+        let physical = state
+            .compact
+            .as_ref()
+            .ok_or_else(stale_inode_structure)?
+            .physical
+            .get(&root);
+        if physical != Some(&loaded.guard.identity)
+            || state.namespace.nodes.get(&root) != Some(&loaded.guard.node)
+        {
+            drop(state);
+            return Err(self.fail_closed(stale_inode_structure()));
+        }
+        Ok(true)
+    }
+
+    async fn refresh_compact_inode_once(&self, inode: InodeId) -> Result<bool> {
+        self.check_inode_runtime()?;
+        let backing = self
+            .inner
+            .concurrent_backing
+            .ok_or_else(|| FsError::new(ErrorCode::Eio))?;
+        let (generation, revision) = {
             let state = self.lock_state()?;
             if state.orphans.contains_key(&inode) {
-                return Ok(());
+                return Ok(true);
             }
-            if state.selected_inodes.contains_key(&inode) {
-                state
-                    .inode_revisions
-                    .get(&inode)
-                    .map(|revision| InodeVersion {
-                        structural_generation: state.persisted_revision,
-                        inode_revision: *revision,
-                    })
+            (state.persisted_revision, state.revision)
+        };
+        let loaded = match self.inner.metadata.load_compact_inode(backing, inode).await {
+            Ok(loaded) => loaded,
+            Err(error) if matches!(error.code, ErrorCode::Estale | ErrorCode::Enoent) => {
+                self.refresh_concurrent_namespace().await?;
+                return Ok(false);
+            }
+            Err(error) => return Err(self.fail_closed(error)),
+        };
+        if loaded.generation != generation {
+            self.refresh_concurrent_namespace().await?;
+            return Ok(false);
+        }
+        let identity = loaded.guard.identity;
+        let logical = identity
+            .logical_version(generation)
+            .map_err(|error| self.fail_closed(error))?;
+        let mut state = self.lock_state()?;
+        if state.revision != revision {
+            return Ok(false);
+        }
+        let Some(old_node) = state.namespace.nodes.get(&inode) else {
+            drop(state);
+            return Err(self.fail_closed(stale_inode_structure()));
+        };
+        let old_identity = state
+            .compact
+            .as_ref()
+            .ok_or_else(stale_inode_structure)?
+            .physical
+            .get(&inode)
+            .copied()
+            .ok_or_else(stale_inode_structure)?;
+        let previous = state
+            .selected_inodes
+            .get(&inode)
+            .map(|node| node.as_ref())
+            .unwrap_or(old_node);
+        let check = validate_cached_inode(inode, previous, &loaded.guard.node).and_then(|()| {
+            let next = loaded.guard.identity;
+            if next.incarnation != old_identity.incarnation
+                || (next.epoch, next.revision) < (old_identity.epoch, old_identity.revision)
+                || (next == old_identity && previous != &loaded.guard.node)
+            {
+                Err(stale_inode_structure())
             } else {
-                None
+                Ok(())
             }
+        });
+        if let Err(error) = check {
+            drop(state);
+            return Err(self.fail_closed(error));
+        }
+        if identity != old_identity {
+            state.revision = state
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        }
+        state
+            .compact
+            .as_mut()
+            .ok_or_else(stale_inode_structure)?
+            .physical
+            .insert(inode, identity);
+        state.inode_revisions.insert(inode, logical.inode_revision);
+        state
+            .selected_inodes
+            .insert(inode, Arc::new(loaded.guard.node));
+        Ok(true)
+    }
+
+    /// One selected check only. A false result asks the caller to discard its
+    /// captured path/identity and retry; there is no recursive refresh chain.
+    async fn refresh_inode_once(&self, inode: InodeId, base_is_usable: bool) -> Result<bool> {
+        if self.inner.options.compact_inode_updates {
+            return self.refresh_compact_inode_once(inode).await;
+        }
+        self.check_inode_runtime()?;
+        let backing = self
+            .inner
+            .concurrent_backing
+            .ok_or_else(|| FsError::new(ErrorCode::Eio))?;
+        let (known, generation, local_revision) = {
+            let state = self.lock_state()?;
+            if state.orphans.contains_key(&inode) {
+                return Ok(true);
+            }
+            let known = (base_is_usable || state.selected_inodes.contains_key(&inode))
+                .then(|| {
+                    state
+                        .inode_revisions
+                        .get(&inode)
+                        .map(|revision| InodeVersion {
+                            structural_generation: state.persisted_revision,
+                            inode_revision: *revision,
+                        })
+                })
+                .flatten();
+            (known, state.persisted_revision, state.revision)
         };
         let loaded = match self
             .inner
@@ -1531,21 +2192,48 @@ where
             Ok(loaded) => loaded,
             Err(error) if error.code == ErrorCode::Estale || error.code == ErrorCode::Enoent => {
                 self.refresh_concurrent_namespace().await?;
-                if self.lock_state()?.orphans.contains_key(&inode) {
-                    return Ok(());
+                if self.lock_state()?.persisted_revision != generation {
+                    return Ok(false);
                 }
-                return Err(error);
+                if self.lock_state()?.orphans.contains_key(&inode) {
+                    return Ok(true);
+                }
+                return Err(self.fail_closed(error));
             }
             Err(error) => return Err(self.fail_closed(error)),
         };
         self.check_inode_runtime()?;
         if let Some(loaded) = loaded {
-            if loaded.version.structural_generation != self.lock_state()?.persisted_revision {
+            if loaded.version.structural_generation < generation {
+                return Err(self.fail_closed(stale_inode_structure()));
+            }
+            if loaded.version.structural_generation != generation {
                 self.refresh_concurrent_namespace().await?;
-                // The structural snapshot may have crossed another inode write.
-                return Box::pin(self.refresh_selected_inode(inode)).await;
+                return Ok(false);
             }
             let mut state = self.lock_state()?;
+            if state.revision != local_revision {
+                return Ok(false);
+            }
+            let Some(original) = state.namespace.nodes.get(&inode) else {
+                drop(state);
+                return Err(self.fail_closed(stale_inode_structure()));
+            };
+            let validation = validate_cached_inode(inode, original, &loaded.node).and_then(|()| {
+                if state.inode_revisions.get(&inode).is_some_and(|revision| {
+                    loaded.version.inode_revision < *revision
+                        || (!matches!(original.data, NodeData::File(_))
+                            && loaded.version.inode_revision != *revision)
+                }) {
+                    Err(stale_inode_structure())
+                } else {
+                    Ok(())
+                }
+            });
+            if let Err(error) = validation {
+                drop(state);
+                return Err(self.fail_closed(error));
+            }
             if state.inode_revisions.get(&inode) != Some(&loaded.version.inode_revision) {
                 state.revision = state
                     .revision
@@ -1556,8 +2244,188 @@ where
                 .inode_revisions
                 .insert(inode, loaded.version.inode_revision);
             state.selected_inodes.insert(inode, Arc::new(loaded.node));
+        } else {
+            let state = self.lock_state()?;
+            if known.is_none() {
+                drop(state);
+                return Err(self.fail_closed(stale_inode_structure()));
+            }
+            if state.revision != local_revision {
+                return Ok(false);
+            }
         }
+        Ok(true)
+    }
+
+    async fn refresh_selected_inode(&self, inode: InodeId) -> Result<()> {
+        // Metadata checks still surround handle block I/O. Actual block backing
+        // verification stays at open/publication, not every selected check.
+        for _ in 0..MAX_CONCURRENT_CAS_RETRIES {
+            if self.refresh_inode_once(inode, false).await? {
+                return Ok(());
+            }
+        }
+        Err(FsError::new(ErrorCode::Eagain).with_message("inode structure repeatedly changed"))
+    }
+
+    fn install_inode_snapshot(&self, snapshot: InodeMetadataSnapshot) -> Result<()> {
+        snapshot
+            .validate()
+            .map_err(|error| self.fail_closed(error))?;
+        self.check_inode_runtime()?;
+        let mut state = self.lock_state()?;
+        if snapshot.structural_generation < state.persisted_revision {
+            return Err(FsError::new(ErrorCode::Eagain));
+        }
+        // A conservative conditional provider can return a full snapshot at an
+        // equal generation. Compare BEFORE replacing the cached topology.
+        if snapshot.structural_generation == state.persisted_revision {
+            let checked = validate_cached_namespace(&state.namespace, &snapshot.namespace)
+                .and_then(|()| {
+                    for (inode, revision) in &state.inode_revisions {
+                        let next = snapshot
+                            .inode_revisions
+                            .get(inode)
+                            .ok_or_else(stale_inode_structure)?;
+                        if next < revision
+                            || (!matches!(state.namespace.nodes[inode].data, NodeData::File(_))
+                                && next != revision)
+                        {
+                            return Err(stale_inode_structure());
+                        }
+                    }
+                    Ok(())
+                });
+            if let Err(error) = checked {
+                drop(state);
+                return Err(self.fail_closed(error));
+            }
+        }
+        retain_open_detached(&mut state, &snapshot.namespace);
+        state.namespace = Arc::new(snapshot.namespace);
+        if state.persisted_revision != snapshot.structural_generation
+            || state.inode_revisions != snapshot.inode_revisions
+            || !state.selected_inodes.is_empty()
+        {
+            state.revision = state
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        }
+        state.persisted_revision = snapshot.structural_generation;
+        state.inode_revisions = snapshot.inode_revisions;
+        state.selected_inodes.clear();
         Ok(())
+    }
+
+    async fn refresh_inode_structure_for_read(&self) -> Result<bool> {
+        if self.inner.options.compact_inode_updates {
+            return self.refresh_compact_structure_for_read().await;
+        }
+        self.check_inode_runtime()?;
+        let backing = self
+            .inner
+            .concurrent_backing
+            .ok_or_else(|| FsError::new(ErrorCode::Eio))?;
+        let (known, local_revision) = {
+            let state = self.lock_state()?;
+            (
+                (state.inode_revisions.len() == state.namespace.nodes.len())
+                    .then_some(state.persisted_revision),
+                state.revision,
+            )
+        };
+        self.inner
+            .blocks
+            .verify_concurrent_backing(backing)
+            .await
+            .map_err(|error| self.fail_closed(error))?;
+        let loaded = {
+            let _profile = Span::new(Event::InodeSnapshotConditional);
+            self.inner
+                .metadata
+                .load_inode_snapshot_if_changed(backing, known)
+                .await
+                .map_err(|error| self.fail_closed(error))?
+        };
+        self.check_inode_runtime()?;
+        if self.lock_state()?.revision != local_revision {
+            return Ok(false);
+        }
+        if let Some(snapshot) = loaded {
+            profile::add(
+                Event::InodeSnapshotReturned,
+                snapshot.namespace.nodes.len() as u64,
+            );
+            self.install_inode_snapshot(snapshot)?;
+        } else {
+            if known.is_none() {
+                return Err(self.fail_closed(stale_inode_structure()));
+            }
+            profile::add(Event::InodeSnapshotHit, 1);
+        }
+        Ok(true)
+    }
+
+    async fn refresh_inode_stat(&self, inode: InodeId) -> Result<()> {
+        for _ in 0..MAX_CONCURRENT_CAS_RETRIES {
+            if self.refresh_inode_structure_for_read().await?
+                && self.refresh_inode_once(inode, false).await?
+            {
+                return Ok(());
+            }
+        }
+        Err(FsError::new(ErrorCode::Eagain).with_message("inode stat structure repeatedly changed"))
+    }
+
+    /// Caller holds the local operation gate. Structural mutations/aggregates
+    /// use the unconditional path instead: selected writes do not change this
+    /// generation. Token hits do not audit out-of-band equal-token body edits.
+    async fn inode_path_view(
+        &self,
+        path: &str,
+        follow: bool,
+        syscall: &str,
+        extra_path: Option<&str>,
+    ) -> Result<(Arc<Namespace>, Entry)> {
+        for _ in 0..MAX_CONCURRENT_CAS_RETRIES {
+            if !self.refresh_inode_structure_for_read().await? {
+                continue;
+            }
+            let (namespace, generation) = {
+                let state = self.lock_state()?;
+                (Arc::clone(&state.namespace), state.persisted_revision)
+            };
+            let mut traversed = Vec::new();
+            let entry = walk_traced(&namespace, path, follow, syscall, 0, Some(&mut traversed));
+            let extra = extra_path.map(|extra| {
+                walk_traced(&namespace, extra, false, syscall, 0, Some(&mut traversed))
+            });
+
+            let mut retry = false;
+            for inode in traversed {
+                let _profile = Span::new(Event::InodePathGuard);
+                let base_is_usable = namespace
+                    .nodes
+                    .get(&inode)
+                    .is_some_and(|node| !matches!(node.data, NodeData::File(_)));
+                if !self.refresh_inode_once(inode, base_is_usable).await?
+                    || self.lock_state()?.persisted_revision != generation
+                {
+                    retry = true;
+                    break;
+                }
+            }
+            if retry {
+                continue;
+            }
+            self.check_inode_runtime()?;
+            if let Some(extra) = extra {
+                extra?;
+            }
+            return Ok((namespace, entry?));
+        }
+        Err(FsError::new(ErrorCode::Eagain).with_message("path structure repeatedly changed"))
     }
 
     async fn publish_inode_structure(
@@ -1566,6 +2434,11 @@ where
         namespace: Namespace,
         blocks_flushed: bool,
     ) -> Result<u64> {
+        if self.inner.options.compact_inode_updates {
+            return self
+                .publish_compact_structure(generation, namespace, blocks_flushed)
+                .await;
+        }
         self.check_inode_runtime()?;
         namespace.validate()?;
         let (generation, revisions) = {
@@ -1627,6 +2500,97 @@ where
         Ok(next)
     }
 
+    /// Full compact structural transaction. Its base is the coherent snapshot
+    /// captured for this operation, never a mixture of selected cached bodies.
+    async fn publish_compact_structure(
+        &self,
+        revision: u64,
+        namespace: Namespace,
+        blocks_flushed: bool,
+    ) -> Result<u64> {
+        self.check_inode_runtime()?;
+        let (base, structure) = {
+            let mut state = self.lock_state()?;
+            if state.revision != revision {
+                return Err(FsError::new(ErrorCode::Eagain));
+            }
+            let compact = state.compact.as_mut().ok_or_else(stale_inode_structure)?;
+            let base = compact
+                .pending_full
+                .take()
+                .ok_or_else(stale_inode_structure)?;
+            (base, compact.structure.clone())
+        };
+        let delta = CompactStructuralDelta::capture(&base, &namespace, StructuralScope::Full)?;
+        if !blocks_flushed {
+            self.inner.blocks.flush().await?;
+        }
+        let backing = self
+            .inner
+            .concurrent_backing
+            .ok_or_else(|| FsError::new(ErrorCode::Eio))?;
+        self.inner
+            .blocks
+            .verify_concurrent_backing(backing)
+            .await
+            .map_err(|error| self.fail_closed(error))?;
+        let mut publication = PublicationGuard::new(&self.inner.state);
+        let receipt = match self.inner.metadata.publish_compact_structure(&delta).await {
+            Ok(receipt) => receipt,
+            Err(error) if error.code == ErrorCode::Eagain => {
+                publication.disarm();
+                return Err(error);
+            }
+            Err(error) => return Err(self.fail_closed(error)),
+        };
+        let next_structure = delta
+            .validate_next_structure(&structure, &receipt, &namespace)
+            .map_err(|error| self.fail_closed(error))?;
+        if !self.inner.metadata.publish_includes_flush_barrier() {
+            self.inner
+                .metadata
+                .flush()
+                .await
+                .map_err(|error| self.fail_closed(error))?;
+        }
+        let next = receipt.anchor.generation;
+        self.check_inode_runtime()?;
+        {
+            let mut state = self.lock_state()?;
+            if state.revision != revision {
+                return Err(FsError::new(ErrorCode::Estale));
+            }
+            let mut physical: BTreeMap<_, _> = base
+                .guards
+                .iter()
+                .map(|(&inode, guard)| (inode, guard.identity))
+                .collect();
+            for inode in &receipt.removed {
+                physical.remove(inode);
+            }
+            for (&inode, guard) in &receipt.upserts {
+                physical.insert(inode, guard.identity);
+            }
+            retain_open_detached(&mut state, &namespace);
+            state.namespace = Arc::new(namespace);
+            state.revision = state
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+            state.persisted_revision = next;
+            state.pending_atime.clear();
+            state.inode_revisions.clear();
+            state.selected_inodes.clear();
+            state.compact = Some(CompactRuntime {
+                structure: next_structure,
+                physical,
+                pending_full: None,
+            });
+        }
+        publication.disarm();
+        Ok(next)
+    }
+
     async fn write_selected_inode(
         &self,
         inode: InodeId,
@@ -1637,7 +2601,7 @@ where
     ) -> Result<(usize, u64)> {
         for attempt in 0..MAX_CONCURRENT_CAS_RETRIES {
             let captured = {
-                let _gate = self.inner.gate.lock().await;
+                let _gate = self.operation_gate().await;
                 self.refresh_selected_inode(inode).await?;
                 let state = self.lock_state()?;
                 if state.orphans.contains_key(&inode) {
@@ -1648,17 +2612,7 @@ where
                         .get(&inode)
                         .cloned()
                         .ok_or_else(|| error_with_path(ErrorCode::Estale, "write", path))?;
-                    let revision = *state
-                        .inode_revisions
-                        .get(&inode)
-                        .ok_or_else(|| FsError::new(ErrorCode::Eio))?;
-                    Some((
-                        node,
-                        InodeVersion {
-                            structural_generation: state.persisted_revision,
-                            inode_revision: revision,
-                        },
-                    ))
+                    Some((node, CapturedInodeVersion::capture(&state, inode)?))
                 }
             };
             let Some((original, expected)) = captured else {
@@ -1705,7 +2659,18 @@ where
             node.data = NodeData::File(layout);
             set_file_size(&mut node.stats, size);
             touch_modified(&mut node.stats, true)?;
-            let _gate = self.inner.gate.lock().await;
+            let _gate = self.operation_gate().await;
+            if self.inner.options.compact_inode_updates {
+                match self.publish_selected_node(inode, expected, node).await {
+                    Ok(()) => return Ok((buffer.len(), end)),
+                    Err(error) if error.code == ErrorCode::Eagain => {
+                        drop(_gate);
+                        concurrent_cas_backoff(attempt, &self.inner.options.owner).await;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
             self.check_inode_runtime()?;
             let backing = self
                 .inner
@@ -1720,7 +2685,7 @@ where
             let version = match self
                 .inner
                 .metadata
-                .publish_inode_if_version(backing, inode, expected, node.clone())
+                .publish_inode_if_version(backing, inode, expected.logical, node.clone())
                 .await
             {
                 Ok(version) => version,
@@ -1760,9 +2725,14 @@ where
     async fn publish_selected_node(
         &self,
         inode: InodeId,
-        expected: InodeVersion,
+        expected: CapturedInodeVersion,
         node: NodeMetadata,
     ) -> Result<()> {
+        if self.inner.options.compact_inode_updates {
+            return self
+                .publish_compact_selected_node(inode, expected, node)
+                .await;
+        }
         self.check_inode_runtime()?;
         let backing = self
             .inner
@@ -1777,7 +2747,7 @@ where
         let version = match self
             .inner
             .metadata
-            .publish_inode_if_version(backing, inode, expected, node.clone())
+            .publish_inode_if_version(backing, inode, expected.logical, node.clone())
             .await
         {
             Ok(version) => version,
@@ -1808,7 +2778,108 @@ where
         Ok(())
     }
 
+    /// Caller owns the operation gate and has made referenced blocks durable.
+    async fn publish_compact_selected_node(
+        &self,
+        inode: InodeId,
+        expected: CapturedInodeVersion,
+        node: NodeMetadata,
+    ) -> Result<()> {
+        self.check_inode_runtime()?;
+        let backing = self
+            .inner
+            .concurrent_backing
+            .ok_or_else(|| FsError::new(ErrorCode::Eio))?;
+        let physical = expected.physical.ok_or_else(stale_inode_structure)?;
+        let expected = expected.logical;
+        {
+            let state = self.lock_state()?;
+            let current = state.compact.as_ref().ok_or_else(stale_inode_structure)?;
+            // A refresh during unlocked block preparation can install another
+            // physical identity with the same logical projection. This is a
+            // definite local noncommit; recapture its body before publishing.
+            if expected.structural_generation != state.persisted_revision
+                || current.physical.get(&inode) != Some(&physical)
+            {
+                return Err(FsError::new(ErrorCode::Eagain));
+            }
+        }
+        self.inner
+            .blocks
+            .verify_concurrent_backing(backing)
+            .await
+            .map_err(|error| self.fail_closed(error))?;
+        let mut publication = PublicationGuard::new(&self.inner.state);
+        let loaded = match self
+            .inner
+            .metadata
+            .publish_compact_inode(
+                backing,
+                inode,
+                expected.structural_generation,
+                physical,
+                node.clone(),
+            )
+            .await
+        {
+            Ok(loaded) => loaded,
+            Err(error) if error.code == ErrorCode::Eagain => {
+                publication.disarm();
+                return Err(error);
+            }
+            Err(error) => return Err(self.fail_closed(error)),
+        };
+        let next_revision = expected
+            .inode_revision
+            .checked_add(1)
+            .ok_or_else(|| self.fail_closed(FsError::new(ErrorCode::Eoverflow)))?;
+        let receipt_valid = loaded.generation == expected.structural_generation
+            && loaded.guard.node == node
+            && loaded.guard.node.stats.ino == inode
+            && loaded.guard.identity.incarnation == physical.incarnation
+            && loaded.guard.identity.epoch == expected.structural_generation
+            && loaded.guard.identity.revision == next_revision;
+        if !receipt_valid {
+            return Err(self.fail_closed(stale_inode_structure()));
+        }
+        if !self.inner.metadata.publish_includes_flush_barrier() {
+            self.inner
+                .metadata
+                .flush()
+                .await
+                .map_err(|error| self.fail_closed(error))?;
+        }
+        self.check_inode_runtime()?;
+        {
+            let mut state = self.lock_state()?;
+            state.revision = state
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+            state
+                .compact
+                .as_mut()
+                .ok_or_else(stale_inode_structure)?
+                .physical
+                .insert(inode, loaded.guard.identity);
+            state.inode_revisions.insert(inode, next_revision);
+            state
+                .selected_inodes
+                .insert(inode, Arc::new(loaded.guard.node));
+        }
+        publication.disarm();
+        Ok(())
+    }
+
     async fn refresh_inode_structure(&self) -> Result<()> {
+        if self.inner.options.compact_inode_updates {
+            for _ in 0..MAX_CONCURRENT_CAS_RETRIES {
+                if self.refresh_compact_structure_for_read().await? {
+                    return Ok(());
+                }
+            }
+            return Err(FsError::new(ErrorCode::Eagain));
+        }
         self.check_inode_runtime()?;
         let mode = self
             .inner
@@ -1833,7 +2904,7 @@ where
             .map_err(|_| error_with_path(ErrorCode::Efbig, "write", path))?;
         for attempt in 0..MAX_CONCURRENT_CAS_RETRIES {
             let captured = {
-                let _gate = self.inner.gate.lock().await;
+                let _gate = self.operation_gate().await;
                 self.refresh_inode_structure().await?;
                 let (namespace, generation) = {
                     let state = self.lock_state()?;
@@ -1866,18 +2937,7 @@ where
                         .get(&inode)
                         .cloned()
                         .ok_or_else(|| error_with_path(ErrorCode::Estale, "write", path))?;
-                    let revision = *state
-                        .inode_revisions
-                        .get(&inode)
-                        .ok_or_else(|| FsError::new(ErrorCode::Eio))?;
-                    Some((
-                        inode,
-                        node,
-                        InodeVersion {
-                            structural_generation: generation,
-                            inode_revision: revision,
-                        },
-                    ))
+                    Some((inode, node, CapturedInodeVersion::capture(&state, inode)?))
                 }
             };
             let Some((inode, original, expected)) = captured else {
@@ -1907,7 +2967,7 @@ where
             node.data = NodeData::File(layout);
             set_file_size(&mut node.stats, size);
             touch_modified(&mut node.stats, true)?;
-            let _gate = self.inner.gate.lock().await;
+            let _gate = self.operation_gate().await;
             match self.publish_selected_node(inode, expected, node).await {
                 Ok(()) => return Ok(true),
                 Err(error) if error.code == ErrorCode::Eagain => {
@@ -1933,7 +2993,7 @@ where
             "truncate"
         };
         for attempt in 0..MAX_CONCURRENT_CAS_RETRIES {
-            let _gate = self.inner.gate.lock().await;
+            let _gate = self.operation_gate().await;
             let inode = if let Some(inode) = selected {
                 inode
             } else {
@@ -1967,16 +3027,9 @@ where
                         .selected_inodes
                         .get(&inode)
                         .ok_or_else(|| error_with_path(ErrorCode::Estale, syscall, path))?;
-                    let revision = *state
-                        .inode_revisions
-                        .get(&inode)
-                        .ok_or_else(|| FsError::new(ErrorCode::Eio))?;
                     (
                         (**node).clone(),
-                        Some(InodeVersion {
-                            structural_generation: state.persisted_revision,
-                            inode_revision: revision,
-                        }),
+                        Some(CapturedInodeVersion::capture(&state, inode)?),
                     )
                 }
             };
@@ -2025,6 +3078,26 @@ where
 
     async fn refresh_concurrent_namespace(&self) -> Result<()> {
         let _profile = Span::new(Event::Refresh);
+        if self.inner.options.compact_inode_updates {
+            self.check_inode_runtime()?;
+            let backing = self
+                .inner
+                .concurrent_backing
+                .ok_or_else(|| FsError::new(ErrorCode::Eio))?;
+            let revision = self.lock_state()?.revision;
+            self.inner
+                .blocks
+                .verify_concurrent_backing(backing)
+                .await
+                .map_err(|error| self.fail_closed(error))?;
+            let snapshot = self
+                .inner
+                .metadata
+                .load_compact_snapshot(backing)
+                .await
+                .map_err(|error| self.fail_closed(error))?;
+            return self.install_compact_snapshot(snapshot, revision, None);
+        }
         if self.inner.options.inode_updates {
             self.check_inode_runtime()?;
             let backing = self
@@ -2042,27 +3115,7 @@ where
                 .load_inode_snapshot(backing)
                 .await
                 .map_err(|error| self.fail_closed(error))?;
-            snapshot
-                .validate()
-                .map_err(|error| self.fail_closed(error))?;
-            self.check_inode_runtime()?;
-            let mut state = self.lock_state()?;
-            if snapshot.structural_generation >= state.persisted_revision {
-                retain_open_detached(&mut state, &snapshot.namespace);
-                state.namespace = Arc::new(snapshot.namespace);
-                if state.persisted_revision != snapshot.structural_generation
-                    || state.inode_revisions != snapshot.inode_revisions
-                    || !state.selected_inodes.is_empty()
-                {
-                    state.revision = state
-                        .revision
-                        .checked_add(1)
-                        .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-                }
-                state.persisted_revision = snapshot.structural_generation;
-                state.inode_revisions = snapshot.inode_revisions;
-                state.selected_inodes.clear();
-            }
+            self.install_inode_snapshot(snapshot)?;
             return Ok(());
         }
         if self.inner.options.delegated {
@@ -2280,6 +3333,26 @@ where
             );
         }
         if self.inner.options.concurrent_writes {
+            if self.inner.options.compact_inode_updates {
+                self.check_inode_runtime()?;
+                let backing = self
+                    .inner
+                    .concurrent_backing
+                    .ok_or_else(|| FsError::new(ErrorCode::Eio))?;
+                let revision = self.lock_state()?.revision;
+                self.inner
+                    .blocks
+                    .verify_concurrent_backing(backing)
+                    .await
+                    .map_err(|error| self.fail_closed(error))?;
+                let snapshot = self
+                    .inner
+                    .metadata
+                    .load_compact_snapshot(backing)
+                    .await
+                    .map_err(|error| self.fail_closed(error))?;
+                return self.install_compact_snapshot(snapshot.clone(), revision, Some(snapshot));
+            }
             return self.refresh_concurrent_namespace().await;
         }
         self.renew_lease().await.map(|_| ())
@@ -2728,8 +3801,10 @@ where
     }
 
     async fn apply_mutation_batch(&self, requests: Vec<MutationRequest>) {
+        // Attempted requests, including fenced retries; elapsed includes waits.
+        let _batch_profile = Span::new(Event::MutationBatch).units(requests.len() as u64);
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.inner.gate.lock().await;
+        let _gate = self.operation_gate().await;
         drop(gate_profile);
         let attempts = if self.inner.options.concurrent_writes {
             MAX_CONCURRENT_CAS_RETRIES
@@ -2865,7 +3940,7 @@ where
         let mut trace = RequestTrace::new("chunked", "mutate");
         trace.stage("gate_wait", format_args!(""));
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.inner.gate.lock().await;
+        let _gate = self.operation_gate().await;
         drop(gate_profile);
         trace.stage("gate_acquired", format_args!(""));
         let attempts = if self.inner.options.concurrent_writes {
@@ -2932,7 +4007,7 @@ where
         let _lifecycle = self.inner.lifecycle.read().await;
         let (layout, original, orphan, size, count) = {
             let gate_profile = Span::new(Event::GateWait);
-            let _gate = self.inner.gate.lock().await;
+            let _gate = self.operation_gate().await;
             drop(gate_profile);
             if self.inner.options.inode_updates {
                 self.refresh_selected_inode(inode).await?;
@@ -3058,7 +4133,7 @@ where
             .await?;
         }
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.inner.gate.lock().await;
+        let _gate = self.operation_gate().await;
         drop(gate_profile);
         if self.inner.options.inode_updates {
             self.refresh_selected_inode(inode).await?;
@@ -3117,7 +4192,7 @@ where
         }
         let (layout, original, orphan, start, end, new_size) = {
             let gate_profile = Span::new(Event::GateWait);
-            let _gate = self.inner.gate.lock().await;
+            let _gate = self.operation_gate().await;
             drop(gate_profile);
             self.ensure_operation_lease().await?;
             let (namespace, _) = self.snapshot()?;
@@ -3165,7 +4240,7 @@ where
 
         let fast_commit = {
             let gate_profile = Span::new(Event::GateWait);
-            let _gate = self.inner.gate.lock().await;
+            let _gate = self.operation_gate().await;
             drop(gate_profile);
             self.ensure_operation_lease().await?;
             if orphan {
@@ -3232,7 +4307,7 @@ where
     ) -> Result<(usize, u64)> {
         profile::add(Event::Fallback, 0);
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.inner.gate.lock().await;
+        let _gate = self.operation_gate().await;
         drop(gate_profile);
         let attempts = if self.inner.options.concurrent_writes {
             MAX_CONCURRENT_CAS_RETRIES
@@ -3318,15 +4393,27 @@ where
         {
             return Ok(());
         }
+        #[cfg(test)]
+        {
+            let pause = self.inner.preparation_pause.lock().unwrap().take();
+            if let Some(pause) = pause {
+                pause.entered.notify_one();
+                pause.resume.notified().await;
+            }
+        }
         let preparation = self.begin_mutation_preparation();
-        // This is an optimistic, read-only preparation snapshot. The state
-        // mutex keeps it coherent while the batcher's revision/CAS and
-        // conflict fallback decide whether it can publish after immutable
-        // block work completes. Keep it outside the global mutation gate so
-        // concurrent whole-file preparations can overlap; lease renewal has
-        // its own gate because it may perform a provider mutation.
-        self.ensure_operation_lease().await?;
         let (layout, original, inode, expected_revision, new_inode) = {
+            // Compact preparation installs a coherent Full snapshot, so it
+            // shares the publication gate through path/body capture. Dropping
+            // this guard also releases pending_full before immutable block
+            // work, allowing whole-file preparations to overlap safely.
+            // Other modes retain their optimistic capture and lease gate.
+            let _capture_gate = if self.inner.options.compact_inode_updates {
+                Some(self.operation_gate().await)
+            } else {
+                None
+            };
+            self.ensure_operation_lease().await?;
             let (namespace, revision) = self.snapshot()?;
             let entry = walk(&namespace, &normalized, true, "open", 0)?;
             self.require_inode_authority(&namespace, entry.node.unwrap_or(entry.parent))?;
@@ -3480,7 +4567,7 @@ where
         mut prepared_layout: FileLayout,
     ) -> Result<()> {
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.inner.gate.lock().await;
+        let _gate = self.operation_gate().await;
         drop(gate_profile);
         let data_length = u64::try_from(data.len())
             .map_err(|_| error_with_path(ErrorCode::Efbig, "write", path))?;
@@ -3605,7 +4692,7 @@ where
                 .await;
         }
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.inner.gate.lock().await;
+        let _gate = self.operation_gate().await;
         drop(gate_profile);
         let attempts = if self.inner.options.concurrent_writes {
             MAX_CONCURRENT_CAS_RETRIES
@@ -3761,9 +4848,10 @@ where
             return Err(FsError::new(ErrorCode::Ebadf).with_message("filesystem is closed"));
         }
         let mut stats = state
-            .namespace
-            .nodes
+            .selected_inodes
             .get(&inode)
+            .map(Arc::as_ref)
+            .or_else(|| state.namespace.nodes.get(&inode))
             .or_else(|| state.orphans.get(&inode))
             .map(|node| node.stats.clone())
             .ok_or_else(|| error_with_path(ErrorCode::Estale, syscall, path))?;
@@ -3836,7 +4924,7 @@ where
     async fn syncfs_with_syscall(&self, syscall: &str) -> Result<()> {
         let _lifecycle = self.inner.lifecycle.write().await;
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.inner.gate.lock().await;
+        let _gate = self.operation_gate().await;
         drop(gate_profile);
         self.ensure_operation_lease().await?;
         self.snapshot()?;
@@ -3922,6 +5010,31 @@ where
         .await
     }
 
+    fn open_inode_handle(
+        &self,
+        inode: InodeId,
+        normalized: String,
+        flags: OpenFlags,
+    ) -> Result<(Arc<dyn FileHandle>, PathIdentity)> {
+        let fd = self.allocate_fd(inode)?;
+        Ok((
+            Arc::new(ChunkedHandle {
+                filesystem: self.clone(),
+                inode,
+                path: normalized,
+                fd,
+                flags,
+                generation: self.inner.delegation_generation.load(Ordering::SeqCst),
+                state: Mutex::new(HandleState {
+                    position: 0,
+                    closed: false,
+                }),
+                gate: AsyncGate::new(),
+            }),
+            PathIdentity { dev: 0, ino: inode },
+        ))
+    }
+
     async fn open_flags_inner(
         &self,
         path: &str,
@@ -3946,9 +5059,38 @@ where
         let normalized = normalize_path(path);
         trace.stage("gate_wait", format_args!("path={normalized:?}"));
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.inner.gate.lock().await;
+        let _gate = self.operation_gate().await;
         drop(gate_profile);
         trace.stage("gate_acquired", format_args!("path={normalized:?}"));
+        if self.inner.options.inode_updates && !flags.truncate {
+            let (namespace, entry) = self
+                .inode_path_view(
+                    &normalized,
+                    !(flags.create && flags.exclusive),
+                    "open",
+                    guard.map(|(parent, _, _)| parent.path.as_str()),
+                )
+                .await?;
+            validate_open_guard(&namespace, &normalized, &entry, flags, guard)?;
+            if let Some(inode) = entry.node {
+                if flags.exclusive {
+                    return Err(error_with_path(ErrorCode::Eexist, "open", &entry.path));
+                }
+                let kind = FileType::from_mode(self.stat_inode(inode, "open", &entry.path)?.mode);
+                if kind == FileType::Directory && flags.write {
+                    return Err(error_with_path(ErrorCode::Eisdir, "open", &entry.path));
+                }
+                if kind.is_special() {
+                    return Err(error_with_path(ErrorCode::Enxio, "open", &entry.path));
+                }
+                trace.finish(format_args!("inode={inode} existing=true"));
+                return self.open_inode_handle(inode, normalized, flags);
+            }
+            if !flags.create {
+                return Err(error_with_path(ErrorCode::Enoent, "open", &entry.path));
+            }
+            // Missing creation still needs a complete fresh structural candidate.
+        }
         let attempts = if self.inner.options.concurrent_writes {
             MAX_CONCURRENT_CAS_RETRIES
         } else {
@@ -3979,33 +5121,7 @@ where
                 "open",
                 0,
             )?;
-            if let Some((parent_guard, name, observed)) = guard {
-                let original =
-                    guarded_child_entry(&namespace, parent_guard, name, observed, "open")?;
-                if original.path != normalized || entry.parent != original.parent {
-                    return Err(stale_guard(&parent_guard.path, "open"));
-                }
-                if original.node.is_some_and(|inode| {
-                    namespace
-                        .nodes
-                        .get(&inode)
-                        .is_some_and(|node| matches!(node.data, NodeData::Symlink { .. }))
-                }) {
-                    // Regular-file CREATE must not follow a final symlink to
-                    // an unobserved target, even when it stays in this parent.
-                    return Err(error_with_path(ErrorCode::Eexist, "open", &normalized));
-                }
-                if entry.node != original.node {
-                    return Err(stale_guard(&normalized, "open"));
-                }
-                if flags.truncate
-                    && !flags.exclusive
-                    && original.node.is_some()
-                    && !matches!(observed, ObservedEntry::Identity(_))
-                {
-                    return Err(stale_guard(&normalized, "open"));
-                }
-            }
+            validate_open_guard(&namespace, &normalized, &entry, flags, guard)?;
             if self.inner.options.delegated {
                 let required = entry.node.unwrap_or(entry.parent);
                 self.require_inode_authority(&namespace, required)?;
@@ -4088,13 +5204,7 @@ where
                         if state.revision != revision {
                             None
                         } else {
-                            Some(InodeVersion {
-                                structural_generation: state.persisted_revision,
-                                inode_revision: *state
-                                    .inode_revisions
-                                    .get(&inode)
-                                    .ok_or_else(|| FsError::new(ErrorCode::Eio))?,
-                            })
+                            Some(CapturedInodeVersion::capture(&state, inode)?)
                         }
                     };
                     if let Some(expected) = expected {
@@ -4139,24 +5249,8 @@ where
                     }
                 }
             }
-            let fd = self.allocate_fd(inode)?;
-            trace.finish(format_args!("attempt={attempt} inode={inode} fd={fd}"));
-            return Ok((
-                Arc::new(ChunkedHandle {
-                    filesystem: self.clone(),
-                    inode,
-                    path: normalized,
-                    fd,
-                    flags,
-                    generation: self.inner.delegation_generation.load(Ordering::SeqCst),
-                    state: Mutex::new(HandleState {
-                        position: 0,
-                        closed: false,
-                    }),
-                    gate: AsyncGate::new(),
-                }),
-                PathIdentity { dev: 0, ino: inode },
-            ));
+            trace.finish(format_args!("attempt={attempt} inode={inode}"));
+            return self.open_inode_handle(inode, normalized, flags);
         }
         Err(FsError::new(ErrorCode::Eagain)
             .with_syscall("open")
@@ -4286,8 +5380,12 @@ where
         if closed {
             return Err(error_with_path(ErrorCode::Ebadf, "fstat", &self.path));
         }
-        let _gate = self.filesystem.inner.gate.lock().await;
-        self.filesystem.validate_lease().await?;
+        let _gate = self.filesystem.operation_gate().await;
+        if self.filesystem.inner.options.inode_updates {
+            self.filesystem.refresh_inode_stat(self.inode).await?;
+        } else {
+            self.filesystem.validate_lease().await?;
+        }
         self.filesystem.stat_inode(self.inode, "fstat", &self.path)
     }
 
@@ -4329,7 +5427,7 @@ where
         let _gate = self.gate.lock().await;
         // Both gates are acquired before closing the handle. If this future
         // is canceled while waiting for either gate, a later close can retry.
-        let _filesystem_gate = self.filesystem.inner.gate.lock().await;
+        let _filesystem_gate = self.filesystem.operation_gate().await;
         {
             let mut state = self.lock_state()?;
             if state.closed {
@@ -4361,18 +5459,40 @@ where
 
     async fn guarded_read(&self, request: GuardedRead) -> Result<GuardedReadResult> {
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.inner.gate.lock().await;
+        let _gate = self.operation_gate().await;
         drop(gate_profile);
-        self.ensure_operation_lease().await?;
-        let (namespace, _) = self.snapshot()?;
+        let namespace = if self.inner.options.inode_updates
+            && !matches!(&request, GuardedRead::Readdir { .. })
+        {
+            let (path, extra) = match &request {
+                GuardedRead::Stat { target } | GuardedRead::Readlink { target } => {
+                    (target.path.clone(), None)
+                }
+                GuardedRead::Lookup { parent, name } => {
+                    let path = match name.as_str() {
+                        "." => parent.path.clone(),
+                        ".." => normalize_path(&format!("{}/..", parent.path)),
+                        _ => guarded_child_path(parent, name, "guarded lookup")?,
+                    };
+                    (path, Some(parent.path.as_str()))
+                }
+                GuardedRead::Readdir { .. } => unreachable!(),
+            };
+            self.inode_path_view(&path, false, "guarded read", extra)
+                .await?
+                .0
+        } else {
+            self.ensure_operation_lease().await?;
+            Arc::new(self.snapshot()?.0)
+        };
         match request {
             GuardedRead::Stat { target } => {
                 let inode = check_path_guard(&namespace, &target, "guarded stat")?;
-                let node = namespace
-                    .nodes
-                    .get(&inode)
-                    .ok_or_else(|| stale_guard(&target.path, "guarded stat"))?;
-                Ok(GuardedReadResult::Stat(node.stats.clone()))
+                Ok(GuardedReadResult::Stat(self.stat_inode(
+                    inode,
+                    "guarded stat",
+                    &target.path,
+                )?))
             }
             GuardedRead::Lookup { parent, name } => {
                 let inode = check_path_guard(&namespace, &parent, "guarded lookup")?;
@@ -4405,12 +5525,9 @@ where
                             })?
                     }
                 };
-                let child_node = namespace.nodes.get(&child).ok_or_else(|| {
-                    stale_guard(&format!("{}/{name}", parent.path), "guarded lookup")
-                })?;
                 Ok(GuardedReadResult::Lookup {
-                    parent: node.stats.clone(),
-                    child: child_node.stats.clone(),
+                    parent: self.stat_inode(inode, "guarded lookup", &parent.path)?,
+                    child: self.stat_inode(child, "guarded lookup", &parent.path)?,
                 })
             }
             GuardedRead::Readdir {
@@ -4680,8 +5797,15 @@ where
 
     async fn stat(&self, path: &str) -> Result<Stats> {
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.inner.gate.lock().await;
+        let _gate = self.operation_gate().await;
         drop(gate_profile);
+        if self.inner.options.inode_updates {
+            let (_, entry) = self.inode_path_view(path, true, "stat", None).await?;
+            let inode = entry
+                .node
+                .ok_or_else(|| error_with_path(ErrorCode::Enoent, "stat", path))?;
+            return self.stat_inode(inode, "stat", &normalize_path(path));
+        }
         self.validate_lease().await?;
         let (namespace, _) = self.snapshot()?;
         let inode = resolve(&namespace, path, true, "stat")?;
@@ -4690,8 +5814,15 @@ where
 
     async fn lstat(&self, path: &str) -> Result<Stats> {
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.inner.gate.lock().await;
+        let _gate = self.operation_gate().await;
         drop(gate_profile);
+        if self.inner.options.inode_updates {
+            let (_, entry) = self.inode_path_view(path, false, "lstat", None).await?;
+            let inode = entry
+                .node
+                .ok_or_else(|| error_with_path(ErrorCode::Enoent, "lstat", path))?;
+            return self.stat_inode(inode, "lstat", &normalize_path(path));
+        }
         self.validate_lease().await?;
         let (namespace, _) = self.snapshot()?;
         let inode = resolve(&namespace, path, false, "lstat")?;
@@ -4700,9 +5831,13 @@ where
 
     async fn statfs(&self, path: &str) -> Result<StatsFs> {
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.inner.gate.lock().await;
+        let _gate = self.operation_gate().await;
         drop(gate_profile);
-        self.validate_lease().await?;
+        if self.inner.options.compact_inode_updates {
+            self.ensure_operation_lease().await?;
+        } else {
+            self.validate_lease().await?;
+        }
         let (namespace, _) = self.snapshot()?;
         resolve(&namespace, path, true, "statfs")?;
         const BLOCKS: u64 = 1024 * 1024;
@@ -4734,7 +5869,7 @@ where
 
     async fn readdir(&self, path: &str) -> Result<Vec<DirEntry>> {
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.inner.gate.lock().await;
+        let _gate = self.operation_gate().await;
         drop(gate_profile);
         self.ensure_operation_lease().await?;
         let (mut namespace, revision) = self.snapshot()?;
@@ -4774,7 +5909,7 @@ where
                 .with_message("directory entry limit must be positive"));
         }
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.inner.gate.lock().await;
+        let _gate = self.operation_gate().await;
         drop(gate_profile);
         self.ensure_operation_lease().await?;
         let (mut namespace, revision) = self.snapshot()?;
@@ -4957,7 +6092,7 @@ where
 
     async fn readlink(&self, path: &str) -> Result<String> {
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.inner.gate.lock().await;
+        let _gate = self.operation_gate().await;
         drop(gate_profile);
         self.ensure_operation_lease().await?;
         let (namespace, _) = self.snapshot()?;
@@ -5867,6 +7002,75 @@ fn apply_guarded_setattr(
     Ok(())
 }
 
+fn validate_open_guard(
+    namespace: &Namespace,
+    normalized: &str,
+    entry: &Entry,
+    flags: OpenFlags,
+    guard: Option<(&PathGuard, &str, ObservedEntry)>,
+) -> Result<()> {
+    if let Some((parent_guard, name, observed)) = guard {
+        let original = guarded_child_entry(namespace, parent_guard, name, observed, "open")?;
+        if original.path != normalized || entry.parent != original.parent {
+            return Err(stale_guard(&parent_guard.path, "open"));
+        }
+        if original.node.is_some_and(|inode| {
+            namespace
+                .nodes
+                .get(&inode)
+                .is_some_and(|node| matches!(node.data, NodeData::Symlink { .. }))
+        }) {
+            // Regular-file CREATE must not follow a final symlink to
+            // an unobserved target, even when it stays in this parent.
+            return Err(error_with_path(ErrorCode::Eexist, "open", normalized));
+        }
+        if entry.node != original.node {
+            return Err(stale_guard(normalized, "open"));
+        }
+        if flags.truncate
+            && !flags.exclusive
+            && original.node.is_some()
+            && !matches!(observed, ObservedEntry::Identity(_))
+        {
+            return Err(stale_guard(normalized, "open"));
+        }
+    }
+    Ok(())
+}
+
+fn stale_inode_structure() -> FsError {
+    FsError::new(ErrorCode::Estale).with_message("inode structure changed without its generation")
+}
+
+fn validate_cached_inode(inode: InodeId, old: &NodeMetadata, next: &NodeMetadata) -> Result<()> {
+    if matches!(old.data, NodeData::File(_)) {
+        mount_rs_core::storage::validate_inode_publication(inode, old, next)
+            .map_err(|_| stale_inode_structure())
+    } else if old == next {
+        Ok(())
+    } else {
+        Err(stale_inode_structure())
+    }
+}
+
+fn validate_cached_namespace(old: &Namespace, next: &Namespace) -> Result<()> {
+    if old.format_version != next.format_version
+        || old.root != next.root
+        || old.next_inode != next.next_inode
+        || old.default_uid != next.default_uid
+        || old.default_gid != next.default_gid
+        || old.umask != next.umask
+        || old.default_chunker != next.default_chunker
+        || !old.nodes.keys().eq(next.nodes.keys())
+    {
+        return Err(stale_inode_structure());
+    }
+    for (inode, node) in &old.nodes {
+        validate_cached_inode(*inode, node, &next.nodes[inode])?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 struct Entry {
     parent: InodeId,
@@ -5882,12 +7086,28 @@ fn walk(
     syscall: &str,
     depth: usize,
 ) -> Result<Entry> {
+    walk_traced(namespace, path, follow_final, syscall, depth, None)
+}
+
+fn walk_traced(
+    namespace: &Namespace,
+    path: &str,
+    follow_final: bool,
+    syscall: &str,
+    depth: usize,
+    mut traversed: Option<&mut Vec<InodeId>>,
+) -> Result<Entry> {
     if depth > MAX_SYMLINK_DEPTH {
         return Err(error_with_path(
             ErrorCode::Eloop,
             syscall,
             &normalize_path(path),
         ));
+    }
+    if let Some(nodes) = traversed.as_mut()
+        && !nodes.contains(&namespace.root)
+    {
+        nodes.push(namespace.root);
     }
     let normalized = normalize_path(path);
     if normalized == "/" {
@@ -5924,6 +7144,11 @@ fn walk(
             }
             return Err(error_with_path(ErrorCode::Enoent, syscall, &normalized));
         };
+        if let Some(nodes) = traversed.as_mut()
+            && !nodes.contains(&child)
+        {
+            nodes.push(child);
+        }
         let child_node = namespace
             .nodes
             .get(&child)
@@ -5951,7 +7176,14 @@ fn walk(
                 rewritten.push('/');
                 rewritten.push_str(&segments[index + 1..].join("/"));
             }
-            return walk(namespace, &rewritten, follow_final, syscall, depth + 1);
+            return walk_traced(
+                namespace,
+                &rewritten,
+                follow_final,
+                syscall,
+                depth + 1,
+                traversed,
+            );
         }
         if last {
             return Ok(Entry {
@@ -8918,6 +10150,51 @@ mod tests {
 }
 
 #[cfg(all(test, unix))]
+mod compact_install_tests {
+    use super::*;
+    use futures_lite::future::block_on;
+    use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
+
+    #[test]
+    fn newer_local_revision_is_retryable_without_poisoning_owner() {
+        block_on(async {
+            let path = std::env::temp_dir().join(format!(
+                "mount-rs-compact-local-race-{}-{}",
+                std::process::id(),
+                now_ms()
+            ));
+            std::fs::create_dir(&path).unwrap();
+            let metadata = SqliteMetadataStore::open(path.join("metadata.db")).unwrap();
+            let blocks = SqliteBlockStore::open(path.join("blocks.db")).unwrap();
+            let fs = ChunkedFs::open(
+                metadata.clone(),
+                blocks.clone(),
+                ChunkedOptions::fixed("local-race", 16)
+                    .unwrap()
+                    .with_compact_inode_updates(true),
+            )
+            .await
+            .unwrap();
+            let backing = fs.inner.concurrent_backing.unwrap();
+            let snapshot = metadata.load_compact_snapshot(backing).await.unwrap();
+            let captured_revision = fs.lock_state().unwrap().revision;
+            fs.lock_state().unwrap().revision += 1;
+            assert_eq!(
+                fs.install_compact_snapshot(snapshot, captured_revision, None)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Eagain,
+            );
+            assert!(!fs.failed());
+            drop(fs);
+            drop(metadata);
+            drop(blocks);
+            std::fs::remove_dir_all(path).unwrap();
+        });
+    }
+}
+
+#[cfg(all(test, unix))]
 mod delegated_generation_tests {
     use super::*;
     use futures_lite::future::block_on;
@@ -9059,6 +10336,436 @@ mod delegated_generation_tests {
             drop(b);
             drop(bootstrap);
             std::fs::remove_dir_all(path).unwrap();
+        });
+    }
+}
+
+#[cfg(all(test, unix))]
+mod compact_preparation_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use futures_lite::future::{block_on, or, poll_once};
+    use mount_rs_core::storage::compact::CompactPublication;
+    use mount_rs_core::storage::{BlockId, LoadedInode};
+    use mount_rs_core::storage::{
+        ConcurrentModeState, InodeMetadataSnapshot, InodeModeState, LoadedMetadata,
+    };
+    use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
+    use std::future::Future;
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicU64;
+    struct Volume(PathBuf);
+    impl Volume {
+        fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "mount-rs-compact-runtime-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::SeqCst)
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+
+        fn metadata(&self) -> SqliteMetadataStore {
+            SqliteMetadataStore::open(self.0.join("metadata.db")).unwrap()
+        }
+
+        fn blocks(&self) -> SqliteBlockStore {
+            SqliteBlockStore::open(self.0.join("blocks.db")).unwrap()
+        }
+
+        async fn open(&self, owner: &str) -> ChunkedFs<SqliteMetadataStore, SqliteBlockStore> {
+            ChunkedFs::open(
+                self.metadata(),
+                self.blocks(),
+                ChunkedOptions::fixed(owner, 16)
+                    .unwrap()
+                    .with_compact_inode_updates(true),
+            )
+            .await
+            .unwrap()
+        }
+    }
+    impl Drop for Volume {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[derive(Clone)]
+    struct RecordingMetadata {
+        inner: SqliteMetadataStore,
+        old_calls: Arc<AtomicU64>,
+        hold_full_once: Arc<AtomicBool>,
+        full_entered: Arc<tokio::sync::Notify>,
+        full_resume: Arc<tokio::sync::Notify>,
+    }
+    impl RecordingMetadata {
+        fn new(inner: SqliteMetadataStore) -> Self {
+            Self {
+                inner,
+                old_calls: Arc::new(AtomicU64::new(0)),
+                hold_full_once: Arc::new(AtomicBool::new(false)),
+                full_entered: Arc::new(tokio::sync::Notify::new()),
+                full_resume: Arc::new(tokio::sync::Notify::new()),
+            }
+        }
+        fn old(&self) -> Result<()> {
+            self.old_calls.fetch_add(1, Ordering::SeqCst);
+            Err(FsError::new(ErrorCode::Eio))
+        }
+    }
+    #[async_trait]
+    impl MetadataStore for RecordingMetadata {
+        fn durable(&self) -> bool {
+            self.inner.durable()
+        }
+        fn publish_includes_flush_barrier(&self) -> bool {
+            self.inner.publish_includes_flush_barrier()
+        }
+        fn compact_inode_capability(&self) -> CompactInodeCapability {
+            self.inner.compact_inode_capability()
+        }
+        async fn compact_inode_mode_state(&self) -> Result<Option<InodeModeState>> {
+            self.inner.compact_inode_mode_state().await
+        }
+        async fn load_compact_snapshot(
+            &self,
+            backing: ConcurrentBackingId,
+        ) -> Result<CompactSnapshot> {
+            self.inner.load_compact_snapshot(backing).await
+        }
+        async fn load_compact_inode(
+            &self,
+            backing: ConcurrentBackingId,
+            inode: u64,
+        ) -> Result<mount_rs_core::storage::compact::LoadedCompactInode> {
+            self.inner.load_compact_inode(backing, inode).await
+        }
+        async fn publish_compact_structure(
+            &self,
+            delta: &CompactStructuralDelta,
+        ) -> Result<CompactPublication> {
+            if self.hold_full_once.swap(false, Ordering::SeqCst) {
+                self.full_entered.notify_one();
+                self.full_resume.notified().await;
+            }
+            self.inner.publish_compact_structure(delta).await
+        }
+        async fn load(&self) -> mount_rs_core::Result<LoadedMetadata> {
+            self.old()?;
+            unreachable!()
+        }
+        async fn inode_mode_state(&self) -> mount_rs_core::Result<Option<InodeModeState>> {
+            self.old()?;
+            unreachable!()
+        }
+        async fn concurrent_mode_state(&self) -> mount_rs_core::Result<ConcurrentModeState> {
+            self.old()?;
+            unreachable!()
+        }
+        async fn load_inode_snapshot(
+            &self,
+            _: ConcurrentBackingId,
+        ) -> mount_rs_core::Result<InodeMetadataSnapshot> {
+            self.old()?;
+            unreachable!()
+        }
+        async fn load_inode(
+            &self,
+            _: ConcurrentBackingId,
+            _: u64,
+        ) -> mount_rs_core::Result<LoadedInode> {
+            self.old()?;
+            unreachable!()
+        }
+        async fn publish_inode_if_version(
+            &self,
+            _: ConcurrentBackingId,
+            _: u64,
+            _: InodeVersion,
+            _: NodeMetadata,
+        ) -> mount_rs_core::Result<InodeVersion> {
+            self.old()?;
+            unreachable!()
+        }
+        async fn publish_structure_if_versions(
+            &self,
+            _: ConcurrentBackingId,
+            _: u64,
+            _: &std::collections::BTreeMap<u64, u64>,
+            _: Namespace,
+        ) -> mount_rs_core::Result<u64> {
+            self.old()?;
+            unreachable!()
+        }
+        async fn acquire_writer(&self, _: &str, _: Duration) -> mount_rs_core::Result<WriterLease> {
+            self.old()?;
+            unreachable!()
+        }
+        async fn renew_writer(
+            &self,
+            _: &WriterLease,
+            _: Duration,
+        ) -> mount_rs_core::Result<WriterLease> {
+            self.old()?;
+            unreachable!()
+        }
+        async fn release_writer(&self, _: &WriterLease) -> mount_rs_core::Result<()> {
+            self.old()
+        }
+        async fn publish(
+            &self,
+            _: u64,
+            _: &WriterLease,
+            _: Namespace,
+        ) -> mount_rs_core::Result<u64> {
+            self.old()?;
+            unreachable!()
+        }
+        async fn publish_bound_if_revision(
+            &self,
+            _: ConcurrentBackingId,
+            _: u64,
+            _: Namespace,
+        ) -> mount_rs_core::Result<u64> {
+            self.old()?;
+            unreachable!()
+        }
+        async fn flush(&self) -> Result<()> {
+            self.inner.flush().await
+        }
+    }
+
+    #[derive(Clone)]
+    struct PausedBlocks {
+        inner: SqliteBlockStore,
+        pause: Arc<AtomicBool>,
+        entered: Arc<tokio::sync::Notify>,
+        resume: Arc<tokio::sync::Notify>,
+        puts: Arc<AtomicU64>,
+    }
+
+    #[async_trait]
+    impl BlockStore for PausedBlocks {
+        fn durable(&self) -> bool {
+            self.inner.durable()
+        }
+        async fn prepare_concurrent_backing(&self) -> mount_rs_core::Result<ConcurrentBackingId> {
+            self.inner.prepare_concurrent_backing().await
+        }
+        async fn verify_concurrent_backing(
+            &self,
+            expected: ConcurrentBackingId,
+        ) -> mount_rs_core::Result<()> {
+            self.inner.verify_concurrent_backing(expected).await
+        }
+        async fn put(&self, bytes: &[u8]) -> mount_rs_core::Result<BlockId> {
+            self.puts.fetch_add(1, Ordering::SeqCst);
+            if self.pause.swap(false, Ordering::SeqCst) {
+                self.entered.notify_one();
+                self.resume.notified().await;
+            }
+            self.inner.put(bytes).await
+        }
+        async fn get(&self, id: &BlockId) -> mount_rs_core::Result<Vec<u8>> {
+            self.inner.get(id).await
+        }
+        async fn flush(&self) -> mount_rs_core::Result<()> {
+            self.inner.flush().await
+        }
+        async fn delete(&self, id: &BlockId) -> mount_rs_core::Result<()> {
+            self.inner.delete(id).await
+        }
+    }
+
+    async fn at_pause<F: Future>(future: &mut Pin<Box<F>>, entered: &tokio::sync::Notify) {
+        or(
+            async {
+                let _ = future.await;
+                panic!("operation completed before pause");
+            },
+            async { entered.notified().await },
+        )
+        .await;
+    }
+
+    fn bounded(future: impl Future<Output = ()>) {
+        block_on(or(future, async {
+            async_io::Timer::after(Duration::from_secs(15)).await;
+            panic!("preparation regression exceeded bounded deadline");
+        }));
+    }
+
+    async fn oracle(volume: &Volume, expected: &[(&str, &[u8])]) {
+        let fresh = volume.open("preparation-fresh-oracle").await;
+        let entries = fresh.readdir("/").await.unwrap();
+        assert_eq!(entries.len(), expected.len(), "exact fresh membership");
+        for (path, body) in expected {
+            let handle = fresh.open(path, "r", 0).await.unwrap();
+            let mut got = vec![0; body.len() + 1];
+            assert_eq!(handle.read(&mut got, Some(0)).await.unwrap(), body.len());
+            assert_eq!(&got[..body.len()], *body);
+            assert_eq!(
+                handle
+                    .read(&mut got, Some(body.len() as u64))
+                    .await
+                    .unwrap(),
+                0
+            );
+            handle.close().await.unwrap();
+        }
+        fresh.shutdown().await.unwrap();
+    }
+
+    fn paused_blocks(volume: &Volume) -> PausedBlocks {
+        PausedBlocks {
+            inner: volume.blocks(),
+            pause: Arc::new(AtomicBool::new(false)),
+            entered: Arc::new(tokio::sync::Notify::new()),
+            resume: Arc::new(tokio::sync::Notify::new()),
+            puts: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    #[test]
+    fn missing_preparation_waits_for_full_publication_and_releases_gate_before_blocks() {
+        bounded(async {
+            let volume = Volume::new();
+            let setup = volume.open("preparation-setup").await;
+            setup
+                .write_file("/old", b"acknowledged original")
+                .await
+                .unwrap();
+            setup.shutdown().await.unwrap();
+            let metadata = RecordingMetadata::new(volume.metadata());
+            let blocks = paused_blocks(&volume);
+            let fs = ChunkedFs::open(
+                metadata.clone(),
+                blocks.clone(),
+                ChunkedOptions::fixed("preparation-owner", 64)
+                    .unwrap()
+                    .with_compact_inode_updates(true),
+            )
+            .await
+            .unwrap();
+            let pause = Arc::new(PreparationPause::default());
+            *fs.inner.preparation_pause.lock().unwrap() = Some(pause.clone());
+            let mut a = Box::pin(fs.write_file("/new", b"acknowledged new"));
+            at_pause(&mut a, &pause.entered).await;
+            metadata.hold_full_once.store(true, Ordering::SeqCst);
+            let mut b = Box::pin(fs.rename("/old", "/renamed"));
+            at_pause(&mut b, &metadata.full_entered).await;
+            let revision = fs.lock_state().unwrap().revision;
+            blocks.pause.store(true, Ordering::SeqCst);
+            pause.resume.notify_one();
+            assert!(poll_once(a.as_mut()).await.is_none());
+            let revision_after_a = fs.lock_state().unwrap().revision;
+            let puts_before_b = blocks.puts.load(Ordering::SeqCst);
+            metadata.full_resume.notify_one();
+            let result = b.await;
+            // This oracle runs even on RED: real SQLite committed the rename,
+            // despite the old runtime returning ESTALE and poisoning its owner.
+            oracle(&volume, &[("/renamed", b"acknowledged original")]).await;
+            eprintln!(
+                "actual_sqlite_rename_committed=1 revision_before={revision} revision_after_a={revision_after_a} puts_before_b={puts_before_b} rename_result={result:?} poisoned={}",
+                fs.failed()
+            );
+            assert!(
+                result.is_ok(),
+                "committed Full rename must install without erroneous poison"
+            );
+            assert_eq!(revision_after_a, revision, "preparation must wait for gate");
+            assert_eq!(
+                puts_before_b, 0,
+                "blocked preparation has not started block IO"
+            );
+            at_pause(&mut a, &blocks.entered).await;
+            assert!(
+                fs.lock_state()
+                    .unwrap()
+                    .compact
+                    .as_ref()
+                    .unwrap()
+                    .pending_full
+                    .is_none()
+            );
+            // Bounded completion while A is stopped inside immutable block put
+            // proves preparation released the operation gate before block IO.
+            fs.rename("/renamed", "/overlapped").await.unwrap();
+            blocks.resume.notify_one();
+            a.await.unwrap();
+            assert!(!fs.failed());
+            assert_eq!(metadata.old_calls.load(Ordering::SeqCst), 0);
+            fs.shutdown().await.unwrap();
+            oracle(
+                &volume,
+                &[
+                    ("/overlapped", b"acknowledged original"),
+                    ("/new", b"acknowledged new"),
+                ],
+            )
+            .await;
+            eprintln!(
+                "preparation_waited=1 block_io_overlap=1 fresh_files=2 full_bytes=37 eof_reads=2"
+            );
+        });
+    }
+
+    #[test]
+    fn canceled_missing_preparation_retains_no_pending_full_capture() {
+        bounded(async {
+            let volume = Volume::new();
+            let setup = volume.open("cancel-setup").await;
+            setup.write_file("/old", b"survivor").await.unwrap();
+            setup.shutdown().await.unwrap();
+            let blocks = paused_blocks(&volume);
+            let fs = ChunkedFs::open(
+                volume.metadata(),
+                blocks.clone(),
+                ChunkedOptions::fixed("cancel-owner", 64)
+                    .unwrap()
+                    .with_compact_inode_updates(true),
+            )
+            .await
+            .unwrap();
+            blocks.pause.store(true, Ordering::SeqCst);
+            let mut canceled = Box::pin(fs.write_file("/canceled", b"unpublished"));
+            at_pause(&mut canceled, &blocks.entered).await;
+            let retained_before_cancel = fs
+                .lock_state()
+                .unwrap()
+                .compact
+                .as_ref()
+                .unwrap()
+                .pending_full
+                .is_some();
+            drop(canceled);
+            let retained_after_cancel = fs
+                .lock_state()
+                .unwrap()
+                .compact
+                .as_ref()
+                .unwrap()
+                .pending_full
+                .is_some();
+            eprintln!(
+                "retained_before_cancel={retained_before_cancel} retained_after_cancel={retained_after_cancel}"
+            );
+            assert!(
+                !retained_before_cancel,
+                "gate release must clear preparation Full capture before block IO"
+            );
+            assert!(
+                !retained_after_cancel,
+                "cancellation must not retain a Full capture on idle runtime"
+            );
+            assert_eq!(fs.inner.preparing_mutations.load(Ordering::SeqCst), 0);
+            assert!(!fs.failed());
+            fs.rename("/old", "/survivor").await.unwrap();
+            fs.shutdown().await.unwrap();
+            oracle(&volume, &[("/survivor", b"survivor")]).await;
         });
     }
 }

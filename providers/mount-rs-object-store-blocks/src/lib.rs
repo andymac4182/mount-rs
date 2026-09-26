@@ -1,8 +1,18 @@
 //! Immutable byte blocks backed by an [\`object_store::ObjectStore\`].
 //!
 //! This adapter deliberately does not store namespace metadata or a snapshot
-//! manifest. Each successful \`put\` is one provider-confirmed object upload;
-//! metadata providers remain responsible for publishing references to it.
+//! manifest. A successful \`put\` may share a coalesced upload or verify an
+//! existing immutable object; raw `put_opts` success confirms an accepted upload.
+//! Metadata providers remain responsible for publishing references to blocks.
+
+mod raw_metrics;
+use raw_metrics::{Api, Claim, ClaimSpan, Local, LocalSpan, LocalState, RawSpan, RawState};
+pub use raw_metrics::{
+    LOCAL_WORK_NAMES, LOCAL_WORK_SCHEMA, LocalWorkEntry, LocalWorkSnapshot, RAW_API_NAMES,
+    RAW_API_SCHEMA, RAW_API_SCOPE, RawApiClaims, RawApiEntry, RawApiSnapshot,
+};
+#[cfg(test)]
+mod raw_metrics_tests;
 
 mod qualification;
 pub use qualification::{
@@ -338,10 +348,15 @@ pub struct ObjectStoreBlockStoreStats {
     pub retry_exhausted: u64,
     pub cache_hits: u64,
     pub error_classes: BTreeMap<ObjectStoreBlockStoreErrorClass, u64>,
+    /// Detailed adapter API counters, absent when profiling was disabled at construction.
+    pub raw_api: Option<RawApiSnapshot>,
+    /// Local preparation/copy/wait observations; independent of adapter API calls.
+    pub local_work: Option<LocalWorkSnapshot>,
 }
 
 #[derive(Default)]
 struct ObjectStoreBlockStoreStatsState {
+    raw: Option<Box<RawState>>,
     puts: AtomicU64,
     gets: AtomicU64,
     deletes: AtomicU64,
@@ -484,6 +499,8 @@ impl ObjectStoreBlockStoreStatsState {
             retry_exhausted: load(&self.retry_exhausted),
             cache_hits: load(&self.cache_hits),
             error_classes,
+            raw_api: self.raw.as_deref().map(RawState::snapshot),
+            local_work: self.raw.as_deref().map(|state| state.local.snapshot()),
         }
     }
 }
@@ -501,9 +518,25 @@ struct ObjectStoreBlockCache {
 }
 
 impl ObjectStoreBlockCache {
+    fn lock(
+        &self,
+        local: Option<&LocalState>,
+    ) -> std::sync::LockResult<std::sync::MutexGuard<'_, ObjectStoreBlockCacheState>> {
+        let mut span = LocalSpan::new(local, Local::CacheLock, 0);
+        let result = self.state.lock();
+        span.result(&result, 0);
+        result
+    }
+    #[cfg(test)]
     fn get(&self, id: &str) -> Option<Vec<u8>> {
-        let mut state = self.state.lock().ok()?;
-        let bytes = state.entries.get(id)?.clone();
+        self.get_with_metrics(id, None)
+    }
+    fn get_with_metrics(&self, id: &str, local: Option<&LocalState>) -> Option<Vec<u8>> {
+        let mut state = self.lock(local).ok()?;
+        let entry = state.entries.get(id)?;
+        let mut copy = LocalSpan::new(local, Local::ReturnCopy, entry.len() as u64);
+        let bytes = entry.clone();
+        copy.success(bytes.len() as u64);
         if let Some(position) = state.order.iter().position(|entry| entry == id) {
             state.order.remove(position);
         }
@@ -511,11 +544,11 @@ impl ObjectStoreBlockCache {
         Some(bytes)
     }
 
-    fn insert(&self, id: &str, bytes: &[u8]) {
+    fn insert(&self, id: &str, bytes: &[u8], local: Option<&LocalState>) {
         if bytes.len() > MAX_CACHE_BYTES {
             return;
         }
-        let Ok(mut state) = self.state.lock() else {
+        let Ok(mut state) = self.lock(local) else {
             return;
         };
         if let Some(previous) = state.entries.remove(id) {
@@ -536,12 +569,16 @@ impl ObjectStoreBlockCache {
             }
         }
         state.bytes = state.bytes.saturating_add(bytes.len());
-        state.entries.insert(id.to_owned(), bytes.to_vec());
+        let key = id.to_owned();
+        let mut copy = LocalSpan::new(local, Local::CacheCopy, bytes.len() as u64);
+        let copied = bytes.to_vec();
+        copy.success(copied.len() as u64);
+        state.entries.insert(key, copied);
         state.order.push_back(id.to_owned());
     }
 
-    fn remove(&self, id: &str) {
-        let Ok(mut state) = self.state.lock() else {
+    fn remove(&self, id: &str, local: Option<&LocalState>) {
+        let Ok(mut state) = self.lock(local) else {
             return;
         };
         if let Some(previous) = state.entries.remove(id) {
@@ -869,7 +906,11 @@ impl ObjectStoreBlockStore {
             store,
             prefix: validate_prefix(&prefix.into())?,
             durable,
-            stats: Arc::new(ObjectStoreBlockStoreStatsState::default()),
+            stats: Arc::new(ObjectStoreBlockStoreStatsState {
+                raw: mount_rs_core::diagnostics::storage::enabled()
+                    .then(|| Box::new(RawState::default())),
+                ..Default::default()
+            }),
             cache: Arc::new(ObjectStoreBlockCache::default()),
             inflight_puts: Arc::new(Mutex::new(HashMap::new())),
         })
@@ -888,6 +929,9 @@ impl ObjectStoreBlockStore {
     /// SLO result.
     pub fn stats(&self) -> ObjectStoreBlockStoreStats {
         self.stats.snapshot()
+    }
+    fn local(&self) -> Option<&LocalState> {
+        self.stats.raw.as_deref().map(|state| &state.local)
     }
 
     fn backing_id_path(&self) -> ObjectPath {
@@ -928,20 +972,19 @@ impl ObjectStoreBlockStore {
         path: &ObjectPath,
         started: Instant,
     ) -> Result<()> {
-        let result = self
-            .store
-            .put_opts(
-                path,
-                PutPayload::from(bytes.to_vec()),
-                PutOptions {
-                    mode: PutMode::Create,
-                    ..Default::default()
-                },
-            )
-            .await;
+        let mut copy = LocalSpan::new(self.local(), Local::UploadCopy, bytes.len() as u64);
+        let payload = PutPayload::from(bytes.to_vec());
+        copy.success(bytes.len() as u64);
+        let options = PutOptions {
+            mode: PutMode::Create,
+            ..Default::default()
+        };
+        let mut raw = RawSpan::new(self.stats.raw.as_deref(), Api::Put, bytes.len() as u64);
+        let result = self.store.put_opts(path, payload, options).await;
+        raw.result(&result, bytes.len() as u64, 0);
         match result {
             Ok(_) => {
-                self.cache.insert(&id.0, bytes);
+                self.cache.insert(&id.0, bytes, self.local());
                 self.stats.success(started, 0, bytes.len() as u64);
                 Ok(())
             }
@@ -952,36 +995,48 @@ impl ObjectStoreBlockStore {
             Err(object_store::Error::AlreadyExists { .. })
             | Err(object_store::Error::Precondition { .. }) => {
                 self.stats.conditional_conflict();
-                let existing = match self.store.get(path).await {
-                    Ok(result) => match result.bytes().await {
-                        Ok(bytes) => bytes,
-                        Err(error) => {
-                            self.cache.remove(&id.0);
-                            self.stats.error(started, &error);
-                            return Err(backend_error(format!(
-                                "verify object-store block: {error}"
-                            )));
+                let mut raw = RawSpan::new(self.stats.raw.as_deref(), Api::ConflictGet, 0);
+                let result = self.store.get(path).await;
+                raw.result(&result, 0, 0);
+                let existing = match result {
+                    Ok(result) => {
+                        let mut raw = RawSpan::new(self.stats.raw.as_deref(), Api::ConflictBody, 0);
+                        let result = result.bytes().await;
+                        raw.result(
+                            &result,
+                            0,
+                            result.as_ref().map_or(0, |bytes| bytes.len() as u64),
+                        );
+                        match result {
+                            Ok(bytes) => bytes,
+                            Err(error) => {
+                                self.cache.remove(&id.0, self.local());
+                                self.stats.error(started, &error);
+                                return Err(backend_error(format!(
+                                    "verify object-store block: {error}"
+                                )));
+                            }
                         }
-                    },
+                    }
                     Err(error) => {
-                        self.cache.remove(&id.0);
+                        self.cache.remove(&id.0, self.local());
                         self.stats.error(started, &error);
                         return Err(map_not_found(error));
                     }
                 };
                 if existing.as_ref() != bytes {
-                    self.cache.remove(&id.0);
+                    self.cache.remove(&id.0, self.local());
                     increment(&self.stats.errors);
                     return Err(backend_error(
                         "object-store content-addressed block collision",
                     ));
                 }
-                self.cache.insert(&id.0, bytes);
+                self.cache.insert(&id.0, bytes, self.local());
                 self.stats.success(started, 0, bytes.len() as u64);
                 Ok(())
             }
             Err(error) => {
-                self.cache.remove(&id.0);
+                self.cache.remove(&id.0, self.local());
                 self.stats.error(started, &error);
                 Err(backend_error(format!("put object-store block: {error}")))
             }
@@ -999,44 +1054,68 @@ impl BlockStore for ObjectStoreBlockStore {
         let path = self.object_path(id)?;
         // Migration must check the current remote bytes rather than a cached
         // value from an earlier successful read in this process.
-        let result = self.store.get(&path).await.map_err(|error| match error {
+        let mut raw = RawSpan::new(self.stats.raw.as_deref(), Api::MigrationGet, 0);
+        let result = self.store.get(&path).await;
+        raw.result(&result, 0, 0);
+        let result = result.map_err(|error| match error {
             object_store::Error::NotFound { .. } => map_get_error(error),
             error => FsError::backend(format!(
                 "object-store migration block read failed ({:?})",
                 classify_error(&error)
             )),
         })?;
-        let bytes = result.bytes().await.map_err(|error| {
+        let mut raw = RawSpan::new(self.stats.raw.as_deref(), Api::MigrationBody, 0);
+        let bytes = result.bytes().await;
+        raw.result(
+            &bytes,
+            0,
+            bytes.as_ref().map_or(0, |bytes| bytes.len() as u64),
+        );
+        let bytes = bytes.map_err(|error| {
             FsError::backend(format!(
                 "object-store migration block read failed ({:?})",
                 classify_error(&error)
             ))
         })?;
-        if id.0.len() == 1 + CONTENT_BLOCK_ID_HEX_CHARS && block_id(&bytes) != id.0 {
+        if id.0.len() == 1 + CONTENT_BLOCK_ID_HEX_CHARS
+            && block_id_with_metrics(&bytes, self.local()) != id.0
+        {
             return Err(FsError::backend(
                 "object-store migration block digest mismatch",
             ));
         }
-        Ok(bytes.to_vec())
+        let mut copy = LocalSpan::new(self.local(), Local::ReturnCopy, bytes.len() as u64);
+        let returned = bytes.to_vec();
+        copy.success(returned.len() as u64);
+        Ok(returned)
     }
 
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
         let started = self.stats.start(BlockOperation::Put);
-        let id = BlockId(block_id(bytes));
+        let id = BlockId(block_id_with_metrics(bytes, self.local()));
         let path = self.object_path(&id)?;
         match self.claim_put(&id.0) {
-            InFlightPutClaim::Follower(receiver) => match wait_for_inflight_put(receiver).await {
-                Ok(()) => {
-                    self.stats.success(started, 0, bytes.len() as u64);
-                    Ok(id)
+            InFlightPutClaim::Follower(receiver) => {
+                let mut claim = ClaimSpan::new(self.stats.raw.as_deref(), Claim::Follower);
+                let mut wait = LocalSpan::new(self.local(), Local::FollowerWait, 0);
+                let result = wait_for_inflight_put(receiver).await;
+                wait.result(&result, 0);
+                claim.result(&result);
+                match result {
+                    Ok(()) => {
+                        self.stats.success(started, 0, bytes.len() as u64);
+                        Ok(id)
+                    }
+                    Err(error) => {
+                        self.stats.logical_error(started);
+                        Err(error)
+                    }
                 }
-                Err(error) => {
-                    self.stats.logical_error(started);
-                    Err(error)
-                }
-            },
+            }
             InFlightPutClaim::Leader(guard) => {
+                let mut claim = ClaimSpan::new(self.stats.raw.as_deref(), Claim::Leader);
                 let result = self.put_remote(&id, bytes, &path, started).await;
+                claim.result(&result);
                 match result {
                     Ok(()) => {
                         guard.finish(Ok(()));
@@ -1054,30 +1133,45 @@ impl BlockStore for ObjectStoreBlockStore {
     async fn get(&self, id: &BlockId) -> Result<Vec<u8>> {
         let path = self.object_path(id)?;
         let started = self.stats.start(BlockOperation::Get);
-        if let Some(bytes) = self.cache.get(&id.0) {
+        if let Some(bytes) = self.cache.get_with_metrics(&id.0, self.local()) {
             self.stats.cache_hit();
             self.stats.success(started, bytes.len() as u64, 0);
             return Ok(bytes);
         }
-        let result = match self.store.get(&path).await {
+        let mut raw = RawSpan::new(self.stats.raw.as_deref(), Api::Get, 0);
+        let result = self.store.get(&path).await;
+        raw.result(&result, 0, 0);
+        let result = match result {
             Ok(result) => result,
             Err(error) => {
                 self.stats.error(started, &error);
                 return Err(map_get_error(error));
             }
         };
-        match result.bytes().await {
+        let mut raw = RawSpan::new(self.stats.raw.as_deref(), Api::Body, 0);
+        let result = result.bytes().await;
+        raw.result(
+            &result,
+            0,
+            result.as_ref().map_or(0, |bytes| bytes.len() as u64),
+        );
+        match result {
             Ok(bytes) => {
-                if id.0.len() == 1 + CONTENT_BLOCK_ID_HEX_CHARS && block_id(&bytes) != id.0 {
-                    self.cache.remove(&id.0);
+                if id.0.len() == 1 + CONTENT_BLOCK_ID_HEX_CHARS
+                    && block_id_with_metrics(&bytes, self.local()) != id.0
+                {
+                    self.cache.remove(&id.0, self.local());
                     self.stats.logical_error(started);
                     return Err(FsError::backend(
                         "object-store content-addressed block digest mismatch",
                     ));
                 }
-                self.cache.insert(&id.0, &bytes);
+                self.cache.insert(&id.0, &bytes, self.local());
                 self.stats.success(started, bytes.len() as u64, 0);
-                Ok(bytes.to_vec())
+                let mut copy = LocalSpan::new(self.local(), Local::ReturnCopy, bytes.len() as u64);
+                let returned = bytes.to_vec();
+                copy.success(returned.len() as u64);
+                Ok(returned)
             }
             Err(error) => {
                 self.stats.error(started, &error);
@@ -1096,13 +1190,19 @@ impl BlockStore for ObjectStoreBlockStore {
     async fn delete(&self, id: &BlockId) -> Result<()> {
         let path = self.object_path(id)?;
         let started = self.stats.start(BlockOperation::Delete);
-        if let Err(error) = self.store.head(&path).await {
+        let mut raw = RawSpan::new(self.stats.raw.as_deref(), Api::Head, 0);
+        let result = self.store.head(&path).await;
+        raw.result(&result, 0, 0);
+        if let Err(error) = result {
             self.stats.error(started, &error);
             return Err(map_not_found(error));
         }
-        match self.store.delete(&path).await {
+        let mut raw = RawSpan::new(self.stats.raw.as_deref(), Api::Delete, 0);
+        let result = self.store.delete(&path).await;
+        raw.result(&result, 0, 0);
+        match result {
             Ok(()) => {
-                self.cache.remove(&id.0);
+                self.cache.remove(&id.0, self.local());
                 self.stats.success(started, 0, 0);
                 Ok(())
             }
@@ -1176,9 +1276,13 @@ impl BlockStore for ObjectStoreBlockStore {
                 }
                 ReconcileCandidate::Delete => {}
             }
-            match self.store.delete(&object.location).await {
+            let mut raw = RawSpan::new(self.stats.raw.as_deref(), Api::ReconcileDelete, 0);
+            let result = self.store.delete(&object.location).await;
+            raw.result(&result, 0, 0);
+            match result {
                 Ok(()) | Err(object_store::Error::NotFound { .. }) => {
-                    self.cache.remove(&id.expect("validated direct block ID").0);
+                    self.cache
+                        .remove(&id.expect("validated direct block ID").0, self.local());
                     report.deleted = report.deleted.saturating_add(1);
                 }
                 Err(error) => {
@@ -1245,13 +1349,21 @@ fn map_get_error(error: object_store::Error) -> FsError {
     map_not_found(error)
 }
 
+#[cfg(test)]
 fn block_id(bytes: &[u8]) -> String {
+    block_id_with_metrics(bytes, None)
+}
+fn block_id_with_metrics(bytes: &[u8], local: Option<&LocalState>) -> String {
+    let mut hash = LocalSpan::new(local, Local::Digest, bytes.len() as u64);
     let digest = Sha256::digest(bytes);
+    hash.success(digest.len() as u64);
+    let mut encode = LocalSpan::new(local, Local::Encode, digest.len() as u64);
     let mut encoded = String::with_capacity(1 + CONTENT_BLOCK_ID_HEX_CHARS);
     encoded.push(BLOCK_ID_PREFIX);
     for byte in digest {
         encoded.push_str(&format!("{byte:02x}"));
     }
+    encode.success(encoded.len() as u64);
     encoded
 }
 
@@ -1991,7 +2103,7 @@ mod tests {
         let put = tokio::spawn(async move { waiting_store.put(bytes).await });
         tokio::task::yield_now().await;
 
-        store.cache.insert(&id, bytes);
+        store.cache.insert(&id, bytes, None);
         leader.finish(Ok(()));
         assert_eq!(put.await.unwrap().unwrap(), BlockId(id));
         assert_eq!(store.stats().puts, 1);

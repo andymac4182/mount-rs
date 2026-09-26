@@ -1,5 +1,10 @@
 //! Diagnostic-only allocator and process counters. Never enabled in production.
+#[path = "device_io.rs"]
+pub mod device_io;
+#[path = "resource_profile/sqlite_heap.rs"]
+mod sqlite_memory;
 use serde::Serialize;
+use sqlite_memory::heap as sqlite_heap;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 #[cfg(feature = "allocation-profiling")]
 use std::{
@@ -197,40 +202,7 @@ pub struct Snapshot {
     freed_bytes: u64,
     live_bytes: u64,
     network: Vec<Network>,
-}
-
-fn sqlite_heap() -> Result<(u64, u64), &'static str> {
-    let mut current = 0;
-    let mut peak = 0;
-    // SQLite owns the counters and synchronizes access; reset=0 leaves its
-    // lifetime high-water mark unchanged. Both output pointers are valid.
-    let status = unsafe {
-        rusqlite::ffi::sqlite3_status64(
-            rusqlite::ffi::SQLITE_STATUS_MEMORY_USED,
-            &mut current,
-            &mut peak,
-            0,
-        )
-    };
-    if status != rusqlite::ffi::SQLITE_OK {
-        return Err("SQLite memory counters unavailable");
-    }
-    Ok((
-        u64::try_from(current).map_err(|_| "negative SQLite heap usage")?,
-        u64::try_from(peak).map_err(|_| "negative SQLite heap peak")?,
-    ))
-}
-
-#[test]
-fn sqlite_foreign_heap_is_observed_separately_from_rust_allocations() {
-    let before = sqlite_heap().unwrap().0;
-    let connection = rusqlite::Connection::open_in_memory().unwrap();
-    connection.execute_batch("CREATE TABLE heap_probe (payload BLOB); INSERT INTO heap_probe VALUES (zeroblob(4096));").unwrap();
-    let during = sqlite_heap().unwrap();
-    assert!(during.0 >= before + 4096);
-    assert!(during.1 >= during.0);
-    drop(connection);
-    assert!(sqlite_heap().unwrap().0 < during.0);
+    os_io: device_io::Snapshot,
 }
 
 #[cfg(target_os = "macos")]
@@ -264,14 +236,58 @@ fn resident_bytes() -> Option<u64> {
 }
 
 impl Snapshot {
+    pub fn resident_bytes(&self) -> Option<u64> {
+        self.resident_bytes
+    }
     pub fn capture(clients: &[super::Client]) -> Result<Self, &'static str> {
-        if clients.is_empty() {
-            return Err("resource profile requires clients");
-        }
         let network = clients
             .iter()
             .map(|client| Network::capture(&client.connection))
             .collect();
+        Self::capture_network(network)
+    }
+
+    /// Boundary-only network capture; never used by the100ms process sampler.
+    pub fn capture_connections(connections: &[quinn::Connection]) -> Result<Self, &'static str> {
+        Self::capture_network(connections.iter().map(Network::capture).collect())
+    }
+    /// Explicit phase boundary only: the100ms sampler never selects or queries
+    /// disk counters. MOUNT_RS_PROFILE_IO=1 enables these new OS observations.
+    pub fn capture_connections_io_boundary(
+        connections: &[quinn::Connection],
+    ) -> Result<Self, &'static str> {
+        let mut snapshot = Self::capture_connections(connections)?;
+        snapshot.os_io = device_io::Snapshot::capture_from_env();
+        Ok(snapshot)
+    }
+    pub fn connection_deltas(&self, before: &Self) -> Result<serde_json::Value, &'static str> {
+        if self.network.len() != before.network.len() {
+            return Err("resource profile client count changed");
+        }
+        let deltas: Vec<_> = self
+            .network
+            .iter()
+            .zip(&before.network)
+            .enumerate()
+            .map(|(lane, (after, before))| {
+                Ok(serde_json::json!({"lane":lane,"quic":after.checked_delta(*before)?}))
+            })
+            .collect::<Result<_, &'static str>>()?;
+        Ok(serde_json::Value::Array(deltas))
+    }
+    /// Observe namespace/population/setup before any protocol clients exist.
+    pub fn capture_process() -> Result<Self, &'static str> {
+        Self::capture_network(Vec::new())
+    }
+    /// Collect own-process disk accounting and one explicitly selected host
+    /// device at a phase boundary. Missing counters remain diagnostic gaps.
+    pub fn capture_process_io_boundary() -> Result<Self, &'static str> {
+        let mut snapshot = Self::capture_process()?;
+        snapshot.os_io = device_io::Snapshot::capture_from_env();
+        Ok(snapshot)
+    }
+
+    fn capture_network(network: Vec<Network>) -> Result<Self, &'static str> {
         let resident_bytes = resident_bytes();
         let (sqlite_heap_bytes, sqlite_heap_peak_bytes) = sqlite_heap()?;
         let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
@@ -322,6 +338,7 @@ impl Snapshot {
             freed_bytes: total(|c| &c.freed_bytes),
             live_bytes: u64::try_from(live).map_err(|_| "inconsistent live allocation snapshot")?,
             network,
+            os_io: device_io::Snapshot::disabled(),
         })
     }
     pub fn delta(&self, before: &Self) -> Result<serde_json::Value, &'static str> {
@@ -354,6 +371,7 @@ impl Snapshot {
             "rust_allocated_bytes":allocation_profile.then_some(delta!(allocated_bytes)), "rust_freed_bytes":allocation_profile.then_some(delta!(freed_bytes)),
             "rust_live_start_bytes":allocation_profile.then_some(before.live_bytes), "rust_live_end_bytes":allocation_profile.then_some(self.live_bytes),
             "quic_client_side":network,
+            "os_io":self.os_io.delta(&before.os_io),
             "scope":"one process includes clients, servers, verification and background; System Rust allocations exclude foreign C allocators; QUIC UDP bytes exclude IP/UDP headers; atomic allocator instrumentation affects throughput"}),
         )
     }
@@ -391,4 +409,260 @@ fn allocation_churn_reconciles_live_bytes_through_shrink_and_growth() {
     assert_eq!(counters.allocs.load(Ordering::Relaxed), 1);
     assert_eq!(counters.frees.load(Ordering::Relaxed), 1);
     assert_eq!(counters.reallocs.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn process_resources_are_available_before_client_connections_exist() {
+    let before = Snapshot::capture(&[]).expect("setup process snapshot unavailable");
+    let after = Snapshot::capture_process().expect("setup process snapshot unavailable");
+    let delta = after.delta(&before).expect("setup process delta invalid");
+    assert!(delta["cpu_user_us"].is_number());
+}
+
+/// Fixed gauges only; cumulative CPU/network counters are phase boundaries.
+#[derive(Clone, Copy, Default)]
+pub struct ProcessSample {
+    pub resident_bytes: Option<u64>,
+    pub sqlite_heap_bytes: u64,
+    pub rust_live_bytes: Option<u64>,
+}
+#[derive(Clone, Default, serde::Serialize)]
+pub struct ProcessSummary {
+    pub samples: u64,
+    pub resident_peak_bytes: Option<u64>,
+    pub resident_unavailable_samples: u64,
+    pub sqlite_heap_peak_bytes: u64,
+    pub rust_live_peak_bytes: Option<u64>,
+    pub capture_errors: u64,
+}
+impl ProcessSummary {
+    pub fn observe(&mut self, sample: ProcessSample) {
+        self.samples += 1;
+        match sample.resident_bytes {
+            Some(bytes) => {
+                self.resident_peak_bytes = Some(self.resident_peak_bytes.unwrap_or(0).max(bytes))
+            }
+            None => self.resident_unavailable_samples += 1,
+        }
+        self.sqlite_heap_peak_bytes = self.sqlite_heap_peak_bytes.max(sample.sqlite_heap_bytes);
+        if let Some(bytes) = sample.rust_live_bytes {
+            self.rust_live_peak_bytes = Some(self.rust_live_peak_bytes.unwrap_or(0).max(bytes));
+        }
+    }
+}
+type SamplerReadings = (bool, ProcessSummary, ProcessSummary);
+type SamplerShared = (std::sync::Mutex<SamplerReadings>, std::sync::Condvar);
+pub struct ProcessSampler {
+    state: std::sync::Arc<SamplerShared>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+impl ProcessSampler {
+    pub fn start(interval: std::time::Duration) -> Result<Self, &'static str> {
+        Self::start_with(interval, || {
+            let snapshot = Snapshot::capture_process()?;
+            Ok(ProcessSample {
+                resident_bytes: snapshot.resident_bytes,
+                sqlite_heap_bytes: snapshot.sqlite_heap_bytes,
+                rust_live_bytes: cfg!(feature = "allocation-profiling")
+                    .then_some(snapshot.live_bytes),
+            })
+        })
+    }
+    pub fn start_with<F>(interval: std::time::Duration, capture: F) -> Result<Self, &'static str>
+    where
+        F: Fn() -> Result<ProcessSample, &'static str> + Send + 'static,
+    {
+        if interval.is_zero() {
+            return Err("sampler interval must be positive");
+        }
+        let mut summary = ProcessSummary::default();
+        match capture() {
+            Ok(sample) => summary.observe(sample),
+            Err(_) => summary.capture_errors += 1,
+        }
+        let state = std::sync::Arc::new((
+            std::sync::Mutex::new((false, summary.clone(), summary)),
+            std::sync::Condvar::new(),
+        ));
+        let thread_state = state.clone();
+        let worker = std::thread::Builder::new()
+            .name("qualification-process-sampler".into())
+            .spawn(move || {
+                let (lock, wake) = &*thread_state;
+                loop {
+                    let guard = lock.lock().unwrap();
+                    let (guard, _) = wake
+                        .wait_timeout_while(guard, interval, |state| !state.0)
+                        .unwrap();
+                    if guard.0 {
+                        break;
+                    }
+                    drop(guard);
+                    let sampled = capture();
+                    let mut guard = lock.lock().unwrap();
+                    match sampled {
+                        Ok(sample) => {
+                            guard.1.observe(sample);
+                            guard.2.observe(sample);
+                        }
+                        Err(_) => {
+                            guard.1.capture_errors += 1;
+                            guard.2.capture_errors += 1;
+                        }
+                    }
+                }
+            })
+            .map_err(|_| "sampler thread creation failed")?;
+        Ok(Self {
+            state,
+            worker: Some(worker),
+        })
+    }
+    pub fn checkpoint(&self) -> Result<ProcessSummary, &'static str> {
+        let mut guard = self.state.0.lock().map_err(|_| "sampler state poisoned")?;
+        Ok(std::mem::take(&mut guard.1))
+    }
+    fn stop(&mut self) -> Result<(), &'static str> {
+        {
+            let mut guard = self.state.0.lock().map_err(|_| "sampler state poisoned")?;
+            guard.0 = true;
+        }
+        self.state.1.notify_all();
+        if let Some(worker) = self.worker.take() {
+            worker.join().map_err(|_| "sampler worker panicked")?;
+        }
+        Ok(())
+    }
+    pub fn finish(mut self) -> Result<ProcessSummary, &'static str> {
+        self.stop()?;
+        let mut guard = self.state.0.lock().map_err(|_| "sampler state poisoned")?;
+        Ok(std::mem::take(&mut guard.2))
+    }
+}
+impl Drop for ProcessSampler {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
+}
+
+// Behavioral contracts for the bounded continuous sampler.
+#[cfg(test)]
+mod continuous_sampler_contracts {
+    use super::{ProcessSample, ProcessSampler, ProcessSummary};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn summary_retains_transient_resident_and_sqlite_peaks_in_constant_space() {
+        let mut summary = ProcessSummary::default();
+        let storage_size = std::mem::size_of_val(&summary);
+        summary.observe(ProcessSample {
+            resident_bytes: Some(10),
+            sqlite_heap_bytes: 5,
+            rust_live_bytes: None,
+        });
+        summary.observe(ProcessSample {
+            resident_bytes: Some(900),
+            sqlite_heap_bytes: 700,
+            rust_live_bytes: None,
+        });
+        for _ in 0..100_000 {
+            summary.observe(ProcessSample {
+                resident_bytes: Some(20),
+                sqlite_heap_bytes: 8,
+                rust_live_bytes: None,
+            });
+        }
+        assert_eq!(summary.samples, 100_002);
+        assert_eq!(summary.resident_peak_bytes, Some(900));
+        assert_eq!(summary.sqlite_heap_peak_bytes, 700);
+        assert_eq!(std::mem::size_of_val(&summary), storage_size);
+        // The summary exposes no sample history: its retained storage is fixed.
+        assert!(storage_size <= 128);
+    }
+
+    #[test]
+    fn unavailable_resident_sample_is_not_reported_as_zero() {
+        let mut summary = ProcessSummary::default();
+        summary.observe(ProcessSample {
+            resident_bytes: None,
+            sqlite_heap_bytes: 3,
+            rust_live_bytes: None,
+        });
+        assert_eq!(summary.resident_peak_bytes, None);
+        assert_eq!(summary.resident_unavailable_samples, 1);
+    }
+
+    #[test]
+    fn early_drop_joins_worker_and_stops_sampling() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let sampler = ProcessSampler::start_with(Duration::from_millis(1), move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+            let _ = sender.send(());
+            Ok(ProcessSample {
+                resident_bytes: Some(12),
+                sqlite_heap_bytes: 6,
+                rust_live_bytes: None,
+            })
+        })
+        .unwrap();
+        receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        drop(sampler);
+        let count = calls.load(Ordering::SeqCst);
+        // Joined worker owns the only sender; disconnect proves termination
+        // without sleeping and hoping no new sample appears.
+        while receiver.try_recv().is_ok() {}
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), count);
+    }
+
+    #[test]
+    fn transient_sqlite_allocation_is_observed_before_free() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let sampler = ProcessSampler::start_with(Duration::from_millis(2), move || {
+            let (heap, _) = super::sqlite_heap()?;
+            let _ = sender.send(heap);
+            Ok(ProcessSample {
+                resident_bytes: super::resident_bytes(),
+                sqlite_heap_bytes: heap,
+                rust_live_bytes: None,
+            })
+        })
+        .unwrap();
+        let baseline = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        let allocation = unsafe { rusqlite::ffi::sqlite3_malloc64(8 * 1024 * 1024) };
+        assert!(!allocation.is_null());
+        let observed = loop {
+            let heap = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+            if heap >= baseline + 8 * 1024 * 1024 {
+                break heap;
+            }
+        };
+        unsafe {
+            rusqlite::ffi::sqlite3_free(allocation);
+        }
+        let (final_heap, _) = super::sqlite_heap().unwrap();
+        assert!(final_heap < observed);
+        let summary = sampler.finish().unwrap();
+        assert!(summary.sqlite_heap_peak_bytes >= observed);
+    }
+
+    #[test]
+    fn capture_failure_is_retained_and_finish_is_bounded() {
+        let sampler = ProcessSampler::start_with(Duration::from_millis(1), || {
+            Err("process counters unavailable")
+        })
+        .unwrap();
+        let summary = sampler.finish().unwrap();
+        assert!(summary.capture_errors >= 1);
+        assert_eq!(summary.samples, 0);
+    }
 }

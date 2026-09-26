@@ -1,0 +1,405 @@
+{
+  "allocation_profile": false,
+  "build_profile": "release",
+  "rows": [
+    {
+      "clients": 10,
+      "document_bytes": 2222,
+      "drives": 10,
+      "elapsed_us": 2182,
+      "grants": 10,
+      "partitions": 5,
+      "profile": {
+        "entries": [
+          {
+            "calls": 40,
+            "elapsed_ns": 2158165,
+            "name": "catalog.load",
+            "units": 0
+          },
+          {
+            "calls": 40,
+            "elapsed_ns": 157081,
+            "name": "catalog.queue_wait",
+            "units": 0
+          },
+          {
+            "calls": 40,
+            "elapsed_ns": 2499,
+            "name": "catalog.pool_wait",
+            "units": 0
+          },
+          {
+            "calls": 80,
+            "elapsed_ns": 1413293,
+            "name": "catalog.backing_verify",
+            "units": 0
+          },
+          {
+            "calls": 40,
+            "elapsed_ns": 303837,
+            "name": "catalog.query_document_bytes",
+            "units": 88880
+          },
+          {
+            "calls": 40,
+            "elapsed_ns": 0,
+            "name": "catalog.pager_hits",
+            "units": 86
+          },
+          {
+            "calls": 40,
+            "elapsed_ns": 0,
+            "name": "catalog.pager_misses",
+            "units": 19
+          },
+          {
+            "calls": 40,
+            "elapsed_ns": 0,
+            "name": "catalog.pager_writes",
+            "units": 5
+          }
+        ]
+      },
+      "queries": 40,
+      "resources": {
+        "block_inputs": 0,
+        "block_outputs": 0,
+        "cpu_system_us": 1476,
+        "cpu_user_us": 389,
+        "involuntary_context_switches": 162,
+        "lifetime_peak_rss_bytes": 11288576,
+        "major_faults": 0,
+        "minor_faults": 12,
+        "quic_client_side": {
+          "congestion_events": 0,
+          "lost_bytes": 0,
+          "lost_packets": 0,
+          "rx_bytes": 0,
+          "rx_datagrams": 0,
+          "rx_ios": 0,
+          "sent_packets": 0,
+          "tx_bytes": 0,
+          "tx_datagrams": 0,
+          "tx_ios": 0
+        },
+        "rss_end_bytes": 11288576,
+        "rss_start_bytes": 11091968,
+        "rust_allocated_bytes": null,
+        "rust_allocations": null,
+        "rust_allocator_instrumented": false,
+        "rust_deallocations": null,
+        "rust_freed_bytes": null,
+        "rust_live_end_bytes": null,
+        "rust_live_start_bytes": null,
+        "rust_reallocations": null,
+        "schema": "mount-rs-process-resource-v1",
+        "scope": "one process includes clients, servers, verification and background; System Rust allocations exclude foreign C allocators; QUIC UDP bytes exclude IP/UDP headers; atomic allocator instrumentation affects throughput",
+        "sqlite_heap_end_bytes": 646256,
+        "sqlite_heap_lifetime_peak_bytes": 651376,
+        "sqlite_heap_start_bytes": 596272,
+        "voluntary_context_switches": 0
+      }
+    },
+    {
+      "clients": 100,
+      "document_bytes": 21557,
+      "drives": 100,
+      "elapsed_us": 2216,
+      "grants": 100,
+      "partitions": 50,
+      "profile": {
+        "entries": [
+          {
+            "calls": 40,
+            "elapsed_ns": 2178708,
+            "name": "catalog.load",
+            "units": 0
+          },
+          {
+            "calls": 40,
+            "elapsed_ns": 136250,
+            "name": "catalog.queue_wait",
+            "units": 0
+          },
+          {
+            "calls": 40,
+            "elapsed_ns": 1789,
+            "name": "catalog.pool_wait",
+            "units": 0
+          },
+          {
+            "calls": 80,
+            "elapsed_ns": 1469290,
+            "name": "catalog.backing_verify",
+            "units": 0
+          },
+          {
+            "calls": 40,
+            "elapsed_ns": 323167,
+            "name": "catalog.query_document_bytes",
+            "units": 862280
+          },
+          {
+            "calls": 40,
+            "elapsed_ns": 0,
+            "name": "catalog.pager_hits",
+            "units": 256
+          },
+          {
+            "calls": 40,
+            "elapsed_ns": 0,
+            "name": "catalog.pager_misses",
+            "units": 49
+          },
+          {
+            "calls": 40,
+            "elapsed_ns": 0,
+            "name": "catalog.pager_writes",
+            "units": 11
+          }
+        ]
+      },
+      "queries": 40,
+      "resources": {
+        "block_inputs": 0,
+        "block_outputs": 0,
+        "cpu_system_us": 1498,
+        "cpu_user_us": 368,
+        "involuntary_context_switches": 160,
+        "lifetime_peak_rss_bytes": 12484608,
+        "major_faults": 0,
+        "minor_faults": 13,
+        "quic_client_side": {
+          "congestion_events": 0,
+          "lost_bytes": 0,
+          "lost_packets": 0,
+          "rx_bytes": 0,
+          "rx_datagrams": 0,
+          "rx_ios": 0,
+          "sent_packets": 0,
+          "tx_bytes": 0,
+          "tx_datagrams": 0,
+          "tx_ios": 0
+        },
+        "rss_end_bytes": 12484608,
+        "rss_start_bytes": 12271616,
+        "rust_allocated_bytes": null,
+        "rust_allocations": null,
+        "rust_allocator_instrumented": false,
+        "rust_deallocations": null,
+        "rust_freed_bytes": null,
+        "rust_live_end_bytes": null,
+        "rust_live_start_bytes": null,
+        "rust_reallocations": null,
+        "schema": "mount-rs-process-resource-v1",
+        "scope": "one process includes clients, servers, verification and background; System Rust allocations exclude foreign C allocators; QUIC UDP bytes exclude IP/UDP headers; atomic allocator instrumentation affects throughput",
+        "sqlite_heap_end_bytes": 851056,
+        "sqlite_heap_lifetime_peak_bytes": 875680,
+        "sqlite_heap_start_bytes": 647472,
+        "voluntary_context_switches": 0
+      }
+    },
+    {
+      "clients": 1000,
+      "document_bytes": 220757,
+      "drives": 1000,
+      "elapsed_us": 2776,
+      "grants": 1000,
+      "partitions": 500,
+      "profile": {
+        "entries": [
+          {
+            "calls": 40,
+            "elapsed_ns": 2589333,
+            "name": "catalog.load",
+            "units": 0
+          },
+          {
+            "calls": 40,
+            "elapsed_ns": 122582,
+            "name": "catalog.queue_wait",
+            "units": 0
+          },
+          {
+            "calls": 40,
+            "elapsed_ns": 2041,
+            "name": "catalog.pool_wait",
+            "units": 0
+          },
+          {
+            "calls": 80,
+            "elapsed_ns": 1260792,
+            "name": "catalog.backing_verify",
+            "units": 0
+          },
+          {
+            "calls": 40,
+            "elapsed_ns": 990377,
+            "name": "catalog.query_document_bytes",
+            "units": 8830280
+          },
+          {
+            "calls": 40,
+            "elapsed_ns": 0,
+            "name": "catalog.pager_hits",
+            "units": 1888
+          },
+          {
+            "calls": 40,
+            "elapsed_ns": 0,
+            "name": "catalog.pager_misses",
+            "units": 337
+          },
+          {
+            "calls": 40,
+            "elapsed_ns": 0,
+            "name": "catalog.pager_writes",
+            "units": 59
+          }
+        ]
+      },
+      "queries": 40,
+      "resources": {
+        "block_inputs": 0,
+        "block_outputs": 0,
+        "cpu_system_us": 1518,
+        "cpu_user_us": 936,
+        "involuntary_context_switches": 160,
+        "lifetime_peak_rss_bytes": 19169280,
+        "major_faults": 0,
+        "minor_faults": 107,
+        "quic_client_side": {
+          "congestion_events": 0,
+          "lost_bytes": 0,
+          "lost_packets": 0,
+          "rx_bytes": 0,
+          "rx_datagrams": 0,
+          "rx_ios": 0,
+          "sent_packets": 0,
+          "tx_bytes": 0,
+          "tx_datagrams": 0,
+          "tx_ios": 0
+        },
+        "rss_end_bytes": 19169280,
+        "rss_start_bytes": 17416192,
+        "rust_allocated_bytes": null,
+        "rust_allocations": null,
+        "rust_allocator_instrumented": false,
+        "rust_deallocations": null,
+        "rust_freed_bytes": null,
+        "rust_live_end_bytes": null,
+        "rust_live_start_bytes": null,
+        "rust_reallocations": null,
+        "schema": "mount-rs-process-resource-v1",
+        "scope": "one process includes clients, servers, verification and background; System Rust allocations exclude foreign C allocators; QUIC UDP bytes exclude IP/UDP headers; atomic allocator instrumentation affects throughput",
+        "sqlite_heap_end_bytes": 2817136,
+        "sqlite_heap_lifetime_peak_bytes": 3046960,
+        "sqlite_heap_start_bytes": 1138992,
+        "voluntary_context_switches": 0
+      }
+    },
+    {
+      "clients": 10000,
+      "document_bytes": 2271257,
+      "drives": 10000,
+      "elapsed_us": 28711,
+      "grants": 10000,
+      "partitions": 5000,
+      "profile": {
+        "entries": [
+          {
+            "calls": 40,
+            "elapsed_ns": 25395748,
+            "name": "catalog.load",
+            "units": 0
+          },
+          {
+            "calls": 40,
+            "elapsed_ns": 178665,
+            "name": "catalog.queue_wait",
+            "units": 0
+          },
+          {
+            "calls": 40,
+            "elapsed_ns": 6502,
+            "name": "catalog.pool_wait",
+            "units": 0
+          },
+          {
+            "calls": 80,
+            "elapsed_ns": 2419419,
+            "name": "catalog.backing_verify",
+            "units": 0
+          },
+          {
+            "calls": 40,
+            "elapsed_ns": 22345081,
+            "name": "catalog.query_document_bytes",
+            "units": 90850280
+          },
+          {
+            "calls": 40,
+            "elapsed_ns": 0,
+            "name": "catalog.pager_hits",
+            "units": 76
+          },
+          {
+            "calls": 40,
+            "elapsed_ns": 0,
+            "name": "catalog.pager_misses",
+            "units": 22229
+          },
+          {
+            "calls": 40,
+            "elapsed_ns": 0,
+            "name": "catalog.pager_writes",
+            "units": 561
+          }
+        ]
+      },
+      "queries": 40,
+      "resources": {
+        "block_inputs": 0,
+        "block_outputs": 0,
+        "cpu_system_us": 16025,
+        "cpu_user_us": 11631,
+        "involuntary_context_switches": 217,
+        "lifetime_peak_rss_bytes": 82116608,
+        "major_faults": 0,
+        "minor_faults": 934,
+        "quic_client_side": {
+          "congestion_events": 0,
+          "lost_bytes": 0,
+          "lost_packets": 0,
+          "rx_bytes": 0,
+          "rx_datagrams": 0,
+          "rx_ios": 0,
+          "sent_packets": 0,
+          "tx_bytes": 0,
+          "tx_datagrams": 0,
+          "tx_ios": 0
+        },
+        "rss_end_bytes": 82116608,
+        "rss_start_bytes": 66813952,
+        "rust_allocated_bytes": null,
+        "rust_allocations": null,
+        "rust_allocator_instrumented": false,
+        "rust_deallocations": null,
+        "rust_freed_bytes": null,
+        "rust_live_end_bytes": null,
+        "rust_live_start_bytes": null,
+        "rust_reallocations": null,
+        "schema": "mount-rs-process-resource-v1",
+        "scope": "one process includes clients, servers, verification and background; System Rust allocations exclude foreign C allocators; QUIC UDP bytes exclude IP/UDP headers; atomic allocator instrumentation affects throughput",
+        "sqlite_heap_end_bytes": 20393072,
+        "sqlite_heap_lifetime_peak_bytes": 22690928,
+        "sqlite_heap_start_bytes": 5524784,
+        "voluntary_context_switches": 0
+      }
+    }
+  ],
+  "schema": "mount-rs-catalog-shape-profile-v1",
+  "scope": "one process, minimal fixture descriptors, authoritative SQLite catalog calls plus exact authorization; no network/filesystem/connection capacity claim; instrumentation affects throughput",
+  "source_revision": "d4935e1b113baee7fdb71ae1b82c5edfd74ee94f"
+}

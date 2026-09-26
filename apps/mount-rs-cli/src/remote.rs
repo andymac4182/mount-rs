@@ -1,4 +1,7 @@
 //! Remote service bootstrap and provider configuration.
+#[path = "remote_diagnostics.rs"]
+mod diagnostics;
+
 use crate::{
     CliError,
     config::parse_config_str,
@@ -24,15 +27,98 @@ struct ServiceConfig {
     version: u32,
     catalog: PathBuf,
     listen: SocketAddr,
+    #[serde(default)]
+    websocket_listen: Option<SocketAddr>,
     certificate: PathBuf,
     private_key: PathBuf,
     #[serde(default = "default_connection_limit")]
     max_connections: usize,
+    #[serde(default = "default_tidb_pool_max_connections")]
+    tidb_pool_max_connections: usize,
     #[serde(default)]
     cache: Option<crate::server_cache::CacheServiceConfig>,
+    #[cfg(all(feature = "local-oidc-fixture", debug_assertions))]
+    #[serde(default)]
+    local_oidc_fixture: Option<LocalOidcFixtureConfig>,
+}
+
+#[cfg(all(feature = "local-oidc-fixture", debug_assertions))]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalOidcFixtureConfig {
+    issuer: String,
+    audiences: Vec<String>,
+    jwks: PathBuf,
+}
+
+#[cfg(all(feature = "local-oidc-fixture", debug_assertions))]
+struct LocalOidcFixtureKeySource {
+    issuer: String,
+    audiences: Vec<String>,
+    verifier: mount_rs_service::auth::OidcVerifier,
+    rejection: mount_rs_service::auth::AuthError,
+}
+
+#[cfg(all(feature = "local-oidc-fixture", debug_assertions))]
+#[async_trait::async_trait]
+impl mount_rs_service::auth::OidcKeySource for LocalOidcFixtureKeySource {
+    async fn fetch(
+        &self,
+        issuer: &str,
+        audiences: &[String],
+    ) -> Result<mount_rs_service::auth::OidcVerifier, mount_rs_service::auth::AuthError> {
+        if issuer != self.issuer || audiences != self.audiences {
+            return Err(self.rejection.clone());
+        }
+        Ok(self.verifier.clone())
+    }
+}
+fn default_tidb_pool_max_connections() -> usize {
+    16
 }
 fn default_connection_limit() -> usize {
     mount_rs_service::server::RemoteServerOptions::default().max_connections
+}
+
+#[cfg(all(feature = "local-oidc-fixture", debug_assertions))]
+fn local_oidc_fixture_key_source(
+    config: &ServiceConfig,
+    path: &Path,
+) -> Result<Option<Arc<dyn mount_rs_service::auth::OidcKeySource>>, CliError> {
+    let Some(fixture) = &config.local_oidc_fixture else {
+        return Ok(None);
+    };
+    if !config.listen.ip().is_loopback()
+        || config
+            .websocket_listen
+            .is_some_and(|address| !address.ip().is_loopback())
+    {
+        return Err(CliError::usage(
+            "local OIDC fixture requires every remote listener to use a loopback address",
+        ));
+    }
+    let jwks_path = relative(path, &fixture.jwks);
+    let metadata = std::fs::metadata(&jwks_path)
+        .map_err(|_| CliError::runtime("cannot read local OIDC fixture JWKS"))?;
+    if metadata.len() > 256 * 1024 {
+        return Err(CliError::usage("local OIDC fixture JWKS is too large"));
+    }
+    let jwks = std::fs::read_to_string(jwks_path)
+        .map_err(|_| CliError::runtime("cannot read local OIDC fixture JWKS"))?;
+    let verifier = mount_rs_service::auth::OidcVerifier::from_jwks_json(
+        &fixture.issuer,
+        &fixture.audiences,
+        &jwks,
+    )
+    .map_err(|_| CliError::usage("invalid local OIDC fixture policy or JWKS"))?;
+    let rejection = mount_rs_service::auth::OidcVerifier::new("", &[], Vec::new())
+        .expect_err("empty OIDC fixture policy is invalid");
+    Ok(Some(Arc::new(LocalOidcFixtureKeySource {
+        issuer: fixture.issuer.clone(),
+        audiences: fixture.audiences.clone(),
+        verifier,
+        rejection,
+    })))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -59,12 +145,43 @@ struct MountConfig {
 struct RemoteProvider {
     kind: String,
     endpoint: SocketAddr,
+    #[serde(default)]
+    connection_transport: ConnectionMode,
+    #[serde(default)]
+    websocket_endpoint: Option<SocketAddr>,
     server_name: String,
     partition: String,
     credentials: Credentials,
     #[serde(default)]
     ca_certificate: Option<PathBuf>,
     mounts: Vec<DriveMount>,
+}
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ConnectionMode {
+    #[default]
+    Quic,
+    Websocket,
+    Auto,
+}
+impl RemoteProvider {
+    fn connection_selection(
+        &self,
+    ) -> Result<mount_rs_remote_client::connection::ConnectionTransport, CliError> {
+        use mount_rs_remote_client::connection::ConnectionTransport;
+        Ok(match self.connection_transport {
+            ConnectionMode::Quic => ConnectionTransport::Quic,
+            ConnectionMode::Websocket => ConnectionTransport::WebSocket(
+                self.websocket_endpoint
+                    .ok_or_else(|| CliError::usage("websocket_endpoint is required"))?,
+            ),
+            ConnectionMode::Auto => ConnectionTransport::Auto {
+                websocket: self
+                    .websocket_endpoint
+                    .ok_or_else(|| CliError::usage("websocket_endpoint is required"))?,
+            },
+        })
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -110,6 +227,7 @@ fn id(value: &str) -> bool {
 fn validate_mount(config: &MountConfig) -> Result<(), CliError> {
     version(config.version)?;
     let provider = &config.driver;
+    provider.connection_selection()?;
     if provider.kind != "remote"
         || !id(&provider.partition)
         || provider.server_name.is_empty()
@@ -165,45 +283,150 @@ pub(crate) async fn apply(path: &Path) -> Result<(), CliError> {
 }
 
 pub(crate) async fn serve(path: &Path) -> Result<(), CliError> {
-    let config: ServiceConfig = read(path)?;
-    version(config.version)?;
-    let server_options = mount_rs_service::server::RemoteServerOptions {
-        max_connections: config.max_connections,
-    };
-    server_options.validate().map_err(CliError::usage)?;
-    if let Some(cache) = &config.cache {
-        cache.validate()?;
-    }
-    let catalog = Arc::new(
-        SqliteCatalog::open(relative(path, &config.catalog))
-            .await
-            .map_err(|_| CliError::runtime("cannot open service catalog"))?,
+    let startup = mount_rs_service::startup::Startup::new(
+        diagnostics::enabled(std::env::var_os("MOUNT_RS_PROFILE_IO").as_deref()),
+        mount_rs_service::startup::Identity::cli(),
     );
-    let snapshot = catalog
-        .load_current()
-        .await
-        .map_err(|_| CliError::runtime("cannot load service catalog"))?;
-    let cert_bytes = std::fs::read(relative(path, &config.certificate))
-        .map_err(|_| CliError::runtime("cannot read TLS certificate"))?;
-    let key_bytes = std::fs::read(relative(path, &config.private_key))
-        .map_err(|_| CliError::runtime("cannot read TLS private key"))?;
-    let certs = rustls_pemfile::certs(&mut cert_bytes.as_slice())
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| CliError::usage("invalid TLS certificate"))?;
-    let key = rustls_pemfile::private_key(&mut key_bytes.as_slice())
-        .map_err(|_| CliError::usage("invalid TLS private key"))?
-        .ok_or_else(|| CliError::usage("missing TLS private key"))?;
+    serve_observed(path, &startup, &mut |snapshot| {
+        mount_rs_service::startup::Startup::write_record(&mut std::io::stderr().lock(), snapshot)
+    })
+    .await
+}
+
+async fn serve_observed(
+    path: &Path,
+    startup: &mount_rs_service::startup::Startup,
+    sink: &mut impl FnMut(&mount_rs_service::startup::Snapshot) -> std::io::Result<()>,
+) -> Result<(), CliError> {
+    startup.publish(sink);
+    let result = serve_resources(path, startup, sink).await;
+    startup.finish_startup(result.is_ok());
+    if result.is_err()
+        && startup
+            .snapshot()
+            .is_some_and(|snapshot| snapshot.cleanup_outcome.is_none())
+    {
+        let _ = startup.write_banks(&mut std::io::stderr().lock());
+    }
+    startup.publish(sink);
+    result
+}
+
+async fn serve_resources(
+    path: &Path,
+    startup: &mount_rs_service::startup::Startup,
+    sink: &mut impl FnMut(&mount_rs_service::startup::Snapshot) -> std::io::Result<()>,
+) -> Result<(), CliError> {
+    use mount_rs_service::startup::Stage;
+    let configuration = startup
+        .observe(
+            Stage::Configuration,
+            async {
+                let config: ServiceConfig = read(path)?;
+                version(config.version)?;
+                let server_options = mount_rs_service::server::RemoteServerOptions {
+                    max_connections: config.max_connections,
+                };
+                server_options.validate().map_err(CliError::usage)?;
+                if let Some(cache) = &config.cache {
+                    cache.validate()?;
+                }
+                Ok::<_, CliError>((config, server_options))
+            },
+            sink,
+        )
+        .await?;
+    let (config, server_options) = configuration;
+    #[cfg(all(feature = "local-oidc-fixture", debug_assertions))]
+    let local_oidc_fixture = startup
+        .observe(
+            Stage::Configuration,
+            async { local_oidc_fixture_key_source(&config, path) },
+            sink,
+        )
+        .await?;
+    let context = startup
+        .observe(
+            Stage::Configuration,
+            async { mount_rs_sdk::StorageContext::new(config.tidb_pool_max_connections) },
+            sink,
+        )
+        .await?;
+    let catalog = Arc::new(
+        startup
+            .observe(
+                Stage::CatalogOpen,
+                async {
+                    SqliteCatalog::open(relative(path, &config.catalog))
+                        .await
+                        .map_err(|_| CliError::runtime("cannot open service catalog"))
+                },
+                sink,
+            )
+            .await?,
+    );
+    let snapshot = startup
+        .observe(
+            Stage::CatalogLoad,
+            async {
+                catalog
+                    .load_current()
+                    .await
+                    .map_err(|_| CliError::runtime("cannot load service catalog"))
+            },
+            sink,
+        )
+        .await?;
+    if startup.enabled() {
+        startup.plan(
+            snapshot.partitions.len() as u64,
+            snapshot
+                .partitions
+                .values()
+                .map(|p| p.drives.len() as u64)
+                .sum(),
+        );
+    }
+    let (certs, key) = startup
+        .observe(
+            Stage::TlsMaterial,
+            async {
+                let cert_bytes = std::fs::read(relative(path, &config.certificate))
+                    .map_err(|_| CliError::runtime("cannot read TLS certificate"))?;
+                let key_bytes = std::fs::read(relative(path, &config.private_key))
+                    .map_err(|_| CliError::runtime("cannot read TLS private key"))?;
+                let certs = rustls_pemfile::certs(&mut cert_bytes.as_slice())
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| CliError::usage("invalid TLS certificate"))?;
+                let key = rustls_pemfile::private_key(&mut key_bytes.as_slice())
+                    .map_err(|_| CliError::usage("invalid TLS private key"))?
+                    .ok_or_else(|| CliError::usage("missing TLS private key"))?;
+                Ok::<_, CliError>((certs, key))
+            },
+            sink,
+        )
+        .await?;
     let (uid, gid) = effective_identity();
-    let cache = config
-        .cache
-        .as_ref()
-        .map(|cache| crate::server_cache::ServerCache::start(cache, path))
-        .transpose()?;
+    let cache = startup
+        .observe(
+            Stage::CacheStart,
+            async {
+                config
+                    .cache
+                    .as_ref()
+                    .map(|cache| crate::server_cache::ServerCache::start(cache, path))
+                    .transpose()
+            },
+            sink,
+        )
+        .await?;
     let mut runtimes = Vec::new();
+    let mut observer = None;
     let result = async {
         let mut dispatcher = mount_rs_service::dispatch::DriveDispatcher::new(catalog.clone());
         for (partition_id, partition) in &snapshot.partitions {
             for (drive_id, drive) in &partition.drives {
+                let (options, decorator) = startup.observe(Stage::DriveConfig, async {
                 let spec = parse_config_str(
                     &serde_json::json!({"version":1,"driver":drive.driver}).to_string(),
                     path.parent().unwrap_or(Path::new(".")),
@@ -223,56 +446,151 @@ pub(crate) async fn serve(path: &Path) -> Result<(), CliError> {
                         "server blob cache requires concurrent_writes for split-storage drives",
                     ));
                 }
-                let runtime = DriverRuntime::open_with_block_decorator(
-                    &options,
-                    uid,
-                    gid,
-                    decorator
-                        .as_ref()
-                        .map(|d| d as &dyn mount_rs_sdk::BlockStoreDecorator),
-                )
-                .await?;
-                dispatcher
-                    .register_definition(
-                        partition_id,
-                        drive_id,
-                        drive.driver.clone(),
-                        runtime.driver(),
+                Ok::<_, CliError>((options, decorator))
+                }, sink).await?;
+                let runtime = startup
+                    .observe(
+                        Stage::DriveOpen,
+                        DriverRuntime::open_with_storage_context(
+                            &options,
+                            uid,
+                            gid,
+                            decorator
+                                .as_ref()
+                                .map(|d| d as &dyn mount_rs_sdk::BlockStoreDecorator),
+                            Some(&context),
+                        ),
+                        sink,
                     )
-                    .map_err(CliError::usage)?;
+                    .await?;
                 runtimes.push(runtime);
+                startup
+                    .observe(
+                        Stage::DriveRegister,
+                        async {
+                            dispatcher
+                                .register_definition(
+                                    partition_id,
+                                    drive_id,
+                                    drive.driver.clone(),
+                                    runtimes.last().expect("just opened runtime").driver(),
+                                )
+                                .map_err(CliError::usage)
+                        },
+                        sink,
+                    )
+                    .await?;
+                startup.registered();
             }
         }
+        #[cfg(all(feature = "local-oidc-fixture", debug_assertions))]
+        let authenticator = Arc::new(match &local_oidc_fixture {
+            Some(source) => mount_rs_service::auth::CatalogAuthenticator::with_key_source(
+                catalog.clone(),
+                source.clone(),
+            ),
+            None => mount_rs_service::auth::CatalogAuthenticator::new(catalog.clone()),
+        });
+        #[cfg(not(all(feature = "local-oidc-fixture", debug_assertions)))]
         let authenticator = Arc::new(mount_rs_service::auth::CatalogAuthenticator::new(
             catalog.clone(),
         ));
-        let mut signal = CtrlCHandler::install().await?;
-        let server = mount_rs_service::server::RemoteServer::bind_with_options(
-            config.listen,
-            certs,
-            key,
-            Arc::new(dispatcher),
-            authenticator,
-            server_options,
-        )
-        .await
-        .map_err(|_| CliError::runtime("cannot start remote service"))?;
+        let mut signal = startup
+            .observe(Stage::ListenerBind, CtrlCHandler::install(), sink)
+            .await?;
+        let dispatcher = Arc::new(dispatcher);
+        let websocket = if let Some(address) = config.websocket_listen {
+            Some(
+                startup
+                    .observe(
+                        Stage::ListenerBind,
+                        async {
+                            mount_rs_service::websocket::WebSocketServer::bind_with_options(
+                                address,
+                                certs.clone(),
+                                key.clone_key(),
+                                dispatcher.clone(),
+                                authenticator.clone(),
+                                server_options,
+                            )
+                            .await
+                            .map_err(|_| CliError::runtime("cannot start TLS websocket service"))
+                        },
+                        sink,
+                    )
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let server = match startup
+            .observe(
+                Stage::ListenerBind,
+                mount_rs_service::server::RemoteServer::bind_with_diagnostics(
+                    config.listen,
+                    certs,
+                    key,
+                    dispatcher,
+                    authenticator,
+                    server_options,
+                    mount_rs_service::server::RemoteTransferLimits::default(),
+                    startup.enabled(),
+                ),
+                sink,
+            )
+            .await
+        {
+            Ok(server) => server,
+            Err(_) => {
+                if let Some(websocket) = websocket {
+                    websocket.close().await;
+                }
+                return Err(CliError::runtime("cannot start remote service"));
+            }
+        };
+        observer = server.diagnostics();
+        startup.finish_startup(true);
+        startup.publish(sink);
+        if let Some(websocket) = &websocket {
+            println!(
+                "remote TLS websocket listening at {}",
+                websocket.local_addr()
+            );
+        }
         println!("remote listening at {}", server.local_addr());
         let result = signal.wait().await;
         server.close().await;
+        if let Some(websocket) = websocket {
+            websocket.close().await;
+        }
         result
     }
     .await;
+    if result.is_err() {
+        startup.finish_startup(false);
+        startup.publish(sink);
+        let _ = startup.write_banks(&mut std::io::stderr().lock());
+    }
+    let cleanup = startup.begin(Stage::Cleanup);
     let mut shutdown_error = None;
     for runtime in runtimes.iter().rev() {
         if let Err(error) = runtime.shutdown().await {
             shutdown_error.get_or_insert_with(|| CliError::from(error));
         }
     }
+    if let Err(error) = context.close().await {
+        shutdown_error.get_or_insert_with(|| CliError::from(error));
+    }
     if let Some(cache) = cache {
         cache.shutdown().await;
     }
-    result.and(shutdown_error.map_or(Ok(()), Err))
+    cleanup.finish(shutdown_error.is_none());
+    startup.finish_cleanup(shutdown_error.is_none());
+    let outcome = result.and(shutdown_error.map_or(Ok(()), Err));
+    if let Some(observer) = observer {
+        diagnostics::emit(&observer);
+    }
+    outcome
 }
 
 pub(crate) async fn mount(path: &Path) -> Result<(), CliError> {
@@ -306,12 +624,13 @@ pub(crate) async fn mount(path: &Path) -> Result<(), CliError> {
             )
         }
     };
-    let connection = mount_rs_remote_client::connection::RemoteConnection::connect(
+    let connection = mount_rs_remote_client::connection::RemoteConnection::connect_with_transport(
         config.driver.endpoint,
         &config.driver.server_name,
         roots,
         config.driver.partition.clone(),
         credentials,
+        config.driver.connection_selection()?,
     )
     .await
     .map_err(|_| CliError::runtime("remote connection failed"))?;
@@ -403,14 +722,175 @@ pub(crate) fn validate(path: &Path) -> Result<(), CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn startup_failure_reports_real_memory_and_sqlite_opens_before_bind() {
+        use base64::Engine;
+        use mount_rs_service::startup::{Identity, Outcome, Startup};
+        let directory = tempfile::tempdir().unwrap();
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let pem = |label: &str, bytes: &[u8]| {
+            format!(
+                "-----BEGIN {label}-----\n{}\n-----END {label}-----\n",
+                base64::engine::general_purpose::STANDARD.encode(bytes)
+            )
+        };
+        std::fs::write(
+            directory.path().join("cert.pem"),
+            pem("CERTIFICATE", cert.cert.der()),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.path().join("key.pem"),
+            pem("PRIVATE KEY", &cert.signing_key.serialize_der()),
+        )
+        .unwrap();
+        std::fs::create_dir(directory.path().join("blocked.sqlite")).unwrap();
+        let catalog = SqliteCatalog::open(directory.path().join("catalog.sqlite"))
+            .await
+            .unwrap();
+        let (uid, gid) = effective_identity();
+        let document = serde_json::json!({"revision":0,"partitions":{"private_partition":{"drives":{
+            "a_private_memory":{"driver":{"kind":"memory"}},
+            "b_private_sqlite":{"driver":{"kind":"sqlite","database":"good.sqlite","uid":uid,"gid":gid}},
+            "c_private_failure":{"driver":{"kind":"sqlite","database":"blocked.sqlite"}}
+        }}},"issuer_policies":{},"grants":{}});
+        catalog
+            .compare_and_swap(0, serde_json::from_value(document).unwrap())
+            .await
+            .unwrap();
+        let path = directory.path().join("service.json");
+        std::fs::write(&path, serde_json::json!({"version":1,"catalog":"catalog.sqlite","listen":"127.0.0.1:0","certificate":"cert.pem","private_key":"key.pem"}).to_string()).unwrap();
+        let startup = Startup::new(true, Identity::cli());
+        let mut output = Vec::new();
+        let result = serve_observed(&path, &startup, &mut |snapshot| {
+            Startup::write_record(&mut output, snapshot)
+        })
+        .await;
+        let error = result.unwrap_err();
+        let snapshot = startup.snapshot().unwrap();
+        assert_eq!(snapshot.open_started, 3, "{error}");
+        assert_eq!(snapshot.open_success, 2);
+        assert_eq!(snapshot.open_error, 1);
+        assert_eq!(snapshot.registered_drives, 2);
+        assert_eq!(snapshot.terminal_outcome, Outcome::Error);
+        assert_eq!(snapshot.stages[10].started, 0);
+        assert!(directory.path().join("good.sqlite").is_file());
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("startup_diagnostics "));
+        for secret in [
+            "private_partition",
+            "a_private_memory",
+            "b_private_sqlite",
+            "c_private_failure",
+            "good.sqlite",
+            "blocked.sqlite",
+        ] {
+            assert!(!output.contains(secret));
+        }
+    }
+    #[test]
+    fn websocket_remote_configuration_is_explicit() {
+        let mut value = valid();
+        value["driver"]["connection_transport"] = serde_json::json!("websocket");
+        value["driver"]["websocket_endpoint"] = serde_json::json!("127.0.0.1:4434");
+        let config: MountConfig = serde_json::from_value(value).expect("TLS websocket config");
+        assert!(validate_mount(&config).is_ok());
+    }
+
+    #[test]
+    fn automatic_remote_selection_requires_explicit_tls_endpoint() {
+        for mode in ["websocket", "auto"] {
+            let mut value = valid();
+            value["driver"]["connection_transport"] = serde_json::json!(mode);
+            assert!(validate_mount(&serde_json::from_value(value.clone()).unwrap()).is_err());
+            value["driver"]["websocket_endpoint"] = serde_json::json!("127.0.0.1:4434");
+            assert!(validate_mount(&serde_json::from_value(value).unwrap()).is_ok());
+        }
+        let mut value = valid();
+        value["driver"]["connection_transport"] = serde_json::json!("plaintext");
+        assert!(serde_json::from_value::<MountConfig>(value).is_err());
+    }
+
     #[test]
     fn server_connection_capacity_is_explicit_with_compatible_default() {
         let mut value = serde_json::json!({"version":1,"catalog":"catalog.sqlite","listen":"127.0.0.1:4433","certificate":"cert.pem","private_key":"key.pem"});
         let config: ServiceConfig = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(config.max_connections, 128);
+        assert_eq!(config.tidb_pool_max_connections, 16);
         value["max_connections"] = serde_json::json!(1024);
         let config: ServiceConfig = serde_json::from_value(value).unwrap();
         assert_eq!(config.max_connections, 1024);
+    }
+
+    #[tokio::test]
+    async fn invalid_pool_bound_fails_before_opening_server_resources() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("service.json");
+        std::fs::write(&path,serde_json::json!({"version":1,"catalog":"absent/catalog.sqlite","listen":"127.0.0.1:0","certificate":"absent.pem","private_key":"absent-key.pem","tidb_pool_max_connections":0}).to_string()).unwrap();
+        let error = serve(&path).await.unwrap_err();
+        assert!(
+            error.to_string().contains("maximum must be positive"),
+            "{error}"
+        );
+        assert!(!directory.path().join("absent").exists());
+    }
+
+    #[cfg(not(all(feature = "local-oidc-fixture", debug_assertions)))]
+    #[test]
+    fn normal_build_rejects_local_oidc_fixture_configuration() {
+        let value = serde_json::json!({
+            "version":1,"catalog":"catalog.sqlite","listen":"127.0.0.1:4433",
+            "certificate":"cert.pem","private_key":"key.pem",
+            "local_oidc_fixture":{
+                "issuer":"https://issuer.example.com","audiences":["mount-rs"],
+                "jwks":"fixture.jwks.json"
+            }
+        });
+        assert!(serde_json::from_value::<ServiceConfig>(value).is_err());
+    }
+
+    #[cfg(all(feature = "local-oidc-fixture", debug_assertions))]
+    #[test]
+    fn debug_feature_accepts_explicit_local_oidc_fixture_configuration() {
+        let value = serde_json::json!({
+            "version":1,"catalog":"catalog.sqlite","listen":"127.0.0.1:4433",
+            "certificate":"cert.pem","private_key":"key.pem",
+            "local_oidc_fixture":{
+                "issuer":"https://issuer.example.com","audiences":["mount-rs"],
+                "jwks":"fixture.jwks.json"
+            }
+        });
+        let config: ServiceConfig = serde_json::from_value(value).unwrap();
+        let fixture = config.local_oidc_fixture.unwrap();
+        assert_eq!(fixture.issuer, "https://issuer.example.com");
+        assert_eq!(fixture.audiences, ["mount-rs"]);
+        assert_eq!(fixture.jwks, Path::new("fixture.jwks.json"));
+    }
+
+    #[cfg(all(feature = "local-oidc-fixture", debug_assertions))]
+    #[tokio::test]
+    async fn debug_fixture_rejects_public_listener_before_opening_resources() {
+        for (listen, websocket) in [("0.0.0.0:0", "127.0.0.1:0"), ("127.0.0.1:0", "0.0.0.0:0")] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("service.json");
+            std::fs::write(
+                &path,
+                serde_json::json!({
+                    "version":1,"catalog":"absent/catalog.sqlite","listen":listen,
+                    "websocket_listen":websocket,
+                    "certificate":"absent.pem","private_key":"absent-key.pem",
+                    "local_oidc_fixture":{
+                        "issuer":"https://issuer.example.com","audiences":["mount-rs"],
+                        "jwks":"absent.jwks.json"
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let error = serve(&path).await.unwrap_err();
+            assert!(error.to_string().contains("loopback"), "{error}");
+            assert!(!directory.path().join("absent").exists());
+        }
     }
 
     #[test]
@@ -488,5 +968,46 @@ mod tests {
             snapshot.partitions["blue"].drives["data"].driver,
             serde_json::json!({"kind":"memory"})
         );
+    }
+
+    #[tokio::test]
+    async fn operator_apply_rejects_compact_contradiction_before_catalog_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let document = directory.path().join("catalog.json");
+        let path = directory.path().join("apply.json");
+        std::fs::write(
+            &document,
+            serde_json::json!({
+                "revision":0,
+                "partitions":{"red":{"drives":{"data":{"driver":{
+                    "kind":"splitstore","storage":{
+                        "metadata":{"kind":"sqlite","path":"metadata.sqlite"},
+                        "blocks":{"kind":"sqlite","path":"blocks.sqlite"},
+                        "compact_inode_updates":true,
+                        "inode_updates":false
+                    }
+                }}}}},
+                "issuer_policies":{},"grants":{}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "version":1,"catalog":"absent/service.sqlite",
+                "document":"catalog.json","expected_revision":0
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let error = apply(&path).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("config.driver.storage.inode_updates"),
+            "{error}"
+        );
+        assert!(!directory.path().join("absent").exists());
     }
 }

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
 import sdk from "../index.js"
+import { verifyFoundationdbInodeLayouts } from "./foundationdb-inodes.mjs"
 
 const { createChunkedDriver, shutdownFoundationdbClientNetwork } = sdk
 
@@ -199,6 +200,7 @@ if (process.env.MOUNT_RS_NAPI_FOUNDATIONDB !== "1") {
     console.log(`FOUNDATIONDB_NAPI_CONCURRENT_VISIBILITY_PASS prefix=${prefix}`)
     await concurrentB.shutdown()
     await concurrentA.shutdown()
+    await verifyFoundationdbInodeLayouts(createChunkedDriver, clusterFile, prefix)
     shutdownFoundationdbClientNetwork()
     shutdownFoundationdbClientNetwork()
     await assert.rejects(

@@ -115,3 +115,34 @@ Peer requests use separately owned headers and shared immutable payloads. Succes
 Placement runs at most `placement_concurrency` jobs (default 4, maximum 32), with at most two replica PUTs per job. The maintenance queue and pending-byte reservation remain bounded. Reads start one peer query, then hedge after `hedge_delay_ms` (default 25 ms, clamped to one quarter of the overall deadline); at most two queries run simultaneously and `peer_query_limit` bounds total attempts. The first valid response wins and cancels outstanding queries. Directory hints and individual corrupt/missing replicas remain best effort.
 
 `peer_transfer_bytes` defaults to 128 MiB and is split equally between incoming and outgoing work. Each admitted transfer reserves twice the maximum blob plus header bound before allocating a body, and queued QUIC payload owners retain their charges. The budget must fit one such reservation in each half and cannot exceed 1 GiB. Cache RAM, staging, transport receive windows, provider buffers and bookkeeping are separate limits; this is not a whole-process RSS cap.
+
+## Authenticated failure qualification
+
+`crates/mount-rs-blob-cache/tests/distributed_failure.rs` composes real pinned
+mTLS QUIC peers, `CachedBlockStore`, bounded RAM/disk, and a counted backing
+store. It checks exact binary bytes through cold, RAM, disk-only, peer, and
+100 simultaneous miss paths; the real peer response is held until every cold
+reader has entered, and disabling the miss lock makes the exact-one peer-request
+oracle fail with 100 requests. The suite stops and restarts a peer at the same socket
+with persisted disk entries; and forces stale hints, checksum corruption and
+budget eviction. The repeated 28-byte fixture performs 125 logical reads
+with two backing GETs (56 bytes), including the forced outage fallback.
+This measures backing-read savings for that fixture, not production throughput.
+
+The suite also checks identical opaque IDs in distinct registered Drive,
+cluster and backing scopes, rejected unregistered sibling scopes and forbidden
+Partitions with no denied PUT side effects, and a controlled successful/failed
+backing flush before real peer placement. Peer trust grants Partitions; exact
+scope registration determines cache availability. Client per-Drive OIDC grants
+are enforced separately by the service. A split SQLite SDK write is acknowledged,
+all cache/peer owners are closed, and a fresh undecorated SDK reopens the exact
+persisted file bytes. Cancellation checks owned directory removal and UDP socket
+reuse. Tests have 15-second outer bounds and explicit cleanup; cache workers are
+drained before invalidation so a late fill cannot hide a peer failure.
+
+Run `scripts/cargo-shared test -p mount-rs-blob-cache --all-targets --locked`.
+These are loopback qualification tests. Capacity eviction is not OS ENOSPC;
+the synthetic flush barrier is not power-loss testing; the SQLite check is an
+orderly fresh reopen; and Redis's separate live fixtures do not compose Redis
+with the real-peer failure suite. Cross-host and production capacity remain
+separate qualification work.

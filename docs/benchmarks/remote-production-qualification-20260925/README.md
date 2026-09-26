@@ -1,0 +1,44 @@
+# Remote production qualification baselines
+
+These retained compact artifacts precede the storage fixes. Source identity,
+configuration, operation counts, exact-byte verification, cleanup, and measured
+resource limits are recorded in the artifacts and
+[qualification report](../../remote-production-qualification.md).
+
+The TiDB comparison uses the preserved release saturation binary from merged
+`cd92c7d4` plus planning-only `c74ca180`. Virgin ten-server startup failed before
+I/O; the preprovisioned control passed. VM block counters are not physical Mac
+SSD IOPS. Authentication is synthetic in that data-path fixture.
+
+The local provider probe uses the preserved public NAPI addon from `180a4552`.
+All four providers completed 400 create/read/unlink lifecycles and 400 exact
+byte reads with zero failures. Durability and execution environments differ;
+these short measurements identify profiling targets and are not a fair
+production performance ranking.
+
+Raw binaries, checksums, scripts, logs, and observer samples remain under the
+owned local `/private/tmp/mount-rs-qualification-baseline` directory. Paired
+after-fix measurements and final acceptance evidence are still required.
+
+The after-fix investigation also retains `tidb-pool-churn.json` (including an
+unexplained failed warmup) and `tidb-pool-retention.json` (two alternating
+before/after pairs plus final virgin startup). The retention correction removes
+reconnect amplification and reduces measured client sessions from 310 to 20.
+Steady throughput improvement and full production scale remain unproven.
+
+
+`fdb-split-inode-after.json` retains corrected split-prefix native diagnostics
+with all 400 byte checks per workload. `pglite-typed-paired.json` retains two
+alternating pairs per workload, 3,200 complete-byte checks and explicitly scoped
+process disk-byte/host interval counters. `pglite-typed-wire-before.json` and
+`pglite-typed-wire-after.json` retain the complete eight-case message experiment.
+These do not qualify physical datastore IOPS, canonical R2, or the full target.
+
+`task4-ten-drive-population-before.json` retains the first actual ten-Drive,
+10,000-file TiDB checkpoint. Namespace and payload preparation completed, but
+the fresh byte oracle hit its 600-second phase budget after 7,076 files; the
+point is unqualified. It includes the complete terminal journal, selected SQL
+and VM counter windows, host observer summary, source/binary identities and raw
+hashes. Known harness cleanup defects prevent interpreting its zero cleanup
+error count as proven drain. Its process-only QUIC placeholders are not traffic
+measurements; use the separately captured primary-connection network windows.

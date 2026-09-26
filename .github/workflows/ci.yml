@@ -175,6 +175,7 @@ jobs:
           echo "W26_NAPI_BUILD_SOURCE_CLEAN_PASS native_path=$native_path"
       - name: Verify Ozone with SQLite and PGlite metadata
         env:
+          MOUNT_RS_PROFILE_IO: '1'
           MOUNT_RS_OZONE_COMPOSITIONS: '1'
           MOUNT_RS_OZONE_NODE_COMPOSITION: '1'
           MOUNT_RS_OZONE_IOPS: '1'
@@ -239,6 +240,7 @@ jobs:
           echo "W26_NAPI_BUILD_SOURCE_CLEAN_PASS native_path=$native_path"
       - name: Verify durable TiDB metadata over Apache Ozone chunks
         env:
+          MOUNT_RS_PROFILE_IO: '1'
           MOUNT_RS_OZONE_TIDB_COMPOSITION: '1'
           MOUNT_RS_TIDB_NAPI: '1'
           MOUNT_RS_TIDB_IOPS: '1'
@@ -281,6 +283,7 @@ jobs:
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
       - name: Verify durable FoundationDB metadata over Apache Ozone chunks
         env:
+          MOUNT_RS_PROFILE_IO: '1'
           MOUNT_RS_OZONE_FOUNDATIONDB_COMPOSITION: '1'
           MOUNT_RS_FOUNDATIONDB_TOPOLOGY: durable
           MOUNT_RS_FOUNDATIONDB_NAPI: '1'
@@ -921,6 +924,18 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
+      - name: Verify guarded backing observer and pilot controls
+        timeout-minutes: 2
+        run: |
+          env -u NAPI_RS_FORCE_WASI -u NAPI_RS_WASI_FLAVOR -u NODE_PATH \
+            -u MOUNT_RS_PROFILE_IO -u MOUNT_RS_TRACE_STORAGE \
+            NAPI_RS_NATIVE_LIBRARY_PATH="$GITHUB_WORKSPACE/benchmarks/storage/capture-native.cjs" \
+            node --test --test-concurrency=1 --test-timeout=10000 \
+            benchmarks/storage/backing-observer.test.mjs \
+            benchmarks/storage/backing-engine-transport.test.mjs \
+            benchmarks/storage/owned-backing-pilot.test.mjs \
+            benchmarks/storage/owned-backing-pilot-entry.test.mjs \
+            scripts/verify-owned-backing-pilot.test.mjs
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
         with:
           version: 11
@@ -1002,6 +1017,18 @@ jobs:
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-fuse-init.mjs
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-fuse-session.mjs
       - run: pnpm --dir tests/pglite install --frozen-lockfile
+      - name: Verify provider matrix CLI process helper
+        env:
+          MOUNT_RS_TEST_POSIX_GROUP_SIGNALS: '1'
+        run: node --test tests/provider_matrix/cli-run.test.mjs
+      - name: Precompile PGlite provider matrix and Rust CLI
+        # The timed fixture runs the standalone matrix binary, the root CLI,
+        # and two filtered CLI lib tests with these graphs and shared target.
+        timeout-minutes: 15
+        run: |
+          ./scripts/cargo-shared build --locked --manifest-path tests/provider_matrix/Cargo.toml
+          ./scripts/cargo-shared build --locked -p mount-rs-cli
+          ./scripts/cargo-shared test --no-run --lib --locked -p mount-rs-cli
       - name: Verify PGlite integration and restart recovery
         timeout-minutes: 10
         run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" ./scripts/test-pglite.sh

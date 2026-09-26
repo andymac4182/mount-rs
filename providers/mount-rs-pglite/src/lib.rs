@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use mount_rs_core::diagnostics::storage::{Operation as StorageOperation, Span as StorageSpan};
 use mount_rs_core::{
     ErrorCode, FsError, LoadedSnapshot, Result, StateStore, backend_error, snapshot_conflict,
 };
@@ -125,7 +126,9 @@ impl PgliteStore {
         if !self.close_gate.is_open() {
             return Err(connection_closed());
         }
+        let mut wait = StorageSpan::new(StorageOperation::PgliteClientWait);
         let client = self.client.lock().await;
+        wait.finish_success(0);
         if client.is_none() || !self.close_gate.is_open() {
             return Err(connection_closed());
         }

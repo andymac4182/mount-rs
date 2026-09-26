@@ -385,6 +385,17 @@ async function checkFactories(): Promise<void> {
   const sharedChunkedOptions: JsChunkedOptions = { ...chunkedOptions, ownershipMode: "shared" }
   sharedChunkedOptions.checkoutPath = "/database"
   void sharedChunkedOptions
+  const compactChunkedOptions: JsChunkedOptions = {
+    ...chunkedOptions,
+    compactInodeUpdates: true,
+  }
+  void compactChunkedOptions
+  const invalidCompactOption: JsChunkedOptions = {
+    ...chunkedOptions,
+    // @ts-expect-error compactInodeUpdates is a boolean.
+    compactInodeUpdates: "true",
+  }
+  void invalidCompactOption
   const invalidOwnership: JsChunkedOptions = {
     ...chunkedOptions,
     // @ts-expect-error ownershipMode only accepts exclusive or shared.

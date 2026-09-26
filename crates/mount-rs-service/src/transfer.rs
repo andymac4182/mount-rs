@@ -156,6 +156,22 @@ impl Budgets {
             control,
         })
     }
+    /// WebSocket aggregation coexists with decoded bodies. Reserve its raw
+    /// wire allocation before reading any body chunks, independently of decode.
+    pub(crate) fn websocket_wire(
+        &self,
+        header: Header,
+    ) -> Result<OwnedSemaphorePermit, FrameError> {
+        let control = header.kind == Kind::Control && header.control_len <= SMALL_CONTROL_BYTES;
+        take(
+            if control {
+                &self.ingress_control
+            } else {
+                &self.ingress_data
+            },
+            header.control_len + header.payload_len,
+        )
+    }
     // Classify small generic envelopes after parsing, then move their ingress
     // bytes and operation into the data lane before dispatch. Completed data
     // requests therefore never retain renewal's reserved control capacity.

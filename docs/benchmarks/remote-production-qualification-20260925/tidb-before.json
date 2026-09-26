@@ -1,0 +1,745 @@
+{
+  "source": {
+    "base_revision": "cd92c7d4c4a46f5752c2f2af0d6983b6e4a3e39d",
+    "plan_commit": "c74ca180",
+    "binary": "quic_tidb_saturation-c0435d8042221d27",
+    "build_profile": "release",
+    "features": [
+      "resource-profiling"
+    ],
+    "fixture_limit": "separate-drive requires TiDB; initial SQLite attempt failed before I/O",
+    "measurement": "virgin failure and provisioned passing control retained"
+  },
+  "environment": {
+    "topology": "single PD/TiKV/TiDB v8.5.7",
+    "docker_memory_bytes": 8318976000,
+    "docker_cpus": 14,
+    "architecture": "ARM64",
+    "scope": "single-host diagnostic; no replicated production capacity claim"
+  },
+  "virgin": {
+    "servers": 10,
+    "clients": 10,
+    "drive_count": 10,
+    "driver_replicas": 100,
+    "inode_updates": true,
+    "separate_drives": true,
+    "verification_status": "skipped",
+    "verified_files": 0,
+    "cleanup_error": null,
+    "work_error": "server setup failures: [\"benchmark TiDB provider open failed: ESTALE: stale file handle, TiDB metadata lease\", \"benchmark TiDB provider open failed: ESTALE: stale file handle, TiDB metadata lease\", \"benchmark TiDB provider open failed: TiDB concurrent mode, backing ID, and fence disagree\", \"benchmark TiDB provider open failed: ESTALE: stale file handle, TiDB metadata lease\", \"benchmark TiDB provider open failed: ESTALE: stale file handle, TiDB metadata lease\", \"benchmark TiDB provider open failed: ESTALE: stale file handle, TiDB metadata lease\", \"benchmark TiDB provider open failed: ESTALE: stale file handle, TiDB metadata lease\", \"benchmark TiDB provider open failed: ESTALE: stale file handle, TiDB metadata lease\", \"benchmark TiDB provider open failed: ESTALE: stale file handle, TiDB metadata lease\"]",
+    "failed_phase": null,
+    "driver_setup_seconds": null,
+    "setup_seconds": null,
+    "stages": []
+  },
+  "provisioned": {
+    "servers": 10,
+    "clients": 10,
+    "drive_count": 10,
+    "driver_replicas": 100,
+    "inode_updates": true,
+    "separate_drives": true,
+    "verification_status": "passed",
+    "verified_files": 10,
+    "cleanup_error": null,
+    "work_error": null,
+    "failed_phase": null,
+    "driver_setup_seconds": 1.045085708,
+    "setup_seconds": 0.146906584,
+    "stages": [
+      {
+        "mode": "Read",
+        "total_iops": 1895.2096454256302,
+        "elapsed_seconds_including_drain": 3.003361667,
+        "failures": 0,
+        "read": {
+          "completed": 5692,
+          "p50_us_upper": 8192,
+          "p95_us_upper": 8192,
+          "p99_us_upper": 16384
+        },
+        "write": {
+          "completed": 0,
+          "p50_us_upper": 0,
+          "p95_us_upper": 0,
+          "p99_us_upper": 0
+        },
+        "io_profile": {
+          "entries": [
+            {
+              "calls": 5692,
+              "elapsed_ns": 925755575,
+              "name": "catalog.load",
+              "units": 0
+            },
+            {
+              "calls": 5692,
+              "elapsed_ns": 69018662,
+              "name": "catalog.queue_wait",
+              "units": 0
+            },
+            {
+              "calls": 5692,
+              "elapsed_ns": 1078862,
+              "name": "catalog.pool_wait",
+              "units": 0
+            },
+            {
+              "calls": 11384,
+              "elapsed_ns": 651320933,
+              "name": "catalog.backing_verify",
+              "units": 0
+            },
+            {
+              "calls": 5692,
+              "elapsed_ns": 93096869,
+              "name": "catalog.query_document_bytes",
+              "units": 11594604
+            },
+            {
+              "calls": 5692,
+              "elapsed_ns": 0,
+              "name": "catalog.pager_hits",
+              "units": 11384
+            },
+            {
+              "calls": 5692,
+              "elapsed_ns": 0,
+              "name": "catalog.pager_misses",
+              "units": 0
+            },
+            {
+              "calls": 5692,
+              "elapsed_ns": 0,
+              "name": "catalog.pager_writes",
+              "units": 0
+            },
+            {
+              "calls": 5692,
+              "elapsed_ns": 28885639287,
+              "name": "service.dispatch",
+              "units": 0
+            },
+            {
+              "calls": 5692,
+              "elapsed_ns": 948155523,
+              "name": "service.authorization",
+              "units": 0
+            },
+            {
+              "calls": 5692,
+              "elapsed_ns": 612099,
+              "name": "service.handle_lock_wait",
+              "units": 0
+            },
+            {
+              "calls": 5692,
+              "elapsed_ns": 77861379,
+              "name": "service.audit",
+              "units": 0
+            },
+            {
+              "calls": 11384,
+              "elapsed_ns": 1909639,
+              "name": "filesystem.gate_wait",
+              "units": 0
+            },
+            {
+              "calls": 5692,
+              "elapsed_ns": 6104296876,
+              "name": "provider.blocks.get_bytes",
+              "units": 23314432
+            },
+            {
+              "calls": 11384,
+              "elapsed_ns": 21723915932,
+              "name": "provider.inode.load_if_changed",
+              "units": 0
+            }
+          ]
+        },
+        "resources": {
+          "block_inputs": 0,
+          "block_outputs": 0,
+          "cpu_system_us": 2097173,
+          "cpu_user_us": 839574,
+          "involuntary_context_switches": 103686,
+          "lifetime_peak_rss_bytes": 43040768,
+          "major_faults": 0,
+          "minor_faults": 0,
+          "quic_client_side": {
+            "congestion_events": 0,
+            "lost_bytes": 0,
+            "lost_packets": 0,
+            "rx_bytes": 24116005,
+            "rx_datagrams": 18038,
+            "rx_ios": 18038,
+            "sent_packets": 11553,
+            "tx_bytes": 734570,
+            "tx_datagrams": 11553,
+            "tx_ios": 11553
+          },
+          "rss_end_bytes": 43040768,
+          "rss_start_bytes": 43040768,
+          "rust_allocated_bytes": null,
+          "rust_allocations": null,
+          "rust_allocator_instrumented": false,
+          "rust_deallocations": null,
+          "rust_freed_bytes": null,
+          "rust_live_end_bytes": null,
+          "rust_live_start_bytes": null,
+          "rust_reallocations": null,
+          "schema": "mount-rs-process-resource-v1",
+          "scope": "one process includes clients, servers, verification and background; System Rust allocations exclude foreign C allocators; QUIC UDP bytes exclude IP/UDP headers; atomic allocator instrumentation affects throughput",
+          "sqlite_heap_end_bytes": 6462560,
+          "sqlite_heap_lifetime_peak_bytes": 6470752,
+          "sqlite_heap_start_bytes": 6462560,
+          "voluntary_context_switches": 1
+        }
+      },
+      {
+        "mode": "Write",
+        "total_iops": 680.1342326477721,
+        "elapsed_seconds_including_drain": 3.0097,
+        "failures": 0,
+        "read": {
+          "completed": 0,
+          "p50_us_upper": 0,
+          "p95_us_upper": 0,
+          "p99_us_upper": 0
+        },
+        "write": {
+          "completed": 2047,
+          "p50_us_upper": 16384,
+          "p95_us_upper": 32768,
+          "p99_us_upper": 65536
+        },
+        "io_profile": {
+          "entries": [
+            {
+              "calls": 2047,
+              "elapsed_ns": 371815823,
+              "name": "catalog.load",
+              "units": 0
+            },
+            {
+              "calls": 2047,
+              "elapsed_ns": 21133610,
+              "name": "catalog.queue_wait",
+              "units": 0
+            },
+            {
+              "calls": 2047,
+              "elapsed_ns": 411130,
+              "name": "catalog.pool_wait",
+              "units": 0
+            },
+            {
+              "calls": 4094,
+              "elapsed_ns": 269124900,
+              "name": "catalog.backing_verify",
+              "units": 0
+            },
+            {
+              "calls": 2047,
+              "elapsed_ns": 38806112,
+              "name": "catalog.query_document_bytes",
+              "units": 4169739
+            },
+            {
+              "calls": 2047,
+              "elapsed_ns": 0,
+              "name": "catalog.pager_hits",
+              "units": 4094
+            },
+            {
+              "calls": 2047,
+              "elapsed_ns": 0,
+              "name": "catalog.pager_misses",
+              "units": 0
+            },
+            {
+              "calls": 2047,
+              "elapsed_ns": 0,
+              "name": "catalog.pager_writes",
+              "units": 0
+            },
+            {
+              "calls": 2047,
+              "elapsed_ns": 29619785594,
+              "name": "service.dispatch",
+              "units": 0
+            },
+            {
+              "calls": 2047,
+              "elapsed_ns": 380701880,
+              "name": "service.authorization",
+              "units": 0
+            },
+            {
+              "calls": 2047,
+              "elapsed_ns": 216087,
+              "name": "service.handle_lock_wait",
+              "units": 0
+            },
+            {
+              "calls": 2047,
+              "elapsed_ns": 32761876,
+              "name": "service.audit",
+              "units": 0
+            },
+            {
+              "calls": 2047,
+              "elapsed_ns": 5931856846,
+              "name": "provider.blocks.put_bytes",
+              "units": 8384512
+            },
+            {
+              "calls": 2047,
+              "elapsed_ns": 1357413014,
+              "name": "provider.blocks.flush",
+              "units": 0
+            },
+            {
+              "calls": 2047,
+              "elapsed_ns": 1888014223,
+              "name": "provider.blocks.verify_authority",
+              "units": 0
+            },
+            {
+              "calls": 2047,
+              "elapsed_ns": 3726572786,
+              "name": "provider.inode.load_if_changed",
+              "units": 0
+            },
+            {
+              "calls": 2047,
+              "elapsed_ns": 16267829782,
+              "name": "provider.inode.publish_cas",
+              "units": 0
+            },
+            {
+              "calls": 2047,
+              "elapsed_ns": 0,
+              "name": "provider.inode_returned_bytes",
+              "units": 9133714
+            },
+            {
+              "calls": 2047,
+              "elapsed_ns": 0,
+              "name": "provider.inode_serialized_bytes",
+              "units": 9133714
+            }
+          ]
+        },
+        "resources": {
+          "block_inputs": 0,
+          "block_outputs": 0,
+          "cpu_system_us": 1189380,
+          "cpu_user_us": 552371,
+          "involuntary_context_switches": 64097,
+          "lifetime_peak_rss_bytes": 44089344,
+          "major_faults": 0,
+          "minor_faults": 1,
+          "quic_client_side": {
+            "congestion_events": 0,
+            "lost_bytes": 0,
+            "lost_packets": 0,
+            "rx_bytes": 211287,
+            "rx_datagrams": 4221,
+            "rx_ios": 4221,
+            "sent_packets": 6511,
+            "tx_bytes": 8725882,
+            "tx_datagrams": 6511,
+            "tx_ios": 6511
+          },
+          "rss_end_bytes": 44089344,
+          "rss_start_bytes": 44072960,
+          "rust_allocated_bytes": null,
+          "rust_allocations": null,
+          "rust_allocator_instrumented": false,
+          "rust_deallocations": null,
+          "rust_freed_bytes": null,
+          "rust_live_end_bytes": null,
+          "rust_live_start_bytes": null,
+          "rust_reallocations": null,
+          "schema": "mount-rs-process-resource-v1",
+          "scope": "one process includes clients, servers, verification and background; System Rust allocations exclude foreign C allocators; QUIC UDP bytes exclude IP/UDP headers; atomic allocator instrumentation affects throughput",
+          "sqlite_heap_end_bytes": 6462560,
+          "sqlite_heap_lifetime_peak_bytes": 6470752,
+          "sqlite_heap_start_bytes": 6462560,
+          "voluntary_context_switches": 1
+        }
+      }
+    ]
+  },
+  "datastore": [
+    {
+      "mode": "read",
+      "logical_successes": 5692,
+      "logical_failures": 0,
+      "sample_elapsed_seconds": 3.618502292,
+      "selected_per_logical_success": {
+        "pd": {
+          "process_cpu_seconds_total": 0.00028285312719606456
+        },
+        "tidb": {
+          "pd_client_cmd_handle_cmds_duration_seconds_count": 6.017392832044975,
+          "pd_client_cmd_handle_failed_cmds_duration_seconds_count": 0.0,
+          "pd_client_request_circuit_breaker_count": 0.0,
+          "pd_client_request_handle_query_region_batch_size_count": 0.0,
+          "pd_client_request_handle_query_region_best_batch_size_count": 0.0,
+          "pd_client_request_handle_requests_duration_seconds_count": 1.3258959943780746,
+          "pd_client_request_handle_tso_batch_size_count": 1.3258959943780746,
+          "pd_client_request_handle_tso_best_batch_size_count": 1.3258959943780746,
+          "pd_client_request_query_region_batch_send_latency_count": 0.0,
+          "pd_client_request_tso_batch_send_latency_count": 1.3258959943780746,
+          "process_cpu_seconds_total": 0.001447645818692902,
+          "tidb_executor_statement_total": 3.0,
+          "tidb_server_query_statement_processed_keys_count": 2.0,
+          "tidb_server_query_statement_rpc_count_count": 3.0,
+          "tidb_server_query_total": 3.0,
+          "tidb_tikvclient_request_retry_times_count": 0.0,
+          "tidb_tikvclient_request_seconds_count": 5.005621925509487
+        },
+        "tikv": {
+          "process_cpu_seconds_total": 0.0005270555165144061,
+          "tikv_grpc_msg_duration_seconds_count": 3.8886156008432886,
+          "tikv_storage_command_total": 0.7868938861560084,
+          "tikv_storage_rocksdb_perf[metric=block_cache_filter_hit_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_cache_hit_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_cache_index_hit_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_checksum_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_decompress_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_read_byte]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_read_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_read_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_seek_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=bloom_memtable_hit_count]": 0.43359100491918484,
+          "tikv_storage_rocksdb_perf[metric=bloom_memtable_miss_count]": 0.4314827828531272,
+          "tikv_storage_rocksdb_perf[metric=bloom_sst_hit_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=bloom_sst_miss_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=db_condition_wait_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=db_mutex_lock_nanos]": 31.230850316233308,
+          "tikv_storage_rocksdb_perf[metric=decrypt_data_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=encrypt_data_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=filter_block_read_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=find_table_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_cpu_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_from_memtable_count]": 0.8640196767392833,
+          "tikv_storage_rocksdb_perf[metric=get_from_memtable_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_from_output_files_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_post_process_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_read_bytes]": 1771.2368236120872,
+          "tikv_storage_rocksdb_perf[metric=get_snapshot_time]": 113.13123682361208,
+          "tikv_storage_rocksdb_perf[metric=index_block_read_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=internal_delete_skipped_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=internal_key_skipped_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=internal_recent_skipped_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=iter_next_cpu_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=iter_prev_cpu_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=iter_read_bytes]": 85.98137737174983,
+          "tikv_storage_rocksdb_perf[metric=iter_seek_cpu_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=new_table_block_iter_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=new_table_iterator_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=next_on_memtable_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=prev_on_memtable_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=read_filter_block_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=read_index_block_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_child_seek_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_child_seek_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_internal_seek_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_max_heap_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_min_heap_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_on_memtable_count]": 0.432536893886156,
+          "tikv_storage_rocksdb_perf[metric=seek_on_memtable_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=user_key_comparison_count]": 19.42111735769501
+        }
+      },
+      "vm_io_per_logical_success": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 3.5980323260716793,
+            "wios": 0.0010541110330288123
+          },
+          "net_dev": {
+            "rx_bytes": 270.670063246662,
+            "rx_packets": 2.5897751229796206,
+            "tx_bytes": 283.3778988053408,
+            "tx_packets": 2.5481377371749825
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 106.84504567814477,
+            "read_bytes": 0.0,
+            "syscr": 4.73085031623331,
+            "syscw": 2.7928671820098385,
+            "wchar": 203.555340829234,
+            "write_bytes": 5.756851721714687
+          }
+        },
+        "tidb": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 0.0,
+            "wios": 0.0
+          },
+          "net_dev": {
+            "rx_bytes": 15740.907413914265,
+            "rx_packets": 12.06570625439213,
+            "tx_bytes": 10844.174279690795,
+            "tx_packets": 13.203092059030217
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 14967.972066057624,
+            "read_bytes": 0.0,
+            "syscr": 19.41514406184118,
+            "syscw": 10.504040758959944,
+            "wchar": 9974.87139845397,
+            "write_bytes": 0.0
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 4.317638791286015,
+            "wios": 0.0015811665495432186
+          },
+          "net_dev": {
+            "rx_bytes": 4377.532677442024,
+            "rx_packets": 7.588193956430077,
+            "tx_bytes": 14848.75650035137,
+            "tx_packets": 5.503338018271258
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 149.81974701335207,
+            "read_bytes": 0.0,
+            "syscr": 4.507905832747716,
+            "syscw": 3.6324666198172872,
+            "wchar": 438.0753689388616,
+            "write_bytes": 4.317638791286015
+          }
+        }
+      },
+      "sessions_by_source": {
+        "mount-rs-tidb-mount-rs-tidb-GSTKki-pd1": {
+          "end": {},
+          "start": {}
+        },
+        "mount-rs-tidb-mount-rs-tidb-GSTKki-tidb": {
+          "end": {
+            "tidb_server_connections{resource_group=\"default\"}": 310.0,
+            "tidb_server_internal_sessions": 13.0
+          },
+          "start": {
+            "tidb_server_connections{resource_group=\"default\"}": 310.0,
+            "tidb_server_internal_sessions": 13.0
+          }
+        },
+        "mount-rs-tidb-mount-rs-tidb-GSTKki-tikv1": {
+          "end": {},
+          "start": {}
+        }
+      },
+      "series_coverage_incomplete": true,
+      "counter_resets": []
+    },
+    {
+      "mode": "write",
+      "logical_successes": 2047,
+      "logical_failures": 0,
+      "sample_elapsed_seconds": 3.546942125,
+      "selected_per_logical_success": {
+        "pd": {
+          "process_cpu_seconds_total": 0.0008646800195407912
+        },
+        "tidb": {
+          "pd_client_cmd_handle_cmds_duration_seconds_count": 21.050806057645335,
+          "pd_client_cmd_handle_failed_cmds_duration_seconds_count": 0.0,
+          "pd_client_request_circuit_breaker_count": 0.0,
+          "pd_client_request_handle_query_region_batch_size_count": 0.0,
+          "pd_client_request_handle_query_region_best_batch_size_count": 0.0,
+          "pd_client_request_handle_requests_duration_seconds_count": 4.843673668783586,
+          "pd_client_request_handle_tso_batch_size_count": 4.843673668783586,
+          "pd_client_request_handle_tso_best_batch_size_count": 4.843673668783586,
+          "pd_client_request_query_region_batch_send_latency_count": 0.0,
+          "pd_client_request_tso_batch_send_latency_count": 4.843673668783586,
+          "process_cpu_seconds_total": 0.003116756228627259,
+          "tidb_executor_statement_total": 10.0,
+          "tidb_server_query_statement_processed_keys_count": 2.0,
+          "tidb_server_query_statement_rpc_count_count": 10.0,
+          "tidb_server_query_total": 10.0,
+          "tidb_tikvclient_request_retry_times_count": 0.0,
+          "tidb_tikvclient_request_seconds_count": 8.015632633121642
+        },
+        "tikv": {
+          "process_cpu_seconds_total": 0.0014655593551538837,
+          "tikv_grpc_msg_duration_seconds_count": 6.856863702979971,
+          "tikv_storage_command_total": 4.274059599413777,
+          "tikv_storage_rocksdb_perf[metric=block_cache_filter_hit_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_cache_hit_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_cache_index_hit_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_checksum_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_decompress_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_read_byte]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_read_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_read_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_seek_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=bloom_memtable_hit_count]": 3.5964826575476305,
+          "tikv_storage_rocksdb_perf[metric=bloom_memtable_miss_count]": 5.696140693698095,
+          "tikv_storage_rocksdb_perf[metric=bloom_sst_hit_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=bloom_sst_miss_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=db_condition_wait_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=db_mutex_lock_nanos]": 276.9120664386908,
+          "tikv_storage_rocksdb_perf[metric=decrypt_data_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=encrypt_data_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=filter_block_read_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=find_table_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_cpu_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_from_memtable_count]": 5.842208109428432,
+          "tikv_storage_rocksdb_perf[metric=get_from_memtable_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_from_output_files_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_post_process_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_read_bytes]": 5356.996091841719,
+          "tikv_storage_rocksdb_perf[metric=get_snapshot_time]": 1175.638495359062,
+          "tikv_storage_rocksdb_perf[metric=index_block_read_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=internal_delete_skipped_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=internal_key_skipped_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=internal_recent_skipped_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=iter_next_cpu_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=iter_prev_cpu_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=iter_read_bytes]": 323.34733756717145,
+          "tikv_storage_rocksdb_perf[metric=iter_seek_cpu_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=new_table_block_iter_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=new_table_iterator_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=next_on_memtable_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=prev_on_memtable_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=read_filter_block_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=read_index_block_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_child_seek_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_child_seek_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_internal_seek_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_max_heap_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_min_heap_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_on_memtable_count]": 4.646311675622862,
+          "tikv_storage_rocksdb_perf[metric=seek_on_memtable_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=user_key_comparison_count]": 114.73229115779189
+        }
+      },
+      "vm_io_per_logical_success": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 20.009770395701025,
+            "wios": 0.006350757205666829
+          },
+          "net_dev": {
+            "rx_bytes": 968.4875427454812,
+            "rx_packets": 9.107962872496335,
+            "tx_bytes": 1012.8119198827552,
+            "tx_packets": 8.922325354176845
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 393.7664875427455,
+            "read_bytes": 0.0,
+            "syscr": 16.40107474352711,
+            "syscw": 9.40742550073278,
+            "wchar": 680.8114313629702,
+            "write_bytes": 32.01563263312164
+          }
+        },
+        "tidb": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 0.0,
+            "wios": 0.0
+          },
+          "net_dev": {
+            "rx_bytes": 22119.319980459208,
+            "rx_packets": 29.85295554469956,
+            "tx_bytes": 23161.411333659013,
+            "tx_packets": 31.78456277479238
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 20225.112359550563,
+            "read_bytes": 0.0,
+            "syscr": 49.791890571568146,
+            "syscw": 27.978016609672693,
+            "wchar": 21074.662921348314,
+            "write_bytes": 0.0
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 0.0,
+            "rios": 0.0,
+            "wbytes": 20692.10356619443,
+            "wios": 3.8470933072789446
+          },
+          "net_dev": {
+            "rx_bytes": 14326.056179775282,
+            "rx_packets": 10.604787493893502,
+            "tx_bytes": 11154.832437713727,
+            "tx_packets": 9.862725940400587
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 393.99951148021495,
+            "read_bytes": 0.0,
+            "syscr": 8.983878847093306,
+            "syscw": 9.73961895456766,
+            "wchar": 13912.622374206156,
+            "write_bytes": 20570.043966780653
+          }
+        }
+      },
+      "sessions_by_source": {
+        "mount-rs-tidb-mount-rs-tidb-GSTKki-pd1": {
+          "end": {},
+          "start": {}
+        },
+        "mount-rs-tidb-mount-rs-tidb-GSTKki-tidb": {
+          "end": {
+            "tidb_server_connections{resource_group=\"default\"}": 310.0,
+            "tidb_server_internal_sessions": 13.0
+          },
+          "start": {
+            "tidb_server_connections{resource_group=\"default\"}": 310.0,
+            "tidb_server_internal_sessions": 13.0
+          }
+        },
+        "mount-rs-tidb-mount-rs-tidb-GSTKki-tikv1": {
+          "end": {},
+          "start": {}
+        }
+      },
+      "series_coverage_incomplete": false,
+      "counter_resets": []
+    }
+  ],
+  "qualification_status": "diagnostic baseline, not production acceptance",
+  "authentication": "synthetic load tokens with authoritative Drive grants; no OIDC signature work"
+}

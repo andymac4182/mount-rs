@@ -1,6 +1,18 @@
 #!/bin/sh
 set -eu
 
+backing_pilot=0
+if [ "${MOUNT_RS_BACKING_PILOT:-0}" = "1" ]; then
+  if [ "${MOUNT_RS_RUSTFS_COMBO_ONLY:-0}" != "1" ] ||
+     [ -z "${MOUNT_RS_BACKING_ENGINE_CAPABILITY:-}" ] ||
+     [ -z "${MOUNT_RS_BACKING_PILOT_OUTPUT:-}" ]; then
+    echo "OWNED_BACKING_PILOT_FAILURE pilot_operator_binding_required" >&2
+    exit 2
+  fi
+  backing_pilot=1
+  umask 077
+fi
+
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 . "$repo_dir/scripts/cargo-shared-env.sh"
 rustfs_image="rustfs/rustfs:1.0.0@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff"
@@ -615,24 +627,31 @@ if [ "${MOUNT_RS_RUSTFS_COMBO_ONLY:-0}" != "1" ]; then
 fi
 export RUSTFS_SQLITE_METADATA_FILE="$run_dir/sqlite-metadata.db"
 
-if bounded_docker_startup_command "run-service" docker run --detach \
-  --name "$container_name" \
-  --label "com.mount-rs.rustfs-test=$ownership_label" \
-  --label "com.mount-rs.rustfs-test-run=$container_name" \
-  --mount "type=bind,src=$data_dir,dst=/data" \
-  --publish 127.0.0.1::9000 \
-  --env "RUSTFS_ACCESS_KEY=$rustfs_access_key" \
-  --env "RUSTFS_SECRET_KEY=$rustfs_secret_key" \
-  --env "RUSTFS_REGION=$rustfs_region" \
-  --env RUSTFS_ADDRESS=:9000 \
-  --env RUSTFS_CONSOLE_ENABLE=false \
-  "$rustfs_image" /data >/dev/null 2>&1; then
-  :
-else
-  docker_run_status=$?
-  echo "Could not start RustFS container with status $docker_run_status" >&2
-  exit 1
-fi
+start_rustfs_service() {
+  set --
+  if [ "$backing_pilot" = 1 ]; then
+    set -- --cidfile "$run_dir/rustfs-service-1.cid"
+  fi
+  if bounded_docker_startup_command "run-service" docker run --detach "$@" \
+    --name "$container_name" \
+    --label "com.mount-rs.rustfs-test=$ownership_label" \
+    --label "com.mount-rs.rustfs-test-run=$container_name" \
+    --mount "type=bind,src=$data_dir,dst=/data" \
+    --publish 127.0.0.1::9000 \
+    --env "RUSTFS_ACCESS_KEY=$rustfs_access_key" \
+    --env "RUSTFS_SECRET_KEY=$rustfs_secret_key" \
+    --env "RUSTFS_REGION=$rustfs_region" \
+    --env RUSTFS_ADDRESS=:9000 \
+    --env RUSTFS_CONSOLE_ENABLE=false \
+    "$rustfs_image" /data >/dev/null 2>&1; then
+    :
+  else
+    docker_run_status=$?
+    echo "Could not start RustFS container with status $docker_run_status" >&2
+    exit 1
+  fi
+}
+start_rustfs_service
 
 refresh_endpoint() {
   rustfs_port=""
@@ -797,6 +816,16 @@ if [ "${MOUNT_RS_RUSTFS_COMBO_ONLY:-0}" = "1" ]; then
   if [ -z "${RUSTFS_COMBO_COMMAND:-}" ]; then
     echo "RUSTFS_COMBO_COMMAND is required for combo-only mode" >&2
     exit 2
+  fi
+  if [ "$backing_pilot" -eq 1 ]; then
+    MOUNT_RS_BACKING_CID_DIR="$run_dir" \
+    MOUNT_RS_BACKING_RUSTFS_OWNER="$container_name" \
+    MOUNT_RS_BACKING_RUSTFS_RECEIPT="$run_dir/backing-rustfs.json" \
+      node "$repo_dir/benchmarks/storage/owned-backing-pilot.mjs" fixture-rustfs
+    export MOUNT_RS_BACKING_RUSTFS_OWNER="$container_name"
+    export MOUNT_RS_BACKING_RUSTFS_RECEIPT="$run_dir/backing-rustfs.json"
+    export MOUNT_RS_BACKING_EXPECT_R2_ENDPOINT="$rustfs_endpoint"
+    export MOUNT_RS_BACKING_EXPECT_R2_BUCKET="$rustfs_bucket"
   fi
   python3 "$repo_dir/scripts/rustfs-combo-runner.py" \
     "${RUSTFS_COMBO_TIMEOUT_SECONDS:-900}" \

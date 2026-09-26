@@ -20,9 +20,13 @@ import {
   MOUNTX_PINNED_REVISION,
   providerById,
   providerSummary,
+  nativeStorageDiagnostics,
   DEFAULT_CHUNK_SIZE_BYTES,
 } from "./providers.mjs"
 import { computeStats, round, roundStats } from "./stats.mjs"
+import { finishPhase, logPhaseSummary, takePhaseSnapshot } from "./diagnostics.mjs"
+import { createRunnerObserverSession } from "./backing-observer.mjs"
+import { observePilotBinding } from "./owned-backing-pilot.mjs"
 
 export const REFERENCE_REVISION = "92fbbc9ba7739111899121195236acb4fc6a8bb5"
 export const FILE_SIZE_MIB = Object.freeze([1, 4, 10, 16])
@@ -72,6 +76,8 @@ function takeValue(argv, index, flag) {
 }
 
 export function parseArgs(argv) {
+  let layout = "legacy"
+  let workload = "lifecycle"
   let smoke = false
   let sizes
   let iterations
@@ -91,6 +97,16 @@ export function parseArgs(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
     switch (argument) {
+      case "--layout":
+        layout = takeValue(argv, index++, argument)
+        if (!["legacy", "inode", "compact"].includes(layout)) {
+          throw usageError("layout must be legacy, inode, or compact")
+        }
+        break
+      case "--workload":
+        workload = takeValue(argv, index++, argument)
+        if (!["lifecycle", "steady-overwrite"].includes(workload)) throw usageError("workload must be lifecycle or steady-overwrite")
+        break
       case "--help":
       case "-h":
         help = true
@@ -152,8 +168,13 @@ export function parseArgs(argv) {
     }
   }
 
+  if (workload === "steady-overwrite" && (iterations || (smoke ? 1 : 2)) > maxSteadyGenerations(payloadBytes ?? 1024 * 1024)) {
+    throw usageError("steady-overwrite iterations exceed the payload's nonrepeating generation capacity")
+  }
   return {
     help,
+    layout,
+    workload,
     mode: smoke ? "smoke" : "full",
     sizes: sizes || (smoke ? [1] : [...FILE_SIZE_MIB]),
     iterations: iterations || (smoke ? 1 : 2),
@@ -182,6 +203,8 @@ Usage:
 Options:
   --smoke                  1 MiB, one iteration, concurrency one, local providers
   --sizes LIST             MiB values; defaults to 1,4,10,16 in full mode
+  --layout legacy|inode|compact  metadata layout (default legacy; inode/compact require split storage)
+  --workload lifecycle|steady-overwrite  create/read/delete or precreated partial overwrite/read
   --iterations N            lifecycle iterations per size (default 2 full, 1 smoke)
   --concurrency N           concurrent lifecycle workers per provider/size (default 1)
   --providers LIST          provider ids (default all in full mode)
@@ -522,6 +545,84 @@ export async function runSample({
   return finishSample(sample, payload)
 }
 
+// Steady-state operations keep a preopened inode and overwrite its interior.
+// The unchanged first/last bytes are part of the read oracle.
+function maxSteadyGenerations(payloadBytes) {
+  return Math.min(Number.MAX_SAFE_INTEGER, 256 ** Math.min(payloadBytes, 7) - 1)
+}
+
+function steadyGenerationPayload(payload, generation) {
+  if (!Number.isSafeInteger(generation) || generation <= 0 || generation > maxSteadyGenerations(payload.byteLength)) {
+    throw usageError("steady-overwrite generation exceeds the payload's nonrepeating capacity")
+  }
+  const changed = Buffer.from(payload)
+  let remaining = BigInt(generation)
+  // XOR preserves the seeded setup payload as generation zero. Seven bytes
+  // encode every positive safe-integer generation without wrapping.
+  for (let index = 0; index < Math.min(changed.length, 7); index += 1) {
+    changed[index] ^= Number(remaining & 255n)
+    remaining >>= 8n
+  }
+  return changed
+}
+
+export async function runSteadySample({ definition, handle, payload, path, iteration, generation, options, pendingOperations }) {
+  const sample = emptySample(definition, payload.byteLength, iteration, path)
+  sample.workload = "steady-overwrite"
+  sample.deleteSucceeded = null
+  if (pendingOperations.has(path)) {
+    firstFailure(sample, "write", new Error("prior operation remains pending on this handle"))
+    return finishSample(sample, payload)
+  }
+  const changed = steadyGenerationPayload(payload, generation)
+  sample.laneGeneration = generation
+  const expected = Buffer.concat([Buffer.from([0x51]), changed, Buffer.from([0xa7])])
+  for (const operation of ["write", "read"]) {
+    const started = performance.now()
+    try {
+      if (operation === "write") {
+        const result = await withTimeout(() => handle.write(changed, 0, changed.length, 1), options.timeoutMs, operation)
+        if (result.bytesWritten !== changed.length) throw new Error("partial steady overwrite")
+        sample.writeSucceeded = true
+      } else {
+        const target = Buffer.alloc(expected.length)
+        const result = await withTimeout(() => handle.read(target, 0, target.length, 0), options.timeoutMs, operation)
+        sample.readMs = performance.now() - started
+        sample.readSucceeded = true
+        sample.bytesReturned = result.bytesRead
+        sample.payloadVerified = result.bytesRead === expected.length && sameBytes(bytes(result.buffer), expected)
+        if (!sample.payloadVerified) throw Object.assign(new Error("steady overwrite byte oracle mismatch"), { code: "PAYLOAD_MISMATCH" })
+      }
+    } catch (error) {
+      firstFailure(sample, operation, error)
+      await observeLateOperation(sample, operation, error, options, path, pendingOperations)
+      break
+    } finally {
+      sample[`${operation}Ms`] ??= performance.now() - started
+    }
+  }
+  sample.uploadMs = sample.writeMs
+  sample.downloadMs = sample.readMs
+  finishSample(sample, payload)
+  sample.success = sample.writeSucceeded && sample.readSucceeded && sample.payloadVerified === true
+  sample.status = sample.success ? "ok" : "failed"
+  return sample
+}
+
+async function closeSteadyLanes(lanes, options, pendingOperations) {
+  const results = await Promise.allSettled(lanes.map(async ({ path, handle }) => {
+    if (pendingOperations.has(path)) return
+    try {
+      await withTimeout(() => handle.close(), options.cleanupTimeoutMs, "steady close")
+    } catch (error) {
+      if (isTimeout(error)) pendingOperations.set(path, { operation: "steady close", promise: error.lateOperation })
+      throw error
+    }
+  }))
+  const failed = results.find((result) => result.status === "rejected")
+  if (failed) throw failed.reason
+}
+
 function values(samples, key, predicate = () => true) {
   return samples
     .filter((sample) => predicate(sample) && Number.isFinite(sample[key]))
@@ -538,6 +639,29 @@ async function runSize(
   ownedPaths,
   pendingOperations,
 ) {
+  const steady = options.workload === "steady-overwrite"
+  const lanes = []
+  if (steady) {
+    // A worker may receive every iteration regardless of concurrency. Tiny
+    // payloads therefore bound total iterations conservatively before setup.
+    if (options.iterations > maxSteadyGenerations(payload.byteLength)) throw usageError("steady-overwrite iterations exceed the payload's nonrepeating generation capacity")
+    // Setup precedes the measurement. Ownership is recorded before each write
+    // so existing cleanup also covers failed setup and delayed native work.
+    for (let slot = 0; slot < Math.min(options.concurrency, options.iterations); slot += 1) {
+      const path = benchmarkPath(context.runId, definition.id, sizeMiBValue, `steady-${slot}`)
+      ownedPaths.add(path)
+      const initial = Buffer.concat([Buffer.from([0x51]), payload, Buffer.from([0xa7])])
+      try {
+        await withTimeout(() => filesystem.writeFile(path, initial), options.timeoutMs, "steady setup")
+        const handle = await withTimeout(() => filesystem.open(path, "r+"), options.timeoutMs, "steady open")
+        lanes.push({ path, handle, generation: 0 })
+      } catch (error) {
+        if (isTimeout(error)) pendingOperations.set(path, { operation: "steady setup", promise: error.lateOperation })
+        await closeSteadyLanes(lanes, options, pendingOperations).catch(() => {})
+        throw error
+      }
+    }
+  }
   const measurementStarted = performance.now()
   const sizeBytes = payload.byteLength
   const tasks = Array.from({ length: options.iterations }, (_, index) => ({
@@ -545,7 +669,7 @@ async function runSize(
     path: benchmarkPath(context.runId, definition.id, sizeMiBValue, index + 1),
   }))
   const samples = await runWorkers(options.iterations === 0 ? [] : tasks, options.concurrency, (task, slot) =>
-    runSample({
+    (steady ? runSteadySample({ definition, ...lanes[slot], generation: ++lanes[slot].generation, payload, iteration: task.iteration, options, pendingOperations }) : runSample({
       definition,
       filesystem,
       payload,
@@ -554,9 +678,11 @@ async function runSize(
       options,
       ownedPaths,
       pendingOperations,
-    }).then((sample) => ({ ...sample, concurrencySlot: slot })),
+    })).then((sample) => ({ ...sample, concurrencySlot: slot })),
   )
 
+  const elapsedMs = performance.now() - measurementStarted
+  await closeSteadyLanes(lanes, options, pendingOperations)
   const writeValues = values(samples, "writeMs", (sample) => sample.writeSucceeded)
   const readValues = values(samples, "readMs", (sample) => sample.readSucceeded)
   const throughputValues = values(
@@ -568,8 +694,7 @@ async function runSize(
   const successfulIterations = samples.filter((sample) => sample.success).length
   const timeoutCount = samples.reduce((total, sample) => total + sample.timeoutCount, 0)
   const cleanupFailureCount = samples.filter((sample) => sample.cleanupFailure).length
-  const elapsedMs = performance.now() - measurementStarted
-  const operationsPerLifecycle = 3
+  const operationsPerLifecycle = steady ? 2 : 3
   const successfulOperations = successfulIterations * operationsPerLifecycle
   const attemptedOperations = samples.length * operationsPerLifecycle
   const iops = elapsedMs > 0 ? successfulOperations / (elapsedMs / 1000) : 0
@@ -612,8 +737,12 @@ async function runSize(
   return {
     ...providerSummary(definition, options.chunkSizeBytes),
     provider: definition.id,
+    layout: options.layout ?? "legacy",
+    workload: options.workload ?? "lifecycle",
     sizeMiB: sizeMiBValue,
-    fileSizeBytes: sizeBytes,
+    fileSizeBytes: steady ? sizeBytes + 2 : sizeBytes,
+    writePayloadBytes: sizeBytes,
+    ...(steady ? { payloadDerivation: "encode a positive per-lane safe-integer generation in up to seven payload bytes; setup is generation zero; verify unchanged 0x51/0xa7 boundary bytes" } : {}),
     iterationsRequested: options.iterations,
     concurrency: options.concurrency,
     status: successfulIterations === samples.length && !iopsTargetFailure ? "ok" : "failed",
@@ -736,14 +865,20 @@ function failedSizeResult(definition, sizeMiBValue, options, operation, error) {
 }
 
 async function runProvider(definition, options, context) {
-  const availability = definition.availability(context.environment)
+  const diagnosticEnabled = context.environment.MOUNT_RS_PROFILE_IO === "1"
+  const phaseSnapshot = diagnosticEnabled ? () => takePhaseSnapshot(nativeStorageDiagnostics) : null
+  const availability = definition.availability(context.environment, context)
+  const requiredEnvVars =
+    typeof definition.requiredEnvVars === "function"
+      ? definition.requiredEnvVars(context)
+      : definition.requiredEnvVars || []
   const providerRun = {
     ...providerSummary(definition, options.chunkSizeBytes),
     provider: definition.id,
     chunkSizeBytes:
       definition.chunking.algorithm === "fixed-size" ? options.chunkSizeBytes : null,
     status: availability.configured ? "pending" : "skipped",
-    requiredEnvVars: definition.requiredEnvVars || [],
+    requiredEnvVars,
     missingConfiguration: availability.missing || [],
     ...(availability.source ? { oracleSource: availability.source } : {}),
     ...(availability.source
@@ -757,141 +892,286 @@ async function runProvider(definition, options, context) {
         }
       : {}),
     sizes: [],
+    ...(diagnosticEnabled ? { storageDiagnostics: { enabled: true, phases: [], scope: "process; quiescent boundaries required" } } : {}),
     cleanup: {
       pathsAttempted: 0,
       remainingPaths: 0,
       failures: [],
       resource: "not-started",
     },
+    ...(options.layout === "compact"
+      ? {
+          layoutSelection: {
+            requested: "compact",
+            selected: null,
+            selectionEvidence: "provider-constructor-not-yet-accepted",
+            persistedMarkerEvidence: "not-observed-by-benchmark-runner",
+          },
+        }
+      : {}),
   }
   const sizeResults = []
-
-  if (availability.revisionMismatch) {
-    providerRun.status = "failed"
-    providerRun.oracleRevisionMismatch = true
-    providerRun.revisionFailure = availability.reason
-    providerRun.sizes = options.sizes.map((size) =>
-      failedSizeResult(
-        definition,
-        size,
-        options,
-        "oracle-revision",
-        new Error(availability.reason),
-      ),
-    )
-    return { providerRun, sizeResults: providerRun.sizes }
+  const observer = context.backingObserver
+    ? createRunnerObserverSession(context.backingObserver, {
+        provider: definition.id,
+        runId: context.runId,
+        clock: context.observerClock,
+        timeoutMs: context.observerHookTimeoutMs,
+      })
+    : null
+  const selectedResourceWindow = context.backingObserverWindow === "workload"
+  const workloadName = `workload-${options.payloadBytes ?? options.sizes[0] * 1024 * 1024}bytes`
+  if (selectedResourceWindow) providerRun.backingResourceCoverage = {
+    create: "not_selected", [workloadName]: "not_started", cleanup: "not_selected", shutdown: "not_selected",
+  }
+  const selectedHookIssues = new Set()
+  const resourceBegin = async (name) => {
+    if (!observer || selectedResourceWindow && name !== workloadName) return
+    await observer.begin(name)
+    if (selectedResourceWindow) {
+      providerRun.backingResourceCoverage[name] = "incomplete"
+      if (observer.receipt().events.at(-1)?.status !== "ok") selectedHookIssues.add(name)
+    }
+  }
+  const resourceEnd = async (name, ...metadata) => {
+    if (!observer || selectedResourceWindow && name !== workloadName) return
+    await observer.end(name, ...metadata)
+    if (selectedResourceWindow) {
+      if (observer.receipt().events.at(-1)?.status !== "ok") selectedHookIssues.add(name)
+      providerRun.backingResourceCoverage[name] = selectedHookIssues.has(name) ? "incomplete" : "captured"
+    }
+  }
+  let observerNativeQuiescent = null
+  let observerCleanupComplete = false
+  let observerOwnedOperationsSettled = false
+  let observerWorkloadObserved = false
+  let observerWorkloadNativeComplete = diagnosticEnabled ? true : null
+  let observerWorkloadNonquiescent = false
+  let observerTerminalNativeNonquiescent = false
+  let observerOperationDeadlineFailed = false
+  const recordPhase = (name, before, quiescent = true, measuredElapsedMs = null) => {
+    if (!phaseSnapshot || !before) return null
+    const phase = finishPhase(name, before, phaseSnapshot(), quiescent && !context.diagnosticPriorPending)
+    if (context.diagnosticPriorPending) phase.native.issues.push("prior provider cleanup or native operation incomplete")
+    if (measuredElapsedMs !== null) phase.benchmark_measured_elapsed_ms = measuredElapsedMs
+    providerRun.storageDiagnostics.phases.push(phase)
+    try { logPhaseSummary(phase) } catch { /* Diagnostics must not replace provider cleanup. */ }
+    return phase
+  }
+  const nativeEvidenceState = (phase) => {
+    if (!diagnosticEnabled) return "unobserved"
+    if (phase?.native.complete === true) return "complete"
+    if (phase?.native.issues?.some((issue) => [
+      "instrumented storage operation crossed phase boundary",
+      "instrumented storage row crossed phase boundary",
+      "raw operation or claim crossed phase boundary",
+      "native operations crossed phase boundary",
+    ].includes(issue))) return "nonquiescent"
+    return "unavailable"
+  }
+  const noteWorkloadEvidence = (phase) => {
+    observerWorkloadObserved = true
+    const state = nativeEvidenceState(phase)
+    if (diagnosticEnabled && state !== "complete") observerWorkloadNativeComplete = false
+    if (state === "nonquiescent") observerWorkloadNonquiescent = true
+    return state
   }
 
-  if (!availability.configured) {
-    providerRun.skipReason = availability.reason || "provider configuration is absent"
-    providerRun.sizes = options.sizes.map((size) => skippedSizeResult(definition, size, options, availability))
-    providerRun.status = "skipped"
-    return { providerRun, sizeResults: providerRun.sizes }
-  }
-
-  let opened
-  const setupStarted = performance.now()
   try {
-    opened = await withTimeout(
-      () => definition.create({ ...context, options }),
-      options.timeoutMs,
-      "provider setup",
-    )
-    providerRun.setupMs = performance.now() - setupStarted
-  } catch (error) {
-    providerRun.setupMs = performance.now() - setupStarted
-    providerRun.status = "failed"
-    providerRun.setupError = errorRecord(error)
-    providerRun.sizes = options.sizes.map((size) => failedSizeResult(definition, size, options, "setup", error))
-    return { providerRun, sizeResults: providerRun.sizes }
-  }
-
-  const ownedPaths = new Set()
-  const pendingOperations = new Map()
-  try {
-    for (const sizeMiBValue of options.sizes) {
-      try {
-        // Payload allocation and hashing happen before the first timed write.
-        const payload = makePayload(
-          options.payloadBytes ?? sizeMiBValue * 1024 * 1024,
-          options.payloadSeed,
-        )
-        const result = await runSize(
+    if (availability.revisionMismatch) {
+      providerRun.status = "failed"
+      providerRun.oracleRevisionMismatch = true
+      providerRun.revisionFailure = availability.reason
+      providerRun.sizes = options.sizes.map((size) =>
+        failedSizeResult(
           definition,
-          opened.filesystem,
+          size,
           options,
-          context,
-          sizeMiBValue,
-          payload,
-          ownedPaths,
-          pendingOperations,
-        )
-        sizeResults.push(result)
-      } catch (error) {
-        sizeResults.push(failedSizeResult(definition, sizeMiBValue, options, "benchmark", error))
+          "oracle-revision",
+          new Error(availability.reason),
+        ),
+      )
+      return { providerRun, sizeResults: providerRun.sizes }
+    }
+
+    if (!availability.configured) {
+      providerRun.skipReason = availability.reason || "provider configuration is absent"
+      providerRun.sizes = options.sizes.map((size) => skippedSizeResult(definition, size, options, availability))
+      providerRun.status = "skipped"
+      return { providerRun, sizeResults: providerRun.sizes }
+    }
+
+    let opened
+    if (observer) await resourceBegin("create")
+    const setupStarted = performance.now()
+    const setupSnapshot = phaseSnapshot?.()
+    try {
+      opened = await withTimeout(
+        () => definition.create({ ...context, options }),
+        options.timeoutMs,
+        "provider setup",
+      )
+      if (context.backingPilotIdentity) providerRun.backingPilotIdentity = await observePilotBinding(context.backingPilotIdentity)
+      providerRun.setupMs = performance.now() - setupStarted
+      const createPhase = recordPhase("create", setupSnapshot)
+      if (observer) await resourceEnd("create", !context.diagnosticPriorPending, null, 0, nativeEvidenceState(createPhase))
+      if (options.layout === "compact") {
+        providerRun.layoutSelection = {
+          requested: "compact",
+          selected: "compact",
+          selectionEvidence: "createChunkedDriver-constructor-accepted",
+          persistedMarkerEvidence: "not-observed-by-benchmark-runner",
+        }
+      }
+    } catch (error) {
+      providerRun.setupMs = performance.now() - setupStarted
+      const createPhase = recordPhase("create", setupSnapshot, false)
+      if (observer) await resourceEnd("create", false, null, 0, nativeEvidenceState(createPhase), isTimeout(error))
+      providerRun.status = "failed"
+      providerRun.setupError = errorRecord(error)
+      providerRun.sizes = options.sizes.map((size) => failedSizeResult(definition, size, options, "setup", error))
+      if (isTimeout(error)) context.diagnosticPriorPending = true
+      return { providerRun, sizeResults: providerRun.sizes }
+    }
+
+    const ownedPaths = new Set()
+    const pendingOperations = new Map()
+    try {
+      for (const sizeMiBValue of options.sizes) {
+        const payloadBytes = options.payloadBytes ?? sizeMiBValue * 1024 * 1024
+        let workloadSnapshot
+        try {
+          // Payload allocation and hashing happen before the first timed write.
+          const payload = makePayload(
+            options.payloadBytes ?? sizeMiBValue * 1024 * 1024,
+            options.payloadSeed,
+          )
+          if (observer) await resourceBegin(`workload-${payloadBytes}bytes`)
+          workloadSnapshot = phaseSnapshot?.()
+          const result = await runSize(
+            definition,
+            opened.filesystem,
+            options,
+            context,
+            sizeMiBValue,
+            payload,
+            ownedPaths,
+            pendingOperations,
+          )
+          sizeResults.push(result)
+          const workloadPhase = recordPhase(`workload-${payloadBytes}bytes`, workloadSnapshot, pendingOperations.size === 0, result.summary?.elapsedMs)
+          if (observer) {
+            observerOperationDeadlineFailed ||= result.summary?.timeoutCount > 0
+            await resourceEnd(`workload-${payloadBytes}bytes`, pendingOperations.size === 0 && !context.diagnosticPriorPending, result.summary?.elapsedMs, pendingOperations.size, noteWorkloadEvidence(workloadPhase), result.summary?.timeoutCount > 0)
+          }
+        } catch (error) {
+          sizeResults.push(failedSizeResult(definition, sizeMiBValue, options, "benchmark", error))
+          const workloadPhase = recordPhase(`workload-${payloadBytes}bytes`, workloadSnapshot, pendingOperations.size === 0)
+          if (observer) {
+            observerOperationDeadlineFailed ||= isTimeout(error)
+            await resourceEnd(`workload-${payloadBytes}bytes`, pendingOperations.size === 0 && !context.diagnosticPriorPending, null, pendingOperations.size, noteWorkloadEvidence(workloadPhase), isTimeout(error))
+          }
+        }
+      }
+    } finally {
+      if (observer) await resourceBegin("cleanup")
+      const cleanupSnapshot = phaseSnapshot?.()
+      const pathCleanup = await cleanupOwnedPaths(
+        opened.filesystem,
+        ownedPaths,
+        pendingOperations,
+        options.cleanupTimeoutMs,
+      )
+      providerRun.cleanup.pathsAttempted = pathCleanup.attempted
+      providerRun.cleanup.remainingPaths = pathCleanup.remaining
+      providerRun.cleanup.failures = pathCleanup.failures
+      providerRun.cleanup.pendingOperations = pathCleanup.pendingOperations
+      const cleanupPhase = recordPhase("cleanup", cleanupSnapshot, pendingOperations.size === 0 && pathCleanup.failures.length === 0)
+      if (observer) {
+        observerTerminalNativeNonquiescent ||= nativeEvidenceState(cleanupPhase) === "nonquiescent"
+        await resourceEnd("cleanup", pendingOperations.size === 0 && pathCleanup.failures.length === 0 && !context.diagnosticPriorPending, null, pendingOperations.size, nativeEvidenceState(cleanupPhase))
+      }
+
+      if (observer) await resourceBegin("shutdown")
+      const resourceCleanupStarted = performance.now()
+      const shutdownSnapshot = phaseSnapshot?.()
+      if (pendingOperations.size > 0) {
+        providerRun.cleanup.resource = {
+          status: "deferred",
+          ms: performance.now() - resourceCleanupStarted,
+          reason: "provider shutdown deferred while a timed-out native operation remains pending",
+          pendingOperations: [...pendingOperations].map(([path, pending]) => ({
+            path,
+            operation: pending.operation,
+          })),
+        }
+      } else {
+        try {
+          await withTimeout(opened.cleanup(), options.cleanupTimeoutMs, "provider cleanup")
+          providerRun.cleanup.resource = {
+            status: "ok",
+            ms: performance.now() - resourceCleanupStarted,
+          }
+        } catch (error) {
+          if (isTimeout(error)) {
+            const late = await waitForLateOperation(error, options.cleanupTimeoutMs)
+            providerRun.cleanup.resource = {
+              // Late completion establishes cleanup, but does not erase the
+              // configured deadline failure from the run's success criteria.
+              status: late.status === "pending" ? "pending" : "failed",
+              cleanupCompleted: late.status === "fulfilled",
+              ms: performance.now() - resourceCleanupStarted,
+              error: errorRecord(error),
+              lateOperation: late.status,
+            }
+          } else {
+            providerRun.cleanup.resource = {
+              status: "failed",
+              ms: performance.now() - resourceCleanupStarted,
+              error: errorRecord(error),
+            }
+          }
+        }
+      }
+      const shutdownPhase = recordPhase("shutdown", shutdownSnapshot, pendingOperations.size === 0 && providerRun.cleanup.resource.status === "ok")
+      if (observer) {
+        observerTerminalNativeNonquiescent ||= nativeEvidenceState(shutdownPhase) === "nonquiescent"
+        await resourceEnd("shutdown", pendingOperations.size === 0 && providerRun.cleanup.resource.status === "ok" && !context.diagnosticPriorPending, null, pendingOperations.size, nativeEvidenceState(shutdownPhase))
       }
     }
-  } finally {
-    const pathCleanup = await cleanupOwnedPaths(
-      opened.filesystem,
-      ownedPaths,
-      pendingOperations,
-      options.cleanupTimeoutMs,
-    )
-    providerRun.cleanup.pathsAttempted = pathCleanup.attempted
-    providerRun.cleanup.remainingPaths = pathCleanup.remaining
-    providerRun.cleanup.failures = pathCleanup.failures
-    providerRun.cleanup.pendingOperations = pathCleanup.pendingOperations
 
-    const resourceCleanupStarted = performance.now()
-    if (pendingOperations.size > 0) {
-      providerRun.cleanup.resource = {
-        status: "deferred",
-        ms: performance.now() - resourceCleanupStarted,
-        reason: "provider shutdown deferred while a timed-out native operation remains pending",
-        pendingOperations: [...pendingOperations].map(([path, pending]) => ({
-          path,
-          operation: pending.operation,
-        })),
-      }
-    } else {
-      try {
-        await withTimeout(opened.cleanup(), options.cleanupTimeoutMs, "provider cleanup")
-        providerRun.cleanup.resource = {
-          status: "ok",
-          ms: performance.now() - resourceCleanupStarted,
-        }
-      } catch (error) {
-        if (isTimeout(error)) {
-          const late = await waitForLateOperation(error, options.cleanupTimeoutMs)
-          providerRun.cleanup.resource = {
-            // Late completion establishes cleanup, but does not erase the
-            // configured deadline failure from the run's success criteria.
-            status: late.status === "pending" ? "pending" : "failed",
-            cleanupCompleted: late.status === "fulfilled",
-            ms: performance.now() - resourceCleanupStarted,
-            error: errorRecord(error),
-            lateOperation: late.status,
-          }
-        } else {
-          providerRun.cleanup.resource = {
-            status: "failed",
-            ms: performance.now() - resourceCleanupStarted,
-            error: errorRecord(error),
-          }
-        }
-      }
+    const hasResultFailure = sizeResults.some((result) => result.status === "failed")
+    const hasCleanupFailure =
+      providerRun.cleanup.remainingPaths > 0 ||
+      providerRun.cleanup.failures.length > 0 ||
+      providerRun.cleanup.resource.status !== "ok"
+    providerRun.status = hasResultFailure || hasCleanupFailure ? "failed" : "ok"
+    providerRun.sizes = sizeResults
+    if (pendingOperations.size > 0 || providerRun.cleanup.resource.status !== "ok" || providerRun.cleanup.failures.length > 0) {
+      context.diagnosticPriorPending = true
+    }
+    observerOwnedOperationsSettled = pendingOperations.size === 0 && !context.diagnosticPriorPending
+    if (!observerWorkloadObserved) observerWorkloadNativeComplete = null
+    observerNativeQuiescent = !observerOwnedOperationsSettled || observerWorkloadNonquiescent || observerTerminalNativeNonquiescent ? false
+      : observerWorkloadNativeComplete === true && !observerOperationDeadlineFailed ? true : null
+    observerCleanupComplete = !hasCleanupFailure
+    return { providerRun, sizeResults }
+  } finally {
+    if (observer) {
+      await observer.finalize({
+        status: providerRun.status === "pending" ? "failed" : providerRun.status,
+        native_quiescent: observerNativeQuiescent,
+        owned_operations_settled: observerOwnedOperationsSettled,
+        workload_native_evidence_complete: observerWorkloadObserved ? observerWorkloadNativeComplete : null,
+        native_profiling_enabled: diagnosticEnabled,
+        operation_deadline_failed: observerOperationDeadlineFailed,
+        cleanup_complete: observerCleanupComplete,
+        prior_native_uncertainty: context.diagnosticPriorPending,
+        quiescence_scope: diagnosticEnabled ? "runner_workload_native_diagnostics_and_owned_operation_settlement" : "runner_owned_operations_only; native_workload_proof_unobserved",
+      })
+      providerRun.backingObserver = observer.receipt()
     }
   }
-
-  const hasResultFailure = sizeResults.some((result) => result.status === "failed")
-  const hasCleanupFailure =
-    providerRun.cleanup.remainingPaths > 0 ||
-    providerRun.cleanup.failures.length > 0 ||
-    providerRun.cleanup.resource.status !== "ok"
-  providerRun.status = hasResultFailure || hasCleanupFailure ? "failed" : "ok"
-  providerRun.sizes = sizeResults
-  return { providerRun, sizeResults }
 }
 
 async function gitMetadata(directory) {
@@ -982,19 +1262,41 @@ async function environmentRecord(options, environment) {
   }
 }
 
-export async function runBenchmark(options, environment = process.env) {
-  const definitions = providerById(environment)
+export async function runBenchmark(options, environment = process.env, providerDefinitions, runtime = {}) {
+  // Native profiling is latched on first module use. Set the opt-in before
+  // provider discovery or a phase snapshot can load the addon.
+  if (environment.MOUNT_RS_PROFILE_IO === "1") process.env.MOUNT_RS_PROFILE_IO = "1"
+  const definitions = providerDefinitions ?? providerById(environment)
   const selectedIds = options.providers || [...definitions.keys()]
   const unknown = selectedIds.filter((id) => !definitions.has(id))
   if (unknown.length > 0) {
     throw usageError(`unknown provider(s): ${unknown.join(", ")}`)
   }
 
+  if (runtime.backingObserverWindow !== undefined && (runtime.backingObserverWindow !== "workload" ||
+      !runtime.backingObserver || selectedIds.length !== 1 || options.sizes.length !== 1)) {
+    throw usageError("selected backing resource window requires one observer, provider and size")
+  }
   const runId = makeRunId()
+  if (
+    ["inode", "compact"].includes(options.layout) &&
+    selectedIds.some((id) => !id.startsWith("mount-rs-split-"))
+  ) {
+    throw usageError(`${options.layout} layout requires mount-rs split storage providers`)
+  }
   const context = {
+    layout: options.layout ?? "legacy",
     runId,
     environment,
     chunkSizeBytes: options.chunkSizeBytes,
+    diagnosticPriorPending: false,
+    ...(runtime.backingObserver ? {
+      backingObserver: runtime.backingObserver,
+      observerClock: runtime.observerClock,
+      observerHookTimeoutMs: runtime.observerHookTimeoutMs,
+      backingObserverWindow: runtime.backingObserverWindow,
+      backingPilotIdentity: runtime.backingPilotIdentity,
+    } : {}),
   }
   const providerRuns = []
   const results = []
@@ -1027,6 +1329,8 @@ export async function runBenchmark(options, environment = process.env) {
     },
     mode: options.mode,
     config: {
+      layout: options.layout ?? "legacy",
+      workload: options.workload ?? "lifecycle",
       sizesMiB: options.sizes,
       payloadSizesBytes: options.sizes.map(
         (size) => options.payloadBytes ?? size * 1024 * 1024,
@@ -1039,7 +1343,8 @@ export async function runBenchmark(options, environment = process.env) {
       payloadBytes: options.payloadBytes ?? null,
       minIops: options.minIops ?? null,
       requireConfigured: options.requireConfigured,
-      iopsDefinition: "successful write+read+delete lifecycle operations divided by measured lifecycle wall time",
+      storageDiagnosticsEnabled: environment.MOUNT_RS_PROFILE_IO === "1",
+      iopsDefinition: options.workload === "steady-overwrite" ? "successful partial overwrite+full-file read operations divided by measured wall time; precreate/open/close/unlink excluded" : "successful write+read+delete lifecycle operations divided by measured lifecycle wall time",
       payloadSeed: options.payloadSeed,
       setupExcludedFromTimings: true,
       payloadVerificationExcludedFromReadTimings: true,

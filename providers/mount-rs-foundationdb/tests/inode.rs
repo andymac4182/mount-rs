@@ -145,6 +145,42 @@ async fn independent_inode_cas_and_complete_structural_fold() {
     drop(old_reader);
     drop(old_reader_db);
     let snapshot = metadata.load_inode_snapshot(backing).await.unwrap();
+    assert!(
+        metadata
+            .load_inode_snapshot_if_changed(backing, Some(snapshot.structural_generation))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        metadata
+            .load_inode_snapshot_if_changed(backing, None)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        metadata
+            .load_inode_snapshot_if_changed(backing, Some(0))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        metadata
+            .load_inode_snapshot_if_changed(backing, Some(snapshot.structural_generation + 1))
+            .await
+            .is_err()
+    );
+    let wrong_backing =
+        mount_rs_core::storage::ConcurrentBackingId::from_bytes([0xe7; 16]).unwrap();
+    assert!(
+        metadata
+            .load_inode_snapshot_if_changed(wrong_backing, Some(snapshot.structural_generation))
+            .await
+            .is_err()
+    );
+
     assert_eq!(snapshot.structural_generation, enrolled_generation);
     let a = metadata.load_inode(backing, 2).await.unwrap();
     let b = other.load_inode(backing, 3).await.unwrap();

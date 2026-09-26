@@ -2,12 +2,23 @@
 //! Each database contains one namespace. Metadata and blocks may reside in
 //! different databases, or either provider may be paired with another backend.
 
+#[cfg(all(test, unix))]
+#[path = "compact_tests.rs"]
+mod compact_tests;
+
 #[cfg(test)]
 #[path = "direct_io_benchmark.rs"]
 mod direct_io_benchmark;
 
+#[path = "compact.rs"]
+mod compact;
+
 use async_trait::async_trait;
 use mount_rs_core::diagnostics::profile::{self, Event};
+use mount_rs_core::storage::compact::{
+    CompactInodeCapability, CompactPublication, CompactSnapshot, CompactStructuralDelta,
+    LoadedCompactInode, PhysicalInodeIdentity,
+};
 use mount_rs_core::storage::{
     BlockId, BlockStore, CheckoutRequest, ConcurrentBackingId, ConcurrentModeState,
     DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState, DirectoryGrant,
@@ -44,6 +55,7 @@ const CONCURRENT_WRITE_MODE: &str = "MRC1";
 const BOUND_WRITE_MODE: &str = "MRC2";
 const DELEGATED_WRITE_MODE: &str = "MRC3";
 const INODE_WRITE_MODE: &str = "MRC4";
+const COMPACT_WRITE_MODE: &str = "MRC5";
 #[cfg(unix)]
 const INODE_CONDITIONAL_SQL: &str = "SELECT m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.revision,
                     m.physical_dev,m.physical_ino,m.physical_path,
@@ -1033,7 +1045,7 @@ fn initialize_version_schema(database: &Database) -> Result<()> {
                 && owner.is_none()
                 && fence == CONCURRENT_FENCE_SENTINEL
                 && expires == 0 => {}
-        Some(BOUND_WRITE_MODE | DELEGATED_WRITE_MODE | INODE_WRITE_MODE)
+        Some(BOUND_WRITE_MODE | DELEGATED_WRITE_MODE | INODE_WRITE_MODE | COMPACT_WRITE_MODE)
             if backing
                 .as_deref()
                 .is_some_and(|id| ConcurrentBackingId::from_hex(id).is_ok())
@@ -1051,7 +1063,7 @@ fn initialize_version_schema(database: &Database) -> Result<()> {
         let stamp = FileStamp::from_text(physical_dev.as_deref(), physical_ino.as_deref())?;
         if matches!(
             mode.as_deref(),
-            Some(BOUND_WRITE_MODE | DELEGATED_WRITE_MODE | INODE_WRITE_MODE)
+            Some(BOUND_WRITE_MODE | DELEGATED_WRITE_MODE | INODE_WRITE_MODE | COMPACT_WRITE_MODE)
         ) {
             require_matching_metadata_stamp(
                 database,
@@ -1084,7 +1096,7 @@ fn initialize_version_schema(database: &Database) -> Result<()> {
         let _ = (&physical_dev, &physical_ino, &physical_path);
         if matches!(
             mode.as_deref(),
-            Some(BOUND_WRITE_MODE | DELEGATED_WRITE_MODE | INODE_WRITE_MODE)
+            Some(BOUND_WRITE_MODE | DELEGATED_WRITE_MODE | INODE_WRITE_MODE | COMPACT_WRITE_MODE)
         ) {
             return Err(incompatible_schema(
                 "this platform cannot bind MRC2 SQLite metadata to a physical file",
@@ -1108,6 +1120,7 @@ fn initialize_version_schema(database: &Database) -> Result<()> {
             revision, physical_dev, physical_ino, physical_path)",
     )
     .map_err(backend_error)?;
+    compact::initialize_schema(&tx)?;
     let guard_columns = table_columns(&tx, "mount_rs_inode_guards")?
         .ok_or_else(|| incompatible_schema("MRC4 inode guard table missing"))?;
     require_columns(
@@ -1954,6 +1967,101 @@ fn rebuild_inode_guards(
 
 #[async_trait]
 impl MetadataStore for SqliteMetadataStore {
+    fn compact_inode_capability(&self) -> CompactInodeCapability {
+        if self.0.durable
+            && cfg!(any(
+                target_os = "macos",
+                all(target_os = "linux", target_env = "gnu")
+            ))
+        {
+            CompactInodeCapability::V1
+        } else {
+            CompactInodeCapability::Unsupported
+        }
+    }
+    async fn compact_inode_mode_state(&self) -> Result<Option<InodeModeState>> {
+        #[cfg(unix)]
+        {
+            self.compact_inspect()
+        }
+        #[cfg(not(unix))]
+        {
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+    }
+    async fn prepare_compact_inode_mode(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        #[cfg(unix)]
+        {
+            self.compact_prepare(backing, expected_revision)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (backing, expected_revision);
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+    }
+    async fn load_compact_snapshot(&self, backing: ConcurrentBackingId) -> Result<CompactSnapshot> {
+        #[cfg(unix)]
+        {
+            self.compact_snapshot(backing)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = backing;
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+    }
+    async fn load_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: u64,
+    ) -> Result<LoadedCompactInode> {
+        #[cfg(unix)]
+        {
+            self.compact_load(backing, inode)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (backing, inode);
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+    }
+    async fn publish_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: u64,
+        generation: u64,
+        expected: PhysicalInodeIdentity,
+        node: NodeMetadata,
+    ) -> Result<LoadedCompactInode> {
+        #[cfg(unix)]
+        {
+            self.compact_publish_inode(backing, inode, generation, expected, node)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (backing, inode, generation, expected, node);
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+    }
+    async fn publish_compact_structure(
+        &self,
+        delta: &CompactStructuralDelta,
+    ) -> Result<CompactPublication> {
+        #[cfg(unix)]
+        {
+            self.compact_publish_structure(delta)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = delta;
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+    }
     fn durable(&self) -> bool {
         self.0.durable
     }
@@ -1973,7 +2081,7 @@ impl MetadataStore for SqliteMetadataStore {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .map_err(backend_error)?;
-        if mode.as_deref() == Some(INODE_WRITE_MODE) {
+        if matches!(mode.as_deref(), Some(INODE_WRITE_MODE | COMPACT_WRITE_MODE)) {
             return Err(stale());
         }
         if let Some(json) = &namespace {
@@ -2199,7 +2307,7 @@ impl MetadataStore for SqliteMetadataStore {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .map_err(backend_error)?;
-        if mode.as_deref() == Some(INODE_WRITE_MODE) {
+        if matches!(mode.as_deref(), Some(INODE_WRITE_MODE | COMPACT_WRITE_MODE)) {
             return Err(stale());
         }
         if revision != 0 && revision == known_revision {
@@ -2282,6 +2390,29 @@ impl MetadataStore for SqliteMetadataStore {
                 Ok(())
             })
         }
+    }
+
+    async fn load_inode_snapshot_if_changed(
+        &self,
+        backing: ConcurrentBackingId,
+        known: Option<u64>,
+    ) -> Result<Option<InodeMetadataSnapshot>> {
+        // The compact probe validates authority atomically. A changed response
+        // comes from a separately coherent, fully validated snapshot.
+        let state = self
+            .inode_mode_state()
+            .await?
+            .ok_or_else(|| FsError::new(ErrorCode::Estale))?;
+        if state.backing != backing
+            || state.structural_generation == 0
+            || known.is_some_and(|generation| generation > state.structural_generation)
+        {
+            return Err(FsError::new(ErrorCode::Estale));
+        }
+        if known == Some(state.structural_generation) {
+            return Ok(None);
+        }
+        Ok(Some(self.load_inode_snapshot(backing).await?))
     }
 
     async fn load_inode_snapshot(
@@ -2653,6 +2784,30 @@ impl MetadataStore for SqliteMetadataStore {
             if mode.as_deref() == Some(CONCURRENT_WRITE_MODE) {
                 return Err(mrc1_migration_required());
             }
+            if mode.as_deref() == Some(COMPACT_WRITE_MODE)
+                && stored.as_deref() == Some(backing.to_hex().as_str())
+            {
+                // A peer reached MRC5 on the same backing before this
+                // transaction performed any DML. This attempt definitely
+                // did not commit; the caller may re-read MRC5 authority.
+                require_matching_metadata_stamp(
+                    &self.0,
+                    physical_dev.as_deref(),
+                    physical_ino.as_deref(),
+                    physical_path.as_deref(),
+                )?;
+                if revision > 0
+                    && namespace.is_some()
+                    && owner.is_none()
+                    && fence == CONCURRENT_FENCE_SENTINEL
+                    && expires == 0
+                {
+                    return Err(FsError::new(ErrorCode::Eagain)
+                        .with_syscall("prepare bound concurrent SQLite volume")
+                        .with_message("same-backing peer completed compact mode before claim"));
+                }
+                return Err(incompatible_schema("compact marker and fence disagree"));
+            }
             if mode.is_some() || stored.is_some() {
                 return Err(incompatible_schema(
                     "unsupported SQLite concurrent write mode",
@@ -2912,6 +3067,36 @@ impl MetadataStore for SqliteMetadataStore {
                     [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?))
                 ).map_err(backend_error)?;
             if mode.as_deref() == Some(CONCURRENT_WRITE_MODE) { return Err(mrc1_migration_required()); }
+            if expected == 0
+                && actual_revision > 0
+                && mode.as_deref() == Some(COMPACT_WRITE_MODE)
+                && stored.as_deref() == Some(&backing_text)
+            {
+                // The initial root lost to a same-backing peer before this
+                // transaction wrote anything. Only this revision conflict is
+                // a definite noncommit; later bound publications stay fenced.
+                require_matching_metadata_stamp(
+                    &self.0,
+                    physical_dev.as_deref(),
+                    physical_ino.as_deref(),
+                    physical_path.as_deref(),
+                )?;
+                let has_namespace: i64 = tx.query_row(
+                    "SELECT namespace IS NOT NULL FROM mount_rs_metadata WHERE id=1",
+                    [],
+                    |row| row.get(0),
+                ).map_err(backend_error)?;
+                if has_namespace == 1
+                    && owner.is_none()
+                    && fence == CONCURRENT_FENCE_SENTINEL
+                    && expires == 0
+                {
+                    return Err(FsError::new(ErrorCode::Eagain)
+                        .with_syscall("publish bound concurrent SQLite metadata")
+                        .with_message("same-backing peer completed initial root before publication"));
+                }
+                return Err(incompatible_schema("compact marker and fence disagree"));
+            }
             if mode.as_deref() != Some(BOUND_WRITE_MODE) || stored.as_deref() != Some(&backing_text) {
                 return Err(stale());
             }
@@ -4690,11 +4875,114 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn conditional_inode_snapshot_checks_authority_but_defers_equal_token_body_audit() {
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        let backing = prepare_inode_metadata(&store);
+        let snapshot = run(store.load_inode_snapshot(backing)).unwrap();
+        let known = Some(snapshot.structural_generation);
+        for assignment in [
+            "write_mode='MRC2'",
+            "owner='unexpected'",
+            "fence=1",
+            "expires=1",
+            "revision=0",
+            "backing_id=NULL",
+        ] {
+            let connection = store.0.lock().unwrap();
+            connection
+                .execute(
+                    &format!("UPDATE mount_rs_metadata SET {assignment} WHERE id=1"),
+                    [],
+                )
+                .unwrap();
+            drop(connection);
+            assert!(
+                run(store.load_inode_snapshot_if_changed(backing, known)).is_err(),
+                "{assignment}"
+            );
+            store.0.lock().unwrap().execute(
+                "UPDATE mount_rs_metadata SET write_mode='MRC4',owner=NULL,fence=?1,expires=0,revision=?2,backing_id=?3 WHERE id=1",
+                params![CONCURRENT_FENCE_SENTINEL, snapshot.structural_generation, backing.to_hex()],
+            ).unwrap();
+            assert!(
+                run(store.load_inode_snapshot_if_changed(backing, known))
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        // Deliberately violate the trusted versioned-storage contract: no token
+        // advances. A conditional hit isn't a whole-Drive payload audit.
+        store
+            .0
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE mount_rs_inode_guards SET node='{}' WHERE inode=?",
+                [snapshot.namespace.root.to_string()],
+            )
+            .unwrap();
+        assert!(
+            run(store.load_inode_snapshot_if_changed(backing, known))
+                .unwrap()
+                .is_none()
+        );
+        assert!(run(store.load_inode_snapshot(backing)).is_err());
+        assert!(run(store.load_inode_snapshot_if_changed(backing, None)).is_err());
+        store
+            .0
+            .lock()
+            .unwrap()
+            .execute(
+                "DELETE FROM mount_rs_inode_guards WHERE inode=?",
+                [snapshot.namespace.root.to_string()],
+            )
+            .unwrap();
+        let token = InodeVersion {
+            structural_generation: snapshot.structural_generation,
+            inode_revision: snapshot.inode_revisions[&snapshot.namespace.root],
+        };
+        assert!(
+            run(store.load_inode_if_changed(backing, snapshot.namespace.root, Some(token)))
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn inode_structure_fences_content_and_reopen_preserves_guard_payload() {
         let path = super::super::tests::unique_database_path();
         let store = SqliteMetadataStore::open(&path).unwrap();
         let backing = prepare_inode_metadata(&store);
         let before = run(store.load_inode_snapshot(backing)).unwrap();
+        assert!(
+            run(store.load_inode_snapshot_if_changed(backing, Some(before.structural_generation)))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            run(store.load_inode_snapshot_if_changed(backing, None))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            run(store.load_inode_snapshot_if_changed(backing, Some(0)))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            run(store
+                .load_inode_snapshot_if_changed(backing, Some(before.structural_generation + 1)))
+            .is_err()
+        );
+        let wrong_backing =
+            mount_rs_core::storage::ConcurrentBackingId::from_bytes([0xe7; 16]).unwrap();
+        assert!(
+            run(store
+                .load_inode_snapshot_if_changed(wrong_backing, Some(before.structural_generation)))
+            .is_err()
+        );
+
         let inode = before.namespace.root + 1;
         let loaded = run(store.load_inode(backing, inode)).unwrap();
         let mut node = loaded.node.clone();
@@ -5613,6 +5901,76 @@ mod tests {
         );
         drop(store);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compact_peer_prewrite_claim_is_known_noncommit_only_for_exact_valid_backing() {
+        for case in ["same", "foreign", "bad-fence", "bad-stamp"] {
+            let path = super::super::tests::unique_database_path();
+            let store = SqliteMetadataStore::open(&path).unwrap();
+            let backing = ConcurrentBackingId::from_bytes([1; 16]).unwrap();
+            let foreign = ConcurrentBackingId::from_bytes([2; 16]).unwrap();
+            run(store.prepare_bound_concurrent_mode(backing)).unwrap();
+            assert_eq!(
+                run(store.publish_bound_if_revision(backing, 0, namespace())).unwrap(),
+                1
+            );
+            run(store.prepare_compact_inode_mode(backing, 1)).unwrap();
+            match case {
+                "bad-fence" => {
+                    store
+                        .0
+                        .lock()
+                        .unwrap()
+                        .execute("UPDATE mount_rs_metadata SET fence=0 WHERE id=1", [])
+                        .unwrap();
+                }
+                "bad-stamp" => {
+                    store
+                        .0
+                        .lock()
+                        .unwrap()
+                        .execute(
+                            "UPDATE mount_rs_metadata SET physical_dev='-1' WHERE id=1",
+                            [],
+                        )
+                        .unwrap();
+                }
+                _ => {}
+            }
+            let raw = || -> (Option<String>, Option<String>, i64, Option<String>, i64, Option<String>) {
+                store.0.lock().unwrap().query_row(
+                    "SELECT write_mode, backing_id, revision, namespace, fence, physical_dev FROM mount_rs_metadata WHERE id=1",
+                    [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+                ).unwrap()
+            };
+            let before = raw();
+            let requested = if case == "foreign" { foreign } else { backing };
+            let error = run(store.prepare_bound_concurrent_mode(requested)).unwrap_err();
+            if case == "same" {
+                assert_eq!(error.code, ErrorCode::Eagain);
+            } else {
+                assert_ne!(error.code, ErrorCode::Eagain, "{case}");
+            }
+            let root_error =
+                run(store.publish_bound_if_revision(requested, 0, namespace())).unwrap_err();
+            if case == "same" {
+                assert_eq!(root_error.code, ErrorCode::Eagain);
+                assert_eq!(
+                    run(store.publish_bound_if_revision(backing, 1, namespace()))
+                        .unwrap_err()
+                        .code,
+                    ErrorCode::Estale,
+                    "positive revisions must retain mode-change fencing",
+                );
+            } else {
+                assert_ne!(root_error.code, ErrorCode::Eagain, "{case}");
+            }
+            assert_eq!(raw(), before, "{case}");
+            drop(store);
+            std::fs::remove_file(path).unwrap();
+        }
     }
 
     #[test]

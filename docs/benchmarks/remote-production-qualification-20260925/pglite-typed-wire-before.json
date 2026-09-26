@@ -1,0 +1,221 @@
+{
+  "schema": "mount-rs-pglite-wire-control-v1",
+  "source": "396b7471/storage0015437d",
+  "scope": "owned local plaintext PG wire message counts only; no SQL, parameters, credentials, or payload captured; proxy instrumentation affects timing",
+  "results": [
+    {
+      "inode": false,
+      "concurrency": 1,
+      "workload": "lifecycle",
+      "iterations": 8,
+      "verified": 8,
+      "setupMessages": {
+        "Q": 6,
+        "P": 15,
+        "B": 15,
+        "D": 15,
+        "E": 15,
+        "S": 15
+      },
+      "elapsedSeconds": 0.023344415999999996,
+      "workloadMessages": {
+        "Q": 8,
+        "P": 32,
+        "B": 32,
+        "D": 32,
+        "E": 32,
+        "S": 32
+      }
+    },
+    {
+      "inode": false,
+      "concurrency": 1,
+      "workload": "steady",
+      "iterations": 8,
+      "verified": 8,
+      "setupMessages": {
+        "Q": 7,
+        "P": 16,
+        "B": 16,
+        "D": 16,
+        "E": 16,
+        "S": 16,
+        "X": 0
+      },
+      "elapsedSeconds": 0.012760416000000007,
+      "workloadMessages": {
+        "Q": 8,
+        "P": 24,
+        "B": 24,
+        "D": 24,
+        "E": 24,
+        "S": 24,
+        "X": 0
+      }
+    },
+    {
+      "inode": false,
+      "concurrency": 8,
+      "workload": "lifecycle",
+      "iterations": 8,
+      "verified": 8,
+      "setupMessages": {
+        "Q": 6,
+        "P": 15,
+        "B": 15,
+        "D": 15,
+        "E": 15,
+        "S": 15,
+        "X": 0
+      },
+      "elapsedSeconds": 0.018239709000000003,
+      "workloadMessages": {
+        "Q": 22,
+        "P": 53,
+        "B": 53,
+        "D": 53,
+        "E": 53,
+        "S": 53,
+        "X": 0
+      }
+    },
+    {
+      "inode": false,
+      "concurrency": 8,
+      "workload": "steady",
+      "iterations": 8,
+      "verified": 8,
+      "setupMessages": {
+        "Q": 14,
+        "P": 23,
+        "B": 23,
+        "D": 23,
+        "E": 23,
+        "S": 23,
+        "X": 0
+      },
+      "elapsedSeconds": 0.017830459000000017,
+      "workloadMessages": {
+        "Q": 22,
+        "P": 45,
+        "B": 45,
+        "D": 45,
+        "E": 45,
+        "S": 45,
+        "X": 0
+      }
+    },
+    {
+      "inode": true,
+      "concurrency": 1,
+      "workload": "lifecycle",
+      "iterations": 8,
+      "verified": 8,
+      "setupMessages": {
+        "Q": 8,
+        "P": 27,
+        "B": 27,
+        "D": 27,
+        "E": 27,
+        "S": 40,
+        "X": 0,
+        "C": 6
+      },
+      "elapsedSeconds": 0.14571025,
+      "workloadMessages": {
+        "Q": 40,
+        "P": 320,
+        "B": 320,
+        "D": 320,
+        "E": 320,
+        "S": 800,
+        "X": 0,
+        "C": 240
+      }
+    },
+    {
+      "inode": true,
+      "concurrency": 1,
+      "workload": "steady",
+      "iterations": 8,
+      "verified": 8,
+      "setupMessages": {
+        "Q": 11,
+        "P": 41,
+        "B": 41,
+        "D": 41,
+        "E": 41,
+        "S": 74,
+        "X": 0,
+        "C": 16
+      },
+      "elapsedSeconds": 0.05232425000000001,
+      "workloadMessages": {
+        "Q": 24,
+        "P": 112,
+        "B": 112,
+        "D": 112,
+        "E": 112,
+        "S": 272,
+        "X": 0,
+        "C": 80
+      }
+    },
+    {
+      "inode": true,
+      "concurrency": 8,
+      "workload": "lifecycle",
+      "iterations": 8,
+      "verified": 8,
+      "setupMessages": {
+        "Q": 8,
+        "P": 27,
+        "B": 27,
+        "D": 27,
+        "E": 27,
+        "S": 40,
+        "X": 0,
+        "C": 6
+      },
+      "elapsedSeconds": 0.10631875000000002,
+      "workloadMessages": {
+        "Q": 28,
+        "P": 242,
+        "B": 242,
+        "D": 242,
+        "E": 242,
+        "S": 600,
+        "X": 0,
+        "C": 179
+      }
+    },
+    {
+      "inode": true,
+      "concurrency": 8,
+      "workload": "steady",
+      "iterations": 8,
+      "verified": 8,
+      "setupMessages": {
+        "Q": 32,
+        "P": 167,
+        "B": 167,
+        "D": 167,
+        "E": 167,
+        "S": 396,
+        "X": 0,
+        "C": 114
+      },
+      "elapsedSeconds": 0.05406579199999999,
+      "workloadMessages": {
+        "Q": 24,
+        "P": 112,
+        "B": 112,
+        "D": 112,
+        "E": 112,
+        "S": 272,
+        "X": 0,
+        "C": 80
+      }
+    }
+  ]
+}

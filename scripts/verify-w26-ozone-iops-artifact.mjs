@@ -7,6 +7,7 @@
 import { lstat, readFile } from "node:fs/promises"
 import { fileURLToPath } from "node:url"
 import { resolve } from "node:path"
+import { validateRawPhaseDiagnostics } from "../benchmarks/storage/diagnostics.mjs"
 
 export const W26_IOPS_MINIMUM = 1000
 export const W26_IOPS_PROFILE = Object.freeze({
@@ -56,10 +57,59 @@ function requireEqual(value, expected, field) {
 }
 
 function sameSet(actual, expected) {
+  const actualSet = new Set(actual)
+  const expectedSet = new Set(expected)
   return (
-    actual.length === expected.length &&
-    actual.every((provider) => expected.includes(provider))
+    actualSet.size === actual.length &&
+    expectedSet.size === expected.length &&
+    actualSet.size === expectedSet.size &&
+    expected.every((provider) => actualSet.has(provider))
   )
+}
+
+const splitR2Metadata = new Map([
+  ["mount-rs-split-sqlite-r2", "sqlite"], ["mount-rs-split-pglite-r2", "pglite"],
+  ["mount-rs-split-tidb-r2", "tidb"], ["mount-rs-split-foundationdb-r2", "foundationdb"],
+])
+
+function diagnosticsEnabled(root, config) {
+  if (config.storageDiagnosticsEnabled !== undefined && typeof config.storageDiagnosticsEnabled !== "boolean") failure("diagnostics-config-enabled-must-be-boolean")
+  let enabled = config.storageDiagnosticsEnabled === true
+  for (const provider of root.providers) {
+    if (provider.storageDiagnostics === undefined) continue
+    if (!isObject(provider.storageDiagnostics) || typeof provider.storageDiagnostics.enabled !== "boolean") failure("diagnostics-provider-enabled-must-be-boolean")
+    if (provider.storageDiagnostics.enabled) enabled = true
+  }
+  return enabled
+}
+
+function validateProviderDiagnostics(provider, config) {
+  const metadataProvider = splitR2Metadata.get(provider.provider)
+  if (!metadataProvider) return // Other providers legitimately have no registered R2 store.
+  const field = `${provider.provider}.diagnostics`
+  for (const [label, expected] of Object.entries({ binding: "public-napi", topology: "split-stores", blockProvider: "cloudflare-r2", metadataProvider })) {
+    requireEqual(provider[label], expected, `${field}.${label}`)
+  }
+  const diagnostics = requireObject(provider.storageDiagnostics, field)
+  requireEqual(diagnostics.enabled, true, `${field}.enabled`)
+  requireEqual(diagnostics.scope, "process; quiescent boundaries required", `${field}.scope`)
+  if (!Array.isArray(diagnostics.phases)) failure(`${field}.phases-must-be-array`)
+  const workloads = diagnostics.phases.filter((phase) => typeof phase?.name === "string" && phase.name.startsWith("workload-"))
+  if (workloads.length !== config.sizesMiB.length) failure(`${field}.workloads-must-cover-every-size-result`)
+  let previousIds
+  for (const [index, phase] of workloads.entries()) {
+    requireEqual(phase.name, `workload-${config.payloadSizesBytes[index]}bytes`, `${field}.workload-name`)
+    const size = provider.sizes[index]
+    requireEqual(size.sizeMiB, config.sizesMiB[index], `${field}.sizeMiB`)
+    requireEqual(size.fileSizeBytes, config.payloadSizesBytes[index], `${field}.fileSizeBytes`)
+    // Lifecycle artifacts before writePayloadBytes was introduced use fileSizeBytes.
+    if (size.writePayloadBytes !== undefined) requireEqual(size.writePayloadBytes, config.payloadSizesBytes[index], `${field}.writePayloadBytes`)
+    let ids
+    try { ids = validateRawPhaseDiagnostics(phase) }
+    catch { failure(`${field}.raw-workload-evidence-invalid`) }
+    if (previousIds && !sameSet(ids, previousIds)) failure(`${field}.R2-identities-changed-between-workloads`)
+    previousIds = ids
+  }
 }
 
 export function validateArtifact(document, options = {}) {
@@ -76,6 +126,8 @@ export function validateArtifact(document, options = {}) {
   requireEqual(root.status, "ok", "status")
 
   const config = requireObject(root.config, "config")
+  requireEqual(config.layout ?? "legacy", "legacy", "config.layout")
+  requireEqual(config.workload ?? "lifecycle", "lifecycle", "config.workload")
   requireEqual(config.requireConfigured, true, "config.requireConfigured")
   requireInteger(config.minIops, "config.minIops", minimumIopsFloor)
   requireEqual(config.payloadBytes, W26_IOPS_PROFILE.payloadBytes, "config.payloadBytes")
@@ -111,6 +163,7 @@ export function validateArtifact(document, options = {}) {
   if (!Array.isArray(root.providers) || !sameSet(root.providers.map((provider) => provider?.provider), expectedProviders)) {
     failure("providers-do-not-match-requested-provider-set")
   }
+  const requireDiagnostics = diagnosticsEnabled(root, config)
 
   for (const provider of root.providers) {
     requireObject(provider, "provider")
@@ -132,6 +185,7 @@ export function validateArtifact(document, options = {}) {
     if (!Array.isArray(provider.sizes) || provider.sizes.length !== config.sizesMiB.length) {
       failure(`${provider.provider}.sizes-must-match-requested-sizes`)
     }
+    if (requireDiagnostics) validateProviderDiagnostics(provider, config)
     for (const size of provider.sizes) {
       requireObject(size, `${provider.provider}.size`)
       requireEqual(size.status, "ok", `${provider.provider}.size.status`)

@@ -203,6 +203,7 @@ pub struct SplitStorageConfig {
     pub lease_ttl_ms: Option<u64>,
     pub concurrent_writes: bool,
     pub inode_updates: bool,
+    pub compact_inode_updates: bool,
     pub writeback: bool,
     pub delegated: bool,
     pub checkout_path: Option<String>,
@@ -630,6 +631,7 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
             "lease_ttl_ms",
             "concurrent_writes",
             "inode_updates",
+            "compact_inode_updates",
             "ownership_mode",
             "checkout_path",
             "owner",
@@ -665,15 +667,40 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
         .get("concurrent_writes")
         .map(|value| required_value_bool(value, "config.driver.storage.concurrent_writes"))
         .transpose()?;
-    let inode_updates = object
+    let raw_inode_updates = object
         .get("inode_updates")
         .map(|value| required_value_bool(value, "config.driver.storage.inode_updates"))
-        .transpose()?
-        .unwrap_or(false);
+        .transpose()?;
+    let raw_compact_inode_updates = object
+        .get("compact_inode_updates")
+        .map(|value| required_value_bool(value, "config.driver.storage.compact_inode_updates"))
+        .transpose()?;
     let ownership = object
         .get("ownership_mode")
         .map(|value| required_value_string(value, "config.driver.storage.ownership_mode"))
         .transpose()?;
+    if raw_compact_inode_updates == Some(true) {
+        if legacy_concurrent == Some(false) {
+            return Err(ConfigError::at(
+                "config.driver.storage.concurrent_writes",
+                "must be true with compact_inode_updates",
+            ));
+        }
+        if raw_inode_updates == Some(false) {
+            return Err(ConfigError::at(
+                "config.driver.storage.inode_updates",
+                "must be true with compact_inode_updates",
+            ));
+        }
+        if ownership.is_some() {
+            return Err(ConfigError::at(
+                "config.driver.storage.compact_inode_updates",
+                "cannot be combined with ownership_mode",
+            ));
+        }
+    }
+    let compact_inode_updates = raw_compact_inode_updates.unwrap_or(false);
+    let inode_updates = raw_inode_updates.unwrap_or(compact_inode_updates);
     let (concurrent_writes, writeback) = match ownership.as_deref() {
         Some("exclusive") => (false, true),
         Some("shared") => (true, false),
@@ -820,6 +847,7 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
         lease_ttl_ms,
         concurrent_writes,
         inode_updates,
+        compact_inode_updates,
         writeback,
         delegated,
         checkout_path,
@@ -1820,6 +1848,96 @@ mod tests {
                     .contains("inode_updates")
             );
         }
+    }
+
+    #[test]
+    fn compact_selection_infers_only_omitted_prerequisites_and_keeps_legacy_modes() {
+        let mut value = serde_json::json!({"version": 1, "driver": {
+            "kind": "splitstore", "storage": {
+                "metadata": {"kind": "sqlite", "path": "metadata.db"},
+                "blocks": {"kind": "sqlite", "path": "blocks.db"}
+            }
+        }});
+        let base = value.clone();
+        let parse = |value: &Value| parse_config_str(&value.to_string(), Path::new("/tmp"));
+        let default = parse(&value).unwrap().storage.unwrap();
+        assert!(!default.concurrent_writes && !default.inode_updates);
+        assert!(!default.compact_inode_updates);
+        value["driver"]["storage"]["inode_updates"] = Value::Bool(true);
+        let inode = parse(&value).unwrap().storage.unwrap();
+        assert!(inode.concurrent_writes && inode.inode_updates);
+        assert!(!inode.compact_inode_updates);
+        value["driver"]["storage"]["compact_inode_updates"] = Value::Bool(false);
+        let explicit_false = parse(&value).unwrap().storage.unwrap();
+        assert!(explicit_false.concurrent_writes && explicit_false.inode_updates);
+        assert!(!explicit_false.compact_inode_updates);
+        value["driver"]["storage"]["compact_inode_updates"] = Value::Bool(true);
+        let compact = parse(&value).unwrap().storage.unwrap();
+        assert!(compact.concurrent_writes && compact.inode_updates);
+        assert!(compact.compact_inode_updates);
+        value["driver"]["storage"]
+            .as_object_mut()
+            .unwrap()
+            .remove("inode_updates");
+        let inferred = parse(&value).unwrap().storage.unwrap();
+        assert!(inferred.concurrent_writes && inferred.inode_updates);
+        assert!(inferred.compact_inode_updates);
+
+        let mut exclusive = base;
+        exclusive["driver"]["storage"]["compact_inode_updates"] = Value::Bool(false);
+        exclusive["driver"]["storage"]["ownership_mode"] = Value::String("exclusive".into());
+        let explicit_false = parse(&exclusive).unwrap().storage.unwrap();
+        assert!(explicit_false.writeback);
+        assert!(!explicit_false.compact_inode_updates);
+    }
+
+    #[test]
+    fn compact_selection_rejects_raw_contradictions_at_public_config_boundary() {
+        let base = serde_json::json!({"version": 1, "driver": {
+            "kind": "splitstore", "storage": {
+                "metadata": {"kind": "sqlite", "path": "metadata.db"},
+                "blocks": {"kind": "sqlite", "path": "blocks.db"},
+                "compact_inode_updates": true
+            }
+        }});
+        let parse = |value: &Value| parse_config_str(&value.to_string(), Path::new("/tmp"));
+        for field in ["concurrent_writes", "inode_updates"] {
+            let mut invalid = base.clone();
+            invalid["driver"]["storage"][field] = Value::Bool(false);
+            let error = parse(&invalid).unwrap_err();
+            assert!(
+                error
+                    .message()
+                    .contains(&format!("config.driver.storage.{field}")),
+                "{error}"
+            );
+            assert!(!error.message().contains("unknown field"), "{error}");
+        }
+        for mode in ["exclusive", "shared"] {
+            let mut invalid = base.clone();
+            invalid["driver"]["storage"]["ownership_mode"] = Value::String(mode.into());
+            if mode == "shared" {
+                invalid["driver"]["storage"]["checkout_path"] = Value::String("/".into());
+            }
+            let error = parse(&invalid).unwrap_err();
+            assert!(
+                error
+                    .message()
+                    .contains("config.driver.storage.compact_inode_updates"),
+                "{error}"
+            );
+            assert!(!error.message().contains("unknown field"), "{error}");
+        }
+        let mut invalid = base;
+        invalid["driver"]["storage"]["compact_inode_updates"] = Value::String("true".into());
+        let error = parse(&invalid).unwrap_err();
+        assert!(
+            error
+                .message()
+                .contains("config.driver.storage.compact_inode_updates"),
+            "{error}"
+        );
+        assert!(error.message().contains("boolean"), "{error}");
     }
 
     #[test]

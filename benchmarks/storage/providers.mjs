@@ -26,6 +26,10 @@ function loadNapi() {
   return nativeModule
 }
 
+export function nativeStorageDiagnostics() {
+  return loadNapi().storageDiagnostics()
+}
+
 function firstEnvironmentValue(environment, names) {
   for (const name of names) {
     const value = environment[name]
@@ -74,9 +78,6 @@ function readFoundationDbConfig(environment) {
       "MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE (or FOUNDATIONDB_CLUSTER_FILE)",
     )
   }
-  if (sharedProvider && !authorityPrefix) {
-    missing.push("MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX")
-  }
   return {
     configured: missing.length === 0,
     clusterFile,
@@ -85,6 +86,14 @@ function readFoundationDbConfig(environment) {
     leaseAuthority: sharedProvider ? "shared-provider" : "persisted-single-authority",
     missing,
   }
+}
+
+function foundationDbMissingForLayout(foundationDb, layout = "legacy") {
+  const missing = [...foundationDb.missing]
+  if (layout === "legacy" && foundationDb.sharedProvider && !foundationDb.authorityPrefix) {
+    missing.push("MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX")
+  }
+  return missing
 }
 
 function readR2Config(environment) {
@@ -199,6 +208,17 @@ async function openNapiPglite(context) {
   }
 }
 
+function chunkedLayoutOptions(layout) {
+  if (layout === "compact") {
+    return {
+      concurrentWrites: true,
+      inodeUpdates: true,
+      compactInodeUpdates: true,
+    }
+  }
+  return layout === "inode" ? { concurrentWrites: true, inodeUpdates: true } : {}
+}
+
 async function openNapiSplitSqlite(context) {
   const { createChunkedDriver } = loadNapi()
   const directory = await mkdtemp(join(tmpdir(), "mount-rs-storage-split-sqlite-"))
@@ -207,6 +227,7 @@ async function openNapiSplitSqlite(context) {
       metadata: { kind: "sqlite", uri: join(directory, "metadata.sqlite") },
       blocks: { kind: "sqlite", uri: join(directory, "blocks.sqlite") },
       chunkSize: context.chunkSizeBytes,
+      ...chunkedLayoutOptions(context.layout),
       owner: `storage-benchmark-${context.runId}`,
     })
     return {
@@ -236,6 +257,7 @@ async function openNapiSplitPglite(context) {
       durable: context.environment.MOUNT_RS_PGLITE_DURABLE === "1",
     },
     chunkSize: context.chunkSizeBytes,
+    ...chunkedLayoutOptions(context.layout),
     owner: `storage-benchmark-${context.runId}`,
   })
   return {
@@ -265,6 +287,7 @@ async function openNapiSplitPgliteR2(context) {
       durable: r2.durable,
     },
     chunkSize: context.chunkSizeBytes,
+    ...chunkedLayoutOptions(context.layout),
     owner: `storage-benchmark-${context.runId}`,
   })
   return {
@@ -293,6 +316,7 @@ async function openNapiSplitSqliteR2(context) {
         durable: r2.durable,
       },
       chunkSize: context.chunkSizeBytes,
+      ...chunkedLayoutOptions(context.layout),
       owner: `storage-benchmark-${context.runId}`,
     })
     return {
@@ -326,6 +350,7 @@ async function openNapiSplitTidbR2(context) {
       durable: r2.durable,
     },
     chunkSize: context.chunkSizeBytes,
+    ...chunkedLayoutOptions(context.layout),
     owner: `storage-benchmark-${context.runId}`,
   })
   return {
@@ -334,10 +359,7 @@ async function openNapiSplitTidbR2(context) {
   }
 }
 
-async function openNapiSplitFoundationDbR2(context) {
-  const { createChunkedDriver } = loadNapi()
-  const foundationDb = readFoundationDbConfig(context.environment)
-  const r2 = readR2Config(context.environment)
+export function foundationDbMetadataOptions(foundationDb, context) {
   const metadata = {
     kind: "foundationdb",
     uri: foundationDb.clusterFile,
@@ -345,7 +367,18 @@ async function openNapiSplitFoundationDbR2(context) {
     durable: true,
     leaseAuthority: foundationDb.leaseAuthority,
   }
-  if (foundationDb.sharedProvider) metadata.authorityPrefix = foundationDb.authorityPrefix
+  if (["inode", "compact"].includes(context.layout)) metadata.leaseAuthority = "revision-cas"
+  if (foundationDb.sharedProvider && context.layout === "legacy") {
+    metadata.authorityPrefix = foundationDb.authorityPrefix
+  }
+  return metadata
+}
+
+async function openNapiSplitFoundationDbR2(context) {
+  const { createChunkedDriver } = loadNapi()
+  const foundationDb = readFoundationDbConfig(context.environment)
+  const r2 = readR2Config(context.environment)
+  const metadata = foundationDbMetadataOptions(foundationDb, context)
   const filesystem = await createChunkedDriver({
     metadata,
     blocks: {
@@ -358,6 +391,7 @@ async function openNapiSplitFoundationDbR2(context) {
       durable: r2.durable,
     },
     chunkSize: context.chunkSizeBytes,
+    ...chunkedLayoutOptions(context.layout),
     owner: `storage-benchmark-${context.runId}`,
   })
   return {
@@ -435,6 +469,10 @@ export function providerDefinitions(environment = process.env) {
   const foundationDb = readFoundationDbConfig(environment)
   const r2 = readR2Config(environment)
   const oracle = mountxMemoryAvailability(environment)
+  const foundationDbRequiredEnvVars = (context = {}) => [
+    ...foundationDbMissingForLayout(foundationDb, context.layout),
+    ...r2.missing,
+  ]
 
   return [
     provider({
@@ -664,10 +702,10 @@ export function providerDefinitions(environment = process.env) {
         version: "1",
         chunkSizeBytes: DEFAULT_CHUNK_SIZE_BYTES,
       },
-      requiredEnvVars: [...foundationDb.missing, ...r2.missing],
+      requiredEnvVars: foundationDbRequiredEnvVars,
       remoteRegion: r2.region || null,
-      availability: () => {
-        const missing = [...foundationDb.missing, ...r2.missing]
+      availability: (_environment, context = {}) => {
+        const missing = foundationDbRequiredEnvVars(context)
         return {
           configured: missing.length === 0,
           missing,

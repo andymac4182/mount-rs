@@ -213,6 +213,13 @@ impl BlockStoreDecorator for DriveCacheDecorator {
         store: Arc<dyn BlockStore>,
     ) -> Result<Arc<dyn BlockStore>> {
         let policy = match config {
+            StoreConfig::SlateDb { .. } => {
+                return Err(
+                    mount_rs_core::FsError::new(mount_rs_core::ErrorCode::Enotsup).with_message(
+                        "SlateDB stores metadata; use a block provider for the blob cache",
+                    ),
+                );
+            }
             StoreConfig::Tidb { .. } => IntegrityPolicy::Sha256Prefixed,
             StoreConfig::FoundationDb { .. } => IntegrityPolicy::Sha256Colon,
             StoreConfig::R2 { .. } | StoreConfig::RustFs { .. } | StoreConfig::AwsS3 { .. } => {
@@ -528,6 +535,25 @@ mod tests {
             },
             metrics: metrics.clone(),
         };
+        let metadata_only = StoreConfig::SlateDb {
+            endpoint: "http://127.0.0.1:1".into(),
+            bucket: "metadata".into(),
+            region: "us-east-1".into(),
+            path: "metadata".into(),
+            access_key_id: "test-key".into(),
+            secret_access_key: "test-secret".into(),
+            durable: false,
+        };
+        let unused_blocks = Arc::new(
+            mount_rs_sqlite::SqliteBlockStore::open(dir.path().join("unused-blocks.sqlite"))
+                .unwrap(),
+        );
+        let error = decorator
+            .decorate(&metadata_only, unused_blocks)
+            .err()
+            .expect("metadata-only providers cannot register a block cache");
+        assert_eq!(error.code, mount_rs_core::ErrorCode::Enotsup);
+        assert!(metrics.lock().unwrap().is_empty());
         let mut options =
             mount_rs_sdk::SplitOptions::memory("first", 4096).with_concurrent_writes(true);
         options.metadata = StoreConfig::Sqlite {

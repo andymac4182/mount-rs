@@ -69,11 +69,21 @@ fields needed to interpret failures.
 
 Useful options include `--providers`, `--timeout-ms`,
 `--cleanup-timeout-ms`, `--chunk-size-bytes`, `--payload-seed`, and
-`--network-context`. Use `--require-configured` for a qualification lane that
-must run every requested provider; without it, missing external configuration
-is recorded as an explicit skip and the overall result can remain `ok` for a
-mixed local/provider matrix. A sequential run is explicit with
-`--concurrency 1`.
+`--network-context`. Split providers also accept `--layout inode` and
+`--layout compact`; compact passes `concurrentWrites`, `inodeUpdates`, and
+`compactInodeUpdates` to the public `createChunkedDriver` constructor. Combined
+providers reject either layout before provider setup. Use `--require-configured`
+for a qualification lane that must run every requested provider; without it,
+missing external configuration is recorded as an explicit skip and the overall
+result can remain `ok` for a mixed local/provider matrix. A sequential run is
+explicit with `--concurrency 1`.
+
+Compact provider artifacts distinguish the requested and constructor-selected
+layout from physical metadata evidence. The benchmark records
+`selectionEvidence: "createChunkedDriver-constructor-accepted"` and
+`persistedMarkerEvidence: "not-observed-by-benchmark-runner"`; constructor
+acceptance does not claim that the runner directly inspected a persisted MRC5
+marker.
 
 The PGlite script requires `pnpm --dir tests/pglite install --frozen-lockfile`
 and a built native addon. It starts an isolated real PGlite socket server,
@@ -82,6 +92,41 @@ results are explicitly volatile, not durable-disk benchmark evidence. CI runs
 this check on the Node platform matrix and uploads its JSON separately.
 
 ### Ozone IOPS qualification
+
+Set `MOUNT_RS_PROFILE_IO=1` before loading the native addon to include
+`storageDiagnostics` in each provider's benchmark JSON. The runner records
+create, per-size workload, owned-path cleanup, and shutdown phases and prints
+one bounded `MOUNT_RS_STORAGE_PHASE` summary per phase. The JSON retains exact
+decimal-string native counters, fixed log2 microsecond latency buckets,
+successful payload bytes, success/error/cancellation counts, existing core
+profile counters, SQLite pager and SQL-category counters by connection ID, and
+live R2 logical block-store/cache counters. Closed SQLite connections or R2
+instances, counter resets, and native operations crossing a phase boundary
+mark attribution incomplete. Snapshot observer time is separate from measured
+phase time; `benchmark_measured_elapsed_ms` retains the unchanged timed workload
+window while phase elapsed time also includes `runSize` bookkeeping. Process
+CPU records aligned workload and observer deltas separately.
+Global native and JS allocation counts, internal successful HTTP retries,
+HTTP attempts, and physical device IOPS are unavailable from this interface.
+The enabled N-API dynamic-provider adapter reports the exact number of its
+forwarding `Box::pin` sites and the requested future-object bytes at those
+sites. This subset excludes allocator overhead, all other native/JS
+allocations, and the default disabled path (which makes no forwarding box).
+The recorder's atomic updates themselves allocate nothing. Diagnostic JSON
+retains explicit inclusive-time scope, all 32 log2 microsecond intervals with
+a terminal overflow bucket, logical/provider and pager scopes, and the
+unavailable fields. Native SQLite controls capture connection stats before
+each shutdown and separately after reopen; closed connection counters cannot
+be reconstructed from an overall lifecycle delta. PGlite client mutex
+wait is recorded. `tidb.pool.checkout` records inclusive checkout time,
+including possible lazy connection and session configuration; isolated
+TiDB pool queue wait remains unavailable. Inclusive provider
+durations overlap under concurrency. `MOUNT_RS_TRACE_STORAGE=1` separately
+enables at most 16 slow-operation stderr records with fixed labels and no
+paths, keys, payloads, SQL, or raw errors. It is off during normal profiling.
+For server-side SQL and host/process I/O, use `scripts/observe-tidb-stage.py`
+with its documented scope instead of treating SQLite pager or provider calls
+as physical IOPS.
 
 The same runner can measure a small, concurrent split-provider lifecycle over
 the real Ozone S3 Gateway and fail below a requested threshold:
@@ -205,3 +250,51 @@ The reference snapshot/fork benchmark is recorded in each result as
 `snapshotFork.status: "deferred"`. This runner does not copy whole snapshots,
 pretend that they are copy-on-write, or publish performance claims for the
 future COW requirement.
+
+
+### Owned TiDB/RustFS resource pilot
+
+`MOUNT_RS_BACKING_PILOT=1` is a default-off diagnostic route through the
+RustFS combo-only owner and an explicit `test-tidb.sh` command with NAPI and
+IOPS enabled. It retains creation-time CID files for the durable 3 PD / 3 TiKV /
+1 TiDB topology and the RustFS service, with direct owner labels. The cleanup
+container is excluded. The operator must supply a private Engine capability
+file (`MOUNT_RS_BACKING_ENGINE_CAPABILITY`, JSON containing only an absolute
+`socket_path`) and an explicit private output path
+(`MOUNT_RS_BACKING_PILOT_OUTPUT`). Both private input files and final output use
+mode 0600 in an owned mode-0700 directory. No socket discovery, container-name
+CID lookup, global inventory or socket mount is used for observation.
+
+The pilot selects one `workload-4096bytes` resource interval at the existing
+runner boundary: legacy public NAPI TiDB/R2, 400 lifecycle iterations,
+concurrency 64, 65536-byte chunks and the unchanged 1000 IOPS floor. Effective
+TiDB and R2 endpoint/bucket aliases must match the owner-issued current
+loopback bindings; a conflicting higher-precedence alias is rejected. The
+first pilot ends before fixture restart. Later generations require a fresh
+receipt and observer and are outside this route.
+
+Create, cleanup and shutdown resources are `not_selected`; their existing
+native phase diagnostics remain separate. A complete pair uses 33 serialized
+GETs for eight exact CIDs, including version negotiation. The resource window
+includes boundary/snapshot skew; it is not the lifecycle IOPS denominator.
+Short intervals remain incomplete under the existing 1-second minimum cadence:
+there is no pacing, waiting, sample reuse or retry. The existing 60-second
+owner, 2-second calls/hooks, 257-request and 16-CID caps remain unchanged. Real
+serial-call fit and a viable host meeting the existing 4 CPU / 10 GiB durable
+floor remain execution prerequisites.
+
+The fixed sanitized artifact is at most 8 MiB including newline, reserving
+16 KiB for outcome/terminal fields. Oversized optional native/backing evidence
+is omitted as incomplete, while first recorded failure, floor, workload and
+cleanup counts are preserved. Environment/configuration, credentials, socket
+and private file paths, raw errors and Engine response bodies are excluded.
+Selected binary hashes are inert file identities until joined to the already
+loaded binding at the successful constructor boundary. Capture-JS controls
+carry synthetic identity, no native digest and no live-native qualification.
+
+This diagnostic route emits no Ozone qualification PASS marker and does not
+replace its verifier. Container CPU/block/network counters are enclosing
+accounting, not physical device IOPS or SQL wire/server timing. Client/server
+interfaces may count the same traffic more than once. Node own CPU excludes
+backing servers. FDB server/client handoff, SQLite/PGlite host metadata
+processes, external services and unselected phases remain coverage gaps.

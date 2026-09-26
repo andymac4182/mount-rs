@@ -870,6 +870,8 @@ export declare class WebdavStreamResponse {
 export declare function basename(path: string): string
 
 export declare function createChunkedDriver(options: JsChunkedOptions): Promise<Filesystem>
+/** Versioned, read-only JSON snapshot. Counters are exact decimal strings. */
+export declare function storageDiagnostics(): string
 
 /**
  * Construct a Rust `Filesystem` backed by a structural JavaScript
@@ -1305,6 +1307,10 @@ export interface JsChunkedOptions {
    * local SQLite metadata. SQLite metadata and blocks are same-host only.
    */
   concurrentWrites?: boolean
+  /** Enable independent inode revisions. Requires concurrentWrites and no ownershipMode. */
+  inodeUpdates?: boolean
+  /** Opt in to compact MRC5 metadata. Enables inodeUpdates and concurrentWrites; rejects either explicitly false, ownershipMode, or checkoutPath. */
+  compactInodeUpdates?: boolean
   /**
    * Explicit exclusive ownership enables writeback until sync or shutdown.
    * Shared ownership uses fenced directory delegation; same-host SQLite constraints remain.

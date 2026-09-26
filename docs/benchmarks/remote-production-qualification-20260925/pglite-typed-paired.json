@@ -1,0 +1,838 @@
+{
+  "schema": "mount-rs-pglite-typed-paired-v1",
+  "before_source": "396b7471/storage0015437d",
+  "after_source": "c24e1513b7217275b89aa4b5a684b324fa579dfc",
+  "after_addon_sha256": "642c6c7002aed0645211c3cbdbc6630081a6d7e397146b0d65bbdf7b8de64332",
+  "wire_artifacts": [
+    {
+      "label": "before",
+      "sha256": "418bbaf330590b6a364a9aa628eb10d90e7052bfded9ad8ae5535334c95bd458"
+    },
+    {
+      "label": "after",
+      "sha256": "ed234d8ed1fb0349fe6235189768aa28036fc1cd8008a0f7a97d243cd96e7757"
+    }
+  ],
+  "scope": "Two alternating before/after pairs per workload; public NAPI inode mode, split PGlite roles, volatile configuration, owned persistent server process, 400 iterations/64 workers/4096B writes each; no QUIC/native mounting/production capacity.",
+  "limitations": [
+    "Timed operations exclude setup/cleanup; process disk-byte counters cover full runner window including setup/cleanup/background and observer margins. Short zero write-byte deltas do not prove zero backing writes or durable publication. No fixed physical SSD write-amplification ratio is inferred.",
+    "Backing-process byte counters use macOS proc_pid_rusage RUSAGE_INFO_V2, SDK resource.h160-byte layout and monotonic same UUID/start-time checks. They provide bytes, not operation counts. The first before1 lifecycle run preceded this observer and lacks process counters.",
+    "Host iostat reports all host traffic, not attributable to this datastore. First since-boot sample discarded; disk4 is the virtual FDB image and must not be added to disk0.",
+    "Two short trial pairs are diagnostic; no confidence interval or throughput floor acceptance. Fifteen SQL texts and transaction semantics are unchanged; structural whole-guard rewrite remains.",
+    "No allocator profiler or server CPU sampler used here. Kernel resident/footprint before/after values are gauges, not phase peaks. Foreign allocator and full-target profiles remain separate."
+  ],
+  "runs": [
+    {
+      "case": "before1",
+      "workload": "lifecycle",
+      "result": {
+        "schema": "mount-rs-local-provider-probe-v1",
+        "run": "qualification-58795-a3c4066c-9b31-4970-9b50-875d0ab5a29e",
+        "source": "396b7471/storage0015437d",
+        "addon": "/private/tmp/mount-rs-qualification-baseline/bin/mount-rs-396b7471.node",
+        "layout": "inode",
+        "workload": "lifecycle",
+        "scope": "public NAPI split stores; local blob providers; no QUIC/OIDC/native mounting",
+        "payloadBytes": 4096,
+        "oracle": "full-byte comparison; unique unsigned 64-bit generation i+1; setup generation zero",
+        "iterations": 400,
+        "concurrency": 64,
+        "results": [
+          {
+            "provider": "pglite",
+            "durability": "configured-volatile",
+            "attempted": 400,
+            "successful": 400,
+            "verifiedReads": 400,
+            "errors": 0,
+            "cleanup": "passed",
+            "phase": "complete",
+            "setupSeconds": 0.013987999999999999,
+            "elapsedSeconds": 55.719020333,
+            "logicalOperations": 1200,
+            "iops": 21.536631348295458
+          }
+        ]
+      },
+      "runner": {
+        "started_utc": "2026-09-25T07:20:54.781508+00:00",
+        "ended_utc": "2026-09-25T07:21:53.610135+00:00",
+        "physical_observer": {
+          "log": "/private/tmp/mount-rs-qualification-baseline/pglite-typed-before1-lifecycle.physical-iostat.log",
+          "command": [
+            "iostat",
+            "-d",
+            "-c",
+            "1000",
+            "-w",
+            "1"
+          ],
+          "scope": "all host traffic; cannot attribute to backing store; discard first since-boot sample; do not sum physical disk0 with virtual disk image",
+          "exit_code": -15
+        },
+        "exit_code": 0,
+        "elapsed_seconds": 58.828597832995,
+        "timeout_seconds": 120,
+        "runner": "after",
+        "layout": "inode",
+        "workload": "lifecycle",
+        "durable_pglite": false,
+        "output": "/private/tmp/mount-rs-qualification-baseline/pglite-typed-before1-lifecycle.json",
+        "log": "/private/tmp/mount-rs-qualification-baseline/pglite-typed-before1-lifecycle.log",
+        "source": "396b7471/storage0015437d"
+      },
+      "host_io_summary": {
+        "disk0": {
+          "interval_samples": 58,
+          "mean_reported_tps": 17229.96551724138,
+          "max_reported_tps": 25327.0,
+          "mean_reported_MB_per_second": 73.25362068965518,
+          "scope": "All host device traffic; since-boot first row excluded; nominal 1s intervals across setup/work/cleanup plus observer margins. Not datastore-attributed IOPS. Virtual disk4 must not be summed with physical disk0."
+        },
+        "disk4": {
+          "interval_samples": 58,
+          "mean_reported_tps": 26.82758620689655,
+          "max_reported_tps": 109.0,
+          "mean_reported_MB_per_second": 0.1667241379310345,
+          "scope": "All host device traffic; since-boot first row excluded; nominal 1s intervals across setup/work/cleanup plus observer margins. Not datastore-attributed IOPS. Virtual disk4 must not be summed with physical disk0."
+        }
+      },
+      "raw_iostat_sha256": "7e75129fcffa384266327f5b9330d0d37af510670c4d5a1727c16874a7aa806b"
+    },
+    {
+      "case": "after1",
+      "workload": "lifecycle",
+      "result": {
+        "schema": "mount-rs-local-provider-probe-v1",
+        "run": "qualification-59157-fe8b7c16-aa78-4bdd-9a27-df6342923599",
+        "source": "c24e1513",
+        "addon": "/private/tmp/mount-rs-pglite-typed.node",
+        "layout": "inode",
+        "workload": "lifecycle",
+        "scope": "public NAPI split stores; local blob providers; no QUIC/OIDC/native mounting",
+        "payloadBytes": 4096,
+        "oracle": "full-byte comparison; unique unsigned 64-bit generation i+1; setup generation zero",
+        "iterations": 400,
+        "concurrency": 64,
+        "results": [
+          {
+            "provider": "pglite",
+            "durability": "configured-volatile",
+            "attempted": 400,
+            "successful": 400,
+            "verifiedReads": 400,
+            "errors": 0,
+            "cleanup": "passed",
+            "phase": "complete",
+            "setupSeconds": 0.015037750000000003,
+            "elapsedSeconds": 46.7259805,
+            "logicalOperations": 1200,
+            "iops": 25.681644069512892
+          }
+        ]
+      },
+      "runner": {
+        "backing_process_before": {
+          "available": true,
+          "pid": 72311,
+          "process_uuid": "88dd67065d0e3353b375774228420e75",
+          "process_start_abstime": 4784569015545,
+          "disk_read_bytes": 13373440,
+          "disk_write_bytes": 389627904,
+          "resident_bytes": 631586816,
+          "physical_footprint_bytes": 771241336,
+          "scope": "owned PGlite Node server process kernel rusage_info_v2 byte counters; not physical SSD IOPS, no operation count; window includes setup/workload/cleanup and background; excludes client process"
+        },
+        "backing_process_after": {
+          "available": true,
+          "pid": 72311,
+          "process_uuid": "88dd67065d0e3353b375774228420e75",
+          "process_start_abstime": 4784569015545,
+          "disk_read_bytes": 63168512,
+          "disk_write_bytes": 527843328,
+          "resident_bytes": 713654272,
+          "physical_footprint_bytes": 505165200,
+          "scope": "owned PGlite Node server process kernel rusage_info_v2 byte counters; not physical SSD IOPS, no operation count; window includes setup/workload/cleanup and background; excludes client process"
+        },
+        "backing_process_delta": {
+          "available": true,
+          "disk_read_bytes": 49795072,
+          "disk_write_bytes": 138215424,
+          "scope": "owned PGlite Node server process kernel rusage_info_v2 byte counters; not physical SSD IOPS, no operation count; window includes setup/workload/cleanup and background; excludes client process"
+        },
+        "started_utc": "2026-09-25T07:22:24.842198+00:00",
+        "ended_utc": "2026-09-25T07:23:14.715703+00:00",
+        "physical_observer": {
+          "log": "/private/tmp/mount-rs-qualification-baseline/pglite-typed-after1-lifecycle.physical-iostat.log",
+          "command": [
+            "iostat",
+            "-d",
+            "-c",
+            "1000",
+            "-w",
+            "1"
+          ],
+          "scope": "all host traffic; cannot attribute to backing store; discard first since-boot sample; do not sum physical disk0 with virtual disk image",
+          "exit_code": -15
+        },
+        "exit_code": 0,
+        "elapsed_seconds": 49.87348654199741,
+        "timeout_seconds": 120,
+        "runner": "after",
+        "layout": "inode",
+        "workload": "lifecycle",
+        "durable_pglite": false,
+        "output": "/private/tmp/mount-rs-qualification-baseline/pglite-typed-after1-lifecycle.json",
+        "log": "/private/tmp/mount-rs-qualification-baseline/pglite-typed-after1-lifecycle.log",
+        "source": "c24e1513"
+      },
+      "host_io_summary": {
+        "disk0": {
+          "interval_samples": 49,
+          "mean_reported_tps": 17605.85714285714,
+          "max_reported_tps": 24370.0,
+          "mean_reported_MB_per_second": 75.19326530612246,
+          "scope": "All host device traffic; since-boot first row excluded; nominal 1s intervals across setup/work/cleanup plus observer margins. Not datastore-attributed IOPS. Virtual disk4 must not be summed with physical disk0."
+        },
+        "disk4": {
+          "interval_samples": 49,
+          "mean_reported_tps": 24.285714285714285,
+          "max_reported_tps": 81.0,
+          "mean_reported_MB_per_second": 0.15183673469387754,
+          "scope": "All host device traffic; since-boot first row excluded; nominal 1s intervals across setup/work/cleanup plus observer margins. Not datastore-attributed IOPS. Virtual disk4 must not be summed with physical disk0."
+        }
+      },
+      "raw_iostat_sha256": "92c23b270ad9dafadc84d5afb43871ca1cea33a89c0ec4ffa597938ede7ce811"
+    },
+    {
+      "case": "before2",
+      "workload": "lifecycle",
+      "result": {
+        "schema": "mount-rs-local-provider-probe-v1",
+        "run": "qualification-59600-f802f526-df83-4ac2-9110-40a721324203",
+        "source": "396b7471/storage0015437d",
+        "addon": "/private/tmp/mount-rs-qualification-baseline/bin/mount-rs-396b7471.node",
+        "layout": "inode",
+        "workload": "lifecycle",
+        "scope": "public NAPI split stores; local blob providers; no QUIC/OIDC/native mounting",
+        "payloadBytes": 4096,
+        "oracle": "full-byte comparison; unique unsigned 64-bit generation i+1; setup generation zero",
+        "iterations": 400,
+        "concurrency": 64,
+        "results": [
+          {
+            "provider": "pglite",
+            "durability": "configured-volatile",
+            "attempted": 400,
+            "successful": 400,
+            "verifiedReads": 400,
+            "errors": 0,
+            "cleanup": "passed",
+            "phase": "complete",
+            "setupSeconds": 0.013273000000000004,
+            "elapsedSeconds": 55.421437292,
+            "logicalOperations": 1200,
+            "iops": 21.65227137068887
+          }
+        ]
+      },
+      "runner": {
+        "backing_process_before": {
+          "available": true,
+          "pid": 72311,
+          "process_uuid": "88dd67065d0e3353b375774228420e75",
+          "process_start_abstime": 4784569015545,
+          "disk_read_bytes": 63168512,
+          "disk_write_bytes": 527843328,
+          "resident_bytes": 713654272,
+          "physical_footprint_bytes": 505165200,
+          "scope": "owned PGlite Node server process kernel rusage_info_v2 byte counters; not physical SSD IOPS, no operation count; window includes setup/workload/cleanup and background; excludes client process"
+        },
+        "backing_process_after": {
+          "available": true,
+          "pid": 72311,
+          "process_uuid": "88dd67065d0e3353b375774228420e75",
+          "process_start_abstime": 4784569015545,
+          "disk_read_bytes": 86425600,
+          "disk_write_bytes": 667779072,
+          "resident_bytes": 771260416,
+          "physical_footprint_bytes": 435189232,
+          "scope": "owned PGlite Node server process kernel rusage_info_v2 byte counters; not physical SSD IOPS, no operation count; window includes setup/workload/cleanup and background; excludes client process"
+        },
+        "backing_process_delta": {
+          "available": true,
+          "disk_read_bytes": 23257088,
+          "disk_write_bytes": 139935744,
+          "scope": "owned PGlite Node server process kernel rusage_info_v2 byte counters; not physical SSD IOPS, no operation count; window includes setup/workload/cleanup and background; excludes client process"
+        },
+        "started_utc": "2026-09-25T07:23:33.600232+00:00",
+        "ended_utc": "2026-09-25T07:24:32.162212+00:00",
+        "physical_observer": {
+          "log": "/private/tmp/mount-rs-qualification-baseline/pglite-typed-before2-lifecycle.physical-iostat.log",
+          "command": [
+            "iostat",
+            "-d",
+            "-c",
+            "1000",
+            "-w",
+            "1"
+          ],
+          "scope": "all host traffic; cannot attribute to backing store; discard first since-boot sample; do not sum physical disk0 with virtual disk image",
+          "exit_code": -15
+        },
+        "exit_code": 0,
+        "elapsed_seconds": 58.55772254100884,
+        "timeout_seconds": 120,
+        "runner": "after",
+        "layout": "inode",
+        "workload": "lifecycle",
+        "durable_pglite": false,
+        "output": "/private/tmp/mount-rs-qualification-baseline/pglite-typed-before2-lifecycle.json",
+        "log": "/private/tmp/mount-rs-qualification-baseline/pglite-typed-before2-lifecycle.log",
+        "source": "396b7471/storage0015437d"
+      },
+      "host_io_summary": {
+        "disk0": {
+          "interval_samples": 58,
+          "mean_reported_tps": 16209.51724137931,
+          "max_reported_tps": 25260.0,
+          "mean_reported_MB_per_second": 71.88,
+          "scope": "All host device traffic; since-boot first row excluded; nominal 1s intervals across setup/work/cleanup plus observer margins. Not datastore-attributed IOPS. Virtual disk4 must not be summed with physical disk0."
+        },
+        "disk4": {
+          "interval_samples": 58,
+          "mean_reported_tps": 26.53448275862069,
+          "max_reported_tps": 105.0,
+          "mean_reported_MB_per_second": 0.1646551724137931,
+          "scope": "All host device traffic; since-boot first row excluded; nominal 1s intervals across setup/work/cleanup plus observer margins. Not datastore-attributed IOPS. Virtual disk4 must not be summed with physical disk0."
+        }
+      },
+      "raw_iostat_sha256": "d9599af40b1ca5978744edeec203167d42f17a2dca8e099e22d1907c0e1a3d10"
+    },
+    {
+      "case": "after2",
+      "workload": "lifecycle",
+      "result": {
+        "schema": "mount-rs-local-provider-probe-v1",
+        "run": "qualification-60161-1ae7b630-220d-4a1b-b2d5-230097ad46c7",
+        "source": "c24e1513",
+        "addon": "/private/tmp/mount-rs-pglite-typed.node",
+        "layout": "inode",
+        "workload": "lifecycle",
+        "scope": "public NAPI split stores; local blob providers; no QUIC/OIDC/native mounting",
+        "payloadBytes": 4096,
+        "oracle": "full-byte comparison; unique unsigned 64-bit generation i+1; setup generation zero",
+        "iterations": 400,
+        "concurrency": 64,
+        "results": [
+          {
+            "provider": "pglite",
+            "durability": "configured-volatile",
+            "attempted": 400,
+            "successful": 400,
+            "verifiedReads": 400,
+            "errors": 0,
+            "cleanup": "passed",
+            "phase": "complete",
+            "setupSeconds": 0.011967750000000003,
+            "elapsedSeconds": 46.764434666,
+            "logicalOperations": 1200,
+            "iops": 25.660526179149084
+          }
+        ]
+      },
+      "runner": {
+        "backing_process_before": {
+          "available": true,
+          "pid": 72311,
+          "process_uuid": "88dd67065d0e3353b375774228420e75",
+          "process_start_abstime": 4784569015545,
+          "disk_read_bytes": 86425600,
+          "disk_write_bytes": 667779072,
+          "resident_bytes": 771260416,
+          "physical_footprint_bytes": 415135216,
+          "scope": "owned PGlite Node server process kernel rusage_info_v2 byte counters; not physical SSD IOPS, no operation count; window includes setup/workload/cleanup and background; excludes client process"
+        },
+        "backing_process_after": {
+          "available": true,
+          "pid": 72311,
+          "process_uuid": "88dd67065d0e3353b375774228420e75",
+          "process_start_abstime": 4784569015545,
+          "disk_read_bytes": 142344192,
+          "disk_write_bytes": 813662208,
+          "resident_bytes": 780025856,
+          "physical_footprint_bytes": 423589360,
+          "scope": "owned PGlite Node server process kernel rusage_info_v2 byte counters; not physical SSD IOPS, no operation count; window includes setup/workload/cleanup and background; excludes client process"
+        },
+        "backing_process_delta": {
+          "available": true,
+          "disk_read_bytes": 55918592,
+          "disk_write_bytes": 145883136,
+          "scope": "owned PGlite Node server process kernel rusage_info_v2 byte counters; not physical SSD IOPS, no operation count; window includes setup/workload/cleanup and background; excludes client process"
+        },
+        "started_utc": "2026-09-25T07:25:16.559379+00:00",
+        "ended_utc": "2026-09-25T07:26:06.468197+00:00",
+        "physical_observer": {
+          "log": "/private/tmp/mount-rs-qualification-baseline/pglite-typed-after2-lifecycle.physical-iostat.log",
+          "command": [
+            "iostat",
+            "-d",
+            "-c",
+            "1000",
+            "-w",
+            "1"
+          ],
+          "scope": "all host traffic; cannot attribute to backing store; discard first since-boot sample; do not sum physical disk0 with virtual disk image",
+          "exit_code": -15
+        },
+        "exit_code": 0,
+        "elapsed_seconds": 49.90874987500138,
+        "timeout_seconds": 120,
+        "runner": "after",
+        "layout": "inode",
+        "workload": "lifecycle",
+        "durable_pglite": false,
+        "output": "/private/tmp/mount-rs-qualification-baseline/pglite-typed-after2-lifecycle.json",
+        "log": "/private/tmp/mount-rs-qualification-baseline/pglite-typed-after2-lifecycle.log",
+        "source": "c24e1513"
+      },
+      "host_io_summary": {
+        "disk0": {
+          "interval_samples": 49,
+          "mean_reported_tps": 17264.448979591838,
+          "max_reported_tps": 24012.0,
+          "mean_reported_MB_per_second": 75.54122448979592,
+          "scope": "All host device traffic; since-boot first row excluded; nominal 1s intervals across setup/work/cleanup plus observer margins. Not datastore-attributed IOPS. Virtual disk4 must not be summed with physical disk0."
+        },
+        "disk4": {
+          "interval_samples": 49,
+          "mean_reported_tps": 25.122448979591837,
+          "max_reported_tps": 108.0,
+          "mean_reported_MB_per_second": 0.15918367346938775,
+          "scope": "All host device traffic; since-boot first row excluded; nominal 1s intervals across setup/work/cleanup plus observer margins. Not datastore-attributed IOPS. Virtual disk4 must not be summed with physical disk0."
+        }
+      },
+      "raw_iostat_sha256": "677cd068ed14b02542704bec83e3838c0a1a43cda1d7d5e4ecaf3adf9aa705f9"
+    },
+    {
+      "case": "before1",
+      "workload": "steady",
+      "result": {
+        "schema": "mount-rs-local-provider-probe-v1",
+        "run": "qualification-60441-4bc61e20-6e0f-4580-87b6-8e832e07d820",
+        "source": "396b7471/storage0015437d",
+        "addon": "/private/tmp/mount-rs-qualification-baseline/bin/mount-rs-396b7471.node",
+        "layout": "inode",
+        "workload": "steady",
+        "scope": "public NAPI split stores; local blob providers; no QUIC/OIDC/native mounting",
+        "payloadBytes": 4096,
+        "oracle": "full-byte comparison; unique unsigned 64-bit generation i+1; setup generation zero",
+        "iterations": 400,
+        "concurrency": 64,
+        "results": [
+          {
+            "provider": "pglite",
+            "durability": "configured-volatile",
+            "attempted": 400,
+            "successful": 400,
+            "verifiedReads": 400,
+            "errors": 0,
+            "cleanup": "passed",
+            "phase": "complete",
+            "setupSeconds": 0.011236791000000003,
+            "elapsedSeconds": 2.648383417,
+            "logicalOperations": 800,
+            "iops": 302.07106526373485
+          }
+        ]
+      },
+      "runner": {
+        "backing_process_before": {
+          "available": true,
+          "pid": 72311,
+          "process_uuid": "88dd67065d0e3353b375774228420e75",
+          "process_start_abstime": 4784569015545,
+          "disk_read_bytes": 142344192,
+          "disk_write_bytes": 813662208,
+          "resident_bytes": 780025856,
+          "physical_footprint_bytes": 423589360,
+          "scope": "owned PGlite Node server process kernel rusage_info_v2 byte counters; not physical SSD IOPS, no operation count; window includes setup/workload/cleanup and background; excludes client process"
+        },
+        "backing_process_after": {
+          "available": true,
+          "pid": 72311,
+          "process_uuid": "88dd67065d0e3353b375774228420e75",
+          "process_start_abstime": 4784569015545,
+          "disk_read_bytes": 146423808,
+          "disk_write_bytes": 813662208,
+          "resident_bytes": 782614528,
+          "physical_footprint_bytes": 426047248,
+          "scope": "owned PGlite Node server process kernel rusage_info_v2 byte counters; not physical SSD IOPS, no operation count; window includes setup/workload/cleanup and background; excludes client process"
+        },
+        "backing_process_delta": {
+          "available": true,
+          "disk_read_bytes": 4079616,
+          "disk_write_bytes": 0,
+          "scope": "owned PGlite Node server process kernel rusage_info_v2 byte counters; not physical SSD IOPS, no operation count; window includes setup/workload/cleanup and background; excludes client process"
+        },
+        "started_utc": "2026-09-25T07:26:31.420003+00:00",
+        "ended_utc": "2026-09-25T07:26:39.662185+00:00",
+        "physical_observer": {
+          "log": "/private/tmp/mount-rs-qualification-baseline/pglite-typed-before1-steady.physical-iostat.log",
+          "command": [
+            "iostat",
+            "-d",
+            "-c",
+            "1000",
+            "-w",
+            "1"
+          ],
+          "scope": "all host traffic; cannot attribute to backing store; discard first since-boot sample; do not sum physical disk0 with virtual disk image",
+          "exit_code": -15
+        },
+        "exit_code": 0,
+        "elapsed_seconds": 8.241958917002194,
+        "timeout_seconds": 120,
+        "runner": "after",
+        "layout": "inode",
+        "workload": "steady",
+        "durable_pglite": false,
+        "output": "/private/tmp/mount-rs-qualification-baseline/pglite-typed-before1-steady.json",
+        "log": "/private/tmp/mount-rs-qualification-baseline/pglite-typed-before1-steady.log",
+        "source": "396b7471/storage0015437d"
+      },
+      "host_io_summary": {
+        "disk0": {
+          "interval_samples": 8,
+          "mean_reported_tps": 18454.75,
+          "max_reported_tps": 28738.0,
+          "mean_reported_MB_per_second": 75.27875,
+          "scope": "All host device traffic; since-boot first row excluded; nominal 1s intervals across setup/work/cleanup plus observer margins. Not datastore-attributed IOPS. Virtual disk4 must not be summed with physical disk0."
+        },
+        "disk4": {
+          "interval_samples": 8,
+          "mean_reported_tps": 23.375,
+          "max_reported_tps": 41.0,
+          "mean_reported_MB_per_second": 0.145,
+          "scope": "All host device traffic; since-boot first row excluded; nominal 1s intervals across setup/work/cleanup plus observer margins. Not datastore-attributed IOPS. Virtual disk4 must not be summed with physical disk0."
+        }
+      },
+      "raw_iostat_sha256": "c3e6f2e451479a9308c7ed7fec759689218cee7582bf3bd1b2dc6f5bb3d67014"
+    },
+    {
+      "case": "after1",
+      "workload": "steady",
+      "result": {
+        "schema": "mount-rs-local-provider-probe-v1",
+        "run": "qualification-60644-e23ebe1d-cf7b-47ac-8224-6f90f886f5eb",
+        "source": "c24e1513",
+        "addon": "/private/tmp/mount-rs-pglite-typed.node",
+        "layout": "inode",
+        "workload": "steady",
+        "scope": "public NAPI split stores; local blob providers; no QUIC/OIDC/native mounting",
+        "payloadBytes": 4096,
+        "oracle": "full-byte comparison; unique unsigned 64-bit generation i+1; setup generation zero",
+        "iterations": 400,
+        "concurrency": 64,
+        "results": [
+          {
+            "provider": "pglite",
+            "durability": "configured-volatile",
+            "attempted": 400,
+            "successful": 400,
+            "verifiedReads": 400,
+            "errors": 0,
+            "cleanup": "passed",
+            "phase": "complete",
+            "setupSeconds": 0.014241792000000003,
+            "elapsedSeconds": 2.292862417,
+            "logicalOperations": 800,
+            "iops": 348.90885474355093
+          }
+        ]
+      },
+      "runner": {
+        "backing_process_before": {
+          "available": true,
+          "pid": 72311,
+          "process_uuid": "88dd67065d0e3353b375774228420e75",
+          "process_start_abstime": 4784569015545,
+          "disk_read_bytes": 146423808,
+          "disk_write_bytes": 813662208,
+          "resident_bytes": 782630912,
+          "physical_footprint_bytes": 426047248,
+          "scope": "owned PGlite Node server process kernel rusage_info_v2 byte counters; not physical SSD IOPS, no operation count; window includes setup/workload/cleanup and background; excludes client process"
+        },
+        "backing_process_after": {
+          "available": true,
+          "pid": 72311,
+          "process_uuid": "88dd67065d0e3353b375774228420e75",
+          "process_start_abstime": 4784569015545,
+          "disk_read_bytes": 150421504,
+          "disk_write_bytes": 813662208,
+          "resident_bytes": 782860288,
+          "physical_footprint_bytes": 425916176,
+          "scope": "owned PGlite Node server process kernel rusage_info_v2 byte counters; not physical SSD IOPS, no operation count; window includes setup/workload/cleanup and background; excludes client process"
+        },
+        "backing_process_delta": {
+          "available": true,
+          "disk_read_bytes": 3997696,
+          "disk_write_bytes": 0,
+          "scope": "owned PGlite Node server process kernel rusage_info_v2 byte counters; not physical SSD IOPS, no operation count; window includes setup/workload/cleanup and background; excludes client process"
+        },
+        "started_utc": "2026-09-25T07:27:13.833147+00:00",
+        "ended_utc": "2026-09-25T07:27:21.145460+00:00",
+        "physical_observer": {
+          "log": "/private/tmp/mount-rs-qualification-baseline/pglite-typed-after1-steady.physical-iostat.log",
+          "command": [
+            "iostat",
+            "-d",
+            "-c",
+            "1000",
+            "-w",
+            "1"
+          ],
+          "scope": "all host traffic; cannot attribute to backing store; discard first since-boot sample; do not sum physical disk0 with virtual disk image",
+          "exit_code": -15
+        },
+        "exit_code": 0,
+        "elapsed_seconds": 7.3120713340176735,
+        "timeout_seconds": 120,
+        "runner": "after",
+        "layout": "inode",
+        "workload": "steady",
+        "durable_pglite": false,
+        "output": "/private/tmp/mount-rs-qualification-baseline/pglite-typed-after1-steady.json",
+        "log": "/private/tmp/mount-rs-qualification-baseline/pglite-typed-after1-steady.log",
+        "source": "c24e1513"
+      },
+      "host_io_summary": {
+        "disk0": {
+          "interval_samples": 7,
+          "mean_reported_tps": 19755.285714285714,
+          "max_reported_tps": 25623.0,
+          "mean_reported_MB_per_second": 79.56714285714285,
+          "scope": "All host device traffic; since-boot first row excluded; nominal 1s intervals across setup/work/cleanup plus observer margins. Not datastore-attributed IOPS. Virtual disk4 must not be summed with physical disk0."
+        },
+        "disk4": {
+          "interval_samples": 7,
+          "mean_reported_tps": 27.0,
+          "max_reported_tps": 81.0,
+          "mean_reported_MB_per_second": 0.16428571428571428,
+          "scope": "All host device traffic; since-boot first row excluded; nominal 1s intervals across setup/work/cleanup plus observer margins. Not datastore-attributed IOPS. Virtual disk4 must not be summed with physical disk0."
+        }
+      },
+      "raw_iostat_sha256": "b5c21a1bce7932a73529f669318ee37430ab8bc58414aec15291c427a75546b7"
+    },
+    {
+      "case": "before2",
+      "workload": "steady",
+      "result": {
+        "schema": "mount-rs-local-provider-probe-v1",
+        "run": "qualification-60750-d5625714-5df8-48bc-80e3-829dcbe1bec3",
+        "source": "396b7471/storage0015437d",
+        "addon": "/private/tmp/mount-rs-qualification-baseline/bin/mount-rs-396b7471.node",
+        "layout": "inode",
+        "workload": "steady",
+        "scope": "public NAPI split stores; local blob providers; no QUIC/OIDC/native mounting",
+        "payloadBytes": 4096,
+        "oracle": "full-byte comparison; unique unsigned 64-bit generation i+1; setup generation zero",
+        "iterations": 400,
+        "concurrency": 64,
+        "results": [
+          {
+            "provider": "pglite",
+            "durability": "configured-volatile",
+            "attempted": 400,
+            "successful": 400,
+            "verifiedReads": 400,
+            "errors": 0,
+            "cleanup": "passed",
+            "phase": "complete",
+            "setupSeconds": 0.017040167000000005,
+            "elapsedSeconds": 3.0563884169999995,
+            "logicalOperations": 800,
+            "iops": 261.7468367404823
+          }
+        ]
+      },
+      "runner": {
+        "backing_process_before": {
+          "available": true,
+          "pid": 72311,
+          "process_uuid": "88dd67065d0e3353b375774228420e75",
+          "process_start_abstime": 4784569015545,
+          "disk_read_bytes": 150421504,
+          "disk_write_bytes": 813662208,
+          "resident_bytes": 782860288,
+          "physical_footprint_bytes": 425916176,
+          "scope": "owned PGlite Node server process kernel rusage_info_v2 byte counters; not physical SSD IOPS, no operation count; window includes setup/workload/cleanup and background; excludes client process"
+        },
+        "backing_process_after": {
+          "available": true,
+          "pid": 72311,
+          "process_uuid": "88dd67065d0e3353b375774228420e75",
+          "process_start_abstime": 4784569015545,
+          "disk_read_bytes": 154546176,
+          "disk_write_bytes": 832684032,
+          "resident_bytes": 783204352,
+          "physical_footprint_bytes": 411580176,
+          "scope": "owned PGlite Node server process kernel rusage_info_v2 byte counters; not physical SSD IOPS, no operation count; window includes setup/workload/cleanup and background; excludes client process"
+        },
+        "backing_process_delta": {
+          "available": true,
+          "disk_read_bytes": 4124672,
+          "disk_write_bytes": 19021824,
+          "scope": "owned PGlite Node server process kernel rusage_info_v2 byte counters; not physical SSD IOPS, no operation count; window includes setup/workload/cleanup and background; excludes client process"
+        },
+        "started_utc": "2026-09-25T07:27:37.575452+00:00",
+        "ended_utc": "2026-09-25T07:27:46.279550+00:00",
+        "physical_observer": {
+          "log": "/private/tmp/mount-rs-qualification-baseline/pglite-typed-before2-steady.physical-iostat.log",
+          "command": [
+            "iostat",
+            "-d",
+            "-c",
+            "1000",
+            "-w",
+            "1"
+          ],
+          "scope": "all host traffic; cannot attribute to backing store; discard first since-boot sample; do not sum physical disk0 with virtual disk image",
+          "exit_code": -15
+        },
+        "exit_code": 0,
+        "elapsed_seconds": 8.703911415999755,
+        "timeout_seconds": 120,
+        "runner": "after",
+        "layout": "inode",
+        "workload": "steady",
+        "durable_pglite": false,
+        "output": "/private/tmp/mount-rs-qualification-baseline/pglite-typed-before2-steady.json",
+        "log": "/private/tmp/mount-rs-qualification-baseline/pglite-typed-before2-steady.log",
+        "source": "396b7471/storage0015437d"
+      },
+      "host_io_summary": {
+        "disk0": {
+          "interval_samples": 8,
+          "mean_reported_tps": 17972.875,
+          "max_reported_tps": 26168.0,
+          "mean_reported_MB_per_second": 74.70625,
+          "scope": "All host device traffic; since-boot first row excluded; nominal 1s intervals across setup/work/cleanup plus observer margins. Not datastore-attributed IOPS. Virtual disk4 must not be summed with physical disk0."
+        },
+        "disk4": {
+          "interval_samples": 8,
+          "mean_reported_tps": 20.125,
+          "max_reported_tps": 41.0,
+          "mean_reported_MB_per_second": 0.1225,
+          "scope": "All host device traffic; since-boot first row excluded; nominal 1s intervals across setup/work/cleanup plus observer margins. Not datastore-attributed IOPS. Virtual disk4 must not be summed with physical disk0."
+        }
+      },
+      "raw_iostat_sha256": "0d5a945c427785e1ab05b85ace1d9e5a0d33f89c7bd1e84193d814fb3b471af0"
+    },
+    {
+      "case": "after2",
+      "workload": "steady",
+      "result": {
+        "schema": "mount-rs-local-provider-probe-v1",
+        "run": "qualification-60882-4016f92d-4ad3-488a-9a96-1f96e6aff60f",
+        "source": "c24e1513",
+        "addon": "/private/tmp/mount-rs-pglite-typed.node",
+        "layout": "inode",
+        "workload": "steady",
+        "scope": "public NAPI split stores; local blob providers; no QUIC/OIDC/native mounting",
+        "payloadBytes": 4096,
+        "oracle": "full-byte comparison; unique unsigned 64-bit generation i+1; setup generation zero",
+        "iterations": 400,
+        "concurrency": 64,
+        "results": [
+          {
+            "provider": "pglite",
+            "durability": "configured-volatile",
+            "attempted": 400,
+            "successful": 400,
+            "verifiedReads": 400,
+            "errors": 0,
+            "cleanup": "passed",
+            "phase": "complete",
+            "setupSeconds": 0.011540334000000001,
+            "elapsedSeconds": 2.217549625,
+            "logicalOperations": 800,
+            "iops": 360.75855574145265
+          }
+        ]
+      },
+      "runner": {
+        "backing_process_before": {
+          "available": true,
+          "pid": 72311,
+          "process_uuid": "88dd67065d0e3353b375774228420e75",
+          "process_start_abstime": 4784569015545,
+          "disk_read_bytes": 154546176,
+          "disk_write_bytes": 832684032,
+          "resident_bytes": 783204352,
+          "physical_footprint_bytes": 411580176,
+          "scope": "owned PGlite Node server process kernel rusage_info_v2 byte counters; not physical SSD IOPS, no operation count; window includes setup/workload/cleanup and background; excludes client process"
+        },
+        "backing_process_after": {
+          "available": true,
+          "pid": 72311,
+          "process_uuid": "88dd67065d0e3353b375774228420e75",
+          "process_start_abstime": 4784569015545,
+          "disk_read_bytes": 158543872,
+          "disk_write_bytes": 832684032,
+          "resident_bytes": 783286272,
+          "physical_footprint_bytes": 407123728,
+          "scope": "owned PGlite Node server process kernel rusage_info_v2 byte counters; not physical SSD IOPS, no operation count; window includes setup/workload/cleanup and background; excludes client process"
+        },
+        "backing_process_delta": {
+          "available": true,
+          "disk_read_bytes": 3997696,
+          "disk_write_bytes": 0,
+          "scope": "owned PGlite Node server process kernel rusage_info_v2 byte counters; not physical SSD IOPS, no operation count; window includes setup/workload/cleanup and background; excludes client process"
+        },
+        "started_utc": "2026-09-25T07:28:02.971271+00:00",
+        "ended_utc": "2026-09-25T07:28:10.257659+00:00",
+        "physical_observer": {
+          "log": "/private/tmp/mount-rs-qualification-baseline/pglite-typed-after2-steady.physical-iostat.log",
+          "command": [
+            "iostat",
+            "-d",
+            "-c",
+            "1000",
+            "-w",
+            "1"
+          ],
+          "scope": "all host traffic; cannot attribute to backing store; discard first since-boot sample; do not sum physical disk0 with virtual disk image",
+          "exit_code": -15
+        },
+        "exit_code": 0,
+        "elapsed_seconds": 7.286151207983494,
+        "timeout_seconds": 120,
+        "runner": "after",
+        "layout": "inode",
+        "workload": "steady",
+        "durable_pglite": false,
+        "output": "/private/tmp/mount-rs-qualification-baseline/pglite-typed-after2-steady.json",
+        "log": "/private/tmp/mount-rs-qualification-baseline/pglite-typed-after2-steady.log",
+        "source": "c24e1513"
+      },
+      "host_io_summary": {
+        "disk0": {
+          "interval_samples": 7,
+          "mean_reported_tps": 18691.285714285714,
+          "max_reported_tps": 25152.0,
+          "mean_reported_MB_per_second": 74.37285714285714,
+          "scope": "All host device traffic; since-boot first row excluded; nominal 1s intervals across setup/work/cleanup plus observer margins. Not datastore-attributed IOPS. Virtual disk4 must not be summed with physical disk0."
+        },
+        "disk4": {
+          "interval_samples": 7,
+          "mean_reported_tps": 26.428571428571427,
+          "max_reported_tps": 63.0,
+          "mean_reported_MB_per_second": 0.16428571428571428,
+          "scope": "All host device traffic; since-boot first row excluded; nominal 1s intervals across setup/work/cleanup plus observer margins. Not datastore-attributed IOPS. Virtual disk4 must not be summed with physical disk0."
+        }
+      },
+      "raw_iostat_sha256": "fa1d617185b8e8dea65023552cb1208b4145f2a9ea74d8e97117fc2ad20f16f1"
+    }
+  ]
+}
