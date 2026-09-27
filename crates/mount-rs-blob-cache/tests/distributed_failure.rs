@@ -13,18 +13,24 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     future::{Future, poll_fn},
     net::SocketAddr,
+    path::PathBuf,
+    process::{ExitStatus, Stdio},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     task::Poll,
     time::Duration,
 };
 use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    process::{Child, Command},
     sync::Semaphore,
     time::{Instant, timeout},
 };
 const BOUND: Duration = Duration::from_secs(15);
+const REDIS_BOUND: Duration = Duration::from_secs(3);
+const CLEANUP_BOUND: Duration = Duration::from_secs(3);
 fn io_error() -> FsError {
     FsError::new(ErrorCode::Eio)
 }
@@ -41,6 +47,8 @@ fn scope() -> CacheScope {
 fn block(bytes: &[u8]) -> BlockId {
     BlockId(format!("b{:x}", Sha256::digest(bytes)))
 }
+// This memory fixture counts calls and returned bytes at the BlockStore boundary.
+// Its synthetic durability flag does not measure SSD IOPS or provider durability.
 struct Backing {
     committed: Mutex<BTreeMap<BlockId, Vec<u8>>>,
     staged: Mutex<BTreeMap<BlockId, Vec<u8>>>,
@@ -135,16 +143,186 @@ struct ResponseGate {
     arrived: Semaphore,
     release: tokio::sync::watch::Sender<bool>,
 }
+#[derive(Clone, Copy, Default)]
+struct PeerPutObservation {
+    started: u64,
+    completed: u64,
+    errors: u64,
+    cancelled: u64,
+    inflight: u64,
+}
 struct CountPeer {
     peer: Arc<QuicPeerTransport>,
     gets: AtomicU64,
     gate: Mutex<Option<Arc<ResponseGate>>>,
+    puts: Mutex<BTreeMap<BlockId, PeerPutObservation>>,
+    put_completions: Semaphore,
+    diagnostics: AtomicBool,
+    trace_epoch: Instant,
+}
+impl CountPeer {
+    fn put_snapshot(&self) -> PeerPutObservation {
+        self.puts
+            .lock()
+            .unwrap()
+            .values()
+            .fold(PeerPutObservation::default(), |mut total, next| {
+                total.started += next.started;
+                total.completed += next.completed;
+                total.errors += next.errors;
+                total.cancelled += next.cancelled;
+                total.inflight += next.inflight;
+                total
+            })
+    }
+    async fn observe_put_completion(&self, phase: &str, id: &BlockId, expected_errors: u64) {
+        let observation = timeout(Duration::from_secs(2), async {
+            loop {
+                let observation = self
+                    .puts
+                    .lock()
+                    .unwrap()
+                    .get(id)
+                    .copied()
+                    .unwrap_or_default();
+                if observation.completed != 0 || observation.cancelled != 0 {
+                    break observation;
+                }
+                // Retained permits avoid a lost completion between the snapshot
+                // and this await; the per-block record identifies the actual PUT.
+                self.put_completions.acquire().await.unwrap().forget();
+            }
+        })
+        .await
+        .expect("bounded actual placement PUT completion");
+        assert_eq!(
+            observation.started, 1,
+            "one placement PUT started for {phase}"
+        );
+        assert_eq!(
+            observation.completed, 1,
+            "normal placement PUT completion for {phase}"
+        );
+        assert_eq!(
+            observation.errors, expected_errors,
+            "placement PUT outcome for {phase}"
+        );
+        assert_eq!(
+            observation.cancelled, 0,
+            "cancelled placement is not complete for {phase}"
+        );
+        assert_eq!(observation.inflight, 0, "placement PUT settled for {phase}");
+        println!(
+            "peer_put_barrier=observed phase={phase} block={} at_us={} \
+             started=1 completed=1 errors={} cancelled=0 inflight=0",
+            id.0,
+            self.trace_epoch.elapsed().as_micros(),
+            observation.errors
+        );
+    }
+}
+// A dropped placement future is observable cancellation, not normal completion.
+struct PeerPutAttempt<'a> {
+    counted: &'a CountPeer,
+    peer: &'a PeerId,
+    id: &'a BlockId,
+    started: Instant,
+    completed: bool,
+}
+impl<'a> PeerPutAttempt<'a> {
+    fn start(counted: &'a CountPeer, peer: &'a PeerId, id: &'a BlockId) -> Self {
+        let attempt = Self {
+            counted,
+            peer,
+            id,
+            started: Instant::now(),
+            completed: false,
+        };
+        let observation = {
+            let mut puts = counted.puts.lock().unwrap();
+            let observation = puts.entry(id.clone()).or_default();
+            observation.started += 1;
+            observation.inflight += 1;
+            *observation
+        };
+        attempt.trace("start", "pending", observation);
+        attempt
+    }
+    fn finish(&mut self, error: bool) {
+        let observation = {
+            let mut puts = self.counted.puts.lock().unwrap();
+            let observation = puts.get_mut(self.id).unwrap();
+            observation.completed += 1;
+            observation.errors += u64::from(error);
+            observation.inflight -= 1;
+            *observation
+        };
+        self.completed = true;
+        self.trace("complete", if error { "error" } else { "ok" }, observation);
+        self.counted.put_completions.add_permits(1);
+    }
+    fn trace(&self, event: &str, outcome: &str, observation: PeerPutObservation) {
+        if self.counted.diagnostics.load(Ordering::SeqCst) {
+            println!(
+                "peer_put_event={event} peer={} block={} outcome={outcome} at_us={} \
+                 elapsed_us={} started={} completed={} errors={} cancelled={} inflight={}",
+                self.peer.0,
+                self.id.0,
+                self.counted.trace_epoch.elapsed().as_micros(),
+                self.started.elapsed().as_micros(),
+                observation.started,
+                observation.completed,
+                observation.errors,
+                observation.cancelled,
+                observation.inflight
+            );
+        }
+    }
+}
+impl Drop for PeerPutAttempt<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            let observation = {
+                let mut puts = self.counted.puts.lock().unwrap();
+                let observation = puts.get_mut(self.id).unwrap();
+                observation.cancelled += 1;
+                observation.inflight -= 1;
+                *observation
+            };
+            self.trace("cancel", "cancelled", observation);
+            self.counted.put_completions.add_permits(1);
+        }
+    }
 }
 #[async_trait]
 impl PeerTransport for CountPeer {
     async fn get(&self, p: &PeerId, s: &CacheScope, id: &BlockId) -> Result<Option<Vec<u8>>> {
         self.gets.fetch_add(1, Ordering::SeqCst);
+        let started = Instant::now();
+        if self.diagnostics.load(Ordering::SeqCst) {
+            println!(
+                "peer_get_event=start peer={} block={} outcome=pending at_us={}",
+                p.0,
+                id.0,
+                self.trace_epoch.elapsed().as_micros()
+            );
+        }
         let result = self.peer.get(p, s, id).await;
+        if self.diagnostics.load(Ordering::SeqCst) {
+            let (outcome, bytes) = match &result {
+                Ok(Some(bytes)) => ("hit", bytes.len()),
+                Ok(None) => ("miss", 0),
+                Err(_) => ("error", 0),
+            };
+            println!(
+                "peer_get_event=complete peer={} block={} outcome={outcome} at_us={} \
+                 elapsed_us={} response_bytes={bytes}",
+                p.0,
+                id.0,
+                self.trace_epoch.elapsed().as_micros(),
+                started.elapsed().as_micros()
+            );
+        }
         let gate = self.gate.lock().unwrap().clone();
         if let Some(gate) = gate {
             let mut release = gate.release.subscribe();
@@ -156,7 +334,10 @@ impl PeerTransport for CountPeer {
         result
     }
     async fn put(&self, p: &PeerId, s: &CacheScope, id: &BlockId, b: &[u8]) -> Result<()> {
-        self.peer.put(p, s, id, b).await
+        let mut attempt = PeerPutAttempt::start(self, p, id);
+        let result = self.peer.put(p, s, id, b).await;
+        attempt.finish(result.is_err());
+        result
     }
 }
 // Discovery deliberately retains A as a stale holder; reads do not repopulate A via placement.
@@ -188,6 +369,8 @@ impl Discovery for Hint {
 struct Pair {
     cleaned: bool,
     dir: Option<tempfile::TempDir>,
+    cache_lifetimes: Vec<Weak<LocalCache>>,
+    cleanup_complete: Option<tokio::sync::oneshot::Sender<PairCleanupResult>>,
     a_cache: Option<Arc<LocalCache>>,
     b_cache: Arc<LocalCache>,
     a: Option<Arc<QuicPeerTransport>>,
@@ -308,10 +491,16 @@ impl Pair {
             peer: b.clone(),
             gets: AtomicU64::new(0),
             gate: Mutex::new(None),
+            puts: Mutex::new(BTreeMap::new()),
+            put_completions: Semaphore::new(0),
+            diagnostics: AtomicBool::new(false),
+            trace_epoch: Instant::now(),
         });
         Self {
             cleaned: false,
             dir: Some(dir),
+            cache_lifetimes: vec![Arc::downgrade(&a_cache), Arc::downgrade(&b_cache)],
+            cleanup_complete: None,
             a_cache: Some(a_cache),
             b_cache,
             a: Some(a),
@@ -378,8 +567,17 @@ impl Pair {
             local.clone(),
         )
         .unwrap();
+        self.track_cache(&local);
         self.a_cache = Some(local);
         self.a = Some(peer);
+    }
+    fn track_cache(&mut self, cache: &Arc<LocalCache>) {
+        self.cache_lifetimes.push(Arc::downgrade(cache));
+    }
+    fn cleanup_completion(&mut self) -> tokio::sync::oneshot::Receiver<PairCleanupResult> {
+        let (complete, completed) = tokio::sync::oneshot::channel();
+        assert!(self.cleanup_complete.replace(complete).is_none());
+        completed
     }
     async fn shutdown(&mut self) {
         if self.a.is_some() {
@@ -390,34 +588,184 @@ impl Pair {
         self.cleaned = true;
     }
 }
-// Async cleanup also runs on unwinding/outer timeout: close endpoints, abort runtime workers,
-// and retain directories until endpoint/cache work has drained. A runtime owns no fixture refs.
+type PairCleanupResult = std::result::Result<(), String>;
+async fn wait_for_cache_owners(cache_lifetimes: Vec<Weak<LocalCache>>) -> PairCleanupResult {
+    // LocalCache::shutdown discards its timeout result. Zero remaining Arc owners
+    // proves its non-cancellable blocking closures and other cache users are gone.
+    while cache_lifetimes
+        .iter()
+        .any(|cache| cache.strong_count() != 0)
+    {
+        tokio::task::yield_now().await;
+    }
+    Ok(())
+}
+fn pair_cleanup(
+    directory: Option<tempfile::TempDir>,
+    work: impl Future<Output = PairCleanupResult>,
+    complete: Option<tokio::sync::oneshot::Sender<PairCleanupResult>>,
+) -> impl Future<Output = ()> {
+    // This executes before spawn, so dropping an unpolled/cancelled worker cannot
+    // remove files while endpoint or blocking cache work is still unobserved.
+    let retained = directory.map(tempfile::TempDir::keep);
+    eprintln!(
+        "peer_cache_cleanup=pending retained_directory={:?}",
+        retained.as_deref()
+    );
+    async move {
+        let result = match timeout(CLEANUP_BOUND, work).await {
+            Ok(result) => result,
+            Err(_) => {
+                Err("peer/cache cleanup deadline; remaining owners are unobserved".to_owned())
+            }
+        };
+        let result = result.and_then(|()| {
+            if let Some(path) = &retained {
+                std::fs::remove_dir_all(path)
+                    .map_err(|error| format!("peer/cache directory removal failed: {error}"))?;
+            }
+            Ok(())
+        });
+        if let Err(error) = &result {
+            eprintln!(
+                "{error}; retained peer/cache directory {:?}",
+                retained.as_deref()
+            );
+        }
+        if let Some(complete) = complete {
+            let _ = complete.send(result);
+        }
+    }
+}
+// Drop cleanup covers unwinding and outer timeout. Directory removal requires
+// observed endpoint shutdown and loss of every tracked cache owner, not a drain timeout.
 impl Drop for Pair {
     fn drop(&mut self) {
-        if self.cleaned {
-            return;
-        }
         let dir = self.dir.take();
+        let directory_path = dir.as_ref().map(|directory| directory.path().to_owned());
         let a = self.a.take();
         let ac = self.a_cache.take();
         let b = self.b.clone();
         let bc = self.b_cache.clone();
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                if let Some(a) = a {
+        let cleaned = self.cleaned;
+        let caches = std::mem::take(&mut self.cache_lifetimes);
+        let complete = self.cleanup_complete.take();
+        let work = async move {
+            if !cleaned {
+                if let Some(a) = &a {
                     a.shutdown().await;
                 }
                 b.shutdown().await;
-                if let Some(ac) = ac {
+                if let Some(ac) = &ac {
                     ac.shutdown().await;
                 }
                 bc.shutdown().await;
-                drop(b);
-                drop(bc);
-                drop(dir);
-            });
+            }
+            drop(a);
+            drop(ac);
+            drop(b);
+            drop(bc);
+            wait_for_cache_owners(caches).await
+        };
+        let cleanup = pair_cleanup(dir, work, complete);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(cleanup);
+        } else {
+            eprintln!(
+                "peer/cache cleanup has no runtime; retained {:?}; remaining owners are unobserved",
+                directory_path.as_deref()
+            );
+            drop(cleanup);
         }
     }
+}
+#[test]
+fn cancelled_pair_cleanup_future_retains_owned_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().to_owned();
+    let (complete, mut completed) = tokio::sync::oneshot::channel();
+    let cleanup = pair_cleanup(
+        Some(directory),
+        std::future::pending::<PairCleanupResult>(),
+        Some(complete),
+    );
+    drop(cleanup);
+    assert!(
+        path.is_dir(),
+        "unobserved cache drain must retain the directory"
+    );
+    assert!(matches!(
+        completed.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+    ));
+    std::fs::remove_dir_all(path).unwrap();
+}
+#[tokio::test]
+async fn pair_cleanup_waits_for_all_cache_owners_before_removing_directory() {
+    timeout(BOUND, async {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().to_owned();
+        let local = cache(&path.join("cache"), 0, 32768);
+        let caches = vec![Arc::downgrade(&local)];
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let work = async move {
+            entered.send(()).unwrap();
+            wait_for_cache_owners(caches).await
+        };
+        let (complete, mut completed) = tokio::sync::oneshot::channel();
+        let mut tasks = tokio::task::JoinSet::new();
+        tasks.spawn(pair_cleanup(Some(directory), work, Some(complete)));
+        ready.await.unwrap();
+        assert!(path.is_dir(), "a live cache owner keeps its directory");
+        assert!(matches!(
+            completed.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        drop(local);
+        timeout(CLEANUP_BOUND, completed)
+            .await
+            .expect("bounded observed cache-owner release")
+            .expect("cache cleanup worker remained available")
+            .expect("observed cache cleanup succeeded");
+        tasks.join_next().await.unwrap().unwrap();
+        assert!(
+            !path.exists(),
+            "observed cache-owner release permits removal"
+        );
+    })
+    .await
+    .expect("bounded cache cleanup ownership control");
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn explicit_pair_shutdown_retains_directory_until_all_cache_owners_release() {
+    timeout(BOUND, async {
+        let mut pair = Pair::new(0, 32768);
+        let directory = pair.dir.as_ref().unwrap().path().to_owned();
+        let cache_owner = pair.b_cache.clone();
+        let mut completed = pair.cleanup_completion();
+        pair.shutdown().await;
+        drop(pair);
+        assert!(
+            directory.is_dir(),
+            "shutdown is not proof that all cache owners are gone"
+        );
+        assert!(matches!(
+            completed.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        drop(cache_owner);
+        timeout(CLEANUP_BOUND, completed)
+            .await
+            .expect("bounded cleanup after explicit shutdown")
+            .expect("explicit-shutdown cleanup worker remained available")
+            .expect("all cache owners were observed released");
+        assert!(
+            !directory.exists(),
+            "directory removal follows observed owner release"
+        );
+    })
+    .await
+    .expect("bounded explicit-shutdown directory ownership control");
 }
 async fn eventually(mut check: impl AsyncFnMut() -> bool) {
     timeout(Duration::from_secs(3), async {
@@ -430,6 +778,645 @@ async fn eventually(mut check: impl AsyncFnMut() -> bool) {
     })
     .await
     .expect("bounded eventual cache observation");
+}
+struct RedisFixture {
+    child: Option<Child>,
+    reaped: Option<ExitStatus>,
+    directory: Option<tempfile::TempDir>,
+    cleanup_complete: Option<tokio::sync::oneshot::Sender<RedisCleanupResult>>,
+    address: SocketAddr,
+    password: String,
+}
+type RedisCleanupResult = std::result::Result<ExitStatus, String>;
+impl RedisFixture {
+    async fn start() -> Self {
+        let directory = tempfile::Builder::new()
+            .prefix("mount-rs-redis-peer-")
+            .tempdir()
+            .unwrap();
+        let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = reservation.local_addr().unwrap();
+        drop(reservation);
+        // A unique credential prevents readiness from accepting another listener
+        // if the reserved port is taken before our child binds it.
+        let password = format!(
+            "fixture-{:x}",
+            Sha256::digest(rcgen::KeyPair::generate().unwrap().serialize_der())
+        );
+        let binary = std::env::var_os("MOUNT_RS_CACHE_REDIS_SERVER")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                let homebrew = PathBuf::from("/opt/homebrew/bin/redis-server");
+                if homebrew.is_file() {
+                    homebrew
+                } else {
+                    PathBuf::from("redis-server")
+                }
+            });
+        let log = std::fs::File::create(directory.path().join("redis.log")).unwrap();
+        let child = Command::new(&binary)
+            .args(["--bind", "127.0.0.1", "--port"])
+            .arg(address.port().to_string())
+            .args(["--save", "", "--appendonly", "no", "--dir"])
+            .arg(directory.path())
+            .args([
+                "--protected-mode",
+                "yes",
+                "--daemonize",
+                "no",
+                "--maxclients",
+                "16",
+                "--requirepass",
+            ])
+            .arg(&password)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(log.try_clone().unwrap()))
+            .stderr(Stdio::from(log))
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap_or_else(|error| panic!("start owned Redis {}: {error}", binary.display()));
+        // Own both child and directory before the first cancellable readiness wait.
+        let mut fixture = Self {
+            child: Some(child),
+            reaped: None,
+            directory: Some(directory),
+            cleanup_complete: None,
+            address,
+            password,
+        };
+        timeout(REDIS_BOUND, async {
+            loop {
+                assert!(
+                    fixture
+                        .child
+                        .as_mut()
+                        .unwrap()
+                        .try_wait()
+                        .expect("inspect owned Redis child")
+                        .is_none(),
+                    "owned Redis exited before authenticated PING readiness"
+                );
+                if fixture.ping().await.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("owned Redis authenticated PING readiness deadline");
+        fixture
+    }
+    async fn ping(&self) -> std::io::Result<()> {
+        timeout(Duration::from_millis(200), async {
+            let mut stream = tokio::net::TcpStream::connect(self.address).await?;
+            let request = format!(
+                "*2\r\n$4\r\nAUTH\r\n${}\r\n{}\r\n*1\r\n$4\r\nPING\r\n",
+                self.password.len(),
+                self.password
+            );
+            stream.write_all(request.as_bytes()).await?;
+            let mut response = [0; 12];
+            stream.read_exact(&mut response).await?;
+            if &response != b"+OK\r\n+PONG\r\n" {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "owned Redis did not authenticate and reply PONG",
+                ));
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "owned Redis PING deadline")
+        })?
+    }
+    fn config(&self) -> RedisConfig {
+        RedisConfig {
+            address: self.address.to_string(),
+            username: None,
+            password: Some(self.password.clone()),
+            namespace: self
+                .directory
+                .as_ref()
+                .unwrap()
+                .path()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            ttl: Duration::from_secs(60),
+            deadline: Duration::from_millis(100),
+            max_reply_bytes: 8192,
+            tls: None,
+        }
+    }
+    async fn stop(&mut self) {
+        if let Some(child) = &mut self.child {
+            self.reaped = Some(
+                kill_owned_redis(child)
+                    .await
+                    .expect("kill and reap owned Redis child"),
+            );
+            drop(self.child.take());
+        }
+    }
+    fn cleanup_completion(&mut self) -> tokio::sync::oneshot::Receiver<RedisCleanupResult> {
+        let (complete, completed) = tokio::sync::oneshot::channel();
+        assert!(self.cleanup_complete.replace(complete).is_none());
+        completed
+    }
+}
+async fn kill_owned_redis(child: &mut Child) -> std::io::Result<ExitStatus> {
+    if let Some(status) = child.try_wait()? {
+        return Ok(status);
+    }
+    child.start_kill()?;
+    timeout(REDIS_BOUND, child.wait()).await.map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::TimedOut, "owned Redis reap deadline")
+    })?
+}
+fn redis_cleanup(
+    mut child: Option<Child>,
+    reaped: Option<ExitStatus>,
+    directory: Option<tempfile::TempDir>,
+    complete: Option<tokio::sync::oneshot::Sender<RedisCleanupResult>>,
+) -> impl Future<Output = ()> {
+    // Retain synchronously, before constructing or spawning the cancellable future.
+    // Cancelling that future drops only a PathBuf, never an auto-removing TempDir.
+    let retained = directory.map(tempfile::TempDir::keep);
+    eprintln!(
+        "redis_cleanup=pending retained_directory={:?}",
+        retained.as_deref()
+    );
+    async move {
+        let result = if let Some(child) = &mut child {
+            kill_owned_redis(child)
+                .await
+                .map_err(|error| format!("owned Redis reap failed: {error}"))
+        } else {
+            reaped.ok_or_else(|| "owned Redis has no observed child reap".to_owned())
+        };
+        finish_redis_cleanup(retained, result, complete);
+    }
+}
+fn finish_redis_cleanup(
+    retained: Option<PathBuf>,
+    result: RedisCleanupResult,
+    complete: Option<tokio::sync::oneshot::Sender<RedisCleanupResult>>,
+) {
+    let result = result.and_then(|status| {
+        if let Some(path) = &retained {
+            std::fs::remove_dir_all(path).map_err(|error| {
+                format!("owned Redis was reaped but directory removal failed: {error}")
+            })?;
+        }
+        Ok(status)
+    });
+    if let Err(error) = &result {
+        eprintln!(
+            "{error}; retained Redis directory {:?}",
+            retained.as_deref()
+        );
+    }
+    if let Some(complete) = complete {
+        let _ = complete.send(result);
+    }
+}
+impl Drop for RedisFixture {
+    fn drop(&mut self) {
+        let directory = self.directory.take();
+        let complete = self.cleanup_complete.take();
+        if let Some(mut child) = self.child.take() {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                // redis_cleanup retains the directory before spawn can own or drop it.
+                let cleanup = redis_cleanup(Some(child), None, directory, complete);
+                handle.spawn(cleanup);
+            } else {
+                let retained = directory.map(tempfile::TempDir::keep);
+                let _ = child.start_kill();
+                finish_redis_cleanup(
+                    retained,
+                    Err("owned Redis cleanup has no runtime; child reap is unobserved".to_owned()),
+                    complete,
+                );
+            }
+        } else {
+            // Explicit stop already observed wait/try_wait before releasing the child.
+            let retained = directory.map(tempfile::TempDir::keep);
+            finish_redis_cleanup(
+                retained,
+                self.reaped
+                    .take()
+                    .ok_or_else(|| "owned Redis has no observed child reap".to_owned()),
+                complete,
+            );
+        }
+    }
+}
+#[test]
+fn cancelled_redis_cleanup_future_retains_directory_without_reap_receipt() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().to_owned();
+    let (complete, mut completed) = tokio::sync::oneshot::channel();
+    let cleanup = redis_cleanup(None, None, Some(directory), Some(complete));
+    // An unpolled cleanup future models cancellation at spawn/runtime teardown.
+    // No child is launched and no reap is claimed by this retention control.
+    drop(cleanup);
+    assert!(
+        path.is_dir(),
+        "unobserved reap must leave the directory retained"
+    );
+    assert!(matches!(
+        completed.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+    ));
+    std::fs::remove_dir_all(path).unwrap();
+}
+#[test]
+fn failed_redis_cleanup_retains_directory_and_reports_reap_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.keep();
+    let (complete, mut completed) = tokio::sync::oneshot::channel();
+    finish_redis_cleanup(
+        Some(path.clone()),
+        Err("injected owned-child reap failure".to_owned()),
+        Some(complete),
+    );
+    assert_eq!(
+        completed.try_recv().unwrap(),
+        Err("injected owned-child reap failure".to_owned())
+    );
+    assert!(
+        path.is_dir(),
+        "failed reap must leave the directory retained"
+    );
+    std::fs::remove_dir_all(path).unwrap();
+}
+async fn redis_payload(phase: &str, fallback: &FixedDiscovery, selected: &PeerId) -> Vec<u8> {
+    for nonce in 0_u16..256 {
+        let mut bytes = (0..768).map(|i| (i % 256) as u8).collect::<Vec<_>>();
+        bytes.extend_from_slice(phase.as_bytes());
+        bytes.extend_from_slice(&nonce.to_be_bytes());
+        if fallback.locate(&scope(), &block(&bytes)).await.unwrap() == vec![selected.clone()] {
+            return bytes;
+        }
+    }
+    panic!(
+        "bounded payload selection did not find fallback {} for {phase}",
+        selected.0
+    );
+}
+async fn assert_redis_phase(
+    phase: &str,
+    pair: &Pair,
+    store: &CachedBlockStore,
+    backing: &Backing,
+    id: &BlockId,
+    bytes: &[u8],
+    expected_backing_gets: u64,
+) {
+    let before_gets = backing.reads();
+    let before_bytes = backing.bytes.load(Ordering::SeqCst);
+    let before_peer = pair.counted.gets.load(Ordering::SeqCst);
+    let before_puts = pair.counted.put_snapshot();
+    let before_metrics = store.metrics().snapshot();
+    let started = Instant::now();
+    let actual = timeout(Duration::from_secs(2), store.get(id))
+        .await
+        .expect("bounded Redis/peer read")
+        .unwrap();
+    assert_eq!(actual, bytes, "full binary bytes for {phase}");
+    let backing_gets = backing.reads() - before_gets;
+    let backing_bytes = backing.bytes.load(Ordering::SeqCst) - before_bytes;
+    let peer_gets = pair.counted.gets.load(Ordering::SeqCst) - before_peer;
+    let puts = pair.counted.put_snapshot();
+    let metrics = store.metrics().snapshot();
+    println!(
+        "phase={phase} payload_bytes={} memory_backing_get_calls={backing_gets} \
+         memory_backing_bytes={backing_bytes} peer_get_attempts={peer_gets} peer_hits={} \
+         cache_errors={} elapsed_us={} peer_put_started={} peer_put_completed={} \
+         peer_put_errors={} peer_put_cancelled={} peer_put_inflight={}",
+        bytes.len(),
+        metrics.peer_hits - before_metrics.peer_hits,
+        metrics.cache_errors - before_metrics.cache_errors,
+        started.elapsed().as_micros(),
+        puts.started - before_puts.started,
+        puts.completed - before_puts.completed,
+        puts.errors - before_puts.errors,
+        puts.cancelled - before_puts.cancelled,
+        puts.inflight
+    );
+    assert_eq!(
+        backing_gets, expected_backing_gets,
+        "backing GET calls for {phase}"
+    );
+    assert_eq!(backing_bytes, expected_backing_gets * bytes.len() as u64);
+    assert_eq!(peer_gets, 1, "one actual QUIC peer attempt for {phase}");
+    assert_eq!(
+        metrics.backing_fetches - before_metrics.backing_fetches,
+        backing_gets
+    );
+    assert_eq!(
+        metrics.peer_hits - before_metrics.peer_hits,
+        u64::from(backing_gets == 0)
+    );
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an owned redis-server binary; see MOUNT_RS_CACHE_REDIS_SERVER"]
+async fn redis_directory_real_peer_failures_preserve_exact_backing() {
+    timeout(BOUND, async {
+        let a = PeerId("a".into());
+        let b = PeerId("b".into());
+        let peers = vec![a.clone(), b.clone()];
+        let fallback =
+            FixedDiscovery::new_with_mode(peers.clone(), 1, DiscoveryMode::PeerQuery).unwrap();
+        let healthy = redis_payload("healthy-directory", &fallback, &b).await;
+        let stale = redis_payload("stale-holder", &fallback, &b).await;
+        let peer_down = redis_payload("peer-outage", &fallback, &b).await;
+        let directory_down = redis_payload("directory-outage", &fallback, &a).await;
+        let both_down = redis_payload("combined-outage", &fallback, &a).await;
+        let mut redis = RedisFixture::start().await;
+        let redis_cleanup = redis.cleanup_completion();
+        let redis_address = redis.address;
+        let redis_directory = redis.directory.as_ref().unwrap().path().to_owned();
+        let discovery =
+            RedisDiscovery::new(redis.config(), peers, 1, DiscoveryMode::Directory).unwrap();
+        let mut pair = Pair::new(0, 32768);
+        pair.counted.diagnostics.store(true, Ordering::SeqCst);
+        let backing = Backing::new();
+        let healthy_id = backing.seed(&healthy);
+        let stale_id = backing.seed(&stale);
+        let peer_down_id = backing.seed(&peer_down);
+        let directory_down_id = backing.seed(&directory_down);
+        let both_down_id = backing.seed(&both_down);
+        let runtime = DistributedRuntime::new(
+            discovery.clone(),
+            pair.counted.clone(),
+            b.clone(),
+            DistributedConfig {
+                max_peer_queries: 1,
+                deadline: Duration::from_millis(600),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let store = pair.store(backing.clone(), runtime.clone()).await;
+        let local = pair.a_cache.as_ref().unwrap();
+        for (id, bytes) in [
+            (&healthy_id, &healthy),
+            (&peer_down_id, &peer_down),
+            (&directory_down_id, &directory_down),
+        ] {
+            local
+                .insert(&scope(), id, bytes, IntegrityPolicy::Sha256Prefixed)
+                .unwrap();
+        }
+        assert!(
+            local
+                .get(&scope(), &stale_id, IntegrityPolicy::Sha256Prefixed)
+                .is_none()
+        );
+        assert_eq!(pair.b_cache.usage().2, 0, "all requester blocks start cold");
+        discovery.heartbeat(&a).await.unwrap();
+        for id in [&healthy_id, &stale_id, &peer_down_id] {
+            // The one-query fallback selects local B, which the runtime excludes.
+            // Only a valid Redis holder+lease can steer these reads to remote A.
+            assert_eq!(
+                fallback.locate(&scope(), id).await.unwrap(),
+                vec![b.clone()]
+            );
+            discovery.advertise(&scope(), id, &a).await.unwrap();
+            assert_eq!(
+                discovery.locate(&scope(), id).await.unwrap(),
+                vec![a.clone()]
+            );
+        }
+        assert_redis_phase(
+            "healthy-directory",
+            &pair,
+            &store,
+            &backing,
+            &healthy_id,
+            &healthy,
+            0,
+        )
+        .await;
+        assert_redis_phase(
+            "stale-holder",
+            &pair,
+            &store,
+            &backing,
+            &stale_id,
+            &stale,
+            1,
+        )
+        .await;
+        // Keep the existing replica placement, and observe its result before
+        // changing the endpoint state for the next independent fault phase.
+        pair.counted
+            .observe_put_completion("stale-holder", &stale_id, 0)
+            .await;
+        // A actually held the outage block before its authenticated endpoint closed.
+        assert_eq!(
+            pair.a_cache
+                .as_ref()
+                .unwrap()
+                .get(&scope(), &peer_down_id, IntegrityPolicy::Sha256Prefixed)
+                .unwrap(),
+            peer_down
+        );
+        pair.stop_a().await;
+        redis.ping().await.unwrap();
+        assert_eq!(
+            discovery.locate(&scope(), &peer_down_id).await.unwrap(),
+            vec![a.clone()],
+            "owned Redis retains the now-stale holder and unexpired node lease"
+        );
+        assert_redis_phase(
+            "peer-outage",
+            &pair,
+            &store,
+            &backing,
+            &peer_down_id,
+            &peer_down,
+            1,
+        )
+        .await;
+        // A remains stopped until its failed placement handshake releases B's
+        // per-peer connection slot, which the next phase's GET also needs.
+        pair.counted
+            .observe_put_completion("peer-outage", &peer_down_id, 1)
+            .await;
+        let puts = pair.counted.put_snapshot();
+        assert_eq!(
+            puts.started, 2,
+            "exactly two known backing fills started placement"
+        );
+        assert_eq!(
+            puts.completed, 2,
+            "both known placements returned before A restart"
+        );
+        assert_eq!(puts.errors, 1, "only the stopped-peer placement failed");
+        assert_eq!(
+            puts.cancelled, 0,
+            "no placement was cancelled before A restart"
+        );
+        assert_eq!(
+            puts.inflight, 0,
+            "no placement holds a connection slot at A restart"
+        );
+        redis.stop().await;
+        assert!(
+            discovery.heartbeat(&a).await.is_err(),
+            "owned directory is unavailable"
+        );
+        pair.restart_a();
+        let local = pair.a_cache.as_ref().unwrap();
+        assert_eq!(
+            local.usage().0,
+            0,
+            "restarted peer begins with no RAM entries"
+        );
+        assert!(local.path_for(&scope(), &directory_down_id).exists());
+        assert_eq!(
+            local
+                .get(
+                    &scope(),
+                    &directory_down_id,
+                    IntegrityPolicy::Sha256Prefixed
+                )
+                .unwrap(),
+            directory_down,
+            "restarted peer independently verifies full persisted binary bytes"
+        );
+        assert_eq!(
+            local.usage().0,
+            0,
+            "zero-capacity peer disk verification does not admit RAM bytes"
+        );
+        let puts = pair.counted.put_snapshot();
+        println!(
+            "peer_fixture_event=restart_a_disk_verified at_us={} payload_bytes={} ram_bytes=0 \
+             peer_put_started={} peer_put_completed={} peer_put_errors={} \
+             peer_put_cancelled={} peer_put_inflight={}",
+            pair.counted.trace_epoch.elapsed().as_micros(),
+            directory_down.len(),
+            puts.started,
+            puts.completed,
+            puts.errors,
+            puts.cancelled,
+            puts.inflight
+        );
+        assert_eq!(
+            discovery
+                .locate(&scope(), &directory_down_id)
+                .await
+                .unwrap(),
+            fallback.locate(&scope(), &directory_down_id).await.unwrap()
+        );
+        assert_redis_phase(
+            "directory-outage-persisted-peer",
+            &pair,
+            &store,
+            &backing,
+            &directory_down_id,
+            &directory_down,
+            0,
+        )
+        .await;
+        pair.stop_a().await;
+        assert_eq!(
+            discovery.locate(&scope(), &both_down_id).await.unwrap(),
+            vec![a]
+        );
+        assert_redis_phase(
+            "combined-outage",
+            &pair,
+            &store,
+            &backing,
+            &both_down_id,
+            &both_down,
+            1,
+        )
+        .await;
+        assert_eq!(backing.reads(), 3);
+        assert_eq!(
+            backing.bytes.load(Ordering::SeqCst),
+            (stale.len() + peer_down.len() + both_down.len()) as u64
+        );
+        assert_eq!(pair.counted.gets.load(Ordering::SeqCst), 5);
+        assert_eq!(store.metrics().snapshot().peer_hits, 2);
+        assert_eq!(store.metrics().snapshot().backing_fetches, 3);
+        println!(
+            "redis-real-peer qualification: logical_reads=5 peer_get_attempts=5 peer_hits=2 \
+             memory_backing_get_calls=3 memory_backing_bytes={}; \
+             BlockStore call counts are not physical SSD IOPS or provider durability",
+            backing.bytes.load(Ordering::SeqCst)
+        );
+        drop(store);
+        runtime.shutdown().await;
+        drop(runtime);
+        drop(discovery);
+        pair.shutdown().await;
+        drop(pair);
+        drop(redis);
+        let reaped = timeout(REDIS_BOUND, redis_cleanup)
+            .await
+            .expect("bounded explicit Redis cleanup receipt")
+            .expect("Redis cleanup was not cancelled before observed reap")
+            .expect("owned Redis reap and directory removal succeeded");
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&reaped),
+            Some(libc::SIGKILL)
+        );
+        assert!(
+            !redis_directory.exists(),
+            "owned Redis directory removed after reap"
+        );
+        drop(
+            std::net::TcpListener::bind(redis_address)
+                .expect("owned Redis TCP socket was released"),
+        );
+    })
+    .await
+    .expect("bounded owned Redis and authenticated peer qualification");
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an owned redis-server binary; see MOUNT_RS_CACHE_REDIS_SERVER"]
+async fn cancelled_redis_fixture_reaps_owned_child_before_removing_directory() {
+    timeout(BOUND, async {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        let mut tasks = tokio::task::JoinSet::new();
+        tasks.spawn(async move {
+            let mut redis = RedisFixture::start().await;
+            let completed = redis.cleanup_completion();
+            send.send((
+                redis.address,
+                redis.directory.as_ref().unwrap().path().to_owned(),
+                completed,
+            ))
+            .unwrap();
+            std::future::pending::<()>().await;
+            drop(redis);
+        });
+        let (address, directory, completed) = receive.await.unwrap();
+        tasks.abort_all();
+        assert!(tasks.join_next().await.unwrap().unwrap_err().is_cancelled());
+        let reaped = timeout(REDIS_BOUND, completed)
+            .await
+            .expect("bounded cancellation Redis cleanup receipt")
+            .expect("cleanup cancellation cannot be reported as an observed child reap")
+            .expect("owned Redis child was reaped and its directory removed");
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&reaped),
+            Some(libc::SIGKILL)
+        );
+        println!("redis_cleanup=observed child_exit_status={reaped}");
+        eventually(async || !directory.exists() && std::net::TcpListener::bind(address).is_ok())
+            .await;
+    })
+    .await
+    .expect("bounded cancellation cleanup of owned Redis child");
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn authenticated_hierarchy_saves_reads_and_reconnects_to_persisted_peer() {
@@ -556,6 +1543,7 @@ async fn authenticated_hierarchy_saves_reads_and_reconnects_to_persisted_peer() 
         assert_eq!(store.metrics().snapshot().peer_hits, peers + 1);
         assert_eq!(backing.reads(), 2);
         let disk_cache = cache(&pair.dir.as_ref().unwrap().path().join("disk-requester"),0,32768);
+        pair.track_cache(&disk_cache);
         disk_cache.insert(&scope(),&id,bytes,IntegrityPolicy::Sha256Prefixed).unwrap();
         let disk_store = CachedBlockStore::new(backing.clone(),disk_cache.clone(),scope().identity,IntegrityPolicy::Sha256Prefixed).with_runtime(runtime.clone());
         disk_store.prepare_concurrent_backing().await.unwrap();
@@ -837,6 +1825,7 @@ async fn sqlite_sdk_acknowledgment_survives_fresh_undecorated_reopen() {
         view.write_file("/acknowledged", &bytes).await.unwrap();
         assert_eq!(view.read_file("/acknowledged").await.unwrap(), bytes);
         eventually(async || pair.a_cache.as_ref().unwrap().usage().2 > 0).await;
+        let completed = pair.cleanup_completion();
         first.shutdown().await.unwrap();
         drop(view);
         drop(first);
@@ -845,7 +1834,12 @@ async fn sqlite_sdk_acknowledgment_survives_fresh_undecorated_reopen() {
         drop(runtime);
         pair.shutdown().await;
         drop(pair);
-        // Every decorator/cache/peer owner is gone. The fresh SDK uses only persisted SQLite.
+        timeout(CLEANUP_BOUND, completed)
+            .await
+            .expect("bounded peer/cache cleanup before fresh SQLite reopen")
+            .expect("cleanup was not cancelled before observing all cache owners gone")
+            .expect("endpoint shutdown and every tracked cache owner were observed released");
+        // Observed cleanup released every cache/peer owner; reopen only persisted SQLite.
         options.owner = "fresh-undecorated-reader".into();
         let fresh = mount_rs_sdk::Filesystem::split(options).await.unwrap();
         let view = mount_rs_core::Loopback::from_arc(fresh.driver());
@@ -863,7 +1857,8 @@ async fn cancelled_fixture_releases_authenticated_sockets_and_owned_directory() 
         let (send, receive) = tokio::sync::oneshot::channel();
         let mut tasks = tokio::task::JoinSet::new();
         tasks.spawn(async move {
-            let pair = Pair::new(0, 32768);
+            let mut pair = Pair::new(0, 32768);
+            let completed = pair.cleanup_completion();
             assert!(
                 pair.b
                     .get(&PeerId("a".into()), &scope(), &BlockId("missing".into()))
@@ -875,14 +1870,20 @@ async fn cancelled_fixture_releases_authenticated_sockets_and_owned_directory() 
                 pair.address,
                 pair.b.local_addr().unwrap(),
                 pair.dir.as_ref().unwrap().path().to_owned(),
+                completed,
             ))
             .unwrap();
             std::future::pending::<()>().await;
             drop(pair);
         });
-        let (a, b, directory) = receive.await.unwrap();
+        let (a, b, directory, completed) = receive.await.unwrap();
         tasks.abort_all();
         assert!(tasks.join_next().await.unwrap().unwrap_err().is_cancelled());
+        timeout(CLEANUP_BOUND, completed)
+            .await
+            .expect("bounded cancellation peer/cache cleanup receipt")
+            .expect("cleanup cancellation cannot be reported as an observed cache drain")
+            .expect("endpoint shutdown and all tracked cache owners were observed");
         // Quinn closes its driver asynchronously after the last endpoint owner drops.
         // Observe directory removal and actual socket reuse together.
         eventually(async || {

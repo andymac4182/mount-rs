@@ -22,6 +22,8 @@ use ring::{
 use serde_json::json;
 use std::{collections::BTreeMap, sync::Arc};
 
+mod quic_mount_reply_loss;
+
 struct Keys(Jwk);
 #[async_trait::async_trait]
 impl OidcKeySource for Keys {
@@ -61,6 +63,12 @@ async fn signed_oidc_multiple_drives_persistence_and_revocation() {
 #[tokio::test]
 async fn websocket_signed_oidc_multiple_drives_persistence_and_revocation() {
     signed_oidc_roundtrip(1).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MOUNT_RS_REMOTE_SQLITE_REPLY_LOSS=1, private TMPDIR and an owned process gate"]
+async fn websocket_sqlite_commit_survives_lost_wire_reply_without_replay() {
+    quic_mount_reply_loss::run().await.unwrap();
 }
 
 #[tokio::test]

@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+"""Run fixed Unix cache/remote failure gates with owned process containment.
+
+Set CARGO_TARGET_DIR to a dedicated cache and, for Redis gates,
+MOUNT_RS_CACHE_REDIS_SERVER to an explicit absolute executable path.
+Only receipt/log/source-pin files are evidence; fixture contents are private.
+Postterminal group signals provide containment, not fixture graceful-cleanup proof.
+"""
+import hashlib,json,os,pathlib,re,selectors,signal,stat,subprocess,sys,tempfile,time,shutil
+BASE=pathlib.Path(__file__).resolve().parent.parent
+COMMANDS={'cachetests': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--all-targets', '--locked', '--offline'], 180, 0, 0), 'redisfault': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'distributed_failure', '--locked', '--offline', '--', '--ignored', '--exact', 'redis_directory_real_peer_failures_preserve_exact_backing', '--test-threads=1', '--nocapture'], 180, 0, 0), 'rediscleanup': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'distributed_failure', '--locked', '--offline', '--', '--ignored', '--exact', 'cancelled_redis_fixture_reaps_owned_child_before_removing_directory', '--test-threads=1', '--nocapture'], 180, 0, 0), 'wsloss': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-remote-client', '--test', 'quic_mount', '--locked', '--offline', '--', '--ignored', '--exact', 'websocket_sqlite_commit_survives_lost_wire_reply_without_replay', '--test-threads=1', '--nocapture'], 180, 0, 0), 'remotetests': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-remote-client', '--all-targets', '--locked', '--offline'], 180, 0, 0), 'faultclippy': (['./scripts/cargo-shared', 'clippy', '-p', 'mount-rs-blob-cache', '-p', 'mount-rs-remote-client', '--all-targets', '--locked', '--offline', '--', '-D', 'warnings'], 180, 0, 0), 'fmt': (['./scripts/cargo-shared', 'fmt', '--all', '--', '--check'], 120, 0, 0)}
+def exact_case_passed(output, selected_test):
+    # Nocapture output may separate the selected name and its trailing "ok".
+    # The fixed --exact command plus one executed, nonignored passing case is
+    # the qualification boundary; partial/zero/multi-case output is rejected.
+    return bool(
+        re.search(r'^running 1 test$', output, re.M)
+        and re.search(r'^test '+re.escape(selected_test)+r' \.\.\. ', output, re.M)
+        and re.search(r'^test result: ok\. 1 passed; 0 failed; 0 ignored;', output, re.M)
+    )
+
+
+def terminal_eperm_eligible(platform, action, terminal, error_number):
+    # XNU killpg filters SZOMB and returns EPERM for an existing zombie-only
+    # group. Keep errno untouched; final absence, not signal delivery, decides
+    # containment. https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_sig.c
+    return platform == 'darwin' and action in {'postterminal_term', 'postterminal_kill'} and terminal is True and error_number == 1
+
+def terminal_eperm_settled(reaped, group_absent, eof, deadline, lifecycle_unknown):
+    return reaped is True and group_absent is True and eof is True and deadline is False and not lifecycle_unknown
+
+def main():
+    kind=sys.argv[1];command,limit,profile,trace=COMMANDS[kind]
+    assert os.name=='posix' and hasattr(os,'waitid') and hasattr(os,'WNOWAIT'), 'Unix ownership observer required'
+    FAULT_KINDS={'cachetests','redisfault','rediscleanup','wsloss','remotetests','faultclippy','fmt'}
+    assert kind in FAULT_KINDS, 'fixed fault qualification commands only'
+    root=pathlib.Path(tempfile.mkdtemp(prefix='mount-rs-owned-fault-'+kind+'-',dir=os.environ.get('MOUNT_RS_FAILURE_EVIDENCE_ROOT',tempfile.gettempdir())));os.chmod(root,0o700)
+    fixture_tmp=root/'fixtures';fixture_tmp.mkdir(mode=0o700)
+    redis_pin=None
+    if kind in {'redisfault','rediscleanup'}:
+     redis_configured=os.environ.get('MOUNT_RS_CACHE_REDIS_SERVER')
+     assert redis_configured and pathlib.Path(redis_configured).is_absolute(), 'explicit absolute Redis executable required'
+     redis_path=pathlib.Path(redis_configured).resolve(strict=True)
+     redis_stat=redis_path.stat();assert stat.S_ISREG(redis_stat.st_mode) and os.access(redis_path,os.X_OK)
+     redis_pin={'path':str(redis_path),'size':redis_stat.st_size,'sha256':hashlib.sha256(redis_path.read_bytes()).hexdigest()}
+     # Bind the selected deployment binary before launch and require it unchanged afterward.
+    def write(name,value):
+     data=(json.dumps(value,sort_keys=True,indent=2)+'\n').encode();fd=os.open(root/name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600);assert os.write(fd,data)==len(data);os.close(fd);return hashlib.sha256(data).hexdigest()
+    def frozen():
+     if kind in {'node','processnode','diagnosticnode'}:
+      pending=[BASE/v for v in command if v.endswith('.mjs')];found=set()
+      while pending:
+       path=pending.pop().resolve(strict=True);assert path.is_relative_to(BASE) and path not in [BASE]
+       if path in found:continue
+       found.add(path)
+       for spec in re.findall(r'(?:from\s+|import\s*\(?\s*)[\"\x27](\.[^\"\x27]+\.mjs)[\"\x27]',path.read_text()):pending.append(path.parent/spec)
+      paths=sorted(found | {BASE/'benchmarks/storage/capture-native.cjs',BASE/'bindings/mount-rs-napi/index.js'})
+     else:
+      tracked=subprocess.check_output(['git','ls-files','-z'],cwd=BASE).decode().split('\0')
+      paths=[BASE/v for v in tracked if v and (v.endswith(('.rs','.toml','.lock')) or v=='scripts/cargo-shared')]
+      paths.append(BASE/'.github/workflows/ci.yml')
+      paths.append(pathlib.Path(__file__).resolve())
+      paths.append(BASE/'scripts/test-remote-failures-controls.py')
+      paths.append(BASE/'.github/workflows/remote-drives.yml')
+      paths.append(BASE/'crates/mount-rs-remote-client/tests/quic_mount_reply_loss/mod.rs')
+      paths.extend(BASE/v for v in ['filesystems/mount-rs-chunked/src/causal_metrics.rs','filesystems/mount-rs-chunked/tests/filesystem_causal_metrics.rs','tests/filesystem_causal_profile_allocations.rs','filesystems/mount-rs-chunked/tests/compact_snapshot_revision.rs','filesystems/mount-rs-chunked/src/create_guard_metrics_tests.rs','filesystems/mount-rs-chunked/src/create_rebase.rs','filesystems/mount-rs-chunked/tests/current_path_create_rebase.rs'] if (BASE/v).is_file())
+     return {str(p.relative_to(BASE)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(set(paths))}
+    before=frozen();write('source-before.json',before)
+    env=os.environ.copy();env.update({'MOUNT_RS_PROFILE_IO':str(profile),'MOUNT_RS_TRACE_STORAGE':str(trace),'MOUNT_RS_TRACE_REQUESTS':'0','CARGO_TARGET_DIR':os.environ.get('CARGO_TARGET_DIR',os.environ.get('MOUNT_RS_CARGO_TARGET_DIR',str(root/'cargo-target')))})
+    env['TMPDIR']=str(fixture_tmp)
+    env.pop('MOUNT_RS_CACHE_REDIS_SERVER',None)
+    if redis_pin is not None:env['MOUNT_RS_CACHE_REDIS_SERVER']=redis_pin['path']
+    if kind=='wsloss':env['MOUNT_RS_REMOTE_SQLITE_REPLY_LOSS']='1'
+    # All owned files/selector setup precede child creation.
+    selector=selectors.DefaultSelector();logs={};cap=4194304
+    for name in ['stdout','stderr']:
+     fd=os.open(root/(name+'.log'),os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+     logs[name]={'fd':fd,'received':0,'retained':0,'overflow':False}
+    start=time.monotonic();end=start+limit;proc=None;owned=None
+    unknown=[];signals=[];deadline=False;primary=None;code=None;eof=False;absent=None
+    term_at=None;kill_at=None;terminal_observed=False;signal_decisions_finished=False
+
+    def send_owned(action,sig):
+     attempt={'action':action,'signal':int(sig),'errno':None,'outcome':'pending'}
+     signals.append(attempt)
+     try:
+      os.killpg(owned,sig);attempt['outcome']='sent'
+     except ProcessLookupError:
+      attempt.update(outcome='already_absent',errno=3)
+     except OSError as error:
+      attempt.update(outcome='error',errno=error.errno)
+      if terminal_eperm_eligible(sys.platform, action, terminal_observed, error.errno):
+       attempt['terminal_darwin_eperm']='pending_final_observations'
+      else:
+       unknown.append(action+'_signal_error')
+
+    def leader_terminal():
+     # WNOWAIT preserves the original PID/PGID owner through every signal decision.
+     result=os.waitid(os.P_PID,owned,os.WEXITED|os.WNOHANG|os.WNOWAIT)
+     return result is not None
+
+    def drain_once(seconds):
+     for key,_ in selector.select(max(0,min(seconds,end-time.monotonic()))):
+      data=os.read(key.fileobj.fileno(),65536);entry=logs[key.data]
+      if not data:
+       selector.unregister(key.fileobj);key.fileobj.close();continue
+      entry['received']+=len(data);keep=data[:max(0,cap-entry['retained'])]
+      if keep:
+       view=memoryview(keep)
+       while view:
+        n=os.write(entry['fd'],view)
+        if n<=0:raise OSError('output_write_no_progress')
+        entry['retained']+=n;view=view[n:]
+      if entry['received']>cap:
+       entry['overflow']=True
+       if 'output_overflow' not in unknown:unknown.append('output_overflow')
+
+    try:
+     proc=subprocess.Popen(command,cwd=BASE,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
+     owned=proc.pid
+     # start_new_session is the ownership contract; failure of its identity check
+     # is sticky, and cleanup still addresses only the child-created session group.
+     if os.getpgid(owned)!=owned:raise RuntimeError('initial_owned_group_mismatch')
+     for name,pipe in [('stdout',proc.stdout),('stderr',proc.stderr)]:
+      os.set_blocking(pipe.fileno(),False);selector.register(pipe,selectors.EVENT_READ,name)
+     while True:
+      terminal_observed=leader_terminal()
+      now=time.monotonic()
+      if now>=end-5:deadline=True
+      if terminal_observed and term_at is None:
+       term_at=now;send_owned('postterminal_term',signal.SIGTERM)
+      if terminal_observed and not selector.get_map() and kill_at is not None:
+       break
+      if (now>=end-5 or unknown) and term_at is None:
+       if now>=end-5:deadline=True
+       term_at=now;send_owned('term',signal.SIGTERM)
+      if term_at is not None and now>=term_at+2 and kill_at is None:
+       kill_at=now;send_owned('postterminal_kill' if terminal_observed else 'kill',signal.SIGKILL)
+      if now>=end:
+       unknown.append('parent_settlement_deadline');break
+      drain_once(.05)
+    except BaseException as error:
+     primary=error
+     unknown.append('primary_'+type(error).__name__)
+    finally:
+     if proc is not None:
+      # Every path settles its owned-group signal decisions while the leader is pinned.
+      try:
+       if term_at is None:
+        term_at=time.monotonic();send_owned('final_term',signal.SIGTERM)
+       if kill_at is None:
+        while time.monotonic()<min(end,term_at+2):drain_once(.05)
+      except BaseException as cleanup_error:
+       unknown.append('cleanup_'+type(cleanup_error).__name__)
+      finally:
+       if kill_at is None:
+        kill_at=time.monotonic()
+        if kill_at>=end:
+         deadline=True
+         if 'parent_settlement_deadline' not in unknown:unknown.append('parent_settlement_deadline')
+        try:send_owned('forced_deadline_kill' if kill_at>=end else 'final_kill',signal.SIGKILL)
+        except BaseException as kill_error:unknown.append('final_kill_'+type(kill_error).__name__)
+      # No group-directed signal may occur after this point.
+      signal_decisions_finished=True
+      try:code=proc.wait(timeout=max(0,end-time.monotonic()))
+      except subprocess.TimeoutExpired:unknown.append('owned_child_unreaped')
+      except BaseException as wait_error:unknown.append('wait_'+type(wait_error).__name__)
+      # No further signals: allow kernel reaping of killed descendants to settle.
+      probe_end=min(end,time.monotonic()+2)
+      while True:
+       try:os.killpg(owned,0);absent=False
+       except ProcessLookupError:absent=True
+       except OSError as probe_error:
+        absent=None;unknown.append('final_group_unavailable')
+        signals.append({'action':'group_absence_probe','signal':0,'outcome':'error','errno':probe_error.errno})
+       if absent is not False or time.monotonic()>=probe_end:break
+       drain_once(.05)
+      if absent is False:unknown.append('owned_group_still_present')
+      # Drain normal termination output within the original total deadline.
+      if primary is None:
+       try:
+        while selector.get_map() and time.monotonic()<end:drain_once(.05)
+       except BaseException as drain_error:
+        primary=drain_error;unknown.append('drain_'+type(drain_error).__name__)
+      eof=not selector.get_map()
+      for pipe in [proc.stdout,proc.stderr]:
+       if pipe is not None and not pipe.closed:pipe.close()
+     try:selector.close()
+     except BaseException as close_error:
+      if primary is None:primary=close_error
+      unknown.append('selector_close_error')
+     for entry in logs.values():
+      try:os.close(entry.pop('fd'))
+      except BaseException as close_error:
+       if primary is None:primary=close_error
+       unknown.append('log_close_error')
+
+    # Reconcile only Darwin postterminal EPERM, after the independent ownership
+    # observations; retain original outcome/errno and never signal after reap.
+    for attempt in signals:
+     if attempt.get('terminal_darwin_eperm') == 'pending_final_observations':
+      settled=terminal_eperm_settled(code is not None, absent, eof, deadline, unknown)
+      attempt['terminal_darwin_eperm']='empty_group_after_reap' if settled else 'unresolved'
+      if not settled:unknown.append(attempt['action']+'_signal_error')
+
+    # Evidence writes occur after cleanup decisions/reap. They never gate cleanup.
+    try:
+     for name,item in logs.items():
+      raw=(root/(name+'.log')).read_bytes();item.update({'bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest(),'path':str(root/(name+'.log'))})
+     selected_test={'redisfault':'redis_directory_real_peer_failures_preserve_exact_backing','rediscleanup':'cancelled_redis_fixture_reaps_owned_child_before_removing_directory','wsloss':'websocket_sqlite_commit_survives_lost_wire_reply_without_replay'}.get(kind)
+     selected_test_pass=None
+     if selected_test is not None:
+      output=(root/'stdout.log').read_text(errors='replace')
+      selected_test_pass=exact_case_passed(output, selected_test)
+      if not selected_test_pass:unknown.append('exact_named_case_not_observed_passed')
+     after=frozen();write('source-after.json',after)
+     redis_unchanged=None if redis_pin is None else redis_path.is_file() and redis_path.stat().st_size==redis_pin['size'] and hashlib.sha256(redis_path.read_bytes()).hexdigest()==redis_pin['sha256']
+     if redis_unchanged is False:unknown.append('redis_executable_changed')
+     fixture_children=sorted(p.name for p in fixture_tmp.iterdir())
+     fixture_removed=False
+     if code is not None and absent is True and eof:
+      assert shutil.rmtree.avoids_symlink_attacks, 'require fd-based removal of owned fixture root'
+      shutil.rmtree(fixture_tmp);fixture_removed=not fixture_tmp.exists()
+     else:unknown.append('fixture_directory_retained_unknown_process_ownership')
+     receipt={'schema':'mount-rs.causal-bounded-local-gate.v2','kind':kind,'command':command,'elapsed_seconds':time.monotonic()-start,'parent_limit_seconds':limit,'cleanup_reserved_seconds':5,'returncode':code,'owned_pid':owned,'new_session':True,'wnowait_owner_pin':True,'signal_decisions_finished':signal_decisions_finished,'owned_child_reaped':code is not None,'owned_group_absent':absent,'pipes_eof':eof,'deadline_exceeded':deadline,'signals':signals,'sticky_unknown':unknown,'primary_failure':None if primary is None else {'type':type(primary).__name__,'errno':getattr(primary,'errno',None)},'logs':logs,'source_count':len(before),'source_unchanged':before==after,'head':subprocess.check_output(['git','rev-parse','HEAD'],cwd=BASE).decode().strip(),'runner_sha256':hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest(),'profile':env.get('MOUNT_RS_PROFILE_IO'),'trace':env.get('MOUNT_RS_TRACE_STORAGE'),'native_capture_binding':str(BASE/'benchmarks/storage/capture-native.cjs') if kind in {'node','processnode','diagnosticnode'} else None,'automatic_retry':False,'selected_test':selected_test,'exact_named_case_observed_passed':selected_test_pass,'redis_executable':redis_pin,'redis_executable_unchanged':redis_unchanged,'fixture_tmpdir':str(fixture_tmp),'fixture_children_before_postprocess_removal':fixture_children,'fixture_tmpdir_removed_after_reap_group_absence_eof':fixture_removed,'postterminal_group_sweep':'containment_only; fixture_cleanup_requires_in_test_assertions'}
+     sha=write('receipt.json',receipt);print(json.dumps({'path':str(root/'receipt.json'),'sha256':sha,'returncode':code,'elapsed_seconds':receipt['elapsed_seconds'],'source_unchanged':before==after,'unknown':unknown,'group_absent':absent,'pipes_eof':eof}))
+    except BaseException:
+     if primary is not None:raise primary
+     raise
+    if primary is not None:raise primary
+    raise SystemExit(0 if code==0 and absent is True and eof and not deadline and not unknown and before==after and not any(v['overflow'] for v in logs.values()) else 1)
+
+if __name__=='__main__':
+    main()

@@ -56,6 +56,100 @@ jobs:
         with:
           name: remote-quic-soak-${{ matrix.os }}
           path: remote-quic-soak.log
+  failure-e2e:
+    if: github.event_name != 'workflow_dispatch' || !(inputs.native_qualification || inputs.production_target || inputs.owned_backing_pilot || inputs.formal_qualification)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_BUILD_JOBS: '1'
+      CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-remote-failure-target
+      MOUNT_RS_FAILURE_EVIDENCE_ROOT: ${{ runner.temp }}/mount-rs-remote-failure-evidence
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697
+      - name: Prepare private failure evidence and require clean source
+        id: failure-evidence
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -m 700 "$CARGO_TARGET_DIR" "$MOUNT_RS_FAILURE_EVIDENCE_ROOT"
+          git status --porcelain=v1 --untracked-files=all > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/source-before.txt"
+          test ! -s "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/source-before.txt"
+      - name: Verify modeled owned failure parent controls
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures-controls.py
+      - name: Extract an owned Redis executable without starting a service
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          umask 077
+          redis_root="$RUNNER_TEMP/mount-rs-remote-failure-redis"
+          mkdir -m 700 "$redis_root"
+          mkdir -m 700 "$redis_root/downloads" "$redis_root/unpacked"
+          sudo apt-get update > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/redis-package.log" 2>&1
+          (
+            cd "$redis_root/downloads"
+            apt-get download redis-server redis-tools >> "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/redis-package.log" 2>&1
+          )
+          for package in "$redis_root/downloads"/*.deb; do
+            test -f "$package"
+            dpkg-deb --extract "$package" "$redis_root/unpacked" >> "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/redis-package.log" 2>&1
+          done
+          redis_source="$redis_root/unpacked/usr/bin/redis-server"
+          if [ -L "$redis_source" ]; then
+            case "$(readlink "$redis_source")" in
+              redis-check-rdb|/usr/bin/redis-check-rdb) redis_source="$redis_root/unpacked/usr/bin/redis-check-rdb" ;;
+              *) echo 'unsupported extracted Redis executable target' >&2; exit 1 ;;
+            esac
+          fi
+          test -f "$redis_source"
+          test ! -L "$redis_source"
+          test -x "$redis_source"
+          # A regular file named redis-server preserves server mode after path resolution.
+          install -m 700 "$redis_source" "$redis_root/redis-server"
+          "$redis_root/redis-server" --version > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/redis-version.txt" 2>&1
+          printf 'MOUNT_RS_CACHE_REDIS_SERVER=%s\n' "$redis_root/redis-server" >> "$GITHUB_ENV"
+      - name: Warm the two locked failure test targets online
+        run: |
+          set -euo pipefail
+          umask 077
+          ./scripts/cargo-shared test --locked -p mount-rs-blob-cache --test distributed_failure --no-run \
+            > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-cache.log" 2>&1
+          ./scripts/cargo-shared test --locked -p mount-rs-remote-client --test quic_mount --no-run \
+            > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-remote.log" 2>&1
+      - name: Verify Redis directory and peer failures through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py redisfault
+      - name: Verify cancelled Redis fixture cleanup through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py rediscleanup
+      - name: Verify SQLite commit after lost WebSocket reply through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py wsloss
+      - name: Verify final failure source state
+        if: always() && steps.failure-evidence.outcome == 'success'
+        run: |
+          set -euo pipefail
+          umask 077
+          git status --porcelain=v1 --untracked-files=all > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/source-after.txt"
+          test ! -s "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/source-after.txt"
+      - name: Retain only bounded failure receipts and source pins
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: remote-failure-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.MOUNT_RS_FAILURE_EVIDENCE_ROOT }}/source-before.txt
+            ${{ env.MOUNT_RS_FAILURE_EVIDENCE_ROOT }}/source-after.txt
+            ${{ env.MOUNT_RS_FAILURE_EVIDENCE_ROOT }}/mount-rs-owned-fault-*/receipt.json
+            ${{ env.MOUNT_RS_FAILURE_EVIDENCE_ROOT }}/mount-rs-owned-fault-*/source-before.json
+            ${{ env.MOUNT_RS_FAILURE_EVIDENCE_ROOT }}/mount-rs-owned-fault-*/source-after.json
+          if-no-files-found: warn
   native-linux:
     if: github.event_name != 'workflow_dispatch' || !(inputs.native_qualification || inputs.production_target || inputs.owned_backing_pilot || inputs.formal_qualification)
     runs-on: ubuntu-latest
