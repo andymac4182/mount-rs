@@ -257,7 +257,7 @@ mod tests {
         let entries = process["storage"]["snapshot"]["entries"]
             .as_array()
             .unwrap();
-        assert_eq!(entries.len(), 78);
+        assert_eq!(entries.len(), 85);
         for (actual, expected) in entries.iter().zip(&storage.entries) {
             assert_eq!(actual["name"], expected.name);
             assert_eq!(actual["calls"].as_u64(), Some(exact));
@@ -265,7 +265,22 @@ mod tests {
             assert_eq!(actual["bytes"].as_u64(), Some(exact));
             assert_eq!(actual["latency_log2_us"].as_array().unwrap().len(), 32);
         }
-        assert_eq!(entries.last().unwrap()["name"], "tidb.sql.flush_probe");
+        assert_eq!(entries[77]["name"], "tidb.sql.flush_probe");
+        assert_eq!(
+            entries[78..]
+                .iter()
+                .map(|entry| entry["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "foundationdb.transaction.create",
+                "foundationdb.transaction.closure_attempt",
+                "foundationdb.read.get",
+                "foundationdb.read.get_key",
+                "foundationdb.read.get_range_page",
+                "foundationdb.transaction.commit",
+                "foundationdb.transaction.on_error",
+            ]
+        );
         assert_eq!(
             process["storage"]["snapshot"]["in_flight"].as_u64(),
             Some(exact)
@@ -298,7 +313,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            78
+            85
         );
         for name in [
             "raw_object_store",
