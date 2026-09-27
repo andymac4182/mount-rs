@@ -1120,7 +1120,10 @@ jobs:
         timeout-minutes: 1
         run: node --test --test-timeout=10000 benchmarks/storage/namespace-presence.test.mjs bindings/mount-rs-napi/test/namespace-presence-postlude.test.mjs
       - name: Verify owned layout comparison and bottleneck metrics controls
-        timeout-minutes: 1
+        # Seven files include bounded child-process and filesystem controls.
+        # Keep the per-case deadline below and allow slower matrix hosts time
+        # to complete the full group.
+        timeout-minutes: 3
         run: |
           set -o pipefail
           node --test --test-reporter=tap --test-timeout=10000 benchmarks/storage/owned-layout-arm.test.mjs benchmarks/storage/owned-layout-outcome.test.mjs benchmarks/storage/owned-layout-comparison.test.mjs benchmarks/storage/owned-layout-metrics.test.mjs benchmarks/storage/process-resource-metrics.test.mjs benchmarks/storage/owned-layout-entry.test.mjs scripts/verify-owned-layout-comparison.test.mjs 2>&1 | tee "$RUNNER_TEMP/owned-layout-controls.log"

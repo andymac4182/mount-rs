@@ -49,6 +49,9 @@ there is no additional permission gate for this design.
 - SDK lifecycle observations forward `ChunkedFs::failed()` and the opened
   immutable concurrent backing identity. They do not infer health from shutdown
   success or turn a cached identity into a fresh provider-authority check.
+  Failure observation is nonblocking and sticky, including uncertainty published
+  before the detailed state lock and observed state poisoning. Healthy state
+  mutex contention does not report failure.
 - CLI registration prepares immutable resolved construction plans, including
   endpoint/path/volume/environment references and cache decoration. Activation
   reuses these plans and the server-owned `StorageContext`. It does not resolve

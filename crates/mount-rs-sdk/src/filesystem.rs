@@ -358,6 +358,8 @@ impl Filesystem {
 
     /// Observe sticky failure in the opened chunked filesystem owner.
     ///
+    /// This does not wait for filesystem state locks. Known publication
+    /// uncertainty and observed state poisoning remain sticky across clones.
     /// Other driver kinds report no chunked failure. A false result does not
     /// qualify a runtime for eviction or prove that shutdown has completed.
     pub fn failed(&self) -> bool {

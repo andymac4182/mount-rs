@@ -28,13 +28,21 @@ QUIC/WebSocket service.
 
 **Files:** `crates/mount-rs-sdk/src/filesystem.rs`,
 `filesystems/mount-rs-chunked/src/lib.rs`,
-`crates/mount-rs-service/tests/runtime_health.rs`.
+`crates/mount-rs-service/tests/runtime_health.rs`,
+`filesystems/mount-rs-chunked/src/runtime_health_tests.rs`.
 
 **Interfaces:** `Filesystem::failed() -> bool` forwards sticky ChunkedFs failure;
 `Filesystem::concurrent_backing_id() -> Option<ConcurrentBackingId>` forwards the
 opened identity through a read-only ChunkedFs accessor. Other SDK driver kinds
 report no chunked failure and no concurrent backing identity; this does not
 qualify them for eviction.
+
+The pool callback requires nonblocking observation. The concrete ChunkedFs
+accessor now uses a sticky atomic latch, set before its three detailed failure
+publishers wait for state and on observed state poison. Six actual-mutex
+controls passed after a genuine blocking-accessor regression; healthy contention
+does not quarantine an owner. This repairs the observation seam without
+qualifying provider construction cleanup or fresh backing authority.
 
 - [x] Write actual SQLite tests before the observations. Open MRC5, acknowledge
   a complete deterministic payload, inject a SQLite trigger rejecting inode

@@ -114,3 +114,27 @@ immutable backing identity and sibling-provider usability after repeated
 eviction. Native resource observations, concrete provider construction cleanup,
 CLI/process wiring, all backend qualification and the full 10,000-client target
 remain separate gates.
+
+## Nonblocking SDK health observation
+
+The concrete ChunkedFs health accessor now uses a sticky atomic observation.
+Active publication cancellation, a committed but unobserved mutation response,
+and `fail_closed` publish uncertainty before waiting for detailed filesystem
+state. The first detailed error remains unchanged. Poisoned state is also
+latched; healthy mutex contention does not imply failure. The accessor performs
+no state locking, logging or provider work, and does not qualify shutdown or
+fresh backing authority.
+
+Six private controls hold the actual state mutex while observing healthy and
+failed owners, exercise all three failure publishers before that mutex becomes
+available, and check disarmed guards, clones, shutdown and observed poison.
+The original accessor failed the healthy-contention control after its bounded
+wait; the state guard was released and the worker joined before the assertion.
+All six controls passed after the repair. Full qualification records remain
+separate from the earlier timing-bank report.
+
+The exact seven-file layout/metrics CI command passed 592 controls locally.
+Its failing CI step took about 67 seconds with a one-minute group budget;
+metadata alone does not establish the failure cause. That group's budget is
+now three minutes, retaining its ten-second per-case deadline. CI on the new
+commit must establish whether that margin resolves the remote failure.

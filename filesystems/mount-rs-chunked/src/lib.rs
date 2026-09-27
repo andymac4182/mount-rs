@@ -11,6 +11,8 @@ mod causal_metrics;
 mod create_guard_metrics_tests;
 mod create_rebase;
 mod migration;
+#[cfg(test)]
+mod runtime_health_tests;
 pub use migration::{migrate_mrc1_backing, migrate_trusted_unstamped_mrc1_backing};
 
 use causal_metrics::{
@@ -358,6 +360,7 @@ struct RuntimeState {
     /// Unlinked inodes remain available to existing handles but are never
     /// published. They are reclaimed on the last close or process restart.
     orphans: HashMap<InodeId, NodeMetadata>,
+    /// Detailed first failure; every publisher sets ChunkedInner::failed first.
     failure: Option<FsError>,
     closed: bool,
 }
@@ -492,13 +495,15 @@ struct MutationRunnerGuard<'a> {
 /// before the provider returns or the local state records its acknowledgement.
 struct PublicationGuard<'a> {
     state: &'a Mutex<RuntimeState>,
+    failed: &'a AtomicBool,
     active: bool,
 }
 
 impl<'a> PublicationGuard<'a> {
-    fn new(state: &'a Mutex<RuntimeState>) -> Self {
+    fn new(state: &'a Mutex<RuntimeState>, failed: &'a AtomicBool) -> Self {
         Self {
             state,
+            failed,
             active: true,
         }
     }
@@ -510,8 +515,12 @@ impl<'a> PublicationGuard<'a> {
 
 impl Drop for PublicationGuard<'_> {
     fn drop(&mut self) {
-        if self.active
-            && let Ok(mut state) = self.state.lock()
+        if !self.active {
+            return;
+        }
+        // Publish uncertainty before waiting for the detailed state lock.
+        self.failed.store(true, Ordering::Release);
+        if let Ok(mut state) = self.state.lock()
             && state.failure.is_none()
         {
             state.failure = Some(
@@ -528,14 +537,20 @@ impl Drop for PublicationGuard<'_> {
 /// its queued response; that dropped caller must preserve the uncertain result.
 struct MutationAcknowledgementGuard<'a> {
     state: &'a Mutex<RuntimeState>,
+    failed: &'a AtomicBool,
     committed: Arc<AtomicBool>,
     observed: bool,
 }
 
 impl<'a> MutationAcknowledgementGuard<'a> {
-    fn new(state: &'a Mutex<RuntimeState>, committed: Arc<AtomicBool>) -> Self {
+    fn new(
+        state: &'a Mutex<RuntimeState>,
+        failed: &'a AtomicBool,
+        committed: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             state,
+            failed,
             committed,
             observed: false,
         }
@@ -548,9 +563,11 @@ impl<'a> MutationAcknowledgementGuard<'a> {
 
 impl Drop for MutationAcknowledgementGuard<'_> {
     fn drop(&mut self) {
-        if !self.observed
-            && self.committed.load(Ordering::Acquire)
-            && let Ok(mut state) = self.state.lock()
+        if self.observed || !self.committed.load(Ordering::Acquire) {
+            return;
+        }
+        self.failed.store(true, Ordering::Release);
+        if let Ok(mut state) = self.state.lock()
             && state.failure.is_none()
         {
             state.failure = Some(
@@ -677,6 +694,8 @@ where
     options: ChunkedOptions,
     gate: AsyncGate,
     lifecycle: tokio::sync::RwLock<()>,
+    /// Sticky uncertainty observation, independent of the detailed state lock.
+    failed: AtomicBool,
     state: Mutex<RuntimeState>,
     lease: Mutex<Option<WriterLease>>,
     lease_gate: AsyncGate,
@@ -750,6 +769,7 @@ where
                 options,
                 gate: AsyncGate::new(),
                 lifecycle: tokio::sync::RwLock::new(()),
+                failed: AtomicBool::new(false),
                 state: Mutex::new(RuntimeState {
                     namespace: Arc::new(namespace),
                     inode_revisions: BTreeMap::new(),
@@ -991,6 +1011,7 @@ where
                 options,
                 gate: AsyncGate::new(),
                 lifecycle: tokio::sync::RwLock::new(()),
+                failed: AtomicBool::new(false),
                 state: Mutex::new(RuntimeState {
                     inode_revisions: BTreeMap::new(),
                     selected_inodes: HashMap::new(),
@@ -1655,6 +1676,7 @@ where
                         options,
                         gate: AsyncGate::new(),
                         lifecycle: tokio::sync::RwLock::new(()),
+                        failed: AtomicBool::new(false),
                         state: Mutex::new(RuntimeState {
                             inode_revisions,
                             selected_inodes: HashMap::new(),
@@ -1738,6 +1760,7 @@ where
                 options,
                 gate: AsyncGate::new(),
                 lifecycle: tokio::sync::RwLock::new(()),
+                failed: AtomicBool::new(false),
                 state: Mutex::new(RuntimeState {
                     inode_revisions: BTreeMap::new(),
                     selected_inodes: HashMap::new(),
@@ -1895,19 +1918,27 @@ where
         self.inner.blocks.reconcile(&live, grace).await
     }
 
+    /// Observe sticky failure without waiting for filesystem operations.
+    ///
+    /// Known publication uncertainty is visible before its detailed error can
+    /// be stored. Mutex contention is healthy; poison is latched as failure.
+    /// This does not validate backing authority or prove shutdown completion.
     pub fn failed(&self) -> bool {
-        self.inner
-            .state
-            .lock()
-            .map(|state| state.failure.is_some())
-            .unwrap_or(true)
+        if self.inner.failed.load(Ordering::Acquire) {
+            return true;
+        }
+        if self.inner.state.is_poisoned() {
+            self.inner.failed.store(true, Ordering::Release);
+            return true;
+        }
+        false
     }
 
     fn lock_state(&self) -> Result<MutexGuard<'_, RuntimeState>> {
-        self.inner
-            .state
-            .lock()
-            .map_err(|_| FsError::new(ErrorCode::Eio).with_message("chunked state lock poisoned"))
+        self.inner.state.lock().map_err(|_| {
+            self.inner.failed.store(true, Ordering::Release);
+            FsError::new(ErrorCode::Eio).with_message("chunked state lock poisoned")
+        })
     }
 
     fn lock_lease(&self) -> Result<MutexGuard<'_, Option<WriterLease>>> {
@@ -1982,6 +2013,7 @@ where
     }
 
     fn fail_closed(&self, error: FsError) -> FsError {
+        self.inner.failed.store(true, Ordering::Release);
         mount_rs_core::diagnostics::trace_failure("chunked", "fail_closed", &error);
         if let Ok(mut state) = self.inner.state.lock()
             && state.failure.is_none()
@@ -2544,7 +2576,7 @@ where
             .verify_concurrent_backing(backing)
             .await
             .map_err(|error| self.fail_closed(error))?;
-        let mut publication = PublicationGuard::new(&self.inner.state);
+        let mut publication = PublicationGuard::new(&self.inner.state, &self.inner.failed);
         let next = match self
             .inner
             .metadata
@@ -2618,7 +2650,7 @@ where
             .verify_concurrent_backing(backing)
             .await
             .map_err(|error| self.fail_closed(error))?;
-        let mut publication = PublicationGuard::new(&self.inner.state);
+        let mut publication = PublicationGuard::new(&self.inner.state, &self.inner.failed);
         let receipt = match self.inner.metadata.publish_compact_structure(&delta).await {
             Ok(receipt) => receipt,
             Err(error) if error.code == ErrorCode::Eagain => {
@@ -2776,7 +2808,7 @@ where
                 .verify_concurrent_backing(backing)
                 .await
                 .map_err(|error| self.fail_closed(error))?;
-            let mut publication = PublicationGuard::new(&self.inner.state);
+            let mut publication = PublicationGuard::new(&self.inner.state, &self.inner.failed);
             let result = {
                 let _publication = _gate.phase_permit().phase(GatePhase::Publication);
                 self.inner
@@ -2842,7 +2874,7 @@ where
             .verify_concurrent_backing(backing)
             .await
             .map_err(|error| self.fail_closed(error))?;
-        let mut publication = PublicationGuard::new(&self.inner.state);
+        let mut publication = PublicationGuard::new(&self.inner.state, &self.inner.failed);
         let version = match self
             .inner
             .metadata
@@ -2908,7 +2940,7 @@ where
             .verify_concurrent_backing(backing)
             .await
             .map_err(|error| self.fail_closed(error))?;
-        let mut publication = PublicationGuard::new(&self.inner.state);
+        let mut publication = PublicationGuard::new(&self.inner.state, &self.inner.failed);
         let loaded = match self
             .inner
             .metadata
@@ -3554,7 +3586,7 @@ where
             state.persisted_revision
         };
         // Arm before block I/O: canceling a required barrier makes this owner unusable.
-        let mut barrier = PublicationGuard::new(&self.inner.state);
+        let mut barrier = PublicationGuard::new(&self.inner.state, &self.inner.failed);
         // Immutable block flushing does not publish references or require
         // writer authority. The durable path forces a provider lease check
         // after flushing, immediately before its fenced metadata publication.
@@ -3677,7 +3709,7 @@ where
             );
             result
                 .map_err(|error| self.fail_closed(with_context(error, "backing-verify", None)))?;
-            let mut publication = PublicationGuard::new(&self.inner.state);
+            let mut publication = PublicationGuard::new(&self.inner.state, &self.inner.failed);
             trace.stage(
                 "cas_start",
                 format_args!("expected_revision={expected_revision}"),
@@ -3759,7 +3791,7 @@ where
             self.validate_lease(phase).await?;
         }
         let lease = self.renew_lease(phase).await?;
-        let mut publication = PublicationGuard::new(&self.inner.state);
+        let mut publication = PublicationGuard::new(&self.inner.state, &self.inner.failed);
         let revision = match self
             .inner
             .metadata
@@ -3813,8 +3845,11 @@ where
     ) -> Result<WholeFileMutationResult> {
         let (reply, response) = tokio::sync::oneshot::channel();
         let committed = Arc::new(AtomicBool::new(false));
-        let mut acknowledgement =
-            MutationAcknowledgementGuard::new(&self.inner.state, Arc::clone(&committed));
+        let mut acknowledgement = MutationAcknowledgementGuard::new(
+            &self.inner.state,
+            &self.inner.failed,
+            Arc::clone(&committed),
+        );
         self.enqueue_mutation(MutationRequest::WholeFile {
             mutation: Box::new(mutation),
             reply,
@@ -3839,8 +3874,11 @@ where
     async fn submit_unlink_mutation(&self, path: String) -> Result<()> {
         let (reply, response) = tokio::sync::oneshot::channel();
         let committed = Arc::new(AtomicBool::new(false));
-        let mut acknowledgement =
-            MutationAcknowledgementGuard::new(&self.inner.state, Arc::clone(&committed));
+        let mut acknowledgement = MutationAcknowledgementGuard::new(
+            &self.inner.state,
+            &self.inner.failed,
+            Arc::clone(&committed),
+        );
         self.enqueue_mutation(MutationRequest::Unlink {
             path,
             reply,
@@ -5254,7 +5292,7 @@ where
             .inner
             .options
             .writeback
-            .then(|| PublicationGuard::new(&self.inner.state));
+            .then(|| PublicationGuard::new(&self.inner.state, &self.inner.failed));
         if self.drain_writeback(Some(_gate.phase_permit())).await? {
             if let Some(barrier) = &mut barrier {
                 barrier.disarm();
