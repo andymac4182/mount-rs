@@ -52,6 +52,29 @@ class ResultControls(unittest.TestCase):
 
 
 class CacheStageSelectors(unittest.TestCase):
+    def test_create_qualification_requires_complete_executed_controls(self):
+        for kind, count in [("createpath", 5), ("createunit", 4)]:
+            names = parent.EXPECTED_SUITES[kind]
+            self.assertEqual(len(names), count)
+            valid = f"running {count} tests\n"+"".join(f"test {name} ... ok\n" for name in names)+f"test result: ok. {count} passed; 0 failed; 0 ignored;\n"
+            self.assertTrue(parent.named_suite_passed(valid, names))
+            self.assertFalse(parent.named_suite_passed(valid.replace(names[0], "unrelated"), names))
+            self.assertFalse(parent.named_suite_passed(valid.replace(f"{count} passed", f"{count-1} passed"), names))
+            split = valid.replace(f"test {names[0]} ... ok", f"test {names[0]} ... FIXED_STAGE\nok")
+            self.assertFalse(parent.named_suite_passed(split, names))
+            self.assertTrue(parent.named_suite_passed(split, names, nocapture=True))
+            self.assertFalse(parent.named_suite_passed(split.replace(names[0], "unrelated"), names, nocapture=True))
+            self.assertFalse(parent.named_suite_passed(split+f"test {names[0]} ... ok\n", names, nocapture=True))
+            self.assertFalse(parent.named_suite_passed(split.replace(f"{count} passed", f"{count-1} passed"), names, nocapture=True))
+        for kind, name in [
+            ("createprep", "missing_compact_create_preparation_avoids_full_scan_with_128_siblings"),
+            ("createguard", "unchanged_compact_refresh_preserves_prepared_create"),
+        ]:
+            command, limit, profile, trace = parent.COMMANDS[kind]
+            self.assertEqual((limit, profile, trace), (180, 1, 0))
+            self.assertEqual(parent.EXACT_CASES[kind], name)
+            self.assertEqual(command[command.index("--exact")+1], name)
+
     def test_quinn_close_regressions_require_the_selected_executed_case(self):
         expected = {
             "quinnordinary": ("tests::ordinary_initial_then_close_drains_without_waiting_for_idle_timeout", False),

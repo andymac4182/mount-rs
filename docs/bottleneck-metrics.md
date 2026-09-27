@@ -128,6 +128,16 @@ retains that absence, while exact current pilot qualification requires all
 118 rows. The six optional `compact.capture.*` and `compact.create.*` projector
 labels have no Rust producers and do not supply these observations.
 
+The [compact create preparation comparison](benchmarks/compact-create-preparation-20260927/README.md)
+uses these rows to isolate preparation from publication. With 128 siblings,
+guarded missing-path preparation removes its 129-row Full scan and namespace
+snapshot while increasing selected reads from one to three. Total guard bytes
+decoded through acknowledgment fall from 284,682 to 200,582; authority checks
+and read transaction begins each increase by one. Full publication scans remain
+unchanged. This local controlled result identifies less scan/decode work, with
+explicit race, corruption and unreferenced-block controls; it does not establish
+fewer SQL statements, physical IOPS or production throughput.
+
 All timed rows use the existing opt-in recorder and fixed slow-log format
 `MOUNT_RS_PROFILE_SLOW event=... elapsed_us=... units=...`. With storage tracing
 enabled, operations taking at least 100 ms can emit at most 16 such records per

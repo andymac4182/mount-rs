@@ -4657,10 +4657,11 @@ where
             }
         }
         let preparation = self.begin_mutation_preparation();
-        let (layout, original, inode, expected_revision, new_inode) = {
-            // Compact preparation installs a coherent Full snapshot, so it
-            // shares the publication gate through path/body capture. Dropping
-            // this guard also releases pending_full before immutable block
+        let (layout, original, inode, expected_revision, new_inode) = 'capture: {
+            // Compact preparation shares the publication gate through path
+            // capture. A missing path needs only its guarded structure; an
+            // occupied path retains a Full capture for the current file body.
+            // Dropping this guard clears pending_full before immutable block
             // work, allowing whole-file preparations to overlap safely.
             // Other modes retain their optimistic capture and lease gate.
             let _capture_gate = if self.inner.options.compact_inode_updates {
@@ -4668,13 +4669,41 @@ where
             } else {
                 None
             };
-            {
-                let _profile = Span::new(Event::FilesystemRefreshCreateCapture);
-                self.ensure_operation_lease(
-                    _capture_gate.as_ref().map(OperationGateGuard::phase_permit),
-                )
-                .await?;
+            let capture_profile = Span::new(Event::FilesystemRefreshCreateCapture);
+            if let Some(gate) = &_capture_gate {
+                let (namespace, entry) = self
+                    .inode_path_view(&normalized, true, "open", None, gate.phase_permit())
+                    .await?;
+                if entry.node.is_none() {
+                    self.require_inode_authority(&namespace, entry.parent)?;
+                    let parent = namespace
+                        .nodes
+                        .get(&entry.parent)
+                        .ok_or_else(|| error_with_path(ErrorCode::Estale, "open", &entry.path))?;
+                    if !matches!(parent.data, NodeData::Directory { .. }) {
+                        return Err(error_with_path(ErrorCode::Enotdir, "open", &entry.path));
+                    }
+                    // Traversal can install selected acknowledgements and
+                    // advance the local revision. Capture it afterward; the
+                    // inode/chunker remain provisional until Full batch rebase.
+                    let revision = { self.lock_state()?.revision };
+                    break 'capture (
+                        FileLayout {
+                            chunker: namespace.default_chunker.clone(),
+                            extents: Vec::new(),
+                        },
+                        None,
+                        namespace.next_inode,
+                        revision,
+                        true,
+                    );
+                }
             }
+            self.ensure_operation_lease(
+                _capture_gate.as_ref().map(OperationGateGuard::phase_permit),
+            )
+            .await?;
+            drop(capture_profile);
             let (namespace, revision) = self.snapshot()?;
             let entry = walk(&namespace, &normalized, true, "open", 0)?;
             self.require_inode_authority(&namespace, entry.node.unwrap_or(entry.parent))?;
@@ -10908,6 +10937,7 @@ mod compact_preparation_tests {
     struct RecordingMetadata {
         inner: SqliteMetadataStore,
         old_calls: Arc<AtomicU64>,
+        full_reads: Arc<AtomicU64>,
         hold_full_once: Arc<AtomicBool>,
         full_entered: Arc<tokio::sync::Notify>,
         full_resume: Arc<tokio::sync::Notify>,
@@ -10917,6 +10947,7 @@ mod compact_preparation_tests {
             Self {
                 inner,
                 old_calls: Arc::new(AtomicU64::new(0)),
+                full_reads: Arc::new(AtomicU64::new(0)),
                 hold_full_once: Arc::new(AtomicBool::new(false)),
                 full_entered: Arc::new(tokio::sync::Notify::new()),
                 full_resume: Arc::new(tokio::sync::Notify::new()),
@@ -10945,6 +10976,7 @@ mod compact_preparation_tests {
             &self,
             backing: ConcurrentBackingId,
         ) -> Result<CompactSnapshot> {
+            self.full_reads.fetch_add(1, Ordering::SeqCst);
             self.inner.load_compact_snapshot(backing).await
         }
         async fn load_compact_inode(
@@ -11222,6 +11254,165 @@ mod compact_preparation_tests {
                 "preparation_waited=1 block_io_overlap=1 fresh_files=2 full_bytes=37 eof_reads=2"
             );
         });
+    }
+
+    #[test]
+    fn occupied_preparation_uses_full_current_selected_body() {
+        bounded(async {
+            let volume = Volume::new();
+            let setup = volume.open("occupied-enroll").await;
+            setup.shutdown().await.unwrap();
+            drop(setup);
+            let metadata = RecordingMetadata::new(volume.metadata());
+            let blocks = paused_blocks(&volume);
+            let fs = ChunkedFs::open(
+                metadata.clone(),
+                blocks.clone(),
+                ChunkedOptions::fixed("occupied-owner", 16)
+                    .unwrap()
+                    .with_compact_inode_updates(true),
+            )
+            .await
+            .unwrap();
+            let peer = volume.open("occupied-peer").await;
+            let pause = Arc::new(PreparationPause::default());
+            *fs.inner.preparation_pause.lock().unwrap() = Some(pause.clone());
+            let mut write = Box::pin(fs.write_file("/created", b"complete replacement"));
+            at_pause(&mut write, &pause.entered).await;
+            peer.write_file("/created", b"initial peer body")
+                .await
+                .unwrap();
+            let inode = fs.stat("/created").await.unwrap().ino;
+            let old_body = fs.lock_state().unwrap().namespace.nodes[&inode].clone();
+            peer.write_file("/created", b"newer selected peer body across chunks")
+                .await
+                .unwrap();
+            assert_eq!(fs.lock_state().unwrap().namespace.nodes[&inode], old_body);
+            let before = metadata.full_reads.load(Ordering::SeqCst);
+            blocks.pause.store(true, Ordering::SeqCst);
+            pause.resume.notify_one();
+            at_pause(&mut write, &blocks.entered).await;
+            assert_eq!(
+                metadata.full_reads.load(Ordering::SeqCst) - before,
+                1,
+                "occupied capture must load a Full current body, not its stale namespace leaf"
+            );
+            blocks.resume.notify_one();
+            write.await.unwrap();
+            assert_eq!(
+                metadata.full_reads.load(Ordering::SeqCst) - before,
+                2,
+                "current occupied body commits with capture and batch, without replay"
+            );
+            assert!(!fs.failed());
+            peer.shutdown().await.unwrap();
+            fs.shutdown().await.unwrap();
+            drop(peer);
+            drop(fs);
+            drop(blocks);
+            drop(metadata);
+            oracle(&volume, &[("/created", b"complete replacement")]).await;
+        });
+    }
+
+    fn raw_metadata(volume: &Volume) -> Vec<Vec<rusqlite::types::Value>> {
+        let connection = rusqlite::Connection::open(volume.0.join("metadata.db")).unwrap();
+        let mut all = Vec::new();
+        for sql in [
+            "SELECT * FROM mount_rs_metadata ORDER BY id",
+            "SELECT * FROM mount_rs_compact_guards ORDER BY inode",
+        ] {
+            let mut statement = connection.prepare(sql).unwrap();
+            let columns = statement.column_count();
+            all.extend(
+                statement
+                    .query_map([], |row| {
+                        (0..columns)
+                            .map(|n| row.get(n))
+                            .collect::<rusqlite::Result<Vec<rusqlite::types::Value>>>()
+                    })
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap(),
+            );
+        }
+        all
+    }
+
+    #[test]
+    fn damaged_traversed_or_unrelated_guard_refuses_create_without_publication() {
+        for traversed in [true, false] {
+            bounded(async {
+                let volume = Volume::new();
+                let setup = volume.open("damage-setup").await;
+                setup
+                    .write_file("/sibling", b"preserved sibling")
+                    .await
+                    .unwrap();
+                let sibling = setup.stat("/sibling").await.unwrap().ino;
+                setup.shutdown().await.unwrap();
+                drop(setup);
+                let blocks = paused_blocks(&volume);
+                let fs = ChunkedFs::open(
+                    volume.metadata(),
+                    blocks.clone(),
+                    ChunkedOptions::fixed("damage-owner", 16)
+                        .unwrap()
+                        .with_compact_inode_updates(true),
+                )
+                .await
+                .unwrap();
+                let pause = Arc::new(PreparationPause::default());
+                *fs.inner.preparation_pause.lock().unwrap() = Some(pause.clone());
+                let mut write =
+                    Box::pin(fs.write_file("/created", b"unacknowledged prepared bytes"));
+                at_pause(&mut write, &pause.entered).await;
+                let root = fs.lock_state().unwrap().namespace.root;
+                let connection = rusqlite::Connection::open(volume.0.join("metadata.db")).unwrap();
+                assert_eq!(
+                    connection
+                        .execute(
+                            "UPDATE mount_rs_compact_guards SET epoch=999 WHERE inode=?1",
+                            [if traversed { root } else { sibling }.to_string()]
+                        )
+                        .unwrap(),
+                    1
+                );
+                drop(connection);
+                let damaged = raw_metadata(&volume);
+                pause.resume.notify_one();
+                assert!(write.await.is_err());
+                assert!(fs.failed());
+                assert!(fs.stat("/created").await.is_err());
+                assert_eq!(
+                    raw_metadata(&volume),
+                    damaged,
+                    "refusal must preserve damaged metadata without publication or repair"
+                );
+                let puts = blocks.puts.load(Ordering::SeqCst);
+                if traversed {
+                    assert_eq!(puts, 0, "traversed damage must refuse before immutable PUT");
+                }
+                println!(
+                    "compact_create_damage traversed={traversed} puts={puts} poisoned=true metadata_unchanged=true acknowledged=false"
+                );
+                drop(fs);
+                drop(blocks);
+                let reopened = ChunkedFs::open(
+                    volume.metadata(),
+                    volume.blocks(),
+                    ChunkedOptions::fixed("damage-reopen", 16)
+                        .unwrap()
+                        .with_compact_inode_updates(true),
+                )
+                .await;
+                assert!(
+                    reopened.is_err(),
+                    "fresh owner must also refuse damaged durable state"
+                );
+                assert_eq!(raw_metadata(&volume), damaged);
+            });
+        }
     }
 
     #[test]

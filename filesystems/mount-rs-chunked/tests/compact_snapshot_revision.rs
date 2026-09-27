@@ -143,6 +143,14 @@ fn unchanged_compact_refresh_preserves_prepared_create() {
         "an unchanged snapshot must not force whole-file replay",
     );
     assert_eq!(committed, 1, "the prepared request must commit directly");
+    assert_eq!(
+        guard_delta(&before, &after, "filesystem.snapshot_nodes"),
+        (1, 1)
+    );
+    assert_eq!(
+        guard_delta(&before, &after, "sqlite.compact.guard_full_rows"),
+        (2, 2)
+    );
     assert_eq!(replies, 1, "the committed request must deliver its reply");
     assert_eq!(
         guard_delta(

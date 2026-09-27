@@ -208,11 +208,13 @@ fn run(case: Case) {
                 Case::RemovedParent => "/parent/created",
                 _ => "/created",
             };
+            let preparation_before = profile::snapshot();
             blocks.pause.store(true, Ordering::SeqCst);
             let create = creator.write_file(path, CREATED_BYTES);
             let change = async {
                 blocks.entered.notified().await;
-                // The first immutable PUT follows the creator's Full namespace capture.
+                // The first immutable PUT follows the guarded missing-path capture.
+                let prepared = profile::snapshot();
                 // Finish the peer mutation before collecting creator-only counters.
                 match case {
                     Case::PeerAllocation => peer.write_file("/peer", PEER_BYTES).await.unwrap(),
@@ -225,9 +227,9 @@ fn run(case: Case) {
                 }
                 let before = profile::snapshot();
                 blocks.resume.notify_one();
-                before
+                (before, prepared)
             };
-            let (result, before) = futures_lite::future::zip(create, change).await;
+            let (result, (before, prepared)) = futures_lite::future::zip(create, change).await;
             let after = profile::snapshot();
             match case {
                 Case::RemovedParent => assert_eq!(result.unwrap_err().code, ErrorCode::Enoent),
@@ -301,6 +303,18 @@ fn run(case: Case) {
                 }
             }
             reopened.shutdown().await.unwrap();
+            assert_eq!(
+                row_delta(
+                    &preparation_before,
+                    &prepared,
+                    "sqlite.compact.guard_full_rows"
+                ),
+                (0, 0)
+            );
+            assert_eq!(
+                row_delta(&preparation_before, &prepared, "filesystem.snapshot_nodes"),
+                (0, 0)
+            );
             match case {
                 Case::PeerAllocation | Case::RetargetedSymlink => {
                     assert_eq!(
@@ -387,4 +401,215 @@ fn occupied_current_path_keeps_guard_conflict_and_replay() {
 #[ignore = "requires MOUNT_RS_PROFILE_IO=1 and MOUNT_RS_TRACE_STORAGE=0"]
 fn removed_current_parent_is_rejected() {
     run(Case::RemovedParent);
+}
+
+fn row_delta(before: &Snapshot, after: &Snapshot, name: &str) -> (u64, u64) {
+    let find = |snapshot: &Snapshot| {
+        let row = snapshot
+            .entries
+            .iter()
+            .find(|row| row.name == name)
+            .unwrap();
+        (row.calls, row.units)
+    };
+    let old = find(before);
+    let new = find(after);
+    (
+        new.0.checked_sub(old.0).unwrap(),
+        new.1.checked_sub(old.1).unwrap(),
+    )
+}
+
+#[test]
+#[ignore = "requires MOUNT_RS_PROFILE_IO=1 and MOUNT_RS_TRACE_STORAGE=0"]
+fn missing_compact_create_preparation_avoids_full_scan_with_128_siblings() {
+    assert!(profile::enabled(), "run with MOUNT_RS_PROFILE_IO=1");
+    let volume = PrivateVolume::new();
+    let metadata_path = volume.0.join("metadata.sqlite");
+    let blocks_path = volume.0.join("blocks.sqlite");
+    block_on(async {
+        let options = |name| {
+            ChunkedOptions::fixed(name, 16)
+                .unwrap()
+                .with_compact_inode_updates(true)
+        };
+        let siblings: Vec<_> = (0..128)
+            .map(|n| {
+                (
+                    format!("/sibling-{n:03}"),
+                    format!("complete sibling {n:03} bytes across blocks").into_bytes(),
+                )
+            })
+            .collect();
+        let setup = ChunkedFs::open(
+            SqliteMetadataStore::open(&metadata_path).unwrap(),
+            SqliteBlockStore::open(&blocks_path).unwrap(),
+            options("preparation-setup"),
+        )
+        .await
+        .unwrap();
+        for (path, bytes) in &siblings {
+            setup.write_file(path, bytes).await.unwrap();
+        }
+        setup.shutdown().await.unwrap();
+        drop(setup);
+        let blocks = PausedBlocks {
+            inner: SqliteBlockStore::open(&blocks_path).unwrap(),
+            pause: Arc::new(AtomicBool::new(false)),
+            entered: Arc::new(tokio::sync::Notify::new()),
+            resume: Arc::new(tokio::sync::Notify::new()),
+        };
+        let creator = ChunkedFs::open(
+            SqliteMetadataStore::open(&metadata_path).unwrap(),
+            blocks.clone(),
+            options("preparation-creator"),
+        )
+        .await
+        .unwrap();
+        let before = profile::snapshot();
+        blocks.pause.store(true, Ordering::SeqCst);
+        let create = creator.write_file("/created", CREATED_BYTES);
+        let observe = async {
+            blocks.entered.notified().await;
+            let prepared = profile::snapshot();
+            blocks.resume.notify_one();
+            prepared
+        };
+        let (result, prepared) =
+            futures_lite::future::race(futures_lite::future::zip(create, observe), async {
+                async_io::Timer::after(Duration::from_secs(10)).await;
+                panic!("paused first PUT create timed out")
+            })
+            .await;
+        result.unwrap();
+        let committed = profile::snapshot();
+        let mut inodes = BTreeSet::new();
+        assert!(inodes.insert(assert_bytes(&creator, "/created", CREATED_BYTES).await));
+        for (path, bytes) in &siblings {
+            assert!(inodes.insert(assert_bytes(&creator, path, bytes).await));
+        }
+        assert_eq!(inodes.len(), 129);
+        creator.shutdown().await.unwrap();
+        drop(creator);
+        drop(blocks);
+        let reopened = ChunkedFs::open(
+            SqliteMetadataStore::open(&metadata_path).unwrap(),
+            SqliteBlockStore::open(&blocks_path).unwrap(),
+            options("preparation-reopened"),
+        )
+        .await
+        .unwrap();
+        let mut fresh_inodes = BTreeSet::new();
+        assert!(fresh_inodes.insert(assert_bytes(&reopened, "/created", CREATED_BYTES).await));
+        for (path, bytes) in &siblings {
+            assert!(fresh_inodes.insert(assert_bytes(&reopened, path, bytes).await));
+        }
+        assert_eq!(fresh_inodes, inodes);
+        reopened.shutdown().await.unwrap();
+        drop(reopened);
+        let names = [
+            "sqlite.compact.guard_selected_rows",
+            "sqlite.compact.guard_full_rows",
+            "sqlite.compact.guard_selected_decode_bytes",
+            "sqlite.compact.guard_full_decode_bytes",
+            "filesystem.snapshot_nodes",
+            "filesystem.refresh.create_capture",
+            "filesystem.refresh.batch_capture",
+            "sqlite.compact.authority_query",
+            "sqlite.compact.anchor_query_bytes",
+            "sqlite.compact.read_begin",
+        ];
+        for (phase, start, end) in [
+            ("preparation", &before, &prepared),
+            ("publication", &prepared, &committed),
+        ] {
+            for name in names {
+                let (calls, units) = row_delta(start, end, name);
+                let old = start.entries.iter().find(|row| row.name == name).unwrap();
+                let new = end.entries.iter().find(|row| row.name == name).unwrap();
+                println!(
+                    "MOUNT_RS_CREATE_PREP {}",
+                    serde_json::json!({
+                        "phase":phase,"name":name,"calls":calls,"units":units,
+                        "elapsed_ns":new.elapsed_ns.checked_sub(old.elapsed_ns).unwrap(),
+                    })
+                );
+            }
+        }
+        println!(
+            "MOUNT_RS_CREATE_PREP_ORACLES siblings=128 files=129 complete_bytes=true size=true eof=true distinct_inodes=true fresh_reopen=true"
+        );
+        assert_eq!(
+            row_delta(&before, &prepared, "sqlite.compact.guard_full_rows"),
+            (0, 0),
+            "missing preparation must not scan all guards"
+        );
+        assert_eq!(
+            row_delta(&before, &prepared, "filesystem.snapshot_nodes"),
+            (0, 0)
+        );
+        assert_eq!(
+            row_delta(&before, &prepared, "sqlite.compact.guard_selected_rows"),
+            (3, 3)
+        );
+        assert_eq!(
+            row_delta(
+                &before,
+                &prepared,
+                "sqlite.compact.guard_selected_decode_bytes"
+            )
+            .0,
+            3
+        );
+        assert_eq!(
+            row_delta(&before, &prepared, "sqlite.compact.guard_full_decode_bytes").0,
+            0
+        );
+        assert_eq!(
+            row_delta(&before, &prepared, "filesystem.refresh.create_capture"),
+            (1, 0)
+        );
+        assert_eq!(
+            row_delta(&before, &prepared, "filesystem.refresh.batch_capture"),
+            (0, 0)
+        );
+        assert_eq!(
+            row_delta(&prepared, &committed, "sqlite.compact.guard_full_rows"),
+            (2, 258)
+        );
+        assert_eq!(
+            row_delta(&prepared, &committed, "sqlite.compact.guard_selected_rows"),
+            (0, 0)
+        );
+        assert_eq!(
+            row_delta(&prepared, &committed, "filesystem.snapshot_nodes"),
+            (1, 129)
+        );
+        assert_eq!(
+            row_delta(
+                &prepared,
+                &committed,
+                "sqlite.compact.guard_full_decode_bytes"
+            )
+            .0,
+            258
+        );
+        assert_eq!(
+            row_delta(&prepared, &committed, "filesystem.refresh.batch_capture"),
+            (1, 0)
+        );
+        for name in [
+            "filesystem.mutation.request.conflict",
+            "filesystem.gate_hold.whole_file_replay",
+        ] {
+            assert_eq!(delta(&before, &committed, name), 0);
+        }
+        for name in [
+            "filesystem.mutation.request.committed",
+            "filesystem.mutation.request.reply_sent",
+            "filesystem.mutation.create_guard.passed",
+        ] {
+            assert_eq!(delta(&before, &committed, name), 1);
+        }
+    });
 }

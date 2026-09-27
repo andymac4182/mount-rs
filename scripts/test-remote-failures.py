@@ -22,6 +22,12 @@ COMMANDS.update({
     'quinnclose': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'quinn_close', '--locked', '--offline', '--', '--exact', 'tests::first_close_initial_drains_without_waiting_for_idle_timeout', '--test-threads=1', '--nocapture'], 180, 0, 0),
     'quinnordinary': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'quinn_close', '--locked', '--offline', '--', '--exact', 'tests::ordinary_initial_then_close_drains_without_waiting_for_idle_timeout', '--test-threads=1', '--nocapture'], 180, 0, 0),
     'quinnruntimeclose': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'quinn_close', '--locked', '--offline', '--', '--ignored', '--exact', 'tests::first_close_initial_releases_real_endpoint_within_close_grace', '--test-threads=1', '--nocapture'], 180, 0, 0),
+    'createprep': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-chunked', '--test', 'current_path_create_rebase', '--locked', '--offline', '--', '--ignored', '--exact', 'missing_compact_create_preparation_avoids_full_scan_with_128_siblings', '--test-threads=1', '--nocapture'], 180, 1, 0),
+    'createpath': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-chunked', '--test', 'current_path_create_rebase', '--locked', '--offline', '--', '--ignored', '--test-threads=1', '--nocapture'], 180, 1, 0),
+    'createguard': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-chunked', '--test', 'compact_snapshot_revision', '--locked', '--offline', '--', '--ignored', '--exact', 'unchanged_compact_refresh_preserves_prepared_create', '--test-threads=1', '--nocapture'], 180, 1, 0),
+    'createunit': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-chunked', '--lib', '--locked', '--offline', 'compact_preparation_tests::', '--', '--test-threads=1', '--nocapture'], 180, 0, 0),
+    'chunkedtests': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-chunked', '-p', 'mount-rs-sqlite', '--all-targets', '--locked', '--offline'], 180, 0, 0),
+    'chunkedclippy': (['./scripts/cargo-shared', 'clippy', '-p', 'mount-rs-chunked', '-p', 'mount-rs-sqlite', '--all-targets', '--locked', '--offline', '--', '-D', 'warnings'], 180, 0, 0),
     'cacheprofileoff': (['./scripts/cargo-shared', 'run', '--locked', '--offline', '-p', 'mount-rs-blob-cache', '--example', 'cache_profile'], 180, 0, 0),
     'cacheprofileon': (['./scripts/cargo-shared', 'run', '--locked', '--offline', '-p', 'mount-rs-blob-cache', '--example', 'cache_profile'], 180, 1, 0),
     'storagealloc': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-core', '--test', 'storage_diagnostics_allocations', '--locked', '--offline', '--', '--ignored', '--exact', 'warmed_core_spans_record_without_added_allocations', '--test-threads=1', '--nocapture'], 180, 1, 0),
@@ -42,10 +48,25 @@ EXACT_CASES = {
     'quinnclose': 'tests::first_close_initial_drains_without_waiting_for_idle_timeout',
     'quinnordinary': 'tests::ordinary_initial_then_close_drains_without_waiting_for_idle_timeout',
     'quinnruntimeclose': 'tests::first_close_initial_releases_real_endpoint_within_close_grace',
+    'createprep': 'missing_compact_create_preparation_avoids_full_scan_with_128_siblings',
+    'createguard': 'unchanged_compact_refresh_preserves_prepared_create',
     'storagealloc': 'warmed_core_spans_record_without_added_allocations',
     'corealloc': 'warmed_causal_profile_rows_record_without_added_allocations',
 }
 EXPECTED_SUITES = {
+    'createunit': tuple('compact_preparation_tests::'+name for name in (
+        'missing_preparation_waits_for_full_publication_and_releases_gate_before_blocks',
+        'canceled_missing_preparation_retains_no_pending_full_capture',
+        'occupied_preparation_uses_full_current_selected_body',
+        'damaged_traversed_or_unrelated_guard_refuses_create_without_publication',
+    )),
+    'createpath': (
+        'missing_compact_create_preparation_avoids_full_scan_with_128_siblings',
+        'peer_allocation_rebases_prepared_create',
+        'retargeted_symlink_rebases_into_current_parent',
+        'occupied_current_path_keeps_guard_conflict_and_replay',
+        'removed_current_parent_is_rejected',
+    ),
     'clidiagnostics': tuple('remote::diagnostics::tests::'+name for name in (
         'typed_process_banks_preserve_registry_scopes_and_raw_u64',
         'disabled_process_banks_do_not_capture_or_export_zero_snapshots',
@@ -56,12 +77,17 @@ EXPECTED_SUITES = {
         'serialization_failure_uses_a_fixed_incomplete_record',
     )),
 }
-def named_suite_passed(output, names):
+def named_suite_passed(output, names, nocapture=False):
     count=len(names)
     return bool(
         re.search(r'^running '+str(count)+r' tests$', output, re.M)
         and re.search(r'^test result: ok\. '+str(count)+r' passed; 0 failed; 0 ignored;', output, re.M)
-        and all(re.search(r'^test '+re.escape(name)+r' \.\.\. ok$', output, re.M) for name in names)
+        and (
+            (lambda observed: len(observed) == count and set(observed) == set(names))(
+                re.findall(r'^test ([^\s]+) \.\.\.', output, re.M)
+            ) if nocapture else
+            all(re.search(r'^test '+re.escape(name)+r' \.\.\. ok$', output, re.M) for name in names)
+        )
     )
 
 
@@ -171,7 +197,7 @@ def terminal_eperm_settled(reaped, group_absent, eof, deadline, lifecycle_unknow
 def main():
     kind=sys.argv[1];command,limit,profile,trace=COMMANDS[kind]
     assert os.name=='posix' and hasattr(os,'waitid') and hasattr(os,'WNOWAIT'), 'Unix ownership observer required'
-    FAULT_KINDS={'cachetests','redisfault','rediscleanup','wsloss','remotetests','faultclippy','fmt','cachemetrics','peermetrics','peerreconnect','quinnclose','quinnordinary','quinnruntimeclose','cacheprofileoff','cacheprofileon','storagealloc','corealloc','coremetrics','cachemetricsclippy','cacheconsumers','cacheconsumerred','clidiagnostics','clicompact','napimetrics','consumerclippy','cachemetricstrace'}
+    FAULT_KINDS={'cachetests','redisfault','rediscleanup','wsloss','remotetests','faultclippy','fmt','cachemetrics','peermetrics','peerreconnect','quinnclose','quinnordinary','quinnruntimeclose','createprep','createpath','createguard','createunit','chunkedtests','chunkedclippy','cacheprofileoff','cacheprofileon','storagealloc','corealloc','coremetrics','cachemetricsclippy','cacheconsumers','cacheconsumerred','clidiagnostics','clicompact','napimetrics','consumerclippy','cachemetricstrace'}
     assert kind in FAULT_KINDS, 'fixed fault qualification commands only'
     root=pathlib.Path(tempfile.mkdtemp(prefix='mount-rs-owned-fault-'+kind+'-',dir=os.environ.get('MOUNT_RS_FAILURE_EVIDENCE_ROOT',tempfile.gettempdir())));os.chmod(root,0o700)
     fixture_tmp=root/'fixtures';fixture_tmp.mkdir(mode=0o700)
@@ -369,7 +395,7 @@ def main():
      selected_suite=EXPECTED_SUITES.get(kind)
      selected_suite_pass=None
      if selected_suite is not None:
-      selected_suite_pass=named_suite_passed((root/'stdout.log').read_text(),selected_suite)
+      selected_suite_pass=named_suite_passed((root/'stdout.log').read_text(),selected_suite,nocapture=kind in {'createpath','createunit'})
       if not selected_suite_pass:unknown.append('named_suite_not_observed_passed')
      cache_slow_records=None
      if kind=='cachemetricstrace':
