@@ -854,6 +854,9 @@ jobs:
           ./scripts/cargo-shared test -p mount-rs-cli --features observability --locked
           ./scripts/cargo-shared check -p mount-rs-napi --features observability --locked
           ./scripts/cargo-shared clippy -p mount-rs-observability --all-features --all-targets --locked -- -D warnings
+      - name: Verify authentication stage accounting controls
+        timeout-minutes: 5
+        run: ./scripts/cargo-shared test --locked -p mount-rs-service --features io-profiling --lib server::diagnostics::tests::auth_stage_ -- --nocapture
       - name: Verify isolated RustFS diagnostic export controls
         timeout-minutes: 5
         shell: bash
@@ -977,7 +980,7 @@ jobs:
         run: node --test --test-timeout=10000 benchmarks/storage/namespace-presence.test.mjs bindings/mount-rs-napi/test/namespace-presence-postlude.test.mjs
       - name: Verify owned layout comparison and bottleneck metrics controls
         timeout-minutes: 1
-        run: node --test --test-timeout=10000 benchmarks/storage/owned-layout-arm.test.mjs benchmarks/storage/owned-layout-outcome.test.mjs benchmarks/storage/owned-layout-comparison.test.mjs benchmarks/storage/owned-layout-metrics.test.mjs
+        run: node --test --test-timeout=10000 benchmarks/storage/owned-layout-arm.test.mjs benchmarks/storage/owned-layout-outcome.test.mjs benchmarks/storage/owned-layout-comparison.test.mjs benchmarks/storage/owned-layout-metrics.test.mjs benchmarks/storage/owned-layout-entry.test.mjs
       - name: Verify guarded backing observer and pilot controls
         timeout-minutes: 2
         run: |

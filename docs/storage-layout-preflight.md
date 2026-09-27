@@ -101,7 +101,41 @@ original runner input for independent verification; it is absent from public
 serialization. The comparison stops permanently on missed cooperative deadlines
 or uncertain native work, including work that settles after a delayed timer.
 
-The enclosing owned runtime entry still has to join controller-created endpoints
-to the fixture manifest, retain source/build provenance and confirm final owner
-teardown. Cache state is uncontrolled. Pure controls establish the coordinator
-contracts; they provide no live paired throughput or causal improvement proof.
+Cache state is uncontrolled. Pure controls establish the coordinator contracts;
+they provide no live paired throughput or causal improvement proof.
+
+## Runtime entry and retained metrics
+
+`owned-layout-entry.mjs run` joins four private handoff files before loading the
+native addon: the eight-container receipt, Engine capability, controller endpoint
+and scope manifest, and native build seal. Files must be owned by the current
+user, mode 0600, with one link, in a mode 0700 directory. Reads are bounded,
+reject duplicate JSON fields and refuse files that change while being read.
+
+The controller manifest binds loopback TiDB/RustFS endpoints and separate owned
+prefixes to the container and Engine receipt hashes. This is a manifest join;
+it performs no active endpoint identity probe. The build seal requires a clean
+matching Git revision, locked release build, successful exit and exact native
+and runtime source hashes. These are boundary observations, rather than proof
+that source and binaries remained immutable throughout execution.
+
+The entry requires Node 24, profiling enabled before loading, a canonical native
+path outside the checkout, and an empty relevant module cache. It loads that
+exact native file before the public binding loader and joins both cached exports.
+A selected native load failure stops before automatic fallback can run.
+
+After comparison, the entry consumes the one-use original evidence and recomputes
+each arm's outcome and native metric projection. Its private output is capped at
+32 MiB. Output must be distinct from all four input receipts by canonical path
+and file identity; the writer rechecks separation before publication. A
+publication or size failure reports an incomplete result while retaining
+original supported statuses, floor failures and native uncertainty. Missing
+physical counters remain unavailable.
+
+The new controller and build seal producers, final owner-verified teardown and
+namespace purge, independent artifact verifier and live workflow integration are
+still outstanding. The entry always records hosted qualification as false.
+Its controls use modeled dependencies and denied native/network dispatches; they
+do not establish live throughput. The existing provider map also eagerly checks
+the optional mountx checkout; when present, that Git lookup is currently unbounded
+and must be resolved before a bounded production comparison is qualified.
