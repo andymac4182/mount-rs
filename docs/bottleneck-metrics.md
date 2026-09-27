@@ -1,5 +1,19 @@
 # Finding remote-drive bottlenecks
 
+The [SQLite journal comparison](benchmarks/sqlite-journal-diagnostic-20260928/README.md)
+adds a test-only owned-file DELETE/WAL selector and verifies actual FULL settings
+on all provider connections. It retains database/WAL/SHM size gauges and a
+separate terminal close/drop process-I/O interval before fresh verification.
+Three repetitions per mode measured median writes of 1,641 versus 10,459 IOPS,
+with unchanged chunk/metadata format, 17 statement notifications and two commits
+per write. The result identifies local journal/commit cost and retains deferred
+work and environment limits.
+
+For WAL, SQLite pager writes count pages submitted to the log; checkpoint
+database rewrites are outside that counter. Earlier worker-report wording that
+the pager counter excludes WAL was imprecise. Compare pager activity with
+separate process/device observations without equating them to physical writes.
+
 Enable `MOUNT_RS_PROFILE_IO=1` before constructing stores. The service benchmark
 also needs its `io-profiling` feature; the production-target runner uses
 `resource-profiling`, which includes it. Profiling is opt-in. Keep a disabled

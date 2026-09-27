@@ -97,6 +97,219 @@ impl Backend {
         })
     }
 
+    /// Configure a provisioned, disposable backing before opening measured replicas.
+    /// Metadata and blocks share this file; missing or unowned files are never created.
+    pub fn configure_owned_sqlite_journal(&self, mode: &str) -> Result<serde_json::Value, String> {
+        if !matches!(mode, "DELETE" | "WAL") {
+            return Err("owned SQLite journal requires DELETE or WAL".into());
+        }
+        let StoreConfig::Sqlite { path } = &self.store else {
+            return Err("owned SQLite journal requires the SQLite backend".into());
+        };
+        let owner = self
+            ._directory
+            .as_ref()
+            .ok_or("owned SQLite journal requires a retained temporary directory")?;
+        if path != &owner.path().join("drive.sqlite") {
+            return Err("owned SQLite journal path is outside its owner".into());
+        }
+        #[cfg(not(unix))]
+        {
+            Err("owned SQLite journal file identity requires Unix".into())
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            fn stamp(path: &std::path::Path) -> Result<(u64, u64), String> {
+                let metadata = std::fs::symlink_metadata(path)
+                    .map_err(|_| "owned SQLite journal backing must already exist")?;
+                if !metadata.file_type().is_file() || metadata.nlink() != 1 {
+                    return Err(
+                        "owned SQLite journal requires a regular single-link backing".into(),
+                    );
+                }
+                Ok((metadata.dev(), metadata.ino()))
+            }
+
+            let original = stamp(path)?;
+            let canonical_owner = std::fs::canonicalize(owner.path())
+                .map_err(|_| "owned SQLite journal owner resolution failed")?;
+            let canonical = std::fs::canonicalize(path)
+                .map_err(|_| "owned SQLite journal backing resolution failed")?;
+            if canonical != canonical_owner.join("drive.sqlite") || stamp(&canonical)? != original {
+                return Err("owned SQLite journal backing identity mismatch".into());
+            }
+            let connection = rusqlite::Connection::open_with_flags(
+                &canonical,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+            )
+            .map_err(|_| "owned SQLite journal existing backing open failed")?;
+            let observed: Result<(String, u64), String> = (|| {
+                if stamp(path)? != original || stamp(&canonical)? != original {
+                    return Err("owned SQLite journal backing changed while opening".into());
+                }
+                let (marker, backing): (String, String) = connection
+                    .query_row(
+                        "SELECT write_mode,backing_id FROM mount_rs_metadata WHERE id=1",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .map_err(|_| "owned SQLite journal requires a provisioned backing")?;
+                let expected = match self.inode_mode {
+                    InodeMode::Legacy => "MRC2",
+                    InodeMode::Inode => "MRC4",
+                    InodeMode::Compact => "MRC5",
+                };
+                if marker != expected {
+                    return Err("owned SQLite journal provisioned mode mismatch".into());
+                }
+                mount_rs_core::storage::ConcurrentBackingId::from_hex(&backing)
+                    .map_err(|_| "owned SQLite journal provisioned backing ID is invalid")?;
+                connection
+                    .execute_batch("PRAGMA main.synchronous=FULL;")
+                    .map_err(|_| "owned SQLite journal FULL durability configuration failed")?;
+                let journal_mode: String = match mode {
+                    "DELETE" => {
+                        connection
+                            .query_row("PRAGMA main.journal_mode=DELETE", [], |row| row.get(0))
+                    }
+                    "WAL" => {
+                        connection.query_row("PRAGMA main.journal_mode=WAL", [], |row| row.get(0))
+                    }
+                    _ => unreachable!("journal selector checked before opening"),
+                }
+                .map_err(|_| "owned SQLite journal mode configuration failed")?;
+                if journal_mode != mode.to_ascii_lowercase() {
+                    return Err("owned SQLite journal requested mode was not applied".into());
+                }
+                let synchronous: u64 = connection
+                    .query_row("PRAGMA main.synchronous", [], |row| row.get(0))
+                    .map_err(|_| "owned SQLite journal durability observation failed")?;
+                if synchronous != 2 {
+                    return Err("owned SQLite journal FULL durability was not retained".into());
+                }
+                Ok((journal_mode, synchronous))
+            })();
+            let final_stamp = stamp(path).and_then(|requested| {
+                let canonical_stamp = stamp(&canonical)?;
+                if requested != original || canonical_stamp != original {
+                    return Err("owned SQLite journal backing changed during observation".into());
+                }
+                Ok(())
+            });
+            let closed = connection
+                .close()
+                .map_err(|_| "owned SQLite journal observer close failed");
+            let (journal_mode, synchronous) = observed?;
+            final_stamp?;
+            closed?;
+            Ok(serde_json::json!({
+                "requested": mode,
+                "journal_mode": journal_mode,
+                "synchronous": synchronous,
+                "owned_file_verified": true,
+                "identity_unchanged": true,
+                "scope": "one owned SQLite file shared by metadata and block provider roles",
+            }))
+        }
+    }
+
+    /// Stat local allocation gauges without opening SQLite or forcing a checkpoint.
+    pub fn owned_sqlite_file_bytes(&self) -> Result<serde_json::Value, String> {
+        let StoreConfig::Sqlite { path } = &self.store else {
+            return Err("owned SQLite file receipt requires the SQLite backend".into());
+        };
+        let owner = self
+            ._directory
+            .as_ref()
+            .ok_or("owned SQLite file receipt requires a retained temporary directory")?;
+        if path != &owner.path().join("drive.sqlite") {
+            return Err("owned SQLite file receipt path is outside its owner".into());
+        }
+        #[cfg(not(unix))]
+        {
+            Err("owned SQLite file allocation receipt requires Unix".into())
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            fn regular(path: &std::path::Path) -> Result<std::fs::Metadata, String> {
+                let metadata = std::fs::symlink_metadata(path)
+                    .map_err(|_| "owned SQLite file receipt backing must already exist")?;
+                if !metadata.file_type().is_file() || metadata.nlink() != 1 {
+                    return Err(
+                        "owned SQLite file receipt requires regular single-link files".into(),
+                    );
+                }
+                Ok(metadata)
+            }
+
+            let original = regular(path)?;
+            let identity = (original.dev(), original.ino());
+            let canonical_owner = std::fs::canonicalize(owner.path())
+                .map_err(|_| "owned SQLite file receipt owner resolution failed")?;
+            let canonical = std::fs::canonicalize(path)
+                .map_err(|_| "owned SQLite file receipt backing resolution failed")?;
+            let resolved = regular(&canonical)?;
+            if canonical != canonical_owner.join("drive.sqlite")
+                || (resolved.dev(), resolved.ino()) != identity
+            {
+                return Err("owned SQLite file receipt backing identity mismatch".into());
+            }
+            let mut files = serde_json::Map::new();
+            for (role, name) in [
+                ("database", "drive.sqlite"),
+                ("wal", "drive.sqlite-wal"),
+                ("shm", "drive.sqlite-shm"),
+            ] {
+                let observed = match std::fs::symlink_metadata(canonical_owner.join(name)) {
+                    Ok(metadata) => {
+                        if !metadata.file_type().is_file() || metadata.nlink() != 1 {
+                            return Err(
+                                "owned SQLite file receipt requires regular single-link files"
+                                    .into(),
+                            );
+                        }
+                        if role == "database" && (metadata.dev(), metadata.ino()) != identity {
+                            return Err(
+                                "owned SQLite file receipt backing changed while sampling".into()
+                            );
+                        }
+                        let allocated = metadata
+                            .blocks()
+                            .checked_mul(512)
+                            .ok_or("owned SQLite file allocation bytes overflow")?;
+                        serde_json::json!({
+                            "state": "present", "logical_bytes": metadata.len(), "allocated_bytes": allocated,
+                        })
+                    }
+                    Err(error)
+                        if role != "database" && error.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        serde_json::json!({
+                            "state": "absent", "logical_bytes": null, "allocated_bytes": null,
+                        })
+                    }
+                    Err(_) => return Err("owned SQLite file receipt stat failed".into()),
+                };
+                files.insert(role.into(), observed);
+            }
+            for checked in [path.as_path(), canonical.as_path()] {
+                let final_metadata = regular(checked)?;
+                if (final_metadata.dev(), final_metadata.ino()) != identity {
+                    return Err("owned SQLite file receipt backing changed during sampling".into());
+                }
+            }
+            Ok(serde_json::json!({
+                "block_unit_bytes": 512,
+                "files": files,
+                "scope": "sequential filesystem stat at a drained boundary; size and allocation gauges, not physical device writes or IOPS; absent sidecars have unavailable byte gauges",
+            }))
+        }
+    }
+
     /// Validate every stored byte without repeating a full namespace open per file.
     pub async fn verify_stored_files(&self, expected: &[Vec<(usize, u64)>]) -> Result<(), String> {
         self.verify_stored_files_from(0, expected).await
@@ -819,6 +1032,379 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[cfg(unix)]
+    fn owned_sqlite_fixture() -> Backend {
+        let directory = tempfile::tempdir().unwrap();
+        Backend {
+            name: "sqlite".into(),
+            identity: "owned SQLite journal control".into(),
+            version: rusqlite::version().into(),
+            topology: Some("local-file".into()),
+            inode_mode: InodeMode::Compact,
+            store: StoreConfig::Sqlite {
+                path: directory.path().join("drive.sqlite"),
+            },
+            _directory: Some(directory),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owned_journal_guards_reject_unowned_or_missing_files_without_creating_them() {
+        let mut backend = owned_sqlite_fixture();
+        let StoreConfig::Sqlite { path } = &backend.store else {
+            unreachable!()
+        };
+        let path = path.clone();
+        for mode in ["", "wal", "delete", "WAL ", "TRUNCATE"] {
+            assert!(backend.configure_owned_sqlite_journal(mode).is_err());
+            assert!(!path.exists(), "invalid selector must not create a file");
+        }
+        assert!(backend.configure_owned_sqlite_journal("WAL").is_err());
+        assert!(!path.exists(), "missing backing must not be created");
+        assert!(backend.owned_sqlite_file_bytes().is_err());
+        assert!(
+            !path.exists(),
+            "a file receipt must not create missing backing"
+        );
+
+        let external = tempfile::tempdir().unwrap();
+        let external_path = external.path().join("outside.sqlite");
+        let connection = rusqlite::Connection::open(&external_path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE contents(value BLOB); INSERT INTO contents VALUES(X'112233');",
+            )
+            .unwrap();
+        connection.close().unwrap();
+        let original = std::fs::read(&external_path).unwrap();
+        backend.store = StoreConfig::Sqlite {
+            path: external_path.clone(),
+        };
+        assert!(backend.configure_owned_sqlite_journal("WAL").is_err());
+        assert!(backend.owned_sqlite_file_bytes().is_err());
+        assert_eq!(std::fs::read(&external_path).unwrap(), original);
+
+        backend.store = StoreConfig::Memory;
+        assert!(backend.configure_owned_sqlite_journal("DELETE").is_err());
+        assert!(backend.owned_sqlite_file_bytes().is_err());
+        backend.store = StoreConfig::Sqlite { path: path.clone() };
+        let owner = backend._directory.take().unwrap();
+        assert!(backend.configure_owned_sqlite_journal("WAL").is_err());
+        assert!(backend.owned_sqlite_file_bytes().is_err());
+        assert!(!path.exists());
+        backend._directory = Some(owner);
+
+        std::os::unix::fs::symlink(&external_path, &path).unwrap();
+        assert!(backend.configure_owned_sqlite_journal("WAL").is_err());
+        assert!(backend.owned_sqlite_file_bytes().is_err());
+        assert_eq!(std::fs::read(&external_path).unwrap(), original);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::hard_link(&external_path, &path).unwrap();
+        assert!(backend.configure_owned_sqlite_journal("WAL").is_err());
+        assert!(backend.owned_sqlite_file_bytes().is_err());
+        assert_eq!(std::fs::read(&external_path).unwrap(), original);
+        std::fs::remove_file(&path).unwrap();
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch("CREATE TABLE unprovisioned(value BLOB);")
+            .unwrap();
+        connection.close().unwrap();
+        let unprovisioned = std::fs::read(&path).unwrap();
+        assert!(backend.configure_owned_sqlite_journal("WAL").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), unprovisioned);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owned_file_byte_receipts_observe_sizes_absence_and_reject_sidecar_aliases() {
+        use std::os::unix::fs::MetadataExt;
+
+        let backend = owned_sqlite_fixture();
+        let StoreConfig::Sqlite { path } = &backend.store else {
+            unreachable!()
+        };
+        // Invalid SQLite contents prove the receipt does not open or query SQLite.
+        let contents = b"stat this private fixture without interpreting its contents";
+        std::fs::write(path, contents).unwrap();
+        let wal = path.with_file_name("drive.sqlite-wal");
+        let shm = path.with_file_name("drive.sqlite-shm");
+        let absent = backend.owned_sqlite_file_bytes().unwrap();
+        assert_eq!(absent["block_unit_bytes"], 512);
+        assert_eq!(
+            absent["files"]["database"]["logical_bytes"],
+            contents.len() as u64
+        );
+        for role in ["wal", "shm"] {
+            assert_eq!(absent["files"][role]["state"], "absent");
+            assert!(absent["files"][role]["logical_bytes"].is_null());
+            assert!(absent["files"][role]["allocated_bytes"].is_null());
+        }
+        let file = std::fs::File::create(&wal).unwrap();
+        file.set_len(65_536).unwrap();
+        drop(file);
+        std::fs::write(&shm, [0x51; 4096]).unwrap();
+        let observed = backend.owned_sqlite_file_bytes().unwrap();
+        for (role, file) in [
+            ("database", path.as_path()),
+            ("wal", wal.as_path()),
+            ("shm", shm.as_path()),
+        ] {
+            let metadata = std::fs::symlink_metadata(file).unwrap();
+            assert_eq!(observed["files"][role]["state"], "present");
+            assert_eq!(observed["files"][role]["logical_bytes"], metadata.len());
+            assert_eq!(
+                observed["files"][role]["allocated_bytes"],
+                metadata.blocks().checked_mul(512).unwrap()
+            );
+        }
+        let encoded = serde_json::to_vec(&observed).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&encoded).unwrap(),
+            observed
+        );
+        assert_eq!(std::fs::read(path).unwrap(), contents);
+        std::fs::remove_file(&wal).unwrap();
+        std::fs::remove_file(&shm).unwrap();
+        assert_eq!(backend.owned_sqlite_file_bytes().unwrap(), absent);
+
+        let external = tempfile::tempdir().unwrap();
+        let external_path = external.path().join("sidecar-target");
+        std::fs::write(&external_path, b"unchanged external sidecar bytes").unwrap();
+        std::os::unix::fs::symlink(&external_path, &wal).unwrap();
+        assert!(backend.owned_sqlite_file_bytes().is_err());
+        std::fs::remove_file(&wal).unwrap();
+        std::fs::hard_link(&external_path, &shm).unwrap();
+        assert!(backend.owned_sqlite_file_bytes().is_err());
+        std::fs::remove_file(&shm).unwrap();
+        std::fs::create_dir(&wal).unwrap();
+        assert!(backend.owned_sqlite_file_bytes().is_err());
+        assert_eq!(
+            std::fs::read(&external_path).unwrap(),
+            b"unchanged external sidecar bytes"
+        );
+        assert_eq!(std::fs::read(path).unwrap(), contents);
+    }
+
+    #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+    #[tokio::test]
+    #[ignore = "requires owned SQLite MRC5 selectors, MOUNT_RS_PROFILE_IO=1, and exclusive registry ownership"]
+    async fn owned_journal_conversion_preserves_both_provider_roles_and_fresh_bytes() {
+        use mount_rs_sqlite::sqlite_io_diagnostics;
+        use std::collections::BTreeSet;
+
+        fn configurations(snapshot: &serde_json::Value, count: usize) -> Vec<(u64, String)> {
+            assert!(snapshot.get("error").is_none(), "{snapshot}");
+            let connections = snapshot["connections"].as_array().unwrap();
+            assert_eq!(connections.len(), count, "{snapshot}");
+            let mut ids = BTreeSet::new();
+            connections
+                .iter()
+                .map(|connection| {
+                    assert!(connection.get("error").is_none(), "{connection}");
+                    let id = connection["connection_id"].as_u64().unwrap();
+                    assert!(ids.insert(id), "connection IDs must be distinct");
+                    assert_eq!(connection["configuration"]["synchronous"], 2);
+                    (
+                        id,
+                        connection["configuration"]["journal_mode"]
+                            .as_str()
+                            .unwrap()
+                            .to_owned(),
+                    )
+                })
+                .collect()
+        }
+
+        let _lock = ENV_LOCK.lock().await;
+        assert_eq!(std::env::var("MOUNT_RS_PROFILE_IO").as_deref(), Ok("1"));
+        assert_eq!(
+            std::env::var("MOUNT_RS_REMOTE_SATURATION_PROVIDER").as_deref(),
+            Ok("sqlite")
+        );
+        assert_eq!(std::env::var(INODE_SELECTOR).as_deref(), Ok("0"));
+        assert_eq!(std::env::var(COMPACT_SELECTOR).as_deref(), Ok("1"));
+        assert!(
+            sqlite_io_diagnostics(false)["connections"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let parent = Backend::from_environment("owned-journal-control")
+            .await
+            .unwrap();
+        let backend = parent.child(0).unwrap();
+        assert_eq!(backend.inode_mode, InodeMode::Compact);
+        let first_payload = super::super::payload(0, 0, 1);
+        assert_eq!(first_payload.len(), 4096);
+        let fs = backend.open(0).await.unwrap();
+        let view = Loopback::from_arc(fs.driver());
+        let written = view.write_file("/saturation-0", &first_payload).await;
+        drop(view);
+        let closed = fs.shutdown().await;
+        drop(fs);
+        written.unwrap();
+        closed.unwrap();
+        for (mode, initial_sequence, second_sequence, final_sequence) in
+            [("WAL", 1, 2, 3), ("DELETE", 3, 4, 5)]
+        {
+            let first_payload = super::super::payload(0, 0, initial_sequence);
+            let before_receipt = backend.persisted_mode_receipt().await.unwrap();
+            assert!(
+                sqlite_io_diagnostics(false)["connections"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty(),
+                "the owned conversion boundary must have no live providers"
+            );
+            let configured = backend.configure_owned_sqlite_journal(mode).unwrap();
+
+            // Each SDK replica opens both the metadata and block provider roles.
+            let left = backend.open(1).await.unwrap();
+            let right = backend.open(2).await.unwrap();
+            let left_view = Loopback::from_arc(left.driver());
+            let right_view = Loopback::from_arc(right.driver());
+            let initial_configurations = sqlite_io_diagnostics(false);
+            let cross_replica: Result<(), String> = async {
+                for view in [&left_view, &right_view] {
+                    let actual = view
+                        .read_file("/saturation-0")
+                        .await
+                        .map_err(|_| "initial replica read failed")?;
+                    if actual != first_payload {
+                        return Err("initial replica payload mismatch".into());
+                    }
+                }
+                let second_payload = super::super::payload(0, 0, second_sequence);
+                left_view
+                    .write_file("/saturation-0", &second_payload)
+                    .await
+                    .map_err(|_| "left replica write failed")?;
+                if right_view
+                    .read_file("/saturation-0")
+                    .await
+                    .map_err(|_| "right replica read failed")?
+                    != second_payload
+                {
+                    return Err("left-to-right replica payload mismatch".into());
+                }
+                let third_payload = super::super::payload(0, 0, final_sequence);
+                right_view
+                    .write_file("/saturation-0", &third_payload)
+                    .await
+                    .map_err(|_| "right replica write failed")?;
+                if left_view
+                    .read_file("/saturation-0")
+                    .await
+                    .map_err(|_| "left replica read failed")?
+                    != third_payload
+                {
+                    return Err("right-to-left replica payload mismatch".into());
+                }
+                Ok(())
+            }
+            .await;
+            let live_files = backend.owned_sqlite_file_bytes();
+            let final_configurations = sqlite_io_diagnostics(false);
+            drop(left_view);
+            drop(right_view);
+            let left_closed = left.shutdown().await;
+            let right_closed = right.shutdown().await;
+            drop(left);
+            drop(right);
+            cross_replica.unwrap();
+            left_closed.unwrap();
+            right_closed.unwrap();
+            let closed_files = backend.owned_sqlite_file_bytes();
+            assert!(
+                sqlite_io_diagnostics(false)["connections"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty(),
+                "replicas must be dropped before fresh verification"
+            );
+
+            backend
+                .verify_stored_files(&[vec![(0, final_sequence)]])
+                .await
+                .unwrap();
+            let fresh = backend.open(3).await.unwrap();
+            let fresh_view = Loopback::from_arc(fresh.driver());
+            let fresh_bytes = fresh_view.read_file("/saturation-0").await;
+            let fresh_configurations = sqlite_io_diagnostics(false);
+            drop(fresh_view);
+            let fresh_closed = fresh.shutdown().await;
+            drop(fresh);
+            fresh_closed.unwrap();
+            let after_receipt = backend.persisted_mode_receipt().await.unwrap();
+            assert_eq!(
+                fresh_bytes.unwrap(),
+                super::super::payload(0, 0, final_sequence)
+            );
+            assert_eq!(before_receipt["persisted_marker"], "MRC5");
+            assert_eq!(after_receipt["persisted_marker"], "MRC5");
+            assert_eq!(after_receipt["provider_backing_verified"], true);
+            assert_eq!(
+                before_receipt["persisted_backing_id"],
+                after_receipt["persisted_backing_id"]
+            );
+            let initial = configurations(&initial_configurations, 4);
+            let final_configs = configurations(&final_configurations, 4);
+            let fresh_configs = configurations(&fresh_configurations, 2);
+            assert_eq!(
+                initial, final_configs,
+                "every replica connection remains observed"
+            );
+            let replica_ids: BTreeSet<_> = initial.iter().map(|(id, _)| *id).collect();
+            assert!(
+                fresh_configs
+                    .iter()
+                    .all(|(id, _)| !replica_ids.contains(id)),
+                "fresh providers must have new observed connection identities"
+            );
+            assert_eq!(configured["synchronous"], 2);
+            assert!(
+                sqlite_io_diagnostics(false)["connections"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty(),
+                "all provider resources must be dropped before the mode assertion"
+            );
+            let live_files = live_files.unwrap();
+            let closed_files = closed_files.unwrap();
+            assert_eq!(live_files["files"]["database"]["state"], "present");
+            assert_eq!(closed_files["files"]["database"]["state"], "present");
+            for role in ["wal", "shm"] {
+                assert_eq!(
+                    live_files["files"][role]["state"],
+                    if mode == "WAL" { "present" } else { "absent" }
+                );
+                assert_eq!(closed_files["files"][role]["state"], "absent");
+            }
+            println!(
+                "owned_journal_mode_behavior_complete: {mode} cross_replica_full_payload_mrc5_fresh_bytes_closed"
+            );
+            let expected_mode = mode.to_ascii_lowercase();
+            assert_eq!(
+                configured["journal_mode"], expected_mode,
+                "owned journal conversion is missing"
+            );
+            for (_, mode) in initial
+                .into_iter()
+                .chain(final_configs)
+                .chain(fresh_configs)
+            {
+                assert_eq!(
+                    mode, expected_mode,
+                    "every actual SDK provider connection must use the requested journal mode"
+                );
+            }
+        }
+        println!(
+            "owned_journal_behavior_complete: cross_replica_full_payload_mrc5_fresh_bytes_closed"
+        );
     }
 
     #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
