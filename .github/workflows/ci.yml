@@ -1056,18 +1056,17 @@ jobs:
           MOUNT_RS_NAPI_STRUCTURAL_NATIVE_MOUNT: '1'
         run: python3 -c 'import subprocess; subprocess.run(["node", "bindings/mount-rs-napi/test/structural-native.mjs"], check=True, timeout=180)'
       - run: pnpm --dir tests/upstream install --frozen-lockfile
+      - name: Precompile conformance and HTTP fixtures in the shared target
+        timeout-minutes: 15
+        run: |
+          ./scripts/cargo-shared build --locked --example http_oracle --example p9_oracle --example nfs_oracle
+          ./scripts/cargo-shared test --locked --example http_oracle -- http_fixture_progress_tests
       - name: Run the unmodified upstream driver conformance suite
-        # This suite builds its own locked Rust graph; a cold macOS Intel
-        # runner can spend the original five-minute limit compiling before
-        # the conformance assertions begin.
+        # Both fixture modules retain their 180-second build limits and use
+        # the locked default-profile artifacts precompiled above.
         timeout-minutes: 10
         run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" pnpm --dir tests/upstream test
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-kv-parity.mjs
-      - name: Precompile the HTTP fixture in the launcher shared target
-        timeout-minutes: 15
-        run: |
-          ./scripts/cargo-shared build --locked --example http_oracle
-          ./scripts/cargo-shared test --locked --example http_oracle -- http_fixture_progress_tests
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-http-parity.mjs
       - name: Verify fragmented request early rejection
         timeout-minutes: 5

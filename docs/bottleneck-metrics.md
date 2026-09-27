@@ -24,6 +24,30 @@ time and 32 logarithmic latency buckets. Returned-row observations distinguish
 known zero rows from an unavailable row count. Nonzero values in nested families
 must not be added as unique application operations or exclusive CPU time.
 
+## Locate the bottleneck in one measured phase
+
+Use completed workload operations and the workload's own elapsed time for the
+application rate. Keep preparation, observation, persistence verification and
+teardown outside that denominator. Compare the same workload, durability,
+concurrency and payload with profiling enabled and disabled before attributing
+an improvement to a storage change.
+
+| Signal | Calculation or comparison | What to investigate next |
+| --- | --- | --- |
+| SQL amplification | Recorded SQL-family calls / completed workload operations | Repeated namespace/inode queries, retries and transaction setup; these are statement calls, not physical IOPS |
+| Blob read amplification | Raw block-read GETs / verified application reads; keep conflict verification and migration separate | Cache misses, repeated block fetches and read-before-write behavior |
+| Byte amplification | Known returned or copied bytes / verified payload bytes at the same boundary | Whole-document reads, oversized chunks and buffer copies; unknown metadata bytes remain unavailable |
+| Pool contention | Pool-checkout latency buckets against transaction and SQL-family buckets | Connection limits, lazy setup and contention; checkout includes setup work |
+| Service contention | Admission, request and dispatch timing against SDK/backend timing | Stream admission, filesystem gates and work queued before storage |
+| CPU cost | Aligned process CPU delta / completed operations, alongside digest/copy input bytes | Hashing, copies, encoding and metadata processing; nested wall spans are not exclusive CPU measurements |
+| Memory cost | Aligned current RSS and allocation churn against phase boundaries | Retained handles, caches and temporary buffers; lifetime peaks do not establish simultaneous fleet memory |
+| Physical storage activity | Available operation deltas / their own observed interval | A stable explicitly selected device or owned daemon counter; missing operations cannot be derived from byte totals |
+
+Retain incomplete observations and original floor failures. A high adapter-call
+ratio locates work above the backend; it does not establish the backend's device
+amplification. A long inclusive span locates elapsed time; separate CPU and
+resource observations are needed to distinguish computation from waiting.
+
 Native storage diagnostics use `mount-rs.storage-diagnostics.v3`, with exact
 decimal strings for counters. The closed row registry and the instrumented-row
 coverage are separate: reserving a row does not prove that a provider records it.
