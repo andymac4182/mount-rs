@@ -1,0 +1,389 @@
+{
+  "base_head": "6cba8b4921b9259207a0306dde4fb7dbdbeec537",
+  "byte_scope": "Logical MRB2 envelope and application payload bytes; excludes WebSocket/TLS wire framing.",
+  "fault_observations": {
+    "wsautoloss": {
+      "client_hellos": 1,
+      "completed_write_count": 65673,
+      "completed_write_replies": 1,
+      "connection_selection": "auto",
+      "deferred_credential_issues": 1,
+      "denied_partition_hellos": 1,
+      "denied_untrusted_tls": 1,
+      "directory_removed": 0,
+      "directory_retained": 1,
+      "downstream_write_response_messages": 0,
+      "drive_permission_denials": 2,
+      "fail_closed_followups": 3,
+      "held_reply": 1,
+      "initial_quic_datagrams": 4,
+      "initial_quic_responses": 0,
+      "initial_quic_settlement_quiet_ms": 100,
+      "no_contact_window_ms": 100,
+      "oracle_cleanup_completed": 1,
+      "oracle_eof_count": 0,
+      "oracle_metadata_checks": 1,
+      "oracle_size_bytes": 65673,
+      "oracle_verified_bytes": 65673,
+      "preclose_eof": 0,
+      "preclose_metadata_checks": 1,
+      "preclose_verified_bytes": 65673,
+      "process_cleanup_observed": 0,
+      "protocol_version": 2,
+      "quic_datagrams": 0,
+      "quic_observation_scope": "after_initial_settlement_through_post_loss_quiet",
+      "reconnects": 0,
+      "relay_cleanup_completed": 1,
+      "replayed_write_submissions": 0,
+      "request_cleanup_completed": 1,
+      "schema_version": 2,
+      "server_close_wait_completed": 1,
+      "suppressed_response_bytes": 32,
+      "suppressed_response_envelopes": 1,
+      "suppressed_response_messages": 2,
+      "uncertain_results": 1,
+      "websocket_contact_elapsed_us": 3006093,
+      "write_submissions": 1
+    },
+    "wsloss": {
+      "client_hellos": 1,
+      "completed_write_count": 65673,
+      "completed_write_replies": 1,
+      "connection_selection": "websocket",
+      "deferred_credential_issues": 0,
+      "denied_partition_hellos": 1,
+      "denied_untrusted_tls": 1,
+      "directory_removed": 0,
+      "directory_retained": 1,
+      "downstream_write_response_messages": 0,
+      "drive_permission_denials": 2,
+      "fail_closed_followups": 3,
+      "held_reply": 1,
+      "initial_quic_datagrams": 0,
+      "initial_quic_responses": 0,
+      "initial_quic_settlement_quiet_ms": 100,
+      "no_contact_window_ms": 100,
+      "oracle_cleanup_completed": 1,
+      "oracle_eof_count": 0,
+      "oracle_metadata_checks": 1,
+      "oracle_size_bytes": 65673,
+      "oracle_verified_bytes": 65673,
+      "preclose_eof": 0,
+      "preclose_metadata_checks": 1,
+      "preclose_verified_bytes": 65673,
+      "process_cleanup_observed": 0,
+      "protocol_version": 2,
+      "quic_datagrams": 0,
+      "quic_observation_scope": "after_initial_settlement_through_post_loss_quiet",
+      "reconnects": 0,
+      "relay_cleanup_completed": 1,
+      "replayed_write_submissions": 0,
+      "request_cleanup_completed": 1,
+      "schema_version": 2,
+      "server_close_wait_completed": 1,
+      "suppressed_response_bytes": 32,
+      "suppressed_response_envelopes": 1,
+      "suppressed_response_messages": 2,
+      "uncertain_results": 1,
+      "websocket_contact_elapsed_us": 446,
+      "write_submissions": 1
+    }
+  },
+  "gates": [
+    {
+      "automatic_retry": false,
+      "command": [
+        "./scripts/cargo-shared",
+        "test",
+        "-p",
+        "mount-rs-remote-client",
+        "--test",
+        "quic_mount",
+        "--locked",
+        "--offline",
+        "--",
+        "--ignored",
+        "--exact",
+        "automatic_fallback_sqlite_commit_survives_lost_wire_reply_without_replay",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "contained": true,
+      "elapsed_seconds": 8.56138283299515,
+      "exact_named_case_observed_passed": true,
+      "kind": "wsautoloss",
+      "logs": {
+        "stderr": {
+          "bytes": 2109,
+          "overflow": false,
+          "sha256": "69ee73eb051c73bc7b19c5f88c2f009aaf3765c1dcdf33a62c70c9d0143ce73c"
+        },
+        "stdout": {
+          "bytes": 197,
+          "overflow": false,
+          "sha256": "aebc287855c9804ad4f787a0460e20c91258818ef1d8cd57efee02859de6d896"
+        }
+      },
+      "profile": "0",
+      "receipt_sha256": "53bccbfaa6ceb25960ef7978b36020c13bfb9a0539295270544173478e4772a6",
+      "selected_test": "automatic_fallback_sqlite_commit_survives_lost_wire_reply_without_replay",
+      "source_count": 510,
+      "source_unchanged": true,
+      "trace": "0"
+    },
+    {
+      "automatic_retry": false,
+      "command": [
+        "./scripts/cargo-shared",
+        "test",
+        "-p",
+        "mount-rs-remote-client",
+        "--test",
+        "quic_mount",
+        "--locked",
+        "--offline",
+        "--",
+        "--ignored",
+        "--exact",
+        "websocket_sqlite_commit_survives_lost_wire_reply_without_replay",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "contained": true,
+      "elapsed_seconds": 2.760085500020068,
+      "exact_named_case_observed_passed": true,
+      "kind": "wsloss",
+      "logs": {
+        "stderr": {
+          "bytes": 1972,
+          "overflow": false,
+          "sha256": "352797986c621fd9be21e81facd2c076b0b27f20860ea3f5009032621e9792e7"
+        },
+        "stdout": {
+          "bytes": 188,
+          "overflow": false,
+          "sha256": "0cb29c816d1add75d125b8852630188467d7331b1ebb847e5eb18d39aa5dac3e"
+        }
+      },
+      "profile": "0",
+      "receipt_sha256": "c3ad0b6be167aa188825bb79fb2201689420b63f523ecef48527a5705d74847a",
+      "selected_test": "websocket_sqlite_commit_survives_lost_wire_reply_without_replay",
+      "source_count": 510,
+      "source_unchanged": true,
+      "trace": "0"
+    },
+    {
+      "automatic_retry": false,
+      "command": [
+        "./scripts/cargo-shared",
+        "test",
+        "-p",
+        "mount-rs-remote-client",
+        "--all-targets",
+        "--locked",
+        "--offline"
+      ],
+      "contained": true,
+      "elapsed_seconds": 25.92610958404839,
+      "exact_named_case_observed_passed": null,
+      "kind": "remotetests",
+      "logs": {
+        "stderr": {
+          "bytes": 12728,
+          "overflow": false,
+          "sha256": "a431aef90eaca84cbd6e504adb38f84409dca1ff5b5582712457ad201fcffebb"
+        },
+        "stdout": {
+          "bytes": 4003,
+          "overflow": false,
+          "sha256": "96fb5e0dd5e208a5f29ee2ebea70664662215cf20d3a6efee0b2b2899d7f7fdc"
+        }
+      },
+      "profile": "0",
+      "receipt_sha256": "03c9f463a196eb953621885b28dd01554f7f960e4f5c8e35b5207f6672215480",
+      "selected_test": null,
+      "source_count": 510,
+      "source_unchanged": true,
+      "trace": "0"
+    },
+    {
+      "automatic_retry": false,
+      "command": [
+        "./scripts/cargo-shared",
+        "clippy",
+        "-p",
+        "mount-rs-blob-cache",
+        "-p",
+        "mount-rs-remote-client",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "contained": true,
+      "elapsed_seconds": 7.21932758402545,
+      "exact_named_case_observed_passed": null,
+      "kind": "faultclippy",
+      "logs": {
+        "stderr": {
+          "bytes": 1383,
+          "overflow": false,
+          "sha256": "453929c406c120826af7aed7bcba76bdc1ac0d5f7fdd5a7eba55f3633b007dbe"
+        },
+        "stdout": {
+          "bytes": 0,
+          "overflow": false,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "profile": "0",
+      "receipt_sha256": "d63fd553b8234e952e1a5ef79a6ab8b65a4bc66afa44573eb891445230554cdb",
+      "selected_test": null,
+      "source_count": 510,
+      "source_unchanged": true,
+      "trace": "0"
+    },
+    {
+      "automatic_retry": false,
+      "command": [
+        "./scripts/cargo-shared",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "contained": true,
+      "elapsed_seconds": 3.9317541250493377,
+      "exact_named_case_observed_passed": null,
+      "kind": "fmt",
+      "logs": {
+        "stderr": {
+          "bytes": 0,
+          "overflow": false,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdout": {
+          "bytes": 0,
+          "overflow": false,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "profile": "0",
+      "receipt_sha256": "be23bd764445846e295f35ee3afa337198de9933532a536904ca5612904eed8a",
+      "selected_test": null,
+      "source_count": 510,
+      "source_unchanged": true,
+      "trace": "0"
+    }
+  ],
+  "independent_source_review_sha256": "6bb6202d71c027061000fa2d894a9960caf91626adcfa979fa2d7a9f2a9647c8",
+  "limitations": [
+    "Snapshot SQLite filesystem; Auto plus compact MRC5 reply-loss composition remains unqualified.",
+    "Local loopback only; no cross-host, external-provider or native-mount execution.",
+    "No process crash or power-loss qualification.",
+    "Absence of subsequent network contact is bounded by the observed phase and 100ms post-loss window.",
+    "Credential counter observes file issuance, not later reads.",
+    "TCP-contact time begins at selection entry; it is not exclusive QUIC or TLS timing.",
+    "No throughput, device IOPS or full 10-server/10000-client/10000-Drive/5000-Partition/10M-file capacity claim.",
+    "Hosted CI and the open PR stack remain unqualified/unmerged; full goal remains active."
+  ],
+  "local_date": "2026-09-28",
+  "modeled_parent_controls": {
+    "count": 103,
+    "logs": {
+      "stderr": {
+        "bytes": 203,
+        "sha256": "f9d284b1a3f74dc006813bb561b16f986067d444acdebcb46c2e8808fdd5ef7b"
+      },
+      "stdout": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    "receipt_sha256": "fcdec8c8728317310d790c5800db46d08e06ff89e0777172049b54ebc85c1647",
+    "scope": "pure modeled parser/selector/lifecycle controls; no backend/network/native-addon execution"
+  },
+  "observed_utc": "2026-09-27T20:41:42.127763+00:00",
+  "platform": "macOS arm64",
+  "qualification": "local actual TLS/UDP/signed-OIDC/snapshot-SQLite commit-before-disconnect and fresh-reopen behaviour",
+  "remote_client_all_targets": {
+    "ignored": 4,
+    "passed": 38,
+    "real_ready_datagram_control_passed": true,
+    "test_binaries": 4
+  },
+  "retained_preliminary_results": [
+    {
+      "logs": {
+        "stderr": {
+          "bytes": 776,
+          "overflow": false,
+          "sha256": "5c71e7b1f8f9b2d1a42980d39e34579b60adb6474e47c1de5902c88bed426280"
+        },
+        "stdout": {
+          "bytes": 304,
+          "overflow": false,
+          "sha256": "c8c661cc824c786eb4f30dd52999039a30953c72e3c6c33f639a683b0cd7b24c"
+        }
+      },
+      "qualified": false,
+      "receipt_sha256": "0bfe73a90c142837ecfbea675f13f0571b20f16b2d79fbebb186326f1029d6fc",
+      "returncode": 101,
+      "scope": "Behavioral RED: new Auto expectation against existing explicit-WebSocket fixture; missing real initial QUIC attempt.",
+      "source_unchanged": true
+    },
+    {
+      "logs": {
+        "stderr": {
+          "bytes": 2109,
+          "overflow": false,
+          "sha256": "af57f01f5f15870969e329b228c1dcf658d94fdc6ea3e2f8432073c7d1101619"
+        },
+        "stdout": {
+          "bytes": 197,
+          "overflow": false,
+          "sha256": "3beaf4b719f0ed99fab6fa55af519ce45c5b2c1556bd778e3ca1d18049b2a613"
+        }
+      },
+      "qualified": false,
+      "receipt_sha256": "01950749c93a5f2efeb6d1c573585765d200f6670f8d2595ae46c30c2149ae55",
+      "returncode": 0,
+      "scope": "Preliminary pass retained; unbiased contact/completion race found in review, corrected before final qualification.",
+      "source_unchanged": true
+    }
+  ],
+  "schema": "mount-rs.automatic-fallback-reply-loss.v1",
+  "source_files": {
+    ".github/workflows/remote-drives.yml": {
+      "bytes": 70208,
+      "sha256": "41de2ca44785f2953bf26ba18df3ba4fa41620d58f2f1a3c5f9047aba223baaf"
+    },
+    "crates/mount-rs-remote-client/tests/quic_mount.rs": {
+      "bytes": 13462,
+      "sha256": "55dcbfb512c34003f58015663fdf48d9ec9fb8a48d1302436ad13a6094872390"
+    },
+    "crates/mount-rs-remote-client/tests/quic_mount_reply_loss/mod.rs": {
+      "bytes": 42805,
+      "sha256": "5ce85fd4643cf432bc88ffc9e1f2f7db9b67cea7471d068232580ef1d7f8b01f"
+    },
+    "docs/benchmarks/automatic-fallback-reply-loss-20260928/README.md": {
+      "bytes": 4708,
+      "sha256": "df8aa589b5edbdce531bc13acc5798cb1bd951c68dfa3ce4b3ac96a14dfbbec5"
+    },
+    "docs/remote-drives.md": {
+      "bytes": 12827,
+      "sha256": "91efe9257ab2ae66364907b0ad56e8de063923d566194efe0c459bc5454cef53"
+    },
+    "scripts/test-remote-failures-controls.py": {
+      "bytes": 55216,
+      "sha256": "d3cbbec76cb9cf3fbf6562d8cd880b9e26ece138f2f52e4490ab46a0ffc3a72d"
+    },
+    "scripts/test-remote-failures.py": {
+      "bytes": 51145,
+      "sha256": "3b779d4890768fa992e8a2e5ac7981e48a31641212c7f5721999fb530b132c81"
+    }
+  },
+  "source_freeze_sha256": "81ce923395edbd7836d23e015ca99dcecd797c299bb4eb93fa06674dccb6a0ef"
+}

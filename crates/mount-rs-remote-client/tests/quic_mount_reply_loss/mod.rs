@@ -27,8 +27,11 @@ use std::{
     collections::BTreeMap,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -41,12 +44,27 @@ use tokio_tungstenite::{
     tungstenite::{
         Bytes, Message as WsMessage,
         client::IntoClientRequest,
-        handshake::server::{ErrorResponse, Request, Response},
+        handshake::server::{Callback, ErrorResponse, Request, Response},
         protocol::WebSocketConfig,
     },
 };
 
 type TestResult<T> = Result<T, String>;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Selection {
+    WebSocket,
+    Auto,
+}
+
+impl Selection {
+    fn label(self) -> &'static str {
+        match self {
+            Self::WebSocket => "websocket",
+            Self::Auto => "auto",
+        }
+    }
+}
 const STEP_TIMEOUT: Duration = Duration::from_secs(3);
 const REPLY_HOLD_TIMEOUT: Duration = Duration::from_secs(10);
 const WORK_TIMEOUT: Duration = Duration::from_secs(30);
@@ -181,8 +199,44 @@ struct RelayReceipt {
 }
 
 struct ReplyBarrier {
+    contacted: oneshot::Sender<Instant>,
     held: oneshot::Sender<usize>,
     release: oneshot::Receiver<()>,
+}
+
+struct DeferredCredential {
+    path: PathBuf,
+    token: String,
+    issues: Arc<AtomicU64>,
+}
+
+struct RelayUpgrade(Option<DeferredCredential>);
+
+impl Callback for RelayUpgrade {
+    // Tungstenite requires this concrete HTTP error response in its callback.
+    #[allow(clippy::result_large_err)]
+    fn on_request(self, request: &Request, response: Response) -> Result<Response, ErrorResponse> {
+        let response = upgrade(request, response)?;
+        if let Some(credential) = self.0 {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let issued = options.open(&credential.path).and_then(|mut file| {
+                std::io::Write::write_all(&mut file, credential.token.as_bytes())
+            });
+            if issued.is_err() {
+                return Err(ErrorResponse::new(Some(
+                    "deferred fixture credential unavailable".into(),
+                )));
+            }
+            credential.issues.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(response)
+    }
 }
 
 struct PrecloseReceipt {
@@ -197,18 +251,26 @@ async fn relay(
     roots: rustls::RootCertStore,
     expected: Arc<Vec<u8>>,
     barrier: ReplyBarrier,
+    credential: Option<DeferredCredential>,
 ) -> TestResult<RelayReceipt> {
     let (tcp, _) = listener.accept().await.map_err(|_| "relay accept failed")?;
+    barrier
+        .contacted
+        .send(Instant::now())
+        .map_err(|_| "relay contact observer disappeared")?;
     tcp.set_nodelay(true)
         .map_err(|_| "relay TCP setup failed")?;
     let tls = acceptor
         .accept(tcp)
         .await
         .map_err(|_| "relay TLS accept failed")?;
-    let mut downstream =
-        tokio_tungstenite::accept_hdr_async_with_config(tls, upgrade, Some(socket_config()))
-            .await
-            .map_err(|_| "relay WebSocket upgrade failed")?;
+    let mut downstream = tokio_tungstenite::accept_hdr_async_with_config(
+        tls,
+        RelayUpgrade(credential),
+        Some(socket_config()),
+    )
+    .await
+    .map_err(|_| "relay WebSocket upgrade failed")?;
     let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
@@ -444,7 +506,92 @@ async fn preclose_read_only_oracle(
     observation
 }
 
-pub(super) async fn run() -> TestResult<()> {
+fn drain_initial_datagrams(socket: &UdpSocket) -> TestResult<u64> {
+    let mut packet = [0; 65_536];
+    let mut count = 0;
+    loop {
+        match socket.try_recv_from(&mut packet) {
+            Ok((bytes, source)) => {
+                ensure(
+                    bytes != 0 && source.ip().is_loopback(),
+                    "invalid initial QUIC probe",
+                )?;
+                count += 1;
+                ensure(count <= 32, "initial QUIC probes exceed fixture bound")?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(count),
+            Err(_) => return Err("initial QUIC probe observation failed".into()),
+        }
+    }
+}
+
+async fn settle_initial_datagrams(socket: &UdpSocket) -> TestResult<u64> {
+    tokio::time::timeout(STEP_TIMEOUT, async {
+        let mut count = drain_initial_datagrams(socket)?;
+        let mut packet = [0; 65_536];
+        loop {
+            match tokio::time::timeout(QUIET_WINDOW, socket.recv_from(&mut packet)).await {
+                Err(_) => return Ok(count),
+                Ok(Ok((bytes, source))) => {
+                    ensure(
+                        bytes != 0 && source.ip().is_loopback(),
+                        "invalid retiring QUIC probe",
+                    )?;
+                    count += 1;
+                    ensure(count <= 32, "retiring QUIC probes exceed fixture bound")?;
+                }
+                Ok(Err(_)) => return Err("initial QUIC settlement observation failed".into()),
+            }
+        }
+    })
+    .await
+    .map_err(|_| "initial QUIC settlement deadline exceeded")?
+}
+
+async fn observe_without_quic_contact<T>(
+    socket: &UdpSocket,
+    observation: impl std::future::Future<Output = TestResult<T>>,
+) -> TestResult<T> {
+    let mut packet = [0; 2048];
+    let observed = tokio::select! {
+        biased;
+        _ = socket.recv_from(&mut packet) => Err("client contacted QUIC after initial fallback settlement".into()),
+        result = observation => result,
+    }?;
+    // Contact that becomes readable while the observation finishes is still a
+    // failure. Never consume and classify a late packet as initial traffic.
+    match socket.try_recv_from(&mut packet) {
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(observed),
+        _ => Err("client contacted QUIC at the end of the observation window".into()),
+    }
+}
+
+#[tokio::test]
+async fn ready_quic_contact_cannot_be_hidden_by_completed_observation() {
+    tokio::time::timeout(STEP_TIMEOUT, async {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        sender
+            .send_to(b"contact", socket.local_addr().unwrap())
+            .await
+            .unwrap();
+        socket.readable().await.unwrap();
+        assert!(
+            observe_without_quic_contact(&socket, std::future::ready(Ok(())))
+                .await
+                .is_err()
+        );
+        assert!(
+            observe_without_quic_contact(&socket, std::future::ready(Ok(())))
+                .await
+                .is_ok()
+        );
+    })
+    .await
+    .expect("bounded real ready-contact control");
+}
+
+pub(super) async fn run(selection: Selection) -> TestResult<()> {
     ensure(
         std::env::var("MOUNT_RS_REMOTE_SQLITE_REPLY_LOSS").as_deref() == Ok("1"),
         "durable reply loss control requires the explicit owned runtime gate",
@@ -573,7 +720,7 @@ pub(super) async fn run() -> TestResult<()> {
         .map_err(|_| "fixture logs registration failed")?;
     let (_, jwt, jwk) = token();
     let token_path = directory.join("token.jwt");
-    std::fs::write(&token_path, jwt).map_err(|_| "fixture token write failed")?;
+    std::fs::write(&token_path, &jwt).map_err(|_| "fixture token write failed")?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -625,6 +772,14 @@ pub(super) async fn run() -> TestResult<()> {
     .await
     .map_err(|_| "actual WebSocket server bind failed")?;
     let actual_address = server.local_addr();
+    let credential_issues = Arc::new(AtomicU64::new(0));
+    let deferred_token_path = directory.join("after-fallback.jwt");
+    let credential = (selection == Selection::Auto).then(|| DeferredCredential {
+        path: deferred_token_path.clone(),
+        token: jwt,
+        issues: credential_issues.clone(),
+    });
+    let (contact_sender, contact_receiver) = oneshot::channel();
     let (held_sender, held_receiver) = oneshot::channel();
     let (release_sender, release_receiver) = oneshot::channel();
     let mut release_reply = Some(release_sender);
@@ -635,9 +790,11 @@ pub(super) async fn run() -> TestResult<()> {
         roots.clone(),
         payload.clone(),
         ReplyBarrier {
+            contacted: contact_sender,
             held: held_sender,
             release: release_receiver,
         },
+        credential,
     )));
     let mut write_task = None;
     let mut connection = None;
@@ -648,11 +805,47 @@ pub(super) async fn run() -> TestResult<()> {
         ensure(matches!(RemoteConnection::connect_with_transport(quic_address, "localhost", rustls::RootCertStore::empty(), "red".into(),
             CredentialSource::File(token_path.clone()), ConnectionTransport::WebSocket(actual_address)).await,
             Err(ClientError::Authentication)), "untrusted TLS root was not denied")?;
-        let connected = RemoteConnection::connect_with_transport(quic_address, "localhost", roots, "red".into(),
-            CredentialSource::File(token_path), ConnectionTransport::WebSocket(relay_address))
-            .await.map_err(|_| "relayed authenticated connection failed")?;
+        let (transport, credentials) = match selection {
+            Selection::WebSocket => (ConnectionTransport::WebSocket(relay_address), CredentialSource::File(token_path)),
+            Selection::Auto => {
+                ensure(!deferred_token_path.exists(), "Auto credential existed before selection")?;
+                (ConnectionTransport::Auto { websocket: relay_address }, CredentialSource::File(deferred_token_path.clone()))
+            }
+        };
+        let selection_started = Instant::now();
+        let establishment = RemoteConnection::connect_with_transport(quic_address, "localhost", roots, "red".into(), credentials, transport);
+        tokio::pin!(establishment);
+        let mut initial_quic_datagrams = 0;
+        if selection == Selection::Auto {
+            let mut packet = [0; 65_536];
+            tokio::select! {
+                _ = &mut establishment => return Err("Auto establishment ended before an initial QUIC probe".into()),
+                result = udp.recv_from(&mut packet) => {
+                    let (bytes, source) = result.map_err(|_| "initial Auto QUIC probe unavailable")?;
+                    ensure(bytes >= 1200 && source.ip().is_loopback(), "initial Auto QUIC probe invalid")?;
+                    initial_quic_datagrams = 1;
+                }
+            }
+            ensure(!deferred_token_path.exists() && credential_issues.load(Ordering::Relaxed) == 0,
+                "credential issued before unavailable QUIC attempt")?;
+        }
+        let connected = establishment.await.map_err(|_| "relayed authenticated connection failed")?;
         connection = Some(connected.clone());
+        let websocket_contact = contact_receiver.await.map_err(|_| "relay contact observation missing")?;
+        let contact_elapsed = websocket_contact.checked_duration_since(selection_started)
+            .ok_or("relay was contacted before selection started")?;
+        ensure(selection != Selection::Auto || contact_elapsed >= Duration::from_secs(3),
+            "Auto contacted WebSocket before its existing QUIC deadline")?;
+        ensure(credential_issues.load(Ordering::Relaxed) == u64::from(selection == Selection::Auto),
+            "deferred credential issue count differs from selected transport")?;
+        initial_quic_datagrams += settle_initial_datagrams(&udp).await?;
+        ensure(initial_quic_datagrams <= 32, "total initial QUIC probes exceed fixture bound")?;
+        ensure((selection == Selection::Auto) == (initial_quic_datagrams > 0),
+            "selected Auto control did not make a real initial QUIC attempt")?;
         ensure(connected.protocol_version() == PROTOCOL_VERSION, "client negotiated version mismatch")?;
+        // Arm before any filesystem request. This receive remains polled
+        // through the held reply, independent preclose oracle and loss window.
+        let io_and_loss = async {
         let capabilities = call(&connected, "data", OperationName::Capabilities, json!({})).await
             .map_err(|_| "durable capabilities request failed")?;
         ensure(capabilities["durable_writes"] == true, "SQLite driver lacks durable writes")?;
@@ -692,15 +885,23 @@ pub(super) async fn run() -> TestResult<()> {
             call(&connected, "data", OperationName::Stat, json!({"path":FILE}))).await
             .map_err(|_| "failed connection did not fail closed promptly")?, Err(ClientError::Transport)),
             "failed connection accepted a subsequent request")?;
+        ensure(matches!(connected.write("data", handle, Some(0), &[1]).await, Err(ClientError::Transport)),
+            "failed connection accepted a subsequent binary write")?;
+        let mut unread = [0xa5; 17];
+        ensure(matches!(connected.read("data", handle, Some(0), &mut unread).await, Err(ClientError::Transport))
+            && unread == [0xa5; 17], "failed connection accepted or modified a subsequent binary read")?;
+        ensure(credential_issues.load(Ordering::Relaxed) == u64::from(selection == Selection::Auto),
+            "failed session reissued credentials")?;
         let relay_receipt = join_owned(&mut relay_task).await??;
         ensure(relay_receipt.write_submissions == 1, "target write was submitted more than once")?;
-        let mut packet = [0; 2048];
         tokio::select! {
+            biased;
             _ = listener.accept() => return Err("client reconnected to the relay after reply loss".into()),
-            _ = udp.recv_from(&mut packet) => return Err("client switched to QUIC after reply loss".into()),
             _ = tokio::time::sleep(QUIET_WINDOW) => {},
         }
-        Ok::<_, String>((before, relay_receipt, preclose))
+        Ok::<_, String>((before, relay_receipt, preclose, initial_quic_datagrams, contact_elapsed))
+        };
+        observe_without_quic_contact(&udp, io_and_loss).await
     }).await.map_err(|_| "durable reply loss work deadline exceeded".to_owned()).and_then(|value| value);
     // An error or deadline first drops any preclose observer, then releases or
     // cancels the held relay through the same owned cleanup path. It never
@@ -733,7 +934,7 @@ pub(super) async fn run() -> TestResult<()> {
     server_close_wait?;
     server_waiter_cancel?;
     storage_cleanup?;
-    let (before, relay_receipt, preclose) = work?;
+    let (before, relay_receipt, preclose, initial_quic_datagrams, contact_elapsed) = work?;
     let reopened = mount_rs_sdk::Filesystem::sqlite(&db)
         .await
         .map_err(|_| "fresh SQLite reopen failed")?;
@@ -802,7 +1003,12 @@ pub(super) async fn run() -> TestResult<()> {
     eprintln!(
         "MOUNT_RS_SQLITE_REPLY_LOSS {}",
         json!({
-            "schema_version":1,"protocol_version":PROTOCOL_VERSION,"client_hellos":1,
+            "schema_version":2,"connection_selection":selection.label(),
+            "initial_quic_datagrams":initial_quic_datagrams,"initial_quic_responses":0,
+            "websocket_contact_elapsed_us":contact_elapsed.as_micros(),
+            "initial_quic_settlement_quiet_ms":QUIET_WINDOW.as_millis(),
+            "deferred_credential_issues":credential_issues.load(Ordering::Relaxed),
+            "protocol_version":PROTOCOL_VERSION,"client_hellos":1,
             "denied_partition_hellos":1,"denied_untrusted_tls":1,"drive_permission_denials":2,
             "write_submissions":relay_receipt.write_submissions,"completed_write_replies":1,
             "held_reply":1,"preclose_metadata_checks":1,
@@ -810,8 +1016,9 @@ pub(super) async fn run() -> TestResult<()> {
             "suppressed_response_envelopes":1,"suppressed_response_bytes":relay_receipt.committed_reply_bytes,
             "completed_write_count":relay_receipt.committed_write_count,
             "suppressed_response_messages":relay_receipt.suppressed_messages,
-            "downstream_write_response_messages":0,"uncertain_results":1,"fail_closed_followups":1,
+            "downstream_write_response_messages":0,"uncertain_results":1,"fail_closed_followups":3,
             "replayed_write_submissions":0,"reconnects":0,"quic_datagrams":0,
+            "quic_observation_scope":"after_initial_settlement_through_post_loss_quiet",
             "no_contact_window_ms":QUIET_WINDOW.as_millis(),"oracle_metadata_checks":1,
             "oracle_verified_bytes":verified_bytes,"oracle_size_bytes":PAYLOAD_BYTES,"oracle_eof_count":0,
             "request_cleanup_completed":1,"relay_cleanup_completed":1,"oracle_cleanup_completed":1,

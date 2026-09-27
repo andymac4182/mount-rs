@@ -10,6 +10,7 @@ import hashlib,json,os,pathlib,re,selectors,signal,stat,subprocess,sys,tempfile,
 BASE=pathlib.Path(__file__).resolve().parent.parent
 COMMANDS={'cachetests': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--all-targets', '--locked', '--offline'], 180, 0, 0), 'redisfault': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'distributed_failure', '--locked', '--offline', '--', '--ignored', '--exact', 'redis_directory_real_peer_failures_preserve_exact_backing', '--test-threads=1', '--nocapture'], 180, 0, 0), 'rediscleanup': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'distributed_failure', '--locked', '--offline', '--', '--ignored', '--exact', 'cancelled_redis_fixture_reaps_owned_child_before_removing_directory', '--test-threads=1', '--nocapture'], 180, 0, 0), 'wsloss': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-remote-client', '--test', 'quic_mount', '--locked', '--offline', '--', '--ignored', '--exact', 'websocket_sqlite_commit_survives_lost_wire_reply_without_replay', '--test-threads=1', '--nocapture'], 180, 0, 0), 'remotetests': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-remote-client', '--all-targets', '--locked', '--offline'], 180, 0, 0), 'faultclippy': (['./scripts/cargo-shared', 'clippy', '-p', 'mount-rs-blob-cache', '-p', 'mount-rs-remote-client', '--all-targets', '--locked', '--offline', '--', '-D', 'warnings'], 180, 0, 0), 'fmt': (['./scripts/cargo-shared', 'fmt', '--all', '--', '--check'], 120, 0, 0)}
 COMMANDS.update({
+    'wsautoloss': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-remote-client', '--test', 'quic_mount', '--locked', '--offline', '--', '--ignored', '--exact', 'automatic_fallback_sqlite_commit_survives_lost_wire_reply_without_replay', '--test-threads=1', '--nocapture'], 180, 0, 0),
     'wsservicedefault': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-service', '--test', 'websocket_diagnostics', '--locked', '--offline', '--', '--test-threads=1'], 180, 0, 0),
     'wsserviceon': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-service', '--features', 'io-profiling', '--test', 'websocket_diagnostics', '--locked', '--offline', '--', '--test-threads=1'], 180, 1, 0),
     'wsserviceunit': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-service', '--features', 'io-profiling', '--lib', '--locked', '--offline', 'server::diagnostics::tests::', '--', '--test-threads=1'], 180, 1, 0),
@@ -51,6 +52,7 @@ COMMANDS.update({
     'cacheconsumers': (['fnm', 'exec', '--using', 'v24.18.0', 'node', '--test', 'benchmarks/storage/test.mjs', 'benchmarks/storage/foundationdb-diagnostics.test.mjs', 'benchmarks/storage/owned-layout-metrics.test.mjs', 'benchmarks/storage/owned-backing-pilot.test.mjs', 'scripts/verify-owned-backing-pilot.test.mjs'], 180, 0, 0),
 })
 EXACT_CASES = {
+    'wsautoloss': 'automatic_fallback_sqlite_commit_survives_lost_wire_reply_without_replay',
     'wsclientmetrics': 'websocket::metrics_tests::websocket_stages_preserve_serialized_transactions',
     'sqlitecache': 'sqlite_backed_authenticated_cache_failures_preserve_exact_backing_savings',
     'peeriometricstrace': 'peer::tests::peer_request_stage_metrics_preserve_bytes_outcomes_and_cancellation',
@@ -200,6 +202,125 @@ def slow_logging_file_records(path, peer=False):
     return peer_slow_logging_records(output) if peer else cache_slow_logging_records(output)
 
 
+SQLITE_REPLY_LOSS_MARKER = b'MOUNT_RS_SQLITE_REPLY_LOSS'
+SQLITE_REPLY_LOSS_FIXED = {
+    'schema_version': 2,
+    'initial_quic_responses': 0,
+    'initial_quic_settlement_quiet_ms': 100,
+    'protocol_version': 2,
+    'client_hellos': 1,
+    'denied_partition_hellos': 1,
+    'denied_untrusted_tls': 1,
+    'drive_permission_denials': 2,
+    'write_submissions': 1,
+    'completed_write_replies': 1,
+    'held_reply': 1,
+    'preclose_metadata_checks': 1,
+    'preclose_verified_bytes': 65673,
+    'preclose_eof': 0,
+    'suppressed_response_envelopes': 1,
+    # binary::HEADER_BYTES is 32; WriteResult has no body, followed by one
+    # empty WebSocket message terminating this complete response envelope.
+    'suppressed_response_bytes': 32,
+    'completed_write_count': 65673,
+    'suppressed_response_messages': 2,
+    'downstream_write_response_messages': 0,
+    'uncertain_results': 1,
+    'fail_closed_followups': 3,
+    'replayed_write_submissions': 0,
+    'reconnects': 0,
+    'quic_datagrams': 0,
+    'quic_observation_scope': 'after_initial_settlement_through_post_loss_quiet',
+    'no_contact_window_ms': 100,
+    'oracle_metadata_checks': 1,
+    'oracle_verified_bytes': 65673,
+    'oracle_size_bytes': 65673,
+    'oracle_eof_count': 0,
+    'request_cleanup_completed': 1,
+    'relay_cleanup_completed': 1,
+    'oracle_cleanup_completed': 1,
+    'server_close_wait_completed': 1,
+    'process_cleanup_observed': 0,
+    'directory_retained': 1,
+    'directory_removed': 0,
+}
+SQLITE_REPLY_LOSS_FIELDS = frozenset(SQLITE_REPLY_LOSS_FIXED) | frozenset((
+    'connection_selection', 'initial_quic_datagrams',
+    'websocket_contact_elapsed_us', 'deferred_credential_issues',
+))
+
+
+def sqlite_reply_loss_record(stderr_bytes, kind):
+    """Validate one complete raw stderr fixture receipt for its selected gate."""
+    if kind not in ('wsloss', 'wsautoloss') or type(stderr_bytes) is not bytes:
+        return None
+    frames = []
+    lines = stderr_bytes.split(b'\n')
+    for index, line in enumerate(lines):
+        if SQLITE_REPLY_LOSS_MARKER not in line:
+            continue
+        # Preserve LF framing: CRLF, embedded prefixes and unterminated
+        # records cannot become valid through text-mode normalization.
+        if (index == len(lines)-1 or b'\r' in line or len(line)+1 > 4096
+                or not line.startswith(SQLITE_REPLY_LOSS_MARKER+b' ')):
+            return None
+        frames.append(line[len(SQLITE_REPLY_LOSS_MARKER)+1:])
+    if len(frames) != 1:
+        return None
+    payload = frames[0]
+    if not payload.startswith(b'{') or not payload.endswith(b'}'):
+        return None
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('duplicate_sqlite_reply_loss_key')
+            result[key] = value
+        return result
+
+    def non_integer_number(_):
+        raise ValueError('non_integer_sqlite_reply_loss_number')
+
+    try:
+        record = json.loads(payload.decode('ascii'), object_pairs_hook=unique_object,
+                            parse_float=non_integer_number, parse_constant=non_integer_number)
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return None
+    if type(record) is not dict or set(record) != SQLITE_REPLY_LOSS_FIELDS:
+        return None
+    for key, expected in SQLITE_REPLY_LOSS_FIXED.items():
+        if type(record[key]) is not type(expected) or record[key] != expected:
+            return None
+    if type(record['connection_selection']) is not str:
+        return None
+    for key in ('initial_quic_datagrams', 'websocket_contact_elapsed_us', 'deferred_credential_issues'):
+        if type(record[key]) is not int:
+            return None
+    expected_selection = 'auto' if kind == 'wsautoloss' else 'websocket'
+    if record['connection_selection'] != expected_selection:
+        return None
+    if kind == 'wsautoloss':
+        if (not 1 <= record['initial_quic_datagrams'] <= 32
+                or not 3000000 <= record['websocket_contact_elapsed_us'] <= 30000000
+                or record['deferred_credential_issues'] != 1):
+            return None
+    elif (record['initial_quic_datagrams'] != 0
+            or not 0 <= record['websocket_contact_elapsed_us'] <= 30000000
+            or record['deferred_credential_issues'] != 0):
+        return None
+    return record
+
+
+def sqlite_reply_loss_gate_record(kind, stderr_bytes, unknown):
+    if kind not in ('wsloss', 'wsautoloss'):
+        return None
+    record = sqlite_reply_loss_record(stderr_bytes, kind)
+    if record is None and 'sqlite_reply_loss_not_observed_valid' not in unknown:
+        unknown.append('sqlite_reply_loss_not_observed_valid')
+    return record
+
+
 PEER_RECONNECT_PROGRESS = frozenset((
     'before_stop_a', 'after_stop_a',
     'before_blackhole_bind', 'after_blackhole_bind',
@@ -346,6 +467,7 @@ def main():
     FAULT_KINDS.add('peeriometricstrace')
     FAULT_KINDS.add('sqlitecache')
     FAULT_KINDS.add('wsclientmetrics')
+    FAULT_KINDS.add('wsautoloss')
     FAULT_KINDS.update({'wsservicedefault','wsserviceon','wsserviceunit','wspackages','wspackagesprofiled','wsclippy','wsclippyprofiled'})
     assert kind in FAULT_KINDS, 'fixed fault qualification commands only'
     root=pathlib.Path(tempfile.mkdtemp(prefix='mount-rs-owned-fault-'+kind+'-',dir=os.environ.get('MOUNT_RS_FAILURE_EVIDENCE_ROOT',tempfile.gettempdir())));os.chmod(root,0o700)
@@ -396,7 +518,7 @@ def main():
      return {str(p.relative_to(BASE)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(set(paths))}
     before=frozen();write('source-before.json',before)
     env=os.environ.copy();env.update({'MOUNT_RS_PROFILE_IO':str(profile),'MOUNT_RS_TRACE_STORAGE':str(trace),'MOUNT_RS_TRACE_REQUESTS':'0','CARGO_TARGET_DIR':os.environ.get('CARGO_TARGET_DIR',os.environ.get('MOUNT_RS_CARGO_TARGET_DIR',str(root/'cargo-target')))})
-    if kind in {'wsclientmetrics','wsservicedefault','wsserviceon','wsserviceunit','wspackages','wspackagesprofiled','wsclippy','wsclippyprofiled','clidiagnostics','clicompact'}:env['MOUNT_RS_TRACE_SERVICE']='0'
+    if kind in {'wsloss','wsautoloss','wsclientmetrics','wsservicedefault','wsserviceon','wsserviceunit','wspackages','wspackagesprofiled','wsclippy','wsclippyprofiled','clidiagnostics','clicompact'}:env['MOUNT_RS_TRACE_SERVICE']='0'
     if kind in {'cacheconsumers','cacheconsumerred'}:
      # Pure suites forbid loading a real addon or latching native profiling.
      for key in ['MOUNT_RS_PROFILE_IO','MOUNT_RS_TRACE_STORAGE','MOUNT_RS_TRACE_REQUESTS','NAPI_RS_FORCE_WASI','NAPI_RS_WASI_FLAVOR','NODE_PATH']:
@@ -405,7 +527,7 @@ def main():
     env['TMPDIR']=str(fixture_tmp)
     env.pop('MOUNT_RS_CACHE_REDIS_SERVER',None)
     if redis_pin is not None:env['MOUNT_RS_CACHE_REDIS_SERVER']=redis_pin['path']
-    if kind=='wsloss':env['MOUNT_RS_REMOTE_SQLITE_REPLY_LOSS']='1'
+    if kind in {'wsloss','wsautoloss'}:env['MOUNT_RS_REMOTE_SQLITE_REPLY_LOSS']='1'
     # All owned files/selector setup precede child creation.
     selector=selectors.DefaultSelector();logs={};cap=4194304
     for name in ['stdout','stderr']:
@@ -560,6 +682,9 @@ def main():
      if kind=='peeriometricstrace':
       cache_slow_records=slow_logging_file_records(root/'stderr.log', peer=True)
       if cache_slow_records is None:unknown.append('peer_slow_logging_not_observed_valid')
+     sqlite_reply_loss=None
+     if kind in {'wsloss','wsautoloss'}:
+      sqlite_reply_loss=sqlite_reply_loss_gate_record(kind,(root/'stderr.log').read_bytes(),unknown)
      after=frozen();write('source-after.json',after)
      redis_unchanged=None if redis_pin is None else redis_path.is_file() and redis_path.stat().st_size==redis_pin['size'] and hashlib.sha256(redis_path.read_bytes()).hexdigest()==redis_pin['sha256']
      if redis_unchanged is False:unknown.append('redis_executable_changed')
@@ -570,6 +695,7 @@ def main():
       shutil.rmtree(fixture_tmp);fixture_removed=not fixture_tmp.exists()
      else:unknown.append('fixture_directory_retained_unknown_process_ownership')
      receipt={'schema':'mount-rs.causal-bounded-local-gate.v2','kind':kind,'command':command,'elapsed_seconds':time.monotonic()-start,'parent_limit_seconds':limit,'cleanup_reserved_seconds':5,'returncode':code,'owned_pid':owned,'new_session':True,'wnowait_owner_pin':True,'signal_decisions_finished':signal_decisions_finished,'owned_child_reaped':code is not None,'owned_group_absent':absent,'pipes_eof':eof,'deadline_exceeded':deadline,'signals':signals,'sticky_unknown':unknown,'primary_failure':None if primary is None else {'type':type(primary).__name__,'errno':getattr(primary,'errno',None)},'logs':logs,'source_count':len(before),'source_unchanged':before==after,'head':subprocess.check_output(['git','rev-parse','HEAD'],cwd=BASE).decode().strip(),'runner_sha256':hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest(),'profile':env.get('MOUNT_RS_PROFILE_IO'),'trace':env.get('MOUNT_RS_TRACE_STORAGE'),'native_capture_binding':str(BASE/'benchmarks/storage/capture-native.cjs') if kind in {'node','processnode','diagnosticnode','cacheconsumers','cacheconsumerred'} else None,'automatic_retry':False,'cache_slow_records':cache_slow_records,'selected_suite':selected_suite,'named_suite_observed_passed':selected_suite_pass,'selected_test':selected_test,'exact_named_case_observed_passed':selected_test_pass,'redis_executable':redis_pin,'redis_executable_unchanged':redis_unchanged,'fixture_tmpdir':str(fixture_tmp),'fixture_children_before_postprocess_removal':fixture_children,'fixture_tmpdir_removed_after_reap_group_absence_eof':fixture_removed,'postterminal_group_sweep':'containment_only; fixture_cleanup_requires_in_test_assertions'}
+     if kind in {'wsloss','wsautoloss'}:receipt['sqlite_reply_loss']=sqlite_reply_loss
      diagnostic=gate_failure_diagnostic(kind, receipt, gate_failure_log_sample(root/'stdout.log'), gate_failure_log_sample(root/'stderr.log'))
      receipt['failure_diagnostic']=diagnostic
      sha=write('receipt.json',receipt);print(json.dumps({'path':str(root/'receipt.json'),'sha256':sha,'returncode':code,'elapsed_seconds':receipt['elapsed_seconds'],'source_unchanged':before==after,'unknown':unknown,'group_absent':absent,'pipes_eof':eof}))

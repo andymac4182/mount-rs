@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Result-gating controls; importing the parent must start no child processes."""
+import ast
 import importlib.util
+import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 path = Path(__file__).with_name("test-remote-failures.py")
 spec = importlib.util.spec_from_file_location("owned_remote_failures", path)
@@ -11,6 +14,348 @@ spec.loader.exec_module(parent)
 
 NAME = "redis_directory_real_peer_failures_preserve_exact_backing"
 SUMMARY = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.42s\n"
+
+
+# Independent schema-v2 oracles; never derive these keys or values from the parser.
+SQLITE_REPLY_LOSS_PREFIX = b"MOUNT_RS_SQLITE_REPLY_LOSS "
+SQLITE_REPLY_LOSS_FIXTURES = {
+    "wsloss": {
+        "schema_version": 2,
+        "connection_selection": "websocket",
+        "initial_quic_datagrams": 0,
+        "initial_quic_responses": 0,
+        "websocket_contact_elapsed_us": 0,
+        "initial_quic_settlement_quiet_ms": 100,
+        "deferred_credential_issues": 0,
+        "protocol_version": 2,
+        "client_hellos": 1,
+        "denied_partition_hellos": 1,
+        "denied_untrusted_tls": 1,
+        "drive_permission_denials": 2,
+        "write_submissions": 1,
+        "completed_write_replies": 1,
+        "held_reply": 1,
+        "preclose_metadata_checks": 1,
+        "preclose_verified_bytes": 65673,
+        "preclose_eof": 0,
+        "suppressed_response_envelopes": 1,
+        "suppressed_response_bytes": 32,
+        "completed_write_count": 65673,
+        "suppressed_response_messages": 2,
+        "downstream_write_response_messages": 0,
+        "uncertain_results": 1,
+        "fail_closed_followups": 3,
+        "replayed_write_submissions": 0,
+        "reconnects": 0,
+        "quic_datagrams": 0,
+        "quic_observation_scope": "after_initial_settlement_through_post_loss_quiet",
+        "no_contact_window_ms": 100,
+        "oracle_metadata_checks": 1,
+        "oracle_verified_bytes": 65673,
+        "oracle_size_bytes": 65673,
+        "oracle_eof_count": 0,
+        "request_cleanup_completed": 1,
+        "relay_cleanup_completed": 1,
+        "oracle_cleanup_completed": 1,
+        "server_close_wait_completed": 1,
+        "process_cleanup_observed": 0,
+        "directory_retained": 1,
+        "directory_removed": 0,
+    },
+    "wsautoloss": {
+        "schema_version": 2,
+        "connection_selection": "auto",
+        "initial_quic_datagrams": 1,
+        "initial_quic_responses": 0,
+        "websocket_contact_elapsed_us": 3000000,
+        "initial_quic_settlement_quiet_ms": 100,
+        "deferred_credential_issues": 1,
+        "protocol_version": 2,
+        "client_hellos": 1,
+        "denied_partition_hellos": 1,
+        "denied_untrusted_tls": 1,
+        "drive_permission_denials": 2,
+        "write_submissions": 1,
+        "completed_write_replies": 1,
+        "held_reply": 1,
+        "preclose_metadata_checks": 1,
+        "preclose_verified_bytes": 65673,
+        "preclose_eof": 0,
+        "suppressed_response_envelopes": 1,
+        "suppressed_response_bytes": 32,
+        "completed_write_count": 65673,
+        "suppressed_response_messages": 2,
+        "downstream_write_response_messages": 0,
+        "uncertain_results": 1,
+        "fail_closed_followups": 3,
+        "replayed_write_submissions": 0,
+        "reconnects": 0,
+        "quic_datagrams": 0,
+        "quic_observation_scope": "after_initial_settlement_through_post_loss_quiet",
+        "no_contact_window_ms": 100,
+        "oracle_metadata_checks": 1,
+        "oracle_verified_bytes": 65673,
+        "oracle_size_bytes": 65673,
+        "oracle_eof_count": 0,
+        "request_cleanup_completed": 1,
+        "relay_cleanup_completed": 1,
+        "oracle_cleanup_completed": 1,
+        "server_close_wait_completed": 1,
+        "process_cleanup_observed": 0,
+        "directory_retained": 1,
+        "directory_removed": 0,
+    },
+}
+
+
+class SqliteReplyLossRecordControls(unittest.TestCase):
+    def fixture(self, kind):
+        return SQLITE_REPLY_LOSS_FIXTURES[kind].copy()
+
+    def wire(self, record):
+        return SQLITE_REPLY_LOSS_PREFIX + json.dumps(record, separators=(",", ":")).encode() + b"\n"
+
+    def parsed(self, raw, kind):
+        parser = getattr(parent, "sqlite_reply_loss_record", lambda *args: None)
+        return parser(raw, kind)
+
+    def test_literal_schema_two_records_project_only_their_closed_fields(self):
+        for kind in ["wsloss", "wsautoloss"]:
+            with self.subTest(kind=kind):
+                expected = self.fixture(kind)
+                raw = b"Compiling private-package\nwarning: private build path\n" + self.wire(expected) + b"Finished test profile\n"
+                self.assertEqual(self.parsed(raw, kind), expected)
+
+    def test_missing_or_malformed_record_is_unavailable(self):
+        for kind in ["wsloss", "wsautoloss"]:
+            for raw in [b"", b"Compiling private-package\n", SQLITE_REPLY_LOSS_PREFIX + b"{}\n", SQLITE_REPLY_LOSS_PREFIX + b"{invalid}\n"]:
+                with self.subTest(kind=kind, raw=raw):
+                    self.assertIsNone(self.parsed(raw, kind))
+
+    def test_duplicate_records_do_not_choose_a_favorable_candidate(self):
+        for kind in ["wsloss", "wsautoloss"]:
+            valid = self.wire(self.fixture(kind))
+            malformed = SQLITE_REPLY_LOSS_PREFIX + b"{invalid}\n"
+            for raw in [valid + valid, valid + malformed, malformed + valid]:
+                with self.subTest(kind=kind, raw=raw):
+                    self.assertIsNone(self.parsed(raw, kind))
+
+    def test_private_extra_field_is_rejected(self):
+        for kind in ["wsloss", "wsautoloss"]:
+            record = self.fixture(kind)
+            record["private_path"] = "/private/token.jwt"
+            with self.subTest(kind=kind):
+                self.assertIsNone(self.parsed(self.wire(record), kind))
+
+    def test_every_required_key_must_be_present(self):
+        for kind in ["wsloss", "wsautoloss"]:
+            for key in self.fixture(kind):
+                record = self.fixture(kind)
+                del record[key]
+                with self.subTest(kind=kind, omitted=key):
+                    self.assertIsNone(self.parsed(self.wire(record), kind))
+
+    def test_fixed_numeric_values_are_exact(self):
+        variable = {"initial_quic_datagrams", "websocket_contact_elapsed_us"}
+        for kind in ["wsloss", "wsautoloss"]:
+            for key, value in self.fixture(kind).items():
+                if type(value) is not int or key in variable:
+                    continue
+                record = self.fixture(kind)
+                record[key] = value + 1
+                with self.subTest(kind=kind, field=key):
+                    self.assertIsNone(self.parsed(self.wire(record), kind))
+
+    def test_numeric_fields_reject_boolean_float_nonfinite_and_nonnumeric_values(self):
+        invalid = [True, False, 0.0, 1.5, float("nan"), float("inf"), -float("inf"), None, "1", [], {}]
+        for kind in ["wsloss", "wsautoloss"]:
+            for key, value in self.fixture(kind).items():
+                if type(value) is not int:
+                    continue
+                for replacement in invalid:
+                    record = self.fixture(kind)
+                    record[key] = replacement
+                    with self.subTest(kind=kind, field=key, replacement=replacement):
+                        self.assertIsNone(self.parsed(self.wire(record), kind))
+
+    def test_mode_and_observation_scope_are_exact_strings(self):
+        for kind in ["wsloss", "wsautoloss"]:
+            for key in ["connection_selection", "quic_observation_scope"]:
+                for replacement in [None, True, 1, [], {}, "", "/private/token", self.fixture(kind)[key].upper()]:
+                    record = self.fixture(kind)
+                    record[key] = replacement
+                    with self.subTest(kind=kind, field=key, replacement=replacement):
+                        self.assertIsNone(self.parsed(self.wire(record), kind))
+        self.assertIsNone(self.parsed(self.wire(self.fixture("wsloss")), "wsautoloss"))
+        self.assertIsNone(self.parsed(self.wire(self.fixture("wsautoloss")), "wsloss"))
+
+    def test_auto_probe_count_and_contact_duration_accept_both_closed_bounds(self):
+        for datagrams in [1, 32]:
+            for contact in [3000000, 30000000]:
+                record = self.fixture("wsautoloss")
+                record.update(initial_quic_datagrams=datagrams, websocket_contact_elapsed_us=contact)
+                with self.subTest(datagrams=datagrams, contact=contact):
+                    self.assertEqual(self.parsed(self.wire(record), "wsautoloss"), record)
+
+    def test_auto_probe_count_and_contact_duration_reject_outside_bounds(self):
+        for key, values in {
+            "initial_quic_datagrams": [-1, 0, 33, 18446744073709551616],
+            "websocket_contact_elapsed_us": [-1, 2999999, 30000001, 18446744073709551616],
+        }.items():
+            for value in values:
+                record = self.fixture("wsautoloss")
+                record[key] = value
+                with self.subTest(field=key, value=value):
+                    self.assertIsNone(self.parsed(self.wire(record), "wsautoloss"))
+
+    def test_explicit_websocket_has_no_probe_and_its_own_contact_bounds(self):
+        for contact in [0, 30000000]:
+            record = self.fixture("wsloss")
+            record["websocket_contact_elapsed_us"] = contact
+            self.assertEqual(self.parsed(self.wire(record), "wsloss"), record)
+        for key, values in {"initial_quic_datagrams": [-1, 1, 32], "websocket_contact_elapsed_us": [-1, 30000001]}.items():
+            for value in values:
+                record = self.fixture("wsloss")
+                record[key] = value
+                with self.subTest(field=key, value=value):
+                    self.assertIsNone(self.parsed(self.wire(record), "wsloss"))
+
+    def test_duplicate_json_keys_and_nonobject_json_are_rejected(self):
+        for kind in ["wsloss", "wsautoloss"]:
+            valid = self.wire(self.fixture(kind))
+            duplicate = valid.replace(b'{"schema_version":2,', b'{"schema_version":2,"schema_version":2,', 1)
+            self.assertNotEqual(duplicate, valid)
+            for raw in [duplicate, self.wire([self.fixture(kind)]), self.wire(None), self.wire(True), self.wire(2), self.wire("private text")]:
+                with self.subTest(kind=kind, raw=raw):
+                    self.assertIsNone(self.parsed(raw, kind))
+
+    def test_candidates_require_the_exact_prefix_and_complete_physical_lf_line(self):
+        for kind in ["wsloss", "wsautoloss"]:
+            valid = self.wire(self.fixture(kind))
+            malformed = [
+                valid[:-1], valid[:-1] + b"\r\n", valid[:-1] + b"\r", valid[:-1] + b"\v",
+                valid[:-1] + b"\f", valid[:-1] + "\u2028".encode(), valid[:-1] + "\u2029".encode(),
+                b"private prefix " + valid, b" " + valid, b"\x1b[31m" + valid,
+                valid[:-1] + b" trailing private text\n", valid[:-1] + b"\xff\n",
+                valid[:100] + b"\n" + valid[100:],
+                valid + b"warning: MOUNT_RS_SQLITE_REPLY_LOSS was quoted\n",
+                b"warning: MOUNT_RS_SQLITE_REPLY_LOSS was quoted\n" + valid,
+                valid + SQLITE_REPLY_LOSS_PREFIX + b"{",
+            ]
+            for raw in malformed:
+                with self.subTest(kind=kind, raw=raw):
+                    self.assertIsNone(self.parsed(raw, kind))
+
+    def test_oversized_physical_candidate_is_unavailable(self):
+        for kind in ["wsloss", "wsautoloss"]:
+            raw = self.wire(self.fixture(kind))[:-1] + b" " * 4194304 + b"\n"
+            with self.subTest(kind=kind):
+                self.assertIsNone(self.parsed(raw, kind))
+
+    def test_unknown_selector_cannot_project_a_valid_record(self):
+        valid = self.wire(self.fixture("wsloss"))
+        for kind in ["unknown", "remotetests", "/private/token", "WSLOSS"]:
+            with self.subTest(kind=kind):
+                self.assertIsNone(self.parsed(valid, kind))
+
+
+class SqliteReplyLossGateControls(unittest.TestCase):
+    fixture = SqliteReplyLossRecordControls.fixture
+    wire = SqliteReplyLossRecordControls.wire
+    parsed = SqliteReplyLossRecordControls.parsed
+    parsed = SqliteReplyLossRecordControls.parsed
+
+    def gated(self, kind, raw, unknown):
+        gate = getattr(parent, "sqlite_reply_loss_gate_record", lambda *args: None)
+        return gate(kind, raw, unknown)
+
+    def test_invalid_record_adds_one_fixed_sticky_failure(self):
+        for kind in ["wsloss", "wsautoloss"]:
+            unknown = ["owned_group_unsettled"]
+            self.assertIsNone(self.gated(kind, b"", unknown))
+            self.assertIsNone(self.gated(kind, b"malformed output\n", unknown))
+            self.assertEqual(unknown, ["owned_group_unsettled", "sqlite_reply_loss_not_observed_valid"])
+
+    def test_bounded_deeply_nested_numeric_value_is_unavailable_and_sticky(self):
+        nested = b"[" * 1100 + b"0" + b"]" * 1100
+        for kind in ["wsloss", "wsautoloss"]:
+            raw = self.wire(self.fixture(kind)).replace(b'"schema_version":2', b'"schema_version":' + nested, 1)
+            with self.subTest(kind=kind):
+                self.assertLessEqual(len(raw), 4096)
+                self.assertIsNone(self.parsed(raw, kind))
+                unknown = []
+                self.assertIsNone(self.gated(kind, raw, unknown))
+                self.assertEqual(unknown, ["sqlite_reply_loss_not_observed_valid"])
+
+    def test_valid_record_preserves_prior_failure(self):
+        for kind in ["wsloss", "wsautoloss"]:
+            unknown = ["owned_group_unsettled"]
+            expected = self.fixture(kind)
+            self.assertEqual(self.gated(kind, self.wire(expected), unknown), expected)
+            self.assertEqual(unknown, ["owned_group_unsettled"])
+
+    def test_later_valid_record_never_clears_invalid_record_failure(self):
+        for kind in ["wsloss", "wsautoloss"]:
+            unknown = []
+            self.assertIsNone(self.gated(kind, b"", unknown))
+            expected = self.fixture(kind)
+            self.assertEqual(self.gated(kind, self.wire(expected), unknown), expected)
+            self.assertEqual(unknown, ["sqlite_reply_loss_not_observed_valid"])
+
+    def test_unrelated_kind_skips_parser_and_preserves_unknown(self):
+        for kind in ["remotetests", "unknown", "/private/token"]:
+            unknown = ["owned_group_unsettled"]
+            with patch.object(parent, "sqlite_reply_loss_record", create=True, side_effect=AssertionError("unrelated kind must not parse")):
+                self.assertIsNone(self.gated(kind, self.wire(self.fixture("wsloss")), unknown))
+            self.assertEqual(unknown, ["owned_group_unsettled"])
+
+
+class SqliteReplyLossSelectors(unittest.TestCase):
+    def test_each_loss_selector_executes_one_serial_ignored_unprofiled_case(self):
+        expected = {
+            "wsloss": "websocket_sqlite_commit_survives_lost_wire_reply_without_replay",
+            "wsautoloss": "automatic_fallback_sqlite_commit_survives_lost_wire_reply_without_replay",
+        }
+        for kind, name in expected.items():
+            with self.subTest(kind=kind):
+                command, limit, profile, trace = parent.COMMANDS[kind]
+                self.assertEqual((limit, profile, trace), (180, 0, 0))
+                self.assertEqual(command, ["./scripts/cargo-shared", "test", "-p", "mount-rs-remote-client", "--test", "quic_mount", "--locked", "--offline", "--", "--ignored", "--exact", name, "--test-threads=1", "--nocapture"])
+                self.assertEqual(parent.EXACT_CASES[kind], name)
+                valid = f"running 1 test\ntest {name} ... receipt observed\nok\n{SUMMARY}"
+                self.assertTrue(parent.exact_case_passed(valid, name))
+                other = expected["wsautoloss" if kind == "wsloss" else "wsloss"]
+                self.assertFalse(parent.exact_case_passed(valid.replace(name, other), name))
+                self.assertFalse(parent.exact_case_passed("running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored;\n", name))
+                self.assertFalse(parent.exact_case_passed(f"running 1 test\ntest {name} ... ignored\ntest result: ok. 0 passed; 0 failed; 1 ignored;\n", name))
+
+    def test_reply_loss_environment_gate_is_static_and_scoped_to_both_selectors(self):
+        tree = ast.parse(path.read_text())
+        gates = []
+        service_trace_gates = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
+                continue
+            comparison = node.test
+            if not (isinstance(comparison.left, ast.Name) and comparison.left.id == "kind"
+                    and len(comparison.ops) == 1 and isinstance(comparison.ops[0], ast.In)
+                    and len(comparison.comparators) == 1 and isinstance(comparison.comparators[0], ast.Set)):
+                continue
+            kinds = {entry.value for entry in comparison.comparators[0].elts if isinstance(entry, ast.Constant)}
+            for assignment in node.body:
+                if not isinstance(assignment, ast.Assign) or len(assignment.targets) != 1:
+                    continue
+                target = assignment.targets[0]
+                if (isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)
+                        and target.value.id == "env" and isinstance(target.slice, ast.Constant)
+                        and target.slice.value == "MOUNT_RS_REMOTE_SQLITE_REPLY_LOSS"):
+                    gates.append((kinds, ast.literal_eval(assignment.value)))
+                if (isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)
+                        and target.value.id == "env" and isinstance(target.slice, ast.Constant)
+                        and target.slice.value == "MOUNT_RS_TRACE_SERVICE"):
+                    service_trace_gates.append((kinds, ast.literal_eval(assignment.value)))
+        self.assertEqual(gates, [({"wsloss", "wsautoloss"}, "1")])
+        self.assertTrue(any({"wsloss", "wsautoloss"} <= kinds and value == "0" for kinds, value in service_trace_gates))
 
 
 class ResultControls(unittest.TestCase):

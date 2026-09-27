@@ -268,6 +268,9 @@ jobs:
       - name: Verify SQLite commit after lost WebSocket reply through the owned parent
         timeout-minutes: 5
         run: python3 -B scripts/test-remote-failures.py wsloss
+      - name: Verify Auto fallback SQLite commit after lost WebSocket reply through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py wsautoloss
       - name: Verify final failure source state
         if: always() && steps.failure-evidence.outcome == 'success'
         run: |

@@ -68,7 +68,17 @@ async fn websocket_signed_oidc_multiple_drives_persistence_and_revocation() {
 #[tokio::test]
 #[ignore = "requires MOUNT_RS_REMOTE_SQLITE_REPLY_LOSS=1, private TMPDIR and an owned process gate"]
 async fn websocket_sqlite_commit_survives_lost_wire_reply_without_replay() {
-    quic_mount_reply_loss::run().await.unwrap();
+    quic_mount_reply_loss::run(quic_mount_reply_loss::Selection::WebSocket)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires MOUNT_RS_REMOTE_SQLITE_REPLY_LOSS=1, private TMPDIR and an owned process gate"]
+async fn automatic_fallback_sqlite_commit_survives_lost_wire_reply_without_replay() {
+    quic_mount_reply_loss::run(quic_mount_reply_loss::Selection::Auto)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
