@@ -2048,13 +2048,25 @@ where
             drop(state);
             return Err(self.fail_closed(error));
         }
+        // Equal physical identities above require equal effective bodies,
+        // including selected-inode overlays. The full anchor also covers the
+        // namespace defaults and membership. A coherent refresh of that same
+        // state must not invalidate a whole-file preparation made before it.
+        let changed = generation != state.persisted_revision
+            || structure.anchor() != previous.structure.anchor()
+            || physical != previous.physical;
+        let next_revision = if changed {
+            state
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?
+        } else {
+            state.revision
+        };
         retain_open_detached(&mut state, &namespace);
         state.namespace = Arc::new(namespace);
         state.persisted_revision = generation;
-        state.revision = state
-            .revision
-            .checked_add(1)
-            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        state.revision = next_revision;
         state.selected_inodes.clear();
         state.inode_revisions.clear();
         state.compact = Some(CompactRuntime {
@@ -10426,6 +10438,173 @@ mod compact_install_tests {
     use super::*;
     use futures_lite::future::block_on;
     use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
+
+    struct PrivateVolume(std::path::PathBuf);
+
+    impl PrivateVolume {
+        fn new() -> Self {
+            use std::os::unix::fs::DirBuilderExt;
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "mount-rs-compact-install-{}-{nonce}",
+                std::process::id(),
+            ));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&path)
+                .unwrap();
+            Self(path)
+        }
+
+        async fn open(&self, owner: &str) -> ChunkedFs<SqliteMetadataStore, SqliteBlockStore> {
+            ChunkedFs::open(
+                SqliteMetadataStore::open(self.0.join("metadata.db")).unwrap(),
+                SqliteBlockStore::open(self.0.join("blocks.db")).unwrap(),
+                ChunkedOptions::fixed(owner, 16)
+                    .unwrap()
+                    .with_compact_inode_updates(true),
+            )
+            .await
+            .unwrap()
+        }
+    }
+
+    impl Drop for PrivateVolume {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn unchanged_selected_overlay_folds_at_max_revision_and_keeps_full_capture() {
+        block_on(async {
+            let volume = PrivateVolume::new();
+            let fs = volume.open("unchanged-overlay").await;
+            fs.write_file("/file", b"original").await.unwrap();
+            let handle = fs.open("/file", "r+", 0).await.unwrap();
+            handle.write(b"updated!", Some(0)).await.unwrap();
+            let inode = handle.stat().await.unwrap().ino;
+            let backing = fs.inner.concurrent_backing.unwrap();
+            let snapshot = fs
+                .metadata_store()
+                .load_compact_snapshot(backing)
+                .await
+                .unwrap();
+            let revision = {
+                let mut state = fs.lock_state().unwrap();
+                assert!(!state.selected_inodes.is_empty());
+                let revision = state.revision;
+                state.revision = u64::MAX;
+                revision
+            };
+            fs.install_compact_snapshot(snapshot.clone(), u64::MAX, Some(snapshot.clone()))
+                .unwrap();
+            {
+                let mut state = fs.lock_state().unwrap();
+                assert_eq!(state.revision, u64::MAX);
+                assert!(state.selected_inodes.is_empty());
+                assert_eq!(
+                    state.compact.as_ref().unwrap().pending_full.as_ref(),
+                    Some(&snapshot)
+                );
+                assert_eq!(
+                    &state.namespace.nodes[&inode],
+                    &snapshot.guards[&inode].node
+                );
+                state.revision = revision;
+            }
+            let mut bytes = [0; 8];
+            assert_eq!(handle.read(&mut bytes, Some(0)).await.unwrap(), bytes.len());
+            assert_eq!(&bytes, b"updated!");
+            handle.close().await.unwrap();
+            fs.shutdown().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn changed_snapshot_overflow_preserves_runtime_state() {
+        block_on(async {
+            let volume = PrivateVolume::new();
+            let fs = volume.open("overflow-owner").await;
+            fs.write_file("/file", b"original").await.unwrap();
+            let peer = volume.open("overflow-peer").await;
+            let handle = peer.open("/file", "r+", 0).await.unwrap();
+            handle.write(b"changed!", Some(0)).await.unwrap();
+            handle.close().await.unwrap();
+            let backing = fs.inner.concurrent_backing.unwrap();
+            let snapshot = fs
+                .metadata_store()
+                .load_compact_snapshot(backing)
+                .await
+                .unwrap();
+            let (revision, namespace, physical, generation) = {
+                let mut state = fs.lock_state().unwrap();
+                let revision = state.revision;
+                state.revision = u64::MAX;
+                (
+                    revision,
+                    state.namespace.clone(),
+                    state.compact.as_ref().unwrap().physical.clone(),
+                    state.persisted_revision,
+                )
+            };
+            assert_eq!(snapshot.anchor.generation, generation);
+            assert_eq!(
+                fs.install_compact_snapshot(snapshot, u64::MAX, None)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Eoverflow,
+            );
+            {
+                let mut state = fs.lock_state().unwrap();
+                assert_eq!(state.revision, u64::MAX);
+                assert!(Arc::ptr_eq(&state.namespace, &namespace));
+                assert_eq!(state.persisted_revision, generation);
+                assert_eq!(state.compact.as_ref().unwrap().physical, physical);
+                assert!(state.compact.as_ref().unwrap().pending_full.is_none());
+                state.revision = revision;
+            }
+            assert!(!fs.failed());
+            peer.shutdown().await.unwrap();
+            fs.shutdown().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn changed_physical_or_structural_identity_advances_revision_with_equal_bodies() {
+        block_on(async {
+            for structural in [false, true] {
+                let volume = PrivateVolume::new();
+                let fs = volume.open("equal-bodies").await;
+                let backing = fs.inner.concurrent_backing.unwrap();
+                let mut snapshot = fs
+                    .metadata_store()
+                    .load_compact_snapshot(backing)
+                    .await
+                    .unwrap();
+                let revision = fs.lock_state().unwrap().revision;
+                if structural {
+                    snapshot.anchor.generation += 1;
+                } else {
+                    snapshot
+                        .guards
+                        .get_mut(&snapshot.anchor.root)
+                        .unwrap()
+                        .identity
+                        .revision += 1;
+                }
+                fs.install_compact_snapshot(snapshot, revision, None)
+                    .unwrap();
+                assert_eq!(fs.lock_state().unwrap().revision, revision + 1);
+                // The modeled installation is deliberately newer than this
+                // provider; do not ask shutdown to refresh the older provider.
+                drop(fs);
+            }
+        });
+    }
 
     #[test]
     fn newer_local_revision_is_retryable_without_poisoning_owner() {

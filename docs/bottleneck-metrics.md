@@ -62,6 +62,66 @@ output from the comparison controls, including on failure. The pipeline retains
 the test exit status and existing deadlines. Verify the uploaded artifact before
 using its test names or counts; an empty check-API response supplies neither.
 
+## Compact snapshot revision experiment
+
+A public SQLite regression reproduced a prepared create reporting one conflict
+and entering whole-file replay without any competing writer. Installing a
+validated, unchanged compact snapshot advanced the local revision. The installer
+now preserves that revision when the full anchor and physical identities match,
+after the existing checks establish exact effective inode-body equality. It
+still installs the fresh Full capture and folds selected-inode caches.
+
+The isolated create now records zero conflicts/replays and one committed reply.
+A second public control pauses its blob PUT, commits a real peer inode update
+without changing the anchor, and verifies that the prepared create still
+conflicts and replays. Both controls verify complete bytes and EOF after fresh
+SQLite connections reopen. Additional controls cover selected-cache folding,
+revision exhaustion without partial state changes, and advanced identities with
+unchanged bodies. This is a correctness fix; it does not remove Full captures.
+
+The same local native API workload was run before and after the fix: 400 fresh
+file write/read/delete lifecycles, concurrency 64, 4,096-byte payloads,
+65,536-byte chunks and an unchanged 1,000 logical operations/sec floor. Each
+arm verified all 400 reads and completed all 1,200 logical operations without
+timeouts or cleanup failures. Fresh native artifacts were independently hashed
+and joined to their captured Rust sources; the installed addon was untouched.
+
+| Layout / profiling | Baseline operations/sec | Candidate operations/sec |
+| --- | ---: | ---: |
+| Compact / enabled | 1,015.45 | **947.80 — floor failed** |
+| Compact / disabled | 1,049.38 | 1,042.37 |
+| Legacy / enabled | 1,275.45 | 1,126.73 |
+| Legacy / disabled | 1,518.08 | 1,399.35 |
+
+These are single controls in the same execution order, with uncontrolled host
+and OS cache activity. They establish neither a causal speedup nor an isolated
+instrumentation overhead estimate. Retain the candidate's profiling-enabled
+failure. The unchanged legacy path also varied between the measurements.
+
+| Profiled compact workload counter | Baseline | Candidate |
+| --- | ---: | ---: |
+| Conflicting prepared requests / whole-file replays | 400 / 400 | 393 / 393 |
+| Full metadata captures / publications | 838 / 419 | 831 / 419 |
+| SQLite statement calls, both stores | 28,399 | 28,357 |
+| Inode bodies returned | 244,906 | 243,801 |
+| Known inode-body bytes returned | 118,507,084 | 118,101,202 |
+| Initial block PUT input calls / bytes | 400 / 1,638,400 | 400 / 1,638,400 |
+
+The remaining work is visible: most prepared creates still leave the batch and
+take the serial replay path, while Full captures and structural publications
+materialize complete guard sets. Selected inode reads also load and validate
+the anchor. The conflict counter does not distinguish its revision, allocation
+or path predicate, so attributing every conflict to one predicate needs another
+observation. The next comparison should also separate fresh file creation from
+updates to existing files. Compression or chunk sizing is not yet established
+as the limiting factor.
+
+Creation, workload and cleanup diagnostics were complete and quiescent in the
+profiled arms. Shutdown diagnostics remained incomplete because their SQLite
+connections had closed; the original diagnostic issue is retained. These runs
+provide no mounted-path, server-fleet, physical device IOPS, total native
+allocation or 10,000-client qualification.
+
 ## Retained example: FoundationDB and Ozone
 
 The [Ozone FoundationDB job](https://github.com/andymac4182/mount-rs/actions/runs/36286931056/job/108529427341)
