@@ -729,6 +729,166 @@ fn env_num(name: &str, default: usize, min: usize, max: usize) -> usize {
     );
     n
 }
+// File population and verification still use every block. Only timed lane
+// positions are limited, so inode size can vary with a fixed blob working set.
+fn selected_hot_blocks(
+    value: Result<String, std::env::VarError>,
+    file_blocks: usize,
+    depths: &[usize],
+) -> Result<usize, String> {
+    let hot = match value {
+        Err(std::env::VarError::NotPresent) => file_blocks,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err("hot block selector must be Unicode decimal".into());
+        }
+        Ok(value) => {
+            if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                return Err("hot block selector must be unsigned decimal".into());
+            }
+            value
+                .parse::<usize>()
+                .map_err(|_| "hot block selector overflow")?
+        }
+    };
+    let max_depth = depths.iter().copied().max().ok_or("no lane depths")?;
+    if max_depth == 0 || depths.contains(&0) || hot < max_depth || hot > file_blocks {
+        return Err("hot blocks must cover all lanes and fit the full file".into());
+    }
+    Ok(hot)
+}
+
+fn lane_positions(blocks: usize, lane: usize, depth: usize) -> Vec<usize> {
+    assert!(depth > 0 && lane < depth && blocks >= depth);
+    (lane..blocks).step_by(depth).collect()
+}
+
+fn validate_hot_ledger(
+    ledger: &[(usize, usize, usize, u64)],
+    expected: &[Vec<(usize, u64)>],
+    hot_blocks: usize,
+    depth: usize,
+) -> Result<(), String> {
+    for &(client, lane, block, _) in ledger {
+        if depth == 0
+            || client >= expected.len()
+            || lane >= depth
+            || block >= hot_blocks
+            || block >= expected[client].len()
+            || block % depth != lane
+        {
+            return Err("write ledger escaped its client/lane/hot block range".into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_cold_suffix(expected: &[Vec<(usize, u64)>], hot_blocks: usize) -> Result<(), String> {
+    for blocks in expected {
+        if hot_blocks > blocks.len()
+            || blocks
+                .iter()
+                .enumerate()
+                .skip(hot_blocks)
+                .any(|(block, value)| *value != (0, block as u64 + 1))
+        {
+            return Err("cold suffix no longer matches the initial full file".into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn hot_block_selection_is_strict_and_preserves_default_file_range() {
+    for blocks in [32, 128, 256, 1024] {
+        assert_eq!(
+            selected_hot_blocks(Err(std::env::VarError::NotPresent), blocks, &[1, 2, 8]).unwrap(),
+            blocks
+        );
+        assert_eq!(
+            selected_hot_blocks(Ok("32".into()), blocks, &[1, 8]).unwrap(),
+            32
+        );
+    }
+    for invalid in [
+        "",
+        "0",
+        "-1",
+        "+32",
+        " 32",
+        "32 ",
+        "3.2",
+        "３２",
+        "257",
+        "999999999999999999999999999999",
+    ] {
+        assert!(selected_hot_blocks(Ok(invalid.into()), 256, &[1]).is_err());
+    }
+    assert!(selected_hot_blocks(Ok("3".into()), 256, &[1, 4]).is_err());
+    assert!(selected_hot_blocks(Ok("32".into()), 256, &[]).is_err());
+    assert!(selected_hot_blocks(Ok("32".into()), 256, &[0, 1]).is_err());
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        assert!(
+            selected_hot_blocks(
+                Err(std::env::VarError::NotUnicode(
+                    std::ffi::OsString::from_vec(vec![0xff])
+                )),
+                256,
+                &[1],
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn hot_lane_positions_cover_disjoint_nonempty_ranges_without_touching_cold_blocks() {
+    for hot in [1, 3, 5, 32, 128, 256] {
+        for depth in 1..=hot.min(8) {
+            let mut observed = BTreeSet::new();
+            for lane in 0..depth {
+                let positions = lane_positions(hot, lane, depth);
+                assert!(!positions.is_empty());
+                assert_eq!(positions, (lane..hot).step_by(depth).collect::<Vec<_>>());
+                for block in positions {
+                    assert!(block < hot && block % depth == lane && observed.insert(block));
+                }
+            }
+            assert_eq!(observed, (0..hot).collect());
+        }
+    }
+}
+
+#[test]
+fn hot_ledger_rejects_out_of_bounds_or_wrong_lane_before_expected_updates() {
+    let expected = vec![vec![(0, 1); 256]];
+    assert!(validate_hot_ledger(&[(0, 0, 0, 99), (0, 1, 31, 100)], &expected, 32, 2).is_ok());
+    for invalid in [
+        (1, 0, 0, 1),
+        (0, 2, 0, 1),
+        (0, 0, 32, 1),
+        (0, 0, 31, 1),
+        (0, 0, 256, 1),
+    ] {
+        assert!(validate_hot_ledger(&[invalid], &expected, 32, 2).is_err());
+    }
+    assert!(validate_hot_ledger(&[(0, 0, 0, 1)], &expected, 32, 0).is_err());
+}
+
+#[test]
+fn hot_ledger_preserves_seeded_cold_suffix_and_refuses_a_changed_tail() {
+    let mut expected = vec![
+        (0..256)
+            .map(|block| (0, block as u64 + 1))
+            .collect::<Vec<_>>(),
+    ];
+    expected[0][31] = (0, 999);
+    assert!(validate_cold_suffix(&expected, 32).is_ok());
+    expected[0][255] = (0, 999);
+    assert!(validate_cold_suffix(&expected, 32).is_err());
+}
+
 #[allow(clippy::too_many_arguments)] // Explicit worker inputs are test-only and immutable.
 async fn lane(
     connection: quinn::Connection,
@@ -748,7 +908,7 @@ async fn lane(
     let mut result = LaneResult::default();
     let mut seq = 0u64;
     let mut rng = (client as u64 + 1) * 7919 + (lane as u64 + 1) * 104729;
-    let positions: Vec<usize> = (lane..blocks).step_by(depth).collect();
+    let positions = lane_positions(blocks, lane, depth);
     let mut expected_bytes = vec![0; BYTES];
     let mut read_buffer = vec![0; BYTES];
     let mut request = IoRequest {
@@ -1276,6 +1436,11 @@ async fn packet() -> Result<(), String> {
     let warmup = env_num("MOUNT_RS_REMOTE_TIDB_SATURATION_WARMUP_SECONDS", 1, 1, 10);
     let blocks = env_num("MOUNT_RS_REMOTE_TIDB_SATURATION_BLOCKS", 64, 32, 1024);
     assert!(blocks >= *depths.iter().max().unwrap());
+    let hot_blocks = selected_hot_blocks(
+        std::env::var("MOUNT_RS_REMOTE_SATURATION_HOT_BLOCKS"),
+        blocks,
+        &depths,
+    )?;
     let timeout = Duration::from_secs(env_num(
         "MOUNT_RS_REMOTE_TIDB_SATURATION_REQUEST_TIMEOUT_SECONDS",
         30,
@@ -1511,7 +1676,7 @@ async fn packet() -> Result<(), String> {
                         server_count,
                         active_clients,
                         depth,
-                        blocks,
+                        hot_blocks,
                         *mode,
                         codec,
                         duration,
@@ -1520,6 +1685,9 @@ async fn packet() -> Result<(), String> {
                         &expected,
                     )
                     .await;
+                    report["file_blocks"] = json!(blocks);
+                    report["hot_blocks"] = json!(hot_blocks);
+                    report["hot_working_set_bytes"] = json!(active_clients * hot_blocks * BYTES);
                     if measured {
                         stage_diagnostics.finish_into(&mut report)?;
                         if let Some(before) = files_before {
@@ -1536,9 +1704,11 @@ async fn packet() -> Result<(), String> {
                         stage_observer("end", *mode, depth, &stage_id,
                             report["read"]["completed"].as_u64().unwrap_or(0) + report["write"]["completed"].as_u64().unwrap_or(0), errors.len(), active_clients).await?;
                     }
+                    validate_hot_ledger(&ledger, &expected, hot_blocks, depth)?;
                     for (c, l, b, s) in ledger {
                         expected[c][b] = (l, s);
                     }
+                    validate_cold_suffix(&expected[..active_clients], hot_blocks)?;
                     if !errors.is_empty() {
                         let samples:Vec<&String>=errors.iter().take(8).collect();
                         failed_phase=Some(json!({"report":report,"measured":measured,"failure_count":errors.len(),"timeout_failures":errors.iter().filter(|e|e.contains("request timeout")).count(),"error_samples":samples}));
@@ -1684,6 +1854,10 @@ async fn packet() -> Result<(), String> {
         std::env::var("MOUNT_RS_REMOTE_SATURATION_SNAPSHOT_VERIFY").as_deref() == Ok("1");
     let mut artifact = json!({"separate_drives":separate,"drive_count":if separate {client_count} else {1},"driver_replicas":if separate {client_count*server_count} else {server_count},"verification_method":if separate && snapshot_verification {"all stored and fresh driver files"} else if separate {"all fresh driver files"} else if snapshot_verification {"all stored files plus fresh driver sample"} else {"all fresh driver files"},"fresh_driver_sample_limit":if separate {active_clients} else if snapshot_verification {64} else {active_clients},"schema":"mount-rs-provider-saturation-v2","inode_updates":backend.inode_mode.inode_updates(),"compact_inode_updates":backend.inode_mode.compact_inode_updates(),"provider":backend.name,"provider_identity":backend.identity,"provider_version":backend.version,"volume_key":key,"clients":client_count,"active_clients":active_clients,"servers":server_count,"offline_empty_file_preseed":preseed,"setup_concurrency":setup_concurrency,"setup_seconds":setup_seconds,"driver_setup_seconds":driver_setup_seconds,"parallel_server_startup":separate,"drives_provisioned_before_startup":provision,"provisioning_seconds":provisioning_seconds,"dataset_bytes":active_clients*blocks*BYTES,"namespace_bytes":namespace_bytes,"topology":topology,"debug_assertions":cfg!(debug_assertions),"build_profile":if cfg!(debug_assertions){"debug"}else{"release"},"warmup_seconds":warmup,"nominal_stage_seconds":seconds,"configured_modes":modes.iter().map(|m|format!("{m:?}")).collect::<Vec<_>>(),"audit_logging":"enabled; request audit cost included","latency_histogram":"power-of-two microsecond upper bounds","stages":reports,"failed_phase":failed_phase,"verification_status":verification_status,"verified_files":if verification_status=="passed"{active_clients}else{0},"work_error":work.as_ref().err(),"cleanup_error":cleanup.as_ref().err(),"verification_error":verification.as_ref().err()});
     artifact["runtime"] = runtime_worker_receipt();
+    artifact["file_blocks"] = json!(blocks);
+    artifact["hot_blocks"] = json!(hot_blocks);
+    artifact["hot_working_set_bytes"] = json!(active_clients * hot_blocks * BYTES);
+    artifact["cold_suffix_blocks_per_file"] = json!(blocks - hot_blocks);
     artifact["sqlite_journal_experiment"] = json!({"requested":journal,"setup_seconds":journal_setup_seconds,
         "owned_drive_receipts":journal_receipts,"provider_connection_ids":journal_connection_ids,
         "provider_connection_count":journal.map(|_| journal_connection_count),"terminal_cleanup":terminal_receipt,
@@ -1976,6 +2150,79 @@ async fn snapshot_oracle_rejects_incorrect_byte_ledger() {
         .await
         .unwrap_err();
     assert!(error.contains("stored file mismatch"));
+}
+
+#[tokio::test]
+#[ignore = "explicit owned SQLite compact cold-tail oracle"]
+async fn hot_working_set_oracles_reject_corrupted_cold_tail() {
+    assert_eq!(
+        std::env::var("MOUNT_RS_REMOTE_SATURATION_PROVIDER").as_deref(),
+        Ok("sqlite")
+    );
+    assert_eq!(
+        std::env::var("MOUNT_RS_REMOTE_SATURATION_COMPACT_INODE_UPDATES").as_deref(),
+        Ok("1")
+    );
+    let key = format!(
+        "hot-tail-oracle-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let backend = backend::Backend::from_environment(&key).await.unwrap();
+    let mut expected = (0..64)
+        .map(|block| (0, block as u64 + 1))
+        .collect::<Vec<_>>();
+    for (block, value) in expected.iter_mut().enumerate().take(32) {
+        *value = (0, 900_000 + block as u64);
+    }
+    validate_cold_suffix(&[expected.clone()], 32).unwrap();
+    let mut bytes = expected
+        .iter()
+        .flat_map(|(lane, seq)| payload(0, *lane, *seq))
+        .collect::<Vec<_>>();
+    let fs = backend.open(0).await.unwrap();
+    let view = Loopback::from_arc(fs.driver());
+    view.write_file("/saturation-0", &bytes).await.unwrap();
+    fs.shutdown().await.unwrap();
+    drop(view);
+    drop(fs);
+    backend
+        .verify_stored_files(&[expected.clone()])
+        .await
+        .unwrap();
+    verify_one_separate_drive_with_shutdown(&backend, 1, 0, &expected, |fs| async move {
+        fs.shutdown()
+            .await
+            .map_err(|_| "cold-tail positive shutdown failed".to_owned())
+    })
+    .await
+    .unwrap();
+
+    // Alter a real cold block while keeping the full expected file unchanged.
+    bytes[63 * BYTES + 17] ^= 0x40;
+    let fs = backend.open(2).await.unwrap();
+    let view = Loopback::from_arc(fs.driver());
+    view.write_file("/saturation-0", &bytes).await.unwrap();
+    fs.shutdown().await.unwrap();
+    drop(view);
+    drop(fs);
+    let stored = backend
+        .verify_stored_files(&[expected.clone()])
+        .await
+        .unwrap_err();
+    assert!(stored.contains("stored file mismatch"), "{stored}");
+    let fresh =
+        verify_one_separate_drive_with_shutdown(&backend, 3, 0, &expected, |fs| async move {
+            fs.shutdown()
+                .await
+                .map_err(|_| "cold-tail negative shutdown failed".to_owned())
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(fresh, "separate drive content mismatch");
 }
 
 #[test]

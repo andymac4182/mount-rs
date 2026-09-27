@@ -1,5 +1,10 @@
 # Finding remote-drive bottlenecks
 
+The [fixed-working-set extent comparison](benchmarks/extent-scaling-20260928/README.md)
+separates whole-inode metadata growth from blob input and native SQLite write
+amplification. Six balanced WAL/FULL runs keep the accessed 32 blocks fixed while
+varying file layout size, retaining full-file stored and fresh-reader checks.
+
 The [persistent SQLite cache fault measurements](benchmarks/sqlite-cache-failure-metrics-20260928/README.md)
 join actual backing GETs, SQL statements, pager activity and VFS callbacks across
 14 cache phases. They also retain a disk-admission rejection that returned full
