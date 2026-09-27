@@ -119,6 +119,16 @@ class CacheStageSelectors(unittest.TestCase):
         self.assertFalse(parent.exact_case_passed(f"running 1 test\ntest other ... ok\n{SUMMARY}", name))
         self.assertFalse(parent.exact_case_passed("running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored;\n", name))
 
+    def test_udp_release_requires_one_unprofiled_real_socket_case(self):
+        name = "stopped_peer_udp_rebind_waits_for_real_driver_release"
+        command, limit, profile, trace = parent.COMMANDS["peerport"]
+        self.assertEqual((limit, profile, trace), (180, 0, 0))
+        self.assertEqual(command, ["./scripts/cargo-shared", "test", "-p", "mount-rs-blob-cache", "--test", "distributed_failure", "--locked", "--offline", "--", "--ignored", "--exact", name, "--test-threads=1", "--nocapture"])
+        self.assertEqual(parent.EXACT_CASES["peerport"], name)
+        self.assertTrue(parent.exact_case_passed(f"running 1 test\ntest {name} ... real_udp_oracles=complete\nok\n{SUMMARY}", name))
+        self.assertFalse(parent.exact_case_passed("running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored;\n", name))
+        self.assertFalse(parent.exact_case_passed(f"running 1 test\ntest {name} ... FAILED\ntest result: FAILED. 0 passed; 1 failed; 0 ignored;\n", name))
+
     def test_ready_future_baselines_are_separate_profile_processes(self):
         for kind, enabled in [("cacheprofileoff", 0), ("cacheprofileon", 1)]:
             command, limit, profile, trace = parent.COMMANDS[kind]

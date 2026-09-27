@@ -1569,6 +1569,118 @@ async fn authenticated_hierarchy_saves_reads_and_reconnects_to_persisted_peer() 
     .await
     .unwrap();
 }
+// Retain the successful socket as the owner throughout the stopped-peer phase.
+async fn bind_stopped_fixture_udp(address: SocketAddr) -> std::io::Result<tokio::net::UdpSocket> {
+    timeout(CLEANUP_BOUND, async {
+        loop {
+            match tokio::net::UdpSocket::bind(address).await {
+                Ok(socket) => return Ok(socket),
+                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "stopped-peer UDP release deadline",
+        ))
+    })
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "isolated real UDP endpoint release observation"]
+async fn stopped_peer_udp_rebind_waits_for_real_driver_release() {
+    timeout(BOUND, async {
+        // Retain the directory until cache ownership release is observed;
+        // failure or cancellation before then leaves it for the owned parent.
+        let dir = tempfile::tempdir().unwrap().keep();
+        let local = cache(&dir.join("port-release"), 0, 32768);
+        let weak_cache = Arc::downgrade(&local);
+        let mut params = rcgen::CertificateParams::new(vec!["cache-ca".into()]).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca = rcgen::CertifiedIssuer::self_signed(params, rcgen::KeyPair::generate().unwrap())
+            .unwrap();
+        let (cert, key) = leaf(&ca);
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(ca.der().clone()).unwrap();
+        let mut observations = Vec::new();
+        for kind in ["bare_quinn", "peer_transport"] {
+            let address = if kind == "bare_quinn" {
+                let endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+                let address = endpoint.local_addr().unwrap();
+                endpoint.close(0u32.into(), b"shutdown");
+                endpoint.wait_idle().await;
+                drop(endpoint);
+                address
+            } else {
+                let peer = QuicPeerTransport::bind(
+                    config(
+                        "port-release",
+                        "127.0.0.1:0".parse().unwrap(),
+                        cert.clone(),
+                        key.clone_key(),
+                        roots.clone(),
+                        BTreeMap::new(),
+                    ),
+                    local.clone(),
+                )
+                .unwrap();
+                let address = peer.local_addr().unwrap();
+                let weak = Arc::downgrade(&peer);
+                peer.shutdown().await;
+                drop(peer);
+                assert!(weak.upgrade().is_none());
+                address
+            };
+            // The immediate probe precedes scheduling after the no-connection
+            // endpoint's fixture-owned handle is dropped. Preparation may yield.
+            let immediate = std::net::UdpSocket::bind(address);
+            let immediate_bound = immediate.is_ok();
+            let immediate_addr_in_use = immediate
+                .as_ref()
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::AddrInUse);
+            drop(immediate); // An unexpected success must not block the next bind.
+            let prepared = bind_stopped_fixture_udp(address).await;
+            let prepared_bound = prepared.is_ok();
+            let socket = prepared.expect("bounded real UDP release observation");
+            let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let payload = [0, 1, 2, 0xff, 0, 0x80, 0xa5];
+            assert_eq!(sender.send_to(&payload, socket.local_addr().unwrap()).await.unwrap(), payload.len());
+            let mut bytes = [0u8; 32];
+            let (count, source) = timeout(CLEANUP_BOUND, socket.recv_from(&mut bytes))
+                .await
+                .expect("bounded rebound socket binary oracle")
+                .unwrap();
+            assert_eq!(&bytes[..count], &payload);
+            assert_eq!(source, sender.local_addr().unwrap());
+            drop(sender);
+            drop(socket);
+            observations.push((kind, immediate_bound, immediate_addr_in_use, prepared_bound));
+        }
+        // A real socket that stays owned must exhaust the one total deadline.
+        let held = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let held_result = bind_stopped_fixture_udp(held.local_addr().unwrap()).await;
+        drop(held);
+        local.shutdown().await;
+        drop(local);
+        assert!(weak_cache.upgrade().is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+        for (kind, immediate_bound, immediate_addr_in_use, prepared_bound) in &observations {
+            println!("MOUNT_RS_PEER_PORT_RELEASE kind={kind} no_connections=true immediate_bound={immediate_bound} immediate_addr_in_use={immediate_addr_in_use} prepared_bound={prepared_bound} complete_binary=true cache_owners_released=true");
+        }
+        assert_eq!(observations.len(), 2);
+        assert!(observations.iter().all(|(_, _, _, bound)| *bound), "stopped-peer fixture must await real UDP release before returning its bound owner");
+        assert!(held_result.is_err_and(|error| error.kind() == std::io::ErrorKind::TimedOut), "owned UDP port must exhaust one fixed release deadline");
+        println!("MOUNT_RS_PEER_PORT_RELEASE kind=held_socket fixed_deadline=true timed_out=true socket_released=true");
+    })
+    .await
+    .expect("bounded matched public UDP release qualification");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "isolated process: MOUNT_RS_PROFILE_IO=1, storage/request traces=0"]
 async fn peer_read_reconnect_bypasses_pending_replica_handshake() {
@@ -1596,7 +1708,7 @@ async fn peer_read_reconnect_bypasses_pending_replica_handshake() {
         println!("peer_read_reconnect_progress=after_stop_a");
 
         println!("peer_read_reconnect_progress=before_blackhole_bind");
-        let blackhole = tokio::net::UdpSocket::bind(pair.address).await.unwrap();
+        let blackhole = bind_stopped_fixture_udp(pair.address).await.unwrap();
         println!("peer_read_reconnect_progress=after_blackhole_bind");
         let counted = pair.counted.clone();
         let peer = PeerId("a".into());

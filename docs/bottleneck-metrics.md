@@ -247,6 +247,26 @@ diagnostic. Failure classification, process ownership, deadlines and output
 caps retain their existing contracts. This change gathers evidence for the
 hosted failure; it does not establish its cause or a throughput improvement.
 
+### Stopped-peer UDP fixture release
+
+Real no-connection probes reproduced the restart fixture's immediate-bind
+assumption failing for both a bare Quinn endpoint and the public peer transport.
+Both later rebound sockets received the complete binary datagram from the
+expected sender. The restart fixture now retries only `AddrInUse`, yields for
+one millisecond, and retains the first successfully bound socket within one
+fixed three-second deadline. Other bind errors return immediately. A real
+held socket exercises exhaustion of that deadline.
+
+The [UDP release report](benchmarks/stopped-peer-udp-release-20260927/report.json)
+joins the intended baseline failure with 49 final Rust test executions, 64
+modeled parent controls, formatting and strict cache/remote Clippy. The
+authenticated reconnect still checks complete bytes, peer reuse, partition
+isolation and zero backing reads. Fixture directories remain until observed
+cache-owner release; earlier failure or cancellation leaves them for the owned
+parent's cleanup. These observations establish fixture address reuse. They do
+not establish a synchronous production shutdown contract, identify the earlier
+hosted failure's cause or measure throughput.
+
 ### Authority checks and refresh reasons
 
 The authority/refresh slice appended sixteen rows to the 118-row prefix, for

@@ -19,6 +19,7 @@ COMMANDS.update({
     'cachemetrics': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'distributed_failure', '--locked', '--offline', '--', '--ignored', '--exact', 'cache_lookup_stage_metrics_preserve_bytes_and_cancellation', '--test-threads=1', '--nocapture'], 180, 1, 0),
     'peermetrics': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--lib', '--locked', '--offline', '--', '--ignored', '--exact', 'peer::tests::peer_connection_stage_metrics_preserve_bytes_and_cancellation', '--test-threads=1', '--nocapture'], 180, 1, 0),
     'peerreconnect': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'distributed_failure', '--locked', '--offline', '--', '--ignored', '--exact', 'peer_read_reconnect_bypasses_pending_replica_handshake', '--test-threads=1', '--nocapture'], 180, 1, 0),
+    'peerport': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'distributed_failure', '--locked', '--offline', '--', '--ignored', '--exact', 'stopped_peer_udp_rebind_waits_for_real_driver_release', '--test-threads=1', '--nocapture'], 180, 0, 0),
     'quinnclose': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'quinn_close', '--locked', '--offline', '--', '--exact', 'tests::first_close_initial_drains_without_waiting_for_idle_timeout', '--test-threads=1', '--nocapture'], 180, 0, 0),
     'quinnordinary': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'quinn_close', '--locked', '--offline', '--', '--exact', 'tests::ordinary_initial_then_close_drains_without_waiting_for_idle_timeout', '--test-threads=1', '--nocapture'], 180, 0, 0),
     'quinnruntimeclose': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'quinn_close', '--locked', '--offline', '--', '--ignored', '--exact', 'tests::first_close_initial_releases_real_endpoint_within_close_grace', '--test-threads=1', '--nocapture'], 180, 0, 0),
@@ -37,6 +38,7 @@ COMMANDS.update({
     'cacheconsumers': (['fnm', 'exec', '--using', 'v24.18.0', 'node', '--test', 'benchmarks/storage/test.mjs', 'benchmarks/storage/foundationdb-diagnostics.test.mjs', 'benchmarks/storage/owned-layout-metrics.test.mjs', 'benchmarks/storage/owned-backing-pilot.test.mjs', 'scripts/verify-owned-backing-pilot.test.mjs'], 180, 0, 0),
 })
 EXACT_CASES = {
+    'peerport': 'stopped_peer_udp_rebind_waits_for_real_driver_release',
     'clicompact': 'configured_binary_selects_mrc5_for_signed_quic_and_websocket_reopen',
     'cachemetricstrace': 'cache_lookup_stage_metrics_preserve_bytes_and_cancellation',
     'redisfault': 'redis_directory_real_peer_failures_preserve_exact_backing',
@@ -253,7 +255,7 @@ def terminal_eperm_settled(reaped, group_absent, eof, deadline, lifecycle_unknow
 def main():
     kind=sys.argv[1];command,limit,profile,trace=COMMANDS[kind]
     assert os.name=='posix' and hasattr(os,'waitid') and hasattr(os,'WNOWAIT'), 'Unix ownership observer required'
-    FAULT_KINDS={'cachetests','redisfault','rediscleanup','wsloss','remotetests','faultclippy','fmt','cachemetrics','peermetrics','peerreconnect','quinnclose','quinnordinary','quinnruntimeclose','createprep','createpath','createguard','createunit','chunkedtests','chunkedclippy','cacheprofileoff','cacheprofileon','storagealloc','corealloc','coremetrics','cachemetricsclippy','cacheconsumers','cacheconsumerred','clidiagnostics','clicompact','napimetrics','consumerclippy','cachemetricstrace'}
+    FAULT_KINDS={'cachetests','redisfault','rediscleanup','wsloss','remotetests','faultclippy','fmt','cachemetrics','peermetrics','peerreconnect','peerport','quinnclose','quinnordinary','quinnruntimeclose','createprep','createpath','createguard','createunit','chunkedtests','chunkedclippy','cacheprofileoff','cacheprofileon','storagealloc','corealloc','coremetrics','cachemetricsclippy','cacheconsumers','cacheconsumerred','clidiagnostics','clicompact','napimetrics','consumerclippy','cachemetricstrace'}
     assert kind in FAULT_KINDS, 'fixed fault qualification commands only'
     root=pathlib.Path(tempfile.mkdtemp(prefix='mount-rs-owned-fault-'+kind+'-',dir=os.environ.get('MOUNT_RS_FAILURE_EVIDENCE_ROOT',tempfile.gettempdir())));os.chmod(root,0o700)
     fixture_tmp=root/'fixtures';fixture_tmp.mkdir(mode=0o700)
