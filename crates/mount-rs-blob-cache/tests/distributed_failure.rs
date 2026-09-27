@@ -31,9 +31,18 @@ use tokio::{
 const BOUND: Duration = Duration::from_secs(15);
 const REDIS_BOUND: Duration = Duration::from_secs(3);
 const CLEANUP_BOUND: Duration = Duration::from_secs(3);
+#[path = "support/sqlite_cache.rs"]
+mod sqlite_cache;
 #[path = "support/stage_metrics.rs"]
 #[allow(dead_code)]
 mod stage_metrics;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "isolated profiled persistent SQLite and authenticated two-peer component cell"]
+async fn sqlite_backed_authenticated_cache_failures_preserve_exact_backing_savings() {
+    sqlite_cache::run().await;
+}
+
 fn io_error() -> FsError {
     FsError::new(ErrorCode::Eio)
 }

@@ -209,6 +209,9 @@ jobs:
       - name: Verify cache stage counts and cancellation through the owned parent
         timeout-minutes: 5
         run: python3 -B scripts/test-remote-failures.py cachemetrics
+      - name: Verify persistent SQLite cache faults and backing savings through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py sqlitecache
       - name: Verify authenticated peer connection stages through the owned parent
         timeout-minutes: 5
         run: python3 -B scripts/test-remote-failures.py peermetrics

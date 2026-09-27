@@ -1,0 +1,2480 @@
+{
+  "schema": "mount-rs.sqlite-cache-failure-metrics.v1",
+  "source_base": "0725e9460e056fe0f97e3676413e23db1bd75242",
+  "owned_source_sha256": {
+    "Cargo.lock": "3c30990a92859bfde2778f283eb5906f4b98538f547a1b174d64c34c9cee2e20",
+    "crates/mount-rs-blob-cache/Cargo.toml": "97596438bc6054ddf3c7145e4974723802c059ca1acfe0656ea79df5b1e692b4",
+    "crates/mount-rs-blob-cache/tests/distributed_failure.rs": "9e090f82cc6c73d17b90d6e7ad55cc075d31c2116a2b81baa7864c4aad38ece1",
+    "crates/mount-rs-blob-cache/tests/support/sqlite_cache.rs": "9633de6974f8249cc02cec76a2f325072fb722b5d104543d140ce869d40b148a",
+    "scripts/test-remote-failures.py": "3ce3bca23ea98c26b2f40cabcc21dce30d163cac40ccf2c5e4749bcf5730c447",
+    "scripts/test-remote-failures-controls.py": "80454ef4ca904afe3c0fed7468d56a796d500f229432d80ba6b27e2070d1e76c",
+    ".github/workflows/remote-drives.yml": "1d52a0def38b08ce3e753db97dd75cdefe143845b9eacd27ea82b8cc858d75c1"
+  },
+  "platform": "macOS ARM64",
+  "workload": {
+    "files": 3,
+    "bytes_each": 4096,
+    "logical_cache_reads": 33,
+    "phases": 14,
+    "authenticated_peer_servers": 2,
+    "backing_provider": "SQLite",
+    "backing_journal": "DELETE",
+    "synchronous": 2,
+    "scope": "persistent MRC5 SDK seed and read-only cache component with actual authenticated peer QUIC; no CLI client/server capacity qualification"
+  },
+  "summary": {
+    "all_cache_peer_provider_owners_released": true,
+    "backing_bytes": 40960,
+    "backing_gets": 10,
+    "bytes_each": 4096,
+    "capacity_claim": false,
+    "files": 3,
+    "fresh_sdk_payload_and_eof": true,
+    "hit_bytes": 94208,
+    "kind": "complete",
+    "logical_cache_reads": 33,
+    "observed_cache_hits": 23,
+    "persistent_metadata_and_block_ids_unchanged": true,
+    "physical_iops": false,
+    "power_loss": false,
+    "sqlite_fixture_removed": true
+  },
+  "phases": [
+    {
+      "phase": "cold-nonholder",
+      "complete_bytes": true,
+      "delegated_gets": 1,
+      "delegated_success": 1,
+      "delegated_errors": 0,
+      "delegated_cancelled": 0,
+      "backing_bytes": 4096,
+      "local_hits": 0,
+      "peer_hits": 0,
+      "peer_get_attempts": 1,
+      "backing_fetches": 1,
+      "hit_bytes": 0,
+      "cache_errors": 0,
+      "maintenance_dropped": 1,
+      "io_scope": "delegated SQLite calls, statements, pager and VFS callbacks; not physical IOPS",
+      "sqlite": {
+        "configuration": {
+          "busy_timeout_ms": 5000,
+          "cache_size": -2000,
+          "checkpoint_fullfsync": 0,
+          "fullfsync": 0,
+          "is_autocommit": true,
+          "journal_mode": "delete",
+          "locking_mode": "normal",
+          "synchronous": 2,
+          "wal_autocheckpoint_pages": 1000
+        },
+        "sql_statements": 1,
+        "sql_categories": {
+          "SELECT": 1
+        },
+        "pager": {
+          "cache_hits": 1,
+          "cache_misses": 2,
+          "cache_spills": 0,
+          "page_writes": 0
+        },
+        "page_size": 4096,
+        "sql_profile": {
+          "SELECT": {
+            "completed": 1,
+            "elapsed_ns": 0,
+            "invalid_elapsed": 0,
+            "max_elapsed_ns": 0,
+            "overflow": false
+          }
+        },
+        "zero_sql_profile_categories": [
+          "BEGIN",
+          "COMMIT",
+          "DELETE",
+          "INSERT",
+          "OTHER",
+          "PRAGMA",
+          "ROLLBACK",
+          "UPDATE"
+        ],
+        "connection_lock": {
+          "completed": 1,
+          "elapsed_ns": 167,
+          "errors": 0,
+          "invalid_elapsed": 0,
+          "max_elapsed_ns": 167,
+          "overflow": false
+        },
+        "connection_lock_hold": {
+          "completed": 1,
+          "elapsed_ns": 46333,
+          "invalid_elapsed": 0,
+          "max_elapsed_ns": 46333,
+          "overflow": false
+        },
+        "vfs_rows": [
+          {
+            "name": "main_database.read",
+            "completed": 4,
+            "confirmed_bytes": 11888,
+            "requested_bytes": 11888,
+            "errors": 0,
+            "short_reads": 0,
+            "elapsed_ns": 4833,
+            "max_elapsed_ns": 2208
+          }
+        ],
+        "zero_vfs_rows": [
+          "main_database.write",
+          "main_database.sync",
+          "main_journal.read",
+          "main_journal.write",
+          "main_journal.sync",
+          "wal.read",
+          "wal.write",
+          "wal.sync",
+          "temporary.read",
+          "temporary.write",
+          "temporary.sync",
+          "other.read",
+          "other.write",
+          "other.sync"
+        ]
+      },
+      "cache_spans": [
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 542,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.miss.admission_wait",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 1083,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.miss.singleflight_wait",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 2,
+          "cancelled": 0,
+          "elapsed_ns": 14916,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.ram.lookup",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 2
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 86584,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.disk.lookup",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 709,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.connection_lock_wait",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 2640125,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.connection_establish",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 1542,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.request_byte_admission_wait",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 43875,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.open_bi",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 104,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 5750,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.request_send",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 1,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 860042,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.response_receive",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 3562958,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.get",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 0,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.get_miss",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        }
+      ],
+      "zero_cache_spans": []
+    },
+    {
+      "phase": "disk-only-peer",
+      "complete_bytes": true,
+      "delegated_gets": 0,
+      "delegated_success": 0,
+      "delegated_errors": 0,
+      "delegated_cancelled": 0,
+      "backing_bytes": 0,
+      "local_hits": 0,
+      "peer_hits": 1,
+      "peer_get_attempts": 1,
+      "backing_fetches": 0,
+      "hit_bytes": 4096,
+      "cache_errors": 0,
+      "maintenance_dropped": 0,
+      "io_scope": "delegated SQLite calls, statements, pager and VFS callbacks; not physical IOPS",
+      "sqlite": {
+        "configuration": {
+          "busy_timeout_ms": 5000,
+          "cache_size": -2000,
+          "checkpoint_fullfsync": 0,
+          "fullfsync": 0,
+          "is_autocommit": true,
+          "journal_mode": "delete",
+          "locking_mode": "normal",
+          "synchronous": 2,
+          "wal_autocheckpoint_pages": 1000
+        },
+        "sql_statements": 0,
+        "sql_categories": {},
+        "pager": {
+          "cache_hits": 0,
+          "cache_misses": 0,
+          "cache_spills": 0,
+          "page_writes": 0
+        },
+        "page_size": 4096,
+        "sql_profile": {},
+        "zero_sql_profile_categories": [
+          "BEGIN",
+          "COMMIT",
+          "DELETE",
+          "INSERT",
+          "OTHER",
+          "PRAGMA",
+          "ROLLBACK",
+          "SELECT",
+          "UPDATE"
+        ],
+        "connection_lock": {
+          "completed": 0,
+          "elapsed_ns": 0,
+          "errors": 0,
+          "invalid_elapsed": 0,
+          "max_elapsed_ns": 0,
+          "overflow": false
+        },
+        "connection_lock_hold": {
+          "completed": 0,
+          "elapsed_ns": 0,
+          "invalid_elapsed": 0,
+          "max_elapsed_ns": 0,
+          "overflow": false
+        },
+        "vfs_rows": [],
+        "zero_vfs_rows": [
+          "main_database.read",
+          "main_database.write",
+          "main_database.sync",
+          "main_journal.read",
+          "main_journal.write",
+          "main_journal.sync",
+          "wal.read",
+          "wal.write",
+          "wal.sync",
+          "temporary.read",
+          "temporary.write",
+          "temporary.sync",
+          "other.read",
+          "other.write",
+          "other.sync"
+        ]
+      },
+      "cache_spans": [
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 1417,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.miss.admission_wait",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 917,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.miss.singleflight_wait",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 2,
+          "cancelled": 0,
+          "elapsed_ns": 18292,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.ram.lookup",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 2
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 45084,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.disk.lookup",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 1000,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.connection_lock_wait",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 1209,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.request_byte_admission_wait",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 4125,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.open_bi",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 104,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 7500,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.request_send",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 4097,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 796500,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.response_receive",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 4096,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 825334,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.get",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        }
+      ],
+      "zero_cache_spans": [
+        "blob_cache.peer.connection_establish",
+        "blob_cache.peer.get_miss"
+      ]
+    },
+    {
+      "phase": "stale-holder",
+      "complete_bytes": true,
+      "delegated_gets": 1,
+      "delegated_success": 1,
+      "delegated_errors": 0,
+      "delegated_cancelled": 0,
+      "backing_bytes": 4096,
+      "local_hits": 0,
+      "peer_hits": 0,
+      "peer_get_attempts": 1,
+      "backing_fetches": 1,
+      "hit_bytes": 0,
+      "cache_errors": 0,
+      "maintenance_dropped": 1,
+      "io_scope": "delegated SQLite calls, statements, pager and VFS callbacks; not physical IOPS",
+      "sqlite": {
+        "configuration": {
+          "busy_timeout_ms": 5000,
+          "cache_size": -2000,
+          "checkpoint_fullfsync": 0,
+          "fullfsync": 0,
+          "is_autocommit": true,
+          "journal_mode": "delete",
+          "locking_mode": "normal",
+          "synchronous": 2,
+          "wal_autocheckpoint_pages": 1000
+        },
+        "sql_statements": 1,
+        "sql_categories": {
+          "SELECT": 1
+        },
+        "pager": {
+          "cache_hits": 3,
+          "cache_misses": 0,
+          "cache_spills": 0,
+          "page_writes": 0
+        },
+        "page_size": 4096,
+        "sql_profile": {
+          "SELECT": {
+            "completed": 1,
+            "elapsed_ns": 0,
+            "invalid_elapsed": 0,
+            "max_elapsed_ns": 0,
+            "overflow": false
+          }
+        },
+        "zero_sql_profile_categories": [
+          "BEGIN",
+          "COMMIT",
+          "DELETE",
+          "INSERT",
+          "OTHER",
+          "PRAGMA",
+          "ROLLBACK",
+          "UPDATE"
+        ],
+        "connection_lock": {
+          "completed": 1,
+          "elapsed_ns": 41,
+          "errors": 0,
+          "invalid_elapsed": 0,
+          "max_elapsed_ns": 41,
+          "overflow": false
+        },
+        "connection_lock_hold": {
+          "completed": 1,
+          "elapsed_ns": 47000,
+          "invalid_elapsed": 0,
+          "max_elapsed_ns": 47000,
+          "overflow": false
+        },
+        "vfs_rows": [
+          {
+            "name": "main_database.read",
+            "completed": 2,
+            "confirmed_bytes": 3696,
+            "requested_bytes": 3696,
+            "errors": 0,
+            "short_reads": 0,
+            "elapsed_ns": 2958,
+            "max_elapsed_ns": 1833
+          }
+        ],
+        "zero_vfs_rows": [
+          "main_database.write",
+          "main_database.sync",
+          "main_journal.read",
+          "main_journal.write",
+          "main_journal.sync",
+          "wal.read",
+          "wal.write",
+          "wal.sync",
+          "temporary.read",
+          "temporary.write",
+          "temporary.sync",
+          "other.read",
+          "other.write",
+          "other.sync"
+        ]
+      },
+      "cache_spans": [
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 500,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.miss.admission_wait",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 542,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.miss.singleflight_wait",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 2,
+          "cancelled": 0,
+          "elapsed_ns": 15249,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.ram.lookup",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 2
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 39375,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.disk.lookup",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 459,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.connection_lock_wait",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 416,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.request_byte_admission_wait",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 1291,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.open_bi",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 104,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 2542,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.request_send",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 1,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 398333,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.response_receive",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 410459,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.get",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 41,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.get_miss",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        }
+      ],
+      "zero_cache_spans": [
+        "blob_cache.peer.connection_establish"
+      ]
+    },
+    {
+      "phase": "holder-outage",
+      "complete_bytes": true,
+      "delegated_gets": 1,
+      "delegated_success": 1,
+      "delegated_errors": 0,
+      "delegated_cancelled": 0,
+      "backing_bytes": 4096,
+      "local_hits": 0,
+      "peer_hits": 0,
+      "peer_get_attempts": 1,
+      "backing_fetches": 1,
+      "hit_bytes": 0,
+      "cache_errors": 1,
+      "maintenance_dropped": 1,
+      "io_scope": "delegated SQLite calls, statements, pager and VFS callbacks; not physical IOPS",
+      "sqlite": {
+        "configuration": {
+          "busy_timeout_ms": 5000,
+          "cache_size": -2000,
+          "checkpoint_fullfsync": 0,
+          "fullfsync": 0,
+          "is_autocommit": true,
+          "journal_mode": "delete",
+          "locking_mode": "normal",
+          "synchronous": 2,
+          "wal_autocheckpoint_pages": 1000
+        },
+        "sql_statements": 1,
+        "sql_categories": {
+          "SELECT": 1
+        },
+        "pager": {
+          "cache_hits": 3,
+          "cache_misses": 0,
+          "cache_spills": 0,
+          "page_writes": 0
+        },
+        "page_size": 4096,
+        "sql_profile": {
+          "SELECT": {
+            "completed": 1,
+            "elapsed_ns": 1000000,
+            "invalid_elapsed": 0,
+            "max_elapsed_ns": 1000000,
+            "overflow": false
+          }
+        },
+        "zero_sql_profile_categories": [
+          "BEGIN",
+          "COMMIT",
+          "DELETE",
+          "INSERT",
+          "OTHER",
+          "PRAGMA",
+          "ROLLBACK",
+          "UPDATE"
+        ],
+        "connection_lock": {
+          "completed": 1,
+          "elapsed_ns": 750,
+          "errors": 0,
+          "invalid_elapsed": 0,
+          "max_elapsed_ns": 750,
+          "overflow": false
+        },
+        "connection_lock_hold": {
+          "completed": 1,
+          "elapsed_ns": 123333,
+          "invalid_elapsed": 0,
+          "max_elapsed_ns": 123333,
+          "overflow": false
+        },
+        "vfs_rows": [
+          {
+            "name": "main_database.read",
+            "completed": 2,
+            "confirmed_bytes": 3696,
+            "requested_bytes": 3696,
+            "errors": 0,
+            "short_reads": 0,
+            "elapsed_ns": 6416,
+            "max_elapsed_ns": 4625
+          }
+        ],
+        "zero_vfs_rows": [
+          "main_database.write",
+          "main_database.sync",
+          "main_journal.read",
+          "main_journal.write",
+          "main_journal.sync",
+          "wal.read",
+          "wal.write",
+          "wal.sync",
+          "temporary.read",
+          "temporary.write",
+          "temporary.sync",
+          "other.read",
+          "other.write",
+          "other.sync"
+        ]
+      },
+      "cache_spans": [
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 875,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.miss.admission_wait",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 1292,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.miss.singleflight_wait",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 2,
+          "cancelled": 0,
+          "elapsed_ns": 25125,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.ram.lookup",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 2
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 65583,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.disk.lookup",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 916,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.connection_lock_wait",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 1,
+          "elapsed_ns": 403082458,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.connection_establish",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 0
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 1083,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.request_byte_admission_wait",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 403103917,
+          "error": 1,
+          "in_flight": 0,
+          "name": "blob_cache.peer.get",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 0
+        }
+      ],
+      "zero_cache_spans": [
+        "blob_cache.peer.open_bi",
+        "blob_cache.peer.request_send",
+        "blob_cache.peer.response_receive",
+        "blob_cache.peer.get_miss"
+      ]
+    },
+    {
+      "phase": "same-holder-restart",
+      "complete_bytes": true,
+      "delegated_gets": 0,
+      "delegated_success": 0,
+      "delegated_errors": 0,
+      "delegated_cancelled": 0,
+      "backing_bytes": 0,
+      "local_hits": 0,
+      "peer_hits": 1,
+      "peer_get_attempts": 1,
+      "backing_fetches": 0,
+      "hit_bytes": 4096,
+      "cache_errors": 0,
+      "maintenance_dropped": 0,
+      "io_scope": "delegated SQLite calls, statements, pager and VFS callbacks; not physical IOPS",
+      "sqlite": {
+        "configuration": {
+          "busy_timeout_ms": 5000,
+          "cache_size": -2000,
+          "checkpoint_fullfsync": 0,
+          "fullfsync": 0,
+          "is_autocommit": true,
+          "journal_mode": "delete",
+          "locking_mode": "normal",
+          "synchronous": 2,
+          "wal_autocheckpoint_pages": 1000
+        },
+        "sql_statements": 0,
+        "sql_categories": {},
+        "pager": {
+          "cache_hits": 0,
+          "cache_misses": 0,
+          "cache_spills": 0,
+          "page_writes": 0
+        },
+        "page_size": 4096,
+        "sql_profile": {},
+        "zero_sql_profile_categories": [
+          "BEGIN",
+          "COMMIT",
+          "DELETE",
+          "INSERT",
+          "OTHER",
+          "PRAGMA",
+          "ROLLBACK",
+          "SELECT",
+          "UPDATE"
+        ],
+        "connection_lock": {
+          "completed": 0,
+          "elapsed_ns": 0,
+          "errors": 0,
+          "invalid_elapsed": 0,
+          "max_elapsed_ns": 0,
+          "overflow": false
+        },
+        "connection_lock_hold": {
+          "completed": 0,
+          "elapsed_ns": 0,
+          "invalid_elapsed": 0,
+          "max_elapsed_ns": 0,
+          "overflow": false
+        },
+        "vfs_rows": [],
+        "zero_vfs_rows": [
+          "main_database.read",
+          "main_database.write",
+          "main_database.sync",
+          "main_journal.read",
+          "main_journal.write",
+          "main_journal.sync",
+          "wal.read",
+          "wal.write",
+          "wal.sync",
+          "temporary.read",
+          "temporary.write",
+          "temporary.sync",
+          "other.read",
+          "other.write",
+          "other.sync"
+        ]
+      },
+      "cache_spans": [
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 2416,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.miss.admission_wait",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 1834,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.miss.singleflight_wait",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 2,
+          "cancelled": 0,
+          "elapsed_ns": 49125,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.ram.lookup",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 2
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 63708,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.disk.lookup",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 1125,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.connection_lock_wait",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 3341166,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.connection_establish",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 1625,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.request_byte_admission_wait",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 2208,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.open_bi",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 104,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 7541,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.request_send",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 4097,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 1239250,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.response_receive",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        },
+        {
+          "bytes": 4096,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 4615917,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.peer.get",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        }
+      ],
+      "zero_cache_spans": [
+        "blob_cache.peer.get_miss"
+      ]
+    },
+    {
+      "phase": "ram-cold",
+      "complete_bytes": true,
+      "delegated_gets": 1,
+      "delegated_success": 1,
+      "delegated_errors": 0,
+      "delegated_cancelled": 0,
+      "backing_bytes": 4096,
+      "local_hits": 0,
+      "peer_hits": 0,
+      "peer_get_attempts": 0,
+      "backing_fetches": 1,
+      "hit_bytes": 0,
+      "cache_errors": 0,
+      "maintenance_dropped": 0,
+      "io_scope": "delegated SQLite calls, statements, pager and VFS callbacks; not physical IOPS",
+      "sqlite": {
+        "configuration": {
+          "busy_timeout_ms": 5000,
+          "cache_size": -2000,
+          "checkpoint_fullfsync": 0,
+          "fullfsync": 0,
+          "is_autocommit": true,
+          "journal_mode": "delete",
+          "locking_mode": "normal",
+          "synchronous": 2,
+          "wal_autocheckpoint_pages": 1000
+        },
+        "sql_statements": 1,
+        "sql_categories": {
+          "SELECT": 1
+        },
+        "pager": {
+          "cache_hits": 3,
+          "cache_misses": 0,
+          "cache_spills": 0,
+          "page_writes": 0
+        },
+        "page_size": 4096,
+        "sql_profile": {
+          "SELECT": {
+            "completed": 1,
+            "elapsed_ns": 0,
+            "invalid_elapsed": 0,
+            "max_elapsed_ns": 0,
+            "overflow": false
+          }
+        },
+        "zero_sql_profile_categories": [
+          "BEGIN",
+          "COMMIT",
+          "DELETE",
+          "INSERT",
+          "OTHER",
+          "PRAGMA",
+          "ROLLBACK",
+          "UPDATE"
+        ],
+        "connection_lock": {
+          "completed": 1,
+          "elapsed_ns": 125,
+          "errors": 0,
+          "invalid_elapsed": 0,
+          "max_elapsed_ns": 125,
+          "overflow": false
+        },
+        "connection_lock_hold": {
+          "completed": 1,
+          "elapsed_ns": 38375,
+          "invalid_elapsed": 0,
+          "max_elapsed_ns": 38375,
+          "overflow": false
+        },
+        "vfs_rows": [
+          {
+            "name": "main_database.read",
+            "completed": 2,
+            "confirmed_bytes": 3696,
+            "requested_bytes": 3696,
+            "errors": 0,
+            "short_reads": 0,
+            "elapsed_ns": 3375,
+            "max_elapsed_ns": 2125
+          }
+        ],
+        "zero_vfs_rows": [
+          "main_database.write",
+          "main_database.sync",
+          "main_journal.read",
+          "main_journal.write",
+          "main_journal.sync",
+          "wal.read",
+          "wal.write",
+          "wal.sync",
+          "temporary.read",
+          "temporary.write",
+          "temporary.sync",
+          "other.read",
+          "other.write",
+          "other.sync"
+        ]
+      },
+      "cache_spans": [
+        {
+          "bytes": 0,
+          "calls": 2,
+          "cancelled": 0,
+          "elapsed_ns": 19875,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.ram.lookup",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 2
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 56916,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.disk.lookup",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        }
+      ],
+      "zero_cache_spans": [
+        "blob_cache.miss.admission_wait",
+        "blob_cache.miss.singleflight_wait",
+        "blob_cache.peer.connection_lock_wait",
+        "blob_cache.peer.connection_establish",
+        "blob_cache.peer.request_byte_admission_wait",
+        "blob_cache.peer.open_bi",
+        "blob_cache.peer.request_send",
+        "blob_cache.peer.response_receive",
+        "blob_cache.peer.get",
+        "blob_cache.peer.get_miss"
+      ]
+    },
+    {
+      "phase": "ram-twenty-repeats",
+      "complete_bytes": true,
+      "delegated_gets": 0,
+      "delegated_success": 0,
+      "delegated_errors": 0,
+      "delegated_cancelled": 0,
+      "backing_bytes": 0,
+      "local_hits": 20,
+      "peer_hits": 0,
+      "peer_get_attempts": 0,
+      "backing_fetches": 0,
+      "hit_bytes": 81920,
+      "cache_errors": 0,
+      "maintenance_dropped": 0,
+      "io_scope": "delegated SQLite calls, statements, pager and VFS callbacks; not physical IOPS",
+      "sqlite": {
+        "configuration": {
+          "busy_timeout_ms": 5000,
+          "cache_size": -2000,
+          "checkpoint_fullfsync": 0,
+          "fullfsync": 0,
+          "is_autocommit": true,
+          "journal_mode": "delete",
+          "locking_mode": "normal",
+          "synchronous": 2,
+          "wal_autocheckpoint_pages": 1000
+        },
+        "sql_statements": 0,
+        "sql_categories": {},
+        "pager": {
+          "cache_hits": 0,
+          "cache_misses": 0,
+          "cache_spills": 0,
+          "page_writes": 0
+        },
+        "page_size": 4096,
+        "sql_profile": {},
+        "zero_sql_profile_categories": [
+          "BEGIN",
+          "COMMIT",
+          "DELETE",
+          "INSERT",
+          "OTHER",
+          "PRAGMA",
+          "ROLLBACK",
+          "SELECT",
+          "UPDATE"
+        ],
+        "connection_lock": {
+          "completed": 0,
+          "elapsed_ns": 0,
+          "errors": 0,
+          "invalid_elapsed": 0,
+          "max_elapsed_ns": 0,
+          "overflow": false
+        },
+        "connection_lock_hold": {
+          "completed": 0,
+          "elapsed_ns": 0,
+          "invalid_elapsed": 0,
+          "max_elapsed_ns": 0,
+          "overflow": false
+        },
+        "vfs_rows": [],
+        "zero_vfs_rows": [
+          "main_database.read",
+          "main_database.write",
+          "main_database.sync",
+          "main_journal.read",
+          "main_journal.write",
+          "main_journal.sync",
+          "wal.read",
+          "wal.write",
+          "wal.sync",
+          "temporary.read",
+          "temporary.write",
+          "temporary.sync",
+          "other.read",
+          "other.write",
+          "other.sync"
+        ]
+      },
+      "cache_spans": [
+        {
+          "bytes": 81920,
+          "calls": 20,
+          "cancelled": 0,
+          "elapsed_ns": 5456,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.ram.lookup",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 20
+        }
+      ],
+      "zero_cache_spans": [
+        "blob_cache.miss.admission_wait",
+        "blob_cache.miss.singleflight_wait",
+        "blob_cache.disk.lookup",
+        "blob_cache.peer.connection_lock_wait",
+        "blob_cache.peer.connection_establish",
+        "blob_cache.peer.request_byte_admission_wait",
+        "blob_cache.peer.open_bi",
+        "blob_cache.peer.request_send",
+        "blob_cache.peer.response_receive",
+        "blob_cache.peer.get",
+        "blob_cache.peer.get_miss"
+      ]
+    },
+    {
+      "phase": "disk-budget-reject",
+      "complete_bytes": true,
+      "delegated_gets": 1,
+      "delegated_success": 1,
+      "delegated_errors": 0,
+      "delegated_cancelled": 0,
+      "backing_bytes": 4096,
+      "local_hits": 0,
+      "peer_hits": 0,
+      "peer_get_attempts": 0,
+      "backing_fetches": 1,
+      "hit_bytes": 0,
+      "cache_errors": 0,
+      "maintenance_dropped": 1,
+      "io_scope": "delegated SQLite calls, statements, pager and VFS callbacks; not physical IOPS",
+      "sqlite": {
+        "configuration": {
+          "busy_timeout_ms": 5000,
+          "cache_size": -2000,
+          "checkpoint_fullfsync": 0,
+          "fullfsync": 0,
+          "is_autocommit": true,
+          "journal_mode": "delete",
+          "locking_mode": "normal",
+          "synchronous": 2,
+          "wal_autocheckpoint_pages": 1000
+        },
+        "sql_statements": 1,
+        "sql_categories": {
+          "SELECT": 1
+        },
+        "pager": {
+          "cache_hits": 3,
+          "cache_misses": 0,
+          "cache_spills": 0,
+          "page_writes": 0
+        },
+        "page_size": 4096,
+        "sql_profile": {
+          "SELECT": {
+            "completed": 1,
+            "elapsed_ns": 0,
+            "invalid_elapsed": 0,
+            "max_elapsed_ns": 0,
+            "overflow": false
+          }
+        },
+        "zero_sql_profile_categories": [
+          "BEGIN",
+          "COMMIT",
+          "DELETE",
+          "INSERT",
+          "OTHER",
+          "PRAGMA",
+          "ROLLBACK",
+          "UPDATE"
+        ],
+        "connection_lock": {
+          "completed": 1,
+          "elapsed_ns": 42,
+          "errors": 0,
+          "invalid_elapsed": 0,
+          "max_elapsed_ns": 42,
+          "overflow": false
+        },
+        "connection_lock_hold": {
+          "completed": 1,
+          "elapsed_ns": 34500,
+          "invalid_elapsed": 0,
+          "max_elapsed_ns": 34500,
+          "overflow": false
+        },
+        "vfs_rows": [
+          {
+            "name": "main_database.read",
+            "completed": 2,
+            "confirmed_bytes": 3696,
+            "requested_bytes": 3696,
+            "errors": 0,
+            "short_reads": 0,
+            "elapsed_ns": 2500,
+            "max_elapsed_ns": 1292
+          }
+        ],
+        "zero_vfs_rows": [
+          "main_database.write",
+          "main_database.sync",
+          "main_journal.read",
+          "main_journal.write",
+          "main_journal.sync",
+          "wal.read",
+          "wal.write",
+          "wal.sync",
+          "temporary.read",
+          "temporary.write",
+          "temporary.sync",
+          "other.read",
+          "other.write",
+          "other.sync"
+        ]
+      },
+      "cache_spans": [
+        {
+          "bytes": 0,
+          "calls": 2,
+          "cancelled": 0,
+          "elapsed_ns": 19625,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.ram.lookup",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 2
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 52708,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.disk.lookup",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        }
+      ],
+      "zero_cache_spans": [
+        "blob_cache.miss.admission_wait",
+        "blob_cache.miss.singleflight_wait",
+        "blob_cache.peer.connection_lock_wait",
+        "blob_cache.peer.connection_establish",
+        "blob_cache.peer.request_byte_admission_wait",
+        "blob_cache.peer.open_bi",
+        "blob_cache.peer.request_send",
+        "blob_cache.peer.response_receive",
+        "blob_cache.peer.get",
+        "blob_cache.peer.get_miss"
+      ]
+    },
+    {
+      "phase": "disk-cold",
+      "complete_bytes": true,
+      "delegated_gets": 1,
+      "delegated_success": 1,
+      "delegated_errors": 0,
+      "delegated_cancelled": 0,
+      "backing_bytes": 4096,
+      "local_hits": 0,
+      "peer_hits": 0,
+      "peer_get_attempts": 0,
+      "backing_fetches": 1,
+      "hit_bytes": 0,
+      "cache_errors": 0,
+      "maintenance_dropped": 0,
+      "io_scope": "delegated SQLite calls, statements, pager and VFS callbacks; not physical IOPS",
+      "sqlite": {
+        "configuration": {
+          "busy_timeout_ms": 5000,
+          "cache_size": -2000,
+          "checkpoint_fullfsync": 0,
+          "fullfsync": 0,
+          "is_autocommit": true,
+          "journal_mode": "delete",
+          "locking_mode": "normal",
+          "synchronous": 2,
+          "wal_autocheckpoint_pages": 1000
+        },
+        "sql_statements": 1,
+        "sql_categories": {
+          "SELECT": 1
+        },
+        "pager": {
+          "cache_hits": 3,
+          "cache_misses": 0,
+          "cache_spills": 0,
+          "page_writes": 0
+        },
+        "page_size": 4096,
+        "sql_profile": {
+          "SELECT": {
+            "completed": 1,
+            "elapsed_ns": 0,
+            "invalid_elapsed": 0,
+            "max_elapsed_ns": 0,
+            "overflow": false
+          }
+        },
+        "zero_sql_profile_categories": [
+          "BEGIN",
+          "COMMIT",
+          "DELETE",
+          "INSERT",
+          "OTHER",
+          "PRAGMA",
+          "ROLLBACK",
+          "UPDATE"
+        ],
+        "connection_lock": {
+          "completed": 1,
+          "elapsed_ns": 125,
+          "errors": 0,
+          "invalid_elapsed": 0,
+          "max_elapsed_ns": 125,
+          "overflow": false
+        },
+        "connection_lock_hold": {
+          "completed": 1,
+          "elapsed_ns": 28334,
+          "invalid_elapsed": 0,
+          "max_elapsed_ns": 28334,
+          "overflow": false
+        },
+        "vfs_rows": [
+          {
+            "name": "main_database.read",
+            "completed": 2,
+            "confirmed_bytes": 3696,
+            "requested_bytes": 3696,
+            "errors": 0,
+            "short_reads": 0,
+            "elapsed_ns": 2042,
+            "max_elapsed_ns": 1083
+          }
+        ],
+        "zero_vfs_rows": [
+          "main_database.write",
+          "main_database.sync",
+          "main_journal.read",
+          "main_journal.write",
+          "main_journal.sync",
+          "wal.read",
+          "wal.write",
+          "wal.sync",
+          "temporary.read",
+          "temporary.write",
+          "temporary.sync",
+          "other.read",
+          "other.write",
+          "other.sync"
+        ]
+      },
+      "cache_spans": [
+        {
+          "bytes": 0,
+          "calls": 2,
+          "cancelled": 0,
+          "elapsed_ns": 18791,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.ram.lookup",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 2
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 39167,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.disk.lookup",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        }
+      ],
+      "zero_cache_spans": [
+        "blob_cache.miss.admission_wait",
+        "blob_cache.miss.singleflight_wait",
+        "blob_cache.peer.connection_lock_wait",
+        "blob_cache.peer.connection_establish",
+        "blob_cache.peer.request_byte_admission_wait",
+        "blob_cache.peer.open_bi",
+        "blob_cache.peer.request_send",
+        "blob_cache.peer.response_receive",
+        "blob_cache.peer.get",
+        "blob_cache.peer.get_miss"
+      ]
+    },
+    {
+      "phase": "disk-restart",
+      "complete_bytes": true,
+      "delegated_gets": 0,
+      "delegated_success": 0,
+      "delegated_errors": 0,
+      "delegated_cancelled": 0,
+      "backing_bytes": 0,
+      "local_hits": 1,
+      "peer_hits": 0,
+      "peer_get_attempts": 0,
+      "backing_fetches": 0,
+      "hit_bytes": 4096,
+      "cache_errors": 0,
+      "maintenance_dropped": 0,
+      "io_scope": "delegated SQLite calls, statements, pager and VFS callbacks; not physical IOPS",
+      "sqlite": {
+        "configuration": {
+          "busy_timeout_ms": 5000,
+          "cache_size": -2000,
+          "checkpoint_fullfsync": 0,
+          "fullfsync": 0,
+          "is_autocommit": true,
+          "journal_mode": "delete",
+          "locking_mode": "normal",
+          "synchronous": 2,
+          "wal_autocheckpoint_pages": 1000
+        },
+        "sql_statements": 0,
+        "sql_categories": {},
+        "pager": {
+          "cache_hits": 0,
+          "cache_misses": 0,
+          "cache_spills": 0,
+          "page_writes": 0
+        },
+        "page_size": 4096,
+        "sql_profile": {},
+        "zero_sql_profile_categories": [
+          "BEGIN",
+          "COMMIT",
+          "DELETE",
+          "INSERT",
+          "OTHER",
+          "PRAGMA",
+          "ROLLBACK",
+          "SELECT",
+          "UPDATE"
+        ],
+        "connection_lock": {
+          "completed": 0,
+          "elapsed_ns": 0,
+          "errors": 0,
+          "invalid_elapsed": 0,
+          "max_elapsed_ns": 0,
+          "overflow": false
+        },
+        "connection_lock_hold": {
+          "completed": 0,
+          "elapsed_ns": 0,
+          "invalid_elapsed": 0,
+          "max_elapsed_ns": 0,
+          "overflow": false
+        },
+        "vfs_rows": [],
+        "zero_vfs_rows": [
+          "main_database.read",
+          "main_database.write",
+          "main_database.sync",
+          "main_journal.read",
+          "main_journal.write",
+          "main_journal.sync",
+          "wal.read",
+          "wal.write",
+          "wal.sync",
+          "temporary.read",
+          "temporary.write",
+          "temporary.sync",
+          "other.read",
+          "other.write",
+          "other.sync"
+        ]
+      },
+      "cache_spans": [
+        {
+          "bytes": 0,
+          "calls": 2,
+          "cancelled": 0,
+          "elapsed_ns": 19250,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.ram.lookup",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 2
+        },
+        {
+          "bytes": 4096,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 288208,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.disk.lookup",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        }
+      ],
+      "zero_cache_spans": [
+        "blob_cache.miss.admission_wait",
+        "blob_cache.miss.singleflight_wait",
+        "blob_cache.peer.connection_lock_wait",
+        "blob_cache.peer.connection_establish",
+        "blob_cache.peer.request_byte_admission_wait",
+        "blob_cache.peer.open_bi",
+        "blob_cache.peer.request_send",
+        "blob_cache.peer.response_receive",
+        "blob_cache.peer.get",
+        "blob_cache.peer.get_miss"
+      ]
+    },
+    {
+      "phase": "corrupt-isolated-disk",
+      "complete_bytes": true,
+      "delegated_gets": 1,
+      "delegated_success": 1,
+      "delegated_errors": 0,
+      "delegated_cancelled": 0,
+      "backing_bytes": 4096,
+      "local_hits": 0,
+      "peer_hits": 0,
+      "peer_get_attempts": 0,
+      "backing_fetches": 1,
+      "hit_bytes": 0,
+      "cache_errors": 0,
+      "maintenance_dropped": 0,
+      "io_scope": "delegated SQLite calls, statements, pager and VFS callbacks; not physical IOPS",
+      "sqlite": {
+        "configuration": {
+          "busy_timeout_ms": 5000,
+          "cache_size": -2000,
+          "checkpoint_fullfsync": 0,
+          "fullfsync": 0,
+          "is_autocommit": true,
+          "journal_mode": "delete",
+          "locking_mode": "normal",
+          "synchronous": 2,
+          "wal_autocheckpoint_pages": 1000
+        },
+        "sql_statements": 1,
+        "sql_categories": {
+          "SELECT": 1
+        },
+        "pager": {
+          "cache_hits": 3,
+          "cache_misses": 0,
+          "cache_spills": 0,
+          "page_writes": 0
+        },
+        "page_size": 4096,
+        "sql_profile": {
+          "SELECT": {
+            "completed": 1,
+            "elapsed_ns": 0,
+            "invalid_elapsed": 0,
+            "max_elapsed_ns": 0,
+            "overflow": false
+          }
+        },
+        "zero_sql_profile_categories": [
+          "BEGIN",
+          "COMMIT",
+          "DELETE",
+          "INSERT",
+          "OTHER",
+          "PRAGMA",
+          "ROLLBACK",
+          "UPDATE"
+        ],
+        "connection_lock": {
+          "completed": 1,
+          "elapsed_ns": 41,
+          "errors": 0,
+          "invalid_elapsed": 0,
+          "max_elapsed_ns": 41,
+          "overflow": false
+        },
+        "connection_lock_hold": {
+          "completed": 1,
+          "elapsed_ns": 35417,
+          "invalid_elapsed": 0,
+          "max_elapsed_ns": 35417,
+          "overflow": false
+        },
+        "vfs_rows": [
+          {
+            "name": "main_database.read",
+            "completed": 2,
+            "confirmed_bytes": 3696,
+            "requested_bytes": 3696,
+            "errors": 0,
+            "short_reads": 0,
+            "elapsed_ns": 2750,
+            "max_elapsed_ns": 1667
+          }
+        ],
+        "zero_vfs_rows": [
+          "main_database.write",
+          "main_database.sync",
+          "main_journal.read",
+          "main_journal.write",
+          "main_journal.sync",
+          "wal.read",
+          "wal.write",
+          "wal.sync",
+          "temporary.read",
+          "temporary.write",
+          "temporary.sync",
+          "other.read",
+          "other.write",
+          "other.sync"
+        ]
+      },
+      "cache_spans": [
+        {
+          "bytes": 0,
+          "calls": 2,
+          "cancelled": 0,
+          "elapsed_ns": 18499,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.ram.lookup",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 2
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 314667,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.disk.lookup",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        }
+      ],
+      "zero_cache_spans": [
+        "blob_cache.miss.admission_wait",
+        "blob_cache.miss.singleflight_wait",
+        "blob_cache.peer.connection_lock_wait",
+        "blob_cache.peer.connection_establish",
+        "blob_cache.peer.request_byte_admission_wait",
+        "blob_cache.peer.open_bi",
+        "blob_cache.peer.request_send",
+        "blob_cache.peer.response_receive",
+        "blob_cache.peer.get",
+        "blob_cache.peer.get_miss"
+      ]
+    },
+    {
+      "phase": "eviction-first-admitted",
+      "complete_bytes": true,
+      "delegated_gets": 1,
+      "delegated_success": 1,
+      "delegated_errors": 0,
+      "delegated_cancelled": 0,
+      "backing_bytes": 4096,
+      "local_hits": 0,
+      "peer_hits": 0,
+      "peer_get_attempts": 0,
+      "backing_fetches": 1,
+      "hit_bytes": 0,
+      "cache_errors": 0,
+      "maintenance_dropped": 0,
+      "io_scope": "delegated SQLite calls, statements, pager and VFS callbacks; not physical IOPS",
+      "sqlite": {
+        "configuration": {
+          "busy_timeout_ms": 5000,
+          "cache_size": -2000,
+          "checkpoint_fullfsync": 0,
+          "fullfsync": 0,
+          "is_autocommit": true,
+          "journal_mode": "delete",
+          "locking_mode": "normal",
+          "synchronous": 2,
+          "wal_autocheckpoint_pages": 1000
+        },
+        "sql_statements": 1,
+        "sql_categories": {
+          "SELECT": 1
+        },
+        "pager": {
+          "cache_hits": 3,
+          "cache_misses": 0,
+          "cache_spills": 0,
+          "page_writes": 0
+        },
+        "page_size": 4096,
+        "sql_profile": {
+          "SELECT": {
+            "completed": 1,
+            "elapsed_ns": 0,
+            "invalid_elapsed": 0,
+            "max_elapsed_ns": 0,
+            "overflow": false
+          }
+        },
+        "zero_sql_profile_categories": [
+          "BEGIN",
+          "COMMIT",
+          "DELETE",
+          "INSERT",
+          "OTHER",
+          "PRAGMA",
+          "ROLLBACK",
+          "UPDATE"
+        ],
+        "connection_lock": {
+          "completed": 1,
+          "elapsed_ns": 83,
+          "errors": 0,
+          "invalid_elapsed": 0,
+          "max_elapsed_ns": 83,
+          "overflow": false
+        },
+        "connection_lock_hold": {
+          "completed": 1,
+          "elapsed_ns": 34084,
+          "invalid_elapsed": 0,
+          "max_elapsed_ns": 34084,
+          "overflow": false
+        },
+        "vfs_rows": [
+          {
+            "name": "main_database.read",
+            "completed": 2,
+            "confirmed_bytes": 3696,
+            "requested_bytes": 3696,
+            "errors": 0,
+            "short_reads": 0,
+            "elapsed_ns": 2417,
+            "max_elapsed_ns": 1333
+          }
+        ],
+        "zero_vfs_rows": [
+          "main_database.write",
+          "main_database.sync",
+          "main_journal.read",
+          "main_journal.write",
+          "main_journal.sync",
+          "wal.read",
+          "wal.write",
+          "wal.sync",
+          "temporary.read",
+          "temporary.write",
+          "temporary.sync",
+          "other.read",
+          "other.write",
+          "other.sync"
+        ]
+      },
+      "cache_spans": [
+        {
+          "bytes": 0,
+          "calls": 2,
+          "cancelled": 0,
+          "elapsed_ns": 18125,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.ram.lookup",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 2
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 51542,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.disk.lookup",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        }
+      ],
+      "zero_cache_spans": [
+        "blob_cache.miss.admission_wait",
+        "blob_cache.miss.singleflight_wait",
+        "blob_cache.peer.connection_lock_wait",
+        "blob_cache.peer.connection_establish",
+        "blob_cache.peer.request_byte_admission_wait",
+        "blob_cache.peer.open_bi",
+        "blob_cache.peer.request_send",
+        "blob_cache.peer.response_receive",
+        "blob_cache.peer.get",
+        "blob_cache.peer.get_miss"
+      ]
+    },
+    {
+      "phase": "eviction-replacement",
+      "complete_bytes": true,
+      "delegated_gets": 1,
+      "delegated_success": 1,
+      "delegated_errors": 0,
+      "delegated_cancelled": 0,
+      "backing_bytes": 4096,
+      "local_hits": 0,
+      "peer_hits": 0,
+      "peer_get_attempts": 0,
+      "backing_fetches": 1,
+      "hit_bytes": 0,
+      "cache_errors": 0,
+      "maintenance_dropped": 0,
+      "io_scope": "delegated SQLite calls, statements, pager and VFS callbacks; not physical IOPS",
+      "sqlite": {
+        "configuration": {
+          "busy_timeout_ms": 5000,
+          "cache_size": -2000,
+          "checkpoint_fullfsync": 0,
+          "fullfsync": 0,
+          "is_autocommit": true,
+          "journal_mode": "delete",
+          "locking_mode": "normal",
+          "synchronous": 2,
+          "wal_autocheckpoint_pages": 1000
+        },
+        "sql_statements": 1,
+        "sql_categories": {
+          "SELECT": 1
+        },
+        "pager": {
+          "cache_hits": 3,
+          "cache_misses": 0,
+          "cache_spills": 0,
+          "page_writes": 0
+        },
+        "page_size": 4096,
+        "sql_profile": {
+          "SELECT": {
+            "completed": 1,
+            "elapsed_ns": 0,
+            "invalid_elapsed": 0,
+            "max_elapsed_ns": 0,
+            "overflow": false
+          }
+        },
+        "zero_sql_profile_categories": [
+          "BEGIN",
+          "COMMIT",
+          "DELETE",
+          "INSERT",
+          "OTHER",
+          "PRAGMA",
+          "ROLLBACK",
+          "UPDATE"
+        ],
+        "connection_lock": {
+          "completed": 1,
+          "elapsed_ns": 292,
+          "errors": 0,
+          "invalid_elapsed": 0,
+          "max_elapsed_ns": 292,
+          "overflow": false
+        },
+        "connection_lock_hold": {
+          "completed": 1,
+          "elapsed_ns": 43625,
+          "invalid_elapsed": 0,
+          "max_elapsed_ns": 43625,
+          "overflow": false
+        },
+        "vfs_rows": [
+          {
+            "name": "main_database.read",
+            "completed": 2,
+            "confirmed_bytes": 3696,
+            "requested_bytes": 3696,
+            "errors": 0,
+            "short_reads": 0,
+            "elapsed_ns": 2334,
+            "max_elapsed_ns": 1250
+          }
+        ],
+        "zero_vfs_rows": [
+          "main_database.write",
+          "main_database.sync",
+          "main_journal.read",
+          "main_journal.write",
+          "main_journal.sync",
+          "wal.read",
+          "wal.write",
+          "wal.sync",
+          "temporary.read",
+          "temporary.write",
+          "temporary.sync",
+          "other.read",
+          "other.write",
+          "other.sync"
+        ]
+      },
+      "cache_spans": [
+        {
+          "bytes": 0,
+          "calls": 2,
+          "cancelled": 0,
+          "elapsed_ns": 17667,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.ram.lookup",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 2
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 48667,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.disk.lookup",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        }
+      ],
+      "zero_cache_spans": [
+        "blob_cache.miss.admission_wait",
+        "blob_cache.miss.singleflight_wait",
+        "blob_cache.peer.connection_lock_wait",
+        "blob_cache.peer.connection_establish",
+        "blob_cache.peer.request_byte_admission_wait",
+        "blob_cache.peer.open_bi",
+        "blob_cache.peer.request_send",
+        "blob_cache.peer.response_receive",
+        "blob_cache.peer.get",
+        "blob_cache.peer.get_miss"
+      ]
+    },
+    {
+      "phase": "evicted-block-after-restart",
+      "complete_bytes": true,
+      "delegated_gets": 1,
+      "delegated_success": 1,
+      "delegated_errors": 0,
+      "delegated_cancelled": 0,
+      "backing_bytes": 4096,
+      "local_hits": 0,
+      "peer_hits": 0,
+      "peer_get_attempts": 0,
+      "backing_fetches": 1,
+      "hit_bytes": 0,
+      "cache_errors": 0,
+      "maintenance_dropped": 0,
+      "io_scope": "delegated SQLite calls, statements, pager and VFS callbacks; not physical IOPS",
+      "sqlite": {
+        "configuration": {
+          "busy_timeout_ms": 5000,
+          "cache_size": -2000,
+          "checkpoint_fullfsync": 0,
+          "fullfsync": 0,
+          "is_autocommit": true,
+          "journal_mode": "delete",
+          "locking_mode": "normal",
+          "synchronous": 2,
+          "wal_autocheckpoint_pages": 1000
+        },
+        "sql_statements": 1,
+        "sql_categories": {
+          "SELECT": 1
+        },
+        "pager": {
+          "cache_hits": 3,
+          "cache_misses": 0,
+          "cache_spills": 0,
+          "page_writes": 0
+        },
+        "page_size": 4096,
+        "sql_profile": {
+          "SELECT": {
+            "completed": 1,
+            "elapsed_ns": 0,
+            "invalid_elapsed": 0,
+            "max_elapsed_ns": 0,
+            "overflow": false
+          }
+        },
+        "zero_sql_profile_categories": [
+          "BEGIN",
+          "COMMIT",
+          "DELETE",
+          "INSERT",
+          "OTHER",
+          "PRAGMA",
+          "ROLLBACK",
+          "UPDATE"
+        ],
+        "connection_lock": {
+          "completed": 1,
+          "elapsed_ns": 41,
+          "errors": 0,
+          "invalid_elapsed": 0,
+          "max_elapsed_ns": 41,
+          "overflow": false
+        },
+        "connection_lock_hold": {
+          "completed": 1,
+          "elapsed_ns": 27209,
+          "invalid_elapsed": 0,
+          "max_elapsed_ns": 27209,
+          "overflow": false
+        },
+        "vfs_rows": [
+          {
+            "name": "main_database.read",
+            "completed": 2,
+            "confirmed_bytes": 3696,
+            "requested_bytes": 3696,
+            "errors": 0,
+            "short_reads": 0,
+            "elapsed_ns": 2166,
+            "max_elapsed_ns": 1208
+          }
+        ],
+        "zero_vfs_rows": [
+          "main_database.write",
+          "main_database.sync",
+          "main_journal.read",
+          "main_journal.write",
+          "main_journal.sync",
+          "wal.read",
+          "wal.write",
+          "wal.sync",
+          "temporary.read",
+          "temporary.write",
+          "temporary.sync",
+          "other.read",
+          "other.write",
+          "other.sync"
+        ]
+      },
+      "cache_spans": [
+        {
+          "bytes": 0,
+          "calls": 2,
+          "cancelled": 0,
+          "elapsed_ns": 18042,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.ram.lookup",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 2
+        },
+        {
+          "bytes": 0,
+          "calls": 1,
+          "cancelled": 0,
+          "elapsed_ns": 40334,
+          "error": 0,
+          "in_flight": 0,
+          "name": "blob_cache.disk.lookup",
+          "returned_row_observations": 0,
+          "returned_rows": 0,
+          "success": 1
+        }
+      ],
+      "zero_cache_spans": [
+        "blob_cache.miss.admission_wait",
+        "blob_cache.miss.singleflight_wait",
+        "blob_cache.peer.connection_lock_wait",
+        "blob_cache.peer.connection_establish",
+        "blob_cache.peer.request_byte_admission_wait",
+        "blob_cache.peer.open_bi",
+        "blob_cache.peer.request_send",
+        "blob_cache.peer.response_receive",
+        "blob_cache.peer.get",
+        "blob_cache.peer.get_miss"
+      ]
+    }
+  ],
+  "gates": [
+    {
+      "kind": "sqlitecache",
+      "receipt_sha256": "76c175f242b9f2432c56afc99a14fc8db6ce0ff2d833ddce236a74d71b6f9746",
+      "head": "0725e9460e056fe0f97e3676413e23db1bd75242",
+      "elapsed_seconds": 6.021226708020549,
+      "returncode": 0,
+      "source_unchanged": true,
+      "lifecycle_settled": true,
+      "rust_tests_passed": 1,
+      "logs": {
+        "stderr": {
+          "sha256": "d15831823229ccdb46f828810cdecea82000efac1b5a5ea15f76ca3482dcde6e",
+          "bytes": 396,
+          "overflow": false
+        },
+        "stdout": {
+          "sha256": "d8c52eec1486b30c67242dff5867767d83575c8e4a74d4e18f18cdf3c54ef33f",
+          "bytes": 183958,
+          "overflow": false
+        }
+      }
+    },
+    {
+      "kind": "cachetests",
+      "receipt_sha256": "14f97f4d8e95f300842d35efca6d41ee7b3ba3beb2433b0e766bb8d9448387fd",
+      "head": "00da60103da3afb5111e244403ddf5a4edd6ea1d",
+      "elapsed_seconds": 9.426185625023209,
+      "returncode": 0,
+      "source_unchanged": true,
+      "lifecycle_settled": true,
+      "rust_tests_passed": 48,
+      "logs": {
+        "stderr": {
+          "sha256": "ee64cb0d5ac38448cb1993da551361d49399d6eb792a8ec9c2412875701414d6",
+          "bytes": 662,
+          "overflow": false
+        },
+        "stdout": {
+          "sha256": "25bcb8f42eab27d14498a99530f9e32d9a425c1a5c1f75a2fa36c020be6d138d",
+          "bytes": 5941,
+          "overflow": false
+        }
+      }
+    },
+    {
+      "kind": "cachemetricsclippy",
+      "receipt_sha256": "92aca2862710776b8a874f74bdc164ae9ea27ca60bc0d41da374dbdf6666bc5d",
+      "head": "00da60103da3afb5111e244403ddf5a4edd6ea1d",
+      "elapsed_seconds": 19.85312054195674,
+      "returncode": 0,
+      "source_unchanged": true,
+      "lifecycle_settled": true,
+      "rust_tests_passed": 0,
+      "logs": {
+        "stderr": {
+          "sha256": "b563f831fc8bcf437862c6a1de982f593c80b039041a35f3b2707c8037844045",
+          "bytes": 3568,
+          "overflow": false
+        },
+        "stdout": {
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0,
+          "overflow": false
+        }
+      }
+    }
+  ],
+  "parent_controls": {
+    "passed": 78,
+    "receipt_sha256": "d4bc5d8df4590710efc0d55eef12e07535fcf74b79a1a6a6a23ffbed4993367b"
+  },
+  "limits": [
+    "Selected read pattern includes twenty RAM repetitions; hit ratio is not a production forecast.",
+    "VFS callbacks are SQLite I/O calls, not physical SSD IOPS. Local cache disk I/O is outside SQLite VFS counters.",
+    "No idle/all-active 10000-client, ten-CLI-server, ten-million-file, other-provider, power-loss or native host-mount qualification.",
+    "Recorder allocation controls exist separately; this fixture does not measure total allocations."
+  ],
+  "failed_draft": {
+    "receipt_sha256": "ef34e86c39550e4568391aa2dc4ba28622ef6b1a5d922e424c80444e5cc8dcfd",
+    "result": "disk-only deferred fill refused payload+128 reservation; full bytes returned from SQLite; final helper provides 8192 bytes of headroom and explicit rejection phase retains original limit"
+  },
+  "projection": "Fixed numeric phase rows only; omitted row bodies have observed zero calls/completions and their names are retained. Histograms and complete raw phase evidence retained privately.",
+  "earlier_component_gate": {
+    "receipt_sha256": "566c480bba761852b5068279cc2e4b5e339dd616707915e6e24ef49888693b3e",
+    "same_fixture_sha256": "9633de6974f8249cc02cec76a2f325072fb722b5d104543d140ce869d40b148a",
+    "purpose": "First passing whole fixture before CI wiring and native test commit; final gate uses updated parent inputs."
+  }
+}

@@ -52,6 +52,16 @@ class ResultControls(unittest.TestCase):
 
 
 class CacheStageSelectors(unittest.TestCase):
+    def test_persistent_sqlite_cache_has_one_exact_profiled_case(self):
+        name = "sqlite_backed_authenticated_cache_failures_preserve_exact_backing_savings"
+        command, limit, profile, trace = parent.COMMANDS["sqlitecache"]
+        self.assertEqual(parent.EXACT_CASES["sqlitecache"], name)
+        self.assertEqual(command[command.index("--exact") + 1], name)
+        self.assertIn("--ignored", command)
+        self.assertIn("--test-threads=1", command)
+        self.assertEqual(command[command.index("--test") + 1], "distributed_failure")
+        self.assertEqual((limit, profile, trace), (180, 1, 0))
+
     def test_peer_request_stages_require_one_profiled_executed_case(self):
         name = "peer::tests::peer_request_stage_metrics_preserve_bytes_outcomes_and_cancellation"
         command, limit, profile, trace = parent.COMMANDS["peeriometrics"]

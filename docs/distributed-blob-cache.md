@@ -182,13 +182,16 @@ normal completion; cancellation is rejected. Before restart, two attempts are
 complete with one error and no cancelled or in-flight PUTs. These barriers keep
 background placement from overlapping the recovered-peer read.
 
-The retained diagnostic failure without those barriers verified all recovered
+The earlier diagnostic failure without those barriers verified all recovered
 disk bytes with zero RAM usage, but an earlier placement PUT remained in flight.
 That PUT failed after about 402 ms and the overlapping GET exhausted its 400 ms
 budget, adding a backing GET. GET/PUT outcome and timing logs expose this overlap;
 they do not separately measure connection-mutex wait and handshake time. The
-connection mutex is held across establishment. This test correction isolates
-fault phases; production contention during reconnect remains follow-up work.
+connection mutex was held across establishment. The subsequent
+[reconnect comparison](benchmarks/peer-reconnect-isolation-20260927/README.md)
+separates read and replica connection roles and tests a read while replica
+establishment remains pending. Its single controlled observation reduced the
+read from 402.80 ms and one backing GET to 6.04 ms and zero backing GETs.
 The direct disk oracle also warms the OS page cache, so these elapsed times do
 not qualify cold physical disk latency.
 

@@ -1,5 +1,11 @@
 # Finding remote-drive bottlenecks
 
+The [persistent SQLite cache fault measurements](benchmarks/sqlite-cache-failure-metrics-20260928/README.md)
+join actual backing GETs, SQL statements, pager activity and VFS callbacks across
+14 cache phases. They also retain a disk-admission rejection that returned full
+bytes while dropping the optional fill. This separates cache admission and peer
+faults from backing-store I/O, with fresh payload/EOF and authority checks.
+
 The [SQLite journal comparison](benchmarks/sqlite-journal-diagnostic-20260928/README.md)
 adds a test-only owned-file DELETE/WAL selector and verifies actual FULL settings
 on all provider connections. It retains database/WAL/SHM size gauges and a
