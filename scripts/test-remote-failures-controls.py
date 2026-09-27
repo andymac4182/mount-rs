@@ -52,6 +52,23 @@ class ResultControls(unittest.TestCase):
 
 
 class CacheStageSelectors(unittest.TestCase):
+    def test_quinn_close_regressions_require_the_selected_executed_case(self):
+        expected = {
+            "quinnordinary": ("tests::ordinary_initial_then_close_drains_without_waiting_for_idle_timeout", False),
+            "quinnclose": ("tests::first_close_initial_drains_without_waiting_for_idle_timeout", False),
+            "quinnruntimeclose": ("tests::first_close_initial_releases_real_endpoint_within_close_grace", True),
+        }
+        for kind, (name, ignored) in expected.items():
+            command, limit, profile, trace = parent.COMMANDS[kind]
+            self.assertEqual((limit, profile, trace), (180, 0, 0))
+            self.assertEqual(command[command.index("--test") + 1], "quinn_close")
+            self.assertEqual(command[command.index("--exact") + 1], name)
+            self.assertEqual("--ignored" in command, ignored)
+            self.assertEqual(parent.EXACT_CASES[kind], name)
+            self.assertTrue(parent.exact_case_passed(f"running 1 test\ntest {name} ... ok\n{SUMMARY}", name))
+            self.assertFalse(parent.exact_case_passed("running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored;\n", name))
+            self.assertFalse(parent.exact_case_passed(f"running 1 test\ntest {name} ... FAILED\ntest result: FAILED. 0 passed; 1 failed; 0 ignored;\n", name))
+
     def test_profiled_exact_cases_have_one_literal_selector(self):
         expected = {
             "cachemetrics": "cache_lookup_stage_metrics_preserve_bytes_and_cancellation",

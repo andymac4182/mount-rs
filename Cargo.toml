@@ -39,6 +39,12 @@ members = [
     "crates/mount-rs-remote-client",
 ]
 resolver = "3"
+exclude = ["vendor/quinn-proto-0.11.18"]
+
+[patch.crates-io]
+# Preserve natural QUIC draining when the first Initial contains CLOSE.
+# Remove this scoped patch when a fixed upstream release passes our regressions.
+quinn-proto = { path = "vendor/quinn-proto-0.11.18" }
 
 # Rust 1.95 can emit a misaligned LINKEDIT string pool when stripping the
 # macOS N-API cdylib; dyld on macOS 27 then refuses to load the addon.
