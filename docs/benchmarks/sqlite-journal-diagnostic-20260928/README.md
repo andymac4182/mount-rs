@@ -1,6 +1,6 @@
 # SQLite journal comparison — 2026-09-28
 
-This compares **DELETE and WAL with FULL durability** on disposable local SQLite
+This compares **DELETE and WAL with `synchronous=FULL`** on disposable local SQLite
 Drives. Production defaults are unchanged. The [report](report.json) retains
 measurements, source/binary bindings, receipts and excluded preliminary runs.
 
