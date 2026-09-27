@@ -173,6 +173,9 @@ jobs:
       - name: Verify authenticated peer connection stages through the owned parent
         timeout-minutes: 5
         run: python3 -B scripts/test-remote-failures.py peermetrics
+      - name: Verify peer read reconnect bypasses pending replica handshake through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py peerreconnect
       - name: Verify warmed storage recorder allocations through the owned parent
         timeout-minutes: 5
         run: python3 -B scripts/test-remote-failures.py storagealloc

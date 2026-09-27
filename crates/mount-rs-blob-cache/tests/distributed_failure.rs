@@ -1571,6 +1571,307 @@ async fn authenticated_hierarchy_saves_reads_and_reconnects_to_persisted_peer() 
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "isolated process: MOUNT_RS_PROFILE_IO=1, storage/request traces=0"]
+async fn peer_read_reconnect_bypasses_pending_replica_handshake() {
+    use mount_rs_core::diagnostics::{profile, storage};
+    use stage_metrics::*;
+    timeout(BOUND, async {
+        assert!(
+            storage::enabled() && profile::enabled(),
+            "parent must isolate the enabled profiler"
+        );
+        let mut checks = Checks::default();
+        let mut pair = Pair::new(0, 32768);
+        let cleanup = pair.cleanup_completion();
+        let backing = Backing::new();
+        let bytes: Vec<u8> = (0..=255).cycle().take(786).collect();
+        let id = backing.seed(&bytes);
+        pair.a_cache
+            .as_ref()
+            .unwrap()
+            .insert(&scope(), &id, &bytes, IntegrityPolicy::Sha256Prefixed)
+            .unwrap();
+        assert_eq!(pair.a_cache.as_ref().unwrap().usage().0, 0);
+        println!("peer_read_reconnect_progress=before_stop_a");
+        pair.stop_a().await;
+        println!("peer_read_reconnect_progress=after_stop_a");
+
+        println!("peer_read_reconnect_progress=before_blackhole_bind");
+        let blackhole = tokio::net::UdpSocket::bind(pair.address).await.unwrap();
+        println!("peer_read_reconnect_progress=after_blackhole_bind");
+        let counted = pair.counted.clone();
+        let peer = PeerId("a".into());
+        let cache_scope = scope();
+        let replica_bytes = b"pending replica\0\xffmust not serialize the read";
+        let replica_id = block(replica_bytes);
+        let before = storage::snapshot();
+        let hits = profile::snapshot();
+        let mut replica = counted.put(&peer, &cache_scope, &replica_id, replica_bytes);
+        println!("peer_read_reconnect_progress=before_replica_first_poll");
+        poll_fn(|cx| {
+            assert!(
+                replica.as_mut().poll(cx).is_pending(),
+                "replica PUT first polls Pending against the owned blackhole"
+            );
+            Poll::Ready(())
+        })
+        .await;
+        println!("peer_read_reconnect_progress=after_replica_first_poll");
+        let mut datagram = [0u8; 2048];
+        println!("peer_read_reconnect_progress=before_initial_receive");
+        let (initial_bytes, sender) = timeout(
+            Duration::from_secs(3),
+            blackhole.recv_from(&mut datagram),
+        )
+        .await
+        .expect("bounded owned UDP observation of the replica Initial")
+        .unwrap();
+        println!("peer_read_reconnect_progress=after_initial_receive");
+        assert_eq!(sender, pair.b.local_addr().unwrap());
+        assert!(initial_bytes >= 1200, "QUIC Initial datagram is padded");
+        assert_eq!(datagram[0] & 0xf0, 0xc0, "QUIC v1 Initial long header");
+        assert_eq!(&datagram[1..5], &[0, 0, 0, 1], "QUIC v1 version");
+        let initial_pending = storage::snapshot();
+        checks.pending(
+            "replica Initial observed",
+            1,
+            vec![(LOCK, 0), (ESTABLISH, 1)],
+        );
+        // Never poll this future again: elapsed deadlines cannot release its
+        // negotiation guard until it is polled or dropped. The Quinn driver may
+        // finish its handshake after restart; this holds the future's guard and
+        // unfinished stage, rather than claiming the wire handshake stays pending.
+        drop(blackhole);
+        println!("peer_read_reconnect_progress=before_restart_a");
+        pair.restart_a();
+        println!("peer_read_reconnect_progress=after_restart_a");
+        // The consumed Initial was the only original datagram delivered to the
+        // blackhole. Observe the restarted server owning an incoming attempt before
+        // cancellation can make an Initial CLOSE its first received packet.
+        // Only the retained replica is talking to A at this point. The accept
+        // loop upgrades its Weak service only after receiving an incoming. A
+        // second service owner proves that an incoming reached A; it does not
+        // claim that TLS or the spawned task has completed.
+        // No Connection handle is cloned and the replica future stays unpolled.
+        timeout(Duration::from_secs(3), async {
+            let mut tick = tokio::time::interval(Duration::from_millis(1));
+            loop {
+                if Arc::strong_count(pair.a.as_ref().unwrap()) > 1 {
+                    break;
+                }
+                tick.tick().await;
+            }
+        })
+        .await
+        .expect("retransmitted replica Initial reached restarted server");
+        println!("peer_read_reconnect_progress=incoming_replica_observed");
+        let local = pair.a_cache.as_ref().unwrap();
+        assert_eq!(local.usage().0, 0);
+        assert!(local.path_for(&scope(), &id).exists());
+        assert_eq!(
+            local
+                .get(&scope(), &id, IntegrityPolicy::Sha256Prefixed)
+                .unwrap(),
+            bytes
+        );
+        assert_eq!(local.usage().0, 0, "persisted byte oracle does not admit RAM");
+        assert_eq!(pair.b_cache.usage().2, 0, "requester starts cold");
+
+        let runtime = pair.runtime(false);
+        println!("peer_read_reconnect_progress=before_store_prepare");
+        let store = pair.store(backing.clone(), runtime.clone()).await;
+        println!("peer_read_reconnect_progress=after_store_prepare");
+        let started = Instant::now();
+        println!("peer_read_reconnect_progress=before_public_get");
+        assert_eq!(store.get(&id).await.unwrap(), bytes);
+        println!("peer_read_reconnect_progress=after_public_get");
+        let elapsed_ns = started.elapsed().as_nanos();
+        let read_backing_gets = backing.reads();
+        let read_backing_bytes = backing.bytes.load(Ordering::SeqCst);
+        let read_peer_gets = counted.gets.load(Ordering::SeqCst);
+        let read_metrics = store.metrics().snapshot();
+        let pending_put = counted.put_snapshot();
+        let read_pending = storage::snapshot();
+        checks.pending(
+            "replica retained after read",
+            1,
+            vec![(LOCK, 0), (ESTABLISH, 1)],
+        );
+        println!("peer_read_reconnect_progress=before_drop_replica_put");
+        drop(replica);
+        println!("peer_read_reconnect_progress=after_drop_replica_put");
+        let cancelled_put = counted.put_snapshot();
+        let reconnect = storage::snapshot().delta(&before).unwrap();
+        checks.phase(
+            "reconnect while replica pending",
+            &before,
+            vec![
+                Expected(ADMISSION, 1, 0, 0, 0),
+                Expected(FLIGHT, 1, 0, 0, 0),
+                Expected(RAM, 2, 0, 0, 0),
+                Expected(DISK, 1, 0, 0, 0),
+                Expected(LOCK, 2, 0, 0, 0),
+                Expected(ESTABLISH, 1, 0, 1, 0),
+            ],
+        );
+        checks.hit("reconnect while replica pending", &hits, RAM_HIT, 0, 0);
+        checks.hit("reconnect while replica pending", &hits, DISK_HIT, 0, 0);
+
+        let before = storage::snapshot();
+        println!("peer_read_reconnect_progress=before_direct_get");
+        assert_eq!(
+            counted.get(&peer, &cache_scope, &id).await.unwrap().unwrap(),
+            bytes
+        );
+        println!("peer_read_reconnect_progress=after_direct_get");
+        checks.phase(
+            "authenticated read connection reuse",
+            &before,
+            vec![Expected(LOCK, 1, 0, 0, 0), Expected(ESTABLISH, 0, 0, 0, 0)],
+        );
+        let before = storage::snapshot();
+        println!("peer_read_reconnect_progress=before_healthy_put");
+        counted
+            .put(&peer, &cache_scope, &replica_id, replica_bytes)
+            .await
+            .unwrap();
+        println!("peer_read_reconnect_progress=after_healthy_put");
+        checks.phase(
+            "healthy PUT connection reuse",
+            &before,
+            vec![Expected(LOCK, 1, 0, 0, 0), Expected(ESTABLISH, 0, 0, 0, 0)],
+        );
+        let settled_put = counted.put_snapshot();
+        let before = storage::snapshot();
+        println!("peer_read_reconnect_progress=before_replica_readback_get");
+        assert_eq!(
+            counted
+                .get(&peer, &cache_scope, &replica_id)
+                .await
+                .unwrap()
+                .unwrap(),
+            replica_bytes
+        );
+        println!("peer_read_reconnect_progress=after_replica_readback_get");
+        checks.phase(
+            "healthy PUT full byte readback",
+            &before,
+            vec![Expected(LOCK, 1, 0, 0, 0), Expected(ESTABLISH, 0, 0, 0, 0)],
+        );
+        let mut forbidden = cache_scope.clone();
+        forbidden.identity.partition = "forbidden".into();
+        let before = storage::snapshot();
+        println!("peer_read_reconnect_progress=before_partition_control");
+        assert!(
+            pair.b.get(&peer, &forbidden, &id).await.is_err(),
+            "reused authenticated connection preserves A's inbound partition allowance"
+        );
+        println!("peer_read_reconnect_progress=after_partition_control");
+        checks.phase(
+            "reused connection partition denial",
+            &before,
+            vec![Expected(LOCK, 1, 0, 0, 0), Expected(ESTABLISH, 0, 0, 0, 0)],
+        );
+        let total_peer_gets = counted.gets.load(Ordering::SeqCst);
+        drop(store);
+        println!("peer_read_reconnect_progress=before_runtime_shutdown");
+        runtime.shutdown().await;
+        println!("peer_read_reconnect_progress=after_runtime_shutdown");
+        drop(runtime);
+        drop(counted);
+        println!("peer_read_reconnect_progress=before_pair_shutdown");
+        let requester = pair.b.clone();
+        tokio::join!(
+            async {
+                pair.stop_a().await;
+                println!("peer_read_reconnect_progress=after_server_shutdown");
+            },
+            async {
+                requester.shutdown().await;
+                println!("peer_read_reconnect_progress=after_requester_shutdown");
+            }
+        );
+        drop(requester);
+        pair.b_cache.shutdown().await;
+        pair.cleaned = true;
+        println!("peer_read_reconnect_progress=after_pair_shutdown");
+        drop(pair);
+        println!("peer_read_reconnect_progress=before_cleanup_receipt");
+        timeout(CLEANUP_BOUND, cleanup)
+            .await
+            .expect("bounded reconnect cache owner cleanup")
+            .expect("reconnect cleanup observed")
+            .expect("all reconnect cache owners released");
+        println!("peer_read_reconnect_progress=after_cleanup_receipt");
+        println!(
+            "peer_read_reconnect_behavior_oracles=complete payload_bytes={} initial_datagram_bytes={} authenticated_reuse_bytes={} healthy_replica_readback_bytes={} partition_denied=true cleanup_observed=true",
+            bytes.len(), initial_bytes, bytes.len(), replica_bytes.len()
+        );
+        // Preserve actual stage/gauge evidence even when the amplification
+        // oracle below is RED. Labels are authored constants, never identities.
+        for (phase, snapshot) in [
+            ("replica Initial observed", &initial_pending),
+            ("replica retained after read", &read_pending),
+            ("reconnect while replica pending", &reconnect),
+        ] {
+            for name in [ADMISSION, FLIGHT, RAM, DISK, LOCK, ESTABLISH] {
+                let row = snapshot.entries.iter().find(|row| row.name == name).unwrap();
+                println!(
+                    "MOUNT_RS_CACHE_STAGE {{\"kind\":\"reconnect_observation\",\"phase\":\"{phase}\",\"name\":\"{name}\",\"available\":true,\"calls\":{},\"success\":{},\"error\":{},\"cancelled\":{},\"bytes\":{},\"elapsed_ns\":{},\"in_flight\":{},\"global_in_flight\":{},\"histogram_total\":{},\"returned_rows\":{},\"returned_row_observations\":{}}}",
+                    row.calls, row.success, row.error, row.cancelled, row.bytes,
+                    row.elapsed_ns, row.in_flight, snapshot.in_flight,
+                    row.latency_log2_us.iter().sum::<u64>(), row.returned_rows,
+                    row.returned_row_observations
+                );
+            }
+        }
+        println!(
+            "MOUNT_RS_CACHE_STAGE {{\"kind\":\"reconnect_read\",\"phase\":\"reconnect while replica pending\",\"full_bytes\":{},\"elapsed_ns\":{elapsed_ns},\"backing_get_calls\":{read_backing_gets},\"backing_bytes\":{read_backing_bytes},\"peer_get_attempts\":{read_peer_gets},\"peer_hits\":{},\"backing_fetches\":{},\"cache_errors\":{},\"replica_started\":{},\"replica_completed\":{},\"replica_errors\":{},\"replica_cancelled\":{},\"replica_in_flight\":{}}}",
+            bytes.len(), read_metrics.peer_hits, read_metrics.backing_fetches,
+            read_metrics.cache_errors, pending_put.started,
+            pending_put.completed, pending_put.errors, pending_put.cancelled,
+            pending_put.inflight
+        );
+        for (phase, observation) in [
+            ("replica retained after read", pending_put),
+            ("late replica cancellation", cancelled_put),
+            ("healthy PUT connection reuse", settled_put),
+        ] {
+            println!(
+                "MOUNT_RS_CACHE_STAGE {{\"kind\":\"replica_put\",\"phase\":\"{phase}\",\"started\":{},\"completed\":{},\"error\":{},\"cancelled\":{},\"in_flight\":{}}}",
+                observation.started, observation.completed, observation.errors,
+                observation.cancelled, observation.inflight
+            );
+        }
+        assert_eq!(read_backing_bytes, read_backing_gets * bytes.len() as u64);
+        assert_eq!(read_backing_gets, 0, "pending replica must not amplify read backing GETs");
+        assert_eq!(read_backing_bytes, 0);
+        assert_eq!(read_peer_gets, 1, "one actual peer query for the public cold read");
+        assert_eq!(read_metrics.peer_hits, 1);
+        assert_eq!(read_metrics.backing_fetches, 0);
+        assert_eq!(read_metrics.cache_errors, 0);
+        assert_eq!(total_peer_gets, 3, "public cold read, authenticated reuse, and PUT readback");
+        assert_eq!(pending_put.started, 1);
+        assert_eq!(pending_put.completed, 0);
+        assert_eq!(pending_put.errors, 0);
+        assert_eq!(pending_put.cancelled, 0);
+        assert_eq!(pending_put.inflight, 1);
+        assert_eq!(cancelled_put.started, 1);
+        assert_eq!(cancelled_put.completed, 0);
+        assert_eq!(cancelled_put.errors, 0);
+        assert_eq!(cancelled_put.cancelled, 1);
+        assert_eq!(cancelled_put.inflight, 0);
+        assert_eq!(settled_put.started, 2);
+        assert_eq!(settled_put.completed, 1);
+        assert_eq!(settled_put.errors, 0);
+        assert_eq!(settled_put.cancelled, 1);
+        assert_eq!(settled_put.inflight, 0);
+        checks.verify();
+    })
+    .await
+    .expect("bounded isolated peer reconnect amplification qualification");
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "isolated process: MOUNT_RS_PROFILE_IO=1, storage/request traces=0"]
 async fn cache_lookup_stage_metrics_preserve_bytes_and_cancellation() {
     use mount_rs_core::diagnostics::{profile, storage};
     use stage_metrics::*;

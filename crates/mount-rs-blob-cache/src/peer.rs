@@ -67,11 +67,19 @@ pub struct QuicPeerConfig {
     pub transfer_bytes: usize,
     pub deadline: Duration,
 }
+/// Negotiation is isolated by role. Both slots may share one authenticated live
+/// connection. Each peer has at most two guarded negotiations and cached slots;
+/// Quinn can retain additional draining state after cancelled attempts.
+#[derive(Default)]
+struct PeerConnections {
+    reads: Mutex<Option<quinn::Connection>>,
+    placements: Mutex<Option<quinn::Connection>>,
+}
 pub struct QuicPeerTransport {
     endpoint: quinn::Endpoint,
     config: QuicPeerConfig,
     cache: Arc<LocalCache>,
-    connections: BTreeMap<PeerId, Arc<Mutex<Option<quinn::Connection>>>>,
+    connections: BTreeMap<PeerId, Arc<PeerConnections>>,
     permits: Arc<Semaphore>,
     inbound: Arc<Semaphore>,
     streams: Arc<Semaphore>,
@@ -159,7 +167,7 @@ impl QuicPeerTransport {
         let connections = config
             .trusted
             .keys()
-            .map(|peer| (peer.clone(), Arc::new(Mutex::new(None))))
+            .map(|peer| (peer.clone(), Arc::new(PeerConnections::default())))
             .collect();
         let result = Arc::new(Self {
             endpoint,
@@ -207,9 +215,14 @@ impl QuicPeerTransport {
             .map(|(id, _)| id.clone())
             .ok_or_else(error)
     }
-    async fn connection(&self, id: &PeerId) -> Result<quinn::Connection> {
+    async fn connection(&self, id: &PeerId, placement: bool) -> Result<quinn::Connection> {
         let peer = self.config.trusted.get(id).ok_or_else(error)?;
-        let slot = self.connections.get(id).ok_or_else(error)?;
+        let slots = self.connections.get(id).ok_or_else(error)?;
+        let (slot, other) = if placement {
+            (&slots.placements, &slots.reads)
+        } else {
+            (&slots.reads, &slots.placements)
+        };
         let mut slot = {
             let mut span = Span::new(Operation::BlobCachePeerConnectionLockWait);
             let slot = slot.lock().await;
@@ -219,6 +232,15 @@ impl QuicPeerTransport {
         if let Some(connection) = slot.as_ref()
             && connection.close_reason().is_none()
         {
+            return Ok(connection.clone());
+        }
+        // Slots are populated only after exact peer authentication below. Never
+        // wait for the other role: it may own a stalled cold negotiation.
+        if let Ok(other) = other.try_lock()
+            && let Some(connection) = other.as_ref()
+            && connection.close_reason().is_none()
+        {
+            *slot = Some(connection.clone());
             return Ok(connection.clone());
         }
         let mut span = Span::new(Operation::BlobCachePeerConnectionEstablish);
@@ -374,7 +396,7 @@ impl QuicPeerTransport {
                     .await
                     .map_err(|_| error())?,
             );
-            let connection = self.connection(peer).await?;
+            let connection = self.connection(peer, bytes.is_some()).await?;
             let (mut send, mut recv) = connection.open_bi().await.map_err(|_| error())?;
             let header = encode_header(
                 scope,
@@ -855,12 +877,18 @@ mod tests {
             let before = storage::snapshot();
             assert_eq!(peers.a.get(&peer,&peers.scope,&id).await.unwrap(),Some(bytes.to_vec()));
             checks.phase("reused authenticated connection",&before,vec![Expected(LOCK,1,0,0,0),Expected(ESTABLISH,0,0,0,0)]);
+            let connection_id = peers.a.connection(&peer,false).await.unwrap().stable_id();
+            let before = storage::snapshot();
+            peers.a.put(&peer,&peers.scope,&BlockId("placement reuse".into()),bytes).await.unwrap();
+            checks.phase("placement reuses authenticated read connection",&before,vec![Expected(LOCK,1,0,0,0),Expected(ESTABLISH,0,0,0,0)]);
+            assert_eq!(peers.a.connection(&peer,true).await.unwrap().stable_id(),connection_id);
+            assert_eq!(peers.b_cache.get(&peers.scope,&BlockId("placement reuse".into()),IntegrityPolicy::Opaque),Some(bytes.to_vec()));
             let mut denied = peers.scope.clone(); denied.identity.partition = "other".into();
             let before = storage::snapshot();
             assert!(peers.a.get(&peer,&denied,&id).await.is_err());
             checks.phase("partition rejected before connection",&before,vec![Expected(LOCK,0,0,0,0),Expected(ESTABLISH,0,0,0,0)]);
             let slot = peers.a.connections.get(&peer).unwrap().clone();
-            let held = slot.lock().await;
+            let held = slot.reads.lock().await;
             let before = storage::snapshot();
             let mut read = peers.a.get(&peer,&peers.scope,&id);
             poll_fn(|cx| { assert!(read.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
@@ -873,20 +901,69 @@ mod tests {
             let before = storage::snapshot();
             let mut put = peers.a.put(&blackhole,&peers.scope,&id,bytes);
             poll_fn(|cx| { assert!(put.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
-            assert!(peers.a.connections.get(&blackhole).unwrap().try_lock().is_err(),"cold PUT holds its existing connection slot");
+            assert!(peers.a.connections.get(&blackhole).unwrap().placements.try_lock().is_err(),"cold PUT holds only its placement negotiation slot");
             checks.pending("blackhole PUT establishment",1,vec![(LOCK,0),(ESTABLISH,1)]);
             let mut get = peers.a.get(&blackhole,&peers.scope,&id);
             poll_fn(|cx| { assert!(get.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
-            checks.pending("blackhole PUT and same-peer GET",2,vec![(LOCK,1),(ESTABLISH,1)]);
+            assert!(peers.a.connections.get(&blackhole).unwrap().reads.try_lock().is_err(),"cold GET owns its independent read negotiation slot");
+            checks.pending("blackhole PUT and same-peer GET",2,vec![(LOCK,0),(ESTABLISH,2)]);
             // A different peer's reused connection remains functional while the
-            // owned blackhole holds establishment and its same-peer GET queues.
+            // owned blackhole holds two independent role negotiations.
             assert_eq!(peers.a.get(&peer,&peers.scope,&id).await.unwrap(),Some(bytes.to_vec()));
             drop(get);
             checks.pending("blackhole PUT after GET cancellation",1,vec![(LOCK,0),(ESTABLISH,1)]);
             drop(put);
-            checks.phase("overlapping establishment cancellation",&before,vec![Expected(LOCK,2,0,1,0),Expected(ESTABLISH,0,0,1,0)]);
+            checks.phase("overlapping establishment cancellation",&before,vec![Expected(LOCK,3,0,0,0),Expected(ESTABLISH,0,0,2,0)]);
+            let blackhole_slots = peers.a.connections.get(&blackhole).unwrap();
+            assert!(blackhole_slots.reads.try_lock().is_ok());
+            assert!(blackhole_slots.placements.try_lock().is_ok());
+            let before = storage::snapshot();
+            let mut read = peers.a.get(&blackhole,&peers.scope,&id);
+            poll_fn(|cx| { assert!(read.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
+            let mut placement = peers.a.put(&blackhole,&peers.scope,&id,b"");
+            poll_fn(|cx| { assert!(placement.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
+            checks.pending("cold GET and empty PUT negotiate independently",2,vec![(LOCK,0),(ESTABLISH,2)]);
+            let mut same_lane = peers.a.get(&blackhole,&peers.scope,&id);
+            poll_fn(|cx| { assert!(same_lane.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
+            checks.pending("same read role coalesces behind negotiation",3,vec![(LOCK,1),(ESTABLISH,2)]);
+            drop(placement);
+            assert!(blackhole_slots.placements.try_lock().is_ok());
+            assert!(blackhole_slots.reads.try_lock().is_err());
+            checks.pending("read negotiation survives empty PUT cancellation",2,vec![(LOCK,1),(ESTABLISH,1)]);
+            drop(same_lane);
+            checks.pending("read negotiation survives same-role waiter cancellation",1,vec![(LOCK,0),(ESTABLISH,1)]);
+            drop(read);
+            checks.phase("reverse role negotiation and waiter cancellation",&before,vec![Expected(LOCK,2,0,1,0),Expected(ESTABLISH,0,0,2,0)]);
+            assert!(blackhole_slots.reads.try_lock().is_ok());
+            assert!(blackhole_slots.placements.try_lock().is_ok());
+            let before = storage::snapshot();
+            let mut owner = peers.a.get(&blackhole,&peers.scope,&id);
+            poll_fn(|cx| { assert!(owner.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
+            let mut waiter = peers.a.get(&blackhole,&peers.scope,&id);
+            poll_fn(|cx| { assert!(waiter.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
+            checks.pending("same read role has one negotiation",2,vec![(LOCK,1),(ESTABLISH,1)]);
+            drop(owner);
+            poll_fn(|cx| { assert!(waiter.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
+            checks.pending("waiter negotiates after owner cancellation",1,vec![(LOCK,0),(ESTABLISH,1)]);
+            assert!(blackhole_slots.reads.try_lock().is_err());
+            drop(waiter);
+            checks.phase("same role recovers from owner cancellation",&before,vec![Expected(LOCK,2,0,0,0),Expected(ESTABLISH,0,0,2,0)]);
+            assert!(blackhole_slots.reads.try_lock().is_ok());
             assert!(peers.blackhole.local_addr().unwrap().ip().is_loopback());
             peers.shutdown().await; drop(slot); drop(peers);
+            let peers = MetricPeers::new(false,false);
+            let before = storage::snapshot();
+            peers.a.put(&peer,&peers.scope,&id,b"").await.unwrap();
+            checks.phase("cold empty PUT authenticates placement",&before,vec![Expected(LOCK,1,0,0,0),Expected(ESTABLISH,1,0,0,0)]);
+            let placement_id = peers.a.connection(&peer,true).await.unwrap().stable_id();
+            let before = storage::snapshot();
+            assert_eq!(peers.a.get(&peer,&peers.scope,&id).await.unwrap(),Some(Vec::new()));
+            checks.phase("read reuses authenticated placement connection",&before,vec![Expected(LOCK,1,0,0,0),Expected(ESTABLISH,0,0,0,0)]);
+            assert_eq!(peers.a.connection(&peer,false).await.unwrap().stable_id(),placement_id);
+            let full_id = BlockId("placement full bytes".into());
+            peers.a.put(&peer,&peers.scope,&full_id,bytes).await.unwrap();
+            assert_eq!(peers.a.get(&peer,&peers.scope,&full_id).await.unwrap(),Some(bytes.to_vec()));
+            peers.shutdown().await; drop(peers);
             for unknown_ca in [false,true] {
                 let peers = MetricPeers::new(!unknown_ca,unknown_ca);
                 let rejected = BlockId("rejected".into()); let before = storage::snapshot();
@@ -1003,7 +1080,14 @@ mod tests {
         let peer = PeerId("b".into());
         let id = BlockId("opaque".into());
         assert!(a.get(&peer, &s, &id).await.unwrap().is_none());
+        let read_connection = a.connection(&peer, false).await.unwrap();
         a.put(&peer, &s, &id, b"binary\0bytes").await.unwrap();
+        let placement_connection = a.connection(&peer, true).await.unwrap();
+        assert_eq!(
+            read_connection.stable_id(),
+            placement_connection.stable_id(),
+            "healthy sequential reads and placements reuse one connection"
+        );
         assert_eq!(
             a.get(&peer, &s, &id).await.unwrap(),
             Some(b"binary\0bytes".to_vec())
@@ -1024,7 +1108,7 @@ mod tests {
         while let Some(result) = readers.join_next().await {
             assert_eq!(result.unwrap().unwrap(), Some(b"binary\0bytes".to_vec()));
         }
-        let connection = a.connection(&peer).await.unwrap();
+        let connection = a.connection(&peer, false).await.unwrap();
         let (mut stalled_send, mut stalled_recv) = connection.open_bi().await.unwrap();
         stalled_send
             .write_all(&encode(&s, &id, None, 1024).unwrap())

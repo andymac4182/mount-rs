@@ -69,6 +69,16 @@ class CacheStageSelectors(unittest.TestCase):
             self.assertTrue(parent.exact_case_passed(f"running 1 test\ntest {name} ... behavior_oracles=complete\nok\n{SUMMARY}", name))
             self.assertFalse(parent.exact_case_passed(f"running 1 test\ntest other ... ok\n{SUMMARY}", name))
 
+    def test_peer_reconnect_is_one_profiled_serial_integration_case(self):
+        name = "peer_read_reconnect_bypasses_pending_replica_handshake"
+        command, limit, profile, trace = parent.COMMANDS["peerreconnect"]
+        self.assertEqual((limit, profile, trace), (180, 1, 0))
+        self.assertEqual(command, ["./scripts/cargo-shared", "test", "-p", "mount-rs-blob-cache", "--test", "distributed_failure", "--locked", "--offline", "--", "--ignored", "--exact", name, "--test-threads=1", "--nocapture"])
+        self.assertEqual(parent.EXACT_CASES["peerreconnect"], name)
+        self.assertTrue(parent.exact_case_passed(f"running 1 test\ntest {name} ... behavior_oracles=complete\nok\n{SUMMARY}", name))
+        self.assertFalse(parent.exact_case_passed(f"running 1 test\ntest other ... ok\n{SUMMARY}", name))
+        self.assertFalse(parent.exact_case_passed("running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored;\n", name))
+
     def test_ready_future_baselines_are_separate_profile_processes(self):
         for kind, enabled in [("cacheprofileoff", 0), ("cacheprofileon", 1)]:
             command, limit, profile, trace = parent.COMMANDS[kind]
@@ -135,6 +145,106 @@ class CacheSlowLogControls(unittest.TestCase):
     def test_budget_and_threshold_are_enforced(self):
         self.assertIsNone(parent.cache_slow_logging_records(self.LINE*17))
         self.assertIsNone(parent.cache_slow_logging_records(self.LINE.replace("600000", "99999")))
+
+
+class GateFailureDiagnosticControls(unittest.TestCase):
+    def receipt(self, **changes):
+        receipt = {
+            "returncode": 101, "owned_child_reaped": True,
+            "owned_group_absent": True, "pipes_eof": True,
+            "signal_decisions_finished": True, "deadline_exceeded": False,
+            "sticky_unknown": [], "source_unchanged": True,
+            "primary_failure": None,
+            "logs": {"stdout": {"overflow": False}, "stderr": {"overflow": False}},
+        }
+        receipt.update(changes)
+        return receipt
+
+    def expected(self, failure_class="unclassified", **changes):
+        diagnostic = {
+            "kind": "storagealloc", "failure_class": failure_class,
+            "returncode": 101, "deadline_exceeded": False,
+            "lifecycle_unsettled": False, "sticky_unknown": False,
+            "source_changed": False, "output_overflow": False,
+        }
+        diagnostic.update(changes)
+        return diagnostic
+
+    def diagnostic(self, stdout=b"", stderr=b"", receipt=None, kind="storagealloc"):
+        classifier = getattr(parent, "gate_failure_diagnostic", lambda *args: None)
+        return classifier(kind, self.receipt() if receipt is None else receipt, stdout, stderr)
+
+    def test_offline_download_requires_both_observed_markers(self):
+        for reason in [b"--offline was specified", b"attempting to make an HTTP request"]:
+            with self.subTest(reason=reason):
+                self.assertEqual(self.diagnostic(stderr=b"error: failed to download private-package\n"+reason), self.expected("offline_download"))
+        for text in [b"failed to download private-package", b"--offline was specified", b"attempting to make an HTTP request"]:
+            with self.subTest(text=text):
+                self.assertEqual(self.diagnostic(stderr=text), self.expected())
+
+    def test_offline_resolution_requires_both_observed_markers(self):
+        self.assertEqual(self.diagnostic(stderr=b"error: no matching package named private-package found\noffline mode"), self.expected("offline_resolution"))
+        self.assertEqual(self.diagnostic(stderr=b"no matching package named private-package"), self.expected())
+        self.assertEqual(self.diagnostic(stderr=b"offline mode"), self.expected())
+
+    def test_compile_failure_uses_the_known_cargo_marker(self):
+        self.assertEqual(self.diagnostic(stderr=b"error: could not compile private-crate due to 1 previous error"), self.expected("compile_failed"))
+
+    def test_exact_failed_case_requires_one_selected_case_and_failed_summary(self):
+        name = "warmed_core_spans_record_without_added_allocations"
+        output = f"running 1 test\ntest {name} ... FAILED\ntest result: FAILED. 0 passed; 1 failed; 0 ignored;\n".encode()
+        self.assertEqual(self.diagnostic(stdout=output), self.expected("exact_test_failed"))
+        self.assertEqual(self.diagnostic(stdout=output.replace(name.encode(), b"other_case")), self.expected())
+        self.assertEqual(self.diagnostic(stdout=output.replace(b"running 1 test\n", b"")), self.expected())
+        self.assertEqual(self.diagnostic(stdout=output.split(b"test result:")[0]), self.expected())
+
+    def test_zero_cases_requires_the_observed_run_and_summary(self):
+        output = b"running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored;\n"
+        self.assertEqual(self.diagnostic(stdout=output), self.expected("zero_tests"))
+        self.assertEqual(self.diagnostic(stdout=b"running 0 tests\n"), self.expected())
+
+    def test_class_precedence_is_fixed(self):
+        stderr = b"could not compile private-crate\nno matching package named private-package\noffline\nfailed to download private-package\n--offline"
+        self.assertEqual(self.diagnostic(stderr=stderr), self.expected("offline_download"))
+
+    def test_lifecycle_deadline_and_unknown_are_separate_receipt_flags(self):
+        receipt = self.receipt(returncode=None, owned_child_reaped=False, owned_group_absent=False, pipes_eof=False, signal_decisions_finished=False, deadline_exceeded=True, sticky_unknown=["/private/token-path"], source_unchanged=False, logs={"stdout": {"overflow": True}, "stderr": {"overflow": False}})
+        self.assertEqual(self.diagnostic(receipt=receipt), self.expected(returncode=None, deadline_exceeded=True, lifecycle_unsettled=True, sticky_unknown=True, source_changed=True, output_overflow=True))
+
+    def test_unfinished_signal_decisions_are_lifecycle_unsettled(self):
+        self.assertEqual(self.diagnostic(receipt=self.receipt(returncode=0, signal_decisions_finished=False)), self.expected(returncode=0, lifecycle_unsettled=True))
+
+    def test_primary_parent_failure_emits_without_copying_exception_fields(self):
+        receipt = self.receipt(returncode=0, primary_failure={"type": "/private/secret-exception", "errno": 13})
+        self.assertEqual(self.diagnostic(receipt=receipt), self.expected(returncode=0))
+
+    def test_zero_child_status_does_not_hide_changed_source_or_overflow(self):
+        receipt = self.receipt(returncode=0, source_unchanged=False, logs={"stdout": {"overflow": False}, "stderr": {"overflow": True}})
+        self.assertEqual(self.diagnostic(receipt=receipt), self.expected(returncode=0, source_changed=True, output_overflow=True))
+
+    def test_numeric_signal_status_is_retained_and_non_numeric_status_is_unknown(self):
+        self.assertEqual(self.diagnostic(receipt=self.receipt(returncode=-9)), self.expected(returncode=-9))
+        for value in [None, "private-status", False]:
+            with self.subTest(value=value):
+                self.assertEqual(self.diagnostic(receipt=self.receipt(returncode=value)), self.expected(returncode=None))
+
+    def test_first_and_last_samples_exclude_middle_only_markers(self):
+        marker = b"error: failed to download private-package\n--offline was specified\n"
+        middle = b"x"*4096+marker+b"y"*4096
+        self.assertEqual(self.diagnostic(stderr=middle), self.expected())
+        self.assertEqual(self.diagnostic(stderr=marker+b"x"*8192), self.expected("offline_download"))
+        self.assertEqual(self.diagnostic(stderr=b"x"*8192+marker), self.expected("offline_download"))
+
+    def test_secret_and_path_markers_project_only_closed_fields(self):
+        stdout = b"/private/secret-file eyJ.private-token.secret https://private-host/path\n"
+        stderr = b"error: failed to download /private/secret-package\n--offline eyJ.private-token.secret"
+        self.assertEqual(self.diagnostic(stdout=stdout, stderr=stderr), self.expected("offline_download"))
+
+    def test_successful_gate_has_no_diagnostic(self):
+        self.assertIsNone(self.diagnostic(stderr=b"could not compile historical-message", receipt=self.receipt(returncode=0)))
+
+    def test_unknown_kind_cannot_be_copied_to_a_diagnostic(self):
+        self.assertIsNone(self.diagnostic(stderr=b"failed to download private-package --offline", kind="/private/token-kind"))
 
 
 class DarwinSignalControls(unittest.TestCase):

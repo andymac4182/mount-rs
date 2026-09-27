@@ -112,6 +112,16 @@ Run `CARGO_TARGET_DIR=/path/to/isolated-target scripts/test-cache-redis.py` for 
 
 Peer requests use separately owned headers and shared immutable payloads. Successful GET replies read the status separately and retain the received payload without a slicing copy. The ordinary block provider still returns a `Vec`, so it requires a caller copy. Deterministic ranking hashes the scope once and evaluates each peer once.
 
+Each trusted peer has independent read and replica-placement negotiation slots.
+Requests wait only for their own role's slot; an immediately available live,
+authenticated connection from the other slot is reused. Healthy sequential roles
+share one connection, while simultaneous cold roles can establish two. Shared
+request, stream and byte admission remain unchanged, and cancelled Quinn attempts
+can retain additional draining state. The
+[controlled reconnection qualification](benchmarks/peer-reconnect-isolation-20260927/README.md)
+records the avoided connection wait and backing GET, with its test and resource
+limits.
+
 Placement runs at most `placement_concurrency` jobs (default 4, maximum 32), with at most two replica PUTs per job. The maintenance queue and pending-byte reservation remain bounded. Reads start one peer query, then hedge after `hedge_delay_ms` (default 25 ms, clamped to one quarter of the overall deadline); at most two queries run simultaneously and `peer_query_limit` bounds total attempts. The first valid response wins and cancels outstanding queries. Directory hints and individual corrupt/missing replicas remain best effort.
 
 `peer_transfer_bytes` defaults to 128 MiB and is split equally between incoming and outgoing work. Each admitted transfer reserves twice the maximum blob plus header bound before allocating a body, and queued QUIC payload owners retain their charges. The budget must fit one such reservation in each half and cannot exceed 1 GiB. Cache RAM, staging, transport receive windows, provider buffers and bookkeeping are separate limits; this is not a whole-process RSS cap.

@@ -18,6 +18,7 @@ COMMANDS.update({
     'cacheconsumerred': (['fnm', 'exec', '--using', 'v24.18.0', 'node', '--test', '--test-name-pattern=old 85-row observation|cache hit-byte events|causal exact old134', 'benchmarks/storage/foundationdb-diagnostics.test.mjs', 'benchmarks/storage/owned-layout-metrics.test.mjs', 'scripts/verify-owned-backing-pilot.test.mjs'], 180, 0, 0),
     'cachemetrics': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'distributed_failure', '--locked', '--offline', '--', '--ignored', '--exact', 'cache_lookup_stage_metrics_preserve_bytes_and_cancellation', '--test-threads=1', '--nocapture'], 180, 1, 0),
     'peermetrics': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--lib', '--locked', '--offline', '--', '--ignored', '--exact', 'peer::tests::peer_connection_stage_metrics_preserve_bytes_and_cancellation', '--test-threads=1', '--nocapture'], 180, 1, 0),
+    'peerreconnect': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'distributed_failure', '--locked', '--offline', '--', '--ignored', '--exact', 'peer_read_reconnect_bypasses_pending_replica_handshake', '--test-threads=1', '--nocapture'], 180, 1, 0),
     'cacheprofileoff': (['./scripts/cargo-shared', 'run', '--locked', '--offline', '-p', 'mount-rs-blob-cache', '--example', 'cache_profile'], 180, 0, 0),
     'cacheprofileon': (['./scripts/cargo-shared', 'run', '--locked', '--offline', '-p', 'mount-rs-blob-cache', '--example', 'cache_profile'], 180, 1, 0),
     'storagealloc': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-core', '--test', 'storage_diagnostics_allocations', '--locked', '--offline', '--', '--ignored', '--exact', 'warmed_core_spans_record_without_added_allocations', '--test-threads=1', '--nocapture'], 180, 1, 0),
@@ -34,6 +35,7 @@ EXACT_CASES = {
     'wsloss': 'websocket_sqlite_commit_survives_lost_wire_reply_without_replay',
     'cachemetrics': 'cache_lookup_stage_metrics_preserve_bytes_and_cancellation',
     'peermetrics': 'peer::tests::peer_connection_stage_metrics_preserve_bytes_and_cancellation',
+    'peerreconnect': 'peer_read_reconnect_bypasses_pending_replica_handshake',
     'storagealloc': 'warmed_core_spans_record_without_added_allocations',
     'corealloc': 'warmed_causal_profile_rows_record_without_added_allocations',
 }
@@ -80,6 +82,66 @@ def cache_slow_logging_records(output):
     return records
 
 
+def gate_failure_diagnostic(kind, receipt, stdout_bytes, stderr_bytes):
+    if kind not in COMMANDS:
+        return None
+    status = receipt.get('returncode')
+    status = status if type(status) is int else None
+    lifecycle = any(receipt.get(field) is not True for field in (
+        'owned_child_reaped', 'owned_group_absent', 'pipes_eof', 'signal_decisions_finished',
+    ))
+    deadline = receipt.get('deadline_exceeded') is True
+    unknown = bool(receipt.get('sticky_unknown'))
+    changed = receipt.get('source_unchanged') is not True
+    overflow = any(item.get('overflow') is True for item in receipt.get('logs', {}).values())
+    if status == 0 and not (lifecycle or deadline or unknown or changed or overflow) and receipt.get('primary_failure') is None:
+        return None
+
+    # Each stream contributes at most its first and last 2048 raw bytes.
+    # Keep a separator between disjoint samples rather than inventing markers.
+    def sample(data):
+        return data if len(data) <= 2048 else data[:2048]+b'\n'+data[-2048:]
+    stdout = sample(stdout_bytes).decode('utf-8', errors='replace')
+    observed = stdout+'\n'+sample(stderr_bytes).decode('utf-8', errors='replace')
+    failure_class = 'unclassified'
+    if 'failed to download' in observed and ('--offline' in observed or 'attempting to make an HTTP request' in observed):
+        failure_class = 'offline_download'
+    elif 'no matching package named' in observed and 'offline' in observed:
+        failure_class = 'offline_resolution'
+    elif 'could not compile' in observed:
+        failure_class = 'compile_failed'
+    else:
+        selected = EXACT_CASES.get(kind)
+        if (selected is not None
+            and re.search(r'^running 1 test$', stdout, re.M)
+            and re.search(r'^test '+re.escape(selected)+r' \.\.\. ', stdout, re.M)
+            and re.search(r'^test result: FAILED\. 0 passed; 1 failed; 0 ignored;', stdout, re.M)):
+            failure_class = 'exact_test_failed'
+        elif (re.search(r'^running 0 tests$', stdout, re.M)
+              and re.search(r'^test result: ok\. 0 passed; 0 failed; 0 ignored;', stdout, re.M)):
+            failure_class = 'zero_tests'
+    return {
+        'kind': kind, 'failure_class': failure_class, 'returncode': status,
+        'deadline_exceeded': deadline, 'lifecycle_unsettled': lifecycle,
+        'sticky_unknown': unknown, 'source_changed': changed, 'output_overflow': overflow,
+    }
+
+
+def gate_failure_log_sample(path):
+    # Read no more than 4096 raw bytes per owned log, without scanning its middle.
+    try:
+        with path.open('rb') as log:
+            first = log.read(2048)
+            log.seek(0, os.SEEK_END)
+            size = log.tell()
+            if size <= 2048:
+                return first
+            log.seek(max(2048, size-2048))
+            return first+log.read(2048)
+    except OSError:
+        return b''
+
+
 def exact_case_passed(output, selected_test):
     # Nocapture output may separate the selected name and its trailing "ok".
     # The fixed --exact command plus one executed, nonignored passing case is
@@ -103,7 +165,7 @@ def terminal_eperm_settled(reaped, group_absent, eof, deadline, lifecycle_unknow
 def main():
     kind=sys.argv[1];command,limit,profile,trace=COMMANDS[kind]
     assert os.name=='posix' and hasattr(os,'waitid') and hasattr(os,'WNOWAIT'), 'Unix ownership observer required'
-    FAULT_KINDS={'cachetests','redisfault','rediscleanup','wsloss','remotetests','faultclippy','fmt','cachemetrics','peermetrics','cacheprofileoff','cacheprofileon','storagealloc','corealloc','coremetrics','cachemetricsclippy','cacheconsumers','cacheconsumerred','clidiagnostics','clicompact','napimetrics','consumerclippy','cachemetricstrace'}
+    FAULT_KINDS={'cachetests','redisfault','rediscleanup','wsloss','remotetests','faultclippy','fmt','cachemetrics','peermetrics','peerreconnect','cacheprofileoff','cacheprofileon','storagealloc','corealloc','coremetrics','cachemetricsclippy','cacheconsumers','cacheconsumerred','clidiagnostics','clicompact','napimetrics','consumerclippy','cachemetricstrace'}
     assert kind in FAULT_KINDS, 'fixed fault qualification commands only'
     root=pathlib.Path(tempfile.mkdtemp(prefix='mount-rs-owned-fault-'+kind+'-',dir=os.environ.get('MOUNT_RS_FAILURE_EVIDENCE_ROOT',tempfile.gettempdir())));os.chmod(root,0o700)
     fixture_tmp=root/'fixtures';fixture_tmp.mkdir(mode=0o700)
@@ -312,7 +374,15 @@ def main():
       shutil.rmtree(fixture_tmp);fixture_removed=not fixture_tmp.exists()
      else:unknown.append('fixture_directory_retained_unknown_process_ownership')
      receipt={'schema':'mount-rs.causal-bounded-local-gate.v2','kind':kind,'command':command,'elapsed_seconds':time.monotonic()-start,'parent_limit_seconds':limit,'cleanup_reserved_seconds':5,'returncode':code,'owned_pid':owned,'new_session':True,'wnowait_owner_pin':True,'signal_decisions_finished':signal_decisions_finished,'owned_child_reaped':code is not None,'owned_group_absent':absent,'pipes_eof':eof,'deadline_exceeded':deadline,'signals':signals,'sticky_unknown':unknown,'primary_failure':None if primary is None else {'type':type(primary).__name__,'errno':getattr(primary,'errno',None)},'logs':logs,'source_count':len(before),'source_unchanged':before==after,'head':subprocess.check_output(['git','rev-parse','HEAD'],cwd=BASE).decode().strip(),'runner_sha256':hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest(),'profile':env.get('MOUNT_RS_PROFILE_IO'),'trace':env.get('MOUNT_RS_TRACE_STORAGE'),'native_capture_binding':str(BASE/'benchmarks/storage/capture-native.cjs') if kind in {'node','processnode','diagnosticnode','cacheconsumers','cacheconsumerred'} else None,'automatic_retry':False,'cache_slow_records':cache_slow_records,'selected_suite':selected_suite,'named_suite_observed_passed':selected_suite_pass,'selected_test':selected_test,'exact_named_case_observed_passed':selected_test_pass,'redis_executable':redis_pin,'redis_executable_unchanged':redis_unchanged,'fixture_tmpdir':str(fixture_tmp),'fixture_children_before_postprocess_removal':fixture_children,'fixture_tmpdir_removed_after_reap_group_absence_eof':fixture_removed,'postterminal_group_sweep':'containment_only; fixture_cleanup_requires_in_test_assertions'}
+     diagnostic=gate_failure_diagnostic(kind, receipt, gate_failure_log_sample(root/'stdout.log'), gate_failure_log_sample(root/'stderr.log'))
+     receipt['failure_diagnostic']=diagnostic
      sha=write('receipt.json',receipt);print(json.dumps({'path':str(root/'receipt.json'),'sha256':sha,'returncode':code,'elapsed_seconds':receipt['elapsed_seconds'],'source_unchanged':before==after,'unknown':unknown,'group_absent':absent,'pipes_eof':eof}))
+     if diagnostic is not None and os.environ.get('GITHUB_ACTIONS') == 'true':
+      fields=['kind='+diagnostic['kind'], 'class='+diagnostic['failure_class'], 'returncode_known='+str(int(diagnostic['returncode'] is not None))]
+      if diagnostic['returncode'] is not None:fields.append('returncode='+str(diagnostic['returncode']))
+      fields.extend(field+'='+str(int(diagnostic[field])) for field in ['deadline_exceeded','lifecycle_unsettled','sticky_unknown','source_changed','output_overflow'])
+      try:print('::error title=Owned gate failure::'+' '.join(fields),file=sys.stderr)
+      except OSError:pass
     except BaseException:
      if primary is not None:raise primary
      raise
