@@ -29,8 +29,15 @@ pub(super) enum Operation {
     ResponseEncode,
     ResponseSubmit,
     SessionCleanup,
+    AuthDecode,
+    AuthCatalog,
+    AuthCacheWait,
+    AuthPolicySelect,
+    AuthKeyFetch,
+    AuthJwtVerify,
+    AuthGrantAuthorize,
 }
-const NAMES: [&str; 14] = [
+const NAMES: [&str; 21] = [
     "admission.connection",
     "handshake.application",
     "handshake.tls",
@@ -45,10 +52,76 @@ const NAMES: [&str; 14] = [
     "response.encode",
     "response.submit",
     "session.cleanup",
+    "auth.decode",
+    "auth.catalog",
+    "auth.cache.wait",
+    "auth.policy.select",
+    "auth.key.fetch",
+    "auth.jwt.verify",
+    "auth.grant.authorize",
 ];
 
+/// Fixed catalog-authentication stages within the caller's inclusive auth span.
+/// A dropped stage is cancelled, including when the caller's deadline expires.
 #[derive(Clone, Copy)]
-pub(super) enum Outcome {
+pub(crate) enum AuthStage {
+    Decode,
+    Catalog,
+    CacheWait,
+    PolicySelect,
+    KeyFetch,
+    JwtVerify,
+    GrantAuthorize,
+}
+impl AuthStage {
+    fn operation(self) -> Operation {
+        match self {
+            Self::Decode => Operation::AuthDecode,
+            Self::Catalog => Operation::AuthCatalog,
+            Self::CacheWait => Operation::AuthCacheWait,
+            Self::PolicySelect => Operation::AuthPolicySelect,
+            Self::KeyFetch => Operation::AuthKeyFetch,
+            Self::JwtVerify => Operation::AuthJwtVerify,
+            Self::GrantAuthorize => Operation::AuthGrantAuthorize,
+        }
+    }
+}
+
+#[cfg(feature = "io-profiling")]
+tokio::task_local! {
+    static AUTHENTICATION_OBSERVER: ServerDiagnostics;
+}
+
+/// Poll the original future without an extra box, task or observer allocation.
+/// The scope restores its context on each poll and cancellation; spawned tasks
+/// do not inherit it. An absent observer leaves the original future unwrapped.
+pub(crate) async fn auth_scope<F: std::future::Future>(
+    observer: Option<&ServerDiagnostics>,
+    future: F,
+) -> F::Output {
+    #[cfg(feature = "io-profiling")]
+    if let Some(observer) = observer {
+        return AUTHENTICATION_OBSERVER
+            .scope(observer.clone(), future)
+            .await;
+    }
+    #[cfg(not(feature = "io-profiling"))]
+    let _ = observer;
+    future.await
+}
+
+pub(crate) fn auth_span(stage: AuthStage) -> Span {
+    #[cfg(feature = "io-profiling")]
+    if let Ok(span) =
+        AUTHENTICATION_OBSERVER.try_with(|observer| Span::new(Some(observer), stage.operation()))
+    {
+        return span;
+    }
+    Span::new(None, stage.operation())
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Outcome {
     Success,
     Error,
     Timeout,
@@ -63,7 +136,7 @@ impl Outcome {
             Self::Cancelled => "cancelled",
         }
     }
-    pub(super) fn result<T, E>(result: &Result<T, E>) -> Self {
+    pub(crate) fn result<T, E>(result: &Result<T, E>) -> Self {
         if result.is_ok() {
             Self::Success
         } else {
@@ -415,7 +488,7 @@ impl Drop for Mutation<'_> {
     }
 }
 
-pub(super) struct Span {
+pub(crate) struct Span {
     recorder: Option<Arc<Recorder>>,
     operation: Operation,
     started: Option<Instant>,
@@ -437,7 +510,7 @@ impl Span {
             finished: false,
         }
     }
-    pub(super) fn finish(&mut self, outcome: Outcome) {
+    pub(crate) fn finish(&mut self, outcome: Outcome) {
         if self.finished {
             return;
         }

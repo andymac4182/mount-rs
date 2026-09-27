@@ -235,6 +235,39 @@ impl ServerProcess {
         assert_eq!(snapshot["schema"], "mount-rs.service-quic.v1");
         assert_eq!(snapshot["enabled"], true);
         let entries = snapshot["entries"].as_array().unwrap();
+        // Five QUIC attempts below reach the actual server authenticator; the
+        // malformed credential is rejected by the client before ClientHello.
+        // WebSocket calls share the cache but have no QUIC observer context.
+        for (name, calls, success, error) in [
+            ("auth.decode", 5, 5, 0),
+            ("auth.catalog", 5, 5, 0),
+            ("auth.cache.wait", 5, 5, 0),
+            ("auth.policy.select", 5, 5, 0),
+            ("auth.key.fetch", 1, 1, 0),
+            ("auth.jwt.verify", 4, 1, 3),
+            ("auth.grant.authorize", 1, 1, 0),
+        ] {
+            let entry = entries
+                .iter()
+                .find(|entry| entry["name"] == name)
+                .unwrap_or_else(|| panic!("missing actual CatalogAuthenticator stage {name}"));
+            assert_eq!(entry["calls"].as_u64(), Some(calls), "{name} calls");
+            assert_eq!(entry["success"].as_u64(), Some(success), "{name} success");
+            assert_eq!(entry["error"].as_u64(), Some(error), "{name} error");
+            for counter in ["timeout", "cancelled", "in_flight"] {
+                assert_eq!(entry[counter].as_u64(), Some(0), "{name} {counter}");
+            }
+            let histogram = entry["latency_log2_us"].as_array().unwrap();
+            assert_eq!(histogram.len(), 32);
+            assert_eq!(
+                histogram
+                    .iter()
+                    .map(|value| value.as_u64().unwrap())
+                    .sum::<u64>(),
+                calls,
+                "{name} terminal latency samples"
+            );
+        }
         let labels = [
             "admission.connection",
             "handshake.application",
@@ -250,6 +283,13 @@ impl ServerProcess {
             "response.encode",
             "response.submit",
             "session.cleanup",
+            "auth.decode",
+            "auth.catalog",
+            "auth.cache.wait",
+            "auth.policy.select",
+            "auth.key.fetch",
+            "auth.jwt.verify",
+            "auth.grant.authorize",
         ];
         assert_eq!(entries.len(), labels.len());
         for (entry, label) in entries.iter().zip(labels) {

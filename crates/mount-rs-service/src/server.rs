@@ -15,7 +15,8 @@ pub use crate::transfer::RemoteTransferLimits;
 use crate::transfer::{Admission, Budgets, ResponseBuffer, ResponseReservation, charged_bytes};
 
 mod diagnostics;
-use diagnostics::{Operation as DiagnosticOperation, Outcome, Span};
+use diagnostics::Operation as DiagnosticOperation;
+pub(crate) use diagnostics::{AuthStage, Outcome, Span, auth_scope, auth_span};
 pub use diagnostics::{ServerDiagnostics, ServerSnapshot};
 
 const OPERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -299,7 +300,10 @@ async fn serve_connection(
     let mut authentication = Span::new(diagnostics.as_ref(), DiagnosticOperation::Authentication);
     let authentication_result = tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        authenticator.authenticate(&bearer, &partition_id),
+        auth_scope(
+            diagnostics.as_ref(),
+            authenticator.authenticate(&bearer, &partition_id),
+        ),
     )
     .await;
     authentication.finish(match &authentication_result {
@@ -544,7 +548,10 @@ async fn serve_stream(
                 Span::new(diagnostics.as_ref(), DiagnosticOperation::Authentication);
             let authentication_result = tokio::time::timeout(
                 std::time::Duration::from_secs(30),
-                authenticator.authenticate(&bearer, &partition),
+                auth_scope(
+                    diagnostics.as_ref(),
+                    authenticator.authenticate(&bearer, &partition),
+                ),
             )
             .await;
             authentication.finish(match &authentication_result {

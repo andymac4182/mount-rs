@@ -577,9 +577,42 @@ CPU includes it. Do not subtract cumulative maxima or use shared host activity
 as exact provider IOPS. A profile identifies where to investigate; a performance
 win needs a controlled before/after workload with matching correctness checks.
 
-Authentication spans currently combine cache-mutex waiting, key fetching, JWT
-verification and grant traversal. Their totals do not identify which of those
-steps is responsible; separate authentication-stage measurements remain a gap.
+### Authentication stages
+
+Enabled QUIC observers retain seven fixed rows for `CatalogAuthenticator`,
+inside the inclusive `auth.authenticate` span:
+
+| Row | Work measured |
+| --- | --- |
+| `auth.decode` | Token and header decoding, including claimed issuer extraction |
+| `auth.catalog` | Current catalog load and requested partition lookup |
+| `auth.cache.wait` | Awaiting the existing authentication cache mutex |
+| `auth.policy.select` | Each policy candidate's eligible-grant scan, configuration and freshness checks |
+| `auth.key.fetch` | Each actual key-source fetch, including failed fetches |
+| `auth.jwt.verify` | Each actual JWT verification, including a failed verification before refresh |
+| `auth.grant.authorize` | Verified principal expiry and allowed-drive evaluation |
+
+Skipped policy candidates complete selection successfully; that is not an
+authentication success. Failed key fetches remain errors when the existing
+negative cache retains them. The original cache locking, refresh rules and
+authorization decisions are unchanged. Cache pruning, identity construction
+and other residual work remain in the outer span. Fetch time does not separate
+DNS, connection setup, HTTP and key parsing.
+
+The caller's task-local observer is active while its authentication future is
+polled and is restored across yields and cancellation. Both initial QUIC
+authentication and renewal use the unchanged 30-second deadline. A dropped
+substage records cancellation; an outer deadline records timeout. Custom
+authenticators and unscoped calls do not supply these catalog substage counts.
+The current WebSocket path has no scoped authentication observer.
+
+Standalone observer helper controls measure no new heap objects or requested
+bytes with a preconstructed observer and tracing disabled. They do not measure
+the real authenticator's boxed future size, JWT/catalog allocations or observer
+construction. Additional future state can increase the existing future's
+requested allocation size. Spans finish and release their observer references
+before later stages; diagnostic snapshots and slow logs remain outside that
+allocation claim.
 
 ### Scale-test receipt overhead
 
