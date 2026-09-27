@@ -30,6 +30,18 @@ const sqliteTimingMeasurement = {
   })) },
 }
 const sqliteObserverScope = "Instant wall time for sequential registry lock and per-connection observer collection; excludes final outer JSON serialization; not workload time"
+export const SQLITE_VFS_MEASUREMENT = {
+  schema: "mount-rs.sqlite-vfs.v1",
+  scope: "process selected observed native VFS invocations including external connections and connection close; excludes observer read/write/sync and checkpoint signals, SHM, mmap and other VFS operations; not syscalls or physical device IOPS",
+  byte_scope: "requested native xRead/xWrite bytes; confirmed only on SQLITE_OK; partial error bytes unavailable; xSync bytes are zero",
+  lifecycle_scope: "native file/context lifecycle including observer sidecar opens and closes; live gauges are never reset",
+  checkpoint_scope: "matched Instant wall time from CKPT_START arrival to CKPT_DONE arrival; backfill copy window only, after initial WAL sync and before final database truncate/sync; signals do not prove checkpoint success",
+}
+export const SQLITE_VFS_ENTRY_NAMES = ["main_database", "main_journal", "wal", "temporary", "other"].flatMap((role) => ["read", "write", "sync"].map((operation) => `${role}.${operation}`))
+const sqliteVfsCounterFields = ["open_attempts", "open_errors", "files_opened", "close_calls", "close_errors"]
+const sqliteVfsGaugeFields = ["in_flight", "live_files", "registered_vfs", "live_contexts"]
+const sqliteVfsByteFields = ["requested_bytes", "confirmed_bytes", "short_reads"]
+const sqliteCheckpointCounterFields = ["starts", "dones", "unmatched_starts", "unmatched_dones", "aborted_windows"]
 export const NATIVE_DIAGNOSTICS_SCHEMA = "mount-rs.storage-diagnostics.v3"
 const rawSchema = "mount-rs.object-store-api.v1"
 const rawScope = "one_object_store_block_store_instance"
@@ -461,7 +473,8 @@ function validateSqliteWalState(state, configuration) {
 }
 function validateSqliteConnection(entry) {
   if (!object(entry) || Object.hasOwn(entry, "error")) invalid("SQLite counter unavailable")
-  exactFields(entry, ["connection_id", "counter_overflow", "pager", "page_size", "pager_read_bytes_estimate", "pager_write_bytes_estimate", "sql_statements", "sql_categories", "configuration", "sql_profile", "connection_lock", "connection_lock_hold", "provider_begin", "provider_commit", "wal_state", ...Object.keys(sqliteScopes)], "SQLite connection fields unavailable")
+  exactFields(entry, ["connection_id", "counter_overflow", "pager", "page_size", "pager_read_bytes_estimate", "pager_write_bytes_estimate", "sql_statements", "sql_categories", "configuration", "sql_profile", "connection_lock", "connection_lock_hold", "provider_begin", "provider_commit", "wal_state", "vfs_observed", ...Object.keys(sqliteScopes)], "SQLite connection fields unavailable")
+  if (typeof entry.vfs_observed !== "boolean") invalid("SQLite VFS connection coverage unavailable")
   if (integer(entry.connection_id) === 0n) invalid("SQLite connection identity unavailable")
   if (entry.counter_overflow !== false) invalid("SQLite counter overflow state unavailable")
   exactFields(entry.pager, sqlitePagerFields, "SQLite pager fields unavailable")
@@ -484,7 +497,7 @@ function validateSqliteConnection(entry) {
   validateSqliteWalState(entry.wal_state, entry.configuration)
 }
 function sqliteConnectionMap(bank) {
-  exactFields(bank, ["connections", "sql_statements", "observer_elapsed_ns", "observer_scope"], "SQLite connection registry unavailable")
+  exactFields(bank, ["connections", "sql_statements", "observer_elapsed_ns", "observer_scope", "vfs"], "SQLite connection registry unavailable")
   if (!Array.isArray(bank.connections)) invalid("SQLite connection registry unavailable")
   integer(bank.observer_elapsed_ns)
   if (bank.observer_scope !== sqliteObserverScope) invalid("SQLite observer measurement scope unavailable")
@@ -507,7 +520,86 @@ function sqliteTimingDelta(before, after, errors = false) {
   validateSqliteTiming(delta, errors, true)
   return delta
 }
-function connectionDelta(before, after) {
+function sqliteVfsTiming(row, phase = false) {
+  return Object.fromEntries([...sqliteTimingFields.filter((field) => field !== "max_elapsed_ns"), ...(phase ? ["max_elapsed_ns_start", "max_elapsed_ns_end", "exact_phase_max_ns"] : ["max_elapsed_ns"]), "errors"].map((field) => [field, row[field]]))
+}
+function validateSqliteVfsRows(entries, phase = false) {
+  if (!Array.isArray(entries) || entries.length !== SQLITE_VFS_ENTRY_NAMES.length) invalid("SQLite VFS role coverage unavailable")
+  for (const [index, row] of entries.entries()) {
+    exactFields(row, ["name", ...Object.keys(sqliteVfsTiming(row, phase)), ...sqliteVfsByteFields], "SQLite VFS row fields unavailable")
+    if (row.name !== SQLITE_VFS_ENTRY_NAMES[index]) invalid("SQLite VFS role names or order changed")
+    validateSqliteTiming(sqliteVfsTiming(row, phase), true, phase)
+    const requested = integer(row.requested_bytes)
+    const confirmed = integer(row.confirmed_bytes)
+    const shortReads = integer(row.short_reads)
+    if (confirmed > requested || (integer(row.completed) === integer(row.errors) && confirmed !== 0n)) invalid("SQLite VFS confirmed bytes inconsistent")
+    if (integer(row.completed) === 0n && requested !== 0n) invalid("SQLite VFS requested bytes have no calls")
+    if (row.name.endsWith(".sync") && (requested !== 0n || confirmed !== 0n)) invalid("SQLite VFS sync byte units changed")
+    if (shortReads > integer(row.errors) || (!row.name.endsWith(".read") && shortReads !== 0n)) invalid("SQLite VFS short-read counts inconsistent")
+  }
+}
+function validateSqliteCheckpoint(checkpoint, phase = false) {
+  const gaugeFields = phase ? ["active_windows_start", "active_windows_end"] : ["active_windows"]
+  exactFields(checkpoint, [...sqliteCheckpointCounterFields, ...gaugeFields, "paired"], "SQLite checkpoint fields unavailable")
+  sqliteCheckpointCounterFields.forEach((field) => integer(checkpoint[field]))
+  validateSqliteTiming(checkpoint.paired, false, phase)
+  const active = phase ? integer(checkpoint.active_windows_end) - integer(checkpoint.active_windows_start) : integer(checkpoint.active_windows)
+  if (integer(checkpoint.starts) !== integer(checkpoint.paired.completed) + integer(checkpoint.unmatched_starts) + integer(checkpoint.aborted_windows) + active ||
+      integer(checkpoint.dones) !== integer(checkpoint.paired.completed) + integer(checkpoint.unmatched_dones)) invalid("SQLite checkpoint signals do not reconcile")
+  if (gaugeFields.some((field) => integer(checkpoint[field]) !== 0n)) invalid("SQLite checkpoint window crossed phase boundary")
+  if (["unmatched_starts", "unmatched_dones", "aborted_windows"].some((field) => checkpoint[field] !== "0")) invalid("SQLite checkpoint duration coverage incomplete")
+}
+function validateSqliteVfsOpenOutcomes(bank) {
+  const attempts = integer(bank.open_attempts)
+  const errors = integer(bank.open_errors)
+  const files = integer(bank.files_opened)
+  // Every successful xOpen owns a file; a failed xOpen with non-null methods also owns a closable file.
+  if (errors > attempts || files > attempts || attempts - errors > files) invalid("SQLite VFS open outcomes do not reconcile")
+}
+function validateSqliteVfs(bank) {
+  if (!object(bank) || Object.hasOwn(bank, "error")) invalid("SQLite VFS diagnostics unavailable")
+  exactFields(bank, [...Object.keys(SQLITE_VFS_MEASUREMENT), "overflow", ...sqliteVfsCounterFields, ...sqliteVfsGaugeFields, "entries", "checkpoint"], "SQLite VFS bank fields unavailable")
+  for (const [field, expected] of Object.entries(SQLITE_VFS_MEASUREMENT)) if (bank[field] !== expected) invalid("SQLite VFS measurement metadata unavailable")
+  if (bank.overflow !== false) invalid("SQLite VFS overflow state unavailable")
+  sqliteVfsCounterFields.forEach((field) => integer(bank[field]))
+  sqliteVfsGaugeFields.forEach((field) => integer(bank[field]))
+  if (integer(bank.in_flight) !== 0n) invalid("SQLite VFS method crossed phase boundary")
+  validateSqliteVfsOpenOutcomes(bank)
+  if (integer(bank.close_errors) > integer(bank.close_calls)) invalid("SQLite VFS file outcomes do not reconcile")
+  validateSqliteVfsRows(bank.entries)
+  validateSqliteCheckpoint(bank.checkpoint)
+}
+function sqliteVfsDelta(before, after) {
+  validateSqliteVfs(before)
+  validateSqliteVfs(after)
+  const delta = { ...SQLITE_VFS_MEASUREMENT, complete: true, issues: [],
+    overflow_start: before.overflow, overflow_end: after.overflow,
+    ...Object.fromEntries(sqliteVfsCounterFields.map((field) => [field, subtract(after[field], before[field])])),
+    ...Object.fromEntries(sqliteVfsGaugeFields.flatMap((field) => [[`${field}_start`, before[field]], [`${field}_end`, after[field]]])),
+    timing_measurement: { duration: "inclusive_wall_nanoseconds; VFS_methods_and_checkpoint_copy_windows_overlap", latency_max: "cumulative_process_bank; exact_phase_max_unavailable", latency_histogram: structuredClone(sqliteTimingMeasurement.latency_histogram) },
+    entries: after.entries.map((row, index) => ({ name: SQLITE_VFS_ENTRY_NAMES[index], ...sqliteTimingDelta(sqliteVfsTiming(before.entries[index]), sqliteVfsTiming(row), true),
+      ...Object.fromEntries(sqliteVfsByteFields.map((field) => [field, subtract(row[field], before.entries[index][field])])) })),
+    checkpoint: { ...Object.fromEntries(sqliteCheckpointCounterFields.map((field) => [field, subtract(after.checkpoint[field], before.checkpoint[field])])),
+      active_windows_start: before.checkpoint.active_windows, active_windows_end: after.checkpoint.active_windows,
+      paired: sqliteTimingDelta(before.checkpoint.paired, after.checkpoint.paired) },
+  }
+  validateSqliteVfsOpenOutcomes(delta)
+  if (integer(delta.close_errors) > integer(delta.close_calls)) invalid("SQLite VFS phase close outcomes do not reconcile")
+  if (integer(delta.registered_vfs_end) < integer(delta.registered_vfs_start)) invalid("SQLite VFS registered wrappers disappeared")
+  if (integer(delta.live_files_end) !== integer(delta.live_files_start) + integer(delta.files_opened) - integer(delta.close_calls)) invalid("SQLite VFS live-file gauge does not reconcile")
+  validateSqliteVfsRows(delta.entries, true)
+  validateSqliteCheckpoint(delta.checkpoint, true)
+  return delta
+}
+function sqliteVfsPhase(before, after) {
+  const vfs = sqliteVfsDelta(before?.vfs, after?.vfs)
+  if ([before?.connections, after?.connections].some((entries) => !Array.isArray(entries) || entries.some((entry) => !object(entry) || entry.vfs_observed !== true))) {
+    vfs.complete = false
+    vfs.issues.push("SQLite VFS provider attribution unavailable")
+  }
+  return vfs
+}
+function connectionDelta(before, after, vfs) {
   const previous = sqliteConnectionMap(before)
   const current = sqliteConnectionMap(after)
   const missing = [...previous.keys()].filter((id) => !current.has(id))
@@ -521,6 +613,7 @@ function connectionDelta(before, after) {
       sql_categories[label] = subtract(entry.sql_categories[label] ?? "0", old?.sql_categories[label] ?? "0")
     }
     return { connection_id: entry.connection_id, page_size: entry.page_size, pager,
+      vfs_observed_start: old ? old.vfs_observed : "unavailable", vfs_observed_end: entry.vfs_observed,
       pager_read_bytes_estimate: subtract(entry.pager_read_bytes_estimate, old?.pager_read_bytes_estimate),
       pager_write_bytes_estimate: subtract(entry.pager_write_bytes_estimate, old?.pager_write_bytes_estimate),
       sql_statements: subtract(entry.sql_statements, old?.sql_statements), sql_categories,
@@ -543,7 +636,7 @@ function connectionDelta(before, after) {
     observer_scope: sqliteObserverScope,
     connection_ids_start: [...previous.keys()], connection_ids_end: [...current.keys()],
     sql_statements: missing.length ? "unavailable" : subtract(after.sql_statements, before.sql_statements),
-    connections, missing_connection_ids: missing, complete: missing.length === 0 }
+    connections, missing_connection_ids: missing, vfs, complete: missing.length === 0 && vfs.complete }
 }
 function validateClaims(claims) {
   if (!object(claims) || Object.keys(claims).length !== claimFields.length) invalid("raw claim fields unavailable")
@@ -715,12 +808,27 @@ function sanitizedObservations(before, after) {
     overflow: typeof value?.overflow === "boolean" ? value.overflow : "unavailable",
     histogram_log2_us: array(value?.histogram_log2_us, 32, counter),
   })
+  const sqliteVfs = (value) => ({
+    available: object(value) && !Object.hasOwn(value, "error") && Array.isArray(value.entries),
+    ...(object(value) && Object.hasOwn(value, "error") ? { error: "unavailable" } : {}),
+    ...Object.fromEntries(Object.entries(SQLITE_VFS_MEASUREMENT).map(([field, expected]) => [field, value?.[field] === expected ? expected : "unavailable"])),
+    overflow: typeof value?.overflow === "boolean" ? value.overflow : "unavailable",
+    ...Object.fromEntries([...sqliteVfsCounterFields, ...sqliteVfsGaugeFields].map((field) => [field, counter(value?.[field])])),
+    entries: array(value?.entries, SQLITE_VFS_ENTRY_NAMES.length, (entry) => ({
+      name: SQLITE_VFS_ENTRY_NAMES.includes(entry?.name) ? entry.name : "unrecognized",
+      ...sqliteTiming(entry, true), ...Object.fromEntries(sqliteVfsByteFields.map((field) => [field, counter(entry?.[field])])),
+    })),
+    checkpoint: { ...Object.fromEntries(sqliteCheckpointCounterFields.map((field) => [field, counter(value?.checkpoint?.[field])])),
+      active_windows: counter(value?.checkpoint?.active_windows), paired: sqliteTiming(value?.checkpoint?.paired) },
+  })
   const sqlite = (value) => ({
     available: object(value) && !Object.hasOwn(value, "error") && Array.isArray(value.connections),
     sql_statements: counter(value?.sql_statements), observer_elapsed_ns: counter(value?.observer_elapsed_ns),
     observer_scope: value?.observer_scope === sqliteObserverScope ? sqliteObserverScope : "unavailable",
+    vfs: sqliteVfs(value?.vfs),
     connections: array(value?.connections, 32, (entry) => ({
       connection_id: counter(entry?.connection_id), counter_overflow: typeof entry?.counter_overflow === "boolean" ? entry.counter_overflow : "unavailable",
+      vfs_observed: typeof entry?.vfs_observed === "boolean" ? entry.vfs_observed : "unavailable",
       ...(entry && Object.hasOwn(entry, "error") ? { error: "unavailable" } : {}),
       pager: Object.fromEntries(sqlitePagerFields.map((field) => [field, counter(entry?.pager?.[field])])),
       ...Object.fromEntries(["page_size", "pager_read_bytes_estimate", "pager_write_bytes_estimate", "sql_statements"].map((field) => [field, counter(entry?.[field])])),
@@ -791,12 +899,18 @@ function retainIncompleteEvidence(delta, before, after) {
     // Keep their whitelisted endpoint counters in observations on failure.
     delete delta.storage
     delete delta.profile
-    delete delta.sqlite
+    if (delta.sqlite?.vfs) {
+      // Global file callbacks outlive the live connection registry. Preserve
+      // their independently validated delta without certifying the whole phase.
+      if (delta.sqlite.missing_connection_ids?.length) delta.sqlite = { complete: false, vfs: delta.sqlite.vfs }
+      else delta.sqlite.complete = false
+    } else delete delta.sqlite
   }
   return delta
 }
 
 export function deltaNativeSnapshots(before, after) {
+  let vfs
   try {
     if (before.schema_version !== NATIVE_DIAGNOSTICS_SCHEMA || after.schema_version !== before.schema_version || before.enabled !== true || after.enabled !== true) invalid("diagnostic version or enabled state changed")
     if (before.scope !== "process" || after.scope !== before.scope || before.quiescent_snapshot_required !== true || after.quiescent_snapshot_required !== true || before.elapsed_semantics !== "inclusive_wall_nanoseconds" || after.elapsed_semantics !== before.elapsed_semantics) invalid("native diagnostic scope changed")
@@ -823,6 +937,10 @@ export function deltaNativeSnapshots(before, after) {
         after.measurement.forwarding_boxes !== "enabled_napi_dynamic_provider_box_pin_site_calls_and_requested_future_object_bytes; excludes_allocator_overhead_and_other_allocations") invalid("measurement metadata changed")
     if (!isDeepStrictEqual(before.backend_waits, after.backend_waits) || !isDeepStrictEqual(after.backend_waits, { pglite_client_lock: "instrumented", tidb_pool: "instrumented_inclusive_checkout_including_lazy_connect_and_session_configuration" }) ||
         before.http_attempts !== after.http_attempts || before.physical_device_iops !== after.physical_device_iops || after.http_attempts !== "unavailable" || after.physical_device_iops !== "unavailable") invalid("availability metadata changed")
+    const hasRustfs = Object.hasOwn(before, "rustfs") || Object.hasOwn(after, "rustfs")
+    if (hasRustfs && (after.measurement.rustfs !== "live_store_logical_calls_and_cache_hits; not_http_attempts" || !isDeepStrictEqual(after.measurement.rustfs_api, RUSTFS_API_MEASUREMENT))) invalid("RustFS measurement metadata changed")
+    // Derive the process bank once, after trusted metadata and before unrelated bank validation.
+    vfs = sqliteVfsPhase(before.sqlite, after.sqlite)
     validateStorageRows(before.storage?.entries)
     validateStorageRows(after.storage?.entries)
     const boxBefore = before.storage.forwarding_boxes
@@ -836,11 +954,10 @@ export function deltaNativeSnapshots(before, after) {
       })) }
     validateStorageRows(storage.entries, true)
     const profile = { entries: entriesDelta(before.profile.entries, after.profile.entries, "name", ["calls", "elapsed_ns", "units"]) }
-    const sqlite = connectionDelta(before.sqlite, after.sqlite)
+    const sqlite = connectionDelta(before.sqlite, after.sqlite, vfs)
     const r2 = objectStoreDelta(before.r2, after.r2, before.measurement.r2_local, after.measurement.r2_local)
     let rustfs
-    if (Object.hasOwn(before, "rustfs") || Object.hasOwn(after, "rustfs")) {
-      if (after.measurement.rustfs !== "live_store_logical_calls_and_cache_hits; not_http_attempts" || !isDeepStrictEqual(after.measurement.rustfs_api, RUSTFS_API_MEASUREMENT)) invalid("RustFS measurement metadata changed")
+    if (hasRustfs) {
       rustfs = objectStoreDelta(before.rustfs, after.rustfs, before.measurement.rustfs_local, after.measurement.rustfs_local, "rustfs")
     }
     const issues = []
@@ -848,7 +965,8 @@ export function deltaNativeSnapshots(before, after) {
         !decimal.test(storage.in_flight_start) || !decimal.test(storage.in_flight_end)) invalid("invalid in-flight gauge")
     if (BigInt(storage.in_flight_start) !== 0n || BigInt(storage.in_flight_end) !== 0n) issues.push("instrumented storage operation crossed phase boundary")
     if (storage.entries.some((entry) => integer(entry.in_flight_start) !== 0n || integer(entry.in_flight_end) !== 0n)) issues.push("instrumented storage row crossed phase boundary")
-    if (!sqlite.complete) issues.push("SQLite connection closed during phase")
+    if (sqlite.missing_connection_ids.length) issues.push("SQLite connection closed during phase")
+    issues.push(...sqlite.vfs.issues)
     if (!r2.complete) issues.push("R2 instance closed during phase")
     if (rustfs && !rustfs.complete) issues.push("RustFS instance closed during phase")
     const result = { schema_version: NATIVE_DIAGNOSTICS_SCHEMA, complete: issues.length === 0, issues,
@@ -860,7 +978,8 @@ export function deltaNativeSnapshots(before, after) {
       backend_waits: after.backend_waits, http_attempts: after.http_attempts,
       physical_device_iops: after.physical_device_iops, storage, profile, sqlite, r2, ...(rustfs ? { rustfs } : {}) }
     return retainIncompleteEvidence(result, before, after)
-  } catch (error) { return { complete: false, issues: [error instanceof DiagnosticValidationError ? error.message : "invalid native diagnostic shape"], observations: sanitizedObservations(before, after) } }
+  } catch (error) { return { complete: false, issues: [error instanceof DiagnosticValidationError ? error.message : "invalid native diagnostic shape", ...(vfs?.issues ?? [])],
+    ...(vfs ? { sqlite: { complete: false, vfs } } : {}), observations: sanitizedObservations(before, after) } }
 }
 
 // The artifact gate validates processed evidence independently of complete=true.

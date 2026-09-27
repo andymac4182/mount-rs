@@ -1827,6 +1827,68 @@ checkpoint work or physical flash amplification. Qualification requiring both
 configuration/WAL boundaries must check each projected connection's
 `boundary_gauges_complete`, including connections opened during a phase.
 
+### Native SQLite file I/O diagnostics
+
+The opt-in provider observer also selects a bounded process-lifetime,
+nondefault wrapper around the native SQLite VFS before opening a connection.
+Its neutral context never borrows a provider connection or its counters, so
+external SQLite connections selecting its globally registered name can safely
+outlive a provider. The native default VFS,
+open flags, locking, shared memory, mapped reads and return codes are preserved.
+`vfs_observed` checks the actual selected main pager VFS at the drained observer
+boundary: a URI that selects a different VFS cannot be reported as observed.
+The service catalog and legacy `SqliteStore` use their normal native defaults
+and remain outside this wrapper scope. All invocations selecting the observed
+wrapper, including external connections, contribute to its process bank.
+
+The top-level `sqlite.vfs` bank has one fixed process-wide set of 15 rows:
+`main_database`, `main_journal`, `wal`, `temporary` and `other`, each with native
+`read`, `write` and `sync` invocations. It records monotonic call-return wall
+time, errors, histograms, requested bytes and bytes confirmed only when the
+native method returns `SQLITE_OK`. A short read is an error with unknown actual
+partial bytes; the underlying method still supplies SQLite's zero filling.
+Sync byte fields are zero. Counts are VFS method invocations, not operating
+system syscall counts, physical SSD IOPS or proof of durable storage.
+
+Mapped reads and native shared-memory file operations can bypass these ordinary
+file callbacks. Directory syncs, file deletion/truncation and other native VFS
+operations are outside these 15 rows. Sync flags are forwarded unchanged;
+one `xSync` invocation does not establish how many `fsync` or `F_FULLFSYNC`
+operations occurred. These omissions stay explicit when interpreting amplification.
+
+The bank retains file open/close outcomes and close-time I/O after the live
+connection registry empties. Lifecycle counters also include sidecar files
+opened or closed by observer queries, as its separate lifecycle scope states.
+Live file, live provider-marker and registered-VFS counts are gauges;
+they retain start/end observations and are not reset with cumulative counters.
+Process-lifetime VFS registrations remain alive after provider markers drop;
+they are bounded and are not allocated once per Drive or connection.
+Drain callbacks before sampling or resetting. An active callback/window or a
+detected reset race prevents complete VFS attribution. Observer query suppression
+is scoped to the synchronous observer's calling thread, so it excludes observer
+I/O without suppressing work on unrelated threads. Registry observer elapsed time covers its existing
+per-connection collection; the global bank export is collected afterward.
+
+Checkpoint signals additionally bracket an observed **backfill copy window**.
+In pinned SQLite 3.51.3, `CKPT_START` follows the initial WAL sync and iterator/
+lock work; `CKPT_DONE` precedes final database truncate/sync and backfill
+publication. DONE can follow a copy error or arrive without START after an
+initial sync failure. Paired durations, unmatched signals, aborted-at-close
+windows and pending windows are recorded separately. They do not count successful
+checkpoints, all checkpoint attempts, copied WAL frames or total checkpoint time.
+The WAL iterator can copy a page once despite multiple frames for that page.
+
+JavaScript validates this global bank independently of connection attribution.
+It retains qualified VFS deltas after connection retirement while keeping full
+native/connection attribution incomplete. Invalid or missing banks retain only
+bounded partial evidence. Exact counters and histograms are subtracted; maxima
+and live gauges retain endpoints. The callback observer adds fixed counters
+and clocks, with no per-call Rust allocation or logging by source inspection.
+Registration allocates its bounded context once, and the wrapper enlarges
+SQLite's native per-file allocation. Shared atomics, clocks, native operations
+and snapshot serialization have their own costs; no allocation or disabled-
+observer overhead comparison was measured for this wrapper.
+
 ### Controlled runtime-worker experiment
 
 The ignored saturation fixture keeps its default 16-worker Tokio runtime. The

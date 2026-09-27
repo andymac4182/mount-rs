@@ -367,9 +367,23 @@ const sqlitePagerSampling = "before observer queries; reset after queries; repea
 function sqliteTiming(calls, errors) {
   return { completed: String(calls), overflow: false, elapsed_ns: String(calls * 1000), max_elapsed_ns: calls ? "1000" : "0", invalid_elapsed: "0", histogram_log2_us: [String(calls), ...Array(31).fill("0")], ...(errors === undefined ? {} : { errors: String(errors) }) }
 }
+const sqliteVfsRoles = ["main_database", "main_journal", "wal", "temporary", "other"]
+const sqliteVfsScope = "process selected observed native VFS invocations including external connections and connection close; excludes observer read/write/sync and checkpoint signals, SHM, mmap and other VFS operations; not syscalls or physical device IOPS"
+const sqliteVfsByteScope = "requested native xRead/xWrite bytes; confirmed only on SQLITE_OK; partial error bytes unavailable; xSync bytes are zero"
+const sqliteVfsLifecycleScope = "native file/context lifecycle including observer sidecar opens and closes; live gauges are never reset"
+const sqliteVfsCheckpointScope = "matched Instant wall time from CKPT_START arrival to CKPT_DONE arrival; backfill copy window only, after initial WAL sync and before final database truncate/sync; signals do not prove checkpoint success"
+function emptySqliteVfs() {
+  return {
+    schema: "mount-rs.sqlite-vfs.v1", scope: sqliteVfsScope, byte_scope: sqliteVfsByteScope, lifecycle_scope: sqliteVfsLifecycleScope, checkpoint_scope: sqliteVfsCheckpointScope,
+    overflow: false, open_attempts: "0", open_errors: "0", files_opened: "0", close_calls: "0", close_errors: "0",
+    in_flight: "0", live_files: "0", registered_vfs: "0", live_contexts: "0",
+    entries: sqliteVfsRoles.flatMap((role) => ["read", "write", "sync"].map((operation) => ({ name: `${role}.${operation}`, ...sqliteTiming(0, 0), requested_bytes: "0", confirmed_bytes: "0", short_reads: "0" }))),
+    checkpoint: { starts: "0", dones: "0", unmatched_starts: "0", unmatched_dones: "0", aborted_windows: "0", active_windows: "0", paired: sqliteTiming(0) },
+  }
+}
 function sqliteConnection(calls, connectionId) {
   return {
-    connection_id: connectionId, counter_overflow: false,
+    connection_id: connectionId, counter_overflow: false, vfs_observed: true,
     pager: { cache_hits: String(calls), cache_misses: "0", page_writes: String(calls), cache_spills: "0" },
     page_size: "4096", pager_read_bytes_estimate: "0", pager_write_bytes_estimate: String(calls * 4096),
     pager_sampling: sqlitePagerSampling, sql_statements: String(calls), sql_categories: { SELECT: String(calls) },
@@ -402,7 +416,7 @@ function diagnosticSnapshot(calls, connectionId = "7", instances = []) {
     http_attempts: "unavailable", physical_device_iops: "unavailable",
     storage: { in_flight: "0", forwarding_boxes: { sites: "napi_dynamic_provider_forwarding_future", calls: String(calls), requested_object_bytes: String(calls * 80) }, entries: STORAGE_OPERATION_NAMES.map((name) => { const count = name === "blocks.put" ? calls : 0; return { name, calls: String(count), success: String(count), error: "0", cancelled: "0", bytes: String(count * 4096), returned_rows: "0", returned_row_observations: "0", in_flight: "0", elapsed_ns: String(count * 1000), latency_log2_us: [String(count), ...Array(31).fill("0")] } }) },
     profile: { entries: [{ name: "filesystem.gate_wait", calls: String(calls), elapsed_ns: String(calls * 50), units: "0" }] },
-    sqlite: { connections: [sqliteConnection(calls, connectionId)], sql_statements: String(calls), observer_elapsed_ns: String(calls * 1000), observer_scope: sqliteObserverScope },
+    sqlite: { connections: [sqliteConnection(calls, connectionId)], sql_statements: String(calls), observer_elapsed_ns: String(calls * 1000), observer_scope: sqliteObserverScope, vfs: { ...emptySqliteVfs(), open_attempts: "1", files_opened: "1", live_files: "1", registered_vfs: "1", live_contexts: "1" } },
     r2: { scope: "process_live_instances", instances, internal_successful_retries: "unavailable" },
   }
 }
@@ -493,7 +507,9 @@ async function testSqlitePhaseDiagnostics() {
   const invalidOnly = deltaNativeSnapshots(invalidOnlyBefore, invalidOnlyAfter)
   assert.deepEqual([observed.complete, invalidOnly.complete], [false, false], "reconciled mixed-valid/invalid and invalid-only duration samples cannot certify complete timing")
   for (const partial of [observed, invalidOnly]) {
-    assert.equal(Object.hasOwn(partial, "sqlite"), false, "partial durations must not appear as a complete phase delta")
+    assert.equal(partial.sqlite.complete, false, "partial durations must not appear as a complete SQLite phase delta")
+    assert.equal(Object.hasOwn(partial.sqlite, "connections"), false, "invalid SQL timings retain endpoints without fabricating connection deltas")
+    assert.equal(partial.sqlite.vfs.complete, true, "independently valid VFS timings survive unavailable SQL duration samples")
     assert.match(partial.issues.join(" "), /duration/u)
     assert.deepEqual(JSON.parse(JSON.stringify(partial)).observations, partial.observations, "encoded partial artifacts retain public endpoint observations")
   }
@@ -582,7 +598,7 @@ async function testSqlitePhaseDiagnostics() {
   assert.equal(observer.sqlite.observer_elapsed_ns_end, "1")
 
   const missingBefore = diagnosticSnapshot(0)
-  missingBefore.sqlite = { connections: [], sql_statements: "0", observer_elapsed_ns: "0", observer_scope: sqliteObserverScope }
+  missingBefore.sqlite = { connections: [], sql_statements: "0", observer_elapsed_ns: "0", observer_scope: sqliteObserverScope, vfs: emptySqliteVfs() }
   const opened = deltaNativeSnapshots(missingBefore, after)
   assert.equal(opened.complete, true)
   assert.equal(opened.sqlite.connections[0].opened_during_phase, true)
@@ -632,7 +648,9 @@ async function testSqlitePhaseDiagnostics() {
       mutate((side === "before" ? first : last).sqlite.connections[0])
       const rejected = deltaNativeSnapshots(first, last)
       assert.equal(rejected.complete, false, `${label} on ${side} must not qualify complete`)
-      assert.equal(Object.hasOwn(rejected, "sqlite"), false, "invalid data must not be presented as a complete phase delta")
+      assert.equal(rejected.sqlite.complete, false, "invalid SQL data must not be presented as a complete phase delta")
+      assert.equal(Object.hasOwn(rejected.sqlite, "connections"), false, "invalid SQL data cannot fabricate connection deltas")
+      assert.equal(rejected.sqlite.vfs.complete, true, "independently valid VFS observations survive unrelated SQL validation failures")
       assert.equal(JSON.stringify(rejected).includes("private-sql-secret"), false, "invalid evidence must retain only closed public labels")
       assert.equal(rejected.observations[side].sqlite.connections.values.length, 1, "failed diagnostics retain bounded public endpoint observations")
     }
@@ -658,6 +676,272 @@ async function testSqlitePhaseDiagnostics() {
   const impossibleWal = structuredClone(walAfter)
   impossibleWal.sqlite.connections[0].wal_state.uncheckpointed_frames = "4"
   assert.equal(deltaNativeSnapshots(walBefore, impossibleWal).complete, false)
+}
+
+async function testSqliteVfsPhaseDiagnostics() {
+  const sample = (calls) => {
+    const native = diagnosticSnapshot(calls)
+    native.sqlite.connections[0].vfs_observed = true
+    native.sqlite.vfs = emptySqliteVfs()
+    Object.assign(native.sqlite.vfs, { open_attempts: calls === 2 ? "2" : "3", files_opened: calls === 2 ? "2" : "3", close_calls: calls === 2 ? "0" : "1", live_files: "2", registered_vfs: "1", live_contexts: "1" })
+    for (const [index, row] of native.sqlite.vfs.entries.entries()) {
+      Object.assign(row, sqliteTiming(calls, calls === 5 ? 1 : 0))
+      if (index % 3 !== 2) Object.assign(row, { requested_bytes: String(calls * 4096), confirmed_bytes: String((calls - (calls === 5 ? 1 : 0)) * 4096) })
+      if (index % 3 === 0 && calls === 5) row.short_reads = "1"
+    }
+    native.sqlite.vfs.checkpoint = { starts: String(calls), dones: String(calls), unmatched_starts: "0", unmatched_dones: "0", aborted_windows: "0", active_windows: "0", paired: sqliteTiming(calls) }
+    return native
+  }
+  const before = sample(2)
+  const after = sample(5)
+  const delta = deltaNativeSnapshots(before, after)
+  assert.ok(delta.sqlite?.vfs, "process VFS phase evidence must be retained by the native consumer")
+  assert.equal(delta.complete, true, "a fully observed process VFS bank must qualify with current SQLite connection diagnostics")
+  const bank = delta.sqlite.vfs
+  assert.equal(bank.complete, true)
+  assert.equal(bank.schema, "mount-rs.sqlite-vfs.v1")
+  assert.equal(bank.scope, sqliteVfsScope)
+  assert.equal(bank.byte_scope, sqliteVfsByteScope)
+  assert.equal(bank.lifecycle_scope, sqliteVfsLifecycleScope)
+  assert.equal(bank.checkpoint_scope, sqliteVfsCheckpointScope)
+  assert.equal(bank.entries.length, 15, "the fixed role bank is process-wide, never repeated per connection")
+  assert.deepEqual(bank.entries.map((row) => row.name), sqliteVfsRoles.flatMap((role) => ["read", "write", "sync"].map((operation) => `${role}.${operation}`)))
+  assert.equal(bank.open_attempts, "1")
+  assert.equal(bank.files_opened, "1")
+  assert.equal(bank.close_calls, "1")
+  assert.equal(bank.live_files_start, "2")
+  assert.equal(bank.live_files_end, "2")
+  assert.equal(bank.registered_vfs_start, "1")
+  assert.equal(bank.registered_vfs_end, "1")
+  assert.equal(bank.live_contexts_start, "1")
+  assert.equal(bank.live_contexts_end, "1")
+  for (const [index, row] of bank.entries.entries()) {
+    assert.equal(row.completed, "3")
+    assert.equal(row.errors, "1", "known-duration VFS errors do not erase observed calls")
+    assert.equal(row.elapsed_ns, "3000")
+    assert.equal(row.histogram_log2_us[0], "3")
+    assert.equal(row.max_elapsed_ns_start, "1000")
+    assert.equal(row.max_elapsed_ns_end, "1000")
+    assert.equal(row.exact_phase_max_ns, "unavailable")
+    assert.equal(row.requested_bytes, index % 3 === 2 ? "0" : "12288")
+    assert.equal(row.confirmed_bytes, index % 3 === 2 ? "0" : "8192")
+    assert.equal(row.short_reads, index % 3 === 0 ? "1" : "0")
+  }
+  assert.equal(bank.checkpoint.starts, "3")
+  assert.equal(bank.checkpoint.dones, "3")
+  assert.equal(bank.checkpoint.active_windows_start, "0")
+  assert.equal(bank.checkpoint.active_windows_end, "0")
+  assert.equal(bank.checkpoint.paired.completed, "3")
+  assert.equal(bank.checkpoint.paired.exact_phase_max_ns, "unavailable")
+  assert.deepEqual(JSON.parse(JSON.stringify(delta)).sqlite.vfs, bank, "encoded artifacts must retain role units and checkpoint window evidence")
+
+  const invalidProfile = (native) => {
+    const timing = native.sqlite.connections[0].sql_profile.SELECT
+    Object.assign(timing, { invalid_elapsed: "1", elapsed_ns: String((BigInt(timing.completed) - 1n) * 1000n), histogram_log2_us: [String(BigInt(timing.completed) - 1n), ...Array(31).fill("0")] })
+  }
+  for (const [label, mutate] of [
+    ["invalid SQL PROFILE duration", invalidProfile],
+    ["errored SQLite connection", (native) => { native.sqlite.connections[0].error = "private-sql-secret" }],
+    ["invalid storage counter", (native) => { delete native.storage.entries[0].calls }],
+  ]) {
+    for (const side of ["before", "after"]) {
+      const first = structuredClone(before)
+      const last = structuredClone(after)
+      mutate(side === "before" ? first : last)
+      const partial = deltaNativeSnapshots(first, last)
+      assert.equal(partial.complete, false, `${label} cannot certify the whole phase`)
+      assert.equal(partial.sqlite?.vfs?.complete, true, "an unrelated diagnostic failure must retain independently validated process VFS evidence")
+      assert.equal(partial.sqlite?.complete, false)
+      assert.deepEqual(partial.sqlite.vfs, bank)
+      assert.equal(Object.hasOwn(partial.sqlite, "connections"), false, "failed SQL validation exposes sanitized endpoints without inventing connection deltas")
+      assert.equal(JSON.stringify(partial).includes("private-sql-secret"), false)
+      if (label === "invalid SQL PROFILE duration") assert.equal(partial.observations[side].sqlite.connections.values[0].sql_profile.SELECT.invalid_elapsed, "1")
+      if (label === "errored SQLite connection") assert.equal(partial.observations[side].sqlite.connections.values[0].error, "unavailable")
+    }
+  }
+  const invalidUnobserved = structuredClone(after)
+  invalidProfile(invalidUnobserved)
+  invalidUnobserved.sqlite.connections[0].vfs_observed = false
+  const partialUnobserved = deltaNativeSnapshots(before, invalidUnobserved)
+  assert.equal(partialUnobserved.complete, false)
+  assert.equal(partialUnobserved.sqlite.complete, false)
+  assert.equal(partialUnobserved.sqlite.vfs.complete, false, "invalid SQL timing cannot hide an explicit VFS attribution gap")
+  assert.ok(partialUnobserved.issues.includes("SQLite VFS provider attribution unavailable"))
+  assert.equal(partialUnobserved.sqlite.vfs.entries[0].completed, "3")
+  const endpoint = (native) => ({ started: 0, ended: 0, cpuStart: { user: 0, system: 0 }, cpuEnd: { user: 0, system: 0 }, resourcesStart: { voluntaryContextSwitches: 0, involuntaryContextSwitches: 0 }, resourcesEnd: { voluntaryContextSwitches: 0, involuntaryContextSwitches: 0 }, memory: {}, native })
+  const invalidPhaseAfter = structuredClone(after)
+  invalidProfile(invalidPhaseAfter)
+  const partialPhase = finishPhase("workload-vfs-partial", endpoint(before), endpoint(invalidPhaseAfter))
+  assert.equal(partialPhase.native.complete, false)
+  assert.equal(partialPhase.native.sqlite.complete, false)
+  assert.deepEqual(partialPhase.native.sqlite.vfs, bank, "phase artifact retention survives a second incomplete-evidence pass")
+  assert.equal(Object.hasOwn(partialPhase.native.sqlite, "missing_connection_ids"), false, "failed SQL validation cannot fabricate connection coverage")
+  assert.equal(partialPhase.native.observations.after.sqlite.connections.values[0].sql_profile.SELECT.invalid_elapsed, "1")
+  for (const [label, mutate] of [
+    ["untrusted schema", (native) => { native.schema_version = "private-sql-secret" }],
+    ["disabled diagnostics", (native) => { native.enabled = false }],
+    ["untrusted scope", (native) => { native.scope = "private-sql-secret" }],
+    ["untrusted measurement", (native) => { native.measurement.storage_duration = "private-sql-secret" }],
+    ["untrusted availability", (native) => { native.backend_waits.pglite_client_lock = "private-sql-secret" }],
+  ]) {
+    const changed = structuredClone(after)
+    invalidProfile(changed)
+    mutate(changed)
+    const untrusted = deltaNativeSnapshots(before, changed)
+    assert.equal(untrusted.complete, false, label)
+    assert.equal(Object.hasOwn(untrusted.sqlite ?? {}, "vfs"), false, "trusted top-level metadata is required before deriving an independent VFS bank")
+    assert.equal(JSON.stringify(untrusted).includes("private-sql-secret"), false)
+  }
+
+  const failedButClosable = structuredClone(after)
+  failedButClosable.sqlite.vfs.open_errors = "1"
+  const closableFailure = deltaNativeSnapshots(before, failedButClosable)
+  assert.equal(closableFailure.complete, true, "a failed xOpen with non-null methods still owns a closable file")
+  for (const field of ["open_attempts", "open_errors", "files_opened", "close_calls"]) assert.equal(closableFailure.sqlite.vfs[field], "1", "failed-but-closeable open outcomes overlap without losing lifecycle counts")
+  assert.equal(closableFailure.sqlite.vfs.live_files_start, "2")
+  assert.equal(closableFailure.sqlite.vfs.live_files_end, "2")
+  assert.equal(closableFailure.sqlite.vfs.entries[0].errors, "1")
+  assert.equal(closableFailure.sqlite.vfs.entries[0].elapsed_ns, "3000", "valid timed errors remain complete observed callback evidence")
+  const failedWithoutFile = structuredClone(after)
+  Object.assign(failedWithoutFile.sqlite.vfs, { open_errors: "1", files_opened: "2", close_calls: "0" })
+  assert.equal(deltaNativeSnapshots(before, failedWithoutFile).complete, true, "a failed xOpen with no methods need not own a file")
+
+  const closed = structuredClone(after)
+  closed.sqlite.connections = []
+  closed.sqlite.sql_statements = "0"
+  Object.assign(closed.sqlite.vfs, { close_calls: "3", live_files: "0", live_contexts: "0" })
+  const retirement = deltaNativeSnapshots(before, closed)
+  assert.equal(retirement.complete, false, "retiring connections cannot certify complete connection attribution")
+  assert.ok(retirement.issues.includes("SQLite connection closed during phase"))
+  assert.equal(retirement.sqlite.complete, false)
+  assert.equal(Object.hasOwn(retirement.sqlite, "connections"), false)
+  assert.equal(retirement.sqlite.vfs.complete, true, "the separately validated global bank survives connection retirement")
+  assert.equal(retirement.sqlite.vfs.close_calls, "3")
+  assert.equal(retirement.sqlite.vfs.live_files_end, "0")
+  assert.equal(retirement.sqlite.vfs.registered_vfs_end, "1", "registered wrappers remain valid for the process lifetime")
+  assert.equal(retirement.sqlite.vfs.live_contexts_end, "0")
+
+  const unobservedBefore = structuredClone(before)
+  const unobservedAfter = structuredClone(after)
+  for (const native of [unobservedBefore, unobservedAfter]) native.sqlite.connections[0].vfs_observed = false
+  const partial = deltaNativeSnapshots(unobservedBefore, unobservedAfter)
+  assert.equal(partial.complete, false, "an alternate selected VFS leaves provider file attribution incomplete")
+  assert.equal(partial.sqlite.complete, false)
+  assert.equal(partial.sqlite.vfs.complete, false)
+  assert.ok(partial.issues.includes("SQLite VFS provider attribution unavailable"))
+  assert.equal(partial.sqlite.connections[0].vfs_observed_start, false)
+  assert.equal(partial.sqlite.connections[0].vfs_observed_end, false)
+  for (const timing of [partial.sqlite.connections[0].provider_begin, partial.sqlite.connections[0].provider_commit, partial.sqlite.connections[0].connection_lock, partial.sqlite.connections[0].connection_lock_hold, partial.sqlite.connections[0].sql_profile.SELECT]) assert.equal(timing.completed, "3", "qualified SQL timing deltas survive a separate VFS coverage gap")
+  assert.equal(partial.sqlite.vfs.entries[0].completed, "3", "the observed portion is retained without certifying full coverage")
+  assert.equal(partial.observations.after.sqlite.connections.values[0].vfs_observed, false)
+
+  const resetOriginBefore = structuredClone(before)
+  const resetOriginAfter = structuredClone(after)
+  Object.assign(resetOriginBefore.sqlite.vfs, { open_attempts: "0", files_opened: "0", close_calls: "0" })
+  Object.assign(resetOriginAfter.sqlite.vfs, { open_attempts: "1", files_opened: "1", close_calls: "1" })
+  const resetOrigin = deltaNativeSnapshots(resetOriginBefore, resetOriginAfter)
+  assert.equal(resetOrigin.complete, true, "a reset counter origin retains live gauges and reconciles phase file deltas")
+  assert.equal(resetOrigin.sqlite.vfs.live_files_start, "2")
+  assert.equal(resetOrigin.sqlite.vfs.live_files_end, "2")
+
+  const largeBefore = structuredClone(before)
+  const largeAfter = structuredClone(after)
+  Object.assign(largeBefore.sqlite.vfs.entries[0], { requested_bytes: "9007199254740993", confirmed_bytes: "9007199254740993" })
+  Object.assign(largeAfter.sqlite.vfs.entries[0], { requested_bytes: "18014398509481988", confirmed_bytes: "18014398509481986" })
+  const precise = deltaNativeSnapshots(largeBefore, largeAfter)
+  assert.equal(precise.complete, true)
+  assert.equal(precise.sqlite.vfs.entries[0].requested_bytes, "9007199254740995")
+  assert.equal(precise.sqlite.vfs.entries[0].confirmed_bytes, "9007199254740993")
+
+  for (const [label, mutate] of [
+    ["missing bank", (native) => { delete native.sqlite.vfs }],
+    ["unavailable bank", (native) => { native.sqlite.vfs = { error: "private-vfs-secret" } }],
+    ["unknown schema", (native) => { native.sqlite.vfs.schema = "private-vfs-secret" }],
+    ["unknown scope", (native) => { native.sqlite.vfs.scope = "private-vfs-secret" }],
+    ["unknown byte scope", (native) => { native.sqlite.vfs.byte_scope = "private-vfs-secret" }],
+    ["missing lifecycle scope", (native) => { delete native.sqlite.vfs.lifecycle_scope }],
+    ["unknown lifecycle scope", (native) => { native.sqlite.vfs.lifecycle_scope = "private-vfs-secret" }],
+    ["unknown checkpoint scope", (native) => { native.sqlite.vfs.checkpoint_scope = "private-vfs-secret" }],
+    ["missing role", (native) => { native.sqlite.vfs.entries.pop() }],
+    ["duplicate role", (native) => { native.sqlite.vfs.entries[1] = structuredClone(native.sqlite.vfs.entries[0]) }],
+    ["changed role order", (native) => { native.sqlite.vfs.entries.reverse() }],
+    ["private role", (native) => { native.sqlite.vfs.entries[0].name = "private-vfs-secret" }],
+    ["private field", (native) => { native.sqlite.vfs.entries[0]["private-vfs-secret"] = "1" }],
+    ["missing counter", (native) => { delete native.sqlite.vfs.entries[0].requested_bytes }],
+    ["missing context gauge", (native) => { delete native.sqlite.vfs.live_contexts }],
+    ["numeric counter", (native) => { native.sqlite.vfs.entries[0].completed = 5 }],
+    ["u64 overflow", (native) => { native.sqlite.vfs.entries[0].requested_bytes = "18446744073709551616" }],
+    ["bank overflow", (native) => { native.sqlite.vfs.overflow = true }],
+    ["timing overflow", (native) => { native.sqlite.vfs.entries[0].overflow = true }],
+    ["unknown duration", (native) => { const row = native.sqlite.vfs.entries[0]; row.invalid_elapsed = "1"; row.histogram_log2_us[0] = String(BigInt(row.completed) - 1n); row.elapsed_ns = String((BigInt(row.completed) - 1n) * 1000n) }],
+    ["histogram shape", (native) => { native.sqlite.vfs.entries[0].histogram_log2_us.push("0") }],
+    ["errors exceed calls", (native) => { native.sqlite.vfs.entries[0].errors = "6" }],
+    ["unconfirmed success bytes", (native) => { native.sqlite.vfs.entries[0].confirmed_bytes = "999999" }],
+    ["sync byte units", (native) => { native.sqlite.vfs.entries[2].requested_bytes = "1" }],
+    ["short reads exceed errors", (native) => { native.sqlite.vfs.entries[0].short_reads = "2" }],
+    ["short reads outside read", (native) => { native.sqlite.vfs.entries[1].short_reads = "1" }],
+    ["open errors exceed attempts", (native) => { native.sqlite.vfs.open_errors = String(BigInt(native.sqlite.vfs.open_attempts) + 1n) }],
+    ["opened files exceed attempts", (native) => { native.sqlite.vfs.files_opened = String(BigInt(native.sqlite.vfs.open_attempts) + 1n) }],
+    ["successful open lacks a file", (native) => { native.sqlite.vfs.files_opened = String(BigInt(native.sqlite.vfs.open_attempts) - 1n) }],
+    ["invalid close outcome", (native) => { native.sqlite.vfs.close_errors = "4" }],
+    ["in-flight method", (native) => { native.sqlite.vfs.in_flight = "1" }],
+    ["unobserved connection", (native) => { native.sqlite.connections[0].vfs_observed = false }],
+    ["missing connection coverage", (native) => { delete native.sqlite.connections[0].vfs_observed }],
+    ["checkpoint pending", (native) => { native.sqlite.vfs.checkpoint.starts = String(BigInt(native.sqlite.vfs.checkpoint.starts) + 1n); native.sqlite.vfs.checkpoint.active_windows = "1" }],
+    ["unmatched START", (native) => { native.sqlite.vfs.checkpoint.starts = String(BigInt(native.sqlite.vfs.checkpoint.starts) + 1n); native.sqlite.vfs.checkpoint.unmatched_starts = "1" }],
+    ["unmatched DONE", (native) => { native.sqlite.vfs.checkpoint.dones = String(BigInt(native.sqlite.vfs.checkpoint.dones) + 1n); native.sqlite.vfs.checkpoint.unmatched_dones = "1" }],
+    ["aborted window", (native) => { native.sqlite.vfs.checkpoint.starts = String(BigInt(native.sqlite.vfs.checkpoint.starts) + 1n); native.sqlite.vfs.checkpoint.aborted_windows = "1" }],
+    ["checkpoint pairing mismatch", (native) => { native.sqlite.vfs.checkpoint.dones = "0" }],
+  ]) {
+    for (const side of ["before", "after"]) {
+      const first = structuredClone(before)
+      const last = structuredClone(after)
+      mutate(side === "before" ? first : last)
+      const rejected = deltaNativeSnapshots(first, last)
+      assert.equal(rejected.complete, false, `${label} at ${side} cannot qualify complete VFS attribution`)
+      assert.notEqual(rejected.sqlite?.vfs?.complete, true)
+      assert.equal(JSON.stringify(rejected).includes("private-vfs-secret"), false)
+      assert.ok(rejected.observations[side].sqlite.vfs, "failed VFS evidence retains fixed endpoint observations")
+    }
+  }
+  const changedLive = structuredClone(after)
+  changedLive.sqlite.vfs.live_files = "3"
+  assert.equal(deltaNativeSnapshots(before, changedLive).complete, false, "live-file gauge changes must agree with opened and closed files in this phase")
+  const closeBefore = structuredClone(before)
+  const closeAfter = structuredClone(after)
+  Object.assign(closeBefore.sqlite.vfs, { close_calls: "10", close_errors: "0" })
+  Object.assign(closeAfter.sqlite.vfs, { close_calls: "11", close_errors: "2" })
+  for (const endpoint of [closeBefore, closeAfter]) assert.equal(deltaNativeSnapshots(endpoint, endpoint).complete, true, "each cumulative close outcome is valid in isolation")
+  const impossibleClose = deltaNativeSnapshots(closeBefore, closeAfter)
+  const disappearedWrapper = structuredClone(after)
+  disappearedWrapper.sqlite.vfs.registered_vfs = "0"
+  const disappearingRegistration = deltaNativeSnapshots(before, disappearedWrapper)
+  assert.deepEqual([impossibleClose.complete, disappearingRegistration.complete], [false, false], "VFS phase must reject impossible close errors and disappearing permanent registrations")
+  for (const rejected of [impossibleClose, disappearingRegistration]) assert.notEqual(rejected.sqlite?.vfs?.complete, true, "inconsistent phase evidence cannot certify a complete process bank")
+  assert.equal(impossibleClose.observations.before.sqlite.vfs.close_calls, "10")
+  assert.equal(impossibleClose.observations.after.sqlite.vfs.close_calls, "11")
+  assert.equal(impossibleClose.observations.after.sqlite.vfs.close_errors, "2", "partial observations retain the invalid phase's actual cumulative counters")
+  assert.equal(disappearingRegistration.observations.before.sqlite.vfs.registered_vfs, "1")
+  assert.equal(disappearingRegistration.observations.after.sqlite.vfs.registered_vfs, "0", "a disappearing wrapper is retained as endpoint evidence, never a valid gauge delta")
+  for (const [label, oldOutcomes, newOutcomes] of [
+    ["phase open errors exceed attempts", { open_attempts: "10", open_errors: "0", files_opened: "10", close_calls: "8" }, { open_attempts: "11", open_errors: "2", files_opened: "11", close_calls: "9" }],
+    ["phase opened files exceed attempts", { open_attempts: "10", open_errors: "2", files_opened: "8", close_calls: "6" }, { open_attempts: "11", open_errors: "3", files_opened: "10", close_calls: "8" }],
+    ["phase successful open lacks a file", { open_attempts: "10", open_errors: "2", files_opened: "10", close_calls: "8" }, { open_attempts: "11", open_errors: "2", files_opened: "10", close_calls: "8" }],
+  ]) {
+    const first = structuredClone(before)
+    const last = structuredClone(after)
+    Object.assign(first.sqlite.vfs, oldOutcomes)
+    Object.assign(last.sqlite.vfs, newOutcomes)
+    for (const endpoint of [first, last]) assert.equal(deltaNativeSnapshots(endpoint, endpoint).complete, true, `${label} has individually valid cumulative endpoints`)
+    const rejected = deltaNativeSnapshots(first, last)
+    assert.equal(rejected.complete, false, `${label} must be rejected despite valid cumulative endpoints and balanced live-file gauges`)
+    assert.notEqual(rejected.sqlite?.vfs?.complete, true)
+    assert.equal(rejected.observations.before.sqlite.vfs.open_attempts, oldOutcomes.open_attempts)
+    assert.equal(rejected.observations.after.sqlite.vfs.open_errors, newOutcomes.open_errors)
+  }
+  const reset = structuredClone(after)
+  Object.assign(reset.sqlite.vfs.entries[0], sqliteTiming(1, 0), { requested_bytes: "4096", confirmed_bytes: "4096", short_reads: "0" })
+  assert.equal(deltaNativeSnapshots(before, reset).complete, false, "global VFS counters cannot reset between observed phase boundaries")
 }
 
 async function testStorageDriverFieldDeltas() {
@@ -1995,7 +2279,7 @@ async function testSteadyGenerationsRejectDroppedWrites() {
 }
 if (process.argv.includes("--diagnostics-only")) {
   const failures = []
-  for (const test of [testStorageDriverFieldDeltas, testStorageFamilyMetadata, testStoragePhaseDiagnostics, testSqlitePhaseDiagnostics, testRawObjectStorePhaseDiagnostics, testObjectStoreLocalPhaseDiagnostics, testRustFsPhaseDiagnostics, testRawQualificationArtifact, testQualificationProviderCoverage, testObserverEndpointsExcludeSnapshotWork, testQualificationArtifact]) {
+  for (const test of [testStorageDriverFieldDeltas, testStorageFamilyMetadata, testStoragePhaseDiagnostics, testSqlitePhaseDiagnostics, testSqliteVfsPhaseDiagnostics, testRawObjectStorePhaseDiagnostics, testObjectStoreLocalPhaseDiagnostics, testRustFsPhaseDiagnostics, testRawQualificationArtifact, testQualificationProviderCoverage, testObserverEndpointsExcludeSnapshotWork, testQualificationArtifact]) {
     try { await test(); console.log(`${test.name}: PASS`) }
     catch (error) { failures.push(test.name); console.error(`${test.name}: FAIL`, error) }
   }
@@ -2007,6 +2291,7 @@ await testSteadyOverwriteOracle()
 await testStats()
 await testStoragePhaseDiagnostics()
 await testSqlitePhaseDiagnostics()
+await testSqliteVfsPhaseDiagnostics()
 await testStorageDriverFieldDeltas()
 await testStorageFamilyMetadata()
 await testRawObjectStorePhaseDiagnostics()

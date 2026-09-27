@@ -12,6 +12,8 @@ use std::{
     time::Instant,
 };
 
+mod vfs;
+
 const CATEGORIES: [&str; 9] = [
     "SELECT", "INSERT", "UPDATE", "DELETE", "BEGIN", "COMMIT", "ROLLBACK", "PRAGMA", "OTHER",
 ];
@@ -86,6 +88,9 @@ pub(crate) struct Counts {
     provider_commit: Timing,
     provider_commit_errors: AtomicU64,
     observer_suppressed: AtomicBool,
+    // The registration is a marker for a bounded process-lifetime native VFS,
+    // whose neutral context never borrows Counts or owns a connection.
+    vfs: OnceLock<vfs::Registration>,
 }
 impl Counts {
     pub(crate) fn lock_finished(&self, elapsed_ns: u64, success: bool) {
@@ -113,6 +118,7 @@ impl Counts {
         ObserverGuard {
             counts: self,
             previous: self.observer_suppressed.swap(true, Ordering::Relaxed),
+            _vfs_observer: vfs::ObserverScope::new(),
         }
     }
     fn reset(&self) {
@@ -135,6 +141,7 @@ impl Counts {
 struct ObserverGuard<'a> {
     counts: &'a Counts,
     previous: bool,
+    _vfs_observer: vfs::ObserverScope,
 }
 impl Drop for ObserverGuard<'_> {
     fn drop(&mut self) {
@@ -203,11 +210,48 @@ unsafe extern "C" fn trace(
     }
     0
 }
-pub(crate) fn register(connection: &Arc<Mutex<Connection>>) -> Result<Option<Arc<Counts>>> {
+pub(crate) fn prepare() -> Result<Option<Arc<Counts>>> {
     if std::env::var("MOUNT_RS_PROFILE_IO").as_deref() != Ok("1") {
         return Ok(None);
     }
     let counts = Arc::new(Counts::default());
+    let registration = vfs::Registration::new()?;
+    if counts.vfs.set(registration).is_err() {
+        return Err(backend_error("SQLite VFS diagnostic registration repeated"));
+    }
+    Ok(Some(counts))
+}
+pub(crate) fn open_connection(
+    path: Option<&std::path::Path>,
+    counts: Option<&Counts>,
+) -> rusqlite::Result<Connection> {
+    let name = counts
+        .and_then(|counts| counts.vfs.get())
+        .map(vfs::Registration::name);
+    match (path, name) {
+        (Some(path), Some(name)) => {
+            Connection::open_with_flags_and_vfs(path, rusqlite::OpenFlags::default(), name)
+        }
+        (None, Some(name)) => {
+            Connection::open_in_memory_with_flags_and_vfs(rusqlite::OpenFlags::default(), name)
+        }
+        (Some(path), None) => Connection::open(path),
+        (None, None) => Connection::open_in_memory(),
+    }
+}
+#[cfg(test)]
+fn register(connection: &Arc<Mutex<Connection>>) -> Result<Option<Arc<Counts>>> {
+    let counts = (std::env::var("MOUNT_RS_PROFILE_IO").as_deref() == Ok("1"))
+        .then(|| Arc::new(Counts::default()));
+    register_prepared(connection, counts)
+}
+pub(crate) fn register_prepared(
+    connection: &Arc<Mutex<Connection>>,
+    counts: Option<Arc<Counts>>,
+) -> Result<Option<Arc<Counts>>> {
+    let Some(counts) = counts else {
+        return Ok(None);
+    };
     let mut registry = REGISTRY
         .get_or_init(Mutex::default)
         .lock()
@@ -349,7 +393,7 @@ fn wal_state(
 pub fn sqlite_io_diagnostics(reset: bool) -> serde_json::Value {
     let Some(registry) = REGISTRY.get() else {
         return serde_json::json!({"connections":[],"sql_statements":0,
-            "observer_elapsed_ns":0,"observer_scope":OBSERVER_SCOPE});
+            "observer_elapsed_ns":0,"observer_scope":OBSERVER_SCOPE,"vfs":vfs::snapshot(reset)});
     };
     let observer_started = Instant::now();
     let Ok(mut entries) = registry.lock() else {
@@ -383,6 +427,7 @@ pub fn sqlite_io_diagnostics(reset: bool) -> serde_json::Value {
         value["sql_statements"] = serde_json::json!(total);
         value["counter_overflow"] = serde_json::json!(total.is_none() || counts.overflow.load(Ordering::Relaxed));
         value["connection_id"] = serde_json::json!(entry.id);
+        value["vfs_observed"] = serde_json::json!(counts.vfs.get().is_some_and(|vfs| vfs.is_selected(&connection)));
         value["sql_categories"] = serde_json::json!(sql);
         value["sql_profile"] = serde_json::json!(profiles);
         value["sql_profile_scope"] = serde_json::json!("SQLite PROFILE completion notifications, not successes; approximate VFS wall clock, bundled SQLite 1ms resolution; excludes post-PROFILE WAL callbacks");
@@ -406,7 +451,7 @@ pub fn sqlite_io_diagnostics(reset: bool) -> serde_json::Value {
         .try_fold(0u64, |sum, value| sum.checked_add(value));
     serde_json::json!({"connections":samples,"sql_statements":total,
         "observer_elapsed_ns":observer_started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
-        "observer_scope":OBSERVER_SCOPE})
+        "observer_scope":OBSERVER_SCOPE,"vfs":vfs::snapshot(reset)})
 }
 
 #[cfg(test)]

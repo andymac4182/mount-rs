@@ -501,15 +501,19 @@ impl Database {
                 Ok((requested, canonical, expected, created_by_open))
             })
             .transpose()?;
-        let connection = match path {
+        // Prepare the nondefault observed VFS before SQLite opens any native
+        // file. This local must outlive Connection even on an early error.
+        let diagnostics = super::io_diagnostics::prepare()?;
+        let selected_path = match path {
             #[cfg(unix)]
             Some(_) if path_info.is_some() => {
-                Connection::open(&path_info.as_ref().expect("checked").1)
+                Some(path_info.as_ref().expect("checked").1.as_path())
             }
-            Some(path) => Connection::open(path),
-            None => Connection::open_in_memory(),
-        }
-        .map_err(backend_error)?;
+            path => path,
+        };
+        let connection =
+            super::io_diagnostics::open_connection(selected_path, diagnostics.as_deref())
+                .map_err(backend_error)?;
         #[cfg(unix)]
         let opened_file = if let Some((requested, canonical, expected, created_by_open)) = path_info
         {
@@ -539,10 +543,13 @@ impl Database {
         // Empty paths and :memory: are not durable even when passed to open().
         let durable = connection.path().is_some_and(|path| !path.is_empty());
         let connection = Arc::new(Mutex::new(connection));
-        let diagnostics = super::io_diagnostics::register(&connection)?;
+        // Retain the original pre-open owner through a registration error;
+        // register_prepared may drop its argument before this connection.
+        let registered =
+            super::io_diagnostics::register_prepared(&connection, diagnostics.clone())?;
         Ok(Self {
             connection,
-            _io_diagnostics: diagnostics,
+            _io_diagnostics: registered,
             durable,
             #[cfg(unix)]
             opened_file,
@@ -4542,6 +4549,288 @@ mod tests {
             rusqlite::ffi::SQLITE_VERSION_NUMBER,
             "runtime SQLite must match the bundled headers",
         );
+    }
+
+    #[test]
+    #[ignore = "requires MOUNT_RS_PROFILE_IO=1 and exclusive VFS phase ownership"]
+    fn provider_vfs_roles_checkpoint_and_close_preserve_payloads() {
+        use crate::sqlite_io_diagnostics;
+        use rusqlite::ffi;
+
+        assert_eq!(std::env::var("MOUNT_RS_PROFILE_IO").as_deref(), Ok("1"));
+        let native_default = unsafe { ffi::sqlite3_vfs_find(std::ptr::null()) };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("private-vfs-oracle.sqlite");
+        let payload: Vec<u8> = (0..16384).map(|index| (index % 251) as u8).collect();
+        // A schema failure closes files before returning from Database::open.
+        // The pre-open context must survive those callbacks on the error path.
+        let failed_path = directory.path().join("private-vfs-error.sqlite");
+        assert!(Database::open(Some(&failed_path), "CREATE TABLE invalid(").is_err());
+        let failed_open = sqlite_io_diagnostics(false);
+        // Assert the contract only after successful real provider payloads
+        // below; this fixture is meaningful even before VFS metrics exist.
+        let store = SqliteBlockStore::open(&path).unwrap();
+        sqlite_io_diagnostics(true);
+        let first = store.put_once(&payload).unwrap();
+        store
+            .0
+            .lock()
+            .unwrap()
+            .execute_batch("PRAGMA shrink_memory")
+            .unwrap();
+        futures_lite::future::block_on(async {
+            assert_eq!(store.get(&first).await.unwrap(), payload);
+        });
+        let delete = sqlite_io_diagnostics(false);
+        // Real provider I/O and full payloads above must precede the feature
+        // assertion, so the intended RED cannot hide a storage fixture error.
+        assert_eq!(
+            delete["vfs"]["schema"], "mount-rs.sqlite-vfs.v1",
+            "native VFS attribution missing"
+        );
+        assert_eq!(failed_open["vfs"]["registered_vfs"], 1);
+        assert_eq!(failed_open["vfs"]["live_contexts"], 0);
+        assert_eq!(failed_open["vfs"]["live_files"], 0);
+        assert!(failed_open["vfs"]["close_calls"].as_u64().unwrap() > 0);
+        let entry = |bank: &serde_json::Value, name: &str| {
+            bank["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["name"] == name)
+                .unwrap()
+                .clone()
+        };
+        for name in [
+            "main_database.read",
+            "main_database.write",
+            "main_database.sync",
+            "main_journal.write",
+            "main_journal.sync",
+        ] {
+            assert!(
+                entry(&delete["vfs"], name)["completed"].as_u64().unwrap() > 0,
+                "missing {name}"
+            );
+        }
+        for row in delete["vfs"]["entries"].as_array().unwrap() {
+            assert!(!row["overflow"].as_bool().unwrap());
+            assert_eq!(row["invalid_elapsed"], 0);
+            assert!(
+                row["confirmed_bytes"].as_u64().unwrap()
+                    <= row["requested_bytes"].as_u64().unwrap()
+            );
+        }
+        assert_eq!(delete["vfs"]["in_flight"], 0);
+        assert_eq!(delete["connections"][0]["vfs_observed"], true);
+        assert_eq!(
+            delete["vfs"],
+            sqlite_io_diagnostics(false)["vfs"],
+            "observer must not add workload VFS calls"
+        );
+
+        store
+            .0
+            .lock()
+            .unwrap()
+            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0")
+            .unwrap();
+        sqlite_io_diagnostics(true);
+        let second = store.put_once(b"wal-payload-after-reset").unwrap();
+        let queued = sqlite_io_diagnostics(false);
+        assert!(
+            entry(&queued["vfs"], "wal.write")["confirmed_bytes"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert!(
+            entry(&queued["vfs"], "wal.sync")["completed"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert_eq!(queued["vfs"]["checkpoint"]["starts"], 0);
+        let (busy, _, _): (i64, i64, i64) = store
+            .0
+            .lock()
+            .unwrap()
+            .query_row("PRAGMA wal_checkpoint(FULL)", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(busy, 0);
+        let copied = sqlite_io_diagnostics(false);
+        let checkpoint = &copied["vfs"]["checkpoint"];
+        assert!(checkpoint["paired"]["completed"].as_u64().unwrap() > 0);
+        assert_eq!(checkpoint["starts"], checkpoint["dones"]);
+        assert_eq!(checkpoint["starts"], checkpoint["paired"]["completed"]);
+        assert_eq!(checkpoint["unmatched_starts"], 0);
+        assert_eq!(checkpoint["unmatched_dones"], 0);
+        assert_eq!(checkpoint["aborted_windows"], 0);
+        assert_eq!(checkpoint["active_windows"], 0);
+        assert!(
+            entry(&copied["vfs"], "main_database.write")["confirmed_bytes"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+
+        let third = store.put_once(b"close-time-checkpoint-payload").unwrap();
+        let before_close = sqlite_io_diagnostics(false);
+        drop(store);
+        let terminal = sqlite_io_diagnostics(false);
+        assert!(terminal["connections"].as_array().unwrap().is_empty());
+        assert_eq!(terminal["vfs"]["registered_vfs"], 1);
+        assert_eq!(terminal["vfs"]["live_contexts"], 0);
+        assert_eq!(terminal["vfs"]["live_files"], 0);
+        assert_eq!(terminal["vfs"]["in_flight"], 0);
+        assert!(
+            terminal["vfs"]["close_calls"].as_u64().unwrap()
+                > before_close["vfs"]["close_calls"].as_u64().unwrap()
+        );
+        assert!(
+            entry(&terminal["vfs"], "main_database.write")["confirmed_bytes"]
+                .as_u64()
+                .unwrap()
+                > entry(&before_close["vfs"], "main_database.write")["confirmed_bytes"]
+                    .as_u64()
+                    .unwrap(),
+            "last-close backfill must remain visible after connection retirement"
+        );
+        assert!(!terminal.to_string().contains("private-vfs-oracle"));
+        assert_eq!(
+            unsafe { ffi::sqlite3_vfs_find(std::ptr::null()) },
+            native_default,
+            "diagnostics must preserve native default VFS"
+        );
+
+        let fresh = SqliteBlockStore::open(&path).unwrap();
+        futures_lite::future::block_on(async {
+            assert_eq!(fresh.get(&first).await.unwrap(), payload);
+            assert_eq!(
+                fresh.get(&second).await.unwrap(),
+                b"wal-payload-after-reset"
+            );
+            assert_eq!(
+                fresh.get(&third).await.unwrap(),
+                b"close-time-checkpoint-payload"
+            );
+        });
+        let raw = Connection::open(&path).unwrap();
+        assert_eq!(
+            raw.query_row("SELECT count(*) FROM mount_rs_blocks", [], |row| row
+                .get::<_, u64>(0))
+                .unwrap(),
+            3
+        );
+        drop(raw);
+        drop(fresh);
+        // URI vfs= overrides sqlite3_open_v2's VFS name. Attribute only the
+        // actual selected main pager, without changing that existing behavior.
+        let override_path = directory.path().join("private-vfs-override.sqlite");
+        let native_name = unsafe { std::ffi::CStr::from_ptr((*native_default).zName) };
+        let uri = format!(
+            "file:{}?vfs={}",
+            override_path.display(),
+            native_name.to_str().unwrap()
+        );
+        let prepared = super::super::io_diagnostics::prepare().unwrap();
+        let override_connection = Arc::new(Mutex::new(
+            super::super::io_diagnostics::open_connection(
+                Some(Path::new(&uri)),
+                prepared.as_deref(),
+            )
+            .unwrap(),
+        ));
+        let override_counts =
+            super::super::io_diagnostics::register_prepared(&override_connection, prepared.clone())
+                .unwrap();
+        let override_sample = sqlite_io_diagnostics(false);
+        assert_eq!(override_sample["connections"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            override_sample["connections"][0]["vfs_observed"], false,
+            "URI native-VFS selection must not fabricate wrapper coverage"
+        );
+        drop(override_connection);
+        drop(override_counts);
+        drop(prepared);
+
+        // The registered VFS name is process-global. Safe external file and
+        // memory connections can select it and outlive every provider marker.
+        // Neither their VFS context nor their file callbacks may borrow Counts.
+        let marker = super::super::io_diagnostics::prepare().unwrap();
+        let owned = super::super::io_diagnostics::open_connection(None, marker.as_deref()).unwrap();
+        let mut selected_vfs = std::ptr::null_mut::<ffi::sqlite3_vfs>();
+        assert_eq!(
+            unsafe {
+                ffi::sqlite3_file_control(
+                    owned.handle(),
+                    c"main".as_ptr(),
+                    ffi::SQLITE_FCNTL_VFS_POINTER,
+                    std::ptr::from_mut(&mut selected_vfs).cast(),
+                )
+            },
+            ffi::SQLITE_OK
+        );
+        assert!(!selected_vfs.is_null());
+        let selected_name = unsafe { std::ffi::CStr::from_ptr((*selected_vfs).zName) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let external_path = directory.path().join("private-vfs-external.sqlite");
+        let external_file = Connection::open_with_flags_and_vfs(
+            &external_path,
+            rusqlite::OpenFlags::default(),
+            selected_name.as_str(),
+        )
+        .unwrap();
+        let external_memory = Connection::open_in_memory_with_flags_and_vfs(
+            rusqlite::OpenFlags::default(),
+            selected_name.as_str(),
+        )
+        .unwrap();
+        drop(owned);
+        drop(marker);
+        assert_eq!(sqlite_io_diagnostics(false)["vfs"]["live_contexts"], 0);
+        external_file.execute_batch("CREATE TABLE external_payload(value BLOB); INSERT INTO external_payload VALUES(X'616263')").unwrap();
+        external_memory.execute_batch("CREATE TABLE external_payload(value BLOB); INSERT INTO external_payload VALUES(X'646566')").unwrap();
+        assert_eq!(
+            external_file
+                .query_row("SELECT value FROM external_payload", [], |row| row
+                    .get::<_, Vec<u8>>(0))
+                .unwrap(),
+            b"abc"
+        );
+        assert_eq!(
+            external_memory
+                .query_row("SELECT value FROM external_payload", [], |row| row
+                    .get::<_, Vec<u8>>(0))
+                .unwrap(),
+            b"def"
+        );
+        assert!(
+            external_memory
+                .query_row("SELECT unixepoch('subsec')", [], |row| row.get::<_, f64>(0))
+                .unwrap()
+                > 0.0
+        );
+        drop(external_file);
+        drop(external_memory);
+        let reopened_external = Connection::open(&external_path).unwrap();
+        assert_eq!(
+            reopened_external
+                .query_row("SELECT value FROM external_payload", [], |row| row
+                    .get::<_, Vec<u8>>(0))
+                .unwrap(),
+            b"abc"
+        );
+        drop(reopened_external);
+        sqlite_io_diagnostics(true);
+        let reset = sqlite_io_diagnostics(false);
+        assert_eq!(reset["vfs"]["close_calls"], 0);
+        assert_eq!(reset["vfs"]["live_files"], 0);
+        assert_eq!(reset["vfs"]["checkpoint"]["paired"]["completed"], 0);
     }
 
     #[test]

@@ -86,7 +86,7 @@ const { createBackingObserver } = await import("./backing-observer.mjs")
 const { createBackingEngineTransport } = await import("./backing-engine-transport.mjs")
 const pilot = await import("./owned-backing-pilot.mjs")
 const diagnostics = await import("./diagnostics.mjs")
-const { FOUNDATIONDB_DIAGNOSTIC_UNAVAILABLE, STORAGE_OPERATION_NAMES, STORAGE_OPERATION_FAMILIES, STORAGE_INSTRUMENTED_OPERATION_NAMES, STORAGE_CALL_SEMANTICS, STORAGE_BYTE_SEMANTICS, STORAGE_ROW_SEMANTICS, TIDB_DIAGNOSTIC_COVERAGE } = diagnostics
+const { FOUNDATIONDB_DIAGNOSTIC_UNAVAILABLE, STORAGE_OPERATION_NAMES, STORAGE_OPERATION_FAMILIES, STORAGE_INSTRUMENTED_OPERATION_NAMES, STORAGE_CALL_SEMANTICS, STORAGE_BYTE_SEMANTICS, STORAGE_ROW_SEMANTICS, TIDB_DIAGNOSTIC_COVERAGE, SQLITE_VFS_MEASUREMENT, SQLITE_VFS_ENTRY_NAMES } = diagnostics
 const capture = require(capturePath)
 
 test.after(() => {
@@ -853,6 +853,14 @@ const modelCommittedProfileNames = [
   "blob_cache.disk.hit_bytes",
 ]
 
+function emptySqliteVfs() {
+  const zero = (fields) => Object.fromEntries(fields.map((field) => [field, "0"]))
+  const timing = () => ({ ...zero(["completed", "elapsed_ns", "max_elapsed_ns", "invalid_elapsed"]), overflow: false, histogram_log2_us: Array(32).fill("0") })
+  return { ...SQLITE_VFS_MEASUREMENT, overflow: false,
+    ...zero(["open_attempts", "open_errors", "files_opened", "close_calls", "close_errors", "in_flight", "live_files", "registered_vfs", "live_contexts"]),
+    entries: SQLITE_VFS_ENTRY_NAMES.map((name) => ({ name, ...timing(), ...zero(["errors", "requested_bytes", "confirmed_bytes", "short_reads"]) })),
+    checkpoint: { ...zero(["starts", "dones", "unmatched_starts", "unmatched_dones", "aborted_windows", "active_windows"]), paired: timing() } }
+}
 function modelNativeSnapshot(live) {
   const zero = (fields) => Object.fromEntries(fields.map((field) => [field, "0"]))
   const rawNames = ["put_opts.block_create", "get.block_read", "body_read.block_read", "get.conflict_verify", "body_read.conflict_verify", "get.migration", "body_read.migration", "head.direct_delete", "delete.direct", "delete.reconcile"]
@@ -877,6 +885,7 @@ function modelNativeSnapshot(live) {
     profile: { entries: modelCommittedProfileNames.map((name) => ({ name, ...zero(["calls", "elapsed_ns", "units"]) })) }, sqlite: {
       connections: [], sql_statements: "0", observer_elapsed_ns: "0",
       observer_scope: "Instant wall time for sequential registry lock and per-connection observer collection; excludes final outer JSON serialization; not workload time",
+      vfs: emptySqliteVfs(),
     }, r2: { scope: "process_live_instances", internal_successful_retries: "unavailable", instances: live ? [instance] : [] },
   })
 }
