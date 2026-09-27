@@ -67,17 +67,20 @@ jobs:
         shell: bash
     env:
       CARGO_BUILD_JOBS: '1'
-      CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-remote-failure-target
-      MOUNT_RS_FAILURE_EVIDENCE_ROOT: ${{ runner.temp }}/mount-rs-remote-failure-evidence
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697
       - name: Prepare private failure evidence and require clean source
         id: failure-evidence
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-remote-failure-target
+          MOUNT_RS_FAILURE_EVIDENCE_ROOT: ${{ runner.temp }}/mount-rs-remote-failure-evidence
         run: |
           set -euo pipefail
           umask 077
           mkdir -m 700 "$CARGO_TARGET_DIR" "$MOUNT_RS_FAILURE_EVIDENCE_ROOT"
+          printf 'CARGO_TARGET_DIR=%s\nMOUNT_RS_FAILURE_EVIDENCE_ROOT=%s\n' \
+            "$CARGO_TARGET_DIR" "$MOUNT_RS_FAILURE_EVIDENCE_ROOT" >> "$GITHUB_ENV"
           git status --porcelain=v1 --untracked-files=all > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/source-before.txt"
           test ! -s "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/source-before.txt"
       - name: Verify modeled owned failure parent controls
