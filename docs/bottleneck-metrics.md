@@ -879,3 +879,74 @@ mode, verifies the selected block backing and awaits handle cleanup. This
 removes the receipt's private pools without caching layout authority. Actual
 TiDB startup savings require a matched live measurement; local SQLite and
 cleanup controls establish correctness, not TiDB throughput.
+
+
+## Filesystem causal profile rows
+
+The opt-in core profile contract retains its original 47 names and appends 61
+fixed causal rows, for 108 total. This is separate from the unchanged 85-row
+storage operation bank. Each core row retains decimal-string `calls`,
+`elapsed_ns` and event-specific `units` in the Node consumer; use a lossless
+parser for raw Rust JSON integers above 2^53. The phase metrics projector can
+retain a valid partial profile without inventing absent rows. Its allowed-label
+set also preserves six existing optional compact capture/COW labels (114 allowed
+labels); this compatibility allowance is separate from the 108-row bank. The
+exact backing pilot and verifier require all 108 rows; an old 47-row snapshot is incomplete,
+rather than evidence of zero causal traffic. Unknown labels are excluded from
+the pilot's closed projection, while unknown or duplicate projected labels fail
+verification. Explicit new zero rows are valid observations.
+
+| Fixed row group | Meaning and limits |
+| --- | --- |
+| `filesystem.block_put.{initial,fallback,retry_rewrite,chunker_reprepare}` and each `.success`, `.error`, `.cancelled` | One span per dispatched block put; unsuffixed units are attempted chunk input bytes. Terminal calls partition dispatches. Success units are the known input length on successful return; error/cancelled units are zero. These are neither application payload nor wire/physical storage bytes. A returned block ID does not prove durability. |
+| `filesystem.gate_wait.<kind>`, `filesystem.gate_hold.<kind>`, `filesystem.gate_wait.<kind>.cancelled` | Kinds: `read`, `metadata`, `write_prepare`, `write_commit`, `write_fallback`, `whole_file_replay`, `mutation_batch`, `maintenance`. Wait includes acquisition cancellation; hold starts only on acquisition and ends on guard drop; units are zero. The unchanged old aggregate covers its original sites, so its sum need not equal the classified rows. |
+| `filesystem.gate_phase.{refresh,recovery,block_rewrite,publication,cas_backoff}` | Constructed only while borrowing an acquired operation gate. Nested phases are inclusive and do not measure work outside the gate. |
+| `filesystem.mutation.{enqueue_requests,dequeue_requests,queue_wait_requests,coalescing_yields,attempt_requests}` | Request/yield units are actual considered counts; queue wait runs until dequeue or queue cancellation. Coalescing observes its actual adaptive window/yields. An attempt includes only open-reply candidates considered in that iteration. It is not a CAS dispatch count. |
+| `filesystem.mutation.attempt.{success,conflict,no_publication,error,cancelled}` | One terminal outcome per attempt; `no_publication` includes candidates producing no namespace change and does not imply a dispatched CAS. |
+| `filesystem.mutation.request.{committed,conflict,cancelled,receiver_closed,error,reply_sent}` | Committed/conflict/cancelled/error are terminal request observations. Delivery rows classify observed sends or closed-receiver skips; dropping a request before either boundary records no delivery. Successful channel send does not prove consumption or application acknowledgement. A receiver lost after known commit retains the committed observation. |
+
+Cancellation records the Rust observer future/guard drop once; it does not
+prove rollback or native operation settlement. Use acknowledged workload
+operations as the independent denominator. Gate, rewrite, publication and
+provider spans overlap and may nest or run concurrently. Their summed elapsed
+time is inclusive wall time, not exclusive CPU, throughput attribution or
+physical device IOPS. Attempted/completed chunk bytes are separate numerators;
+divide by the same phase's verified/acknowledged payload bytes only when that
+independent denominator exists.
+
+### Observer gates and tracing cost
+
+The dedicated public-filesystem integration target exercises deterministic
+provider counts, pending futures, CAS outcomes and manual-clock controls with
+profiling enabled. Its tests are ignored by default: reporting ignored tests
+is not execution evidence. Run the entire dedicated target with `--ignored
+--test-threads=1 --nocapture` and inspect every executed name and the terminal
+result. The separate core allocator gate uses `--ignored --exact
+warmed_causal_profile_rows_record_without_added_allocations`; it measures warmed
+recorder primitives outside filesystem futures, executor work and snapshots.
+The older storage-span allocation gate qualifies the separate storage recorder,
+not these new core rows. None of these controls qualifies backend throughput.
+
+The dedicated target executes 12 cases on Linux/macOS and 11 portable cases on
+Windows; the additional Unix case uses SQLite compact inodes and verifies
+payload after reopening. A separate exact helper lifecycle control checks
+once-only terminal partitions and canceled observers.
+
+The observability CI job adds explicit opt-in commands and retains their
+complete `filesystem-causal-metrics.log` and
+`filesystem-causal-profile-allocations.log`, together with the existing
+`storage-diagnostic-allocations.log`, using an always-upload artifact. Helper
+controls retain `filesystem-causal-helpers.log`. A separate
+trace-enabled smoke runs `causal_profile_slow_span_emits_fixed_stderr` and retains
+`filesystem-causal-profile-slow.log`; CI requires its fixed slow-record line.
+`pipefail` preserves the test failure through `tee`. Hosted coverage requires the actual
+uploaded logs and matching source/build identity, not a workflow definition.
+
+Optional causal slow records reuse `MOUNT_RS_TRACE_STORAGE` and the fixed
+`MOUNT_RS_PROFILE_SLOW` marker: a 100 ms threshold and a 16-record process budget
+bound emitted records. Fixed labels and numeric counters exclude identifiers,
+payloads and error bodies. Tracing still adds observer work; compare tracing-off
+and tracing-on evidence separately. Sampling/log bounds do not make the observer
+free, and the warmed allocation gate does not include formatting or output.
+The retained Ozone floor failures and their source/build uncertainty above
+remain unchanged; these rows do not establish their cause or a speedup.
