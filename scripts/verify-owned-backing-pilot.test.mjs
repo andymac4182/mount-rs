@@ -149,6 +149,111 @@ const profileNames = [
   "blob_cache.ram.hit_bytes",
   "blob_cache.disk.hit_bytes",
 ]
+// Fixed historical names keep incomplete fixtures independent of current order.
+const historical85Names = Object.freeze([
+  "metadata.load",
+  "metadata.load_if_changed",
+  "metadata.snapshot",
+  "metadata.publish",
+  "metadata.flush",
+  "blocks.put",
+  "blocks.get",
+  "blocks.flush",
+  "blocks.verify_backing",
+  "blocks.prepare_backing",
+  "blocks.delete",
+  "blocks.reconcile",
+  "pglite.client_lock_wait",
+  "sdk.metadata.compact_inode_capability",
+  "sdk.metadata.compact_inode_mode_state",
+  "sdk.metadata.prepare_compact_inode_mode",
+  "sdk.metadata.load_compact_snapshot",
+  "sdk.metadata.load_compact_inode",
+  "sdk.metadata.publish_compact_inode",
+  "sdk.metadata.publish_compact_structure",
+  "sdk.metadata.inode_mode_state",
+  "sdk.metadata.prepare_inode_mode",
+  "sdk.metadata.load_inode_snapshot_if_changed",
+  "sdk.metadata.load_inode_snapshot",
+  "sdk.metadata.load_inode",
+  "sdk.metadata.load_inode_if_changed",
+  "sdk.metadata.publish_inode_if_version",
+  "sdk.metadata.publish_structure_if_versions",
+  "sdk.metadata.delegation_state",
+  "sdk.metadata.prepare_delegated_mode",
+  "sdk.metadata.checkout",
+  "sdk.metadata.publish_delegated",
+  "sdk.metadata.checkin",
+  "sdk.metadata.recover",
+  "sdk.metadata.durable",
+  "sdk.metadata.publish_includes_flush_barrier",
+  "sdk.metadata.load",
+  "sdk.metadata.load_if_changed",
+  "sdk.metadata.concurrent_mode_state",
+  "sdk.metadata.preflight_new_bound_mode",
+  "sdk.metadata.prepare_bound_concurrent_mode",
+  "sdk.metadata.acquire_writer",
+  "sdk.metadata.renew_writer",
+  "sdk.metadata.release_writer",
+  "sdk.metadata.publish",
+  "sdk.metadata.publish_bound_if_revision",
+  "sdk.metadata.migrate_mrc1_to_bound_mode",
+  "sdk.metadata.preflight_mrc1_to_bound_mode",
+  "sdk.metadata.preflight_trusted_unstamped_mrc1",
+  "sdk.metadata.migrate_trusted_unstamped_mrc1",
+  "sdk.metadata.flush",
+  "sdk.blocks.durable",
+  "sdk.blocks.prepare_concurrent_backing",
+  "sdk.blocks.verify_concurrent_backing",
+  "sdk.blocks.get_for_migration",
+  "sdk.blocks.put",
+  "sdk.blocks.get",
+  "sdk.blocks.flush",
+  "sdk.blocks.delete",
+  "sdk.blocks.reconcile",
+  "tidb.pool.checkout",
+  "tidb.session.configure",
+  "tidb.open.schema",
+  "tidb.open.metadata_row",
+  "tidb.tx.begin.metadata",
+  "tidb.tx.begin.inode",
+  "tidb.tx.begin.compact_read",
+  "tidb.tx.commit",
+  "tidb.tx.rollback",
+  "tidb.sql.session",
+  "tidb.sql.ddl",
+  "tidb.sql.metadata_read",
+  "tidb.sql.metadata_write",
+  "tidb.sql.inode_read",
+  "tidb.sql.inode_write",
+  "tidb.sql.block_read",
+  "tidb.sql.block_write",
+  "tidb.sql.flush_probe",
+  "foundationdb.transaction.create",
+  "foundationdb.transaction.closure_attempt",
+  "foundationdb.read.get",
+  "foundationdb.read.get_key",
+  "foundationdb.read.get_range_page",
+  "foundationdb.transaction.commit",
+  "foundationdb.transaction.on_error",
+])
+const historical92Names = Object.freeze([
+  ...historical85Names,
+  "blob_cache.miss.admission_wait",
+  "blob_cache.miss.singleflight_wait",
+  "blob_cache.ram.lookup",
+  "blob_cache.disk.lookup",
+  "blob_cache.peer.connection_lock_wait",
+  "blob_cache.peer.connection_establish",
+  "client.quic.open_bi",
+])
+function historicalStorageRows(rows, names) {
+  return names.map((name) => {
+    const row = rows.find((entry) => entry.name === name)
+    assert.ok(row, `missing modeled historical storage row: ${name}`)
+    return structuredClone(row)
+  })
+}
 const roles = ["pd-1", "pd-2", "pd-3", "tikv-1", "tikv-2", "tikv-3", "tidb", "rustfs-service"]
 const rawNames = ["put_opts.block_create", "get.block_read", "body_read.block_read", "get.conflict_verify", "body_read.conflict_verify", "get.migration", "body_read.migration", "head.direct_delete", "delete.direct", "delete.reconcile"]
 const claims = ["leader_claims", "leader_success", "leader_error", "leader_cancelled", "follower_claims", "follower_success", "follower_error", "follower_cancelled"]
@@ -362,17 +467,21 @@ test("current verifier refuses a complete historical 134-core / 85-storage snaps
   const { pilot, build } = model()
   const workload = pilot.native_phases.phases[0]
   assert.equal(workload.core_profile.entries.length, 136)
-  assert.equal(workload.storage.length, 100)
+  assert.equal(workload.storage.length, 108)
   workload.core_profile.entries.splice(134)
-  workload.storage.splice(85)
+  workload.storage = historicalStorageRows(workload.storage, historical85Names)
+  assert.equal(workload.core_profile.entries.length, 134)
+  assert.equal(workload.storage.length, 85)
   assert.throws(() => verifyPilot(pilot, build), { code: "pilot_evidence_rejected", reason: "native_evidence" })
 })
 test("current verifier refuses a complete historical 136-core / 92-storage snapshot", () => {
   const { pilot, build } = model()
   const workload = pilot.native_phases.phases[0]
   assert.equal(workload.core_profile.entries.length, 136)
-  assert.equal(workload.storage.length, 100)
-  workload.storage.splice(92)
+  assert.equal(workload.storage.length, 108)
+  workload.storage = historicalStorageRows(workload.storage, historical92Names)
+  assert.equal(workload.core_profile.entries.length, 136)
+  assert.equal(workload.storage.length, 92)
   assert.throws(() => verifyPilot(pilot, build), { code: "pilot_evidence_rejected", reason: "native_evidence" })
 })
 for (const kind of ["old47", "old108", "old114", "old118", "old134", "missing", "missing_create_guard", "duplicate", "unknown"]) test(`causal exact ${kind} rows reject qualification`, () => {
@@ -404,10 +513,16 @@ for (const name of [
   "blob_cache.peer.request_byte_admission_wait", "blob_cache.peer.open_bi",
   "blob_cache.peer.request_send", "blob_cache.peer.response_receive",
   "blob_cache.peer.get", "blob_cache.peer.get_miss",
+  "client.websocket.tcp_connect", "client.websocket.tls_handshake",
+  "client.websocket.upgrade", "client.websocket.socket_lock_wait",
+  "client.websocket.request_encode", "client.websocket.request_send",
+  "client.websocket.response_receive", "client.websocket.response_decode",
 ]) test(`current exact missing ${name} storage row rejects qualification`, () => {
   const { pilot, build } = model()
   const rows = pilot.native_phases.phases[0].storage
-  assert.equal(rows.length, 100)
-  rows.splice(rows.findIndex((row) => row.name === name), 1)
+  assert.equal(rows.length, 108)
+  const index = rows.findIndex((row) => row.name === name)
+  assert.notEqual(index, -1)
+  rows.splice(index, 1)
   assert.throws(() => verifyPilot(pilot, build), { code: "pilot_evidence_rejected", reason: "native_evidence" })
 })

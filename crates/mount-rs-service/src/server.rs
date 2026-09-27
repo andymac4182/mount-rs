@@ -15,9 +15,9 @@ pub use crate::transfer::RemoteTransferLimits;
 use crate::transfer::{Admission, Budgets, ResponseBuffer, ResponseReservation, charged_bytes};
 
 mod diagnostics;
-use diagnostics::Operation as DiagnosticOperation;
+pub(crate) use diagnostics::Operation as DiagnosticOperation;
 pub(crate) use diagnostics::{AuthStage, Outcome, Span, auth_scope, auth_span};
-pub use diagnostics::{ServerDiagnostics, ServerSnapshot};
+pub use diagnostics::{ServerDiagnostics, ServerSnapshot, WebSocketDiagnostics, WebSocketSnapshot};
 
 const OPERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 

@@ -168,6 +168,14 @@ export const STORAGE_OPERATION_NAMES = [
   "blob_cache.peer.response_receive",
   "blob_cache.peer.get",
   "blob_cache.peer.get_miss",
+  "client.websocket.tcp_connect",
+  "client.websocket.tls_handshake",
+  "client.websocket.upgrade",
+  "client.websocket.socket_lock_wait",
+  "client.websocket.request_encode",
+  "client.websocket.request_send",
+  "client.websocket.response_receive",
+  "client.websocket.response_decode",
 ]
 const storageNames = STORAGE_OPERATION_NAMES
 export const STORAGE_CALL_SEMANTICS = "fixed_label_provider_and_driver_operations; families_overlap_and_are_not_application_iops"
@@ -194,6 +202,7 @@ export const STORAGE_OPERATION_FAMILIES = {
   blob_cache_peer_response_receive: { operations: ["blob_cache.peer.response_receive"], calls: "response_receive_stage_invocations; includes_success_error_and_cancellation; not_backing_reads", bytes: "known_successfully_validated_plaintext_status_and_body_bytes; not_wire_bytes", returned_rows: "unavailable", duration: "inclusive_response_read_and_validation_nanoseconds; overlaps_get_duration" },
   blob_cache_peer_get: { operations: ["blob_cache.peer.get"], calls: "logical_peer_get_and_get_shared_invocations; includes_hits_misses_errors_and_cancellation", bytes: "known_successful_logical_get_payload_bytes; misses_zero", returned_rows: "unavailable", duration: "inclusive_get_method_nanoseconds; includes_request_and_existing_return_conversion; overlaps_transport_stages" },
   blob_cache_peer_get_miss: { operations: ["blob_cache.peer.get_miss"], calls: "successful_get_miss_classifications; not_peer_requests", bytes: "unavailable", returned_rows: "unavailable", duration: "classification_marker_nanoseconds; excludes_get_request_duration" },
+  client_websocket: { operations: ["client.websocket.tcp_connect", "client.websocket.tls_handshake", "client.websocket.upgrade", "client.websocket.socket_lock_wait", "client.websocket.request_encode", "client.websocket.request_send", "client.websocket.response_receive", "client.websocket.response_decode"], calls: "client_stage_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_stage_wall_nanoseconds; nested_and_parallel_spans_overlap; not_exclusive_cpu_or_network_time" },
 }
 export const TIDB_DIAGNOSTIC_COVERAGE = {
   schema: "mount-rs-tidb-client-diagnostic-coverage-v1", status: "source_sites_instrumented",

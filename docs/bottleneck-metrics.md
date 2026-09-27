@@ -58,8 +58,8 @@ observer work.
 
 Phase reports now retain the resource counters already sampled at each boundary.
 `resource_measurement.schema` is `mount-rs.process-resources.v1`. No new Node
-sampler calls are added. The current core, storage and QUIC row inventories are
-136, 100 and 21 respectively; the cache and client additions are described below.
+sampler calls are added. The current core, storage and service row inventories are
+136, 108 and 22 respectively; the cache and client additions are described below.
 
 | Report field | Meaning |
 | --- | --- |
@@ -95,8 +95,8 @@ real Mac gate observes its own PID and start token with no selected device.
 CI runs the Node controls on its existing platforms and the exact OS gate on
 Unix, retaining its output even on failure and rejecting a zero-case pass.
 
-Remaining transport/cache timing gaps are client connection/socket details,
-incoming peer establishment, directory/discovery lookup, and WebSocket stages.
+Remaining transport/cache timing gaps are QUIC client connection establishment,
+incoming peer establishment, and directory/discovery lookup.
 Client send/receive and peer quota/open/send/receive/GET stages are described
 below. Cache lookup histograms include misses; isolated warm phases are needed
 to qualify RAM or disk hit latency. Peer send backpressure/error and stream-open
@@ -248,7 +248,8 @@ snapshots can observe this row.
 
 The [retained transport report](benchmarks/transport-stage-metrics-20260928/report.json)
 qualifies eight appended storage rows, preserving the original 92-row prefix.
-The current bank has 100 rows and 20 distinct units families.
+That slice produced 100 rows and 20 distinct units families. The current bank,
+including the WebSocket stages below, has 108 rows and 21 families.
 
 | Fixed row | Timed boundary | Successful bytes |
 | --- | --- | --- |
@@ -313,9 +314,68 @@ JS and NAPI exports declare stage-specific bytes. The addon still audits 78
 storage producers by default or 85 with FoundationDB; its transport families
 remain unavailable. Literal historical 92-row records retain missing rows and
 histograms as null/unavailable. Strict current validators reject missing rows
-and the historical payload-only descriptor on a current 100-row inventory.
+and the historical payload-only descriptor on a current 108-row inventory.
 Server CLI shutdown banks remain process-local; a dedicated client CLI shutdown
-export, incoming peer/discovery timings and WebSocket stages remain open.
+export and incoming peer/discovery timings remain open.
+
+### WebSocket client and service observations
+
+Enable exactly `MOUNT_RS_PROFILE_IO=1` before the first client recorder use and
+read `mount_rs_core::diagnostics::storage::snapshot()` in that client process.
+The eight rows append at storage indexes 100 through 107, preserving the original
+100-row prefix:
+
+| Fixed row | Timed boundary |
+| --- | --- |
+| `client.websocket.tcp_connect` | Existing TCP connect await |
+| `client.websocket.tls_handshake` | Existing TLS connect await |
+| `client.websocket.upgrade` | HTTP upgrade and subprotocol validation |
+| `client.websocket.socket_lock_wait` | Existing serialized socket acquisition and closed/shutdown checks |
+| `client.websocket.request_encode` | Existing binary request encoding |
+| `client.websocket.request_send` | Header/body/terminator sink submission |
+| `client.websocket.response_receive` | Existing envelope reception and protocol validation |
+| `client.websocket.response_decode` | Result decoding, output copy and trailing-data validation |
+
+Calls are stage invocations with success, error and cancellation outcomes,
+in-flight gauges and 32 latency buckets. Byte and returned-row observations are
+zero because these quantities are unavailable at this seam. Durations are
+inclusive overlapping wall time: they do not isolate CPU or network time and
+must not be summed as exclusive work. Local send success does not establish peer
+acknowledgment; a valid remote error can be successfully received and decoded.
+Existing deadlines, socket serialization and uncertain-write handling remain.
+
+For service observations, compile `mount-rs-cli` with `--features io-profiling`
+and run `serve-remote` with exactly `MOUNT_RS_PROFILE_IO=1` and a configured
+WebSocket listener. Embedders instead explicitly call
+`WebSocketServer::bind_with_diagnostics(..., true)` in an `io-profiling` service
+build and retain `server.diagnostics()`. Ordinary constructors remain disabled,
+including when the environment flag is set. The application-only snapshot schema
+is `mount-rs.service-websocket.v1`; its shared 22-row service bank includes
+`handshake.websocket_upgrade`, scoped hello/renewal authentication, request,
+admission, dispatch, encode, submit and actual session cleanup. Authenticated idle
+sockets have no open request span. Preserve the activity, saturation and quiescence envelope;
+it does not measure passive traffic or prove application drain.
+
+The WebSocket snapshot has no QUIC transport subtree. TCP/TLS wire bytes,
+WebSocket frame counts, peer acknowledgment, process CPU and physical device
+IOPS are explicitly unavailable. NAPI declares the eight client rows and the
+`client_websocket` family but does not invoke that client: addon source coverage
+remains 78 rows by default or 85 with FoundationDB. Historical 100-row receipts
+remain incomplete under strict current validation and are never padded.
+
+Optional slow logs require `MOUNT_RS_TRACE_STORAGE=1` for client stages or
+`MOUNT_RS_TRACE_SERVICE=1` for the enabled service observer. The existing 100 ms
+threshold permits at most 16 storage records per process or 16 service records
+per observer. Formats are `MOUNT_RS_STORAGE_SLOW operation=... outcome=... elapsed_us=...`
+and `MOUNT_RS_SERVICE_SLOW operation=... outcome=... elapsed_us=...`. Labels are
+fixed; tokens, issuers, audiences, partitions, drives, paths, addresses, payloads
+and raw errors are excluded. Leave tracing off for throughput controls.
+
+After actual service, runtime, storage-context and cache cleanup, the CLI emits
+a bounded `transport=websocket` shutdown record alongside its QUIC record, as
+described in the [public CLI export](#public-cli-diagnostic-export). Server
+records cannot observe a separate client process. This section describes the
+source contract; it does not report runtime qualification.
 
 ### Distributed cache lookup and peer connection stages
 
@@ -326,7 +386,8 @@ The cache slice appends six storage rows at indexes 85 through 90 and two core
 hit counters at 134 and 135. The existing 85 storage and 134 core rows retain
 their offsets. This cache slice produced 91 storage rows; client stream acquisition
 brought that slice to 92 storage and 136 core rows; the request-stage slice
-above expands the current storage bank to 100.
+above produced 100 storage rows; the WebSocket stages bring the current bank to
+108.
 
 | Fixed storage row | Measured boundary | Successful bytes |
 | --- | --- | --- |
@@ -446,7 +507,8 @@ The authority/refresh slice appended sixteen rows to the 118-row prefix, for
 134 core rows, while storage then remained 85 rows. The cache slice appends to
 those unchanged prefixes, producing 136 core and 91 storage rows. Client stream
 acquisition subsequently appended storage row 91, producing 92 rows. The
-request-stage slice adds eight more rows to the current 100-row storage bank.
+request-stage slice produced 100 storage rows; WebSocket stages subsequently
+bring the current bank to 108.
 The authority/refresh observations split the
 repeated compact metadata work seen in the latest lifecycle measurement:
 
@@ -1048,14 +1110,15 @@ successful cleanup from an absent terminal record.
 
 ### Public CLI diagnostic export
 
-The ordinary server constructors keep the new observer disabled. Service
-embedders can explicitly use `RemoteServer::bind_with_diagnostics(..., true)` in
-an `io-profiling` build, retain `server.diagnostics()`, and call its `snapshot()`
+The ordinary server constructors keep the service observers disabled. Service
+embedders can explicitly use `RemoteServer::bind_with_diagnostics(..., true)` or
+`WebSocketServer::bind_with_diagnostics(..., true)` in an `io-profiling` build,
+retain `server.diagnostics()`, and call its `snapshot()`
 at controlled boundaries. This is a local API, with no diagnostic network
 endpoint.
 
-The public `serve-remote` CLI selects the QUIC observer only when its
-default-off `io-profiling` feature is compiled and `MOUNT_RS_PROFILE_IO` is
+The public `serve-remote` CLI selects its QUIC and configured WebSocket observers
+only when its default-off `io-profiling` feature is compiled and `MOUNT_RS_PROFILE_IO` is
 exactly `1`. The feature forwards `mount-rs-service/io-profiling` only. It does
 not add SDK or provider feature forwarding; the same environment value can
 independently select their existing runtime banks. A CLI build without this
@@ -1073,11 +1136,12 @@ MOUNT_RS_PROFILE_IO=1 /absolute/isolated-target/debug/mount-rs \
 
 After QUIC, WebSocket, filesystem runtime, storage context and cache cleanup,
 the CLI captures the local service and existing process banks and attempts one
-stderr line prefixed with
+stderr line per enabled service observer, prefixed with
 `service_diagnostics `. Its envelope schema is
-`mount-rs.cli-service-diagnostics.v2`, with the server PID, `transport=quic`,
-`capture_context=shutdown` and the unchanged `mount-rs.service-quic.v1`
-snapshot. `transport=quic` describes this nested service snapshot. Added
+`mount-rs.cli-service-diagnostics.v2`, with the server PID and
+`capture_context=shutdown`. The closed transport labels select the nested
+snapshot: `transport=quic` uses the unchanged `mount-rs.service-quic.v1`, and
+`transport=websocket` uses `mount-rs.service-websocket.v1`. Added
 `process_diagnostics` banks cover instrumented work throughout the process,
 including SDK work shared by QUIC and WebSocket. The whole combined prefix,
 JSON and newline share one 1 MiB cap before output. Overflow or
@@ -1092,13 +1156,14 @@ integer JSON parser for values above `2^53`, including nanosecond timestamps;
 ordinary JavaScript `JSON.parse` can lose precision. This service schema does
 not use the native storage v3 decimal-string counter representation.
 
-The service snapshot is cumulative over the QUIC server lifetime, with no phase
-export or diagnostic endpoint. The WebSocket listener remains outside the
-service observer's coverage. Preserve its completeness, saturation,
-activity, quiescence and registry-gap fields when interpreting it; endpoint
+Each service snapshot is cumulative over its listener lifetime, with no phase
+export or diagnostic endpoint. Preserve the QUIC snapshot's completeness,
+saturation, activity, quiescence and registry-gap fields when interpreting it; endpoint
 closure does not establish application drain. Registry memory and capture cost
 are bounded by the configured `max_connections`. Profiling and any slow-log
-overhead remain part of the instrumented process measurements.
+overhead remain part of the instrumented process measurements. The WebSocket
+snapshot retains application observations and explicitly unavailable transport
+quantities, as described [above](#websocket-client-and-service-observations).
 
 The process section exports the existing typed storage and core profile
 snapshots only when their recorders are enabled. Disabled banks have
@@ -1109,16 +1174,18 @@ overlapping wall durations. Global banks survive provider retirement without
 retaining stores or connections. They do not attribute totals to a particular
 drive or provider instance, and zero in-flight gauges do not prove drain.
 
-Storage retains all 100 ordered rows, outcomes, known successful bytes by
+Storage retains all 108 ordered rows, outcomes, known successful bytes by
 operation (payload or peer plaintext envelope as documented above),
 returned rows and row-observation availability, global/per-row in-flight
 gauges, 32 latency buckets and forwarding-box provenance. Coverage labels are
 derived from the producer registry: 47 `sdk.*` erased-method rows, 18 `tidb.*`
 source-instrumented adapter rows, 12 NAPI `metadata.*`/`blocks.*` forwarding
 rows that this CLI does not use, and one `pglite.client_lock_wait` row selected
-only by that provider. The seven FoundationDB, twelve cache and three client
-QUIC rows are also declared in the bank; these four CLI coverage labels do not establish their
-use or instrumentation in every process. Zero TiDB rows do not prove TiDB use or complete
+only by that provider. The seven FoundationDB, twelve cache, three client QUIC
+and eight client WebSocket rows are also declared in the bank. The additional
+`client_websocket` coverage family is marked
+`declared_not_cli_server_source_instrumented`; these declarations do not
+establish their use or instrumentation in every process. Zero TiDB rows do not prove TiDB use or complete
 SQL/network coverage. Core profile rows retain fixed names, calls, elapsed
 nanoseconds and event-specific units.
 
@@ -1346,8 +1413,8 @@ win needs a controlled before/after workload with matching correctness checks.
 
 ### Authentication stages
 
-Enabled QUIC observers retain seven fixed rows for `CatalogAuthenticator`,
-inside the inclusive `auth.authenticate` span:
+Enabled QUIC and WebSocket observers retain seven fixed rows for
+`CatalogAuthenticator`, inside the inclusive `auth.authenticate` span:
 
 | Row | Work measured |
 | --- | --- |
@@ -1371,7 +1438,8 @@ polled and is restored across yields and cancellation. Both initial QUIC
 authentication and renewal use the unchanged 30-second deadline. A dropped
 substage records cancellation; an outer deadline records timeout. Custom
 authenticators and unscoped calls do not supply these catalog substage counts.
-The current WebSocket path has no scoped authentication observer.
+WebSocket hello and renewal also scope these stages: hello authentication retains
+its existing 30-second timeout, and renewal remains inside the existing dispatch timeout.
 
 Standalone observer helper controls measure no new heap objects or requested
 bytes with a preconstructed observer and tracing disabled. They do not measure

@@ -1088,9 +1088,10 @@ test("causal pilot requires new rows without manufacturing old-snapshot zeros", 
   assert.deepEqual(complete.entries.slice(134).map((row) => row.name), ["blob_cache.ram.hit_bytes", "blob_cache.disk.hit_bytes"])
 })
 
-// Literal v3 descriptor at 56b9; never substitute the current family metadata.
+// Literal historical inventories and v3 descriptor at 56b9; never substitute
+// current names or family metadata into these incomplete observations.
 const historical92ByteSemantics = "known_successful_payload_bytes_only; zero_does_not_establish_no_payload"
-const historical92Names = Object.freeze([
+const historical85Names = Object.freeze([
   "metadata.load",
   "metadata.load_if_changed",
   "metadata.snapshot",
@@ -1176,12 +1177,18 @@ const historical92Names = Object.freeze([
   "foundationdb.read.get_range_page",
   "foundationdb.transaction.commit",
   "foundationdb.transaction.on_error",
+])
+const historical91Names = Object.freeze([
+  ...historical85Names,
   "blob_cache.miss.admission_wait",
   "blob_cache.miss.singleflight_wait",
   "blob_cache.ram.lookup",
   "blob_cache.disk.lookup",
   "blob_cache.peer.connection_lock_wait",
   "blob_cache.peer.connection_establish",
+])
+const historical92Names = Object.freeze([
+  ...historical91Names,
   "client.quic.open_bi",
 ])
 const historical92Families = {
@@ -1199,15 +1206,19 @@ const historical92Families = {
   client_quic: { operations: ["client.quic.open_bi"], calls: "stream_acquisition_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_open_bi_await_nanoseconds; not_exclusive_cpu_or_network_time" },
 }
 
-test("historical 85-row storage snapshot leaves fifteen appended cache and client stages unavailable", () => {
+test("historical 85-row storage snapshot leaves twenty-three appended cache and client stages unavailable", () => {
   const fixture = resultFixture()
-  const oldStorage = STORAGE_OPERATION_NAMES.slice(0, 85).map((name) => ({ name, calls: "0", success: "0", error: "0", cancelled: "0" }))
+  assert.equal(historical85Names.length, 85)
+  const oldStorage = historical85Names.map((name) => ({ name, calls: "0", success: "0", error: "0", cancelled: "0" }))
   fixture.providers[0].storageDiagnostics = { phases: [{ name: "workload-4096bytes", native: {
     complete: false, storage: { entries: oldStorage },
   } }] }
-  const projected = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1].storage
-  assert.equal(projected.length, 100)
-  assert.deepEqual(projected.slice(85).map((row) => row.name), [
+  const before = structuredClone(fixture)
+  const phase = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1]
+  const projected = phase.storage
+  assert.equal(phase.status, "incomplete")
+  assert.equal(projected.length, 108)
+  assert.deepEqual(projected.slice(85, 100).map((row) => row.name), [
     "blob_cache.miss.admission_wait", "blob_cache.miss.singleflight_wait",
     "blob_cache.ram.lookup", "blob_cache.disk.lookup",
     "blob_cache.peer.connection_lock_wait", "blob_cache.peer.connection_establish",
@@ -1221,28 +1232,44 @@ test("historical 85-row storage snapshot leaves fifteen appended cache and clien
     "blob_cache.peer.get",
     "blob_cache.peer.get_miss",
   ])
+  assert.deepEqual(projected.slice(100).map((row) => row.name), [
+    "client.websocket.tcp_connect", "client.websocket.tls_handshake",
+    "client.websocket.upgrade", "client.websocket.socket_lock_wait",
+    "client.websocket.request_encode", "client.websocket.request_send",
+    "client.websocket.response_receive", "client.websocket.response_decode",
+  ])
   assert.ok(projected.slice(0, 85).every((row) => row.calls === "0"))
-  assert.ok(projected.slice(85).every((row) => row.calls === null && row.success === null && row.error === null && row.cancelled === null))
+  for (const row of projected.slice(85)) {
+    for (const field of ["calls", "success", "error", "cancelled", "bytes", "returned_rows", "returned_row_observations", "elapsed_ns", "in_flight_start", "in_flight_end"]) assert.equal(row[field], null)
+    assert.deepEqual(row.latency_log2_us, Array(32).fill(null))
+  }
+  assert.deepEqual(fixture, before)
 })
 
-test("historical 91-row storage snapshot leaves nine client and peer stages unavailable", () => {
+test("historical 91-row storage snapshot leaves seventeen client and peer stages unavailable", () => {
   const fixture = resultFixture()
-  const oldStorage = STORAGE_OPERATION_NAMES.slice(0, 91).map((name) => ({ name, calls: "0", success: "0", error: "0", cancelled: "0" }))
+  assert.equal(historical91Names.length, 91)
+  const oldStorage = historical91Names.map((name) => ({ name, calls: "0", success: "0", error: "0", cancelled: "0" }))
   fixture.providers[0].storageDiagnostics = { phases: [{ name: "workload-4096bytes", native: {
     complete: false, storage: { entries: oldStorage },
   } }] }
-  const projected = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1].storage
-  assert.equal(projected.length, 100)
+  const before = structuredClone(fixture)
+  const phase = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1]
+  const projected = phase.storage
+  assert.equal(phase.status, "incomplete")
+  assert.equal(projected.length, 108)
   assert.ok(projected.slice(0, 91).every((row) => row.calls === "0"))
   assert.equal(projected[91].name, "client.quic.open_bi")
   for (const row of projected.slice(91)) {
     for (const field of ["calls", "success", "error", "cancelled", "bytes", "returned_rows", "returned_row_observations", "elapsed_ns", "in_flight_start", "in_flight_end"]) assert.equal(row[field], null)
     assert.deepEqual(row.latency_log2_us, Array(32).fill(null))
   }
+  assert.deepEqual(fixture, before)
 })
 
-test("literal historical 92-row v3 descriptor leaves all eight transport rows unavailable", () => {
+test("literal historical 92-row v3 descriptor leaves all sixteen appended transport rows unavailable", () => {
   const fixture = resultFixture()
+  assert.equal(historical92Names.length, 92)
   const oldStorage = historical92Names.map((name) => ({ name, calls: "0", success: "0", error: "0", cancelled: "0" }))
   fixture.providers[0].storageDiagnostics = { phases: [{ name: "workload-4096bytes", native: {
     complete: false,
@@ -1252,13 +1279,19 @@ test("literal historical 92-row v3 descriptor leaves all eight transport rows un
   const before = structuredClone(fixture)
   const phase = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1]
   assert.equal(phase.status, "incomplete")
-  assert.equal(phase.storage.length, 100)
+  assert.equal(phase.storage.length, 108)
   assert.ok(phase.storage.slice(0, 92).every((row) => row.calls === "0"))
-  assert.deepEqual(phase.storage.slice(92).map((row) => row.name), [
+  assert.deepEqual(phase.storage.slice(92, 100).map((row) => row.name), [
     "client.quic.request_send", "client.quic.response_receive",
     "blob_cache.peer.request_byte_admission_wait", "blob_cache.peer.open_bi",
     "blob_cache.peer.request_send", "blob_cache.peer.response_receive",
     "blob_cache.peer.get", "blob_cache.peer.get_miss",
+  ])
+  assert.deepEqual(phase.storage.slice(100).map((row) => row.name), [
+    "client.websocket.tcp_connect", "client.websocket.tls_handshake",
+    "client.websocket.upgrade", "client.websocket.socket_lock_wait",
+    "client.websocket.request_encode", "client.websocket.request_send",
+    "client.websocket.response_receive", "client.websocket.response_decode",
   ])
   for (const row of phase.storage.slice(92)) {
     for (const field of ["calls", "success", "error", "cancelled", "bytes", "returned_rows", "returned_row_observations", "elapsed_ns", "in_flight_start", "in_flight_end"]) assert.equal(row[field], null)

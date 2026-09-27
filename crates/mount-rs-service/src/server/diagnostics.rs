@@ -14,7 +14,7 @@ const SLOW_RECORDS: u64 = 16;
 
 #[derive(Clone, Copy)]
 #[repr(usize)]
-pub(super) enum Operation {
+pub(crate) enum Operation {
     ConnectionAdmission,
     Handshake,
     TlsHandshake,
@@ -36,8 +36,9 @@ pub(super) enum Operation {
     AuthKeyFetch,
     AuthJwtVerify,
     AuthGrantAuthorize,
+    WebSocketUpgrade,
 }
-const NAMES: [&str; 21] = [
+const NAMES: [&str; 22] = [
     "admission.connection",
     "handshake.application",
     "handshake.tls",
@@ -59,6 +60,7 @@ const NAMES: [&str; 21] = [
     "auth.key.fetch",
     "auth.jwt.verify",
     "auth.grant.authorize",
+    "handshake.websocket_upgrade",
 ];
 
 /// Fixed catalog-authentication stages within the caller's inclusive auth span.
@@ -468,6 +470,92 @@ pub struct ServerSnapshot {
     pub transport: TransportSnapshot,
 }
 
+/// Application observations for one WebSocket listener, retained after close.
+/// The inner recorder has no registered QUIC connections or transport samples.
+#[derive(Clone)]
+pub struct WebSocketDiagnostics {
+    application: ServerDiagnostics,
+}
+impl WebSocketDiagnostics {
+    pub(crate) fn new(trace: bool) -> Self {
+        Self {
+            application: ServerDiagnostics::new(0, trace),
+        }
+    }
+
+    pub(crate) fn application_observer(&self) -> &ServerDiagnostics {
+        &self.application
+    }
+
+    /// Serial application observations, excluding passive socket traffic.
+    #[must_use]
+    pub fn snapshot(&self) -> WebSocketSnapshot {
+        let snapshot = self.application.snapshot();
+        WebSocketSnapshot {
+            schema: "mount-rs.service-websocket.v1",
+            enabled: snapshot.enabled,
+            capture_started_unix_ns: snapshot.capture_started_unix_ns,
+            capture_elapsed_ns: snapshot.capture_elapsed_ns,
+            activity_sequence_before: snapshot.activity_sequence_before,
+            activity_sequence_after: snapshot.activity_sequence_after,
+            activity_writers_before: snapshot.activity_writers_before,
+            activity_writers_after: snapshot.activity_writers_after,
+            active_handshakes_before: snapshot.active_handshakes_before,
+            active_handshakes_after: snapshot.active_handshakes_after,
+            active_requests_before: snapshot.active_requests_before,
+            active_requests_after: snapshot.active_requests_after,
+            active_operations: snapshot.active_operations,
+            complete: snapshot.complete,
+            counter_saturated: snapshot.counter_saturated,
+            concurrent_activity: snapshot.concurrent_activity,
+            application_quiescent: snapshot.application_quiescent,
+            quiescence_scope: "application_spans_and_session_cleanup_not_passive_websocket",
+            dispatch_scope: snapshot.dispatch_scope,
+            response_scope: "encoding_and_websocket_sink_submission_not_peer_acknowledgement",
+            histogram_scope: snapshot.histogram_scope,
+            cumulative_maxima: snapshot.cumulative_maxima,
+            known_unavailable: [
+                "tcp_wire_bytes",
+                "tls_wire_bytes",
+                "websocket_frame_counts",
+                "peer_acknowledgement",
+                "process_cpu",
+                "physical_device_iops",
+            ],
+            entries: snapshot.entries,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct WebSocketSnapshot {
+    pub schema: &'static str,
+    pub enabled: bool,
+    pub capture_started_unix_ns: Option<u64>,
+    pub capture_elapsed_ns: u64,
+    pub activity_sequence_before: u64,
+    pub activity_sequence_after: u64,
+    pub activity_writers_before: u64,
+    pub activity_writers_after: u64,
+    pub active_handshakes_before: u64,
+    pub active_handshakes_after: u64,
+    pub active_requests_before: u64,
+    pub active_requests_after: u64,
+    /// Nested spans, not a cardinality of distinct application requests.
+    pub active_operations: u64,
+    pub complete: bool,
+    pub counter_saturated: bool,
+    pub concurrent_activity: bool,
+    pub application_quiescent: bool,
+    pub quiescence_scope: &'static str,
+    pub dispatch_scope: &'static str,
+    pub response_scope: &'static str,
+    pub histogram_scope: &'static str,
+    pub cumulative_maxima: &'static str,
+    pub known_unavailable: [&'static str; 6],
+    pub entries: [ServiceEntry; NAMES.len()],
+}
+
 struct Mutation<'a> {
     recorder: &'a Recorder,
 }
@@ -495,7 +583,7 @@ pub(crate) struct Span {
     finished: bool,
 }
 impl Span {
-    pub(super) fn new(observer: Option<&ServerDiagnostics>, operation: Operation) -> Self {
+    pub(crate) fn new(observer: Option<&ServerDiagnostics>, operation: Operation) -> Self {
         let recorder = observer.map(|observer| Arc::clone(&observer.inner));
         let started = recorder.as_ref().map(|recorder| {
             let _mutation = Mutation::new(recorder);

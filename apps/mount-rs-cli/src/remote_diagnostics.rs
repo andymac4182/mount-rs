@@ -1,4 +1,4 @@
-//! Local, bounded shutdown records for QUIC and existing process banks.
+//! Local, bounded shutdown records for service observers and process banks.
 
 use mount_rs_core::diagnostics::{profile, storage};
 use serde::Serialize;
@@ -9,6 +9,21 @@ use std::{
 
 const RECORD_LIMIT: usize = 1024 * 1024;
 const PREFIX: &[u8] = b"service_diagnostics ";
+
+#[derive(Clone, Copy)]
+enum Transport {
+    Quic,
+    WebSocket,
+}
+
+impl Transport {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Quic => "quic",
+            Self::WebSocket => "websocket",
+        }
+    }
+}
 
 pub(super) fn enabled(profile: Option<&OsStr>) -> bool {
     cfg!(feature = "io-profiling") && profile.is_some_and(|value| value == "1")
@@ -54,6 +69,7 @@ struct Coverage {
     tidb: FamilyCoverage,
     napi_forwarding: FamilyCoverage,
     pglite: FamilyCoverage,
+    client_websocket: FamilyCoverage,
 }
 
 #[derive(Serialize)]
@@ -110,6 +126,10 @@ fn process_diagnostics<S, P>(storage: Bank<S>, profile: Bank<P>) -> ProcessDiagn
             tidb: family(&["tidb."], "source_instrumented_adapter_families"),
             napi_forwarding: family(&["metadata.", "blocks."], "napi_forwarding_not_used_by_cli"),
             pglite: family(&["pglite."], "selected_provider_client_lock_wait"),
+            client_websocket: family(
+                &["client.websocket."],
+                "declared_not_cli_server_source_instrumented",
+            ),
         },
         unavailable: UnavailableMetrics {
             raw_object_store: unavailable("instance_handle_not_retained"),
@@ -139,6 +159,7 @@ impl Write for BoundedRecord {
 }
 
 fn encode_record(
+    transport: Transport,
     snapshot: &impl Serialize,
     pid: u32,
     process_diagnostics: &ProcessDiagnostics<impl Serialize, impl Serialize>,
@@ -147,7 +168,7 @@ fn encode_record(
     let record = Record {
         schema: "mount-rs.cli-service-diagnostics.v2",
         pid,
-        transport: "quic",
+        transport: transport.label(),
         capture_context: "shutdown",
         snapshot,
         process_diagnostics,
@@ -159,20 +180,28 @@ fn encode_record(
         output.0
     } else {
         // Never publish the partially serialized record or caller error text.
+        let label = transport.label();
         format!(
-            "service_diagnostics {{\"schema\":\"mount-rs.cli-service-diagnostics.v2\",\"pid\":{pid},\"transport\":\"quic\",\"capture_context\":\"shutdown\",\"diagnostic_incomplete\":true,\"reason\":\"serialization_failed_or_record_limit\"}}\n"
+            "service_diagnostics {{\"schema\":\"mount-rs.cli-service-diagnostics.v2\",\"pid\":{pid},\"transport\":\"{label}\",\"capture_context\":\"shutdown\",\"diagnostic_incomplete\":true,\"reason\":\"serialization_failed_or_record_limit\"}}\n"
         )
         .into_bytes()
     }
 }
 
 pub(super) fn emit(observer: &mount_rs_service::server::ServerDiagnostics) {
-    let snapshot = observer.snapshot();
+    emit_snapshot(Transport::Quic, &observer.snapshot());
+}
+
+pub(super) fn emit_websocket(observer: &mount_rs_service::websocket::WebSocketDiagnostics) {
+    emit_snapshot(Transport::WebSocket, &observer.snapshot());
+}
+
+fn emit_snapshot(transport: Transport, snapshot: &impl Serialize) {
     let process = process_diagnostics(
         capture_bank(storage::enabled(), storage::snapshot),
         capture_bank(profile::enabled(), profile::snapshot),
     );
-    let record = encode_record(&snapshot, std::process::id(), &process);
+    let record = encode_record(transport, snapshot, std::process::id(), &process);
     // Diagnostic output is best effort and cannot replace the service outcome.
     // The process controller owns a blocked stderr deadline and forced kills.
     let _ = io::stderr().lock().write_all(&record);
@@ -246,7 +275,12 @@ mod tests {
             capture_bank(true, || storage.clone()),
             capture_bank(true, || profile.clone()),
         );
-        let value = parse_record(&encode_record(&json!({"counter": exact}), 321, &process));
+        let value = parse_record(&encode_record(
+            Transport::Quic,
+            &json!({"counter": exact}),
+            321,
+            &process,
+        ));
         assert_eq!(value["schema"], "mount-rs.cli-service-diagnostics.v2");
         let process = &value["process_diagnostics"];
         assert_eq!(process["scope"], "process_cumulative");
@@ -257,7 +291,7 @@ mod tests {
         let entries = process["storage"]["snapshot"]["entries"]
             .as_array()
             .unwrap();
-        assert_eq!(entries.len(), 100);
+        assert_eq!(entries.len(), 108);
         for (actual, expected) in entries.iter().zip(&storage.entries) {
             assert_eq!(actual["name"], expected.name);
             assert_eq!(actual["calls"].as_u64(), Some(exact));
@@ -297,7 +331,7 @@ mod tests {
         );
         assert_eq!(entries[91]["name"], "client.quic.open_bi");
         assert_eq!(
-            entries[92..]
+            entries[92..100]
                 .iter()
                 .map(|row| row["name"].as_str().unwrap())
                 .collect::<Vec<_>>(),
@@ -310,6 +344,22 @@ mod tests {
                 "blob_cache.peer.response_receive",
                 "blob_cache.peer.get",
                 "blob_cache.peer.get_miss",
+            ]
+        );
+        assert_eq!(
+            entries[100..108]
+                .iter()
+                .map(|row| row["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "client.websocket.tcp_connect",
+                "client.websocket.tls_handshake",
+                "client.websocket.upgrade",
+                "client.websocket.socket_lock_wait",
+                "client.websocket.request_encode",
+                "client.websocket.request_send",
+                "client.websocket.response_receive",
+                "client.websocket.response_decode",
             ]
         );
         assert_eq!(
@@ -330,6 +380,7 @@ mod tests {
             ("tidb", 18),
             ("napi_forwarding", 12),
             ("pglite", 1),
+            ("client_websocket", 8),
         ] {
             assert_eq!(
                 process["coverage"][family]["rows"]
@@ -344,7 +395,11 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            100
+            108
+        );
+        assert_eq!(
+            process["coverage"]["client_websocket"]["observation"],
+            "declared_not_cli_server_source_instrumented"
         );
         for name in [
             "raw_object_store",
@@ -362,12 +417,20 @@ mod tests {
 
     #[test]
     fn disabled_process_banks_do_not_capture_or_export_zero_snapshots() {
-        let value = parse_record(&encode_record(&json!({}), 123, &disabled_process()));
-        for name in ["storage", "profile"] {
-            let bank = &value["process_diagnostics"][name];
-            assert_eq!(bank["available"], false);
-            assert_eq!(bank["reason"], "observer_disabled");
-            assert!(bank.get("snapshot").is_none());
+        for transport in [Transport::Quic, Transport::WebSocket] {
+            let value = parse_record(&encode_record(
+                transport,
+                &json!({}),
+                123,
+                &disabled_process(),
+            ));
+            assert_eq!(value["transport"], transport.label());
+            for name in ["storage", "profile"] {
+                let bank = &value["process_diagnostics"][name];
+                assert_eq!(bank["available"], false);
+                assert_eq!(bank["reason"], "observer_disabled");
+                assert!(bank.get("snapshot").is_none());
+            }
         }
     }
 
@@ -398,7 +461,12 @@ mod tests {
     #[test]
     fn generic_encoding_preserves_raw_u64_above_javascript_integer_precision() {
         let exact = 9_007_199_254_740_993_u64;
-        let record = encode_record(&json!({"counter": exact}), 123, &disabled_process());
+        let record = encode_record(
+            Transport::Quic,
+            &json!({"counter": exact}),
+            123,
+            &disabled_process(),
+        );
         let value = parse_record(&record);
         assert_eq!(value["schema"], "mount-rs.cli-service-diagnostics.v2");
         assert_eq!(value["pid"].as_u64(), Some(123));
@@ -406,6 +474,39 @@ mod tests {
         assert_eq!(value["capture_context"], "shutdown");
         assert_eq!(value["snapshot"]["counter"].as_u64(), Some(exact));
         assert!(!value["snapshot"]["counter"].is_string());
+    }
+
+    #[test]
+    fn websocket_record_preserves_its_application_schema_and_raw_u64() {
+        let exact = 9_007_199_254_740_993_u64;
+        let snapshot = json!({
+            "schema": "mount-rs.service-websocket.v1",
+            "enabled": true,
+            "active_operations": 0,
+            "entries": [{"name": "response.submit", "calls": exact}],
+            "known_unavailable": ["tcp_wire_bytes", "tls_wire_bytes", "websocket_frame_counts", "peer_acknowledgement", "process_cpu", "physical_device_iops"]
+        });
+        let value = parse_record(&encode_record(
+            Transport::WebSocket,
+            &snapshot,
+            123,
+            &disabled_process(),
+        ));
+        assert_eq!(value["schema"], "mount-rs.cli-service-diagnostics.v2");
+        assert_eq!(value["transport"], "websocket");
+        assert_eq!(value["capture_context"], "shutdown");
+        assert_eq!(value["snapshot"]["schema"], "mount-rs.service-websocket.v1");
+        assert_eq!(
+            value["snapshot"]["entries"][0]["calls"].as_u64(),
+            Some(exact)
+        );
+        assert!(!value["snapshot"]["entries"][0]["calls"].is_string());
+        assert!(value["snapshot"].get("transport").is_none());
+        assert!(
+            value["snapshot"]
+                .get("registry_snapshot_elapsed_ns")
+                .is_none()
+        );
     }
 
     #[test]
@@ -422,21 +523,24 @@ mod tests {
             capture_bank(true, || storage),
             capture_bank(true, || profile),
         );
-        let record = encode_record(&json!({}), 123, &process);
-        let value = parse_record(&record);
-        assert!(value.get("diagnostic_incomplete").is_none());
-        let banks = &value["process_diagnostics"];
-        assert_eq!(
-            banks["storage"]["snapshot"]["entries"]
-                .as_array()
-                .unwrap()
-                .len(),
-            100
-        );
-        for index in [134, 135] {
-            let row = &banks["profile"]["snapshot"]["entries"][index];
-            assert_eq!(row["units"].as_u64(), Some(u64::MAX));
-            assert_eq!(row["calls"].as_u64(), Some(u64::MAX));
+        for transport in [Transport::Quic, Transport::WebSocket] {
+            let record = encode_record(transport, &json!({}), 123, &process);
+            let value = parse_record(&record);
+            assert_eq!(value["transport"], transport.label());
+            assert!(value.get("diagnostic_incomplete").is_none());
+            let banks = &value["process_diagnostics"];
+            assert_eq!(
+                banks["storage"]["snapshot"]["entries"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                108
+            );
+            for index in [134, 135] {
+                let row = &banks["profile"]["snapshot"]["entries"][index];
+                assert_eq!(row["units"].as_u64(), Some(u64::MAX));
+                assert_eq!(row["calls"].as_u64(), Some(u64::MAX));
+            }
         }
     }
 
@@ -447,16 +551,19 @@ mod tests {
             capture_bank(true, || &snapshot),
             capture_bank(false, || json!({})),
         );
-        for record in [
-            encode_record(&snapshot, 456, &disabled_process()),
-            encode_record(&json!({}), 456, &process),
-        ] {
-            let value = parse_record(&record);
-            assert_eq!(value["pid"].as_u64(), Some(456));
-            assert_eq!(value["diagnostic_incomplete"], true);
-            assert_eq!(value["reason"], "serialization_failed_or_record_limit");
-            assert!(value.get("snapshot").is_none());
-            assert!(value.get("process_diagnostics").is_none());
+        for transport in [Transport::Quic, Transport::WebSocket] {
+            for record in [
+                encode_record(transport, &snapshot, 456, &disabled_process()),
+                encode_record(transport, &json!({}), 456, &process),
+            ] {
+                let value = parse_record(&record);
+                assert_eq!(value["transport"], transport.label());
+                assert_eq!(value["pid"].as_u64(), Some(456));
+                assert_eq!(value["diagnostic_incomplete"], true);
+                assert_eq!(value["reason"], "serialization_failed_or_record_limit");
+                assert!(value.get("snapshot").is_none());
+                assert!(value.get("process_diagnostics").is_none());
+            }
         }
     }
 
@@ -474,16 +581,19 @@ mod tests {
             capture_bank(true, || Unserializable),
             capture_bank(false, || json!({})),
         );
-        for record in [
-            encode_record(&Unserializable, 789, &disabled_process()),
-            encode_record(&json!({}), 789, &process),
-        ] {
-            let value = parse_record(&record);
-            assert_eq!(value["schema"], "mount-rs.cli-service-diagnostics.v2");
-            assert_eq!(value["pid"].as_u64(), Some(789));
-            assert_eq!(value["diagnostic_incomplete"], true);
-            assert!(value.get("process_diagnostics").is_none());
-            assert!(!String::from_utf8(record).unwrap().contains("caller detail"));
+        for transport in [Transport::Quic, Transport::WebSocket] {
+            for record in [
+                encode_record(transport, &Unserializable, 789, &disabled_process()),
+                encode_record(transport, &json!({}), 789, &process),
+            ] {
+                let value = parse_record(&record);
+                assert_eq!(value["schema"], "mount-rs.cli-service-diagnostics.v2");
+                assert_eq!(value["transport"], transport.label());
+                assert_eq!(value["pid"].as_u64(), Some(789));
+                assert_eq!(value["diagnostic_incomplete"], true);
+                assert!(value.get("process_diagnostics").is_none());
+                assert!(!String::from_utf8(record).unwrap().contains("caller detail"));
+            }
         }
     }
 }

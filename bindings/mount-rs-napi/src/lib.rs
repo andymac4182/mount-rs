@@ -309,7 +309,15 @@ fn storage_operation_families() -> Value {
         "blob_cache_peer_get_miss":{"operations":["blob_cache.peer.get_miss"],
             "calls":"successful_get_miss_classifications; not_peer_requests",
             "bytes":"unavailable","returned_rows":"unavailable",
-            "duration":"classification_marker_nanoseconds; excludes_get_request_duration"}
+            "duration":"classification_marker_nanoseconds; excludes_get_request_duration"},
+        "client_websocket":{"operations":["client.websocket.tcp_connect",
+            "client.websocket.tls_handshake","client.websocket.upgrade",
+            "client.websocket.socket_lock_wait","client.websocket.request_encode",
+            "client.websocket.request_send","client.websocket.response_receive",
+            "client.websocket.response_decode"],
+            "calls":"client_stage_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments",
+            "bytes":"unavailable","returned_rows":"unavailable",
+            "duration":"inclusive_stage_wall_nanoseconds; nested_and_parallel_spans_overlap; not_exclusive_cpu_or_network_time"}
     })
 }
 
@@ -7443,13 +7451,13 @@ mod tests {
         let families = snapshot["measurement"]["storage_families"]
             .as_object()
             .unwrap();
-        assert_eq!(families.len(), 20);
+        assert_eq!(families.len(), 21);
         let declared = families
             .values()
             .flat_map(|family| family["operations"].as_array().unwrap())
             .map(|name| name.as_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(declared.len(), 100);
+        assert_eq!(declared.len(), 108);
         assert_eq!(
             declared
                 .into_iter()
@@ -7479,7 +7487,7 @@ mod tests {
             "known_selected_successful_returned_value_key_and_range_page_key_value_payload_bytes_only"
         );
         let names = storage::operation_names();
-        assert_eq!(names.len(), 100);
+        assert_eq!(names.len(), 108);
         assert_eq!(
             &names[78..85],
             &[
@@ -7515,7 +7523,7 @@ mod tests {
         assert_eq!(families["client_quic"]["returned_rows"], "unavailable");
         assert!(!storage_instrumented_operation_names().contains(&"client.quic.open_bi"));
         assert_eq!(
-            &names[92..],
+            &names[92..100],
             &[
                 "client.quic.request_send",
                 "client.quic.response_receive",
@@ -7526,6 +7534,38 @@ mod tests {
                 "blob_cache.peer.get",
                 "blob_cache.peer.get_miss",
             ]
+        );
+        assert_eq!(
+            &names[100..108],
+            &[
+                "client.websocket.tcp_connect",
+                "client.websocket.tls_handshake",
+                "client.websocket.upgrade",
+                "client.websocket.socket_lock_wait",
+                "client.websocket.request_encode",
+                "client.websocket.request_send",
+                "client.websocket.response_receive",
+                "client.websocket.response_decode",
+            ]
+        );
+        assert_eq!(
+            families["client_websocket"]["operations"],
+            json!(&names[100..108])
+        );
+        assert_eq!(
+            families["client_websocket"]["calls"],
+            "client_stage_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments"
+        );
+        assert_eq!(families["client_websocket"]["bytes"], "unavailable");
+        assert_eq!(families["client_websocket"]["returned_rows"], "unavailable");
+        assert_eq!(
+            families["client_websocket"]["duration"],
+            "inclusive_stage_wall_nanoseconds; nested_and_parallel_spans_overlap; not_exclusive_cpu_or_network_time"
+        );
+        assert!(
+            storage_instrumented_operation_names()
+                .iter()
+                .all(|name| !name.starts_with("client."))
         );
         for (index, family) in [
             "client_quic_request_send",
@@ -7607,7 +7647,7 @@ mod tests {
         }
         assert_eq!(
             snapshot["storage"]["entries"].as_array().unwrap().len(),
-            100
+            108
         );
         for (index, name) in names[91..].iter().enumerate() {
             let transport_row = &snapshot["storage"]["entries"][91 + index];
@@ -7712,7 +7752,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            100
+            108
         );
         assert!(
             instrumented
@@ -7723,7 +7763,7 @@ mod tests {
         assert!(
             instrumented
                 .iter()
-                .all(|name| !name.as_str().unwrap().starts_with("client.quic.")),
+                .all(|name| !name.as_str().unwrap().starts_with("client.")),
             "client transport declarations do not establish addon source coverage"
         );
         #[cfg(all(

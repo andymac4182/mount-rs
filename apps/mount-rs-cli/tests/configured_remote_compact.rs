@@ -219,14 +219,33 @@ impl ServerProcess {
             .collect();
         assert_eq!(
             records.len(),
-            usize::from(enabled),
+            usize::from(enabled) * 2,
             "unexpected service records: {stderr:?}"
         );
         if !enabled {
             return;
         }
-        assert!(records[0].len() + "service_diagnostics \n".len() <= 1024 * 1024);
-        let record: serde_json::Value = serde_json::from_str(records[0]).unwrap();
+        let records: Vec<serde_json::Value> = records
+            .iter()
+            .map(|record| {
+                assert!(record.len() + "service_diagnostics \n".len() <= 1024 * 1024);
+                serde_json::from_str(record).unwrap()
+            })
+            .collect();
+        for label in ["quic", "websocket"] {
+            assert_eq!(
+                records
+                    .iter()
+                    .filter(|record| record["transport"] == label)
+                    .count(),
+                1,
+                "missing or duplicate {label} record"
+            );
+        }
+        let record = records
+            .iter()
+            .find(|record| record["transport"] == "quic")
+            .unwrap();
         assert_eq!(record["schema"], "mount-rs.cli-service-diagnostics.v2");
         assert_eq!(record["pid"].as_u64(), Some(u64::from(self.child.id())));
         assert_eq!(record["transport"], "quic");
@@ -237,7 +256,7 @@ impl ServerProcess {
         let entries = snapshot["entries"].as_array().unwrap();
         // Five QUIC attempts below reach the actual server authenticator; the
         // malformed credential is rejected by the client before ClientHello.
-        // WebSocket calls share the cache but have no QUIC observer context.
+        // WebSocket calls share the cache and use their own observer context.
         for (name, calls, success, error) in [
             ("auth.decode", 5, 5, 0),
             ("auth.catalog", 5, 5, 0),
@@ -290,10 +309,22 @@ impl ServerProcess {
             "auth.key.fetch",
             "auth.jwt.verify",
             "auth.grant.authorize",
+            "handshake.websocket_upgrade",
         ];
         assert_eq!(entries.len(), labels.len());
         for (entry, label) in entries.iter().zip(labels) {
             assert_eq!(entry["name"], label);
+        }
+        let upgrade = entries.last().unwrap();
+        for counter in [
+            "calls",
+            "success",
+            "error",
+            "timeout",
+            "cancelled",
+            "in_flight",
+        ] {
+            assert_eq!(upgrade[counter].as_u64(), Some(0), "QUIC {counter}");
         }
         for label in ["request.application", "dispatch.read", "dispatch.write"] {
             let entry = entries.iter().find(|entry| entry["name"] == label).unwrap();
@@ -329,8 +360,8 @@ impl ServerProcess {
         let storage = &process["storage"]["snapshot"];
         let storage_entries = storage["entries"].as_array().unwrap();
         let names = mount_rs_core::diagnostics::storage::operation_names();
-        assert_eq!(storage_entries.len(), 100);
-        assert_eq!(names.len(), 100);
+        assert_eq!(storage_entries.len(), 108);
+        assert_eq!(names.len(), 108);
         assert_eq!(storage_entries[77]["name"], "tidb.sql.flush_probe");
         assert_eq!(
             storage_entries[78..85]
@@ -363,7 +394,7 @@ impl ServerProcess {
         );
         assert_eq!(storage_entries[91]["name"], "client.quic.open_bi");
         assert_eq!(
-            storage_entries[92..]
+            storage_entries[92..100]
                 .iter()
                 .map(|row| row["name"].as_str().unwrap())
                 .collect::<Vec<_>>(),
@@ -378,6 +409,26 @@ impl ServerProcess {
                 "blob_cache.peer.get_miss",
             ]
         );
+        assert_eq!(
+            storage_entries[100..108]
+                .iter()
+                .map(|row| row["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "client.websocket.tcp_connect",
+                "client.websocket.tls_handshake",
+                "client.websocket.upgrade",
+                "client.websocket.socket_lock_wait",
+                "client.websocket.request_encode",
+                "client.websocket.request_send",
+                "client.websocket.response_receive",
+                "client.websocket.response_decode",
+            ]
+        );
+        for entry in &storage_entries[100..108] {
+            assert_eq!(entry["calls"].as_u64(), Some(0));
+            assert_eq!(entry["bytes"].as_u64(), Some(0));
+        }
         for (entry, name) in storage_entries.iter().zip(names) {
             assert_eq!(entry["name"], *name);
             assert_eq!(entry["latency_log2_us"].as_array().unwrap().len(), 32);
@@ -429,6 +480,7 @@ impl ServerProcess {
             ("tidb", 18),
             ("napi_forwarding", 12),
             ("pglite", 1),
+            ("client_websocket", 8),
         ] {
             assert_eq!(
                 process["coverage"][family]["rows"]
@@ -438,6 +490,10 @@ impl ServerProcess {
                 count
             );
         }
+        assert_eq!(
+            process["coverage"]["client_websocket"]["observation"],
+            "declared_not_cli_server_source_instrumented"
+        );
         for name in [
             "raw_object_store",
             "http_attempts",
@@ -449,6 +505,120 @@ impl ServerProcess {
             assert_eq!(process["unavailable"][name]["available"], false);
             assert!(process["unavailable"][name].get("snapshot").is_none());
         }
+        let websocket = records
+            .iter()
+            .find(|record| record["transport"] == "websocket")
+            .unwrap();
+        self.assert_websocket_diagnostics(websocket, &labels);
+        assert_eq!(websocket["process_diagnostics"], *process);
+    }
+
+    fn assert_websocket_diagnostics(&self, record: &serde_json::Value, labels: &[&str]) {
+        assert_eq!(record["schema"], "mount-rs.cli-service-diagnostics.v2");
+        assert_eq!(record["pid"].as_u64(), Some(u64::from(self.child.id())));
+        assert_eq!(record["transport"], "websocket");
+        assert_eq!(record["capture_context"], "shutdown");
+        let snapshot = &record["snapshot"];
+        assert_eq!(snapshot["schema"], "mount-rs.service-websocket.v1");
+        assert_eq!(snapshot["enabled"], true);
+        assert!(snapshot.get("transport").is_none());
+        assert!(snapshot.get("registry_snapshot_elapsed_ns").is_none());
+        assert_eq!(
+            snapshot["known_unavailable"],
+            json!([
+                "tcp_wire_bytes",
+                "tls_wire_bytes",
+                "websocket_frame_counts",
+                "peer_acknowledgement",
+                "process_cpu",
+                "physical_device_iops",
+            ])
+        );
+        assert_eq!(
+            snapshot["quiescence_scope"],
+            "application_spans_and_session_cleanup_not_passive_websocket"
+        );
+        assert_eq!(
+            snapshot["response_scope"],
+            "encoding_and_websocket_sink_submission_not_peer_acknowledgement"
+        );
+        assert_eq!(snapshot["complete"], true);
+        assert_eq!(snapshot["application_quiescent"], true);
+        assert_eq!(snapshot["concurrent_activity"], false);
+        for gauge in [
+            "activity_writers_before",
+            "activity_writers_after",
+            "active_handshakes_before",
+            "active_handshakes_after",
+            "active_requests_before",
+            "active_requests_after",
+            "active_operations",
+        ] {
+            assert_eq!(snapshot[gauge].as_u64(), Some(0), "unsettled {gauge}");
+        }
+        let entries = snapshot["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), labels.len());
+        for (entry, label) in entries.iter().zip(labels) {
+            assert_eq!(entry["name"], *label);
+            assert_eq!(entry["in_flight"].as_u64(), Some(0), "{label} still active");
+            let calls = entry["calls"].as_u64().unwrap();
+            let terminal = ["success", "error", "timeout", "cancelled"]
+                .iter()
+                .map(|counter| entry[*counter].as_u64().unwrap())
+                .sum::<u64>();
+            assert_eq!(calls, terminal, "{label} terminal outcomes");
+            let histogram = entry["latency_log2_us"].as_array().unwrap();
+            assert_eq!(histogram.len(), 32);
+            assert_eq!(
+                histogram
+                    .iter()
+                    .map(|count| count.as_u64().unwrap())
+                    .sum::<u64>(),
+                calls
+            );
+        }
+        // Two WebSocket attempts use the actual CatalogAuthenticator and its
+        // shared, already-warmed key cache. QUIC counts above remain separate.
+        for (name, calls, success, error) in [
+            ("auth.decode", 2, 2, 0),
+            ("auth.catalog", 2, 2, 0),
+            ("auth.cache.wait", 2, 2, 0),
+            ("auth.policy.select", 2, 2, 0),
+            ("auth.key.fetch", 0, 0, 0),
+            ("auth.jwt.verify", 2, 1, 1),
+            ("auth.grant.authorize", 1, 1, 0),
+        ] {
+            let entry = entries.iter().find(|entry| entry["name"] == name).unwrap();
+            assert_eq!(entry["calls"].as_u64(), Some(calls), "{name} calls");
+            assert_eq!(entry["success"].as_u64(), Some(success), "{name} success");
+            assert_eq!(entry["error"].as_u64(), Some(error), "{name} error");
+        }
+        for name in [
+            "handshake.websocket_upgrade",
+            "request.application",
+            "dispatch.read",
+            "dispatch.write",
+            "session.cleanup",
+        ] {
+            let entry = entries.iter().find(|entry| entry["name"] == name).unwrap();
+            assert!(
+                entry["success"].as_u64().unwrap() > 0,
+                "missing {name} successes"
+            );
+        }
+        let process = &record["process_diagnostics"];
+        assert_eq!(process["application_drain_proven"], false);
+        assert_eq!(
+            process["storage"]["snapshot"]["in_flight"].as_u64(),
+            Some(0)
+        );
+        assert!(
+            process["storage"]["snapshot"]["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|entry| entry["in_flight"].as_u64() == Some(0))
+        );
     }
 }
 

@@ -37,16 +37,282 @@ fn auth_stage_scope_helpers_allocate_no_heap_with_preconstructed_observer() {
         assert_eq!(allocations, (0, 0), "helper/scope instrumentation only");
     }
     let snapshot = observer.snapshot();
-    for entry in &snapshot.entries[14..] {
+    for entry in &snapshot.entries[14..21] {
         assert_eq!(entry.calls, u64::from(cfg!(feature = "io-profiling")));
     }
+}
+
+#[test]
+fn websocket_inventory_and_application_snapshot_are_transport_specific() {
+    assert_eq!(
+        NAMES,
+        [
+            "admission.connection",
+            "handshake.application",
+            "handshake.tls",
+            "auth.authenticate",
+            "request.application",
+            "request.read_incoming",
+            "admission.ingress",
+            "admission.egress",
+            "dispatch.control",
+            "dispatch.read",
+            "dispatch.write",
+            "response.encode",
+            "response.submit",
+            "session.cleanup",
+            "auth.decode",
+            "auth.catalog",
+            "auth.cache.wait",
+            "auth.policy.select",
+            "auth.key.fetch",
+            "auth.jwt.verify",
+            "auth.grant.authorize",
+            "handshake.websocket_upgrade",
+        ]
+    );
+    assert_eq!(Operation::AuthDecode as usize, 14);
+    assert_eq!(Operation::AuthGrantAuthorize as usize, 20);
+    assert_eq!(Operation::WebSocketUpgrade as usize, 21);
+    assert_eq!(NAMES[21], "handshake.websocket_upgrade");
+    let observer = WebSocketDiagnostics::new(false);
+    let snapshot = observer.snapshot();
+    assert_eq!(snapshot.schema, "mount-rs.service-websocket.v1");
+    assert!(snapshot.complete && snapshot.application_quiescent);
+    assert_eq!(snapshot.entries.len(), 22);
+    assert_eq!(snapshot.known_unavailable.len(), 6);
+    let value = serde_json::to_value(snapshot).unwrap();
+    for field in [
+        "transport",
+        "registry_snapshot_elapsed_ns",
+        "udp_bytes",
+        "frame_counts",
+    ] {
+        assert!(value.get(field).is_none());
+    }
+    assert!(!serde_json::to_string(&value).unwrap().contains("quic"));
+}
+
+#[test]
+fn websocket_span_and_auth_scope_helpers_add_no_heap_allocations() {
+    use std::{
+        future::Future,
+        task::{Context, Poll, Waker},
+    };
+    let observer = WebSocketDiagnostics::new(false);
+    for enabled in [false, true] {
+        let inner = enabled.then(|| observer.application_observer());
+        let allocations = crate::dispatch::allocation_tests::count(|| {
+            let mut upgrade = Span::new(inner, Operation::WebSocketUpgrade);
+            assert_eq!(upgrade.recorder.is_some(), enabled);
+            assert_eq!(upgrade.started.is_some(), enabled);
+            upgrade.finish(Outcome::Success);
+            let mut future = std::pin::pin!(auth_scope(inner, async {
+                auth_span(AuthStage::Decode).finish(Outcome::Success);
+            }));
+            assert!(matches!(
+                future
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop())),
+                Poll::Ready(())
+            ));
+        });
+        assert_eq!(allocations, (0, 0), "preconstructed observer helpers only");
+    }
+    let snapshot = observer.snapshot();
+    assert_eq!(snapshot.entries[21].success, 1);
+    assert_eq!(
+        snapshot.entries[14].success,
+        u64::from(cfg!(feature = "io-profiling"))
+    );
+    assert!(snapshot.application_quiescent);
+}
+
+#[cfg(feature = "io-profiling")]
+#[tokio::test]
+async fn websocket_authentication_helper_scopes_catalog_auth_for_hello_and_renewal() {
+    use auth_stage_fixture::*;
+    for deadline in [Some(std::time::Duration::from_secs(30)), None] {
+        let (auth, keys, token) = fixture(false);
+        let observer = WebSocketDiagnostics::new(false);
+        assert!(
+            crate::websocket::authenticate(
+                &auth,
+                &token,
+                "secret-partition",
+                Some(observer.application_observer()),
+                deadline,
+            )
+            .await
+            .is_err()
+        );
+        let snapshot = observer.snapshot();
+        for name in [
+            "auth.decode",
+            "auth.catalog",
+            "auth.cache.wait",
+            "auth.policy.select",
+        ] {
+            assert_eq!(
+                snapshot
+                    .entries
+                    .iter()
+                    .find(|entry| entry.name == name)
+                    .unwrap()
+                    .success,
+                1
+            );
+        }
+        assert_eq!(keys.calls.load(Ordering::SeqCst), 1);
+        for name in ["auth.authenticate", "auth.key.fetch"] {
+            assert_eq!(
+                snapshot
+                    .entries
+                    .iter()
+                    .find(|entry| entry.name == name)
+                    .unwrap()
+                    .error,
+                1
+            );
+        }
+        assert!(snapshot.complete && snapshot.application_quiescent);
+        let json = serde_json::to_string(&snapshot).unwrap();
+        for secret in [
+            "secret-partition",
+            "secret-issuer",
+            "unverified-signature",
+            "secret-key-source-error",
+        ] {
+            assert!(!json.contains(secret));
+        }
+    }
+}
+
+#[cfg(feature = "io-profiling")]
+#[tokio::test]
+async fn websocket_signed_catalog_hello_and_renewal_record_verification_and_grant_stages() {
+    use auth_stage_fixture::*;
+    let (auth, keys, token, dispatcher) = signed_fixture();
+    let observer = WebSocketDiagnostics::new(false);
+    let hello = crate::websocket::authenticate(
+        &auth,
+        &token,
+        "secret-partition",
+        Some(observer.application_observer()),
+        Some(std::time::Duration::from_secs(30)),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("signed hello authentication denied"));
+    let first = observer.snapshot();
+    for name in [
+        "auth.authenticate",
+        "auth.jwt.verify",
+        "auth.grant.authorize",
+    ] {
+        assert_eq!(
+            first
+                .entries
+                .iter()
+                .find(|entry| entry.name == name)
+                .unwrap()
+                .success,
+            1
+        );
+    }
+    let renewed = crate::websocket::authenticate(
+        &auth,
+        &token,
+        "secret-partition",
+        Some(observer.application_observer()),
+        None,
+    )
+    .await
+    .unwrap_or_else(|_| panic!("signed renewal authentication denied"));
+    assert_eq!(hello.partition_id, renewed.partition_id);
+    assert_eq!(hello.policy_id, renewed.policy_id);
+    assert_eq!(hello.issuer, renewed.issuer);
+    assert_eq!(hello.subject, renewed.subject);
+    assert_eq!(hello.signing_algorithm, renewed.signing_algorithm);
+    assert_eq!(hello.claims, renewed.claims);
+    assert_eq!(hello.expires_at, renewed.expires_at);
+    assert!(dispatcher.renewal_matches(&hello, &renewed).await);
+    let after = observer.snapshot();
+    for name in [
+        "auth.authenticate",
+        "auth.decode",
+        "auth.catalog",
+        "auth.cache.wait",
+        "auth.policy.select",
+        "auth.jwt.verify",
+        "auth.grant.authorize",
+    ] {
+        let entry = after
+            .entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .unwrap();
+        assert_eq!(
+            (
+                entry.calls,
+                entry.success,
+                entry.error,
+                entry.timeout,
+                entry.cancelled
+            ),
+            (2, 2, 0, 0, 0),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        keys.calls.load(Ordering::SeqCst),
+        1,
+        "renewal uses the cached signing key"
+    );
+    assert_eq!(after.entries[Operation::AuthKeyFetch as usize].success, 1);
+    settled(&observer.application_observer().snapshot());
+    let serialized = serde_json::to_string(&after).unwrap();
+    assert!(!serialized.contains(&token));
+    assert!(!serialized.contains("secret-signed-kid"));
+    assert!(auth_span(AuthStage::JwtVerify).recorder.is_none());
+}
+
+#[cfg(feature = "io-profiling")]
+#[tokio::test(start_paused = true)]
+async fn websocket_hello_auth_timeout_cancels_catalog_stage_without_changing_deadline() {
+    use auth_stage_fixture::*;
+    let (auth, keys, token) = fixture(true);
+    let observer = WebSocketDiagnostics::new(false);
+    {
+        let mut future = std::pin::pin!(crate::websocket::authenticate(
+            &auth,
+            &token,
+            "secret-partition",
+            Some(observer.application_observer()),
+            Some(std::time::Duration::from_secs(30)),
+        ));
+        pending(future.as_mut());
+        let live = observer.snapshot();
+        assert_eq!(keys.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            live.entries[Operation::Authentication as usize].in_flight,
+            1
+        );
+        assert_eq!(live.entries[Operation::AuthKeyFetch as usize].in_flight, 1);
+        tokio::time::advance(std::time::Duration::from_secs(31)).await;
+        assert!(future.await.is_err());
+    }
+    let after = observer.snapshot();
+    assert_eq!(after.entries[Operation::Authentication as usize].timeout, 1);
+    assert_eq!(after.entries[Operation::AuthKeyFetch as usize].cancelled, 1);
+    assert!(after.complete && after.application_quiescent);
+    assert!(auth_span(AuthStage::Decode).recorder.is_none());
 }
 
 #[cfg(feature = "io-profiling")]
 mod auth_stage_fixture {
     use super::*;
     use crate::{
-        auth::{AuthError, CatalogAuthenticator, OidcKeySource, OidcVerifier},
+        auth::{AuthError, CatalogAuthenticator, Jwk, OidcKeySource, OidcVerifier},
         catalog::{
             CatalogError, CatalogSnapshot, CatalogStore, DriveDefinition, GrantDefinition,
             PartitionDefinition, Permission,
@@ -92,7 +358,7 @@ mod auth_stage_fixture {
             }
         }
     }
-    pub(super) fn fixture(hold: bool) -> (CatalogAuthenticator, Arc<Keys>, String) {
+    fn authority() -> CatalogSnapshot {
         let mut snapshot = CatalogSnapshot::empty();
         snapshot.partitions.insert(
             "secret-partition".into(),
@@ -115,12 +381,15 @@ mod auth_stage_fixture {
                 claim_conditions: BTreeMap::from([("/sub".into(), "secret-subject".into())]),
             },
         );
+        snapshot
+    }
+    pub(super) fn fixture(hold: bool) -> (CatalogAuthenticator, Arc<Keys>, String) {
         let keys = Arc::new(Keys {
             hold,
             calls: AtomicU64::new(0),
         });
         let auth = CatalogAuthenticator::with_key_source(
-            Arc::new(CurrentCatalog(Arc::new(snapshot))),
+            Arc::new(CurrentCatalog(Arc::new(authority()))),
             keys.clone(),
         );
         // This exercises decode/selection before a failed or pending key fetch.
@@ -132,6 +401,67 @@ mod auth_stage_fixture {
                 .encode(br#"{"iss":"https://secret-issuer.example","sub":"secret-subject"}"#)
         );
         (auth, keys, token)
+    }
+    pub(super) struct SignedKeys {
+        key: Jwk,
+        pub(super) calls: AtomicU64,
+    }
+    #[async_trait::async_trait]
+    impl OidcKeySource for SignedKeys {
+        async fn fetch(
+            &self,
+            issuer: &str,
+            audiences: &[String],
+        ) -> Result<OidcVerifier, AuthError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            OidcVerifier::new(issuer, audiences, vec![self.key.clone()])
+        }
+    }
+    pub(super) fn signed_fixture() -> (
+        CatalogAuthenticator,
+        Arc<SignedKeys>,
+        String,
+        crate::dispatch::DriveDispatcher,
+    ) {
+        use ring::{
+            rand::SystemRandom,
+            signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair},
+        };
+        let random = SystemRandom::new();
+        let pkcs8 =
+            EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &random).unwrap();
+        let key =
+            EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &random)
+                .unwrap();
+        let point = key.public_key().as_ref();
+        let keys = Arc::new(SignedKeys {
+            key: Jwk::EcP256 {
+                kid: "secret-signed-kid".into(),
+                x: URL_SAFE_NO_PAD.encode(&point[1..33]),
+                y: URL_SAFE_NO_PAD.encode(&point[33..65]),
+            },
+            calls: AtomicU64::new(0),
+        });
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"ES256","kid":"secret-signed-kid"}"#);
+        let claims = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&serde_json::json!({
+            "iss":"https://secret-issuer.example", "aud":"secret-audience", "sub":"secret-subject",
+            "iat":now, "exp":now + 300,
+        })).unwrap());
+        let input = format!("{header}.{claims}");
+        let signature = key.sign(&random, input.as_bytes()).unwrap();
+        let token = format!("{input}.{}", URL_SAFE_NO_PAD.encode(signature.as_ref()));
+        let catalog = Arc::new(CurrentCatalog(Arc::new(authority())));
+        let auth = CatalogAuthenticator::with_key_source(catalog.clone(), keys.clone());
+        (
+            auth,
+            keys,
+            token,
+            crate::dispatch::DriveDispatcher::new(catalog),
+        )
     }
     pub(super) fn row(snapshot: &ServerSnapshot, name: &str) -> ServiceEntry {
         snapshot
@@ -418,6 +748,20 @@ fn slow_records_are_bounded_and_have_only_fixed_labels() {
     assert_eq!(output.lines().count(), 16);
     assert!(output.lines().all(|line| line
         == "MOUNT_RS_SERVICE_SLOW operation=dispatch.read outcome=timeout elapsed_us=200000"));
+    let websocket = WebSocketDiagnostics::new(false);
+    let mut output = Vec::new();
+    write_slow_record(
+        &mut output,
+        &websocket.application.inner,
+        Operation::WebSocketUpgrade,
+        Outcome::Error,
+        200_000_000,
+    )
+    .unwrap();
+    assert_eq!(
+        String::from_utf8(output).unwrap(),
+        "MOUNT_RS_SERVICE_SLOW operation=handshake.websocket_upgrade outcome=error elapsed_us=200000\n"
+    );
 }
 
 #[test]

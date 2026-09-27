@@ -52,6 +52,38 @@ class ResultControls(unittest.TestCase):
 
 
 class CacheStageSelectors(unittest.TestCase):
+    def test_websocket_general_suite_keeps_process_recorder_off_in_both_builds(self):
+        for kind in ['wspackages', 'wspackagesprofiled']:
+            command, limit, profile, trace = parent.COMMANDS[kind]
+            self.assertEqual((limit, profile, trace), (180, 0, 0))
+            self.assertIn('--all-targets', command)
+            self.assertNotIn('--ignored', command)
+        self.assertNotIn('--features', parent.COMMANDS['wspackages'][0])
+        self.assertEqual(parent.COMMANDS['wspackagesprofiled'][0][parent.COMMANDS['wspackagesprofiled'][0].index('--features') + 1], 'mount-rs-service/io-profiling,mount-rs-cli/io-profiling')
+
+    def test_websocket_service_suites_reject_partial_or_zero_runs(self):
+        for kind, profile, count in [('wsservicedefault', 0, 2), ('wsserviceon', 1, 8)]:
+            command, limit, observed_profile, trace = parent.COMMANDS[kind]
+            self.assertEqual((limit, observed_profile, trace), (180, profile, 0))
+            self.assertEqual(command[command.index('--test') + 1], 'websocket_diagnostics')
+            self.assertIn('--test-threads=1', command)
+            self.assertNotIn('--ignored', command)
+            names = parent.EXPECTED_SUITES[kind]
+            self.assertEqual(len(names), count)
+            output = f'running {count} tests\n' + ''.join(f'test {name} ... ok\n' for name in names) + f'test result: ok. {count} passed; 0 failed; 0 ignored;\n'
+            self.assertTrue(parent.named_suite_passed(output, names))
+            self.assertFalse(parent.named_suite_passed(output.replace(names[0], 'unrelated'), names))
+            self.assertFalse(parent.named_suite_passed('running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored;\n', names))
+
+    def test_websocket_client_metrics_requires_one_profiled_case(self):
+        name = "websocket::metrics_tests::websocket_stages_preserve_serialized_transactions"
+        command, limit, profile, trace = parent.COMMANDS["wsclientmetrics"]
+        self.assertEqual(parent.EXACT_CASES["wsclientmetrics"], name)
+        self.assertEqual(command[command.index("--exact") + 1], name)
+        self.assertIn("--ignored", command)
+        self.assertIn("--test-threads=1", command)
+        self.assertEqual((limit, profile, trace), (180, 1, 0))
+
     def test_persistent_sqlite_cache_has_one_exact_profiled_case(self):
         name = "sqlite_backed_authenticated_cache_failures_preserve_exact_backing_savings"
         command, limit, profile, trace = parent.COMMANDS["sqlitecache"]
@@ -205,7 +237,8 @@ class CacheDeliverySelectors(unittest.TestCase):
 class NamedSuiteControls(unittest.TestCase):
     def test_current_cli_suite_requires_every_named_case(self):
         names = parent.EXPECTED_SUITES["clidiagnostics"]
-        output = "running 7 tests\n" + "".join(f"test {name} ... ok\n" for name in names) + "test result: ok. 7 passed; 0 failed; 0 ignored;\n"
+        self.assertEqual(len(names), 8)
+        output = "running 8 tests\n" + "".join(f"test {name} ... ok\n" for name in names) + "test result: ok. 8 passed; 0 failed; 0 ignored;\n"
         self.assertTrue(parent.named_suite_passed(output, names))
         self.assertFalse(parent.named_suite_passed(output.replace(names[0], "other"), names))
 

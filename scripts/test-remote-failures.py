@@ -10,6 +10,14 @@ import hashlib,json,os,pathlib,re,selectors,signal,stat,subprocess,sys,tempfile,
 BASE=pathlib.Path(__file__).resolve().parent.parent
 COMMANDS={'cachetests': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--all-targets', '--locked', '--offline'], 180, 0, 0), 'redisfault': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'distributed_failure', '--locked', '--offline', '--', '--ignored', '--exact', 'redis_directory_real_peer_failures_preserve_exact_backing', '--test-threads=1', '--nocapture'], 180, 0, 0), 'rediscleanup': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'distributed_failure', '--locked', '--offline', '--', '--ignored', '--exact', 'cancelled_redis_fixture_reaps_owned_child_before_removing_directory', '--test-threads=1', '--nocapture'], 180, 0, 0), 'wsloss': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-remote-client', '--test', 'quic_mount', '--locked', '--offline', '--', '--ignored', '--exact', 'websocket_sqlite_commit_survives_lost_wire_reply_without_replay', '--test-threads=1', '--nocapture'], 180, 0, 0), 'remotetests': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-remote-client', '--all-targets', '--locked', '--offline'], 180, 0, 0), 'faultclippy': (['./scripts/cargo-shared', 'clippy', '-p', 'mount-rs-blob-cache', '-p', 'mount-rs-remote-client', '--all-targets', '--locked', '--offline', '--', '-D', 'warnings'], 180, 0, 0), 'fmt': (['./scripts/cargo-shared', 'fmt', '--all', '--', '--check'], 120, 0, 0)}
 COMMANDS.update({
+    'wsservicedefault': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-service', '--test', 'websocket_diagnostics', '--locked', '--offline', '--', '--test-threads=1'], 180, 0, 0),
+    'wsserviceon': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-service', '--features', 'io-profiling', '--test', 'websocket_diagnostics', '--locked', '--offline', '--', '--test-threads=1'], 180, 1, 0),
+    'wsserviceunit': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-service', '--features', 'io-profiling', '--lib', '--locked', '--offline', 'server::diagnostics::tests::', '--', '--test-threads=1'], 180, 1, 0),
+    'wspackages': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-service', '-p', 'mount-rs-remote-client', '-p', 'mount-rs-cli', '--all-targets', '--locked', '--offline'], 180, 0, 0),
+    'wspackagesprofiled': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-service', '-p', 'mount-rs-remote-client', '-p', 'mount-rs-cli', '--features', 'mount-rs-service/io-profiling,mount-rs-cli/io-profiling', '--all-targets', '--locked', '--offline'], 180, 0, 0),
+    'wsclippy': (['./scripts/cargo-shared', 'clippy', '-p', 'mount-rs-core', '-p', 'mount-rs-service', '-p', 'mount-rs-remote-client', '-p', 'mount-rs-cli', '-p', 'mount-rs-napi', '--all-targets', '--locked', '--offline', '--', '-D', 'warnings'], 180, 0, 0),
+    'wsclippyprofiled': (['./scripts/cargo-shared', 'clippy', '-p', 'mount-rs-service', '-p', 'mount-rs-remote-client', '-p', 'mount-rs-cli', '--features', 'mount-rs-service/io-profiling,mount-rs-cli/io-profiling', '--all-targets', '--locked', '--offline', '--', '-D', 'warnings'], 180, 0, 0),
+    'wsclientmetrics': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-remote-client', '--lib', '--locked', '--offline', '--', '--ignored', '--exact', 'websocket::metrics_tests::websocket_stages_preserve_serialized_transactions', '--test-threads=1', '--nocapture'], 180, 1, 0),
     'sqlitecache': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'distributed_failure', '--locked', '--offline', '--', '--ignored', '--exact', 'sqlite_backed_authenticated_cache_failures_preserve_exact_backing_savings', '--test-threads=1', '--nocapture'], 180, 1, 0),
     'peeriometricstrace': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--lib', '--locked', '--offline', '--', '--ignored', '--exact', 'peer::tests::peer_request_stage_metrics_preserve_bytes_outcomes_and_cancellation', '--test-threads=1', '--nocapture'], 180, 1, 1),
     'peeriometrics': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--lib', '--locked', '--offline', '--', '--ignored', '--exact', 'peer::tests::peer_request_stage_metrics_preserve_bytes_outcomes_and_cancellation', '--test-threads=1', '--nocapture'], 180, 1, 0),
@@ -43,6 +51,7 @@ COMMANDS.update({
     'cacheconsumers': (['fnm', 'exec', '--using', 'v24.18.0', 'node', '--test', 'benchmarks/storage/test.mjs', 'benchmarks/storage/foundationdb-diagnostics.test.mjs', 'benchmarks/storage/owned-layout-metrics.test.mjs', 'benchmarks/storage/owned-backing-pilot.test.mjs', 'scripts/verify-owned-backing-pilot.test.mjs'], 180, 0, 0),
 })
 EXACT_CASES = {
+    'wsclientmetrics': 'websocket::metrics_tests::websocket_stages_preserve_serialized_transactions',
     'sqlitecache': 'sqlite_backed_authenticated_cache_failures_preserve_exact_backing_savings',
     'peeriometricstrace': 'peer::tests::peer_request_stage_metrics_preserve_bytes_outcomes_and_cancellation',
     'peeriometrics': 'peer::tests::peer_request_stage_metrics_preserve_bytes_outcomes_and_cancellation',
@@ -65,6 +74,34 @@ EXACT_CASES = {
     'corealloc': 'warmed_causal_profile_rows_record_without_added_allocations',
 }
 EXPECTED_SUITES = {
+    'wsservicedefault': ('ordinary_websocket_constructor_has_no_observer', 'explicit_websocket_observer_requires_profiling_feature'),
+    'wsserviceon': (
+        'ordinary_websocket_constructor_has_no_observer',
+        'explicit_websocket_observer_requires_profiling_feature',
+        'enabled::held_hello_authentication_and_idle_socket_have_distinct_lifetimes',
+        'enabled::held_renewal_is_a_request_and_changed_identity_is_still_rejected',
+        'enabled::cancelled_dispatch_settles_before_actual_cleanup_finishes',
+        'enabled::successful_binary_write_and_held_read_record_actual_dispatch_results',
+        'enabled::denied_dispatch_is_an_error_even_when_response_submission_succeeds',
+        'enabled::incomplete_request_body_keeps_the_existing_deadline_and_records_timeout',
+    ),
+    'wsserviceunit': tuple('server::diagnostics::tests::'+name for name in (
+        'auth_stage_scope_helpers_allocate_no_heap_with_preconstructed_observer',
+        'websocket_inventory_and_application_snapshot_are_transport_specific',
+        'websocket_span_and_auth_scope_helpers_add_no_heap_allocations',
+        'websocket_authentication_helper_scopes_catalog_auth_for_hello_and_renewal',
+        'websocket_signed_catalog_hello_and_renewal_record_verification_and_grant_stages',
+        'websocket_hello_auth_timeout_cancels_catalog_stage_without_changing_deadline',
+        'auth_stage_context_restores_across_nested_and_interleaved_polls',
+        'auth_stage_failed_fetch_records_error_before_negative_cache_reuse',
+        'auth_stage_pending_fetch_and_mutex_wait_retire_on_cancellation',
+        'auth_stage_outer_timeout_is_distinct_from_inner_cancellation',
+        'entering_mutation_between_end_envelope_reads_cannot_claim_quiescence',
+        'spans_hold_activity_until_terminal_and_drop_records_cancellation',
+        'saturation_and_mutating_capture_cannot_claim_complete_quiescence',
+        'slow_records_are_bounded_and_have_only_fixed_labels',
+        'transport_fold_saturates_instead_of_wrapping',
+    )),
     'filesystemmetrics': (
         'partial_overwrite_attributes_initial_fallback_and_retry_puts',
         'dropped_pending_put_records_attempted_bytes_and_cancellation',
@@ -97,6 +134,7 @@ EXPECTED_SUITES = {
         'disabled_process_banks_do_not_capture_or_export_zero_snapshots',
         'only_exact_profile_one_selects_a_compiled_service_observer',
         'generic_encoding_preserves_raw_u64_above_javascript_integer_precision',
+        'websocket_record_preserves_its_application_schema_and_raw_u64',
         'full_current_banks_with_maximum_u64_fit_existing_record_limit',
         'oversized_serializable_value_emits_only_a_bounded_incomplete_record',
         'serialization_failure_uses_a_fixed_incomplete_record',
@@ -307,6 +345,8 @@ def main():
     FAULT_KINDS.add('peeriometrics')
     FAULT_KINDS.add('peeriometricstrace')
     FAULT_KINDS.add('sqlitecache')
+    FAULT_KINDS.add('wsclientmetrics')
+    FAULT_KINDS.update({'wsservicedefault','wsserviceon','wsserviceunit','wspackages','wspackagesprofiled','wsclippy','wsclippyprofiled'})
     assert kind in FAULT_KINDS, 'fixed fault qualification commands only'
     root=pathlib.Path(tempfile.mkdtemp(prefix='mount-rs-owned-fault-'+kind+'-',dir=os.environ.get('MOUNT_RS_FAILURE_EVIDENCE_ROOT',tempfile.gettempdir())));os.chmod(root,0o700)
     fixture_tmp=root/'fixtures';fixture_tmp.mkdir(mode=0o700)
@@ -340,8 +380,12 @@ def main():
       paths.append(BASE/'.github/workflows/remote-drives.yml')
       paths.append(BASE/'crates/mount-rs-remote-client/tests/quic_mount_reply_loss/mod.rs')
       paths.append(BASE/'crates/mount-rs-blob-cache/tests/support/stage_metrics.rs')
-      paths.append(BASE/'crates/mount-rs-blob-cache/tests/support/sqlite_cache.rs')
-      paths.extend(BASE/v for v in ['filesystems/mount-rs-chunked/src/causal_metrics.rs','filesystems/mount-rs-chunked/tests/filesystem_causal_metrics.rs','tests/filesystem_causal_profile_allocations.rs','filesystems/mount-rs-chunked/tests/compact_snapshot_revision.rs','filesystems/mount-rs-chunked/src/create_guard_metrics_tests.rs','filesystems/mount-rs-chunked/src/create_rebase.rs','filesystems/mount-rs-chunked/tests/current_path_create_rebase.rs'] if (BASE/v).is_file())
+     paths.append(BASE/'crates/mount-rs-blob-cache/tests/support/sqlite_cache.rs')
+     if (BASE/'crates/mount-rs-remote-client/src/websocket_metrics_tests.rs').is_file():
+      paths.append(BASE/'crates/mount-rs-remote-client/src/websocket_metrics_tests.rs')
+     if (BASE/'crates/mount-rs-service/tests/websocket_diagnostics.rs').is_file():
+      paths.append(BASE/'crates/mount-rs-service/tests/websocket_diagnostics.rs')
+     paths.extend(BASE/v for v in ['filesystems/mount-rs-chunked/src/causal_metrics.rs','filesystems/mount-rs-chunked/tests/filesystem_causal_metrics.rs','tests/filesystem_causal_profile_allocations.rs','filesystems/mount-rs-chunked/tests/current_path_create_rebase.rs','filesystems/mount-rs-chunked/tests/compact_snapshot_revision.rs','filesystems/mount-rs-chunked/src/create_guard_metrics_tests.rs','filesystems/mount-rs-chunked/src/create_rebase.rs'] if (BASE/v).is_file())
      paths.append(BASE/'crates/mount-rs-blob-cache/tests/quinn_close.rs')
      paths.append(BASE/'crates/mount-rs-remote-client/src/connection_metrics_tests.rs')
      # Pin the complete scoped dependency, including upstream provenance and
@@ -352,6 +396,7 @@ def main():
      return {str(p.relative_to(BASE)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(set(paths))}
     before=frozen();write('source-before.json',before)
     env=os.environ.copy();env.update({'MOUNT_RS_PROFILE_IO':str(profile),'MOUNT_RS_TRACE_STORAGE':str(trace),'MOUNT_RS_TRACE_REQUESTS':'0','CARGO_TARGET_DIR':os.environ.get('CARGO_TARGET_DIR',os.environ.get('MOUNT_RS_CARGO_TARGET_DIR',str(root/'cargo-target')))})
+    if kind in {'wsclientmetrics','wsservicedefault','wsserviceon','wsserviceunit','wspackages','wspackagesprofiled','wsclippy','wsclippyprofiled','clidiagnostics','clicompact'}:env['MOUNT_RS_TRACE_SERVICE']='0'
     if kind in {'cacheconsumers','cacheconsumerred'}:
      # Pure suites forbid loading a real addon or latching native profiling.
      for key in ['MOUNT_RS_PROFILE_IO','MOUNT_RS_TRACE_STORAGE','MOUNT_RS_TRACE_REQUESTS','NAPI_RS_FORCE_WASI','NAPI_RS_WASI_FLAVOR','NODE_PATH']:

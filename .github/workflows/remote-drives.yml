@@ -171,6 +171,10 @@ jobs:
             > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-remote.log" 2>&1
           ./scripts/cargo-shared test --locked -p mount-rs-remote-client --lib --no-run \
             > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-client-metrics.log" 2>&1
+          ./scripts/cargo-shared test --locked -p mount-rs-service --features io-profiling --test websocket_diagnostics --no-run \
+            > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-websocket-service-metrics.log" 2>&1
+          ./scripts/cargo-shared test --locked -p mount-rs-service --features io-profiling --lib --no-run \
+            > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-websocket-auth-metrics.log" 2>&1
           ./scripts/cargo-shared test --locked -p mount-rs-blob-cache --test quinn_close --no-run \
             > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-quinn-close.log" 2>&1
           ./scripts/cargo-shared test --locked -p mount-rs-core --test storage_diagnostics_allocations --no-run \
@@ -230,6 +234,18 @@ jobs:
       - name: Verify client QUIC stream, send and receive outcomes through the owned parent
         timeout-minutes: 5
         run: python3 -B scripts/test-remote-failures.py clientmetrics
+      - name: Verify client WebSocket stages and cancellation through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py wsclientmetrics
+      - name: Verify ordinary WebSocket constructors keep diagnostics disabled
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py wsservicedefault
+      - name: Verify WebSocket service lifetimes and unchanged deadlines
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py wsserviceon
+      - name: Verify WebSocket authentication scopes and allocation helpers
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py wsserviceunit
       - name: Verify warmed storage recorder allocations through the owned parent
         timeout-minutes: 5
         run: python3 -B scripts/test-remote-failures.py storagealloc

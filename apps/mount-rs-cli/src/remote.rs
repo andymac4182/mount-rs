@@ -415,6 +415,7 @@ async fn serve_resources(
         .await?;
     let mut runtimes = Vec::new();
     let mut observer = None;
+    let mut websocket_observer = None;
     let result = async {
         let mut dispatcher = mount_rs_service::dispatch::DriveDispatcher::new(catalog.clone());
         for (partition_id, partition) in &snapshot.partitions {
@@ -498,13 +499,15 @@ async fn serve_resources(
                     .observe(
                         Stage::ListenerBind,
                         async {
-                            mount_rs_service::websocket::WebSocketServer::bind_with_options(
+                            mount_rs_service::websocket::WebSocketServer::bind_with_diagnostics(
                                 address,
                                 certs.clone(),
                                 key.clone_key(),
                                 dispatcher.clone(),
                                 authenticator.clone(),
                                 server_options,
+                                mount_rs_service::server::RemoteTransferLimits::default(),
+                                startup.enabled(),
                             )
                             .await
                             .map_err(|_| CliError::runtime("cannot start TLS websocket service"))
@@ -516,6 +519,9 @@ async fn serve_resources(
         } else {
             None
         };
+        websocket_observer = websocket
+            .as_ref()
+            .and_then(mount_rs_service::websocket::WebSocketServer::diagnostics);
         let server = match startup
             .observe(
                 Stage::ListenerBind,
@@ -582,6 +588,9 @@ async fn serve_resources(
     let outcome = result.and(shutdown_error.map_or(Ok(()), Err));
     if let Some(observer) = observer {
         diagnostics::emit(&observer);
+    }
+    if let Some(observer) = websocket_observer {
+        diagnostics::emit_websocket(&observer);
     }
     outcome
 }

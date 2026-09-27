@@ -120,7 +120,120 @@ const transportNames = Object.freeze([
   "blob_cache.peer.get",
   "blob_cache.peer.get_miss",
 ])
-const operationNames = Object.freeze([...preTransportNames, ...transportNames])
+const websocketNames = Object.freeze([
+  "client.websocket.tcp_connect",
+  "client.websocket.tls_handshake",
+  "client.websocket.upgrade",
+  "client.websocket.socket_lock_wait",
+  "client.websocket.request_encode",
+  "client.websocket.request_send",
+  "client.websocket.response_receive",
+  "client.websocket.response_decode",
+])
+const operationNames = Object.freeze([...preTransportNames, ...transportNames, ...websocketNames])
+// Literal historical 100-row inventory, independent of the current declaration.
+const historical100Names = Object.freeze([
+  "metadata.load",
+  "metadata.load_if_changed",
+  "metadata.snapshot",
+  "metadata.publish",
+  "metadata.flush",
+  "blocks.put",
+  "blocks.get",
+  "blocks.flush",
+  "blocks.verify_backing",
+  "blocks.prepare_backing",
+  "blocks.delete",
+  "blocks.reconcile",
+  "pglite.client_lock_wait",
+  "sdk.metadata.compact_inode_capability",
+  "sdk.metadata.compact_inode_mode_state",
+  "sdk.metadata.prepare_compact_inode_mode",
+  "sdk.metadata.load_compact_snapshot",
+  "sdk.metadata.load_compact_inode",
+  "sdk.metadata.publish_compact_inode",
+  "sdk.metadata.publish_compact_structure",
+  "sdk.metadata.inode_mode_state",
+  "sdk.metadata.prepare_inode_mode",
+  "sdk.metadata.load_inode_snapshot_if_changed",
+  "sdk.metadata.load_inode_snapshot",
+  "sdk.metadata.load_inode",
+  "sdk.metadata.load_inode_if_changed",
+  "sdk.metadata.publish_inode_if_version",
+  "sdk.metadata.publish_structure_if_versions",
+  "sdk.metadata.delegation_state",
+  "sdk.metadata.prepare_delegated_mode",
+  "sdk.metadata.checkout",
+  "sdk.metadata.publish_delegated",
+  "sdk.metadata.checkin",
+  "sdk.metadata.recover",
+  "sdk.metadata.durable",
+  "sdk.metadata.publish_includes_flush_barrier",
+  "sdk.metadata.load",
+  "sdk.metadata.load_if_changed",
+  "sdk.metadata.concurrent_mode_state",
+  "sdk.metadata.preflight_new_bound_mode",
+  "sdk.metadata.prepare_bound_concurrent_mode",
+  "sdk.metadata.acquire_writer",
+  "sdk.metadata.renew_writer",
+  "sdk.metadata.release_writer",
+  "sdk.metadata.publish",
+  "sdk.metadata.publish_bound_if_revision",
+  "sdk.metadata.migrate_mrc1_to_bound_mode",
+  "sdk.metadata.preflight_mrc1_to_bound_mode",
+  "sdk.metadata.preflight_trusted_unstamped_mrc1",
+  "sdk.metadata.migrate_trusted_unstamped_mrc1",
+  "sdk.metadata.flush",
+  "sdk.blocks.durable",
+  "sdk.blocks.prepare_concurrent_backing",
+  "sdk.blocks.verify_concurrent_backing",
+  "sdk.blocks.get_for_migration",
+  "sdk.blocks.put",
+  "sdk.blocks.get",
+  "sdk.blocks.flush",
+  "sdk.blocks.delete",
+  "sdk.blocks.reconcile",
+  "tidb.pool.checkout",
+  "tidb.session.configure",
+  "tidb.open.schema",
+  "tidb.open.metadata_row",
+  "tidb.tx.begin.metadata",
+  "tidb.tx.begin.inode",
+  "tidb.tx.begin.compact_read",
+  "tidb.tx.commit",
+  "tidb.tx.rollback",
+  "tidb.sql.session",
+  "tidb.sql.ddl",
+  "tidb.sql.metadata_read",
+  "tidb.sql.metadata_write",
+  "tidb.sql.inode_read",
+  "tidb.sql.inode_write",
+  "tidb.sql.block_read",
+  "tidb.sql.block_write",
+  "tidb.sql.flush_probe",
+  "foundationdb.transaction.create",
+  "foundationdb.transaction.closure_attempt",
+  "foundationdb.read.get",
+  "foundationdb.read.get_key",
+  "foundationdb.read.get_range_page",
+  "foundationdb.transaction.commit",
+  "foundationdb.transaction.on_error",
+  "blob_cache.miss.admission_wait",
+  "blob_cache.miss.singleflight_wait",
+  "blob_cache.ram.lookup",
+  "blob_cache.disk.lookup",
+  "blob_cache.peer.connection_lock_wait",
+  "blob_cache.peer.connection_establish",
+  "client.quic.open_bi",
+  "client.quic.request_send",
+  "client.quic.response_receive",
+  "blob_cache.peer.request_byte_admission_wait",
+  "blob_cache.peer.open_bi",
+  "blob_cache.peer.request_send",
+  "blob_cache.peer.response_receive",
+  "blob_cache.peer.get",
+  "blob_cache.peer.get_miss",
+])
 // Literal v3 descriptor at 56b9; never substitute the current family metadata.
 const historical92ByteSemantics = "known_successful_payload_bytes_only; zero_does_not_establish_no_payload"
 const historical92Names = Object.freeze([
@@ -232,6 +345,20 @@ const historical92Families = {
   client_quic: { operations: ["client.quic.open_bi"], calls: "stream_acquisition_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_open_bi_await_nanoseconds; not_exclusive_cpu_or_network_time" },
 }
 
+// Literal pre-WebSocket descriptor; current declarations cannot repair it.
+const historical100ByteSemantics = "known_successful_stage_specific_bytes; payload_or_plaintext_envelope_as_declared_by_family; zero_does_not_establish_no_payload"
+const historical100Families = {
+  ...historical92Families,
+  client_quic_request_send: { operations: ["client.quic.request_send"], calls: "request_send_stage_invocations; includes_success_error_and_cancellation; not_acknowledgments", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_write_and_fin_submission_nanoseconds; not_acknowledgment_or_exclusive_cpu_time" },
+  client_quic_response_receive: { operations: ["client.quic.response_receive"], calls: "response_receive_stage_invocations; includes_success_error_and_cancellation; not_server_operations", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_decode_and_eof_validation_nanoseconds; not_exclusive_cpu_or_network_time" },
+  blob_cache_peer_request_byte_admission_wait: { operations: ["blob_cache.peer.request_byte_admission_wait"], calls: "request_byte_permit_acquisition_invocations; includes_success_error_and_cancellation", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_request_byte_permit_await_nanoseconds; overlaps_get_duration" },
+  blob_cache_peer_open_bi: { operations: ["blob_cache.peer.open_bi"], calls: "stream_acquisition_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_open_bi_await_nanoseconds; overlaps_get_duration" },
+  blob_cache_peer_request_send: { operations: ["blob_cache.peer.request_send"], calls: "request_send_stage_invocations; includes_success_error_and_cancellation; not_acknowledgments", bytes: "known_successfully_submitted_plaintext_request_header_and_payload_bytes; not_wire_bytes_or_acknowledgments", returned_rows: "unavailable", duration: "inclusive_write_and_fin_submission_nanoseconds; overlaps_get_duration" },
+  blob_cache_peer_response_receive: { operations: ["blob_cache.peer.response_receive"], calls: "response_receive_stage_invocations; includes_success_error_and_cancellation; not_backing_reads", bytes: "known_successfully_validated_plaintext_status_and_body_bytes; not_wire_bytes", returned_rows: "unavailable", duration: "inclusive_response_read_and_validation_nanoseconds; overlaps_get_duration" },
+  blob_cache_peer_get: { operations: ["blob_cache.peer.get"], calls: "logical_peer_get_and_get_shared_invocations; includes_hits_misses_errors_and_cancellation", bytes: "known_successful_logical_get_payload_bytes; misses_zero", returned_rows: "unavailable", duration: "inclusive_get_method_nanoseconds; includes_request_and_existing_return_conversion; overlaps_transport_stages" },
+  blob_cache_peer_get_miss: { operations: ["blob_cache.peer.get_miss"], calls: "successful_get_miss_classifications; not_peer_requests", bytes: "unavailable", returned_rows: "unavailable", duration: "classification_marker_nanoseconds; excludes_get_request_duration" },
+}
+
 const duration = "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap"
 const foundationdbCoverage = {
   schema: "mount-rs-foundationdb-client-diagnostic-coverage-v1",
@@ -274,16 +401,16 @@ function emptySqliteVfs() {
     entries: SQLITE_VFS_ENTRY_NAMES.map((name) => ({ name, ...timing(), ...zero(["errors", "requested_bytes", "confirmed_bytes", "short_reads"]) })),
     checkpoint: { ...zero(["starts", "dones", "unmatched_starts", "unmatched_dones", "aborted_windows", "active_windows"]), paired: timing() } }
 }
-function snapshot({ legacy = false, preCache = false, preClient = false, preTransport = false, feature = true } = {}) {
+function snapshot({ legacy = false, preCache = false, preClient = false, preTransport = false, preWebSocket = false, feature = true } = {}) {
   const historical = legacy || preCache || preClient || preTransport
-  const names = legacy ? legacyNames : preCache ? preCacheNames : preClient ? preClientNames : preTransport ? historical92Names : operationNames
+  const names = legacy ? legacyNames : preCache ? preCacheNames : preClient ? preClientNames : preTransport ? historical92Names : preWebSocket ? historical100Names : operationNames
   const families = historical ? Object.fromEntries(Object.entries(historical92Families)
-    .filter(([, family]) => family.operations.every((name) => names.includes(name)))) : STORAGE_OPERATION_FAMILIES
+    .filter(([, family]) => family.operations.every((name) => names.includes(name)))) : preWebSocket ? historical100Families : STORAGE_OPERATION_FAMILIES
   return {
     schema_version: NATIVE_DIAGNOSTICS_SCHEMA, enabled: true, scope: "process",
     quiescent_snapshot_required: true, elapsed_semantics: "inclusive_wall_nanoseconds",
     measurement: {
-      storage_calls: STORAGE_CALL_SEMANTICS, storage_bytes: historical ? historical92ByteSemantics : STORAGE_BYTE_SEMANTICS, storage_rows: STORAGE_ROW_SEMANTICS,
+      storage_calls: STORAGE_CALL_SEMANTICS, storage_bytes: historical ? historical92ByteSemantics : preWebSocket ? historical100ByteSemantics : STORAGE_BYTE_SEMANTICS, storage_rows: STORAGE_ROW_SEMANTICS,
       storage_operations: [...names], storage_families: structuredClone(families),
       storage_instrumented_operations: [...legacyNames, ...(!legacy && feature ? foundationdbNames : [])],
       tidb_coverage: structuredClone(TIDB_DIAGNOSTIC_COVERAGE),
@@ -339,14 +466,16 @@ function summary(native) {
   return JSON.parse(lines[0].replace(/^MOUNT_RS_STORAGE_PHASE /u, ""))
 }
 
-test("new 100-row fixture has reconciled exact decimal endpoints before consumer validation", () => {
+test("new 108-row fixture has reconciled exact decimal endpoints before consumer validation", () => {
   const value = snapshot()
-  assert.equal(value.storage.entries.length, 100)
+  assert.equal(value.storage.entries.length, 108)
   assert.deepEqual(value.storage.entries.map((entry) => entry.name), operationNames)
   assert.deepEqual(value.storage.entries.slice(78, 85).map((entry) => entry.name), foundationdbNames)
   assert.deepEqual(value.storage.entries.slice(85, 91).map((entry) => entry.name), cacheNames)
   assert.deepEqual(value.storage.entries.slice(91, 92).map((entry) => entry.name), clientNames)
-  assert.deepEqual(value.storage.entries.slice(92).map((entry) => entry.name), transportNames)
+  assert.deepEqual(value.storage.entries.slice(92, 100).map((entry) => entry.name), transportNames)
+  assert.deepEqual(value.storage.entries.slice(100, 108).map((entry) => entry.name), websocketNames)
+  assert.deepEqual(value.storage.entries.slice(0, 100).map((entry) => entry.name), historical100Names)
   for (const entry of value.storage.entries) {
     assert.equal(BigInt(entry.calls), BigInt(entry.success) + BigInt(entry.error) + BigInt(entry.cancelled))
     assert.equal(entry.latency_log2_us.reduce((sum, count) => sum + BigInt(count), 0n), BigInt(entry.calls))
@@ -395,7 +524,23 @@ test("literal 56b9 92-row descriptor remains unavailable without invented transp
   assert.equal(value.observations.after.measurement.storage_bytes, "unavailable")
   assert.equal(value.observations.after.measurement.storage_families, "unavailable")
 })
-test("current 100-row inventory refuses the historical payload-only byte descriptor", () => {
+test("literal historical 100-row inventory stays incomplete without invented WebSocket stages", () => {
+  const before = snapshot({ preWebSocket: true }), after = snapshot({ preWebSocket: true })
+  const base = "9007199254740993"
+  Object.assign(find(after, "client.quic.request_send"), { calls: base, success: base, elapsed_ns: base, latency_log2_us: [base, ...Array(31).fill("0")] })
+  assert.deepEqual(after.measurement.storage_operations, historical100Names)
+  assert.deepEqual(after.measurement.storage_families, historical100Families)
+  assert.equal(after.measurement.storage_bytes, historical100ByteSemantics)
+  assert.equal(Object.keys(after.measurement.storage_families).length, 20)
+  const value = deltaNativeSnapshots(before, after)
+  assert.equal(value.complete, false)
+  assert.equal(Object.hasOwn(value, "storage"), false)
+  assert.equal(value.observations.after.storage.entries.length, 100)
+  assert.equal(value.observations.after.storage.entries.values.length, 100)
+  assert.equal(value.observations.after.storage.entries.values.some((entry) => websocketNames.includes(entry.name)), false)
+  assert.equal(value.observations.after.storage.entries.values.find((entry) => entry.name === "client.quic.request_send").calls, base)
+})
+test("current 108-row inventory refuses the historical payload-only byte descriptor", () => {
   const before = snapshot(), after = snapshot()
   before.measurement.storage_bytes = historical92ByteSemantics
   after.measurement.storage_bytes = historical92ByteSemantics
@@ -437,13 +582,14 @@ test("successful empty get payload is a known zero without inventing SQL rows", 
   assert.match(value.measurement.storage_bytes, /zero_does_not_establish_no_payload/u)
   assert.equal(value.measurement.storage_families.foundationdb_read.returned_rows, "unavailable")
 })
-test("feature-off 100-row phase keeps FDB and cache source coverage unavailable", () => {
+test("feature-off 108-row phase keeps FDB and cache source coverage unavailable", () => {
   const value = observed(snapshot({ feature: false }), snapshot({ feature: false }))
   assert.deepEqual(value.measurement.foundationdb_coverage, disabledCoverage)
   assert.equal(value.measurement.storage_instrumented_operations.some((name) => name.startsWith("foundationdb.")), false)
   assert.equal(value.measurement.storage_instrumented_operations.length, 78)
   assert.equal(value.measurement.storage_instrumented_operations.some((name) => name.startsWith("blob_cache.")), false)
-  assert.equal(value.storage.entries.length, 100)
+  assert.equal(value.storage.entries.length, 108)
+  assert.equal(value.measurement.storage_instrumented_operations.some((name) => name.startsWith("client.")), false)
 })
 test("declared cache family stays unavailable in addon summaries with FDB enabled or disabled", () => {
   for (const feature of [true, false]) {
@@ -476,10 +622,10 @@ test("eight transport families retain separate units without claiming addon sour
     blob_cache_peer_request_send: transportNames[4], blob_cache_peer_response_receive: transportNames[5],
     blob_cache_peer_get: transportNames[6], blob_cache_peer_get_miss: transportNames[7],
   }
-  assert.equal(Object.keys(STORAGE_OPERATION_FAMILIES).length, 20)
+  assert.equal(Object.keys(STORAGE_OPERATION_FAMILIES).length, 21)
   const declared = Object.values(STORAGE_OPERATION_FAMILIES).flatMap((family) => family.operations)
-  assert.equal(declared.length, 100)
-  assert.equal(new Set(declared).size, 100)
+  assert.equal(declared.length, 108)
+  assert.equal(new Set(declared).size, 108)
   assert.deepEqual(STORAGE_OPERATION_FAMILIES.blob_cache.operations, cacheNames)
   assert.equal(STORAGE_OPERATION_FAMILIES.blob_cache_peer_request_send.bytes, "known_successfully_submitted_plaintext_request_header_and_payload_bytes; not_wire_bytes_or_acknowledgments")
   assert.equal(STORAGE_OPERATION_FAMILIES.blob_cache_peer_response_receive.bytes, "known_successfully_validated_plaintext_status_and_body_bytes; not_wire_bytes")
@@ -499,6 +645,46 @@ test("eight transport families retain separate units without claiming addon sour
       for (const field of ["calls", "bytes", "error", "cancelled", "elapsed_ns", "returned_rows", "returned_row_observations"]) assert.equal(Object.hasOwn(logged.families[family], field), false)
     }
   }
+})
+test("WebSocket stages declare exact units without claiming addon source coverage", () => {
+  assert.deepEqual(STORAGE_OPERATION_FAMILIES.client_websocket, {
+    operations: [...websocketNames],
+    calls: "client_stage_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments",
+    bytes: "unavailable", returned_rows: "unavailable",
+    duration: "inclusive_stage_wall_nanoseconds; nested_and_parallel_spans_overlap; not_exclusive_cpu_or_network_time",
+  })
+  for (const feature of [true, false]) {
+    const value = observed(snapshot({ feature }), snapshot({ feature }))
+    assert.equal(value.measurement.storage_instrumented_operations.some((name) => name.startsWith("client.")), false)
+    const family = summary(value).families.client_websocket
+    assert.equal(family.available, false)
+    assert.equal(family.instrumented, false)
+    assert.deepEqual(family.instrumented_operations, [])
+    for (const field of ["calls", "bytes", "error", "cancelled", "elapsed_ns", "returned_rows", "returned_row_observations"]) assert.equal(Object.hasOwn(family, field), false)
+  }
+})
+test("WebSocket stage deltas retain integers above JavaScript safe precision", () => {
+  const before = snapshot(), after = snapshot(), base = 9007199254740993n
+  for (const name of websocketNames) {
+    Object.assign(find(before, name), { calls: String(base), success: String(base), elapsed_ns: String(base), latency_log2_us: [String(base), ...Array(31).fill("0")] })
+    Object.assign(find(after, name), { calls: String(base + 1n), success: String(base + 1n), elapsed_ns: String(base + 9007199254740995n), latency_log2_us: [String(base + 1n), ...Array(31).fill("0")] })
+  }
+  const value = observed(before, after)
+  for (const name of websocketNames) {
+    assert.equal(find(value, name).calls, "1")
+    assert.equal(find(value, name).elapsed_ns, "9007199254740995")
+    assert.equal(find(value, name).bytes, "0")
+  }
+})
+for (const name of websocketNames) test(`missing ${name} is unavailable without a replacement zero row`, () => {
+  const before = snapshot(), after = snapshot()
+  after.storage.entries.splice(after.storage.entries.findIndex((entry) => entry.name === name), 1)
+  incomplete(before, after, /inventory|metadata|entries|operations|coverage/u)
+})
+test("misordered WebSocket stages cannot establish a complete phase", () => {
+  const before = snapshot(), after = snapshot()
+  ;[after.storage.entries[100], after.storage.entries[101]] = [after.storage.entries[101], after.storage.entries[100]]
+  incomplete(before, after, /inventory|metadata|order|name/u)
 })
 test("feature-off family summaries do not publish fixed zero rows as observed FDB attempts", () => {
   const logged = summary(observed(snapshot({ feature: false }), snapshot({ feature: false })))

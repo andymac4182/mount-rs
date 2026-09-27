@@ -26,6 +26,8 @@ pub fn disk_available() -> Result<u64, String> {
         .ok_or("disk observation overflow".into())
 }
 
+type DiskObservation = fn() -> Result<u64, String>;
+
 pub struct Resources {
     stop: Arc<AtomicBool>,
     current: Arc<Mutex<Value>>,
@@ -78,6 +80,8 @@ fn capture(
     samples: u64,
     previous_peak: u64,
     previous_disk: u64,
+    disk_observation: DiskObservation,
+    control_scope: Option<&'static str>,
 ) -> Result<Value, String> {
     let span = super::metrics::observer().begin("sampler_capture");
     let result: Result<Value, String> = (|| {
@@ -90,7 +94,10 @@ fn capture(
         let lifetime = delta["lifetime_peak_rss_bytes"]
             .as_u64()
             .ok_or("lifetime RSS unavailable")?;
-        let value = json!({"pid":std::process::id(),"samples":samples,"peak_rss_bytes":previous_peak.max(current).max(lifetime),"minimum_host_free_bytes":previous_disk.min(disk_available()?),"error":null,"process_delta":delta,"sample_interval_ms":100,"observed_unix_ms":super::utc_ms()});
+        let mut value = json!({"pid":std::process::id(),"samples":samples,"peak_rss_bytes":previous_peak.max(current).max(lifetime),"minimum_host_free_bytes":previous_disk.min(disk_observation()?),"error":null,"process_delta":delta,"sample_interval_ms":100,"observed_unix_ms":super::utc_ms()});
+        if let Some(scope) = control_scope {
+            value["disk_observation_scope"] = json!(scope);
+        }
         Ok(value)
     })();
     span.finish(result.is_ok(), 0);
@@ -132,9 +139,16 @@ fn validate_terminal_sample(value: &Value, pid: u32, now: u64) -> Result<(), Str
 }
 impl Resources {
     pub fn start(path: std::path::PathBuf) -> Result<Self, String> {
+        Self::start_observing_disk(path, disk_available, None)
+    }
+    fn start_observing_disk(
+        path: std::path::PathBuf,
+        disk_observation: DiskObservation,
+        control_scope: Option<&'static str>,
+    ) -> Result<Self, String> {
         let first = super::resource_profile::Snapshot::capture_process()
             .map_err(|_| "resource baseline unavailable")?;
-        let initial = capture(&first, 1, 0, u64::MAX)?;
+        let initial = capture(&first, 1, 0, u64::MAX, disk_observation, control_scope)?;
         validate_sample(&initial, std::process::id(), super::utc_ms())?;
         super::write_json(&path, &initial)?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -153,6 +167,8 @@ impl Resources {
                     previous["samples"].as_u64().unwrap_or(0) + 1,
                     previous["peak_rss_bytes"].as_u64().unwrap_or(0),
                     previous["minimum_host_free_bytes"].as_u64().unwrap_or(0),
+                    disk_observation,
+                    control_scope,
                 );
                 let value = retain_observation(
                     previous,
@@ -175,6 +191,19 @@ impl Resources {
             current,
             thread: Some(thread),
         })
+    }
+    /// Real process observations and sampler lifecycle with a modeled disk
+    /// observation. This private control is not host preflight qualification.
+    #[cfg(test)]
+    fn start_sampler_control(
+        path: std::path::PathBuf,
+        disk_observation: DiskObservation,
+    ) -> Result<Self, String> {
+        Self::start_observing_disk(
+            path,
+            disk_observation,
+            Some("modeled_disk_only_sampler_lifecycle_control"),
+        )
     }
     pub fn snapshot(&self) -> Value {
         self.current.lock().unwrap().clone()
@@ -235,13 +264,14 @@ fn prereview_red_resource_coverage_and_lifetime_peak() {
 async fn readiness_has_synchronous_pid_cpu_rss_sample_and_sampler_stops() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("resources.json");
-    let mut resources = Resources::start(path.clone()).unwrap();
-    validate_sample(
-        &super::read_json(&path).unwrap(),
-        std::process::id(),
-        super::utc_ms(),
-    )
-    .unwrap();
+    let mut resources = Resources::start_sampler_control(path.clone(), || Ok(DISK_FLOOR)).unwrap();
+    let initial = super::read_json(&path).unwrap();
+    assert_eq!(
+        initial["disk_observation_scope"],
+        "modeled_disk_only_sampler_lifecycle_control"
+    );
+    assert_eq!(initial["minimum_host_free_bytes"], DISK_FLOOR);
+    validate_sample(&initial, std::process::id(), super::utc_ms()).unwrap();
     resources.finish().await.unwrap();
     assert!(resources.thread.is_none());
     for field in ["cpu_user_us", "cpu_system_us", "rss_end_bytes"] {
@@ -260,11 +290,15 @@ async fn readiness_has_synchronous_pid_cpu_rss_sample_and_sampler_stops() {
 async fn immediate_stop_persists_final_os_sample_before_success() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("resources.json");
-    let mut resources = Resources::start(path.clone()).unwrap();
+    let mut resources = Resources::start_sampler_control(path.clone(), || Ok(DISK_FLOOR)).unwrap();
     let initial = resources.snapshot();
     let stop_requested = super::utc_ms();
     resources.finish().await.unwrap();
     let final_sample = super::read_json(&path).unwrap();
+    assert_eq!(
+        final_sample["disk_observation_scope"],
+        "modeled_disk_only_sampler_lifecycle_control"
+    );
     assert_eq!(
         final_sample["terminal_sample"], true,
         "successful stop requires final sampler-thread OS capture"
@@ -304,7 +338,7 @@ fn final_sample_retains_cap_breach_and_sticky_error_without_large_allocation() {
 async fn late_finish_poll_cannot_accept_completion_after_wall_budget() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("resources.json");
-    let mut resources = Resources::start(path.clone()).unwrap();
+    let mut resources = Resources::start_sampler_control(path.clone(), || Ok(DISK_FLOOR)).unwrap();
     let mut finish = Box::pin(resources.finish());
     assert!(futures_util::poll!(finish.as_mut()).is_pending());
     // Deliberately stall this test's caller; the real owned sampler can finish.
@@ -314,4 +348,33 @@ async fn late_finish_poll_cannot_accept_completion_after_wall_budget() {
         finish.await.is_err(),
         "late caller must fail closed even when sampler completed"
     );
+}
+
+#[tokio::test]
+async fn sampler_control_rejects_low_or_unavailable_disk_before_publishing_or_spawning() {
+    fn low_disk() -> Result<u64, String> {
+        Ok(DISK_FLOOR - 1)
+    }
+    fn unavailable_disk() -> Result<u64, String> {
+        Err("controlled disk observation unavailable".into())
+    }
+    let probes: [(DiskObservation, &str); 2] = [
+        (low_disk, "host free disk below64GiB"),
+        (unavailable_disk, "controlled disk observation unavailable"),
+    ];
+    for (probe, expected) in probes {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("resources.json");
+        match Resources::start_sampler_control(path.clone(), probe) {
+            Err(error) => assert_eq!(error, expected),
+            Ok(mut resources) => {
+                let _ = resources.finish().await;
+                panic!("sampler admission accepted invalid disk observation");
+            }
+        }
+        assert!(
+            !path.exists(),
+            "admission refusal precedes receipt publication and thread creation"
+        );
+    }
 }

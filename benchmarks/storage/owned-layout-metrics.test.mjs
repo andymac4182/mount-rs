@@ -68,7 +68,7 @@ test("preserves audited FoundationDB source coverage and precise returned payloa
   Object.assign(entry, { calls: "1", success: "1", bytes: "9007199254740993", elapsed_ns: "9007199254740995", latency_log2_us: ["1", ...Array(31).fill("0")] })
   const value = projectOwnedLayoutPhaseMetrics(source)
   assert.equal(value.status, "observed")
-  assert.equal(value.storage.entries.length, 100)
+  assert.equal(value.storage.entries.length, 108)
   assert.deepEqual(value.storage.foundationdb_coverage, FOUNDATIONDB_DIAGNOSTIC_COVERAGE)
   assert.deepEqual(value.storage.instrumented_operations.slice(-7), FOUNDATIONDB_DIAGNOSTIC_COVERAGE.operations)
   const projected = value.storage.entries.find((row) => row.name === "foundationdb.read.get")
@@ -78,10 +78,29 @@ test("preserves audited FoundationDB source coverage and precise returned payloa
 })
 test("feature-off fixed FoundationDB rows retain explicit unavailable coverage", () => {
   const value = projectOwnedLayoutPhaseMetrics(model())
-  assert.equal(value.status, "observed"); assert.equal(value.storage.entries.length, 100)
+  assert.equal(value.status, "observed"); assert.equal(value.storage.entries.length, 108)
   assert.deepEqual(value.storage.foundationdb_coverage, FOUNDATIONDB_DIAGNOSTIC_UNAVAILABLE)
   assert.equal(value.storage.instrumented_operations.some((name) => name.startsWith("foundationdb.")), false)
   assert.match(value.storage.scope, /audited_instrumented_operations_separately_declared/u)
+})
+test("declared WebSocket rows retain exact large counters without entering addon source coverage", () => {
+  const source = model()
+  const names = STORAGE_OPERATION_NAMES.slice(100, 108)
+  assert.equal(names.length, 8)
+  for (const name of names) Object.assign(source.native.storage.entries.find((row) => row.name === name), {
+    calls: "9007199254740993", success: "9007199254740993", elapsed_ns: "9007199254740995",
+    latency_log2_us: ["9007199254740993", ...Array(31).fill("0")],
+  })
+  const value = projectOwnedLayoutPhaseMetrics(source)
+  assert.equal(value.status, "observed")
+  assert.equal(value.storage.entries.length, 108)
+  assert.equal(value.storage.instrumented_operations.some((name) => name.startsWith("client.")), false)
+  for (const name of names) {
+    const row = value.storage.entries.find((entry) => entry.name === name)
+    assert.equal(row.calls, "9007199254740993")
+    assert.equal(row.elapsed_ns, "9007199254740995")
+    assert.equal(row.bytes, "0")
+  }
 })
 test("retains digest, encoding, copy and wait evidence with original limits", () => {
   const source = model(); local(source)
@@ -154,6 +173,8 @@ const faults = [
   ["legacy85 row inventory", (p) => { p.native.storage.entries.length = 85; p.native.measurement.storage_operations.length = 85; delete p.native.measurement.storage_families.blob_cache; return p }],
   ["legacy91 row inventory", (p) => { p.native.storage.entries.length = 91; p.native.measurement.storage_operations.length = 91; delete p.native.measurement.storage_families.client_quic; return p }],
   ["legacy92 row inventory", (p) => { p.native.storage.entries.length = 92; p.native.measurement.storage_operations.length = 92; return p }],
+  ["legacy100 row inventory", (p) => { p.native.storage.entries.length = 100; p.native.measurement.storage_operations.length = 100; delete p.native.measurement.storage_families.client_websocket; return p }],
+  ["misordered WebSocket stages", (p) => { [p.native.storage.entries[100], p.native.storage.entries[101]] = [p.native.storage.entries[101], p.native.storage.entries[100]]; return p }],
   ["former payload-only bytes descriptor", (p) => { p.native.measurement.storage_bytes = "known_successful_payload_bytes_only; zero_does_not_establish_no_payload"; return p }],
   ["cyclic input", (p) => { p.native.storage.circular = p; return p }],
   ["overcap evidence", (p) => { p.native.secret = "PRIVATE".repeat(1_300_000); return p }],
@@ -163,6 +184,10 @@ for (const name of [
   "blob_cache.peer.request_byte_admission_wait", "blob_cache.peer.open_bi",
   "blob_cache.peer.request_send", "blob_cache.peer.response_receive",
   "blob_cache.peer.get", "blob_cache.peer.get_miss",
+  "client.websocket.tcp_connect", "client.websocket.tls_handshake",
+  "client.websocket.upgrade", "client.websocket.socket_lock_wait",
+  "client.websocket.request_encode", "client.websocket.request_send",
+  "client.websocket.response_receive", "client.websocket.response_decode",
 ]) faults.push([`missing ${name} transport row`, (p) => {
   p.native.storage.entries.splice(p.native.storage.entries.findIndex((row) => row.name === name), 1)
   return p
@@ -367,7 +392,7 @@ test("causal core projection preserves fixed prefix, new zero rows and exact dec
   const value = projectOwnedLayoutPhaseMetrics(source)
   assert.deepEqual(value.core_profile.entries, source.native.profile.entries)
   assert.equal(value.core_profile.status, "observed")
-  assert.equal(value.storage.entries.length, 100)
+  assert.equal(value.storage.entries.length, 108)
   source.native.profile.entries = source.native.profile.entries.slice(0, 134)
   const previousCacheSnapshot = projectOwnedLayoutPhaseMetrics(source).core_profile
   assert.equal(previousCacheSnapshot.status, "observed")
