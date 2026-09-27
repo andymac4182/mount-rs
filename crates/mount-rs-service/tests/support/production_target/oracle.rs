@@ -56,8 +56,12 @@ impl Owner {
         if entries.iter().any(|e| e.name != "." && e.name != "..") {
             return Err("empty initializer found unexpected namespace".into());
         }
-        let mut receipt =
-            observed(&self.accounting, "backing_receipt", backend.receipt(drive)).await?;
+        let mut receipt = observed(
+            &self.accounting,
+            "backing_receipt",
+            backend.receipt(drive, self.context.as_ref().unwrap()),
+        )
+        .await?;
         super::process::validate_backing_receipt(&receipt, drive)?;
         observed(&self.accounting, "filesystem_context_close", fs.shutdown())
             .await
@@ -120,7 +124,12 @@ pub async fn verify(
             .await?,
         );
         let driver = owner.filesystem.as_ref().unwrap().driver();
-        observed(&metrics, "backing_receipt", backend.receipt(expected.drive)).await?;
+        observed(
+            &metrics,
+            "backing_receipt",
+            backend.receipt(expected.drive, owner.context.as_ref().unwrap()),
+        )
+        .await?;
         observed(&metrics, "membership", async {
             let actual: BTreeSet<_> = driver
                 .readdir("/")

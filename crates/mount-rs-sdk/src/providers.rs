@@ -13,7 +13,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use mount_rs_aws_s3::{AwsS3BlockStore, AwsS3Config};
-use mount_rs_core::storage::{BlockStore, MetadataStore};
+use mount_rs_core::storage::{BlockStore, InodeModeState, MetadataStore};
 use mount_rs_core::{Result, backend_error};
 #[cfg(all(
     feature = "foundationdb",
@@ -112,6 +112,26 @@ impl StorageContext {
         state.tidb.insert(connection.to_owned(), context.clone());
         Ok(context)
     }
+    /// Inspect persisted compact layout authority through fresh provider handles.
+    ///
+    /// Provider opening may initialize schemas and metadata rows. Inspection
+    /// does not enroll compact layout or repair backing authority. A compact
+    /// marker is returned only after the selected block provider verifies its
+    /// backing identity. `None` retains the metadata provider's noncompact
+    /// result. Inspection releases its handles while context-owned pools remain
+    /// usable until the caller explicitly closes this context.
+    ///
+    /// Cleanup is awaited on both successful and failed inspections. An
+    /// inspection error takes precedence if cleanup also fails; a cleanup error
+    /// rejects an otherwise successful inspection.
+    pub async fn inspect_compact_layout(
+        &self,
+        metadata: &StoreConfig,
+        blocks: &StoreConfig,
+    ) -> Result<Option<InodeModeState>> {
+        let opened = open_storage_in_context(metadata, blocks, None, Some(self)).await?;
+        inspect_compact_layout_opened(opened).await
+    }
     pub async fn close(&self) -> Result<()> {
         let contexts: Vec<_> = {
             let mut state = self
@@ -153,6 +173,8 @@ impl StorageContext {
 
 #[derive(Clone)]
 enum ProviderResource {
+    #[cfg(all(test, unix))]
+    CloseProbe(Arc<compact_layout_inspection_tests::CloseProbe>),
     PgliteMetadata(PgliteMetadataStore),
     PgliteBlocks(PgliteBlockStore),
     TidbMetadata(TidbMetadataStore),
@@ -173,6 +195,8 @@ enum ProviderResource {
 impl ProviderResource {
     async fn close(&self) -> Result<()> {
         match self {
+            #[cfg(all(test, unix))]
+            Self::CloseProbe(probe) => probe.close().await,
             Self::PgliteMetadata(store) => store.close().await,
             Self::PgliteBlocks(store) => store.close().await,
             Self::TidbMetadata(store) => store.close().await,
@@ -229,6 +253,22 @@ impl OpenStorage {
         // `self` until resource shutdown finishes on both result paths.
         self.resources.close().await
     }
+}
+
+async fn inspect_compact_layout_opened(opened: OpenStorage) -> Result<Option<InodeModeState>> {
+    let inspected: Result<Option<InodeModeState>> = async {
+        let mode = opened.metadata.compact_inode_mode_state().await?;
+        if let Some(mode) = &mode {
+            opened
+                .blocks
+                .verify_concurrent_backing(mode.backing)
+                .await?;
+        }
+        Ok(mode)
+    }
+    .await;
+    let closed = opened.close().await;
+    inspected.and_then(|mode| closed.map(|()| mode))
 }
 
 pub(crate) async fn open_storage(
@@ -632,6 +672,367 @@ fn open_foundationdb_storage(
         FoundationDbLeaseAuthority::RevisionCas => options.without_lease_oracle(),
     };
     FoundationDbStorage::connect(cluster_file, options)
+}
+
+#[cfg(all(test, unix))]
+mod compact_layout_inspection_tests {
+    use super::*;
+    use crate::{Filesystem, SplitOptions};
+    use mount_rs_core::{ErrorCode, FsError};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct OwnedDirectory(std::path::PathBuf);
+    impl OwnedDirectory {
+        fn new() -> Self {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "mount-rs-compact-inspection-{}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                NEXT.fetch_add(1, Ordering::SeqCst),
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+        fn store(&self, name: &str) -> StoreConfig {
+            StoreConfig::Sqlite {
+                path: self.0.join(format!("{name}.sqlite")),
+            }
+        }
+    }
+    impl Drop for OwnedDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    async fn layout(
+        context: &StorageContext,
+        metadata: &StoreConfig,
+        blocks: &StoreConfig,
+        compact: bool,
+    ) -> Filesystem {
+        let mut options = SplitOptions::memory("compact-inspection", 4096)
+            .with_concurrent_writes(true)
+            .with_compact_inode_updates(compact);
+        options.metadata = metadata.clone();
+        options.blocks = blocks.clone();
+        Filesystem::split_with_context(options, context)
+            .await
+            .unwrap()
+    }
+
+    pub(super) struct CloseProbe {
+        calls: AtomicUsize,
+        completed: AtomicBool,
+        fail: bool,
+    }
+    impl CloseProbe {
+        fn new(fail: bool) -> Arc<Self> {
+            Arc::new(Self {
+                calls: AtomicUsize::new(0),
+                completed: AtomicBool::new(false),
+                fail,
+            })
+        }
+        pub(super) async fn close(&self) -> Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            self.completed.store(true, Ordering::SeqCst);
+            if self.fail {
+                Err(FsError::new(ErrorCode::Eio))
+            } else {
+                Ok(())
+            }
+        }
+        fn assert_awaited(&self) {
+            assert_eq!(self.calls.load(Ordering::SeqCst), 1);
+            assert!(self.completed.load(Ordering::SeqCst));
+        }
+    }
+    async fn opened_with_probes(
+        context: &StorageContext,
+        metadata: &StoreConfig,
+        blocks: &StoreConfig,
+        first_fails: bool,
+    ) -> (OpenStorage, [Arc<CloseProbe>; 2]) {
+        let mut opened = open_storage_in_context(metadata, blocks, None, Some(context))
+            .await
+            .unwrap();
+        let probes = [CloseProbe::new(first_fails), CloseProbe::new(false)];
+        for probe in &probes {
+            opened
+                .resources
+                .resources
+                .push(ProviderResource::CloseProbe(probe.clone()));
+        }
+        (opened, probes)
+    }
+
+    #[tokio::test]
+    async fn compact_layout_inspection_observes_persisted_enrollment_and_later_generation() {
+        let owned = OwnedDirectory::new();
+        let store = owned.store("layout");
+        let context = StorageContext::new(2).unwrap();
+        let ordinary = layout(&context, &store, &store, false).await;
+        ordinary.shutdown().await.unwrap();
+        drop(ordinary);
+        assert_eq!(
+            context
+                .inspect_compact_layout(&store, &store)
+                .await
+                .unwrap(),
+            None
+        );
+
+        let compact = layout(&context, &store, &store, true).await;
+        let first = context
+            .inspect_compact_layout(&store, &store)
+            .await
+            .unwrap()
+            .unwrap();
+        compact
+            .driver()
+            .mkdir("/fresh", mount_rs_core::MkdirOptions::default())
+            .await
+            .unwrap();
+        let later = context
+            .inspect_compact_layout(&store, &store)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(later.backing, first.backing);
+        assert!(later.structural_generation > first.structural_generation);
+        compact.shutdown().await.unwrap();
+        drop(compact);
+        assert_eq!(
+            context
+                .inspect_compact_layout(&store, &store)
+                .await
+                .unwrap(),
+            Some(later)
+        );
+        context.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn compact_layout_inspection_rejects_missing_and_wrong_backing_without_repair() {
+        let owned = OwnedDirectory::new();
+        let store = owned.store("layout");
+        let wrong = owned.store("wrong-blocks");
+        let context = StorageContext::new(2).unwrap();
+        let fs = layout(&context, &store, &store, true).await;
+        fs.shutdown().await.unwrap();
+        drop(fs);
+        let mode = context
+            .inspect_compact_layout(&store, &store)
+            .await
+            .unwrap()
+            .unwrap();
+        let StoreConfig::Sqlite { path } = &wrong else {
+            unreachable!()
+        };
+        let foreign = SqliteBlockStore::open(path).unwrap();
+        assert_eq!(
+            context
+                .inspect_compact_layout(&store, &wrong)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Estale
+        );
+        assert!(
+            foreign
+                .verify_concurrent_backing(mode.backing)
+                .await
+                .is_err()
+        );
+        let foreign_backing = foreign.prepare_concurrent_backing().await.unwrap();
+        assert_ne!(foreign_backing, mode.backing);
+        assert_eq!(
+            context
+                .inspect_compact_layout(&store, &wrong)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Estale
+        );
+        foreign
+            .verify_concurrent_backing(foreign_backing)
+            .await
+            .unwrap();
+        assert_eq!(
+            context
+                .inspect_compact_layout(&store, &store)
+                .await
+                .unwrap(),
+            Some(mode)
+        );
+        context.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn compact_layout_inspection_closed_clone_is_terminal_and_other_context_is_usable() {
+        let owned = OwnedDirectory::new();
+        let store = owned.store("layout");
+        let context = StorageContext::new(2).unwrap();
+        let fs = layout(&context, &store, &store, true).await;
+        let mode = context
+            .inspect_compact_layout(&store, &store)
+            .await
+            .unwrap();
+        assert_eq!(
+            context
+                .inspect_compact_layout(&store, &store)
+                .await
+                .unwrap(),
+            mode
+        );
+        fs.driver()
+            .write_file("/caller-still-usable", b"receipt")
+            .await
+            .unwrap();
+        fs.shutdown().await.unwrap();
+        drop(fs);
+        let closed = context.clone();
+        context.close().await.unwrap();
+        let unopened = owned.store("must-not-open");
+        assert_eq!(
+            closed
+                .inspect_compact_layout(&unopened, &unopened)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Estale
+        );
+        let StoreConfig::Sqlite { path } = unopened else {
+            unreachable!()
+        };
+        assert!(
+            !path.exists(),
+            "terminal context must reject before provider opening"
+        );
+        let independent = StorageContext::new(2).unwrap();
+        assert_eq!(
+            independent
+                .inspect_compact_layout(&store, &store)
+                .await
+                .unwrap()
+                .unwrap()
+                .backing,
+            mode.unwrap().backing
+        );
+        independent.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn compact_layout_inspection_awaits_cleanup_on_compact_and_noncompact_success() {
+        for compact in [false, true] {
+            let owned = OwnedDirectory::new();
+            let store = owned.store("layout");
+            let context = StorageContext::new(2).unwrap();
+            let fs = layout(&context, &store, &store, compact).await;
+            fs.shutdown().await.unwrap();
+            drop(fs);
+            let (opened, probes) = opened_with_probes(&context, &store, &store, false).await;
+            assert_eq!(
+                inspect_compact_layout_opened(opened)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                compact
+            );
+            for probe in &probes {
+                probe.assert_awaited();
+            }
+            context.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn compact_layout_inspection_awaits_cleanup_after_persisted_read_error() {
+        let context = StorageContext::new(2).unwrap();
+        let (opened, probes) =
+            opened_with_probes(&context, &StoreConfig::Memory, &StoreConfig::Memory, false).await;
+        assert_eq!(
+            inspect_compact_layout_opened(opened)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Enotsup
+        );
+        for probe in &probes {
+            probe.assert_awaited();
+        }
+        context.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn compact_layout_inspection_awaits_cleanup_after_backing_error() {
+        let owned = OwnedDirectory::new();
+        let store = owned.store("layout");
+        let wrong = owned.store("wrong-blocks");
+        let context = StorageContext::new(2).unwrap();
+        let fs = layout(&context, &store, &store, true).await;
+        fs.shutdown().await.unwrap();
+        drop(fs);
+        let (opened, probes) = opened_with_probes(&context, &store, &wrong, false).await;
+        assert_eq!(
+            inspect_compact_layout_opened(opened)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Estale
+        );
+        for probe in &probes {
+            probe.assert_awaited();
+        }
+        context.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn compact_layout_inspection_cleanup_failure_rejects_success_and_closes_remaining_resources()
+     {
+        let owned = OwnedDirectory::new();
+        let store = owned.store("layout");
+        let context = StorageContext::new(2).unwrap();
+        let fs = layout(&context, &store, &store, true).await;
+        fs.shutdown().await.unwrap();
+        drop(fs);
+        let (opened, probes) = opened_with_probes(&context, &store, &store, true).await;
+        assert_eq!(
+            inspect_compact_layout_opened(opened)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Eio
+        );
+        for probe in &probes {
+            probe.assert_awaited();
+        }
+        context.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn compact_layout_inspection_primary_error_survives_cleanup_failure() {
+        let context = StorageContext::new(2).unwrap();
+        let (opened, probes) =
+            opened_with_probes(&context, &StoreConfig::Memory, &StoreConfig::Memory, true).await;
+        assert_eq!(
+            inspect_compact_layout_opened(opened)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Enotsup
+        );
+        for probe in &probes {
+            probe.assert_awaited();
+        }
+        context.close().await.unwrap();
+    }
 }
 
 #[cfg(test)]

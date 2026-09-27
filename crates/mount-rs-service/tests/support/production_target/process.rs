@@ -1011,7 +1011,7 @@ async fn worker_observed(
                 let driver = fs.driver();
                 filesystems.push(fs);
                 opens += 1;
-                receipts.push(startup.observe(StartupStage::BackingReceipt, p.backend.receipt(drive), &mut startup_sink).await?);
+                receipts.push(startup.observe(StartupStage::BackingReceipt, p.backend.receipt(drive, &context), &mut startup_sink).await?);
                 startup.observe(StartupStage::DriveRegister, async { dispatcher
                     .register_definition(
                         &format!("partition-{}", drive / 2),

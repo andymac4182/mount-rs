@@ -563,7 +563,10 @@ Compare each family's phase counts and known bytes with acknowledged workload
 operations. High SDK attempts indicate retries or repeated filesystem work;
 high SQL calls per SDK operation indicate provider amplification. Catalog query
 bytes expose repeated whole-document reads even when decode work is cached.
-High pool/gate time with low provider execution points to contention. High
+TiDB pool checkout includes waiting, lazy connection creation and session setup;
+it does not isolate queue contention. Compare it with session configuration,
+schema initialization and metadata-open counts before attributing the time to
+contention. High
 blob API calls relative to logical puts can reveal verification or conflict work.
 QUIC UDP traffic above application payload includes framing and retransmission;
 the retired-connection scope still applies.
@@ -577,3 +580,21 @@ win needs a controlled before/after workload with matching correctness checks.
 Authentication spans currently combine cache-mutex waiting, key fetching, JWT
 verification and grant traversal. Their totals do not identify which of those
 steps is responsible; separate authentication-stage measurements remain a gap.
+
+### Scale-test receipt overhead
+
+The production-target harness checks persisted MRC5 metadata and the selected
+block backing during initialization, each server generation and fresh oracle
+passes. These checks belong to setup and verification, outside the active I/O
+numerator. For a complete run with `D` drives, the source schedules `23D`
+receipt checks. Previously each TiDB receipt opened two private provider pools,
+or `46D` pool constructions over the run; that arithmetic does not count live
+connections or prove an observed completed run.
+
+Receipts now open fresh provider handles through the caller's `StorageContext`.
+The initializer and server retain their own contexts, and each fresh oracle
+still creates and closes an independent context. Every receipt rereads persisted
+mode, verifies the selected block backing and awaits handle cleanup. This
+removes the receipt's private pools without caching layout authority. Actual
+TiDB startup savings require a matched live measurement; local SQLite and
+cleanup controls establish correctness, not TiDB throughput.

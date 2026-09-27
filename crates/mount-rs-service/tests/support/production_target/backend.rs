@@ -1,4 +1,3 @@
-use mount_rs_core::storage::{BlockStore, MetadataStore};
 use mount_rs_sdk::{Filesystem, SplitOptions, StorageContext, StoreConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -35,52 +34,65 @@ impl Backend {
             .await
             .map_err(|e| format!("provider open failed: {:?}", e.code))
     }
-    pub async fn receipt(&self, drive: usize) -> Result<Value, String> {
-        match self.store(drive)? {
-            StoreConfig::Sqlite { path } => {
-                let meta = mount_rs_sqlite::SqliteMetadataStore::open(&path)
-                    .map_err(|_| "receipt metadata open failed")?;
-                let blocks = mount_rs_sqlite::SqliteBlockStore::open(&path)
-                    .map_err(|_| "receipt block open failed")?;
-                let mode = meta
-                    .compact_inode_mode_state()
-                    .await
-                    .map_err(|_| "MRC5 mode read failed")?
-                    .ok_or("persistent MRC5 marker missing")?;
-                blocks
-                    .verify_concurrent_backing(mode.backing)
-                    .await
-                    .map_err(|_| "persistent backing mismatch")?;
-                Ok(
-                    json!({"drive":drive,"mode":"MRC5","backing":mode.backing.to_hex(),"provider_backing_verified":true,"sqlite_version":rusqlite::version()}),
-                )
-            }
-            StoreConfig::Tidb {
-                connection,
-                volume_key,
-                durable,
-            } => {
-                let options =
-                    mount_rs_tidb::TidbStorageOptions::new(&volume_key).with_durable(durable);
-                let meta = mount_rs_tidb::TidbMetadataStore::connect_with_options(
-                    &connection,
-                    options.clone(),
-                )
-                .await
-                .map_err(|_| "receipt metadata open failed")?;
-                let result=async{
-                    let blocks=mount_rs_tidb::TidbBlockStore::connect_with_options(&connection,options).await.map_err(|_|"receipt block open failed")?;
-                    let checked=async {let mode=meta.compact_inode_mode_state().await.map_err(|_|"MRC5 mode read failed")?.ok_or("persistent MRC5 marker missing")?;
-                        blocks.verify_concurrent_backing(mode.backing).await.map_err(|_|"persistent backing mismatch")?;
-                        Ok::<_,String>(json!({"drive":drive,"mode":"MRC5","backing":mode.backing.to_hex(),"provider_backing_verified":true}))}.await;
-                    let closed=blocks.close().await.map_err(|_|"receipt blocks close failed");closed?;checked
-                }.await;
-                meta.close()
-                    .await
-                    .map_err(|_| "receipt metadata close failed")?;
-                result
-            }
-            _ => Err("unsupported receipt provider".into()),
+    pub async fn receipt(&self, drive: usize, context: &StorageContext) -> Result<Value, String> {
+        let store = self.store(drive)?;
+        let mode = context
+            .inspect_compact_layout(&store, &store)
+            .await
+            .map_err(|error| format!("receipt compact layout inspection failed: {:?}", error.code))?
+            .ok_or("persistent MRC5 marker missing")?;
+        let mut receipt = json!({"drive":drive,"mode":"MRC5","backing":mode.backing.to_hex(),"provider_backing_verified":true});
+        if matches!(store, StoreConfig::Sqlite { .. }) {
+            receipt["sqlite_version"] = json!(rusqlite::version());
         }
+        Ok(receipt)
+    }
+}
+
+#[cfg(test)]
+mod receipt_pooling_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn receipt_pooling_context_preserves_fields_and_caller_usability() {
+        let root = tempfile::tempdir().unwrap();
+        let backend = Backend {
+            provider: "sqlite".into(),
+            root: root.path().into(),
+            prefix: "receipt-pooling".into(),
+        };
+        let context = StorageContext::new(2).unwrap();
+        let fs = backend.open(3, &context).await.unwrap();
+        let first = backend.receipt(3, &context).await.unwrap();
+        assert_eq!(first["drive"], 3);
+        assert_eq!(first["mode"], "MRC5");
+        assert_eq!(first["provider_backing_verified"], true);
+        assert_eq!(first["sqlite_version"], rusqlite::version());
+        assert_eq!(backend.receipt(3, &context).await.unwrap(), first);
+        fs.driver()
+            .write_file("/after-receipt", b"usable caller")
+            .await
+            .unwrap();
+        assert_eq!(backend.receipt(3, &context).await.unwrap(), first);
+        fs.shutdown().await.unwrap();
+        drop(fs);
+        context.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn receipt_pooling_context_rejects_terminal_owner_before_opening_provider() {
+        let root = tempfile::tempdir().unwrap();
+        let backend = Backend {
+            provider: "sqlite".into(),
+            root: root.path().into(),
+            prefix: "receipt-pooling".into(),
+        };
+        let context = StorageContext::new(2).unwrap();
+        context.close().await.unwrap();
+        assert!(backend.receipt(4, &context).await.is_err());
+        assert!(
+            !root.path().join("drive-4.sqlite").exists(),
+            "receipt must use the supplied terminal context before provider opening"
+        );
     }
 }
