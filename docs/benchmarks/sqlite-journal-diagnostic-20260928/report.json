@@ -41169,6 +41169,8 @@
     "Raw JSON observer banks allocate and remain retained across phases; RSS is not workload-only, and allocation churn is not enabled in this binary.",
     "FULL journaling and current chunk/metadata format unchanged between arms; production journal defaults unchanged.",
     "Actual checkpoint count/time and steady-state long-run behavior remain unmeasured.",
-    "No10server independent-host,10000client,5000Partition,10Mfile or backing-daemon qualification."
-  ]
+    "No10server independent-host,10000client,5000Partition,10Mfile or backing-daemon qualification.",
+    "Client traffic uses test wire helpers; this is not production CLI/provider or OS mount throughput."
+  ],
+  "client_path": "direct test wire helpers; production remote client and local OS mount path not exercised"
 }

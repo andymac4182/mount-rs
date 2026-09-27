@@ -11,7 +11,9 @@ active QUIC clients and 10 coordinators in one process. There were 100 separate
 Drives in one Partition, each with one 128 KiB file and random aligned 4 KiB I/O
 at depth one. Metadata and blobs share each Drive's database file: **100 database
 files, 2,000 provider connections**. Authentication was synthetic; the peer blob
-cache was absent. Request audit logging stayed enabled.
+cache was absent. Request audit logging stayed enabled. Clients use the
+test wire helpers; production remote-client and OS-mount costs are outside this
+measurement.
 
 Order was DELETE, WAL, WAL, DELETE, DELETE, WAL. Each read, write and mixed phase
 had a one-second warmup and a three-second measured interval including drain.
