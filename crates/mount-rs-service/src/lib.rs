@@ -3,6 +3,8 @@
 pub mod auth;
 pub mod catalog;
 pub mod dispatch;
+pub mod runtime_diagnostics;
+pub mod runtime_pool;
 pub mod server;
 pub mod startup;
 

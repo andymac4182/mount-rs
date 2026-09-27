@@ -356,6 +356,33 @@ impl Filesystem {
         }
     }
 
+    /// Observe sticky failure in the opened chunked filesystem owner.
+    ///
+    /// Other driver kinds report no chunked failure. A false result does not
+    /// qualify a runtime for eviction or prove that shutdown has completed.
+    pub fn failed(&self) -> bool {
+        match &self.inner {
+            FilesystemInner::Split(driver, _) => driver.failed(),
+            FilesystemInner::Memory(_) | FilesystemInner::Host(_) | FilesystemInner::Sqlite(_) => {
+                false
+            }
+        }
+    }
+
+    /// Return the immutable concurrent backing identity captured at open.
+    ///
+    /// This observation does not perform fresh provider-authority validation.
+    /// Other driver kinds report no chunked identity; that absence does not
+    /// qualify a runtime for eviction.
+    pub fn concurrent_backing_id(&self) -> Option<ConcurrentBackingId> {
+        match &self.inner {
+            FilesystemInner::Split(driver, _) => driver.concurrent_backing_id(),
+            FilesystemInner::Memory(_) | FilesystemInner::Host(_) | FilesystemInner::Sqlite(_) => {
+                None
+            }
+        }
+    }
+
     /// Release writer leases and provider resources in the safe order.
     pub async fn shutdown(&self) -> Result<()> {
         match &self.inner {

@@ -1843,6 +1843,12 @@ where
         }
     }
 
+    /// Return the immutable concurrent backing identity captured at open.
+    /// This does not perform fresh provider-authority validation.
+    pub fn concurrent_backing_id(&self) -> Option<ConcurrentBackingId> {
+        self.inner.concurrent_backing
+    }
+
     pub fn metadata_store(&self) -> Arc<M> {
         Arc::clone(&self.inner.metadata)
     }
