@@ -75,8 +75,8 @@ A symbolic decision proof does not prove the whole async service state machine.
 | `acquired_transaction_cannot_reuse_an_incomplete_response` | Arbitrary response-completed boolean | An acquired exchange remains unusable until its complete response is recorded. Two covers; excludes stream ownership, response parsing and scheduling. |
 | `remote_io_completion_bounds_counts_and_closes_uncertainty` | Unrestricted `usize` count and limit; all five error variants plus a deadline | Counts exceeding the limit are protocol errors; local errors and deadline require closure, while a valid remote error preserves its payload and completed exchange. Five covers. The payload case uses an empty string; arbitrary payloads, allocation and cancellation scheduling are outside the proof. |
 
-The current runner selects these ten identities. The seven-harness results below
-apply to the earlier inventory at the recorded commit.
+The current runner selects these ten identities. Executed results below are
+scoped to their recorded commit and inventory.
 
 Hard expiry or a failed catalog read terminally invalidates the session. A later
 renewal requires a new connection; it cannot advertise a session whose old handle
@@ -84,7 +84,24 @@ table was already shut down. Expiry coverage uses a synthetic expired identity
 and exercises request denial followed by renewal rejection, not a clock-transition
 or cancellation proof.
 
-## Executed CI results (2026-09-25 UTC, Linux)
+## Executed CI results (2026-09-27 UTC, Linux)
+
+At commit `bdfc61f8591e4abb78f64eecdd3419636a640079`,
+[the full formal job](https://github.com/andymac4182/mount-rs/actions/runs/36286504292/job/108528173756)
+executed all ten current remote harnesses: 1,227 checks, zero failures and 39/39
+satisfied covers with Kani 0.68.0 / CBMC 6.11.0 on x86_64 Linux. The complete
+general/remote/cache inventory passed 55/55 proofs, with 9,641 checks and 261/261
+covers. The retained individual logs, source hashes, invocation inventory and
+archive digest were independently rechecked; see
+[the full evidence scope](formal-verification.md#full-hosted-result-2026-09-27-utc).
+
+`remote_io_completion_bounds_counts_and_closes_uncertainty` passed 158 checks
+and 5/5 covers after replacing aggregate result equality with scalar and
+exhaustive variant assertions. Its production helper and input domains are
+unchanged. These are decision proofs at the recorded commit; they do not qualify
+the complete async service, remote backends or production throughput.
+
+## Earlier executed CI results (2026-09-25 UTC, Linux)
 
 At commit `7eee4a3f2ded67fd01dbc8d388c37e8efd4a83eb`, the
 [remote formal job](https://github.com/andymac4182/mount-rs/actions/runs/36164387109/job/108168468016)

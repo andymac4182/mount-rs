@@ -132,3 +132,38 @@ with no disproved assertion established. The retained incomplete harness log
 ended during CBMC symbolic execution, expanding a `memcmp` loop reached through
 `Result<usize, ClientError>` equality; no SAT result or verification completion
 was reported. See [the retained run](https://github.com/andymac4182/mount-rs/actions/runs/36259363630).
+
+### Full hosted result (2026-09-27 UTC)
+
+At commit `bdfc61f8591e4abb78f64eecdd3419636a640079`,
+[run 36286504292, attempt 1](https://github.com/andymac4182/mount-rs/actions/runs/36286504292/job/108528173756)
+completed all 55 named proofs with Kani 0.68.0 / CBMC 6.11.0 on x86_64 Linux.
+The retained inventory, individual harness logs and committed source hashes
+were independently joined and rechecked:
+
+| Runner | Proofs | Checks | Failed checks | Satisfied covers |
+| --- | ---: | ---: | ---: | ---: |
+| General | 44 | 8,340 | 0 | 219/219 |
+| Remote | 10 | 1,227 | 0 | 39/39 |
+| Cache | 1 | 74 | 0 | 3/3 |
+| Total | 55 | 9,641 | 0 | 261/261 |
+
+The completion harness now uses scalar and exhaustive error-variant assertions
+instead of aggregate `Result` equality. Its input domains, five covers and
+production helper are unchanged. It completed 158 checks and 5/5 covers;
+Kani reported 0.599 seconds verification time. That is a symbolic invocation
+time, not a storage throughput measurement or controlled performance comparison.
+The full job took 11 minutes 25 seconds under the existing 100-minute limit.
+
+Artifact `10920916342` retains the summary, 55 harness logs, source and tool
+manifests, and equal before/after root and FSKit lock hashes. The downloaded ZIP
+SHA256 is `3274eae07b748fc4a871175943d849ed579ed3fa70c683a7b323238390bc729d`,
+matching the artifact API digest. All 87 retained files and 429 recorded source
+hashes were rechecked against the archive and this exact commit. Tool and model
+hashes are runner records: their binaries and model bytes were not archived or
+independently rehashed. Kani 0.68 does not forward `--locked`; the lock claim is
+before/after digest equality.
+
+This qualifies the bounded decisions at `bdfc61f8`. Provider transactions,
+asynchronous cancellation, TLS/OIDC implementations, cache fault recovery,
+physical IOPS and production capacity require their separate runtime gates.
