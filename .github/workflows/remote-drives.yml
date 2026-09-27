@@ -89,20 +89,47 @@ jobs:
       - name: Extract an owned Redis executable without starting a service
         timeout-minutes: 5
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
           umask 077
+          redis_phase=prepare
+          redis_prerequisite_failed() {
+            redis_failure_status=$?
+            printf '::error title=Owned Redis prerequisite::phase=%s status=%s\n' "$redis_phase" "$redis_failure_status" >&2
+            if [ "$redis_phase" = version ]; then
+              python3 - "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/redis-version.txt" 2>/dev/null <<'PY' || true
+          import pathlib, sys
+          try:
+              with pathlib.Path(sys.argv[1]).open("rb") as diagnostic:
+                  data = diagnostic.read(4096)
+          except OSError:
+              data = b""
+          for library in [b"liblzf.so.1", b"libjemalloc.so.2", b"libatomic.so.1"]:
+              marker = (b"error while loading shared libraries: " + library
+                        + b": cannot open shared object file: No such file or directory")
+              if marker in data:
+                  print("::error title=Owned Redis loader::missing_shared_library=" + library.decode("ascii"))
+                  break
+          PY
+            fi
+            exit "$redis_failure_status"
+          }
+          trap redis_prerequisite_failed ERR
           redis_root="$RUNNER_TEMP/mount-rs-remote-failure-redis"
           mkdir -m 700 "$redis_root"
           mkdir -m 700 "$redis_root/downloads" "$redis_root/unpacked"
+          redis_phase=package_update
           sudo apt-get update > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/redis-package.log" 2>&1
+          redis_phase=package_download
           (
             cd "$redis_root/downloads"
             apt-get download redis-server redis-tools >> "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/redis-package.log" 2>&1
           )
+          redis_phase=package_extract
           for package in "$redis_root/downloads"/*.deb; do
             test -f "$package"
             dpkg-deb --extract "$package" "$redis_root/unpacked" >> "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/redis-package.log" 2>&1
           done
+          redis_phase=binary_select
           redis_source="$redis_root/unpacked/usr/bin/redis-server"
           if [ -L "$redis_source" ]; then
             case "$(readlink "$redis_source")" in
@@ -115,7 +142,9 @@ jobs:
           test -x "$redis_source"
           # A regular file named redis-server preserves server mode after path resolution.
           install -m 700 "$redis_source" "$redis_root/redis-server"
+          redis_phase=version
           "$redis_root/redis-server" --version > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/redis-version.txt" 2>&1
+          redis_phase=export
           printf 'MOUNT_RS_CACHE_REDIS_SERVER=%s\n' "$redis_root/redis-server" >> "$GITHUB_ENV"
       - name: Warm the two locked failure test targets online
         run: |
