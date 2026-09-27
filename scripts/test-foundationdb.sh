@@ -514,6 +514,11 @@ if [ "$run_service_benchmark" -eq 1 ]; then
   fi
 fi
 
+# These exact diagnostic controls use the existing client-equipped environment.
+# They exercise the shared retry/pager model and static native exports without
+# constructing a FoundationDB store or starting its native network.
+test_command="${test_command} && cargo test --locked -p mount-rs-foundationdb --features foundationdb --lib transaction_metrics::tests:: -- --test-threads=1 && cargo test --locked -p mount-rs-foundationdb --features foundationdb --lib tests::production_transaction_options_preserve_retry_policy_flags -- --exact --nocapture && MOUNT_RS_PROFILE_IO=1 MOUNT_RS_TRACE_STORAGE=0 cargo test --locked -p mount-rs-napi --features foundationdb --lib tests::native_storage_snapshot_serializes_exact_decimal_counters -- --exact --nocapture && MOUNT_RS_PROFILE_IO=1 MOUNT_RS_TRACE_STORAGE=0 cargo test --locked -p mount-rs-napi --features foundationdb --lib tests::foundationdb_coverage_reports_feature_availability_without_backend -- --exact --nocapture"
+
 # The terminal network test runs in its own process after the ordinary
 # provider contract, so stopping the one-shot native client cannot affect
 # subsequent authority or application tests.

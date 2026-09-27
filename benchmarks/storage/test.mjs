@@ -32,8 +32,18 @@ const storageFamilyMeasurement = {
   tidb_open: { operations: STORAGE_OPERATION_NAMES.filter((name) => name.startsWith("tidb.open.")), calls: "open_schema_and_metadata_initialization_invocations", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
   tidb_transaction: { operations: STORAGE_OPERATION_NAMES.filter((name) => name.startsWith("tidb.tx.")), calls: "transaction_lifecycle_invocations", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
   tidb_sql: { operations: STORAGE_OPERATION_NAMES.filter((name) => name.startsWith("tidb.sql.")), calls: "categorized_sql_adapter_invocations; not_internal_requests", bytes: "known_selected_successful_payload_bytes_only; other_sql_bytes_unavailable", returned_rows: STORAGE_ROW_SEMANTICS, duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  foundationdb_transaction: { operations: ["foundationdb.transaction.create", "foundationdb.transaction.closure_attempt", "foundationdb.transaction.commit", "foundationdb.transaction.on_error"], calls: "provider_closure_attempts_and_native_create_commit_on_error_invocations; distinct_units_not_logical_transactions", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  foundationdb_read: { operations: ["foundationdb.read.get", "foundationdb.read.get_key", "foundationdb.read.get_range_page"], calls: "native_client_read_method_invocations; range_page_calls_not_key_value_count", bytes: "known_selected_successful_returned_value_key_and_range_page_key_value_payload_bytes_only", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
 }
-const storageInstrumentedOperations = [...STORAGE_OPERATION_NAMES]
+// This synthetic native snapshot represents a default, feature-off addon: the
+// fixed bank has seven FDB rows, but only the frozen legacy prefix is audited.
+const storageInstrumentedOperations = STORAGE_OPERATION_NAMES.slice(0, 78)
+const foundationdbCoverageMeasurement = {
+  schema: "mount-rs-foundationdb-client-diagnostic-coverage-v1",
+  status: "unavailable",
+  reason: "feature_disabled_or_unsupported_target",
+  operations: [],
+}
 const tidbCoverageMeasurement = {
   schema: "mount-rs-tidb-client-diagnostic-coverage-v1", status: "source_sites_instrumented",
   pool_checkout_sites: "35", session_configure_sites: "1", schema_initialize_sites: "1", metadata_open_sites: "1",
@@ -339,7 +349,7 @@ function rawApiInstance(calls, id = "19") {
 function diagnosticSnapshot(calls, connectionId = "7", instances = []) {
   return {
     schema_version: "mount-rs.storage-diagnostics.v3", enabled: true, scope: "process", quiescent_snapshot_required: true, elapsed_semantics: "inclusive_wall_nanoseconds",
-    measurement: { storage_calls: STORAGE_CALL_SEMANTICS, storage_bytes: STORAGE_BYTE_SEMANTICS, storage_rows: STORAGE_ROW_SEMANTICS, storage_operations: [...STORAGE_OPERATION_NAMES], storage_families: structuredClone(storageFamilyMeasurement), storage_instrumented_operations: [...storageInstrumentedOperations], tidb_coverage: structuredClone(tidbCoverageMeasurement),
+    measurement: { storage_calls: STORAGE_CALL_SEMANTICS, storage_bytes: STORAGE_BYTE_SEMANTICS, storage_rows: STORAGE_ROW_SEMANTICS, storage_operations: [...STORAGE_OPERATION_NAMES], storage_families: structuredClone(storageFamilyMeasurement), storage_instrumented_operations: [...storageInstrumentedOperations], tidb_coverage: structuredClone(tidbCoverageMeasurement), foundationdb_coverage: structuredClone(foundationdbCoverageMeasurement),
       storage_duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap",
       forwarding_boxes: "enabled_napi_dynamic_provider_box_pin_site_calls_and_requested_future_object_bytes; excludes_allocator_overhead_and_other_allocations",
       profile: "existing_core_profile_counters",
@@ -426,6 +436,11 @@ async function testStorageDriverFieldDeltas() {
   const nonSql = diagnosticSnapshot(5)
   Object.assign(nonSql.storage.entries[5], { returned_rows: "1", returned_row_observations: "1" })
   assert.equal(deltaNativeSnapshots(diagnosticSnapshot(2), nonSql).complete, false, "block put success cannot claim an observed SQL result row")
+  const transactionBytes = diagnosticSnapshot(5)
+  Object.assign(transactionBytes.storage.entries.find((entry) => entry.name === "foundationdb.transaction.create"), {
+    calls: "1", success: "1", elapsed_ns: "1", latency_log2_us: ["1", ...Array(31).fill("0")], bytes: "1",
+  })
+  assert.equal(deltaNativeSnapshots(diagnosticSnapshot(2), transactionBytes).complete, false, "FoundationDB transaction attempts cannot claim payload bytes")
 }
 
 async function testStorageFamilyMetadata() {
@@ -438,9 +453,11 @@ async function testStorageFamilyMetadata() {
   assert.deepEqual(delta.measurement.storage_families, storageFamilyMeasurement, "closed families must retain distinct byte, row and duration meanings")
   assert.deepEqual(delta.measurement.storage_instrumented_operations, storageInstrumentedOperations, "coverage must retain the producer's audited operation list")
   assert.deepEqual(delta.measurement.tidb_coverage, tidbCoverageMeasurement, "static coverage is distinct from dynamic operation counters")
-  assert.equal(delta.storage.entries.length, 78)
-  assert.equal(delta.storage.entries.at(-1).returned_row_observations, "1", "the last declared row must reach phase evidence")
-  for (const field of ["storage_families", "storage_instrumented_operations", "tidb_coverage"]) {
+  assert.deepEqual(delta.measurement.foundationdb_coverage, foundationdbCoverageMeasurement, "feature-off FoundationDB coverage is unavailable despite fixed zero rows")
+  assert.equal(delta.storage.entries.length, 85)
+  assert.equal(delta.storage.entries.find((entry) => entry.name === "tidb.sql.flush_probe").returned_row_observations, "1", "the final SQL row must reach phase evidence")
+  assert.deepEqual(delta.storage.entries.slice(78).map((entry) => entry.name), ["foundationdb.transaction.create", "foundationdb.transaction.closure_attempt", "foundationdb.read.get", "foundationdb.read.get_key", "foundationdb.read.get_range_page", "foundationdb.transaction.commit", "foundationdb.transaction.on_error"])
+  for (const field of ["storage_families", "storage_instrumented_operations", "tidb_coverage", "foundationdb_coverage"]) {
     const missingBefore = structuredClone(before)
     const missingAfter = structuredClone(after)
     delete missingBefore.measurement[field]
@@ -466,6 +483,15 @@ async function testStorageFamilyMetadata() {
   assert.equal(malformedCoverage.complete, false)
   assert.equal(malformedCoverage.observations.after.measurement.tidb_coverage, "unavailable")
   assert.equal(JSON.stringify(malformedCoverage).includes("secret-payload-category"), false, "invalid coverage must not retain arbitrary labels")
+  const malformedFoundationDbBefore = structuredClone(before)
+  const malformedFoundationDbAfter = structuredClone(after)
+  for (const endpoint of [malformedFoundationDbBefore, malformedFoundationDbAfter]) {
+    endpoint.measurement.foundationdb_coverage.operations.push("secret-foundationdb-label")
+  }
+  const malformedFoundationDb = deltaNativeSnapshots(malformedFoundationDbBefore, malformedFoundationDbAfter)
+  assert.equal(malformedFoundationDb.complete, false)
+  assert.equal(malformedFoundationDb.observations.after.measurement.foundationdb_coverage, "unavailable")
+  assert.equal(JSON.stringify(malformedFoundationDb).includes("secret-foundationdb-label"), false, "invalid FoundationDB coverage must not retain arbitrary labels")
   const alteredSitesBefore = structuredClone(before)
   const alteredSitesAfter = structuredClone(after)
   alteredSitesBefore.measurement.tidb_coverage.pool_checkout_sites = "36"
@@ -481,6 +507,12 @@ async function testStorageFamilyMetadata() {
   assert.equal(summary.families.tidb_sql.returned_rows, "0")
   assert.equal(summary.families.tidb_sql.returned_row_observations, "1", "known zero SQL rows differ from unknown rows")
   assert.equal(summary.families.tidb_pool_checkout.instrumented, true)
+  for (const family of ["foundationdb_transaction", "foundationdb_read"]) {
+    assert.equal(summary.families[family].available, false)
+    assert.equal(summary.families[family].instrumented, false)
+    assert.deepEqual(summary.families[family].instrumented_operations, [])
+    assert.equal(Object.hasOwn(summary.families[family], "calls"), false)
+  }
 }
 
 async function testRawObjectStorePhaseDiagnostics() {

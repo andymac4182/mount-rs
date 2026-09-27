@@ -16,16 +16,18 @@
 ))]
 
 mod compact;
+mod transaction_metrics;
 use async_trait::async_trait;
 use foundationdb::api::{FdbApiBuilder, NetworkAutoStop};
 use foundationdb::options::TransactionOption;
 use foundationdb::{Database, FdbError, TransactOption, Transaction};
-use futures_util::TryStreamExt;
+use futures_util::{Stream, TryFutureExt, TryStreamExt, future::Either, stream};
 use mount_rs_core::chunking::{ChunkerConfig, from_config};
 use mount_rs_core::delegation::{
     CheckoutRequest, DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState,
     DirectoryGrant,
 };
+use mount_rs_core::diagnostics::storage;
 use mount_rs_core::storage::compact::*;
 use mount_rs_core::storage::{
     BlockId, BlockStore, ConcurrentBackingId, ConcurrentModeState, InodeId, InodeMetadataSnapshot,
@@ -44,6 +46,59 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use transaction_metrics::{CoreObserver, Kind, RangeDriver, RetryOptions, TransactionDriver};
+
+/// Closed source-site coverage for the enabled FoundationDB attempt recorder.
+/// Counts describe audited dispatch sites, not RPCs, successful transactions,
+/// key-value rows, drive labels, or physical device operations.
+pub struct FoundationDbDiagnosticCoverage {
+    pub schema: &'static str,
+    pub status: &'static str,
+    pub attempt_scope: &'static str,
+    pub payload_bytes_scope: &'static str,
+    pub returned_rows_scope: &'static str,
+    pub transaction_runner_sites: u32,
+    pub point_get_sites: u32,
+    pub get_key_sites: u32,
+    pub range_consumer_sites: u32,
+    pub operations: &'static [&'static str],
+    pub unavailable: &'static [&'static str],
+}
+
+/// Feature-on coverage only; feature-off and unsupported callers must report
+/// FoundationDB instrumentation unavailable without inventing observed zeros.
+pub const FOUNDATIONDB_DIAGNOSTIC_COVERAGE: FoundationDbDiagnosticCoverage =
+    FoundationDbDiagnosticCoverage {
+        schema: "mount-rs-foundationdb-client-diagnostic-coverage-v1",
+        status: "source_sites_instrumented",
+        attempt_scope: "audited_provider_closure_and_native_client_dispatch_attempts; process_fixed_label_bank",
+        payload_bytes_scope: "successful_get_value_get_key_key_and_range_page_key_value_return_lengths_only; no_key_contents",
+        returned_rows_scope: "unavailable; storage_returned_rows_are_SQL_only",
+        transaction_runner_sites: 6,
+        point_get_sites: 2,
+        get_key_sites: 1,
+        range_consumer_sites: 3,
+        operations: &[
+            "foundationdb.transaction.create",
+            "foundationdb.transaction.closure_attempt",
+            "foundationdb.read.get",
+            "foundationdb.read.get_key",
+            "foundationdb.read.get_range_page",
+            "foundationdb.transaction.commit",
+            "foundationdb.transaction.on_error",
+        ],
+        unavailable: &[
+            "client_internal_retries",
+            "wire_rpc_count",
+            "wire_bytes",
+            "server_execution_time",
+            "physical_device_iops",
+            "exclusive_cpu",
+            "transaction_lifetime",
+            "native_operation_settlement_after_future_drop",
+            "durability_or_rollback_after_commit_error_or_cancellation",
+        ],
+    };
 use tracing::Level;
 use uuid::Uuid;
 
@@ -562,7 +617,8 @@ impl LeaseOracle for FoundationDbLeaseOracle {
         let db = Arc::clone(&self.db);
         let key = self.key.clone();
         let limits = self.limits;
-        db.transact_boxed(
+        transact_observed(
+            &db,
             (),
             move |trx, _| {
                 let key = key.clone();
@@ -717,27 +773,27 @@ impl FoundationDbLeaseAuthority {
         let db = Arc::clone(&self.db);
         let key = self.key.clone();
         let limits = self.limits;
-        let result = db
-            .transact_boxed(
-                (),
-                move |trx, _| {
-                    let key = key.clone();
-                    Box::pin(async move {
-                        configure_transaction(trx, limits)?;
-                        let current = get_owned(trx, &key)
-                            .await?
-                            .map(|bytes| decode_oracle_time(&bytes).map_err(TxnError::Fs))
-                            .transpose()?;
-                        let published = authority_time_sample(current, now_ms, max_forward_jump_ms)
-                            .map_err(TxnError::Fs)?;
-                        trx.set(&key, &encode_oracle_time(published));
-                        Ok(published)
-                    })
-                },
-                transaction_options(limits, TransactionPolicy::Idempotent),
-            )
-            .await
-            .map_err(TxnError::into_fs);
+        let result = transact_observed(
+            &db,
+            (),
+            move |trx, _| {
+                let key = key.clone();
+                Box::pin(async move {
+                    configure_transaction(trx, limits)?;
+                    let current = get_owned(trx, &key)
+                        .await?
+                        .map(|bytes| decode_oracle_time(&bytes).map_err(TxnError::Fs))
+                        .transpose()?;
+                    let published = authority_time_sample(current, now_ms, max_forward_jump_ms)
+                        .map_err(TxnError::Fs)?;
+                    trx.set(&key, &encode_oracle_time(published));
+                    Ok(published)
+                })
+            },
+            transaction_options(limits, TransactionPolicy::Idempotent),
+        )
+        .await
+        .map_err(TxnError::into_fs);
         match result {
             Ok(published) => {
                 self.stats.record_success(published);
@@ -861,21 +917,21 @@ impl LeaseOracle for FoundationDbSharedLeaseOracle {
         let db = Arc::clone(&self.db);
         let key = self.key.clone();
         let limits = self.limits;
-        let result = db
-            .transact_boxed(
-                (),
-                move |trx, _| {
-                    let key = key.clone();
-                    Box::pin(async move {
-                        configure_transaction(trx, limits)?;
-                        let published = read_shared_authority_time(trx, &key).await?;
-                        Ok(published)
-                    })
-                },
-                transaction_options(limits, TransactionPolicy::Idempotent),
-            )
-            .await
-            .map_err(TxnError::into_fs);
+        let result = transact_observed(
+            &db,
+            (),
+            move |trx, _| {
+                let key = key.clone();
+                Box::pin(async move {
+                    configure_transaction(trx, limits)?;
+                    let published = read_shared_authority_time(trx, &key).await?;
+                    Ok(published)
+                })
+            },
+            transaction_options(limits, TransactionPolicy::Idempotent),
+        )
+        .await
+        .map_err(TxnError::into_fs);
         match result {
             Ok(observed) => {
                 self.stats.record_success(observed);
@@ -1280,6 +1336,163 @@ fn transaction_options(limits: FoundationDbLimits, policy: TransactionPolicy) ->
     }
 }
 
+struct NativeTransactionDriver<'db, F, T> {
+    db: &'db Database,
+    data: (),
+    f: F,
+    _item: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<F, T> TransactionDriver for NativeTransactionDriver<'_, F, T>
+where
+    T: Send,
+    F: for<'a> FnMut(
+            &'a Transaction,
+            &'a mut (),
+        ) -> Pin<Box<dyn Future<Output = TxnResult<T>> + Send + 'a>>
+        + Send,
+{
+    type Transaction = Transaction;
+    type Item = T;
+    type Error = TxnError;
+    type RetryError = FdbError;
+    type CommitError = foundationdb::TransactionCommitError;
+
+    fn now(&self) -> std::time::Instant {
+        std::time::Instant::now()
+    }
+    fn create(&mut self) -> TxnResult<Transaction> {
+        self.db.create_trx().map_err(TxnError::from)
+    }
+    fn invoke<'a>(
+        &'a mut self,
+        transaction: &'a Transaction,
+    ) -> impl Future<Output = TxnResult<T>> + Send + 'a {
+        // This is the provider's existing closure future; no diagnostic box.
+        (self.f)(transaction, &mut self.data)
+    }
+    fn commit(
+        &mut self,
+        transaction: Transaction,
+    ) -> impl Future<Output = std::result::Result<(), Self::CommitError>> + Send {
+        transaction.commit().map_ok(|_| ())
+    }
+    fn commit_on_error(
+        &mut self,
+        error: Self::CommitError,
+    ) -> impl Future<Output = TxnResult<Transaction>> + Send {
+        // Keep the failed commit's owned handle until native recovery consumes it.
+        error.on_error().map_err(TxnError::from)
+    }
+    fn on_error(
+        &mut self,
+        transaction: Transaction,
+        error: FdbError,
+    ) -> impl Future<Output = TxnResult<Transaction>> + Send {
+        transaction.on_error(error).map_err(TxnError::from)
+    }
+    fn commit_maybe_committed(error: &Self::CommitError) -> bool {
+        error.is_maybe_committed()
+    }
+    fn retry_maybe_committed(error: &FdbError) -> bool {
+        error.is_maybe_committed()
+    }
+    fn into_retry_error(error: TxnError) -> std::result::Result<FdbError, TxnError> {
+        error.try_into()
+    }
+    fn from_commit_error(error: Self::CommitError) -> TxnError {
+        TxnError::from(FdbError::from(error))
+    }
+    fn from_retry_error(error: FdbError) -> TxnError {
+        TxnError::from(error)
+    }
+}
+
+async fn transact_observed<T, F>(
+    db: &Database,
+    data: (),
+    f: F,
+    options: TransactOption,
+) -> TxnResult<T>
+where
+    T: Send,
+    F: for<'a> FnMut(
+            &'a Transaction,
+            &'a mut (),
+        ) -> Pin<Box<dyn Future<Output = TxnResult<T>> + Send + 'a>>
+        + Send,
+{
+    if !storage::enabled() {
+        return db.transact_boxed(data, f, options).await;
+    }
+    let mut driver = NativeTransactionDriver {
+        db,
+        data,
+        f,
+        _item: std::marker::PhantomData,
+    };
+    transaction_metrics::run_transaction(
+        &mut driver,
+        RetryOptions {
+            retry_limit: options.retry_limit,
+            time_out: options.time_out,
+            is_idempotent: options.is_idempotent,
+        },
+        &CoreObserver,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+struct NativeRangeDriver<'trx> {
+    transaction: &'trx Transaction,
+    snapshot: bool,
+}
+
+impl<'trx> RangeDriver for NativeRangeDriver<'trx> {
+    type Options = foundationdb::RangeOption<'trx>;
+    type Page = foundationdb::future::FdbValues;
+    type Error = FdbError;
+    fn get_range(
+        &self,
+        options: &Self::Options,
+        iteration: usize,
+    ) -> impl Future<Output = foundationdb::FdbResult<Self::Page>> + Send {
+        self.transaction
+            .get_range(options, iteration, self.snapshot)
+    }
+    fn next_range(&self, options: Self::Options, page: &Self::Page) -> Option<Self::Options> {
+        options.next_range(page)
+    }
+    fn successful_bytes(page: &Self::Page) -> u64 {
+        page.iter()
+            .map(|value| (value.key().len() + value.value().len()) as u64)
+            .sum()
+    }
+}
+
+fn ranges_keyvalues_observed<'trx>(
+    transaction: &'trx Transaction,
+    options: foundationdb::RangeOption<'trx>,
+    snapshot: bool,
+) -> impl Stream<Item = foundationdb::FdbResult<foundationdb::future::FdbValue>> + Send + 'trx {
+    if !storage::enabled() {
+        return Either::Left(transaction.get_ranges_keyvalues(options, snapshot));
+    }
+    let driver = NativeRangeDriver {
+        transaction,
+        snapshot,
+    };
+    let pages = stream::unfold((1, Some(options)), move |state| {
+        transaction_metrics::range_step(driver, &CoreObserver, state)
+    });
+    Either::Right(
+        pages
+            .map_ok(|values| stream::iter(values.into_iter().map(Ok)))
+            .try_flatten(),
+    )
+}
+
 impl Inner {
     async fn transact_with_policy<T, F>(
         &self,
@@ -1296,8 +1509,7 @@ impl Inner {
             + Send,
     {
         let options = transaction_options(self.limits, policy);
-        self.db
-            .transact_boxed(data, f, options)
+        transact_observed(&self.db, data, f, options)
             .await
             .map_err(TxnError::into_fs)
     }
@@ -1556,14 +1768,35 @@ async fn get_block_policy(
     trx: &Transaction,
     key: &[u8],
 ) -> TxnResult<Option<FoundationDbBlockAuthorityPolicy>> {
-    trx.get(key, false)
+    let value = if storage::enabled() {
+        transaction_metrics::call_async(
+            &CoreObserver,
+            Kind::Get,
+            || trx.get(key, false),
+            |value| value.as_ref().map_or(0, |bytes| bytes.len() as u64),
+        )
         .await?
+    } else {
+        trx.get(key, false).await?
+    };
+    value
         .map(|value| FoundationDbBlockAuthorityPolicy::decode(value.as_ref()))
         .transpose()
 }
 
 async fn get_owned(trx: &Transaction, key: &[u8]) -> TxnResult<Option<Vec<u8>>> {
-    Ok(trx.get(key, false).await?.map(|value| value.to_vec()))
+    let value = if storage::enabled() {
+        transaction_metrics::call_async(
+            &CoreObserver,
+            Kind::Get,
+            || trx.get(key, false),
+            |value| value.as_ref().map_or(0, |bytes| bytes.len() as u64),
+        )
+        .await?
+    } else {
+        trx.get(key, false).await?
+    };
+    Ok(value.map(|value| value.to_vec()))
 }
 
 async fn read_shared_authority_time(trx: &Transaction, key: &[u8]) -> TxnResult<u64> {
@@ -2810,13 +3043,13 @@ impl FoundationDbMetadataStore {
                     if affected > FOUNDATIONDB_MAX_TRANSACTION_BYTES {
                         return Err(TxnError::Fs(metadata_transaction_too_large(affected)));
                     }
-                    let mut stream = trx.get_ranges_keyvalues(
+                    let mut stream = std::pin::pin!(ranges_keyvalues_observed(trx,
                         foundationdb::RangeOption::from((
                             guard_prefix.as_slice(),
                             guard_end.as_slice(),
                         )),
                         false,
-                    );
+                    ));
                     while let Some(value) = stream.try_next().await? {
                         if value.key().len() != guard_prefix.len() + 8 {
                             return Err(TxnError::Fs(backend_error("malformed inode guard key")));
@@ -2848,7 +3081,7 @@ impl FoundationDbMetadataStore {
                     let token_prefix = keys.key(b"meta/inode-version/");
                     let token_end = range_end(&token_prefix).map_err(TxnError::Fs)?;
                     let mut tokens = BTreeMap::new();
-                    let mut token_stream = trx.get_ranges_keyvalues(foundationdb::RangeOption::from((token_prefix.as_slice(), token_end.as_slice())), false);
+                    let mut token_stream = std::pin::pin!(ranges_keyvalues_observed(trx, foundationdb::RangeOption::from((token_prefix.as_slice(), token_end.as_slice())), false));
                     while let Some(value) = token_stream.try_next().await? {
                         if value.key().len() != token_prefix.len() + 8 { return Err(TxnError::Fs(backend_error("malformed inode token key"))); }
                         if prepare { return Err(TxnError::Fs(backend_error("unexpected inode token before enrollment"))); }
@@ -4181,23 +4414,22 @@ impl FoundationDbBlockStore {
                 .min(CONCURRENT_BLOCK_PREFLIGHT_RETRY_LIMIT),
             ..inner.limits
         };
-        inner
-            .db
-            .transact_boxed(
-                (),
-                move |trx, _| {
-                    let key = key.clone();
-                    Box::pin(async move {
-                        configure_transaction(trx, limits)?;
-                        let _ = get_owned(trx, &key).await?;
-                        Ok(())
-                    })
-                },
-                transaction_options(limits, TransactionPolicy::Idempotent),
-            )
-            .await
-            .map_err(TxnError::into_fs)
-            .map_err(|error| error.with_syscall("probe concurrent FoundationDB blocks"))
+        transact_observed(
+            &inner.db,
+            (),
+            move |trx, _| {
+                let key = key.clone();
+                Box::pin(async move {
+                    configure_transaction(trx, limits)?;
+                    let _ = get_owned(trx, &key).await?;
+                    Ok(())
+                })
+            },
+            transaction_options(limits, TransactionPolicy::Idempotent),
+        )
+        .await
+        .map_err(TxnError::into_fs)
+        .map_err(|error| error.with_syscall("probe concurrent FoundationDB blocks"))
     }
 }
 
@@ -4249,29 +4481,28 @@ impl BlockStore for FoundationDbBlockStore {
                 .min(CONCURRENT_BLOCK_PREFLIGHT_RETRY_LIMIT),
             ..inner.limits
         };
-        inner
-            .db
-            .transact_boxed(
-                (),
-                move |trx, _| {
-                    let key = key.clone();
-                    Box::pin(async move {
-                        configure_transaction(trx, limits)?;
-                        let raw = get_owned(trx, &key).await?;
-                        let actual = raw
-                            .as_deref()
-                            .and_then(parse_backing_bytes)
-                            .ok_or_else(|| TxnError::Fs(stale_backing()))?;
-                        if actual != expected {
-                            return Err(TxnError::Fs(stale_backing()));
-                        }
-                        Ok(())
-                    })
-                },
-                transaction_options(limits, TransactionPolicy::Idempotent),
-            )
-            .await
-            .map_err(TxnError::into_fs)
+        transact_observed(
+            &inner.db,
+            (),
+            move |trx, _| {
+                let key = key.clone();
+                Box::pin(async move {
+                    configure_transaction(trx, limits)?;
+                    let raw = get_owned(trx, &key).await?;
+                    let actual = raw
+                        .as_deref()
+                        .and_then(parse_backing_bytes)
+                        .ok_or_else(|| TxnError::Fs(stale_backing()))?;
+                    if actual != expected {
+                        return Err(TxnError::Fs(stale_backing()));
+                    }
+                    Ok(())
+                })
+            },
+            transaction_options(limits, TransactionPolicy::Idempotent),
+        )
+        .await
+        .map_err(TxnError::into_fs)
     }
 
     async fn get_for_migration(&self, id: &BlockId) -> Result<Vec<u8>> {

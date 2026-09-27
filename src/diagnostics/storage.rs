@@ -97,8 +97,15 @@ pub enum Operation {
     TidbSqlBlockRead,
     TidbSqlBlockWrite,
     TidbSqlFlushProbe,
+    FoundationDbTransactionCreate,
+    FoundationDbTransactionClosureAttempt,
+    FoundationDbReadGet,
+    FoundationDbReadGetKey,
+    FoundationDbReadGetRangePage,
+    FoundationDbTransactionCommit,
+    FoundationDbTransactionOnError,
 }
-const NAMES: [&str; 78] = [
+const NAMES: [&str; 85] = [
     "metadata.load",
     "metadata.load_if_changed",
     "metadata.snapshot",
@@ -177,6 +184,13 @@ const NAMES: [&str; 78] = [
     "tidb.sql.block_read",
     "tidb.sql.block_write",
     "tidb.sql.flush_probe",
+    "foundationdb.transaction.create",
+    "foundationdb.transaction.closure_attempt",
+    "foundationdb.read.get",
+    "foundationdb.read.get_key",
+    "foundationdb.read.get_range_page",
+    "foundationdb.transaction.commit",
+    "foundationdb.transaction.on_error",
 ];
 
 /// Fixed serialized row order. Appended families have separate invocation semantics.
@@ -640,9 +654,9 @@ mod tests {
     }
 
     #[test]
-    fn fixed_names_match_appended_sdk_and_reserved_tidb_rows() {
+    fn fixed_names_match_appended_sdk_tidb_and_foundationdb_rows() {
         let names = operation_names();
-        assert_eq!(names.len(), 78);
+        assert_eq!(names.len(), 85);
         assert_eq!(
             names[Operation::SdkMetadataLoadIfChanged as usize],
             "sdk.metadata.load_if_changed"
@@ -654,6 +668,20 @@ mod tests {
         assert_eq!(
             names[Operation::TidbSqlFlushProbe as usize],
             "tidb.sql.flush_probe"
+        );
+        assert_eq!(Operation::FoundationDbTransactionCreate as usize, 78);
+        assert_eq!(Operation::FoundationDbTransactionOnError as usize, 84);
+        assert_eq!(
+            &names[78..],
+            &[
+                "foundationdb.transaction.create",
+                "foundationdb.transaction.closure_attempt",
+                "foundationdb.read.get",
+                "foundationdb.read.get_key",
+                "foundationdb.read.get_range_page",
+                "foundationdb.transaction.commit",
+                "foundationdb.transaction.on_error",
+            ]
         );
         assert_eq!(
             names

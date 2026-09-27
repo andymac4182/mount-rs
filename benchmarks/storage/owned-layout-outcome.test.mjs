@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import test from "node:test"
 import { summarizeInterval } from "./backing-observer.mjs"
 import {
-  NATIVE_DIAGNOSTICS_SCHEMA, RUSTFS_API_MEASUREMENT, STORAGE_BYTE_SEMANTICS,
+  FOUNDATIONDB_DIAGNOSTIC_UNAVAILABLE, NATIVE_DIAGNOSTICS_SCHEMA, RUSTFS_API_MEASUREMENT, STORAGE_BYTE_SEMANTICS,
   STORAGE_CALL_SEMANTICS, STORAGE_INSTRUMENTED_OPERATION_NAMES, STORAGE_OPERATION_FAMILIES,
   STORAGE_OPERATION_NAMES, STORAGE_ROW_SEMANTICS, TIDB_DIAGNOSTIC_COVERAGE,
   validateRawPhaseDiagnostics,
@@ -53,6 +53,7 @@ function nativePhase(elapsed) {
         storage_families: structuredClone(STORAGE_OPERATION_FAMILIES),
         storage_instrumented_operations: [...STORAGE_INSTRUMENTED_OPERATION_NAMES],
         tidb_coverage: structuredClone(TIDB_DIAGNOSTIC_COVERAGE),
+        foundationdb_coverage: structuredClone(FOUNDATIONDB_DIAGNOSTIC_UNAVAILABLE),
         latency_histogram: { unit: "microseconds", intervals: Array.from({ length: 32 }, (_, bucket) => bucket === 0
           ? { lower_inclusive_us: "0", upper_exclusive_us: "1" }
           : bucket === 31 ? { lower_inclusive_us: String(2 ** 30), upper_exclusive_us: null, terminal_overflow: true }

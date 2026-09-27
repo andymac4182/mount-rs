@@ -106,7 +106,14 @@ export const STORAGE_OPERATION_NAMES = [
   "tidb.sql.inode_write",
   "tidb.sql.block_read",
   "tidb.sql.block_write",
-  "tidb.sql.flush_probe"
+  "tidb.sql.flush_probe",
+  "foundationdb.transaction.create",
+  "foundationdb.transaction.closure_attempt",
+  "foundationdb.read.get",
+  "foundationdb.read.get_key",
+  "foundationdb.read.get_range_page",
+  "foundationdb.transaction.commit",
+  "foundationdb.transaction.on_error",
 ]
 const storageNames = STORAGE_OPERATION_NAMES
 export const STORAGE_CALL_SEMANTICS = "fixed_label_provider_and_driver_operations; families_overlap_and_are_not_application_iops"
@@ -121,6 +128,8 @@ export const STORAGE_OPERATION_FAMILIES = {
   tidb_open: { operations: STORAGE_OPERATION_NAMES.filter((name) => name.startsWith("tidb.open.")), calls: "open_schema_and_metadata_initialization_invocations", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
   tidb_transaction: { operations: STORAGE_OPERATION_NAMES.filter((name) => name.startsWith("tidb.tx.")), calls: "transaction_lifecycle_invocations", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
   tidb_sql: { operations: STORAGE_OPERATION_NAMES.filter((name) => name.startsWith("tidb.sql.")), calls: "categorized_sql_adapter_invocations; not_internal_requests", bytes: "known_selected_successful_payload_bytes_only; other_sql_bytes_unavailable", returned_rows: STORAGE_ROW_SEMANTICS, duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  foundationdb_transaction: { operations: ["foundationdb.transaction.create", "foundationdb.transaction.closure_attempt", "foundationdb.transaction.commit", "foundationdb.transaction.on_error"], calls: "provider_closure_attempts_and_native_create_commit_on_error_invocations; distinct_units_not_logical_transactions", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  foundationdb_read: { operations: ["foundationdb.read.get", "foundationdb.read.get_key", "foundationdb.read.get_range_page"], calls: "native_client_read_method_invocations; range_page_calls_not_key_value_count", bytes: "known_selected_successful_returned_value_key_and_range_page_key_value_payload_bytes_only", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
 }
 export const TIDB_DIAGNOSTIC_COVERAGE = {
   schema: "mount-rs-tidb-client-diagnostic-coverage-v1", status: "source_sites_instrumented",
@@ -132,7 +141,125 @@ export const TIDB_DIAGNOSTIC_COVERAGE = {
   pool_checkout_scope: "pool.get_conn await includes possible lazy connection and session setup; queue-only wait unavailable",
   unavailable: ["pool_queue_only_wait", "separate_driver_connect_handshake", "server_sql_execution_time", "transaction_lifetime_and_implicit_drop_rollback", "affected_rows", "other_sql_payload_bytes", "sql_wire_bytes_and_client_internal_retries", "tikv_and_physical_device_io"],
 }
-export const STORAGE_INSTRUMENTED_OPERATION_NAMES = storageNames.filter((name) => !name.startsWith("tidb.") || TIDB_DIAGNOSTIC_COVERAGE.operations.includes(name))
+// A bank label does not establish source coverage. Keep the reviewed legacy
+// allowlist fixed; FoundationDB availability comes from each native snapshot.
+const legacyInstrumentedNames = new Set([
+  "metadata.load",
+  "metadata.load_if_changed",
+  "metadata.snapshot",
+  "metadata.publish",
+  "metadata.flush",
+  "blocks.put",
+  "blocks.get",
+  "blocks.flush",
+  "blocks.verify_backing",
+  "blocks.prepare_backing",
+  "blocks.delete",
+  "blocks.reconcile",
+  "pglite.client_lock_wait",
+  "sdk.metadata.compact_inode_capability",
+  "sdk.metadata.compact_inode_mode_state",
+  "sdk.metadata.prepare_compact_inode_mode",
+  "sdk.metadata.load_compact_snapshot",
+  "sdk.metadata.load_compact_inode",
+  "sdk.metadata.publish_compact_inode",
+  "sdk.metadata.publish_compact_structure",
+  "sdk.metadata.inode_mode_state",
+  "sdk.metadata.prepare_inode_mode",
+  "sdk.metadata.load_inode_snapshot_if_changed",
+  "sdk.metadata.load_inode_snapshot",
+  "sdk.metadata.load_inode",
+  "sdk.metadata.load_inode_if_changed",
+  "sdk.metadata.publish_inode_if_version",
+  "sdk.metadata.publish_structure_if_versions",
+  "sdk.metadata.delegation_state",
+  "sdk.metadata.prepare_delegated_mode",
+  "sdk.metadata.checkout",
+  "sdk.metadata.publish_delegated",
+  "sdk.metadata.checkin",
+  "sdk.metadata.recover",
+  "sdk.metadata.durable",
+  "sdk.metadata.publish_includes_flush_barrier",
+  "sdk.metadata.load",
+  "sdk.metadata.load_if_changed",
+  "sdk.metadata.concurrent_mode_state",
+  "sdk.metadata.preflight_new_bound_mode",
+  "sdk.metadata.prepare_bound_concurrent_mode",
+  "sdk.metadata.acquire_writer",
+  "sdk.metadata.renew_writer",
+  "sdk.metadata.release_writer",
+  "sdk.metadata.publish",
+  "sdk.metadata.publish_bound_if_revision",
+  "sdk.metadata.migrate_mrc1_to_bound_mode",
+  "sdk.metadata.preflight_mrc1_to_bound_mode",
+  "sdk.metadata.preflight_trusted_unstamped_mrc1",
+  "sdk.metadata.migrate_trusted_unstamped_mrc1",
+  "sdk.metadata.flush",
+  "sdk.blocks.durable",
+  "sdk.blocks.prepare_concurrent_backing",
+  "sdk.blocks.verify_concurrent_backing",
+  "sdk.blocks.get_for_migration",
+  "sdk.blocks.put",
+  "sdk.blocks.get",
+  "sdk.blocks.flush",
+  "sdk.blocks.delete",
+  "sdk.blocks.reconcile"
+])
+export const FOUNDATIONDB_DIAGNOSTIC_COVERAGE = {
+  "schema": "mount-rs-foundationdb-client-diagnostic-coverage-v1",
+  "status": "source_sites_instrumented",
+  "transaction_runner_sites": "6",
+  "point_get_sites": "2",
+  "get_key_sites": "1",
+  "range_consumer_sites": "3",
+  "operations": [
+    "foundationdb.transaction.create",
+    "foundationdb.transaction.closure_attempt",
+    "foundationdb.read.get",
+    "foundationdb.read.get_key",
+    "foundationdb.read.get_range_page",
+    "foundationdb.transaction.commit",
+    "foundationdb.transaction.on_error"
+  ],
+  "attempt_scope": "audited_provider_closure_and_native_client_dispatch_attempts; process_fixed_label_bank",
+  "payload_bytes_scope": "successful_get_value_get_key_key_and_range_page_key_value_return_lengths_only; no_key_contents",
+  "returned_rows_scope": "unavailable; storage_returned_rows_are_SQL_only",
+  "unavailable": [
+    "client_internal_retries",
+    "wire_rpc_count",
+    "wire_bytes",
+    "server_execution_time",
+    "physical_device_iops",
+    "exclusive_cpu",
+    "transaction_lifetime",
+    "native_operation_settlement_after_future_drop",
+    "durability_or_rollback_after_commit_error_or_cancellation"
+  ]
+}
+export const FOUNDATIONDB_DIAGNOSTIC_UNAVAILABLE = {
+  "schema": "mount-rs-foundationdb-client-diagnostic-coverage-v1",
+  "status": "unavailable",
+  "reason": "feature_disabled_or_unsupported_target",
+  "operations": []
+}
+// Compatibility export describes feature-off coverage, not every bank row.
+export const STORAGE_INSTRUMENTED_OPERATION_NAMES = storageNames.filter((name) => legacyInstrumentedNames.has(name) || TIDB_DIAGNOSTIC_COVERAGE.operations.includes(name))
+function foundationdbCoverage(value) {
+  if (isDeepStrictEqual(value, FOUNDATIONDB_DIAGNOSTIC_COVERAGE)) return FOUNDATIONDB_DIAGNOSTIC_COVERAGE
+  if (isDeepStrictEqual(value, FOUNDATIONDB_DIAGNOSTIC_UNAVAILABLE)) return FOUNDATIONDB_DIAGNOSTIC_UNAVAILABLE
+  return undefined
+}
+export function storageInstrumentedOperationNames(coverage) {
+  const audited = foundationdbCoverage(coverage)
+  if (!audited) invalid("FoundationDB coverage metadata unavailable")
+  return storageNames.filter((name) => legacyInstrumentedNames.has(name) || TIDB_DIAGNOSTIC_COVERAGE.operations.includes(name) || audited.operations.includes(name))
+}
+function validInstrumentedOperations(measurement) {
+  const coverage = foundationdbCoverage(measurement?.foundationdb_coverage)
+  if (!coverage) return undefined
+  const names = storageInstrumentedOperationNames(coverage)
+  return isDeepStrictEqual(measurement?.storage_instrumented_operations, names) ? names : undefined
+}
 const rawMeasurement = {
   schema: rawSchema, scope: "live_registered_split_r2_block_store_instances",
   calls: "object_store_adapter_method_invocations; not_http_attempts_or_internal_retries",
@@ -196,6 +323,7 @@ function validateStorageRows(entries, phase = false) {
     for (const field of ["calls", "success", "error", "cancelled", "bytes", "returned_rows", "returned_row_observations", "elapsed_ns"]) integer(entry[field])
     if (BigInt(entry.calls) !== BigInt(entry.success) + BigInt(entry.error) + BigInt(entry.cancelled)) invalid("storage outcomes do not reconcile")
     if (!entry.name.startsWith("tidb.sql.") && (entry.returned_rows !== "0" || entry.returned_row_observations !== "0")) invalid("returned-row observation outside SQL family")
+    if (entry.name.startsWith("foundationdb.transaction.") && entry.bytes !== "0") invalid("FoundationDB transaction payload bytes unavailable")
     if (BigInt(entry.returned_row_observations) > BigInt(entry.success)) invalid("returned-row observations exceed successful calls")
     if (entry.returned_row_observations === "0" && entry.returned_rows !== "0") invalid("returned rows have no known observations")
     if (!Array.isArray(entry.latency_log2_us) || entry.latency_log2_us.length !== 32 || entry.latency_log2_us.reduce((sum, count) => sum + integer(count), 0n) !== BigInt(entry.calls)) invalid("storage histogram does not reconcile")
@@ -415,8 +543,9 @@ function sanitizedObservations(before, after) {
         storage_rows: value.measurement?.storage_rows === STORAGE_ROW_SEMANTICS ? STORAGE_ROW_SEMANTICS : "unavailable",
         storage_operations: isDeepStrictEqual(value.measurement?.storage_operations, storageNames) ? [...storageNames] : "unavailable",
         storage_families: isDeepStrictEqual(value.measurement?.storage_families, STORAGE_OPERATION_FAMILIES) ? structuredClone(STORAGE_OPERATION_FAMILIES) : "unavailable",
-        storage_instrumented_operations: isDeepStrictEqual(value.measurement?.storage_instrumented_operations, STORAGE_INSTRUMENTED_OPERATION_NAMES) ? [...STORAGE_INSTRUMENTED_OPERATION_NAMES] : "unavailable",
+        storage_instrumented_operations: validInstrumentedOperations(value.measurement) || "unavailable",
         tidb_coverage: isDeepStrictEqual(value.measurement?.tidb_coverage, TIDB_DIAGNOSTIC_COVERAGE) ? structuredClone(TIDB_DIAGNOSTIC_COVERAGE) : "unavailable",
+        foundationdb_coverage: foundationdbCoverage(value.measurement?.foundationdb_coverage) ? structuredClone(foundationdbCoverage(value.measurement.foundationdb_coverage)) : "unavailable",
         r2_api: isDeepStrictEqual(value.measurement?.r2_api, rawMeasurement) ? structuredClone(rawMeasurement) : "unavailable",
         r2_local: isDeepStrictEqual(value.measurement?.r2_local, OBJECT_STORE_LOCAL_MEASUREMENT) ? structuredClone(OBJECT_STORE_LOCAL_MEASUREMENT) : "unavailable",
         ...(Object.hasOwn(value, "rustfs") ? {
@@ -457,7 +586,7 @@ export function deltaNativeSnapshots(before, after) {
         after.measurement.storage_rows !== STORAGE_ROW_SEMANTICS ||
         !isDeepStrictEqual(after.measurement.storage_operations, storageNames) ||
         !isDeepStrictEqual(after.measurement.storage_families, STORAGE_OPERATION_FAMILIES) ||
-        !isDeepStrictEqual(after.measurement.storage_instrumented_operations, STORAGE_INSTRUMENTED_OPERATION_NAMES) ||
+        !validInstrumentedOperations(after.measurement) ||
         !isDeepStrictEqual(after.measurement.tidb_coverage, TIDB_DIAGNOSTIC_COVERAGE) ||
         after.measurement.storage_duration !== "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" ||
         after.measurement.sqlite !== "live_connection_pager_and_sql_category_counters; pager_bytes_are_page_size_estimates" ||
@@ -502,6 +631,7 @@ export function deltaNativeSnapshots(before, after) {
     if (rustfs && !rustfs.complete) issues.push("RustFS instance closed during phase")
     const result = { schema_version: NATIVE_DIAGNOSTICS_SCHEMA, complete: issues.length === 0, issues,
       measurement: { ...Object.fromEntries(["storage_calls", "storage_bytes", "storage_rows", "storage_operations", "storage_families", "storage_instrumented_operations", "tidb_coverage", "storage_duration", "latency_histogram", "forwarding_boxes", "profile", "sqlite", "r2", "r2_api", "unavailable"].map((field) => [field, after.measurement[field]])),
+        foundationdb_coverage: structuredClone(foundationdbCoverage(after.measurement.foundationdb_coverage)),
         r2_local: isDeepStrictEqual(after.measurement.r2_local, OBJECT_STORE_LOCAL_MEASUREMENT) ? structuredClone(OBJECT_STORE_LOCAL_MEASUREMENT) : "unavailable",
         ...(rustfs ? { rustfs: after.measurement.rustfs, rustfs_api: structuredClone(RUSTFS_API_MEASUREMENT),
           rustfs_local: isDeepStrictEqual(after.measurement.rustfs_local, RUSTFS_LOCAL_MEASUREMENT) ? structuredClone(RUSTFS_LOCAL_MEASUREMENT) : "unavailable" } : {}) },
@@ -522,7 +652,7 @@ export function validateRawPhaseDiagnostics(phase, family = "r2") {
   validateStorageRows(native.storage?.entries, true)
   if (native.measurement?.storage_calls !== STORAGE_CALL_SEMANTICS || native.measurement?.storage_bytes !== STORAGE_BYTE_SEMANTICS || native.measurement?.storage_rows !== STORAGE_ROW_SEMANTICS ||
       !isDeepStrictEqual(native.measurement?.storage_operations, storageNames) || !isDeepStrictEqual(native.measurement?.storage_families, STORAGE_OPERATION_FAMILIES) ||
-      !isDeepStrictEqual(native.measurement?.storage_instrumented_operations, STORAGE_INSTRUMENTED_OPERATION_NAMES) ||
+      !validInstrumentedOperations(native.measurement) ||
       !isDeepStrictEqual(native.measurement?.tidb_coverage, TIDB_DIAGNOSTIC_COVERAGE)) invalid("workload storage measurement metadata changed")
   if (!isDeepStrictEqual(native.measurement?.[`${family}_api`], api) || !isDeepStrictEqual(native.measurement?.latency_histogram, { unit: "microseconds", intervals: histogramIntervals })) invalid("workload raw measurement metadata changed")
   const r2 = native[family]
@@ -581,11 +711,12 @@ export function finishPhase(name, before, after, quiescent = true) {
 export function logPhaseSummary(phase) {
   const entries = phase.native.storage?.entries
   const available = Array.isArray(entries)
-  const instrumented = phase.native.measurement?.storage_instrumented_operations || []
+  const instrumented = validInstrumentedOperations(phase.native.measurement) || []
   const families = Object.fromEntries(Object.entries(STORAGE_OPERATION_FAMILIES).map(([name, semantics]) => {
     const observed = semantics.operations.filter((operation) => instrumented.includes(operation))
-    const coverage = { instrumented: observed.length === semantics.operations.length, instrumented_operations: observed, available }
-    if (!available) return [name, coverage]
+    const covered = observed.length === semantics.operations.length
+    const coverage = { instrumented: covered, instrumented_operations: observed, available: available && covered }
+    if (!coverage.available) return [name, coverage]
     const rows = entries.filter((entry) => semantics.operations.includes(entry.name))
     return [name, { ...coverage, ...Object.fromEntries(["calls", "bytes", "error", "cancelled", "elapsed_ns", "returned_rows", "returned_row_observations"].map((field) => [field, rows.reduce((sum, entry) => sum + BigInt(entry[field]), 0n).toString()])) }]
   }))

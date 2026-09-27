@@ -40,7 +40,7 @@ const { validateSplitNamespacePresenceReceipt } = await import("../benchmarks/st
 const {
   NATIVE_DIAGNOSTICS_SCHEMA, OBJECT_STORE_LOCAL_NAMES, RUSTFS_API_MEASUREMENT, RUSTFS_LOCAL_MEASUREMENT, STORAGE_BYTE_SEMANTICS,
   STORAGE_CALL_SEMANTICS, STORAGE_INSTRUMENTED_OPERATION_NAMES, STORAGE_OPERATION_FAMILIES,
-  STORAGE_OPERATION_NAMES, STORAGE_ROW_SEMANTICS, TIDB_DIAGNOSTIC_COVERAGE, validateRawPhaseDiagnostics,
+  STORAGE_OPERATION_NAMES, STORAGE_ROW_SEMANTICS, TIDB_DIAGNOSTIC_COVERAGE, FOUNDATIONDB_DIAGNOSTIC_UNAVAILABLE, validateRawPhaseDiagnostics,
 } = await import("../benchmarks/storage/diagnostics.mjs")
 
 // Missing production source gets an inert exported fallback. Behavior assertions
@@ -163,6 +163,7 @@ function nativePhase(elapsed) {
         storage_families: structuredClone(STORAGE_OPERATION_FAMILIES),
         storage_instrumented_operations: [...STORAGE_INSTRUMENTED_OPERATION_NAMES],
         tidb_coverage: structuredClone(TIDB_DIAGNOSTIC_COVERAGE),
+        foundationdb_coverage: structuredClone(FOUNDATIONDB_DIAGNOSTIC_UNAVAILABLE),
         latency_histogram: { unit: "microseconds", intervals: Array.from({ length: 32 }, (_, bucket) => bucket === 0
           ? { lower_inclusive_us: "0", upper_exclusive_us: "1" }
           : bucket === 31 ? { lower_inclusive_us: String(2 ** 30), upper_exclusive_us: null, terminal_overflow: true }

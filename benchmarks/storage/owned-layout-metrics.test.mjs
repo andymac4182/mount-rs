@@ -5,6 +5,8 @@ import {
   STORAGE_BYTE_SEMANTICS, STORAGE_CALL_SEMANTICS, STORAGE_INSTRUMENTED_OPERATION_NAMES,
   STORAGE_OPERATION_FAMILIES, STORAGE_OPERATION_NAMES, STORAGE_ROW_SEMANTICS,
   TIDB_DIAGNOSTIC_COVERAGE, OBJECT_STORE_LOCAL_NAMES, validateRawPhaseDiagnostics,
+  FOUNDATIONDB_DIAGNOSTIC_COVERAGE, FOUNDATIONDB_DIAGNOSTIC_UNAVAILABLE,
+  storageInstrumentedOperationNames,
 } from "./diagnostics.mjs"
 
 // Missing implementation must fail assertions; these controls open no addon or backend.
@@ -14,7 +16,7 @@ catch (error) { if (error.code !== "ERR_MODULE_NOT_FOUND") throw error }
 const zeros = (fields) => Object.fromEntries(fields.map((field) => [field, "0"]))
 const rawNames = ["put_opts.block_create", "get.block_read", "body_read.block_read", "get.conflict_verify", "body_read.conflict_verify", "get.migration", "body_read.migration", "head.direct_delete", "delete.direct", "delete.reconcile"]
 const claims = ["leader_claims", "leader_success", "leader_error", "leader_cancelled", "follower_claims", "follower_success", "follower_error", "follower_cancelled"]
-function model() {
+function model({ foundationdb = false } = {}) {
   const row = (name) => ({ name, ...zeros(["calls", "success", "error", "cancelled", "bytes", "returned_rows", "returned_row_observations", "elapsed_ns", "in_flight_start", "in_flight_end"]), latency_log2_us: Array(32).fill("0") })
   const entries = STORAGE_OPERATION_NAMES.map(row)
   Object.assign(entries.find((r) => r.name === "tidb.sql.inode_read"), { calls: "600", success: "600", returned_rows: "400", returned_row_observations: "600", elapsed_ns: "9007199254740993", latency_log2_us: ["600", ...Array(31).fill("0")] })
@@ -27,7 +29,9 @@ function model() {
     native: { schema_version: NATIVE_DIAGNOSTICS_SCHEMA, complete: true, issues: [], storage: { in_flight_start: "0", in_flight_end: "0", entries },
       measurement: { rustfs: "live_store_logical_calls_and_cache_hits; not_http_attempts", rustfs_api: structuredClone(RUSTFS_API_MEASUREMENT),
         storage_calls: STORAGE_CALL_SEMANTICS, storage_bytes: STORAGE_BYTE_SEMANTICS, storage_rows: STORAGE_ROW_SEMANTICS,
-        storage_operations: [...STORAGE_OPERATION_NAMES], storage_families: structuredClone(STORAGE_OPERATION_FAMILIES), storage_instrumented_operations: [...STORAGE_INSTRUMENTED_OPERATION_NAMES], tidb_coverage: structuredClone(TIDB_DIAGNOSTIC_COVERAGE),
+        storage_operations: [...STORAGE_OPERATION_NAMES], storage_families: structuredClone(STORAGE_OPERATION_FAMILIES),
+        storage_instrumented_operations: foundationdb ? storageInstrumentedOperationNames(FOUNDATIONDB_DIAGNOSTIC_COVERAGE) : [...STORAGE_INSTRUMENTED_OPERATION_NAMES],
+        tidb_coverage: structuredClone(TIDB_DIAGNOSTIC_COVERAGE), foundationdb_coverage: structuredClone(foundationdb ? FOUNDATIONDB_DIAGNOSTIC_COVERAGE : FOUNDATIONDB_DIAGNOSTIC_UNAVAILABLE),
         latency_histogram: { unit: "microseconds", intervals: Array.from({ length: 32 }, (_, i) => i === 0 ? { lower_inclusive_us: "0", upper_exclusive_us: "1" } : i === 31 ? { lower_inclusive_us: String(2 ** 30), upper_exclusive_us: null, terminal_overflow: true } : { lower_inclusive_us: String(2 ** (i - 1)), upper_exclusive_us: String(2 ** i) }) } },
       rustfs: { scope: "process_live_instances", complete: true, internal_successful_retries: "unavailable", missing_instance_ids: [], instance_ids_start: ["7"], instance_ids_end: ["7"], instances: [instance] } } }
   return phase
@@ -57,6 +61,27 @@ test("retains legitimate zero backend GETs without interpreting missing local wo
   assert.equal(Object.hasOwn(value.rustfs.instances[0].local_work, "entries"), false)
   assert.equal(value.unavailable.physical_device_iops, true)
   assert.equal(value.unavailable.http_attempts_and_internal_retries, true)
+})
+test("preserves audited FoundationDB source coverage and precise returned payload counters", () => {
+  const source = model({ foundationdb: true })
+  const entry = source.native.storage.entries.find((row) => row.name === "foundationdb.read.get")
+  Object.assign(entry, { calls: "1", success: "1", bytes: "9007199254740993", elapsed_ns: "9007199254740995", latency_log2_us: ["1", ...Array(31).fill("0")] })
+  const value = projectOwnedLayoutPhaseMetrics(source)
+  assert.equal(value.status, "observed")
+  assert.equal(value.storage.entries.length, 85)
+  assert.deepEqual(value.storage.foundationdb_coverage, FOUNDATIONDB_DIAGNOSTIC_COVERAGE)
+  assert.deepEqual(value.storage.instrumented_operations.slice(-7), FOUNDATIONDB_DIAGNOSTIC_COVERAGE.operations)
+  const projected = value.storage.entries.find((row) => row.name === "foundationdb.read.get")
+  assert.equal(projected.bytes, "9007199254740993"); assert.equal(projected.elapsed_ns, "9007199254740995")
+  assert.equal(projected.returned_rows, "0"); assert.equal(projected.returned_row_observations, "0")
+  assert.ok(value.storage.foundationdb_coverage.unavailable.includes("native_operation_settlement_after_future_drop"))
+})
+test("feature-off fixed FoundationDB rows retain explicit unavailable coverage", () => {
+  const value = projectOwnedLayoutPhaseMetrics(model())
+  assert.equal(value.status, "observed"); assert.equal(value.storage.entries.length, 85)
+  assert.deepEqual(value.storage.foundationdb_coverage, FOUNDATIONDB_DIAGNOSTIC_UNAVAILABLE)
+  assert.equal(value.storage.instrumented_operations.some((name) => name.startsWith("foundationdb.")), false)
+  assert.match(value.storage.scope, /audited_instrumented_operations_separately_declared/u)
 })
 test("retains digest, encoding, copy and wait evidence with original limits", () => {
   const source = model(); local(source)
@@ -122,6 +147,10 @@ const faults = [
   ["sparse rows", (p) => { delete p.native.storage.entries[0]; return p }],
   ["sparse zero histogram", (p) => { p.native.storage.entries[0].latency_log2_us = Array(32); return p }],
   ["sparse instance identities", (p) => { p.native.rustfs.instance_ids_start = Array(1); return p }],
+  ["missing FoundationDB coverage", (p) => { delete p.native.measurement.foundationdb_coverage; return p }],
+  ["partial FoundationDB source audit", (p) => { p.native.measurement.foundationdb_coverage = structuredClone(FOUNDATIONDB_DIAGNOSTIC_COVERAGE); p.native.measurement.foundationdb_coverage.operations.pop(); return p }],
+  ["private FoundationDB source metadata", (p) => { p.native.measurement.foundationdb_coverage.private_key = "PRIVATE_SECRET"; return p }],
+  ["legacy78 row inventory", (p) => { p.native.storage.entries.length = 78; p.native.measurement.storage_operations.length = 78; delete p.native.measurement.foundationdb_coverage; return p }],
   ["cyclic input", (p) => { p.native.storage.circular = p; return p }],
   ["overcap evidence", (p) => { p.native.secret = "PRIVATE".repeat(1_300_000); return p }],
 ]

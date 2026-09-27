@@ -111,7 +111,10 @@ export function projectOwnedLayoutPhaseMetrics(source) {
     if (native.rustfs.instances.length > 64) throw Error("cap")
     const result = { schema: SCHEMA, status: "observed", phase: "workload-4096bytes", quiescent: true,
       elapsed_ms: phase.elapsed_ms, benchmark_measured_elapsed_ms: phase.benchmark_measured_elapsed_ms, observer_snapshot_ms: phase.observer_snapshot_ms,
-      storage: { scope: "process_instrumented_operation_delta; families_overlap; inclusive_wall_spans_overlap", calls: STORAGE_CALL_SEMANTICS, bytes: STORAGE_BYTE_SEMANTICS, returned_rows: STORAGE_ROW_SEMANTICS, entries: rows(native.storage.entries, STORAGE_FIELDS) },
+      storage: { scope: "process_fixed_label_operation_delta; audited_instrumented_operations_separately_declared; families_overlap; inclusive_wall_spans_overlap", calls: STORAGE_CALL_SEMANTICS, bytes: STORAGE_BYTE_SEMANTICS, returned_rows: STORAGE_ROW_SEMANTICS,
+        operations: [...native.measurement.storage_operations], families: structuredClone(native.measurement.storage_families),
+        instrumented_operations: [...native.measurement.storage_instrumented_operations], foundationdb_coverage: structuredClone(native.measurement.foundationdb_coverage),
+        entries: rows(native.storage.entries, STORAGE_FIELDS) },
       rustfs: { scope: "process_live_instances", instance_ids_start: [...native.rustfs.instance_ids_start], instance_ids_end: [...native.rustfs.instance_ids_end], api_measurement: structuredClone(RUSTFS_API_MEASUREMENT), local_measurement: structuredClone(RUSTFS_LOCAL_MEASUREMENT), instances: native.rustfs.instances.map((instance) => ({
         id: instance.id, ...fields(instance, LOGICAL_FIELDS), raw_api: { ...fields(instance.raw_api, ["schema", "scope", "in_flight_start", "in_flight_end", "pending_claims_start", "pending_claims_end", "saturated_start", "saturated_end"]), claims: fields(instance.raw_api.claims, CLAIM_FIELDS), entries: rows(instance.raw_api.entries, RAW_FIELDS) }, local_work: local(instance, native.measurement.rustfs_local),
       })) },

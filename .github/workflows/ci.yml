@@ -868,6 +868,23 @@ jobs:
       - name: Verify native split namespace presence controls
         timeout-minutes: 5
         run: ./scripts/cargo-shared test --locked -p mount-rs-napi --lib namespace_presence::tests
+      - name: Verify warmed storage diagnostic allocations
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -o pipefail
+          MOUNT_RS_PROFILE_IO=1 MOUNT_RS_TRACE_STORAGE=0 \
+            ./scripts/cargo-shared test --locked -p mount-rs-core --test storage_diagnostics_allocations \
+            -- --ignored --exact warmed_core_spans_record_without_added_allocations --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/storage-diagnostic-allocations.log"
+      - name: Retain storage allocation diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: storage-allocation-controls-${{ github.event_name }}-${{ matrix.os }}
+          path: ${{ runner.temp }}/storage-diagnostic-allocations.log
+          if-no-files-found: warn
+          retention-days: 14
 
   windows-node:
     runs-on: windows-latest
@@ -982,7 +999,17 @@ jobs:
         timeout-minutes: 1
         run: |
           set -o pipefail
-          node --test --test-reporter=tap --test-timeout=10000 benchmarks/storage/owned-layout-arm.test.mjs benchmarks/storage/owned-layout-outcome.test.mjs benchmarks/storage/owned-layout-comparison.test.mjs benchmarks/storage/owned-layout-metrics.test.mjs benchmarks/storage/owned-layout-entry.test.mjs scripts/verify-owned-layout-comparison.test.mjs scripts/owned-layout-handoff.test.mjs 2>&1 | tee "$RUNNER_TEMP/owned-layout-controls.log"
+          node --test --test-reporter=tap --test-timeout=10000 benchmarks/storage/owned-layout-arm.test.mjs benchmarks/storage/owned-layout-outcome.test.mjs benchmarks/storage/owned-layout-comparison.test.mjs benchmarks/storage/owned-layout-metrics.test.mjs benchmarks/storage/owned-layout-entry.test.mjs scripts/verify-owned-layout-comparison.test.mjs 2>&1 | tee "$RUNNER_TEMP/owned-layout-controls.log"
+      - name: Verify receipt producers and readonly handoff CLI
+        timeout-minutes: 1
+        run: |
+          set -o pipefail
+          node --test --test-reporter=tap --test-timeout=10000 scripts/owned-layout-handoff.test.mjs scripts/owned-layout-handoff-cli.test.mjs 2>&1 | tee "$RUNNER_TEMP/owned-layout-handoff-controls.log"
+      - name: Verify FoundationDB diagnostic coverage controls
+        timeout-minutes: 1
+        run: |
+          set -o pipefail
+          node --test --test-reporter=tap --test-timeout=10000 benchmarks/storage/foundationdb-diagnostics.test.mjs 2>&1 | tee "$RUNNER_TEMP/foundationdb-diagnostic-controls.log"
       - name: Verify owned process receipt models
         timeout-minutes: 1
         run: |
@@ -1000,6 +1027,8 @@ jobs:
           name: owned-layout-controls-${{ github.event_name }}-${{ matrix.os }}
           path: |
             ${{ runner.temp }}/owned-layout-controls.log
+            ${{ runner.temp }}/owned-layout-handoff-controls.log
+            ${{ runner.temp }}/foundationdb-diagnostic-controls.log
             ${{ runner.temp }}/owned-layout-process-controls.log
             ${{ runner.temp }}/owned-layout-process-writer-controls.log
           if-no-files-found: warn

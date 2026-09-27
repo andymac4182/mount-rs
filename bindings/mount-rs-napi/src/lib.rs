@@ -252,9 +252,84 @@ fn storage_operation_families() -> Value {
             "calls":"categorized_sql_adapter_invocations; not_internal_requests",
             "bytes":"known_selected_successful_payload_bytes_only; other_sql_bytes_unavailable",
             "returned_rows":"known_returned_sql_rows; observations_count_successes_with_known_rows; excludes_affected_rows",
-            "duration":duration}
+            "duration":duration},
+        "foundationdb_transaction":{"operations":[
+                "foundationdb.transaction.create","foundationdb.transaction.closure_attempt",
+                "foundationdb.transaction.commit","foundationdb.transaction.on_error"],
+            "calls":"provider_closure_attempts_and_native_create_commit_on_error_invocations; distinct_units_not_logical_transactions",
+            "bytes":"unavailable","returned_rows":"unavailable","duration":duration},
+        "foundationdb_read":{"operations":[
+                "foundationdb.read.get","foundationdb.read.get_key","foundationdb.read.get_range_page"],
+            "calls":"native_client_read_method_invocations; range_page_calls_not_key_value_count",
+            "bytes":"known_selected_successful_returned_value_key_and_range_page_key_value_payload_bytes_only",
+            "returned_rows":"unavailable","duration":duration}
     })
 }
+
+// Audited pre-FoundationDB source coverage. A new core label is not
+// instrumented merely because the fixed bank includes it.
+const LEGACY_NON_TIDB_INSTRUMENTED_OPERATIONS: &[&str] = &[
+    "metadata.load",
+    "metadata.load_if_changed",
+    "metadata.snapshot",
+    "metadata.publish",
+    "metadata.flush",
+    "blocks.put",
+    "blocks.get",
+    "blocks.flush",
+    "blocks.verify_backing",
+    "blocks.prepare_backing",
+    "blocks.delete",
+    "blocks.reconcile",
+    "pglite.client_lock_wait",
+    "sdk.metadata.compact_inode_capability",
+    "sdk.metadata.compact_inode_mode_state",
+    "sdk.metadata.prepare_compact_inode_mode",
+    "sdk.metadata.load_compact_snapshot",
+    "sdk.metadata.load_compact_inode",
+    "sdk.metadata.publish_compact_inode",
+    "sdk.metadata.publish_compact_structure",
+    "sdk.metadata.inode_mode_state",
+    "sdk.metadata.prepare_inode_mode",
+    "sdk.metadata.load_inode_snapshot_if_changed",
+    "sdk.metadata.load_inode_snapshot",
+    "sdk.metadata.load_inode",
+    "sdk.metadata.load_inode_if_changed",
+    "sdk.metadata.publish_inode_if_version",
+    "sdk.metadata.publish_structure_if_versions",
+    "sdk.metadata.delegation_state",
+    "sdk.metadata.prepare_delegated_mode",
+    "sdk.metadata.checkout",
+    "sdk.metadata.publish_delegated",
+    "sdk.metadata.checkin",
+    "sdk.metadata.recover",
+    "sdk.metadata.durable",
+    "sdk.metadata.publish_includes_flush_barrier",
+    "sdk.metadata.load",
+    "sdk.metadata.load_if_changed",
+    "sdk.metadata.concurrent_mode_state",
+    "sdk.metadata.preflight_new_bound_mode",
+    "sdk.metadata.prepare_bound_concurrent_mode",
+    "sdk.metadata.acquire_writer",
+    "sdk.metadata.renew_writer",
+    "sdk.metadata.release_writer",
+    "sdk.metadata.publish",
+    "sdk.metadata.publish_bound_if_revision",
+    "sdk.metadata.migrate_mrc1_to_bound_mode",
+    "sdk.metadata.preflight_mrc1_to_bound_mode",
+    "sdk.metadata.preflight_trusted_unstamped_mrc1",
+    "sdk.metadata.migrate_trusted_unstamped_mrc1",
+    "sdk.metadata.flush",
+    "sdk.blocks.durable",
+    "sdk.blocks.prepare_concurrent_backing",
+    "sdk.blocks.verify_concurrent_backing",
+    "sdk.blocks.get_for_migration",
+    "sdk.blocks.put",
+    "sdk.blocks.get",
+    "sdk.blocks.flush",
+    "sdk.blocks.delete",
+    "sdk.blocks.reconcile",
+];
 
 fn storage_instrumented_operation_names() -> Vec<&'static str> {
     // Keep the core order while consuming audited producer coverage explicitly.
@@ -262,12 +337,83 @@ fn storage_instrumented_operation_names() -> Vec<&'static str> {
         .iter()
         .copied()
         .filter(|name| {
-            !name.starts_with("tidb.")
+            LEGACY_NON_TIDB_INSTRUMENTED_OPERATIONS.contains(name)
                 || mount_rs_tidb::TIDB_DIAGNOSTIC_COVERAGE
                     .operations
                     .contains(name)
+                || foundationdb_instrumented_operations().contains(name)
         })
         .collect()
+}
+
+#[cfg(all(
+    feature = "foundationdb",
+    any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64"),
+    )
+))]
+fn foundationdb_instrumented_operations() -> &'static [&'static str] {
+    mount_rs_foundationdb::FOUNDATIONDB_DIAGNOSTIC_COVERAGE.operations
+}
+
+#[cfg(not(all(
+    feature = "foundationdb",
+    any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64"),
+    )
+)))]
+fn foundationdb_instrumented_operations() -> &'static [&'static str] {
+    &[]
+}
+
+fn foundationdb_diagnostic_coverage() -> Value {
+    #[cfg(all(
+        feature = "foundationdb",
+        any(
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "aarch64"),
+            all(target_os = "macos", target_arch = "x86_64"),
+            all(target_os = "macos", target_arch = "aarch64"),
+        )
+    ))]
+    {
+        let coverage = &mount_rs_foundationdb::FOUNDATIONDB_DIAGNOSTIC_COVERAGE;
+        json!({
+            "schema":coverage.schema,"status":coverage.status,
+            "transaction_runner_sites":coverage.transaction_runner_sites,
+            "point_get_sites":coverage.point_get_sites,
+            "get_key_sites":coverage.get_key_sites,
+            "range_consumer_sites":coverage.range_consumer_sites,
+            "operations":coverage.operations,
+            "attempt_scope":coverage.attempt_scope,
+            "payload_bytes_scope":coverage.payload_bytes_scope,
+            "returned_rows_scope":coverage.returned_rows_scope,
+            "unavailable":coverage.unavailable
+        })
+    }
+    #[cfg(not(all(
+        feature = "foundationdb",
+        any(
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "aarch64"),
+            all(target_os = "macos", target_arch = "x86_64"),
+            all(target_os = "macos", target_arch = "aarch64"),
+        )
+    )))]
+    {
+        json!({
+            "schema":"mount-rs-foundationdb-client-diagnostic-coverage-v1",
+            "status":"unavailable",
+            "reason":"feature_disabled_or_unsupported_target",
+            "operations":[]
+        })
+    }
 }
 
 fn tidb_diagnostic_coverage() -> Value {
@@ -324,6 +470,7 @@ pub fn storage_diagnostics() -> String {
             "storage_families":storage_operation_families(),
             "storage_instrumented_operations":storage_instrumented_operation_names(),
             "tidb_coverage":tidb_diagnostic_coverage(),
+            "foundationdb_coverage":foundationdb_diagnostic_coverage(),
             "storage_duration":"inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap",
             "latency_histogram":{
                 "unit":"microseconds",
@@ -7123,13 +7270,13 @@ mod tests {
         let families = snapshot["measurement"]["storage_families"]
             .as_object()
             .unwrap();
-        assert_eq!(families.len(), 8);
+        assert_eq!(families.len(), 10);
         let declared = families
             .values()
             .flat_map(|family| family["operations"].as_array().unwrap())
             .map(|name| name.as_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(declared.len(), 78);
+        assert_eq!(declared.len(), 85);
         assert_eq!(
             declared
                 .into_iter()
@@ -7149,19 +7296,38 @@ mod tests {
             families["tidb_sql"]["returned_rows"],
             "known_returned_sql_rows; observations_count_successes_with_known_rows; excludes_affected_rows"
         );
+        assert_eq!(families["foundationdb_transaction"]["bytes"], "unavailable");
+        assert_eq!(
+            families["foundationdb_read"]["returned_rows"],
+            "unavailable"
+        );
+        assert_eq!(
+            families["foundationdb_read"]["bytes"],
+            "known_selected_successful_returned_value_key_and_range_page_key_value_payload_bytes_only"
+        );
+        let names = storage::operation_names();
+        assert_eq!(names.len(), 85);
+        assert_eq!(
+            &names[78..],
+            &[
+                "foundationdb.transaction.create",
+                "foundationdb.transaction.closure_attempt",
+                "foundationdb.read.get",
+                "foundationdb.read.get_key",
+                "foundationdb.read.get_range_page",
+                "foundationdb.transaction.commit",
+                "foundationdb.transaction.on_error",
+            ]
+        );
+        assert_eq!(LEGACY_NON_TIDB_INSTRUMENTED_OPERATIONS.len(), 60);
+        assert_eq!(&names[..60], LEGACY_NON_TIDB_INSTRUMENTED_OPERATIONS);
+        assert_eq!(
+            &names[60..78],
+            mount_rs_tidb::TIDB_DIAGNOSTIC_COVERAGE.operations
+        );
         assert_eq!(
             snapshot["measurement"]["storage_instrumented_operations"],
-            json!(
-                storage::operation_names()
-                    .iter()
-                    .filter(|name| {
-                        !name.starts_with("tidb.")
-                            || mount_rs_tidb::TIDB_DIAGNOSTIC_COVERAGE
-                                .operations
-                                .contains(name)
-                    })
-                    .collect::<Vec<_>>()
-            )
+            json!(storage_instrumented_operation_names())
         );
         let coverage = &snapshot["measurement"]["tidb_coverage"];
         assert_eq!(coverage["status"], "source_sites_instrumented");
@@ -7185,7 +7351,34 @@ mod tests {
                 "exact static site count {field}"
             );
         }
-        assert_eq!(snapshot["storage"]["entries"].as_array().unwrap().len(), 78);
+        assert_eq!(snapshot["storage"]["entries"].as_array().unwrap().len(), 85);
+        for (index, name) in names[78..].iter().enumerate() {
+            let row = &snapshot["storage"]["entries"][78 + index];
+            assert_eq!(row["name"], *name);
+            assert_eq!(row["returned_rows"], "0");
+            assert_eq!(row["returned_row_observations"], "0");
+            assert_eq!(row["latency_log2_us"].as_array().unwrap().len(), 32);
+            assert_eq!(
+                row.as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                [
+                    "bytes",
+                    "calls",
+                    "cancelled",
+                    "elapsed_ns",
+                    "error",
+                    "in_flight",
+                    "latency_log2_us",
+                    "name",
+                    "returned_row_observations",
+                    "returned_rows",
+                    "success",
+                ]
+            );
+        }
         for row in snapshot["storage"]["entries"].as_array().unwrap() {
             for field in ["in_flight", "returned_rows", "returned_row_observations"] {
                 assert!(row[field].is_string(), "exact driver counter {field}");
@@ -7216,6 +7409,80 @@ mod tests {
         assert_eq!(snapshot["http_attempts"], "unavailable");
         assert!(!json.contains("test-secret"));
         eprintln!("NATIVE_STORAGE_DRIVER_JSON {json}");
+    }
+
+    #[test]
+    fn foundationdb_coverage_reports_feature_availability_without_backend() {
+        let json = storage_diagnostics();
+        let snapshot: Value = serde_json::from_str(&json).unwrap();
+        let coverage = &snapshot["measurement"]["foundationdb_coverage"];
+        let instrumented = snapshot["measurement"]["storage_instrumented_operations"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            coverage["schema"],
+            "mount-rs-foundationdb-client-diagnostic-coverage-v1"
+        );
+        assert_eq!(
+            snapshot["measurement"]["storage_operations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            85
+        );
+        #[cfg(all(
+            feature = "foundationdb",
+            any(
+                all(target_os = "linux", target_arch = "x86_64"),
+                all(target_os = "linux", target_arch = "aarch64"),
+                all(target_os = "macos", target_arch = "x86_64"),
+                all(target_os = "macos", target_arch = "aarch64"),
+            )
+        ))]
+        {
+            let source = &mount_rs_foundationdb::FOUNDATIONDB_DIAGNOSTIC_COVERAGE;
+            assert_eq!(coverage["status"], "source_sites_instrumented");
+            assert_eq!(coverage["transaction_runner_sites"], "6");
+            assert_eq!(coverage["point_get_sites"], "2");
+            assert_eq!(coverage["get_key_sites"], "1");
+            assert_eq!(coverage["range_consumer_sites"], "3");
+            assert_eq!(coverage["operations"], json!(source.operations));
+            assert_eq!(coverage["unavailable"], json!(source.unavailable));
+            assert_eq!(coverage["attempt_scope"], source.attempt_scope);
+            assert_eq!(coverage["payload_bytes_scope"], source.payload_bytes_scope);
+            assert_eq!(coverage["returned_rows_scope"], source.returned_rows_scope);
+            assert_eq!(coverage.as_object().unwrap().len(), 11);
+            for name in source.operations {
+                assert!(instrumented.contains(&json!(name)));
+            }
+            assert_eq!(instrumented.len(), 85);
+        }
+        #[cfg(not(all(
+            feature = "foundationdb",
+            any(
+                all(target_os = "linux", target_arch = "x86_64"),
+                all(target_os = "linux", target_arch = "aarch64"),
+                all(target_os = "macos", target_arch = "x86_64"),
+                all(target_os = "macos", target_arch = "aarch64"),
+            )
+        )))]
+        {
+            assert_eq!(
+                coverage,
+                &json!({
+                    "schema":"mount-rs-foundationdb-client-diagnostic-coverage-v1",
+                    "status":"unavailable",
+                    "reason":"feature_disabled_or_unsupported_target",
+                    "operations":[]
+                })
+            );
+            assert_eq!(instrumented.len(), 78);
+            assert!(
+                instrumented
+                    .iter()
+                    .all(|name| !name.as_str().unwrap().starts_with("foundationdb."))
+            );
+        }
     }
 
     #[test]

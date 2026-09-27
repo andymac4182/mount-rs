@@ -1,6 +1,9 @@
 import { Buffer } from "node:buffer"
 import { createHash } from "node:crypto"
 import { isDeepStrictEqual, types } from "node:util"
+import { constants } from "node:fs"
+import { lstat, open, realpath } from "node:fs/promises"
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 
 // Fixed reviewed seams, not a full native build dependency closure. This codec
 // only joins provided boundary observations; it never builds or loads an addon.
@@ -516,3 +519,176 @@ export function buildOwnedLayoutOwnerTerminal(input) {
     return result("owner_terminal", receipt, { status: complete ? "ready" : "incomplete", count, uncertainty, suffix: complete ? null : "TERMINAL_INCOMPLETE", maximum: 33554432 })
   })
 }
+
+// Readonly CLI boundary. Importing this module performs no evidence IO; the
+// five pure exports above retain their existing input/result contracts.
+const CLI_FLAGS = { controller: ["fixtures", "engine", "observations"], build: ["checkout", "action", "native", "checkout-root"],
+  capacity: ["engine", "observation", "action"], terminal: ["artifacts", "resources", "observations", "groups", "producer-receipt", "producer-checkout"] }
+const STAMP_FIELDS = ["dev", "ino", "size", "mtimeNs", "ctimeNs"]
+const stamp = (stat) => Object.fromEntries(STAMP_FIELDS.map((field) => [field, stat[field]]))
+const fileNeed = (condition) => need(condition, "FILE_INVALID")
+function pathValue(value, suffix = "FILE_INVALID") {
+  need(text(value) && isAbsolute(value) && resolve(value) === value, suffix); return value
+}
+function cliArguments(argv) {
+  need(["linux", "darwin"].includes(process.platform) && typeof process.getuid === "function" && integer(constants.O_NOFOLLOW) && constants.O_NOFOLLOW > 0 && integer(constants.O_NONBLOCK) && constants.O_NONBLOCK > 0, "ARGUMENTS_INVALID")
+  need(Array.isArray(argv) && Object.getPrototypeOf(argv) === Array.prototype && !types.isProxy(argv), "ARGUMENTS_INVALID")
+  const command = argv[0]
+  need(typeof command === "string" && Object.hasOwn(CLI_FLAGS, command), "ARGUMENTS_INVALID")
+  const flags = CLI_FLAGS[command]
+  need(argv.length === 1 + flags.length * 2, "ARGUMENTS_INVALID")
+  const paths = Object.create(null)
+  for (let index = 1; index < argv.length; index += 2) {
+    const flag = argv[index], key = typeof flag === "string" ? flag.slice(2) : null
+    need(flag === `--${key}` && flags.includes(key) && !Object.hasOwn(paths, key), "ARGUMENTS_INVALID")
+    paths[key] = pathValue(argv[index + 1], "ARGUMENTS_INVALID")
+  }
+  return { command, paths }
+}
+async function nonsymlinkPath(path, directory = false) {
+  pathValue(path)
+  let candidate = sep
+  const parts = path.slice(1).split("/").filter((part) => part !== "")
+  for (let index = 0; index < parts.length; index++) {
+    candidate = join(candidate, parts[index]); const current = await lstat(candidate, { bigint: true })
+    fileNeed(!current.isSymbolicLink() && (index === parts.length - 1 && !directory ? current.isFile() : current.isDirectory()))
+  }
+  fileNeed(await realpath(path) === path)
+}
+function privateFile(stat) { fileNeed(stat.uid === BigInt(process.getuid()) && stat.nlink === 1n && (stat.mode & 0o777n) === 0o600n) }
+function inputReader() {
+  const files = new Map(), parents = new Map(), roots = new Map(), identities = new Map()
+  async function parent(path) {
+    const directory = dirname(path); await nonsymlinkPath(directory, true)
+    const current = await lstat(directory, { bigint: true })
+    fileNeed(current.isDirectory() && current.uid === BigInt(process.getuid()) && (current.mode & 0o777n) === 0o700n)
+    const prior = parents.get(directory)
+    if (prior !== undefined) fileNeed(isDeepStrictEqual(prior, stamp(current)))
+    else parents.set(directory, stamp(current))
+  }
+  async function recheck(observation) {
+    await nonsymlinkPath(observation.path)
+    const current = await lstat(observation.path, { bigint: true })
+    fileNeed(current.isFile() && isDeepStrictEqual(stamp(current), observation.initial))
+    if (observation.private) { privateFile(current); await parent(observation.path) }
+  }
+  async function read(path, maximum, role, { private: isPrivate = true, empty = false } = {}) {
+    pathValue(path)
+    const cached = files.get(path)
+    if (cached !== undefined) {
+      // Only the same original process receipt may serve repeated group/action
+      // references. Dense occurrences stay in the converted input arrays.
+      fileNeed(role === "process" && cached.role === role && cached.maximum === maximum && cached.private === isPrivate && cached.empty === empty)
+      return cached.bytes
+    }
+    fileNeed(files.size < 2069)
+    await nonsymlinkPath(path)
+    const before = await lstat(path, { bigint: true })
+    fileNeed(before.isFile() && before.size >= (empty ? 0n : 1n) && before.size <= BigInt(maximum))
+    if (isPrivate) { privateFile(before); await parent(path) }
+    const identity = `${before.dev}:${before.ino}`
+    fileNeed(!identities.has(identity)); identities.set(identity, path)
+    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+    let bytes
+    try {
+      const opened = await handle.stat({ bigint: true })
+      fileNeed(opened.isFile() && isDeepStrictEqual(stamp(opened), stamp(before)))
+      if (isPrivate) privateFile(opened)
+      const storage = Buffer.alloc(Number(before.size) + 1); let used = 0
+      while (used < storage.length) {
+        const received = await handle.read(storage, used, storage.length - used, null)
+        if (received.bytesRead === 0) break
+        used += received.bytesRead
+      }
+      const after = await handle.stat({ bigint: true })
+      fileNeed(used === Number(before.size) && after.isFile() && isDeepStrictEqual(stamp(after), stamp(before)))
+      if (isPrivate) privateFile(after)
+      bytes = storage.subarray(0, used)
+    } finally { await handle.close() }
+    const observation = { path, initial: stamp(before), maximum, role, private: isPrivate, empty, bytes }
+    await recheck(observation); files.set(path, observation); return bytes
+  }
+  async function sourcePath(root, source) {
+    const path = join(root, source), relation = relative(root, path)
+    fileNeed(relation === source.split("/").join(sep) && relation !== "" && relation !== ".." && !relation.startsWith(`..${sep}`) && !isAbsolute(relation))
+    await nonsymlinkPath(path); return path
+  }
+  async function sources(root, paths) {
+    pathValue(root); await nonsymlinkPath(root, true)
+    const rootStat = await lstat(root, { bigint: true }); fileNeed(rootStat.isDirectory())
+    fileNeed(!roots.has(root)); roots.set(root, { initial: stamp(rootStat), paths })
+    const value = Object.create(null)
+    for (const source of paths) value[source] = await read(await sourcePath(root, source), 2097152, `source:${source}`, { private: false })
+    return value
+  }
+  async function finish() {
+    // This complete read-set recheck follows the pure API result and directly
+    // precedes stdout. It is a boundary observation, not interval immutability.
+    for (const observation of files.values()) await recheck(observation)
+    for (const [directory, initial] of parents) {
+      await nonsymlinkPath(directory, true); const current = await lstat(directory, { bigint: true })
+      fileNeed(current.isDirectory() && current.uid === BigInt(process.getuid()) && (current.mode & 0o777n) === 0o700n && isDeepStrictEqual(stamp(current), initial))
+    }
+    for (const [root, observation] of roots) {
+      await nonsymlinkPath(root, true); const current = await lstat(root, { bigint: true })
+      fileNeed(current.isDirectory() && isDeepStrictEqual(stamp(current), observation.initial))
+      for (const source of observation.paths) await sourcePath(root, source)
+    }
+  }
+  return { read, sources, finish }
+}
+async function cliInputs(command, paths, reader) {
+  const readJSON = async (path, maximum, role) => parse(await reader.read(path, maximum, role))
+  if (command === "controller") {
+    const fixtures = await reader.read(paths.fixtures, 16384, "fixtures"), engine = await reader.read(paths.engine, 16384, "engine")
+    const observations = record(await readJSON(paths.observations, 65536, "controller-observations"), ["created", "inherited", "scope_nonce_hex"], "INPUT_INVALID")
+    need(hex(observations.scope_nonce_hex, 32), "SCOPE_INVALID")
+    return { fixtures, engine, created: observations.created, inherited: observations.inherited, scope_nonce: Buffer.from(observations.scope_nonce_hex, "hex") }
+  }
+  if (command === "build") {
+    const checkout = await readJSON(paths.checkout, 16384, "checkout"), build = await readJSON(paths.action, 16384, "build-action")
+    const native = await reader.read(paths.native, 134217728, "native", { private: false }), sources = await reader.sources(paths["checkout-root"], SOURCE_PATHS)
+    return { checkout, build, native, sources }
+  }
+  if (command === "capacity") return { engine: await reader.read(paths.engine, 16384, "engine"), observation: await reader.read(paths.observation, 16384, "capacity-observation"), action: await reader.read(paths.action, 4096, "capacity-action") }
+  const artifactPaths = record(await readJSON(paths.artifacts, 65536, "artifacts-descriptor"), Object.keys(INPUT_CAPS), "INPUT_INVALID")
+  const resources = await readJSON(paths.resources, 65536, "resources"), observationPaths = await readJSON(paths.observations, 33554432, "observations-descriptor")
+  const groupPaths = record(await readJSON(paths.groups, 33554432, "groups-descriptor"), ["outer", "actions"], "INPUT_INVALID")
+  const producer_receipt = await reader.read(paths["producer-receipt"], 65536, "producer-receipt")
+  need(Array.isArray(groupPaths.actions) && groupPaths.actions.length <= 1024 && Array.isArray(observationPaths) && observationPaths.length <= 16, "INPUT_INVALID")
+  const references = new Set(groupPaths.actions.map((path) => pathValue(path)))
+  const artifacts = Object.create(null)
+  for (const [key, cap] of Object.entries(INPUT_CAPS)) artifacts[key] = artifactPaths[key] === null ? null : await reader.read(artifactPaths[key], cap, `artifact:${key}`, { private: key !== "native" })
+  const groups = { outer: groupPaths.outer === null ? null : await reader.read(groupPaths.outer, 4096, "outer-process"), actions: [] }
+  for (const path of groupPaths.actions) groups.actions.push(await reader.read(path, 4096, "process"))
+  const observations = []; let total = 0
+  for (const [rowIndex, row] of observationPaths.entries()) {
+    record(row, ["kind", "id", "owner", "before_owner_verified", "after_absent", "actions"], "INPUT_INVALID")
+    need(Array.isArray(row.actions) && row.actions.length <= 64, "INPUT_INVALID"); total += row.actions.length; need(total <= 1024, "INPUT_INVALID")
+    const actions = []
+    for (const [actionIndex, action] of row.actions.entries()) {
+      record(action, ["phase", "action_kind", "output", "process", "container_delete_mode"], "INPUT_INVALID")
+      pathValue(action.process); need(references.has(action.process), "INPUT_INVALID")
+      actions.push({ phase: action.phase, action_kind: action.action_kind, container_delete_mode: action.container_delete_mode,
+        output: await reader.read(action.output, 16384, `output:${rowIndex}:${actionIndex}`, { empty: true }), process: await reader.read(action.process, 4096, "process") })
+    }
+    observations.push({ kind: row.kind, id: row.id, owner: row.owner, before_owner_verified: row.before_owner_verified, after_absent: row.after_absent, actions })
+  }
+  const producer_sources = await reader.sources(paths["producer-checkout"], PRODUCER_PATHS)
+  return { artifacts, resources, observations, groups, producer_sources, producer_receipt }
+}
+async function handoffCLI(argv) {
+  try {
+    const { command, paths } = cliArguments(argv), reader = inputReader()
+    const input = await cliInputs(command, paths, reader)
+    const api = { controller: buildOwnedLayoutHandoff, build: buildOwnedLayoutNativeSeal, capacity: assessOwnedLayoutEngineCapacity, terminal: buildOwnedLayoutOwnerTerminal }
+    const response = api[command](input)
+    await reader.finish()
+    if (response.private_json !== null) process.stdout.write(response.private_json)
+    if (response.status !== "ready") process.stderr.write(`${response.public.failure_code}\n`)
+    return response.status === "ready" ? 0 : 1
+  } catch (error) {
+    process.stderr.write(`${code(failures.get(error) ?? "FILE_INVALID")}\n`); return 1
+  }
+}
+if (import.meta.main) handoffCLI(process.argv.slice(2)).then((status) => { process.exitCode = status })

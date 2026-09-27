@@ -4,7 +4,7 @@ import { createRequire, Module } from "node:module"
 import { fileURLToPath } from "node:url"
 import { parseArgs, runBenchmark } from "./runner.mjs"
 import { providerById } from "./providers.mjs"
-import { STORAGE_OPERATION_NAMES, STORAGE_OPERATION_FAMILIES, STORAGE_INSTRUMENTED_OPERATION_NAMES, STORAGE_CALL_SEMANTICS, STORAGE_BYTE_SEMANTICS, STORAGE_ROW_SEMANTICS, TIDB_DIAGNOSTIC_COVERAGE } from "./diagnostics.mjs"
+import { STORAGE_OPERATION_NAMES, STORAGE_OPERATION_FAMILIES, STORAGE_INSTRUMENTED_OPERATION_NAMES, STORAGE_CALL_SEMANTICS, STORAGE_BYTE_SEMANTICS, STORAGE_ROW_SEMANTICS, TIDB_DIAGNOSTIC_COVERAGE, FOUNDATIONDB_DIAGNOSTIC_UNAVAILABLE } from "./diagnostics.mjs"
 
 const require = createRequire(import.meta.url)
 const capturePath = fileURLToPath(new URL("./capture-native.cjs", import.meta.url))
@@ -454,7 +454,7 @@ function syntheticNativeSnapshot(live) {
     schema_version: "mount-rs.storage-diagnostics.v3", enabled: true, scope: "process", quiescent_snapshot_required: true, elapsed_semantics: "inclusive_wall_nanoseconds",
     measurement: {
       storage_calls: STORAGE_CALL_SEMANTICS, storage_bytes: STORAGE_BYTE_SEMANTICS, storage_rows: STORAGE_ROW_SEMANTICS,
-      storage_operations: STORAGE_OPERATION_NAMES, storage_families: STORAGE_OPERATION_FAMILIES, storage_instrumented_operations: STORAGE_INSTRUMENTED_OPERATION_NAMES, tidb_coverage: TIDB_DIAGNOSTIC_COVERAGE,
+      storage_operations: STORAGE_OPERATION_NAMES, storage_families: STORAGE_OPERATION_FAMILIES, storage_instrumented_operations: STORAGE_INSTRUMENTED_OPERATION_NAMES, tidb_coverage: TIDB_DIAGNOSTIC_COVERAGE, foundationdb_coverage: FOUNDATIONDB_DIAGNOSTIC_UNAVAILABLE,
       storage_duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap", forwarding_boxes: "enabled_napi_dynamic_provider_box_pin_site_calls_and_requested_future_object_bytes; excludes_allocator_overhead_and_other_allocations", profile: "existing_core_profile_counters", sqlite: "live_connection_pager_and_sql_category_counters; pager_bytes_are_page_size_estimates", r2: "live_store_logical_calls_and_cache_hits; not_http_attempts",
       r2_api: { schema: "mount-rs.object-store-api.v1", scope: "live_registered_split_r2_block_store_instances", calls: "object_store_adapter_method_invocations; not_http_attempts_or_internal_retries", duration: "inclusive_wall_nanoseconds_at_invoked_adapter_await; excludes_argument_preparation", upload_bytes: "attempted=submitted_payload; confirmed=put_opts_ok_only", returned_bytes: "successful_body_materialization_before_integrity_validation", latency_max: "cumulative_per_instance; exact_phase_max_unavailable", reconcile_listing: "unavailable", excluded: ["backing_marker_prepare_and_verify", "concurrent_prefix_probes", "qualification_and_preflight", "unregistered_rust_factories_and_mount_r2", "internal_client_retries"] },
       unavailable: { http_attempts: "unavailable", internal_successful_retries: "unavailable", physical_device_iops: "unavailable", tidb_pool_wait: "isolated_queue_only_wait_unavailable", native_allocation_count: "unavailable", js_allocation_count: "unavailable" },

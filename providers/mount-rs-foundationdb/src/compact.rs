@@ -116,13 +116,18 @@ impl<'a> View<'a> {
     async fn has_prefix(&mut self, prefix: Vec<u8>) -> TxnResult<bool> {
         let end = range_end(&prefix).map_err(TxnError::Fs)?;
         self.budget.range(&prefix, &end)?;
-        let key = self
-            .trx
-            .get_key(
-                &foundationdb::KeySelector::first_greater_or_equal(prefix.clone()),
-                false,
+        let selector = foundationdb::KeySelector::first_greater_or_equal(prefix.clone());
+        let key = if storage::enabled() {
+            transaction_metrics::call_async(
+                &CoreObserver,
+                Kind::GetKey,
+                || self.trx.get_key(&selector, false),
+                |key| key.len() as u64,
             )
-            .await?;
+            .await?
+        } else {
+            self.trx.get_key(&selector, false).await?
+        };
         self.budget.point(&key, 0)?;
         Ok(key.starts_with(&prefix))
     }
@@ -170,9 +175,11 @@ impl<'a> View<'a> {
             .lock()
             .unwrap()
             .push(("range", prefix.clone(), 0));
-        let mut stream = self
-            .trx
-            .get_ranges_keyvalues((prefix.as_slice(), end.as_slice()).into(), false);
+        let mut stream = std::pin::pin!(ranges_keyvalues_observed(
+            self.trx,
+            (prefix.as_slice(), end.as_slice()).into(),
+            false,
+        ));
         let mut rows = Vec::new();
         while let Some(kv) = stream.try_next().await? {
             self.budget.point(kv.key(), kv.value().len())?;

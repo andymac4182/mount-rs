@@ -13,6 +13,7 @@ control when measuring the cost of the observers.
 | Filesystem and catalog | Existing fixed core events, queue/gate time, query/decode document bytes, SQLite pager observations | Inclusive wall time and logical document traffic; pager activity is separate from device I/O |
 | SDK adapters | All metadata and block methods, outcomes, cancellations, in-flight work, known block bytes | Calls through the erased adapters; metadata bytes remain unavailable |
 | TiDB adapter | Pool checkout, session setup, schema/open, transaction begin/commit/explicit rollback, SQL families and known returned rows | Checkout includes lazy connection/setup work. SQL calls are distinct from MySQL commands, TiKV requests and device I/O |
+| FoundationDB adapter | Transaction creation, closure attempts, point reads, selected-key reads, range pages, commit and explicit retry recovery | Client dispatch and closure attempts; range pages are distinct from returned keys, wire RPCs and device I/O |
 | Object-store block adapter | Actual get/put/head/delete invocations and body reads, reason, outcomes, claim leader/follower counters | Adapter API calls and known body bytes; internal HTTP retries and reconciliation listing remain unavailable |
 | QUIC server | TLS/application handshake, authentication, admission, request/read/dispatch/encode/submit/cleanup, latency buckets and gauges | Inclusive application spans; submission to Quinn does not establish peer acknowledgment |
 | QUIC authentication | Token decode, catalog load, key-cache wait, policy selection, key fetch, JWT verification and grant authorization | Inclusive stage times within the existing handshake/renewal deadline; key fetch is only recorded when requested |
@@ -24,6 +25,13 @@ Fixed storage rows have terminal outcomes, in-flight gauges, inclusive elapsed
 time and 32 logarithmic latency buckets. Returned-row observations distinguish
 known zero rows from an unavailable row count. Nonzero values in nested families
 must not be added as unique application operations or exclusive CPU time.
+
+For slow-operation logs, set `MOUNT_RS_TRACE_STORAGE=1` with profiling before
+constructing stores. Operations taking at least 100 ms emit
+`MOUNT_RS_STORAGE_SLOW` with the fixed operation label, outcome and elapsed
+microseconds. Logs contain no storage keys, paths or raw errors. Leave tracing
+off for the allocation and throughput baseline; writing diagnostic output adds
+observer work.
 
 ## Locate the bottleneck in one measured phase
 
@@ -171,6 +179,46 @@ Native storage diagnostics use `mount-rs.storage-diagnostics.v3`, with exact
 decimal strings for counters. The closed row registry and the instrumented-row
 coverage are separate: reserving a row does not prove that a provider records it.
 The object-store API sub-schema remains `mount-rs.object-store-api.v1`.
+
+### FoundationDB attempts
+
+The expanded bank appends these seven rows to the existing 78 rows:
+
+| Row | Boundary | Known successful bytes |
+| --- | --- | --- |
+| `foundationdb.transaction.create` | Native transaction creation | None recorded |
+| `foundationdb.transaction.closure_attempt` | Each invocation of the transaction closure | None recorded |
+| `foundationdb.read.get` | Point-read dispatch and wait | Returned value length; absent value is known zero |
+| `foundationdb.read.get_key` | Selected-key dispatch and wait | Returned key length |
+| `foundationdb.read.get_range_page` | Each dispatched range page and wait | Returned key and value lengths |
+| `foundationdb.transaction.commit` | Commit dispatch and wait | None recorded |
+| `foundationdb.transaction.on_error` | Explicit retry recovery and backoff wait | None recorded |
+
+`measurement.foundationdb_coverage` distinguishes audited source wiring from
+feature-disabled or unsupported builds. Its site counts describe six transaction
+runners, two point-read helpers, one selected-key helper and three range
+consumers. They are source counts, rather than observed attempts. A feature-off
+bank reserves the seven rows but reports the FoundationDB families as
+unavailable. Old 78-row snapshots remain incomplete under the 85-row contract.
+
+Compare closure attempts with successful transaction creations to expose
+retries, and inspect commit and `on_error` latency separately. These are nested,
+inclusive wall spans. They do not report internal client retries, wire RPCs,
+wire bytes, server execution time or physical IOPS. Returned-row observations
+remain SQL-only. Cancellation records an abandoned observed wait; it does not
+establish native operation settlement, rollback or durability after a commit
+error.
+
+The explicit allocation gate measures the warmed global core `Span` lifecycle
+for all seven rows, with tracing off. It excludes first initialization and
+native client futures. Its integration test is intentionally ignored by ordinary
+suites and is selected explicitly in observability CI with
+`--ignored --exact warmed_core_spans_record_without_added_allocations` and
+`MOUNT_RS_PROFILE_IO=1 MOUNT_RS_TRACE_STORAGE=0`. CI retains its output in the
+`storage-allocation-controls` artifact; a default ignored result does not
+qualify this gate.
+
+### Object-store registrations
 
 Registered split R2 and RustFS block stores have separate `r2` and `rustfs`
 families. Each exposes logical calls/cache hits, ten raw adapter rows, upload
