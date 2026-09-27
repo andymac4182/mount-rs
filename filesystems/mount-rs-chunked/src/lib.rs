@@ -7,6 +7,8 @@
 //! provide copy-on-write views.
 
 mod causal_metrics;
+#[cfg(all(test, unix))]
+mod create_guard_metrics_tests;
 mod migration;
 pub use migration::{migrate_mrc1_backing, migrate_trusted_unstamped_mrc1_backing};
 
@@ -6834,10 +6836,11 @@ fn apply_whole_file_mutation(
 ) -> Result<WholeFileMutationResult> {
     if mutation.new_inode {
         let entry = walk(namespace, &mutation.path, true, "open", 0)?;
-        if current_revision != mutation.expected_revision
-            || namespace.next_inode != mutation.inode
-            || entry.node.is_some()
-        {
+        let revision_mismatch = current_revision != mutation.expected_revision;
+        let allocation_mismatch = namespace.next_inode != mutation.inode;
+        let path_present = entry.node.is_some();
+        causal_metrics::observe_create_guard(revision_mismatch, allocation_mismatch, path_present);
+        if revision_mismatch || allocation_mismatch || path_present {
             return Ok(WholeFileMutationResult::Conflict);
         }
         namespace.next_inode = namespace
@@ -10438,6 +10441,9 @@ mod compact_install_tests {
     use super::*;
     use futures_lite::future::block_on;
     use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
+    use std::sync::atomic::AtomicU64;
+
+    static VOLUME_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     struct PrivateVolume(std::path::PathBuf);
 
@@ -10448,8 +10454,9 @@ mod compact_install_tests {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
+            let sequence = VOLUME_SEQUENCE.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir().join(format!(
-                "mount-rs-compact-install-{}-{nonce}",
+                "mount-rs-compact-install-{}-{nonce}-{sequence}",
                 std::process::id(),
             ));
             std::fs::DirBuilder::new()

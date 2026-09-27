@@ -280,12 +280,26 @@ const causalProfileNames = [
   "filesystem.mutation.request.receiver_closed",
   "filesystem.mutation.request.error",
   "filesystem.mutation.request.reply_sent",
+  "filesystem.mutation.create_guard.evaluated",
+  "filesystem.mutation.create_guard.passed",
+  "filesystem.mutation.create_guard.conflict",
+  "filesystem.mutation.create_guard.revision_mismatch",
+  "filesystem.mutation.create_guard.allocation_mismatch",
+  "filesystem.mutation.create_guard.path_present",
 ]
 
 test("causal core projection preserves fixed prefix, new zero rows and exact decimal strings", () => {
-  assert.equal(causalProfileNames.length, 108)
+  assert.equal(causalProfileNames.length, 114)
   assert.equal(causalProfileNames[46], "provider.inode_serialized_bytes")
   assert.equal(causalProfileNames[47], "filesystem.block_put.initial")
+  assert.deepEqual(causalProfileNames.slice(108), [
+    "filesystem.mutation.create_guard.evaluated",
+    "filesystem.mutation.create_guard.passed",
+    "filesystem.mutation.create_guard.conflict",
+    "filesystem.mutation.create_guard.revision_mismatch",
+    "filesystem.mutation.create_guard.allocation_mismatch",
+    "filesystem.mutation.create_guard.path_present",
+  ])
   const source = model()
   source.native.measurement.profile = "existing_core_profile_counters"
   source.native.profile = { entries: causalProfileNames.map((name) => ({ name, calls: "0", elapsed_ns: "0", units: "0" })) }
@@ -294,6 +308,11 @@ test("causal core projection preserves fixed prefix, new zero rows and exact dec
   assert.deepEqual(value.core_profile.entries, source.native.profile.entries)
   assert.equal(value.core_profile.status, "observed")
   assert.equal(value.storage.entries.length, 85)
+  source.native.profile.entries = source.native.profile.entries.slice(0, 108)
+  const oldSnapshot = projectOwnedLayoutPhaseMetrics(source).core_profile
+  assert.equal(oldSnapshot.status, "observed")
+  assert.equal(oldSnapshot.entries.length, 108)
+  assert.equal(oldSnapshot.entries.some((row) => row.name === causalProfileNames[108]), false)
   source.native.profile.entries = source.native.profile.entries.slice(0, 47)
   const partial = projectOwnedLayoutPhaseMetrics(source).core_profile
   assert.equal(partial.status, "observed")
@@ -323,4 +342,12 @@ test("partial projector retains six existing optional compact labels independent
   assert.equal(value.status, "observed")
   assert.deepEqual(value.entries, source.native.profile.entries)
   assert.match(value.scope, /absent_events_unavailable/u)
+  source.native.profile.entries = [
+    ...causalProfileNames.map((name) => ({ name, calls: "0", elapsed_ns: "0", units: "0" })),
+    ...source.native.profile.entries,
+  ]
+  const complete = projectOwnedLayoutPhaseMetrics(source).core_profile
+  assert.equal(complete.status, "observed")
+  assert.equal(complete.entries.length, 120)
+  assert.deepEqual(complete.entries, source.native.profile.entries)
 })
