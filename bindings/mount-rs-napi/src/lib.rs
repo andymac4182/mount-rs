@@ -266,7 +266,11 @@ fn storage_operation_families() -> Value {
         "blob_cache":{"operations":matching(&["blob_cache."]),
             "calls":"cache_stage_invocations; lookups_include_hits_and_misses; waits_count_acquisitions_or_termination",
             "bytes":"known_successful_ram_and_disk_lookup_returned_payload_bytes_only; waits_and_connection_stages_zero; misses_zero",
-            "returned_rows":"unavailable","duration":duration}
+            "returned_rows":"unavailable","duration":duration},
+        "client_quic":{"operations":["client.quic.open_bi"],
+            "calls":"stream_acquisition_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments",
+            "bytes":"unavailable","returned_rows":"unavailable",
+            "duration":"inclusive_open_bi_await_nanoseconds; not_exclusive_cpu_or_network_time"}
     })
 }
 
@@ -7274,13 +7278,13 @@ mod tests {
         let families = snapshot["measurement"]["storage_families"]
             .as_object()
             .unwrap();
-        assert_eq!(families.len(), 11);
+        assert_eq!(families.len(), 12);
         let declared = families
             .values()
             .flat_map(|family| family["operations"].as_array().unwrap())
             .map(|name| name.as_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(declared.len(), 91);
+        assert_eq!(declared.len(), 92);
         assert_eq!(
             declared
                 .into_iter()
@@ -7310,7 +7314,7 @@ mod tests {
             "known_selected_successful_returned_value_key_and_range_page_key_value_payload_bytes_only"
         );
         let names = storage::operation_names();
-        assert_eq!(names.len(), 91);
+        assert_eq!(names.len(), 92);
         assert_eq!(
             &names[78..85],
             &[
@@ -7324,7 +7328,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            &names[85..],
+            &names[85..91],
             &[
                 "blob_cache.miss.admission_wait",
                 "blob_cache.miss.singleflight_wait",
@@ -7334,12 +7338,17 @@ mod tests {
                 "blob_cache.peer.connection_establish",
             ]
         );
-        assert_eq!(families["blob_cache"]["operations"], json!(&names[85..]));
+        assert_eq!(families["blob_cache"]["operations"], json!(&names[85..91]));
         assert_eq!(families["blob_cache"]["returned_rows"], "unavailable");
         assert_eq!(
             families["blob_cache"]["bytes"],
             "known_successful_ram_and_disk_lookup_returned_payload_bytes_only; waits_and_connection_stages_zero; misses_zero"
         );
+        assert_eq!(&names[91..], &["client.quic.open_bi"]);
+        assert_eq!(families["client_quic"]["operations"], json!(&names[91..]));
+        assert_eq!(families["client_quic"]["bytes"], "unavailable");
+        assert_eq!(families["client_quic"]["returned_rows"], "unavailable");
+        assert!(!storage_instrumented_operation_names().contains(&"client.quic.open_bi"));
         assert_eq!(LEGACY_NON_TIDB_INSTRUMENTED_OPERATIONS.len(), 60);
         assert_eq!(&names[..60], LEGACY_NON_TIDB_INSTRUMENTED_OPERATIONS);
         assert_eq!(
@@ -7372,7 +7381,20 @@ mod tests {
                 "exact static site count {field}"
             );
         }
-        assert_eq!(snapshot["storage"]["entries"].as_array().unwrap().len(), 91);
+        assert_eq!(snapshot["storage"]["entries"].as_array().unwrap().len(), 92);
+        let client_row = &snapshot["storage"]["entries"][91];
+        assert_eq!(client_row["name"], "client.quic.open_bi");
+        for field in [
+            "calls",
+            "success",
+            "error",
+            "cancelled",
+            "bytes",
+            "elapsed_ns",
+            "in_flight",
+        ] {
+            assert_eq!(client_row[field], "0");
+        }
         for (index, name) in names[78..85].iter().enumerate() {
             let row = &snapshot["storage"]["entries"][78 + index];
             assert_eq!(row["name"], *name);
@@ -7458,7 +7480,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            91
+            92
         );
         assert!(
             instrumented

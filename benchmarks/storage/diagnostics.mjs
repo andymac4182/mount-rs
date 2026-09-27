@@ -120,6 +120,7 @@ export const STORAGE_OPERATION_NAMES = [
   "blob_cache.disk.lookup",
   "blob_cache.peer.connection_lock_wait",
   "blob_cache.peer.connection_establish",
+  "client.quic.open_bi",
 ]
 const storageNames = STORAGE_OPERATION_NAMES
 export const STORAGE_CALL_SEMANTICS = "fixed_label_provider_and_driver_operations; families_overlap_and_are_not_application_iops"
@@ -137,6 +138,7 @@ export const STORAGE_OPERATION_FAMILIES = {
   foundationdb_transaction: { operations: ["foundationdb.transaction.create", "foundationdb.transaction.closure_attempt", "foundationdb.transaction.commit", "foundationdb.transaction.on_error"], calls: "provider_closure_attempts_and_native_create_commit_on_error_invocations; distinct_units_not_logical_transactions", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
   foundationdb_read: { operations: ["foundationdb.read.get", "foundationdb.read.get_key", "foundationdb.read.get_range_page"], calls: "native_client_read_method_invocations; range_page_calls_not_key_value_count", bytes: "known_selected_successful_returned_value_key_and_range_page_key_value_payload_bytes_only", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
   blob_cache: { operations: STORAGE_OPERATION_NAMES.filter((name) => name.startsWith("blob_cache.")), calls: "cache_stage_invocations; lookups_include_hits_and_misses; waits_count_acquisitions_or_termination", bytes: "known_successful_ram_and_disk_lookup_returned_payload_bytes_only; waits_and_connection_stages_zero; misses_zero", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  client_quic: { operations: ["client.quic.open_bi"], calls: "stream_acquisition_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_open_bi_await_nanoseconds; not_exclusive_cpu_or_network_time" },
 }
 export const TIDB_DIAGNOSTIC_COVERAGE = {
   schema: "mount-rs-tidb-client-diagnostic-coverage-v1", status: "source_sites_instrumented",

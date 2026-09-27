@@ -329,8 +329,8 @@ impl ServerProcess {
         let storage = &process["storage"]["snapshot"];
         let storage_entries = storage["entries"].as_array().unwrap();
         let names = mount_rs_core::diagnostics::storage::operation_names();
-        assert_eq!(storage_entries.len(), 91);
-        assert_eq!(names.len(), 91);
+        assert_eq!(storage_entries.len(), 92);
+        assert_eq!(names.len(), 92);
         assert_eq!(storage_entries[77]["name"], "tidb.sql.flush_probe");
         assert_eq!(
             storage_entries[78..85]
@@ -348,7 +348,7 @@ impl ServerProcess {
             ]
         );
         assert_eq!(
-            storage_entries[85..]
+            storage_entries[85..91]
                 .iter()
                 .map(|entry| entry["name"].as_str().unwrap())
                 .collect::<Vec<_>>(),
@@ -361,6 +361,7 @@ impl ServerProcess {
                 "blob_cache.peer.connection_establish",
             ]
         );
+        assert_eq!(storage_entries[91]["name"], "client.quic.open_bi");
         for (entry, name) in storage_entries.iter().zip(names) {
             assert_eq!(entry["name"], *name);
             assert_eq!(entry["latency_log2_us"].as_array().unwrap().len(), 32);

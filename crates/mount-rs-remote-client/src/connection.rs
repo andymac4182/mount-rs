@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use base64::Engine;
+use mount_rs_core::diagnostics::storage::{Operation as StorageOperation, Span as StorageSpan};
 use mount_rs_remote_protocol::binary::{self, IoRequest};
 use mount_rs_remote_protocol::{Message, Operation, PROTOCOL_VERSION, read_frame, write_frame};
 use quinn::crypto::rustls::QuicClientConfig;
@@ -89,6 +90,22 @@ struct QuicTransport {
     version: u16,
 }
 
+impl QuicTransport {
+    async fn open_bi(&self) -> Result<(quinn::SendStream, quinn::RecvStream), ClientError> {
+        let mut span = StorageSpan::new(StorageOperation::RemoteClientQuicOpenBi);
+        match self.connection.open_bi().await {
+            Ok(streams) => {
+                span.finish_success(0);
+                Ok(streams)
+            }
+            Err(_) => {
+                span.finish_error();
+                Err(ClientError::Transport)
+            }
+        }
+    }
+}
+
 // Once a stream is acquired, dropping a caller may leave a committed operation
 // without its acknowledgment. Close the connection rather than reusing it.
 struct QuicTransaction<'a> {
@@ -110,11 +127,7 @@ impl Transport for QuicTransport {
         self.version
     }
     async fn exchange(&self, message: Message) -> Result<Message, ClientError> {
-        let (mut send, mut recv) = self
-            .connection
-            .open_bi()
-            .await
-            .map_err(|_| ClientError::Transport)?;
+        let (mut send, mut recv) = self.open_bi().await?;
         let mut transaction = QuicTransaction {
             transport: self,
             completion: TransactionCompletion::default(),
@@ -139,11 +152,7 @@ impl Transport for QuicTransport {
         request: &IoRequest<&str>,
         buffer: &mut [u8],
     ) -> Result<usize, ClientError> {
-        let (mut send, mut recv) = self
-            .connection
-            .open_bi()
-            .await
-            .map_err(|_| ClientError::Transport)?;
+        let (mut send, mut recv) = self.open_bi().await?;
         let mut transaction = QuicTransaction {
             transport: self,
             completion: TransactionCompletion::default(),
@@ -167,11 +176,7 @@ impl Transport for QuicTransport {
         request: &IoRequest<&str>,
         data: &[u8],
     ) -> Result<usize, ClientError> {
-        let (mut send, mut recv) = self
-            .connection
-            .open_bi()
-            .await
-            .map_err(|_| ClientError::Transport)?;
+        let (mut send, mut recv) = self.open_bi().await?;
         let mut transaction = QuicTransaction {
             transport: self,
             completion: TransactionCompletion::default(),
@@ -673,6 +678,10 @@ impl QuicEstablishment {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "connection_metrics_tests.rs"]
+mod metrics_tests;
 
 #[cfg(test)]
 mod tests {

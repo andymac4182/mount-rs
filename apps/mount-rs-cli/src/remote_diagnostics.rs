@@ -257,7 +257,7 @@ mod tests {
         let entries = process["storage"]["snapshot"]["entries"]
             .as_array()
             .unwrap();
-        assert_eq!(entries.len(), 91);
+        assert_eq!(entries.len(), 92);
         for (actual, expected) in entries.iter().zip(&storage.entries) {
             assert_eq!(actual["name"], expected.name);
             assert_eq!(actual["calls"].as_u64(), Some(exact));
@@ -282,7 +282,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            entries[85..]
+            entries[85..91]
                 .iter()
                 .map(|entry| entry["name"].as_str().unwrap())
                 .collect::<Vec<_>>(),
@@ -295,6 +295,7 @@ mod tests {
                 "blob_cache.peer.connection_establish",
             ]
         );
+        assert_eq!(entries[91]["name"], "client.quic.open_bi");
         assert_eq!(
             process["storage"]["snapshot"]["in_flight"].as_u64(),
             Some(exact)
@@ -327,7 +328,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            91
+            92
         );
         for name in [
             "raw_object_store",
@@ -414,7 +415,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            91
+            92
         );
         for index in [134, 135] {
             let row = &banks["profile"]["snapshot"]["entries"][index];

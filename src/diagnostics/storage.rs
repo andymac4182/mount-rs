@@ -110,8 +110,9 @@ pub enum Operation {
     BlobCacheDiskLookup,
     BlobCachePeerConnectionLockWait,
     BlobCachePeerConnectionEstablish,
+    RemoteClientQuicOpenBi,
 }
-const NAMES: [&str; 91] = [
+const NAMES: [&str; 92] = [
     "metadata.load",
     "metadata.load_if_changed",
     "metadata.snapshot",
@@ -203,6 +204,7 @@ const NAMES: [&str; 91] = [
     "blob_cache.disk.lookup",
     "blob_cache.peer.connection_lock_wait",
     "blob_cache.peer.connection_establish",
+    "client.quic.open_bi",
 ];
 
 /// Fixed serialized row order. Appended families have separate invocation semantics.
@@ -668,7 +670,7 @@ mod tests {
     #[test]
     fn fixed_names_match_appended_sdk_tidb_and_foundationdb_rows() {
         let names = operation_names();
-        assert_eq!(names.len(), 91);
+        assert_eq!(names.len(), 92);
         assert_eq!(
             names[Operation::SdkMetadataLoadIfChanged as usize],
             "sdk.metadata.load_if_changed"
@@ -719,6 +721,8 @@ mod tests {
                 "blob_cache.peer.connection_establish",
             ]
         );
+        assert_eq!(Operation::RemoteClientQuicOpenBi as usize, 91);
+        assert_eq!(names[91], "client.quic.open_bi");
         assert_eq!(
             names
                 .iter()

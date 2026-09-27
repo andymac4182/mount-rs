@@ -362,7 +362,7 @@ test("current verifier refuses a complete historical 134-core / 85-storage snaps
   const { pilot, build } = model()
   const workload = pilot.native_phases.phases[0]
   assert.equal(workload.core_profile.entries.length, 136)
-  assert.equal(workload.storage.length, 91)
+  assert.equal(workload.storage.length, 92)
   workload.core_profile.entries.splice(134)
   workload.storage.splice(85)
   assert.throws(() => verifyPilot(pilot, build), { code: "pilot_evidence_rejected", reason: "native_evidence" })
@@ -391,10 +391,11 @@ for (const name of [
   "blob_cache.miss.admission_wait", "blob_cache.miss.singleflight_wait",
   "blob_cache.ram.lookup", "blob_cache.disk.lookup",
   "blob_cache.peer.connection_lock_wait", "blob_cache.peer.connection_establish",
+  "client.quic.open_bi",
 ]) test(`current exact missing ${name} storage row rejects qualification`, () => {
   const { pilot, build } = model()
   const rows = pilot.native_phases.phases[0].storage
-  assert.equal(rows.length, 91)
+  assert.equal(rows.length, 92)
   rows.splice(rows.findIndex((row) => row.name === name), 1)
   assert.throws(() => verifyPilot(pilot, build), { code: "pilot_evidence_rejected", reason: "native_evidence" })
 })

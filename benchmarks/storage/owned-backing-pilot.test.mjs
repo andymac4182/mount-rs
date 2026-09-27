@@ -1076,21 +1076,36 @@ test("causal pilot requires new rows without manufacturing old-snapshot zeros", 
   assert.deepEqual(complete.entries.slice(134).map((row) => row.name), ["blob_cache.ram.hit_bytes", "blob_cache.disk.hit_bytes"])
 })
 
-test("historical 85-row storage snapshot leaves six appended cache stages unavailable", () => {
+test("historical 85-row storage snapshot leaves seven appended cache and client stages unavailable", () => {
   const fixture = resultFixture()
   const oldStorage = STORAGE_OPERATION_NAMES.slice(0, 85).map((name) => ({ name, calls: "0", success: "0", error: "0", cancelled: "0" }))
   fixture.providers[0].storageDiagnostics = { phases: [{ name: "workload-4096bytes", native: {
     complete: false, storage: { entries: oldStorage },
   } }] }
   const projected = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1].storage
-  assert.equal(projected.length, 91)
+  assert.equal(projected.length, 92)
   assert.deepEqual(projected.slice(85).map((row) => row.name), [
     "blob_cache.miss.admission_wait", "blob_cache.miss.singleflight_wait",
     "blob_cache.ram.lookup", "blob_cache.disk.lookup",
     "blob_cache.peer.connection_lock_wait", "blob_cache.peer.connection_establish",
+    "client.quic.open_bi",
   ])
   assert.ok(projected.slice(0, 85).every((row) => row.calls === "0"))
   assert.ok(projected.slice(85).every((row) => row.calls === null && row.success === null && row.error === null && row.cancelled === null))
+})
+
+test("historical 91-row storage snapshot leaves the client stream stage unavailable", () => {
+  const fixture = resultFixture()
+  const oldStorage = STORAGE_OPERATION_NAMES.slice(0, 91).map((name) => ({ name, calls: "0", success: "0", error: "0", cancelled: "0" }))
+  fixture.providers[0].storageDiagnostics = { phases: [{ name: "workload-4096bytes", native: {
+    complete: false, storage: { entries: oldStorage },
+  } }] }
+  const projected = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1].storage
+  assert.equal(projected.length, 92)
+  assert.ok(projected.slice(0, 91).every((row) => row.calls === "0"))
+  assert.equal(projected[91].name, "client.quic.open_bi")
+  for (const field of ["calls", "success", "error", "cancelled", "bytes", "returned_rows", "returned_row_observations", "elapsed_ns", "in_flight_start", "in_flight_end"]) assert.equal(projected[91][field], null)
+  assert.deepEqual(projected[91].latency_log2_us, Array(32).fill(null))
 })
 
 test("compact, refresh, and cache pilot projection retains measured units without numeric coercion", () => {

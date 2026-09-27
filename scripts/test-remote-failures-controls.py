@@ -52,6 +52,16 @@ class ResultControls(unittest.TestCase):
 
 
 class CacheStageSelectors(unittest.TestCase):
+    def test_client_stream_metrics_require_one_profiled_executed_case(self):
+        name = "connection::metrics_tests::quic_stream_acquisition_outcomes_preserve_transactions"
+        command, limit, profile, trace = parent.COMMANDS["clientmetrics"]
+        self.assertEqual((limit, profile, trace), (180, 1, 0))
+        self.assertEqual(command, ["./scripts/cargo-shared", "test", "-p", "mount-rs-remote-client", "--lib", "--locked", "--offline", "--", "--ignored", "--exact", name, "--test-threads=1", "--nocapture"])
+        self.assertEqual(parent.EXACT_CASES["clientmetrics"], name)
+        self.assertTrue(parent.exact_case_passed(f"running 1 test\ntest {name} ... behavior_oracles=complete\nok\n{SUMMARY}", name))
+        self.assertFalse(parent.exact_case_passed("running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored;\n", name))
+        self.assertFalse(parent.exact_case_passed(f"running 1 test\ntest {name} ... ignored\ntest result: ok. 0 passed; 0 failed; 1 ignored;\n", name))
+
     def test_create_qualification_requires_complete_executed_controls(self):
         for kind, count in [("createpath", 5), ("createunit", 4)]:
             names = parent.EXPECTED_SUITES[kind]

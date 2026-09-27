@@ -68,7 +68,7 @@ test("preserves audited FoundationDB source coverage and precise returned payloa
   Object.assign(entry, { calls: "1", success: "1", bytes: "9007199254740993", elapsed_ns: "9007199254740995", latency_log2_us: ["1", ...Array(31).fill("0")] })
   const value = projectOwnedLayoutPhaseMetrics(source)
   assert.equal(value.status, "observed")
-  assert.equal(value.storage.entries.length, 91)
+  assert.equal(value.storage.entries.length, 92)
   assert.deepEqual(value.storage.foundationdb_coverage, FOUNDATIONDB_DIAGNOSTIC_COVERAGE)
   assert.deepEqual(value.storage.instrumented_operations.slice(-7), FOUNDATIONDB_DIAGNOSTIC_COVERAGE.operations)
   const projected = value.storage.entries.find((row) => row.name === "foundationdb.read.get")
@@ -78,7 +78,7 @@ test("preserves audited FoundationDB source coverage and precise returned payloa
 })
 test("feature-off fixed FoundationDB rows retain explicit unavailable coverage", () => {
   const value = projectOwnedLayoutPhaseMetrics(model())
-  assert.equal(value.status, "observed"); assert.equal(value.storage.entries.length, 91)
+  assert.equal(value.status, "observed"); assert.equal(value.storage.entries.length, 92)
   assert.deepEqual(value.storage.foundationdb_coverage, FOUNDATIONDB_DIAGNOSTIC_UNAVAILABLE)
   assert.equal(value.storage.instrumented_operations.some((name) => name.startsWith("foundationdb.")), false)
   assert.match(value.storage.scope, /audited_instrumented_operations_separately_declared/u)
@@ -152,6 +152,7 @@ const faults = [
   ["private FoundationDB source metadata", (p) => { p.native.measurement.foundationdb_coverage.private_key = "PRIVATE_SECRET"; return p }],
   ["legacy78 row inventory", (p) => { p.native.storage.entries.length = 78; p.native.measurement.storage_operations.length = 78; delete p.native.measurement.foundationdb_coverage; return p }],
   ["legacy85 row inventory", (p) => { p.native.storage.entries.length = 85; p.native.measurement.storage_operations.length = 85; delete p.native.measurement.storage_families.blob_cache; return p }],
+  ["legacy91 row inventory", (p) => { p.native.storage.entries.length = 91; p.native.measurement.storage_operations.length = 91; delete p.native.measurement.storage_families.client_quic; return p }],
   ["cyclic input", (p) => { p.native.storage.circular = p; return p }],
   ["overcap evidence", (p) => { p.native.secret = "PRIVATE".repeat(1_300_000); return p }],
 ]
@@ -355,7 +356,7 @@ test("causal core projection preserves fixed prefix, new zero rows and exact dec
   const value = projectOwnedLayoutPhaseMetrics(source)
   assert.deepEqual(value.core_profile.entries, source.native.profile.entries)
   assert.equal(value.core_profile.status, "observed")
-  assert.equal(value.storage.entries.length, 91)
+  assert.equal(value.storage.entries.length, 92)
   source.native.profile.entries = source.native.profile.entries.slice(0, 134)
   const previousCacheSnapshot = projectOwnedLayoutPhaseMetrics(source).core_profile
   assert.equal(previousCacheSnapshot.status, "observed")

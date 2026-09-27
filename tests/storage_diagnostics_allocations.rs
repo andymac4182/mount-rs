@@ -82,6 +82,7 @@ fn warmed_core_spans_record_without_added_allocations() {
         Operation::BlobCacheDiskLookup,
         Operation::BlobCachePeerConnectionLockWait,
         Operation::BlobCachePeerConnectionEstablish,
+        Operation::RemoteClientQuicOpenBi,
     ];
     ALLOCATION_CALLS.with(|calls| calls.set(0));
     COUNT_ALLOCATIONS.with(|enabled| enabled.set(true));
@@ -104,7 +105,7 @@ fn warmed_core_spans_record_without_added_allocations() {
         "warmed actual core Span added an allocation"
     );
     let delta = storage::snapshot().delta(&before).unwrap();
-    assert_eq!(before.entries.len(), 91);
+    assert_eq!(before.entries.len(), 92);
     assert_eq!(delta.in_flight, 0);
     for operation in operations {
         let row = &delta.entries[operation as usize];

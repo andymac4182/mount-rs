@@ -10,6 +10,7 @@ import hashlib,json,os,pathlib,re,selectors,signal,stat,subprocess,sys,tempfile,
 BASE=pathlib.Path(__file__).resolve().parent.parent
 COMMANDS={'cachetests': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--all-targets', '--locked', '--offline'], 180, 0, 0), 'redisfault': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'distributed_failure', '--locked', '--offline', '--', '--ignored', '--exact', 'redis_directory_real_peer_failures_preserve_exact_backing', '--test-threads=1', '--nocapture'], 180, 0, 0), 'rediscleanup': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'distributed_failure', '--locked', '--offline', '--', '--ignored', '--exact', 'cancelled_redis_fixture_reaps_owned_child_before_removing_directory', '--test-threads=1', '--nocapture'], 180, 0, 0), 'wsloss': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-remote-client', '--test', 'quic_mount', '--locked', '--offline', '--', '--ignored', '--exact', 'websocket_sqlite_commit_survives_lost_wire_reply_without_replay', '--test-threads=1', '--nocapture'], 180, 0, 0), 'remotetests': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-remote-client', '--all-targets', '--locked', '--offline'], 180, 0, 0), 'faultclippy': (['./scripts/cargo-shared', 'clippy', '-p', 'mount-rs-blob-cache', '-p', 'mount-rs-remote-client', '--all-targets', '--locked', '--offline', '--', '-D', 'warnings'], 180, 0, 0), 'fmt': (['./scripts/cargo-shared', 'fmt', '--all', '--', '--check'], 120, 0, 0)}
 COMMANDS.update({
+    'clientmetrics': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-remote-client', '--lib', '--locked', '--offline', '--', '--ignored', '--exact', 'connection::metrics_tests::quic_stream_acquisition_outcomes_preserve_transactions', '--test-threads=1', '--nocapture'], 180, 1, 0),
     'clidiagnostics': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-cli', '--features', 'io-profiling', '--lib', '--locked', '--offline', 'remote::diagnostics::tests::'], 180, 1, 0),
     'clicompact': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-cli', '--features', 'local-oidc-fixture,io-profiling', '--test', 'configured_remote_compact', '--locked', '--offline', '--', '--exact', 'configured_binary_selects_mrc5_for_signed_quic_and_websocket_reopen', '--test-threads=1', '--nocapture'], 180, 1, 0),
     'napimetrics': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-napi', '--lib', '--locked', '--offline'], 180, 1, 0),
@@ -38,6 +39,7 @@ COMMANDS.update({
     'cacheconsumers': (['fnm', 'exec', '--using', 'v24.18.0', 'node', '--test', 'benchmarks/storage/test.mjs', 'benchmarks/storage/foundationdb-diagnostics.test.mjs', 'benchmarks/storage/owned-layout-metrics.test.mjs', 'benchmarks/storage/owned-backing-pilot.test.mjs', 'scripts/verify-owned-backing-pilot.test.mjs'], 180, 0, 0),
 })
 EXACT_CASES = {
+    'clientmetrics': 'connection::metrics_tests::quic_stream_acquisition_outcomes_preserve_transactions',
     'peerport': 'stopped_peer_udp_rebind_waits_for_real_driver_release',
     'clicompact': 'configured_binary_selects_mrc5_for_signed_quic_and_websocket_reopen',
     'cachemetricstrace': 'cache_lookup_stage_metrics_preserve_bytes_and_cancellation',
@@ -256,6 +258,7 @@ def main():
     kind=sys.argv[1];command,limit,profile,trace=COMMANDS[kind]
     assert os.name=='posix' and hasattr(os,'waitid') and hasattr(os,'WNOWAIT'), 'Unix ownership observer required'
     FAULT_KINDS={'cachetests','redisfault','rediscleanup','wsloss','remotetests','faultclippy','fmt','cachemetrics','peermetrics','peerreconnect','peerport','quinnclose','quinnordinary','quinnruntimeclose','createprep','createpath','createguard','createunit','chunkedtests','chunkedclippy','cacheprofileoff','cacheprofileon','storagealloc','corealloc','coremetrics','cachemetricsclippy','cacheconsumers','cacheconsumerred','clidiagnostics','clicompact','napimetrics','consumerclippy','cachemetricstrace'}
+    FAULT_KINDS.add('clientmetrics')
     assert kind in FAULT_KINDS, 'fixed fault qualification commands only'
     root=pathlib.Path(tempfile.mkdtemp(prefix='mount-rs-owned-fault-'+kind+'-',dir=os.environ.get('MOUNT_RS_FAILURE_EVIDENCE_ROOT',tempfile.gettempdir())));os.chmod(root,0o700)
     fixture_tmp=root/'fixtures';fixture_tmp.mkdir(mode=0o700)
@@ -291,6 +294,7 @@ def main():
       paths.append(BASE/'crates/mount-rs-blob-cache/tests/support/stage_metrics.rs')
       paths.extend(BASE/v for v in ['filesystems/mount-rs-chunked/src/causal_metrics.rs','filesystems/mount-rs-chunked/tests/filesystem_causal_metrics.rs','tests/filesystem_causal_profile_allocations.rs','filesystems/mount-rs-chunked/tests/compact_snapshot_revision.rs','filesystems/mount-rs-chunked/src/create_guard_metrics_tests.rs','filesystems/mount-rs-chunked/src/create_rebase.rs','filesystems/mount-rs-chunked/tests/current_path_create_rebase.rs'] if (BASE/v).is_file())
      paths.append(BASE/'crates/mount-rs-blob-cache/tests/quinn_close.rs')
+     paths.append(BASE/'crates/mount-rs-remote-client/src/connection_metrics_tests.rs')
      # Pin the complete scoped dependency, including upstream provenance and
      # licenses, even before new vendor files have entered the Git index.
      vendor=BASE/'vendor/quinn-proto-0.11.18'

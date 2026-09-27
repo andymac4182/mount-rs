@@ -167,6 +167,8 @@ jobs:
             > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-cache.log" 2>&1
           ./scripts/cargo-shared test --locked -p mount-rs-remote-client --test quic_mount --no-run \
             > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-remote.log" 2>&1
+          ./scripts/cargo-shared test --locked -p mount-rs-remote-client --lib --no-run \
+            > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-client-metrics.log" 2>&1
           ./scripts/cargo-shared test --locked -p mount-rs-blob-cache --test quinn_close --no-run \
             > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-quinn-close.log" 2>&1
           ./scripts/cargo-shared test --locked -p mount-rs-core --test storage_diagnostics_allocations --no-run \
@@ -209,6 +211,9 @@ jobs:
       - name: Verify real UDP stopped-peer port release through the owned parent
         timeout-minutes: 5
         run: python3 -B scripts/test-remote-failures.py peerport
+      - name: Verify client QUIC stream acquisition outcomes through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py clientmetrics
       - name: Verify warmed storage recorder allocations through the owned parent
         timeout-minutes: 5
         run: python3 -B scripts/test-remote-failures.py storagealloc

@@ -35,6 +35,7 @@ const storageFamilyMeasurement = {
   foundationdb_transaction: { operations: ["foundationdb.transaction.create", "foundationdb.transaction.closure_attempt", "foundationdb.transaction.commit", "foundationdb.transaction.on_error"], calls: "provider_closure_attempts_and_native_create_commit_on_error_invocations; distinct_units_not_logical_transactions", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
   foundationdb_read: { operations: ["foundationdb.read.get", "foundationdb.read.get_key", "foundationdb.read.get_range_page"], calls: "native_client_read_method_invocations; range_page_calls_not_key_value_count", bytes: "known_selected_successful_returned_value_key_and_range_page_key_value_payload_bytes_only", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
   blob_cache: { operations: STORAGE_OPERATION_NAMES.filter((name) => name.startsWith("blob_cache.")), calls: "cache_stage_invocations; lookups_include_hits_and_misses; waits_count_acquisitions_or_termination", bytes: "known_successful_ram_and_disk_lookup_returned_payload_bytes_only; waits_and_connection_stages_zero; misses_zero", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  client_quic: { operations: ["client.quic.open_bi"], calls: "stream_acquisition_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_open_bi_await_nanoseconds; not_exclusive_cpu_or_network_time" },
 }
 // This synthetic native snapshot represents a default, feature-off addon: the
 // fixed bank has seven FDB rows, but only the frozen legacy prefix is audited.
@@ -455,12 +456,14 @@ async function testStorageFamilyMetadata() {
   assert.deepEqual(delta.measurement.storage_instrumented_operations, storageInstrumentedOperations, "coverage must retain the producer's audited operation list")
   assert.deepEqual(delta.measurement.tidb_coverage, tidbCoverageMeasurement, "static coverage is distinct from dynamic operation counters")
   assert.deepEqual(delta.measurement.foundationdb_coverage, foundationdbCoverageMeasurement, "feature-off FoundationDB coverage is unavailable despite fixed zero rows")
-  assert.equal(delta.storage.entries.length, 91)
+  assert.equal(delta.storage.entries.length, 92)
   assert.equal(delta.storage.entries.find((entry) => entry.name === "tidb.sql.flush_probe").returned_row_observations, "1", "the final SQL row must reach phase evidence")
   assert.deepEqual(delta.storage.entries.slice(78, 85).map((entry) => entry.name), ["foundationdb.transaction.create", "foundationdb.transaction.closure_attempt", "foundationdb.read.get", "foundationdb.read.get_key", "foundationdb.read.get_range_page", "foundationdb.transaction.commit", "foundationdb.transaction.on_error"])
-  assert.deepEqual(delta.storage.entries.slice(85).map((entry) => entry.name), ["blob_cache.miss.admission_wait", "blob_cache.miss.singleflight_wait", "blob_cache.ram.lookup", "blob_cache.disk.lookup", "blob_cache.peer.connection_lock_wait", "blob_cache.peer.connection_establish"])
+  assert.deepEqual(delta.storage.entries.slice(85, 91).map((entry) => entry.name), ["blob_cache.miss.admission_wait", "blob_cache.miss.singleflight_wait", "blob_cache.ram.lookup", "blob_cache.disk.lookup", "blob_cache.peer.connection_lock_wait", "blob_cache.peer.connection_establish"])
   assert.equal(delta.measurement.storage_instrumented_operations.length, 78)
   assert.equal(delta.measurement.storage_instrumented_operations.some((name) => name.startsWith("blob_cache.")), false)
+  assert.equal(delta.storage.entries[91].name, "client.quic.open_bi")
+  assert.equal(delta.measurement.storage_instrumented_operations.includes("client.quic.open_bi"), false)
   for (const field of ["storage_families", "storage_instrumented_operations", "tidb_coverage", "foundationdb_coverage"]) {
     const missingBefore = structuredClone(before)
     const missingAfter = structuredClone(after)
