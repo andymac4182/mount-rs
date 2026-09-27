@@ -48,6 +48,11 @@ ratio locates work above the backend; it does not establish the backend's device
 amplification. A long inclusive span locates elapsed time; separate CPU and
 resource observations are needed to distinguish computation from waiting.
 
+Unix CI requests a per-platform `owned-layout-controls` artifact containing TAP
+output from the comparison controls, including on failure. The pipeline retains
+the test exit status and existing deadlines. Verify the uploaded artifact before
+using its test names or counts; an empty check-API response supplies neither.
+
 Native storage diagnostics use `mount-rs.storage-diagnostics.v3`, with exact
 decimal strings for counters. The closed row registry and the instrumented-row
 coverage are separate: reserving a row does not prove that a provider records it.

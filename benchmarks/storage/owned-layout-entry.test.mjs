@@ -644,13 +644,15 @@ test("actual successful sidecar rename inode cannot be moved to projection and o
 
 for (const change of ["replacement", "in-place content mutation"]) test(`published sidecar ${change} before projection loses current-success linkage`, async (t) => {
   const fixture = await context(t), model = comparisonModel(fixture), replacement = Buffer.from("changed private originals\n")
+  const tombstone = join(fixture.root, "retained-originals-inode.json")
   const originalRename = fsPromises.rename, originalUnlink = fsPromises.unlink
-  let renamed = false, mutated = false, beforeIdentity, afterIdentity
+  let renamed = false, mutated = false, beforeIdentity, afterIdentity, beforeBytes
   fsPromises.rename = async (...args) => { await originalRename(...args); if (args[1] === fixture.paths.originals) renamed = true }
   fsPromises.unlink = async (...args) => {
     if (renamed && !mutated && typeof args[0] === "string" && basename(args[0]).startsWith(".mount-rs-owned-layout-")) {
-      mutated = true; beforeIdentity = await lstat(fixture.paths.originals, { bigint: true })
-      if (change === "replacement") await originalUnlink(fixture.paths.originals)
+      mutated = true; beforeIdentity = await lstat(fixture.paths.originals, { bigint: true }); beforeBytes = await readFile(fixture.paths.originals)
+      // Keep the prior inode allocated: unlink/recreate can reuse it on Linux.
+      if (change === "replacement") await originalRename(fixture.paths.originals, tombstone)
       await writeFile(fixture.paths.originals, replacement, { mode: 0o600 })
       afterIdentity = await lstat(fixture.paths.originals, { bigint: true })
     }
@@ -662,6 +664,13 @@ for (const change of ["replacement", "in-place content mutation"]) test(`publish
   finally { fsPromises.rename = originalRename; fsPromises.unlink = originalUnlink; syncBuiltinESMExports() }
   assert.equal(mutated, true, "the control must alter the sidecar after successful rename and before projection publication")
   assert.equal(beforeIdentity.ino === afterIdentity.ino, change === "in-place content mutation")
+  if (change === "replacement") {
+    assert.equal((await readdir(fixture.root)).includes(basename(tombstone)), true, "the replacement fixture must keep the old inode allocated")
+    const retainedIdentity = await lstat(tombstone, { bigint: true }), replacementIdentity = await lstat(fixture.paths.originals, { bigint: true })
+    assert.deepEqual([retainedIdentity.dev, retainedIdentity.ino], [beforeIdentity.dev, beforeIdentity.ino])
+    assert.notDeepEqual([retainedIdentity.dev, retainedIdentity.ino], [replacementIdentity.dev, replacementIdentity.ino], "both simultaneously existing files must have distinct identities")
+    assert.equal((await readFile(tombstone)).equals(beforeBytes), true)
+  }
   assertIncomplete(record); unavailableOriginals(record)
   assert.equal(record.failure_code, "OWNED_LAYOUT_ENTRY_PUBLICATION_FAILED")
   assert.equal((await readFile(fixture.paths.originals)).equals(replacement), true)
