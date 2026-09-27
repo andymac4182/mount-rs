@@ -71,6 +71,12 @@ A symbolic decision proof does not prove the whole async service state machine.
 | `generic_control_charge_cannot_wrap_or_exceed_default_admission` | Arbitrary `usize` length, assumed at most 8 MiB | The production charge equals `64 * length + 1 MiB + 32`, is at least the input length and at most the default 1 GiB admission budget without overflow. One cover reaches the maximum admitted input. Excludes actual JSON heap usage, permit lifetime and concurrent admission. |
 | `remote_handle_admission_is_fenced_and_bounded` | Arbitrary closed/present booleans, full-range `u64` revisions/counter, and `usize` count | Only live current-revision admission below 1024 handles with a nonoverflowing ID. Excludes locks, scheduler, and backend close effects. |
 | `remote_handles_require_exact_drive_and_revision` | Two literal Drive identities and unrestricted `u64` revisions; unwind 3 | A handle requires exact Drive and catalog revision. Session ownership is exercised by QUIC integration tests; arbitrary strings and table storage are outside this proof. |
+| `initial_auto_fallback_requires_uncontacted_unavailability` | Arbitrary response-received boolean and all four QUIC failure categories | Fallback requires no received response and deadline, timeout or refusal. A contacted peer or other failure cannot trigger fallback. Seven covers; excludes network observation and WebSocket execution. |
+| `acquired_transaction_cannot_reuse_an_incomplete_response` | Arbitrary response-completed boolean | An acquired exchange remains unusable until its complete response is recorded. Two covers; excludes stream ownership, response parsing and scheduling. |
+| `remote_io_completion_bounds_counts_and_closes_uncertainty` | Unrestricted `usize` count and limit; all five error variants plus a deadline | Counts exceeding the limit are protocol errors; local errors and deadline require closure, while a valid remote error preserves its payload and completed exchange. Five covers. The payload case uses an empty string; arbitrary payloads, allocation and cancellation scheduling are outside the proof. |
+
+The current runner selects these ten identities. The seven-harness results below
+apply to the earlier inventory at the recorded commit.
 
 Hard expiry or a failed catalog read terminally invalidates the session. A later
 renewal requires a new connection; it cannot advertise a session whose old handle
@@ -82,7 +88,7 @@ or cancellation proof.
 
 At commit `7eee4a3f2ded67fd01dbc8d388c37e8efd4a83eb`, the
 [remote formal job](https://github.com/andymac4182/mount-rs/actions/runs/36164387109/job/108168468016)
-executed all seven harnesses in the current runner with Kani 0.68.0 / CBMC
+executed all seven harnesses in that commit's runner with Kani 0.68.0 / CBMC
 6.11.0 on 64-bit x86_64 Linux. Each reported successful verification: 1,038
 checks, zero failed checks, 13 unreachable checks and 25/25 satisfied covers
 across the seven runner invocations. The job also ran handle admission
@@ -92,7 +98,7 @@ The retained CI log proves these bounded decisions. Verifier binary hashes,
 generated proof artifacts and peak RSS were not retained in this record. It
 does not prove compact metadata transactions, cache behavior or end-to-end
 capacity. The six-harness macOS result below records an earlier runner and is
-not a result for the current seven-harness inventory.
+not a result for the current ten-harness inventory.
 
 ## Executed local results (2026-09-24, macOS)
 

@@ -195,9 +195,12 @@ mod proofs {
         let (result, close) = finish_io_completion(Some(Ok(count)), limit);
         assert_eq!(close, count > limit);
         if count <= limit {
-            assert_eq!(result, Ok(count));
+            match result {
+                Ok(actual) => assert_eq!(actual, count),
+                Err(_) => panic!("accepted count must complete successfully"),
+            }
         } else {
-            assert_eq!(result, Err(ClientError::Protocol));
+            assert!(matches!(result, Err(ClientError::Protocol)));
         }
         kani::cover!(count == 0 && limit == 0 && !close);
         kani::cover!(count == usize::MAX && limit == usize::MAX && !close);
@@ -215,15 +218,19 @@ mod proofs {
         };
         let (result, close) = finish_io_completion(input, limit);
         assert_eq!(close, kind != 0);
-        let expected = match kind {
-            0 => ClientError::Remote(String::new()),
-            1 | 5 => ClientError::Transport,
-            2 => ClientError::Protocol,
-            3 => ClientError::Authentication,
-            _ => ClientError::Credential,
-        };
-        assert_eq!(result, Err(expected));
+        let deadline_transport = matches!(&result, Err(ClientError::Transport));
+        match result {
+            Err(ClientError::Remote(message)) => {
+                assert_eq!(kind, 0);
+                assert!(message.is_empty());
+            }
+            Err(ClientError::Transport) => assert!(kind == 1 || kind == 5),
+            Err(ClientError::Protocol) => assert_eq!(kind, 2),
+            Err(ClientError::Authentication) => assert_eq!(kind, 3),
+            Err(ClientError::Credential) => assert_eq!(kind, 4),
+            Ok(_) => panic!("error or deadline must return an error completion"),
+        }
         kani::cover!(kind == 0 && !close);
-        kani::cover!(kind == 5 && close && result == Err(ClientError::Transport));
+        kani::cover!(kind == 5 && close && deadline_transport);
     }
 }

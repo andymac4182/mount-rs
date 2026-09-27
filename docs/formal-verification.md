@@ -116,9 +116,19 @@ Each future harness needs its own property, input assumptions, bound, and result
 
 MRC4 enrollment advances the persisted structural generation and stores the base namespace inside an exact `{"format":"MRC4","namespace":...}` envelope. Both changes must commit with the mode marker and complete inode guards. Already running MRC2 readers that check only the global revision therefore invalidate their cached namespace and fail plain `Namespace` decoding. The envelope remains mandatory on every structural publication; new MRC4 readers use the shared strict codec. This fences old metadata decoding in addition to the separate mode checks that fence old writes. It is a compatibility contract and unit-test slice, not a proof of provider transaction atomicity.
 
-The remote provider has a separate seven-harness runner,
+The remote provider has a separate ten-harness runner,
 [`scripts/verify-remote-formal`](../scripts/verify-remote-formal). Its executed
 results, input domains, and limits are documented in
 [Remote verification](remote-verification.md). These decision proofs supplement
 the inventory above; they do not verify TLS, OIDC cryptography, or the complete
 asynchronous service state machine.
+
+The full hosted qualification at `ca5ebbbc` reached 53 of 55 proofs before its
+unchanged 100-minute job deadline: 44 general proofs and nine remote proofs
+completed, while `remote_io_completion_bounds_counts_and_closes_uncertainty`
+remained incomplete and the cache runner was never reached. Completed proofs
+reported 9,409 checks and 253 satisfied covers. This is partial qualification,
+with no disproved assertion established. The retained incomplete harness log
+ended during CBMC symbolic execution, expanding a `memcmp` loop reached through
+`Result<usize, ClientError>` equality; no SAT result or verification completion
+was reported. See [the retained run](https://github.com/andymac4182/mount-rs/actions/runs/36259363630).
