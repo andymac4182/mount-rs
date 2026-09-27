@@ -169,3 +169,158 @@ test("invalid optional process counters do not silently become zero", () => {
   const value = projectOwnedLayoutPhaseMetrics(source)
   assert.equal(value.status, "observed"); assert.equal(value.process.status, "unavailable")
 })
+
+// Independent fixed recorder contract; not imported from the projector.
+const causalProfileNames = [
+  "wire.json_encode_bytes",
+  "wire.json_decode_bytes",
+  "catalog.load",
+  "catalog.queue_wait",
+  "catalog.pool_wait",
+  "catalog.backing_verify",
+  "catalog.connect_configure",
+  "catalog.query_document_bytes",
+  "catalog.decode_validate_bytes",
+  "catalog.close",
+  "catalog.pager_hits",
+  "catalog.pager_misses",
+  "catalog.pager_writes",
+  "catalog.pager_unavailable",
+  "service.dispatch",
+  "service.authorization",
+  "service.handle_lock_wait",
+  "service.audit",
+  "filesystem.gate_wait",
+  "filesystem.mutation_batch_attempted_requests",
+  "filesystem.snapshot_nodes",
+  "filesystem.metadata_refresh",
+  "filesystem.changed_namespace_nodes",
+  "filesystem.write_fallback",
+  "filesystem.old_chunk_read_bytes",
+  "provider.metadata.load",
+  "provider.metadata.load_if_changed",
+  "provider.blocks.get_bytes",
+  "provider.blocks.put_bytes",
+  "provider.blocks.flush",
+  "provider.blocks.verify_authority",
+  "provider.metadata.publish_cas_nodes",
+  "provider.metadata.cas_conflict",
+  "provider.namespace_returned_bytes",
+  "provider.namespace_serialized_bytes",
+  "provider.inode.snapshot_if_changed",
+  "provider.inode.snapshot_returned_nodes",
+  "provider.inode.snapshot_unchanged",
+  "filesystem.inode_path_guard",
+  "provider.inode.load",
+  "provider.inode.load_if_changed",
+  "provider.inode.publish_cas",
+  "provider.inode.cas_conflict",
+  "provider.compact_anchor_returned_bytes",
+  "provider.compact_anchor_serialized_bytes",
+  "provider.inode_returned_bytes",
+  "provider.inode_serialized_bytes",
+  "filesystem.block_put.initial",
+  "filesystem.block_put.initial.success",
+  "filesystem.block_put.initial.error",
+  "filesystem.block_put.initial.cancelled",
+  "filesystem.block_put.fallback",
+  "filesystem.block_put.fallback.success",
+  "filesystem.block_put.fallback.error",
+  "filesystem.block_put.fallback.cancelled",
+  "filesystem.block_put.retry_rewrite",
+  "filesystem.block_put.retry_rewrite.success",
+  "filesystem.block_put.retry_rewrite.error",
+  "filesystem.block_put.retry_rewrite.cancelled",
+  "filesystem.block_put.chunker_reprepare",
+  "filesystem.block_put.chunker_reprepare.success",
+  "filesystem.block_put.chunker_reprepare.error",
+  "filesystem.block_put.chunker_reprepare.cancelled",
+  "filesystem.gate_wait.read",
+  "filesystem.gate_hold.read",
+  "filesystem.gate_wait.read.cancelled",
+  "filesystem.gate_wait.metadata",
+  "filesystem.gate_hold.metadata",
+  "filesystem.gate_wait.metadata.cancelled",
+  "filesystem.gate_wait.write_prepare",
+  "filesystem.gate_hold.write_prepare",
+  "filesystem.gate_wait.write_prepare.cancelled",
+  "filesystem.gate_wait.write_commit",
+  "filesystem.gate_hold.write_commit",
+  "filesystem.gate_wait.write_commit.cancelled",
+  "filesystem.gate_wait.write_fallback",
+  "filesystem.gate_hold.write_fallback",
+  "filesystem.gate_wait.write_fallback.cancelled",
+  "filesystem.gate_wait.whole_file_replay",
+  "filesystem.gate_hold.whole_file_replay",
+  "filesystem.gate_wait.whole_file_replay.cancelled",
+  "filesystem.gate_wait.mutation_batch",
+  "filesystem.gate_hold.mutation_batch",
+  "filesystem.gate_wait.mutation_batch.cancelled",
+  "filesystem.gate_wait.maintenance",
+  "filesystem.gate_hold.maintenance",
+  "filesystem.gate_wait.maintenance.cancelled",
+  "filesystem.gate_phase.refresh",
+  "filesystem.gate_phase.recovery",
+  "filesystem.gate_phase.block_rewrite",
+  "filesystem.gate_phase.publication",
+  "filesystem.gate_phase.cas_backoff",
+  "filesystem.mutation.enqueue_requests",
+  "filesystem.mutation.dequeue_requests",
+  "filesystem.mutation.queue_wait_requests",
+  "filesystem.mutation.coalescing_yields",
+  "filesystem.mutation.attempt_requests",
+  "filesystem.mutation.attempt.success",
+  "filesystem.mutation.attempt.conflict",
+  "filesystem.mutation.attempt.no_publication",
+  "filesystem.mutation.attempt.error",
+  "filesystem.mutation.attempt.cancelled",
+  "filesystem.mutation.request.committed",
+  "filesystem.mutation.request.conflict",
+  "filesystem.mutation.request.cancelled",
+  "filesystem.mutation.request.receiver_closed",
+  "filesystem.mutation.request.error",
+  "filesystem.mutation.request.reply_sent",
+]
+
+test("causal core projection preserves fixed prefix, new zero rows and exact decimal strings", () => {
+  assert.equal(causalProfileNames.length, 108)
+  assert.equal(causalProfileNames[46], "provider.inode_serialized_bytes")
+  assert.equal(causalProfileNames[47], "filesystem.block_put.initial")
+  const source = model()
+  source.native.measurement.profile = "existing_core_profile_counters"
+  source.native.profile = { entries: causalProfileNames.map((name) => ({ name, calls: "0", elapsed_ns: "0", units: "0" })) }
+  Object.assign(source.native.profile.entries[47], { calls: "9007199254740993", elapsed_ns: "9007199254740995", units: "18446744073709551615" })
+  const value = projectOwnedLayoutPhaseMetrics(source)
+  assert.deepEqual(value.core_profile.entries, source.native.profile.entries)
+  assert.equal(value.core_profile.status, "observed")
+  assert.equal(value.storage.entries.length, 85)
+  source.native.profile.entries = source.native.profile.entries.slice(0, 47)
+  const partial = projectOwnedLayoutPhaseMetrics(source).core_profile
+  assert.equal(partial.status, "observed")
+  assert.equal(partial.entries.length, 47)
+  assert.equal(partial.entries.some((row) => row.name === "filesystem.block_put.initial"), false)
+  assert.match(partial.scope, /absent_events_unavailable/u)
+})
+for (const kind of ["duplicate", "unknown", "numeric_counter"]) test(`causal core ${kind} cannot become measured evidence`, () => {
+  const source = model()
+  source.native.measurement.profile = "existing_core_profile_counters"
+  source.native.profile = { entries: [{ name: "filesystem.block_put.initial", calls: "0", elapsed_ns: "0", units: "0" }] }
+  if (kind === "duplicate") source.native.profile.entries.push({ ...source.native.profile.entries[0] })
+  else if (kind === "unknown") source.native.profile.entries[0].name = "PRIVATE_CAUSAL_LABEL"
+  else source.native.profile.entries[0].calls = 9007199254740992
+  const value = projectOwnedLayoutPhaseMetrics(source)
+  assert.equal(value.core_profile.status, "unavailable")
+  assert.equal(JSON.stringify(value).includes("PRIVATE_CAUSAL_LABEL"), false)
+})
+
+test("partial projector retains six existing optional compact labels independently of exact bank coverage", () => {
+  const source = model()
+  source.native.measurement.profile = "existing_core_profile_counters"
+  const names = ["compact.capture.guard_clones", "compact.capture.file_layout_clones", "compact.capture.extent_clones",
+    "compact.create.namespace_cow_nodes", "compact.create.namespace_cow_layouts", "compact.create.namespace_cow_extents"]
+  source.native.profile = { entries: names.map((name) => ({ name, calls: "1", elapsed_ns: "2", units: "9007199254740993" })) }
+  const value = projectOwnedLayoutPhaseMetrics(source).core_profile
+  assert.equal(value.status, "observed")
+  assert.deepEqual(value.entries, source.native.profile.entries)
+  assert.match(value.scope, /absent_events_unavailable/u)
+})

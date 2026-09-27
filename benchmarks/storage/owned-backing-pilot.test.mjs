@@ -721,7 +721,68 @@ const modelCommittedProfileNames = [
   "provider.compact_anchor_returned_bytes",
   "provider.compact_anchor_serialized_bytes",
   "provider.inode_returned_bytes",
-  "provider.inode_serialized_bytes"
+  "provider.inode_serialized_bytes",
+  "filesystem.block_put.initial",
+  "filesystem.block_put.initial.success",
+  "filesystem.block_put.initial.error",
+  "filesystem.block_put.initial.cancelled",
+  "filesystem.block_put.fallback",
+  "filesystem.block_put.fallback.success",
+  "filesystem.block_put.fallback.error",
+  "filesystem.block_put.fallback.cancelled",
+  "filesystem.block_put.retry_rewrite",
+  "filesystem.block_put.retry_rewrite.success",
+  "filesystem.block_put.retry_rewrite.error",
+  "filesystem.block_put.retry_rewrite.cancelled",
+  "filesystem.block_put.chunker_reprepare",
+  "filesystem.block_put.chunker_reprepare.success",
+  "filesystem.block_put.chunker_reprepare.error",
+  "filesystem.block_put.chunker_reprepare.cancelled",
+  "filesystem.gate_wait.read",
+  "filesystem.gate_hold.read",
+  "filesystem.gate_wait.read.cancelled",
+  "filesystem.gate_wait.metadata",
+  "filesystem.gate_hold.metadata",
+  "filesystem.gate_wait.metadata.cancelled",
+  "filesystem.gate_wait.write_prepare",
+  "filesystem.gate_hold.write_prepare",
+  "filesystem.gate_wait.write_prepare.cancelled",
+  "filesystem.gate_wait.write_commit",
+  "filesystem.gate_hold.write_commit",
+  "filesystem.gate_wait.write_commit.cancelled",
+  "filesystem.gate_wait.write_fallback",
+  "filesystem.gate_hold.write_fallback",
+  "filesystem.gate_wait.write_fallback.cancelled",
+  "filesystem.gate_wait.whole_file_replay",
+  "filesystem.gate_hold.whole_file_replay",
+  "filesystem.gate_wait.whole_file_replay.cancelled",
+  "filesystem.gate_wait.mutation_batch",
+  "filesystem.gate_hold.mutation_batch",
+  "filesystem.gate_wait.mutation_batch.cancelled",
+  "filesystem.gate_wait.maintenance",
+  "filesystem.gate_hold.maintenance",
+  "filesystem.gate_wait.maintenance.cancelled",
+  "filesystem.gate_phase.refresh",
+  "filesystem.gate_phase.recovery",
+  "filesystem.gate_phase.block_rewrite",
+  "filesystem.gate_phase.publication",
+  "filesystem.gate_phase.cas_backoff",
+  "filesystem.mutation.enqueue_requests",
+  "filesystem.mutation.dequeue_requests",
+  "filesystem.mutation.queue_wait_requests",
+  "filesystem.mutation.coalescing_yields",
+  "filesystem.mutation.attempt_requests",
+  "filesystem.mutation.attempt.success",
+  "filesystem.mutation.attempt.conflict",
+  "filesystem.mutation.attempt.no_publication",
+  "filesystem.mutation.attempt.error",
+  "filesystem.mutation.attempt.cancelled",
+  "filesystem.mutation.request.committed",
+  "filesystem.mutation.request.conflict",
+  "filesystem.mutation.request.cancelled",
+  "filesystem.mutation.request.receiver_closed",
+  "filesystem.mutation.request.error",
+  "filesystem.mutation.request.reply_sent",
 ]
 
 function modelNativeSnapshot(live) {
@@ -905,3 +966,20 @@ for (const seam of ["storage_row", "profile_row", "raw_instance"]) {
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
 }
+
+test("causal pilot requires new rows without manufacturing old-snapshot zeros", () => {
+  const fixture = resultFixture()
+  fixture.providers[0].storageDiagnostics = { phases: [{ name: "workload-4096bytes", native: { complete: false,
+    profile: { entries: modelCommittedProfileNames.slice(0, 47).map((name) => ({ name, calls: "0", elapsed_ns: "0", units: "0" })) } } }] }
+  const core = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1].core_profile
+  assert.equal(core.status, "unavailable")
+  assert.equal(core.entries.length, 108)
+  assert.equal(core.entries[46].name, "provider.inode_serialized_bytes")
+  assert.equal(core.entries[47].name, "filesystem.block_put.initial")
+  assert.equal(core.entries[47].calls, null)
+  fixture.providers[0].storageDiagnostics.phases[0].native.profile.entries = modelCommittedProfileNames.map((name) => ({ name, calls: "0", elapsed_ns: "0", units: "0" }))
+  fixture.providers[0].storageDiagnostics.phases[0].native.profile.entries[47].units = "9007199254740993"
+  const complete = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1].core_profile
+  assert.equal(complete.status, "observed")
+  assert.equal(complete.entries[47].units, "9007199254740993")
+})

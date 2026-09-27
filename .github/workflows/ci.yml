@@ -877,12 +877,61 @@ jobs:
             ./scripts/cargo-shared test --locked -p mount-rs-core --test storage_diagnostics_allocations \
             -- --ignored --exact warmed_core_spans_record_without_added_allocations --nocapture \
             2>&1 | tee "$RUNNER_TEMP/storage-diagnostic-allocations.log"
+      - name: Verify dedicated filesystem causal metrics
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -o pipefail
+          MOUNT_RS_PROFILE_IO=1 MOUNT_RS_TRACE_REQUESTS=0 MOUNT_RS_TRACE_STORAGE=0 \
+            ./scripts/cargo-shared test -p mount-rs-chunked --test filesystem_causal_metrics \
+            --locked --offline -- --ignored --test-threads=1 --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/filesystem-causal-metrics.log"
+      - name: Verify warmed causal profile allocations
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -o pipefail
+          MOUNT_RS_PROFILE_IO=1 MOUNT_RS_TRACE_REQUESTS=0 MOUNT_RS_TRACE_STORAGE=0 \
+            ./scripts/cargo-shared test -p mount-rs-core --test filesystem_causal_profile_allocations \
+            --locked --offline -- --ignored --exact warmed_causal_profile_rows_record_without_added_allocations --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/filesystem-causal-profile-allocations.log"
+      - name: Verify causal helper lifecycle accounting
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -o pipefail
+          MOUNT_RS_PROFILE_IO=1 MOUNT_RS_TRACE_REQUESTS=0 MOUNT_RS_TRACE_STORAGE=0 \
+            ./scripts/cargo-shared test -p mount-rs-chunked --lib --locked --offline \
+            -- --ignored --exact causal_metrics::tests::helper_terminal_outcomes_and_drop_partition_once --test-threads=1 --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/filesystem-causal-helpers.log"
+      - name: Verify causal profile slow records
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -o pipefail
+          MOUNT_RS_PROFILE_IO=1 MOUNT_RS_TRACE_REQUESTS=0 MOUNT_RS_TRACE_STORAGE=1 \
+            ./scripts/cargo-shared test -p mount-rs-core --test filesystem_causal_profile_allocations \
+            --locked --offline -- --ignored --exact causal_profile_slow_span_emits_fixed_stderr --quiet --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/filesystem-causal-profile-slow.log"
+          slow_record_found=0
+          slow_record_pattern='^MOUNT_RS_PROFILE_SLOW event=filesystem\.block_put\.initial elapsed_us=[1-9][0-9]{5,} units=4$'
+          while IFS= read -r line; do
+            if [[ "$line" =~ $slow_record_pattern ]]; then
+              slow_record_found=1
+            fi
+          done < "$RUNNER_TEMP/filesystem-causal-profile-slow.log"
+          test "$slow_record_found" -eq 1
       - name: Retain storage allocation diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: storage-allocation-controls-${{ github.event_name }}-${{ matrix.os }}
-          path: ${{ runner.temp }}/storage-diagnostic-allocations.log
+          path: |
+            ${{ runner.temp }}/storage-diagnostic-allocations.log
+            ${{ runner.temp }}/filesystem-causal-metrics.log
+            ${{ runner.temp }}/filesystem-causal-profile-allocations.log
+            ${{ runner.temp }}/filesystem-causal-helpers.log
+            ${{ runner.temp }}/filesystem-causal-profile-slow.log
           if-no-files-found: warn
           retention-days: 14
 

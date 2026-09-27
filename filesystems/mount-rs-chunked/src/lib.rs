@@ -6,8 +6,15 @@
 //! The implementation is intentionally not a snapshot adapter and does not
 //! provide copy-on-write views.
 
+mod causal_metrics;
 mod migration;
 pub use migration::{migrate_mrc1_backing, migrate_trusted_unstamped_mrc1_backing};
+
+use causal_metrics::{
+    AttemptOutcome, BatchAttemptObservation, CoalescingObservation, GateKind, GatePhase,
+    GatePhasePermit, GateWaitObservation, MutationObservation, PutObservation, PutReason,
+    RequestOutcome,
+};
 
 use async_trait::async_trait;
 use mount_rs_core::chunking::{Chunker, FixedSizeChunker, from_config};
@@ -251,8 +258,16 @@ type AsyncGateGuard<'a> = tokio::sync::MutexGuard<'a, ()>;
 /// errors and no-op reads. Drop the temporary guard mirror before releasing
 /// the gate so an idle filesystem retains only namespace and identities.
 struct OperationGateGuard<'a> {
+    // Field order records the hold after Drop's cleanup and before unlocking.
+    _hold_profile: Span,
     _guard: AsyncGateGuard<'a>,
     state: &'a Mutex<RuntimeState>,
+}
+
+impl OperationGateGuard<'_> {
+    fn phase_permit(&self) -> GatePhasePermit<'_> {
+        GatePhasePermit::new(self)
+    }
 }
 
 impl Drop for OperationGateGuard<'_> {
@@ -423,15 +438,23 @@ enum MutationRequest {
         mutation: Box<WholeFileMutation>,
         reply: tokio::sync::oneshot::Sender<Result<MutationResult>>,
         committed: Arc<AtomicBool>,
+        observation: MutationObservation,
     },
     Unlink {
         path: String,
         reply: tokio::sync::oneshot::Sender<Result<MutationResult>>,
         committed: Arc<AtomicBool>,
+        observation: MutationObservation,
     },
 }
 
 impl MutationRequest {
+    fn observation_mut(&mut self) -> &mut MutationObservation {
+        match self {
+            Self::WholeFile { observation, .. } | Self::Unlink { observation, .. } => observation,
+        }
+    }
+
     fn mark_committed(&self) {
         match self {
             Self::WholeFile { committed, .. } | Self::Unlink { committed, .. } => {
@@ -584,7 +607,8 @@ impl Drop for MutationRunnerGuard<'_> {
         let pending = std::mem::take(&mut queue.pending);
         drop(queue);
         let error = FsError::new(ErrorCode::Eio).with_message("mutation batch runner canceled");
-        for request in pending {
+        for mut request in pending {
+            request.observation_mut().outcome(RequestOutcome::Cancelled);
             mutation_reply(request, Err(error.clone()));
         }
     }
@@ -687,9 +711,14 @@ where
     M: MetadataStore + 'static,
     B: BlockStore + 'static,
 {
-    async fn operation_gate(&self) -> OperationGateGuard<'_> {
+    async fn operation_gate(&self, kind: GateKind) -> OperationGateGuard<'_> {
+        let mut wait = GateWaitObservation::new(kind);
+        let guard = self.inner.gate.lock().await;
+        wait.acquired();
+        drop(wait);
         OperationGateGuard {
-            _guard: self.inner.gate.lock().await,
+            _hold_profile: causal_metrics::gate_hold(kind),
+            _guard: guard,
             state: &self.inner.state,
         }
     }
@@ -1033,9 +1062,11 @@ where
             return Err(FsError::new(ErrorCode::Enotsup));
         }
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.operation_gate().await;
+        let _gate = self.operation_gate(GateKind::Metadata).await;
         drop(gate_profile);
+        let _refresh = _gate.phase_permit().phase(GatePhase::Refresh);
         self.refresh_concurrent_namespace().await?;
+        drop(_refresh);
         self.local_grant()
     }
 
@@ -1047,14 +1078,17 @@ where
         }
         let _lifecycle = self.inner.lifecycle.write().await;
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.operation_gate().await;
+        let _gate = self.operation_gate(GateKind::Maintenance).await;
         drop(gate_profile);
         if self.local_grant()?.is_some() {
             return Err(
                 FsError::new(ErrorCode::Ebusy).with_message("coordinator already owns a scope")
             );
         }
-        self.refresh_concurrent_namespace().await?;
+        {
+            let _refresh = _gate.phase_permit().phase(GatePhase::Refresh);
+            self.refresh_concurrent_namespace().await?;
+        }
         let (namespace, _) = self.snapshot()?;
         let root = resolve(&namespace, &normalize_path(path), true, "checkout")?;
         let generation = self
@@ -1163,7 +1197,10 @@ where
             .delegation_generation
             .store(generation, Ordering::SeqCst);
         // Always reload after the claim: a disjoint owner may have published while checkout was pending.
-        self.refresh_concurrent_namespace().await?;
+        {
+            let _refresh = _gate.phase_permit().phase(GatePhase::Refresh);
+            self.refresh_concurrent_namespace().await?;
+        }
         Ok(grant)
     }
 
@@ -1174,12 +1211,13 @@ where
         }
         let _lifecycle = self.inner.lifecycle.write().await;
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.operation_gate().await;
+        let _gate = self.operation_gate(GateKind::Maintenance).await;
         drop(gate_profile);
         let Some(grant) = self.local_grant()? else {
             return Ok(());
         };
         if !self.inner.delegation_draining.load(Ordering::SeqCst) {
+            let _refresh = _gate.phase_permit().phase(GatePhase::Refresh);
             self.refresh_concurrent_namespace().await?;
         }
         {
@@ -1211,7 +1249,10 @@ where
             return Err(self.fail_closed(FsError::new(ErrorCode::Estale)));
         }
         if active {
-            self.refresh_concurrent_namespace().await?;
+            {
+                let _refresh = _gate.phase_permit().phase(GatePhase::Refresh);
+                self.refresh_concurrent_namespace().await?;
+            }
             // A canceled last-close may have released its reference before its reap publication.
             // Complete that durable orphan cleanup before releasing authority.
             for attempt in 0..MAX_CONCURRENT_CAS_RETRIES {
@@ -1226,15 +1267,23 @@ where
                 if !changed {
                     break;
                 }
-                match self
-                    .publish_namespace_durable(revision, namespace, false)
+                let result = {
+                    let _publication = _gate.phase_permit().phase(GatePhase::Publication);
+                    self.publish_namespace_durable(
+                        revision,
+                        namespace,
+                        false,
+                        Some(_gate.phase_permit()),
+                    )
                     .await
-                {
+                };
+                match result {
                     Ok(_) => break,
                     Err(error)
                         if error.code == ErrorCode::Eagain
                             && attempt + 1 < MAX_CONCURRENT_CAS_RETRIES =>
                     {
+                        let _refresh = _gate.phase_permit().phase(GatePhase::Refresh);
                         self.refresh_concurrent_namespace().await?;
                     }
                     Err(error) => return Err(error),
@@ -1712,7 +1761,7 @@ where
 
         if needs_initial_publish
             && let Err(error) = filesystem
-                .publish_namespace_durable(loaded.revision, namespace, false)
+                .publish_namespace_durable(loaded.revision, namespace, false, None)
                 .await
         {
             // publish_namespace may have renewed the lease before the
@@ -1742,7 +1791,7 @@ where
         // from starting while this writer is queued.
         let _lifecycle = self.inner.lifecycle.write().await;
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.operation_gate().await;
+        let _gate = self.operation_gate(GateKind::Maintenance).await;
         drop(gate_profile);
         // A failed publication fails the coordinator closed. Pending atime
         // state must not be published after that boundary: snapshot() will
@@ -1755,8 +1804,8 @@ where
             (state.closed, state.failure.is_some())
         };
         if !already_closed && !failed {
-            self.drain_writeback().await?;
-            self.flush_pending_atime().await?;
+            self.drain_writeback(Some(_gate.phase_permit())).await?;
+            self.flush_pending_atime(Some(_gate.phase_permit())).await?;
         }
         // Provider I/O can outlive the lease TTL (for example, a bounded
         // remote R2 write). Refresh our own lease before releasing it so a
@@ -1765,7 +1814,7 @@ where
         // fence when our lease expired without another owner publishing a
         // revision; a fenced instance still fails closed.
         let refresh = if !already_closed && self.lock_lease()?.is_some() {
-            self.validate_lease().await
+            self.validate_lease(Some(_gate.phase_permit())).await
         } else {
             Ok(())
         };
@@ -1819,10 +1868,10 @@ where
         }
         let _lifecycle = self.inner.lifecycle.write().await;
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.operation_gate().await;
+        let _gate = self.operation_gate(GateKind::Maintenance).await;
         drop(gate_profile);
-        self.validate_lease().await?;
-        self.drain_writeback().await?;
+        self.validate_lease(Some(_gate.phase_permit())).await?;
+        self.drain_writeback(Some(_gate.phase_permit())).await?;
         let (namespace, _) = self.snapshot()?;
         let live = {
             let state = self.lock_state()?;
@@ -2257,7 +2306,12 @@ where
         Ok(true)
     }
 
-    async fn refresh_selected_inode(&self, inode: InodeId) -> Result<()> {
+    async fn refresh_selected_inode(
+        &self,
+        inode: InodeId,
+        phase: GatePhasePermit<'_>,
+    ) -> Result<()> {
+        let _refresh = phase.phase(GatePhase::Refresh);
         // Metadata checks still surround handle block I/O. Actual block backing
         // verification stays at open/publication, not every selected check.
         for _ in 0..MAX_CONCURRENT_CAS_RETRIES {
@@ -2367,7 +2421,8 @@ where
         Ok(true)
     }
 
-    async fn refresh_inode_stat(&self, inode: InodeId) -> Result<()> {
+    async fn refresh_inode_stat(&self, inode: InodeId, phase: GatePhasePermit<'_>) -> Result<()> {
+        let _refresh = phase.phase(GatePhase::Refresh);
         for _ in 0..MAX_CONCURRENT_CAS_RETRIES {
             if self.refresh_inode_structure_for_read().await?
                 && self.refresh_inode_once(inode, false).await?
@@ -2387,7 +2442,9 @@ where
         follow: bool,
         syscall: &str,
         extra_path: Option<&str>,
+        phase: GatePhasePermit<'_>,
     ) -> Result<(Arc<Namespace>, Entry)> {
+        let _refresh = phase.phase(GatePhase::Refresh);
         for _ in 0..MAX_CONCURRENT_CAS_RETRIES {
             if !self.refresh_inode_structure_for_read().await? {
                 continue;
@@ -2601,8 +2658,9 @@ where
     ) -> Result<(usize, u64)> {
         for attempt in 0..MAX_CONCURRENT_CAS_RETRIES {
             let captured = {
-                let _gate = self.operation_gate().await;
-                self.refresh_selected_inode(inode).await?;
+                let _gate = self.operation_gate(GateKind::WritePrepare).await;
+                self.refresh_selected_inode(inode, _gate.phase_permit())
+                    .await?;
                 let state = self.lock_state()?;
                 if state.orphans.contains_key(&inode) {
                     None
@@ -2651,7 +2709,14 @@ where
                 start,
                 buffer,
                 size,
-                path,
+                RewriteContext {
+                    path,
+                    reason: if attempt == 0 {
+                        PutReason::Initial
+                    } else {
+                        PutReason::RetryRewrite
+                    },
+                },
             )
             .await?;
             self.flush_mutation_blocks().await?;
@@ -2659,9 +2724,12 @@ where
             node.data = NodeData::File(layout);
             set_file_size(&mut node.stats, size);
             touch_modified(&mut node.stats, true)?;
-            let _gate = self.operation_gate().await;
+            let _gate = self.operation_gate(GateKind::WriteCommit).await;
             if self.inner.options.compact_inode_updates {
-                match self.publish_selected_node(inode, expected, node).await {
+                match self
+                    .publish_selected_node(inode, expected, node, _gate.phase_permit())
+                    .await
+                {
                     Ok(()) => return Ok((buffer.len(), end)),
                     Err(error) if error.code == ErrorCode::Eagain => {
                         drop(_gate);
@@ -2682,12 +2750,14 @@ where
                 .await
                 .map_err(|error| self.fail_closed(error))?;
             let mut publication = PublicationGuard::new(&self.inner.state);
-            let version = match self
-                .inner
-                .metadata
-                .publish_inode_if_version(backing, inode, expected.logical, node.clone())
-                .await
-            {
+            let result = {
+                let _publication = _gate.phase_permit().phase(GatePhase::Publication);
+                self.inner
+                    .metadata
+                    .publish_inode_if_version(backing, inode, expected.logical, node.clone())
+                    .await
+            };
+            let version = match result {
                 Ok(version) => version,
                 Err(error) if error.code == ErrorCode::Eagain => {
                     publication.disarm();
@@ -2727,7 +2797,9 @@ where
         inode: InodeId,
         expected: CapturedInodeVersion,
         node: NodeMetadata,
+        phase: GatePhasePermit<'_>,
     ) -> Result<()> {
+        let _publication = phase.phase(GatePhase::Publication);
         if self.inner.options.compact_inode_updates {
             return self
                 .publish_compact_selected_node(inode, expected, node)
@@ -2871,7 +2943,8 @@ where
         Ok(())
     }
 
-    async fn refresh_inode_structure(&self) -> Result<()> {
+    async fn refresh_inode_structure(&self, phase: GatePhasePermit<'_>) -> Result<()> {
+        let _refresh = phase.phase(GatePhase::Refresh);
         if self.inner.options.compact_inode_updates {
             for _ in 0..MAX_CONCURRENT_CAS_RETRIES {
                 if self.refresh_compact_structure_for_read().await? {
@@ -2904,8 +2977,8 @@ where
             .map_err(|_| error_with_path(ErrorCode::Efbig, "write", path))?;
         for attempt in 0..MAX_CONCURRENT_CAS_RETRIES {
             let captured = {
-                let _gate = self.operation_gate().await;
-                self.refresh_inode_structure().await?;
+                let _gate = self.operation_gate(GateKind::WritePrepare).await;
+                self.refresh_inode_structure(_gate.phase_permit()).await?;
                 let (namespace, generation) = {
                     let state = self.lock_state()?;
                     (Arc::clone(&state.namespace), state.persisted_revision)
@@ -2914,7 +2987,10 @@ where
                 let Some(inode) = entry.node else {
                     return Ok(false);
                 };
-                match self.refresh_selected_inode(inode).await {
+                match self
+                    .refresh_selected_inode(inode, _gate.phase_permit())
+                    .await
+                {
                     Ok(()) => {}
                     Err(error)
                         if error.code == ErrorCode::Estale || error.code == ErrorCode::Enoent =>
@@ -2960,15 +3036,34 @@ where
             let layout = if data.is_empty() {
                 empty
             } else {
-                rewrite_layout(&self.inner.blocks, &empty, 0, 0, data, size, path).await?
+                rewrite_layout(
+                    &self.inner.blocks,
+                    &empty,
+                    0,
+                    0,
+                    data,
+                    size,
+                    RewriteContext {
+                        path,
+                        reason: if attempt == 0 {
+                            PutReason::Initial
+                        } else {
+                            PutReason::RetryRewrite
+                        },
+                    },
+                )
+                .await?
             };
             self.inner.blocks.flush().await?;
             let mut node = (*original).clone();
             node.data = NodeData::File(layout);
             set_file_size(&mut node.stats, size);
             touch_modified(&mut node.stats, true)?;
-            let _gate = self.operation_gate().await;
-            match self.publish_selected_node(inode, expected, node).await {
+            let _gate = self.operation_gate(GateKind::WriteCommit).await;
+            match self
+                .publish_selected_node(inode, expected, node, _gate.phase_permit())
+                .await
+            {
                 Ok(()) => return Ok(true),
                 Err(error) if error.code == ErrorCode::Eagain => {
                     drop(_gate);
@@ -2993,16 +3088,19 @@ where
             "truncate"
         };
         for attempt in 0..MAX_CONCURRENT_CAS_RETRIES {
-            let _gate = self.operation_gate().await;
+            let _gate = self.operation_gate(GateKind::WriteCommit).await;
             let inode = if let Some(inode) = selected {
                 inode
             } else {
-                self.refresh_inode_structure().await?;
+                self.refresh_inode_structure(_gate.phase_permit()).await?;
                 let namespace = Arc::clone(&self.lock_state()?.namespace);
                 resolve(&namespace, path, true, "truncate")?
             };
             let generation = self.lock_state()?.persisted_revision;
-            match self.refresh_selected_inode(inode).await {
+            match self
+                .refresh_selected_inode(inode, _gate.phase_permit())
+                .await
+            {
                 Ok(()) => {}
                 Err(error)
                     if selected.is_none()
@@ -3063,7 +3161,10 @@ where
                 return Ok(());
             };
             self.inner.blocks.flush().await?;
-            match self.publish_selected_node(inode, expected, node).await {
+            match self
+                .publish_selected_node(inode, expected, node, _gate.phase_permit())
+                .await
+            {
                 Ok(()) => return Ok(()),
                 Err(error) if error.code == ErrorCode::Eagain => {
                     drop(_gate);
@@ -3176,12 +3277,13 @@ where
         Ok(())
     }
 
-    async fn renew_lease(&self) -> Result<WriterLease> {
+    async fn renew_lease(&self, phase: Option<GatePhasePermit<'_>>) -> Result<WriterLease> {
         let _lease_gate = self.inner.lease_gate.lock().await;
-        self.renew_lease_inner(false).await
+        self.renew_lease_inner(false, phase).await
     }
 
-    async fn validate_lease(&self) -> Result<()> {
+    async fn validate_lease(&self, phase: Option<GatePhasePermit<'_>>) -> Result<()> {
+        let _refresh = phase.map(|permit| permit.phase(GatePhase::Refresh));
         if self.inner.options.delegated && self.inner.delegation_draining.load(Ordering::SeqCst) {
             return Err(
                 FsError::new(ErrorCode::Ebusy).with_message("directory checkin is draining")
@@ -3191,10 +3293,14 @@ where
             return self.refresh_concurrent_namespace().await;
         }
         let _lease_gate = self.inner.lease_gate.lock().await;
-        self.renew_lease_inner(true).await.map(|_| ())
+        self.renew_lease_inner(true, phase).await.map(|_| ())
     }
 
-    async fn renew_lease_inner(&self, force: bool) -> Result<WriterLease> {
+    async fn renew_lease_inner(
+        &self,
+        force: bool,
+        phase: Option<GatePhasePermit<'_>>,
+    ) -> Result<WriterLease> {
         let current = self
             .lock_lease()?
             .clone()
@@ -3222,7 +3328,7 @@ where
         {
             Ok(renewed) => renewed,
             Err(error) if error.code == ErrorCode::Estale => {
-                return self.reacquire_expired_lease(current).await;
+                return self.reacquire_expired_lease(current, phase).await;
             }
             Err(error) => {
                 return Err(self.fail_closed(with_context(error, "lease-renew", None)));
@@ -3237,7 +3343,12 @@ where
     /// The provider's revision and fencing token are the recovery boundary:
     /// if either changed, this instance cannot safely continue using its
     /// in-memory namespace and is failed closed.
-    async fn reacquire_expired_lease(&self, current: WriterLease) -> Result<WriterLease> {
+    async fn reacquire_expired_lease(
+        &self,
+        current: WriterLease,
+        phase: Option<GatePhasePermit<'_>>,
+    ) -> Result<WriterLease> {
+        let _recovery = phase.map(|permit| permit.phase(GatePhase::Recovery));
         let acquired = match self
             .inner
             .metadata
@@ -3326,7 +3437,8 @@ where
         Ok(acquired)
     }
 
-    async fn ensure_operation_lease(&self) -> Result<()> {
+    async fn ensure_operation_lease(&self, phase: Option<GatePhasePermit<'_>>) -> Result<()> {
+        let _refresh = phase.map(|permit| permit.phase(GatePhase::Refresh));
         if self.inner.options.delegated && self.inner.delegation_draining.load(Ordering::SeqCst) {
             return Err(
                 FsError::new(ErrorCode::Ebusy).with_message("directory checkin is draining")
@@ -3355,7 +3467,7 @@ where
             }
             return self.refresh_concurrent_namespace().await;
         }
-        self.renew_lease().await.map(|_| ())
+        self.renew_lease(phase).await.map(|_| ())
     }
 
     async fn flush_mutation_blocks(&self) -> Result<()> {
@@ -3370,10 +3482,12 @@ where
         expected_revision: u64,
         namespace: Namespace,
         blocks_flushed: bool,
+        phase: Option<GatePhasePermit<'_>>,
     ) -> Result<u64> {
+        let _publication = phase.map(|permit| permit.phase(GatePhase::Publication));
         if !self.inner.options.writeback {
             return self
-                .publish_namespace_durable(expected_revision, namespace, blocks_flushed)
+                .publish_namespace_durable(expected_revision, namespace, blocks_flushed, phase)
                 .await;
         }
         let mut state = self.lock_state()?;
@@ -3397,7 +3511,7 @@ where
         Ok(generation)
     }
 
-    async fn drain_writeback(&self) -> Result<bool> {
+    async fn drain_writeback(&self, phase: Option<GatePhasePermit<'_>>) -> Result<bool> {
         if !self.inner.options.writeback {
             return Ok(false);
         }
@@ -3414,7 +3528,8 @@ where
         // Immutable block flushing does not publish references or require
         // writer authority. The durable path forces a provider lease check
         // after flushing, immediately before its fenced metadata publication.
-        self.publish_namespace_durable(persisted, namespace, false)
+        let _publication = phase.map(|permit| permit.phase(GatePhase::Publication));
+        self.publish_namespace_durable(persisted, namespace, false, phase)
             .await
             .map_err(|error| self.fail_closed(error))?;
         let mut state = self.lock_state()?;
@@ -3429,6 +3544,7 @@ where
         expected_revision: u64,
         namespace: Namespace,
         blocks_flushed: bool,
+        phase: Option<GatePhasePermit<'_>>,
     ) -> Result<u64> {
         if self.inner.options.inode_updates {
             return self
@@ -3610,9 +3726,9 @@ where
             return Ok(revision);
         }
         if self.inner.options.writeback {
-            self.validate_lease().await?;
+            self.validate_lease(phase).await?;
         }
-        let lease = self.renew_lease().await?;
+        let lease = self.renew_lease(phase).await?;
         let mut publication = PublicationGuard::new(&self.inner.state);
         let revision = match self
             .inner
@@ -3646,7 +3762,7 @@ where
     /// Publish coalesced read-atime changes while the caller owns the
     /// operation gate. Ordinary mutation paths call `snapshot`, so pending
     /// values are included in any later namespace publication too.
-    async fn flush_pending_atime(&self) -> Result<()> {
+    async fn flush_pending_atime(&self, phase: Option<GatePhasePermit<'_>>) -> Result<()> {
         if self.inner.options.concurrent_writes {
             return Ok(());
         }
@@ -3654,9 +3770,9 @@ where
         if !has_pending {
             return Ok(());
         }
-        self.ensure_operation_lease().await?;
+        self.ensure_operation_lease(phase).await?;
         let (namespace, revision) = self.snapshot()?;
-        self.publish_namespace(revision, namespace, false)
+        self.publish_namespace(revision, namespace, false, phase)
             .await
             .map(|_| ())
     }
@@ -3673,6 +3789,7 @@ where
             mutation: Box::new(mutation),
             reply,
             committed,
+            observation: MutationObservation::new(),
         })
         .await?;
         match response
@@ -3698,6 +3815,7 @@ where
             path,
             reply,
             committed,
+            observation: MutationObservation::new(),
         })
         .await?;
         match response
@@ -3735,6 +3853,9 @@ where
                 );
             }
             queue.pending.push(request);
+            if let Some(request) = queue.pending.last_mut() {
+                request.observation_mut().enqueued();
+            }
             if queue.running {
                 false
             } else {
@@ -3758,7 +3879,9 @@ where
             // into a timer or changing the fenced revision/CAS boundary.
             let mut previous_pending = 0;
             let mut idle_rounds = 0;
+            let mut coalescing = CoalescingObservation::new();
             for round in 0..MUTATION_BATCH_MAX_YIELD_ROUNDS {
+                coalescing.yielded();
                 cooperative_yield().await;
                 let pending = match self.inner.mutations.lock() {
                     Ok(queue) => queue.pending.len(),
@@ -3780,6 +3903,7 @@ where
                     break;
                 }
             }
+            drop(coalescing);
 
             let requests = {
                 let mut queue = match self.inner.mutations.lock() {
@@ -3794,17 +3918,22 @@ where
                     runner.finish();
                     return;
                 }
-                std::mem::take(&mut queue.pending)
+                let mut requests = std::mem::take(&mut queue.pending);
+                for request in &mut requests {
+                    request.observation_mut().dequeued();
+                }
+                requests
             };
             self.apply_mutation_batch(requests).await;
         }
     }
 
-    async fn apply_mutation_batch(&self, requests: Vec<MutationRequest>) {
-        // Attempted requests, including fenced retries; elapsed includes waits.
+    async fn apply_mutation_batch(&self, mut requests: Vec<MutationRequest>) {
+        // One invocation with its initial supplied request units; elapsed includes waits.
+        // The causal attempt observation below separately counts retry candidates.
         let _batch_profile = Span::new(Event::MutationBatch).units(requests.len() as u64);
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.operation_gate().await;
+        let _gate = self.operation_gate(GateKind::MutationBatch).await;
         drop(gate_profile);
         let attempts = if self.inner.options.concurrent_writes {
             MAX_CONCURRENT_CAS_RETRIES
@@ -3812,13 +3941,15 @@ where
             1
         };
         for attempt in 0..attempts {
+            let mut observed = BatchAttemptObservation::new();
             let prepared = self
-                .ensure_operation_lease()
+                .ensure_operation_lease(Some(_gate.phase_permit()))
                 .await
                 .and_then(|_| self.snapshot());
             let (mut namespace, revision) = match prepared {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
+                    observed.finish(AttemptOutcome::Error);
                     for request in requests {
                         mutation_reply(request, Err(error.clone()));
                     }
@@ -3828,15 +3959,20 @@ where
             let mut changed = false;
             let mut responses = Vec::with_capacity(requests.len());
 
-            for request in &requests {
+            for request in &mut requests {
                 match request {
                     MutationRequest::WholeFile {
-                        mutation, reply, ..
+                        mutation,
+                        reply,
+                        observation,
+                        ..
                     } => {
                         if reply.is_closed() {
+                            observation.cancelled_receiver();
                             responses.push(None);
                             continue;
                         }
+                        observed.considered();
                         let mut mutation = (**mutation).clone();
                         // Same-revision creates can share one batch. A
                         // remote CAS loss invalidates prepared inode/layout
@@ -3866,11 +4002,18 @@ where
                             Err(error) => responses.push(Some(Err(error))),
                         }
                     }
-                    MutationRequest::Unlink { path, reply, .. } => {
+                    MutationRequest::Unlink {
+                        path,
+                        reply,
+                        observation,
+                        ..
+                    } => {
                         if reply.is_closed() {
+                            observation.cancelled_receiver();
                             responses.push(None);
                             continue;
                         }
+                        observed.considered();
                         let mut candidate = namespace.clone();
                         match apply_unlink_mutation(self, &mut candidate, path) {
                             Ok(()) => {
@@ -3885,26 +4028,42 @@ where
             }
 
             if changed {
-                match self.publish_namespace(revision, namespace, true).await {
-                    Ok(_) => {}
+                match self
+                    .publish_namespace(revision, namespace, true, Some(_gate.phase_permit()))
+                    .await
+                {
+                    Ok(_) => observed.finish(AttemptOutcome::Success),
                     Err(error)
                         if self.inner.options.concurrent_writes
                             && error.code == ErrorCode::Eagain
                             && attempt + 1 < attempts =>
                     {
+                        observed.finish(AttemptOutcome::Conflict);
                         // The provider confirmed no commit. Replay every
                         // request against a fresh revision before replying;
                         // only an acknowledged batch may report success.
+                        let _backoff = _gate.phase_permit().phase(GatePhase::CasBackoff);
                         concurrent_cas_backoff(attempt, &self.inner.options.owner).await;
                         continue;
                     }
                     Err(error) => {
+                        observed.finish(
+                            if self.inner.options.concurrent_writes
+                                && error.code == ErrorCode::Eagain
+                            {
+                                AttemptOutcome::Conflict
+                            } else {
+                                AttemptOutcome::Error
+                            },
+                        );
                         for request in requests {
                             mutation_reply(request, Err(error.clone()));
                         }
                         return;
                     }
                 }
+            } else {
+                observed.finish(AttemptOutcome::NoPublication);
             }
             for (request, response) in requests.into_iter().zip(responses) {
                 if let Some(response) = response {
@@ -3940,7 +4099,7 @@ where
         let mut trace = RequestTrace::new("chunked", "mutate");
         trace.stage("gate_wait", format_args!(""));
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.operation_gate().await;
+        let _gate = self.operation_gate(GateKind::Metadata).await;
         drop(gate_profile);
         trace.stage("gate_acquired", format_args!(""));
         let attempts = if self.inner.options.concurrent_writes {
@@ -3950,7 +4109,9 @@ where
         };
         for attempt in 0..attempts {
             trace.stage("metadata_load_start", format_args!("attempt={attempt}"));
-            let loaded = self.ensure_operation_lease().await;
+            let loaded = self
+                .ensure_operation_lease(Some(_gate.phase_permit()))
+                .await;
             trace.stage(
                 "metadata_load_end",
                 format_args!(
@@ -3967,7 +4128,10 @@ where
                 "publish_start",
                 format_args!("attempt={attempt} expected_revision={revision}"),
             );
-            match self.publish_namespace(revision, namespace, false).await {
+            match self
+                .publish_namespace(revision, namespace, false, Some(_gate.phase_permit()))
+                .await
+            {
                 Ok(next_revision) => {
                     trace.finish(format_args!("attempt={attempt} revision={next_revision}"));
                     return Ok(result);
@@ -3981,6 +4145,7 @@ where
                         "cas_backoff",
                         format_args!("attempt={attempt} expected_revision={revision}"),
                     );
+                    let _backoff = _gate.phase_permit().phase(GatePhase::CasBackoff);
                     concurrent_cas_backoff(attempt, &self.inner.options.owner).await;
                 }
                 Err(error) => {
@@ -4007,12 +4172,14 @@ where
         let _lifecycle = self.inner.lifecycle.read().await;
         let (layout, original, orphan, size, count) = {
             let gate_profile = Span::new(Event::GateWait);
-            let _gate = self.operation_gate().await;
+            let _gate = self.operation_gate(GateKind::Read).await;
             drop(gate_profile);
             if self.inner.options.inode_updates {
-                self.refresh_selected_inode(inode).await?;
+                self.refresh_selected_inode(inode, _gate.phase_permit())
+                    .await?;
             } else {
-                self.ensure_operation_lease().await?;
+                self.ensure_operation_lease(Some(_gate.phase_permit()))
+                    .await?;
             }
             let (layout, original, orphan, size) = if self.inner.options.inode_updates {
                 let state = self.lock_state()?;
@@ -4133,12 +4300,14 @@ where
             .await?;
         }
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.operation_gate().await;
+        let _gate = self.operation_gate(GateKind::Read).await;
         drop(gate_profile);
         if self.inner.options.inode_updates {
-            self.refresh_selected_inode(inode).await?;
+            self.refresh_selected_inode(inode, _gate.phase_permit())
+                .await?;
         } else {
-            self.ensure_operation_lease().await?;
+            self.ensure_operation_lease(Some(_gate.phase_permit()))
+                .await?;
         }
         if self.inner.options.concurrent_writes {
             return Ok(count);
@@ -4192,9 +4361,10 @@ where
         }
         let (layout, original, orphan, start, end, new_size) = {
             let gate_profile = Span::new(Event::GateWait);
-            let _gate = self.operation_gate().await;
+            let _gate = self.operation_gate(GateKind::WritePrepare).await;
             drop(gate_profile);
-            self.ensure_operation_lease().await?;
+            self.ensure_operation_lease(Some(_gate.phase_permit()))
+                .await?;
             let (namespace, _) = self.snapshot()?;
             let (node, orphan) = self.node_snapshot(&namespace, inode, "write", path)?;
             let layout = match &node.data {
@@ -4231,7 +4401,10 @@ where
             start,
             buffer,
             new_size,
-            path,
+            RewriteContext {
+                path,
+                reason: PutReason::Initial,
+            },
         )
         .await?;
         self.flush_mutation_blocks()
@@ -4240,9 +4413,10 @@ where
 
         let fast_commit = {
             let gate_profile = Span::new(Event::GateWait);
-            let _gate = self.operation_gate().await;
+            let _gate = self.operation_gate(GateKind::WriteCommit).await;
             drop(gate_profile);
-            self.ensure_operation_lease().await?;
+            self.ensure_operation_lease(Some(_gate.phase_permit()))
+                .await?;
             if orphan {
                 let mut state = self.lock_state()?;
                 match state.orphans.get_mut(&inode) {
@@ -4270,7 +4444,10 @@ where
                     target.data = NodeData::File(new_layout);
                     set_file_size(&mut target.stats, new_size);
                     touch_modified(&mut target.stats, self.inner.options.concurrent_writes)?;
-                    match self.publish_namespace(revision, namespace, true).await {
+                    match self
+                        .publish_namespace(revision, namespace, true, Some(_gate.phase_permit()))
+                        .await
+                    {
                         Ok(_) => Some((buffer.len(), end)),
                         Err(error)
                             if self.inner.options.concurrent_writes
@@ -4307,7 +4484,7 @@ where
     ) -> Result<(usize, u64)> {
         profile::add(Event::Fallback, 0);
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.operation_gate().await;
+        let _gate = self.operation_gate(GateKind::WriteFallback).await;
         drop(gate_profile);
         let attempts = if self.inner.options.concurrent_writes {
             MAX_CONCURRENT_CAS_RETRIES
@@ -4315,7 +4492,8 @@ where
             1
         };
         for attempt in 0..attempts {
-            self.ensure_operation_lease().await?;
+            self.ensure_operation_lease(Some(_gate.phase_permit()))
+                .await?;
             let (mut namespace, revision) = self.snapshot()?;
             let (node, orphan) = self.node_snapshot(&namespace, inode, "write", path)?;
             let layout = match &node.data {
@@ -4338,6 +4516,7 @@ where
                 return Ok((0, start));
             }
             let new_size = node.stats.size.max(end);
+            let rewrite_phase = _gate.phase_permit().phase(GatePhase::BlockRewrite);
             let new_layout = rewrite_layout(
                 &self.inner.blocks,
                 &layout,
@@ -4345,9 +4524,17 @@ where
                 start,
                 buffer,
                 new_size,
-                path,
+                RewriteContext {
+                    path,
+                    reason: if attempt == 0 {
+                        PutReason::Fallback
+                    } else {
+                        PutReason::RetryRewrite
+                    },
+                },
             )
             .await?;
+            drop(rewrite_phase);
             self.flush_mutation_blocks()
                 .await
                 .map_err(|error| with_context(error, "block-flush", Some(path)))?;
@@ -4369,13 +4556,17 @@ where
             target.data = NodeData::File(new_layout);
             set_file_size(&mut target.stats, new_size);
             touch_modified(&mut target.stats, self.inner.options.concurrent_writes)?;
-            match self.publish_namespace(revision, namespace, true).await {
+            match self
+                .publish_namespace(revision, namespace, true, Some(_gate.phase_permit()))
+                .await
+            {
                 Ok(_) => return Ok((buffer.len(), end)),
                 Err(error)
                     if self.inner.options.concurrent_writes
                         && error.code == ErrorCode::Eagain
                         && attempt + 1 < attempts =>
                 {
+                    let _backoff = _gate.phase_permit().phase(GatePhase::CasBackoff);
                     concurrent_cas_backoff(attempt, &self.inner.options.owner).await;
                 }
                 Err(error) => return Err(error),
@@ -4409,11 +4600,14 @@ where
             // work, allowing whole-file preparations to overlap safely.
             // Other modes retain their optimistic capture and lease gate.
             let _capture_gate = if self.inner.options.compact_inode_updates {
-                Some(self.operation_gate().await)
+                Some(self.operation_gate(GateKind::WritePrepare).await)
             } else {
                 None
             };
-            self.ensure_operation_lease().await?;
+            self.ensure_operation_lease(
+                _capture_gate.as_ref().map(OperationGateGuard::phase_permit),
+            )
+            .await?;
             let (namespace, revision) = self.snapshot()?;
             let entry = walk(&namespace, &normalized, true, "open", 0)?;
             self.require_inode_authority(&namespace, entry.node.unwrap_or(entry.parent))?;
@@ -4474,7 +4668,10 @@ where
                 data,
                 u64::try_from(data.len())
                     .map_err(|_| error_with_path(ErrorCode::Efbig, "write", &normalized))?,
-                &normalized,
+                RewriteContext {
+                    path: &normalized,
+                    reason: PutReason::Initial,
+                },
             )
             .await?
         };
@@ -4567,12 +4764,13 @@ where
         mut prepared_layout: FileLayout,
     ) -> Result<()> {
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.operation_gate().await;
+        let _gate = self.operation_gate(GateKind::WholeFileReplay).await;
         drop(gate_profile);
         let data_length = u64::try_from(data.len())
             .map_err(|_| error_with_path(ErrorCode::Efbig, "write", path))?;
         for attempt in 0..MAX_CONCURRENT_CAS_RETRIES {
-            self.ensure_operation_lease().await?;
+            self.ensure_operation_lease(Some(_gate.phase_permit()))
+                .await?;
             let (mut namespace, revision) = self.snapshot()?;
             let entry = walk(&namespace, path, true, "open", 0)?;
             self.require_inode_authority(&namespace, entry.node.unwrap_or(entry.parent))?;
@@ -4616,6 +4814,7 @@ where
                 prepared_layout = if data.is_empty() {
                     empty_layout
                 } else {
+                    let _rewrite = _gate.phase_permit().phase(GatePhase::BlockRewrite);
                     rewrite_layout(
                         &self.inner.blocks,
                         &empty_layout,
@@ -4623,7 +4822,10 @@ where
                         0,
                         data,
                         data_length,
-                        path,
+                        RewriteContext {
+                            path,
+                            reason: PutReason::ChunkerReprepare,
+                        },
                     )
                     .await?
                 };
@@ -4668,12 +4870,16 @@ where
             target.data = NodeData::File(prepared_layout.clone());
             set_file_size(&mut target.stats, data_length);
             touch_modified(&mut target.stats, self.inner.options.concurrent_writes)?;
-            match self.publish_namespace(revision, namespace, true).await {
+            match self
+                .publish_namespace(revision, namespace, true, Some(_gate.phase_permit()))
+                .await
+            {
                 Ok(_) => return Ok(()),
                 Err(error)
                     if error.code == ErrorCode::Eagain
                         && attempt + 1 < MAX_CONCURRENT_CAS_RETRIES =>
                 {
+                    let _backoff = _gate.phase_permit().phase(GatePhase::CasBackoff);
                     concurrent_cas_backoff(attempt, &self.inner.options.owner).await;
                 }
                 Err(error) => return Err(error),
@@ -4692,7 +4898,7 @@ where
                 .await;
         }
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.operation_gate().await;
+        let _gate = self.operation_gate(GateKind::WriteCommit).await;
         drop(gate_profile);
         let attempts = if self.inner.options.concurrent_writes {
             MAX_CONCURRENT_CAS_RETRIES
@@ -4700,7 +4906,8 @@ where
             1
         };
         for attempt in 0..attempts {
-            self.ensure_operation_lease().await?;
+            self.ensure_operation_lease(Some(_gate.phase_permit()))
+                .await?;
             let (mut namespace, revision) = self.snapshot()?;
             let (node, orphan) = self.node_snapshot(&namespace, inode, "ftruncate", path)?;
             let mut layout = match &node.data {
@@ -4736,13 +4943,17 @@ where
             target.data = NodeData::File(layout);
             set_file_size(&mut target.stats, length);
             touch_modified(&mut target.stats, self.inner.options.concurrent_writes)?;
-            match self.publish_namespace(revision, namespace, false).await {
+            match self
+                .publish_namespace(revision, namespace, false, Some(_gate.phase_permit()))
+                .await
+            {
                 Ok(_) => return Ok(()),
                 Err(error)
                     if self.inner.options.concurrent_writes
                         && error.code == ErrorCode::Eagain
                         && attempt + 1 < attempts =>
                 {
+                    let _backoff = _gate.phase_permit().phase(GatePhase::CasBackoff);
                     concurrent_cas_backoff(attempt, &self.inner.options.owner).await;
                 }
                 Err(error) => return Err(error),
@@ -4782,7 +4993,11 @@ where
     /// Called with `inner.gate` held after the handle is marked closed. The
     /// local reference must be released before the first await so canceling a
     /// close cannot strand an inode behind a permanently closed handle.
-    async fn close_inode_after_gate(&self, inode: InodeId) -> Result<()> {
+    async fn close_inode_after_gate(
+        &self,
+        inode: InodeId,
+        phase: GatePhasePermit<'_>,
+    ) -> Result<()> {
         let should_reap =
             {
                 let mut state = self.lock_state()?;
@@ -4814,7 +5029,7 @@ where
             1
         };
         for attempt in 0..attempts {
-            self.ensure_operation_lease().await?;
+            self.ensure_operation_lease(Some(phase)).await?;
             let (mut namespace, revision) = {
                 let state = self.lock_state()?;
                 if state.failure.is_some() || state.closed {
@@ -4828,9 +5043,13 @@ where
                 (state.namespace.as_ref().clone(), state.revision)
             };
             namespace.nodes.remove(&inode);
-            match self.publish_namespace(revision, namespace, false).await {
+            match self
+                .publish_namespace(revision, namespace, false, Some(phase))
+                .await
+            {
                 Ok(_) => return Ok(()),
                 Err(error) if error.code == ErrorCode::Eagain && attempt + 1 < attempts => {
+                    let _backoff = phase.phase(GatePhase::CasBackoff);
                     concurrent_cas_backoff(attempt, &self.inner.options.owner).await;
                 }
                 Err(error) => return Err(error),
@@ -4924,22 +5143,23 @@ where
     async fn syncfs_with_syscall(&self, syscall: &str) -> Result<()> {
         let _lifecycle = self.inner.lifecycle.write().await;
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.operation_gate().await;
+        let _gate = self.operation_gate(GateKind::Maintenance).await;
         drop(gate_profile);
-        self.ensure_operation_lease().await?;
+        self.ensure_operation_lease(Some(_gate.phase_permit()))
+            .await?;
         self.snapshot()?;
         let mut barrier = self
             .inner
             .options
             .writeback
             .then(|| PublicationGuard::new(&self.inner.state));
-        if self.drain_writeback().await? {
+        if self.drain_writeback(Some(_gate.phase_permit())).await? {
             if let Some(barrier) = &mut barrier {
                 barrier.disarm();
             }
             return Ok(());
         }
-        self.flush_pending_atime().await?;
+        self.flush_pending_atime(Some(_gate.phase_permit())).await?;
         self.inner.blocks.flush().await.map_err(|error| {
             let error = with_context(error, syscall, None);
             if self.inner.options.writeback {
@@ -4948,7 +5168,7 @@ where
                 error
             }
         })?;
-        self.validate_lease().await?;
+        self.validate_lease(Some(_gate.phase_permit())).await?;
         self.inner
             .metadata
             .flush()
@@ -5059,7 +5279,7 @@ where
         let normalized = normalize_path(path);
         trace.stage("gate_wait", format_args!("path={normalized:?}"));
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.operation_gate().await;
+        let _gate = self.operation_gate(GateKind::Metadata).await;
         drop(gate_profile);
         trace.stage("gate_acquired", format_args!("path={normalized:?}"));
         if self.inner.options.inode_updates && !flags.truncate {
@@ -5069,6 +5289,7 @@ where
                     !(flags.create && flags.exclusive),
                     "open",
                     guard.map(|(parent, _, _)| parent.path.as_str()),
+                    _gate.phase_permit(),
                 )
                 .await?;
             validate_open_guard(&namespace, &normalized, &entry, flags, guard)?;
@@ -5098,7 +5319,9 @@ where
         };
         for attempt in 0..attempts {
             trace.stage("metadata_load_start", format_args!("attempt={attempt}"));
-            let loaded = self.ensure_operation_lease().await;
+            let loaded = self
+                .ensure_operation_lease(Some(_gate.phase_permit()))
+                .await;
             trace.stage(
                 "metadata_load_end",
                 format_args!(
@@ -5212,14 +5435,15 @@ where
                             error_with_path(ErrorCode::Estale, "open", &entry.path)
                         })?;
                         self.inner.blocks.flush().await?;
-                        self.publish_selected_node(inode, expected, node)
+                        self.publish_selected_node(inode, expected, node, _gate.phase_permit())
                             .await
                             .map(|()| revision)
                     } else {
                         Err(FsError::new(ErrorCode::Eagain))
                     }
                 } else {
-                    self.publish_namespace(revision, namespace, false).await
+                    self.publish_namespace(revision, namespace, false, Some(_gate.phase_permit()))
+                        .await
                 };
                 match result {
                     Ok(next_revision) => {
@@ -5237,6 +5461,7 @@ where
                             "cas_backoff",
                             format_args!("attempt={attempt} expected_revision={revision}"),
                         );
+                        let _backoff = _gate.phase_permit().phase(GatePhase::CasBackoff);
                         concurrent_cas_backoff(attempt, &self.inner.options.owner).await;
                         continue;
                     }
@@ -5380,11 +5605,15 @@ where
         if closed {
             return Err(error_with_path(ErrorCode::Ebadf, "fstat", &self.path));
         }
-        let _gate = self.filesystem.operation_gate().await;
+        let _gate = self.filesystem.operation_gate(GateKind::Metadata).await;
         if self.filesystem.inner.options.inode_updates {
-            self.filesystem.refresh_inode_stat(self.inode).await?;
+            self.filesystem
+                .refresh_inode_stat(self.inode, _gate.phase_permit())
+                .await?;
         } else {
-            self.filesystem.validate_lease().await?;
+            self.filesystem
+                .validate_lease(Some(_gate.phase_permit()))
+                .await?;
         }
         self.filesystem.stat_inode(self.inode, "fstat", &self.path)
     }
@@ -5427,7 +5656,7 @@ where
         let _gate = self.gate.lock().await;
         // Both gates are acquired before closing the handle. If this future
         // is canceled while waiting for either gate, a later close can retry.
-        let _filesystem_gate = self.filesystem.operation_gate().await;
+        let _filesystem_gate = self.filesystem.operation_gate(GateKind::Maintenance).await;
         {
             let mut state = self.lock_state()?;
             if state.closed {
@@ -5435,7 +5664,9 @@ where
             }
             state.closed = true;
         }
-        self.filesystem.close_inode_after_gate(self.inode).await
+        self.filesystem
+            .close_inode_after_gate(self.inode, _filesystem_gate.phase_permit())
+            .await
     }
 }
 
@@ -5459,7 +5690,7 @@ where
 
     async fn guarded_read(&self, request: GuardedRead) -> Result<GuardedReadResult> {
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.operation_gate().await;
+        let _gate = self.operation_gate(GateKind::Read).await;
         drop(gate_profile);
         let namespace = if self.inner.options.inode_updates
             && !matches!(&request, GuardedRead::Readdir { .. })
@@ -5478,11 +5709,12 @@ where
                 }
                 GuardedRead::Readdir { .. } => unreachable!(),
             };
-            self.inode_path_view(&path, false, "guarded read", extra)
+            self.inode_path_view(&path, false, "guarded read", extra, _gate.phase_permit())
                 .await?
                 .0
         } else {
-            self.ensure_operation_lease().await?;
+            self.ensure_operation_lease(Some(_gate.phase_permit()))
+                .await?;
             Arc::new(self.snapshot()?.0)
         };
         match request {
@@ -5797,16 +6029,18 @@ where
 
     async fn stat(&self, path: &str) -> Result<Stats> {
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.operation_gate().await;
+        let _gate = self.operation_gate(GateKind::Metadata).await;
         drop(gate_profile);
         if self.inner.options.inode_updates {
-            let (_, entry) = self.inode_path_view(path, true, "stat", None).await?;
+            let (_, entry) = self
+                .inode_path_view(path, true, "stat", None, _gate.phase_permit())
+                .await?;
             let inode = entry
                 .node
                 .ok_or_else(|| error_with_path(ErrorCode::Enoent, "stat", path))?;
             return self.stat_inode(inode, "stat", &normalize_path(path));
         }
-        self.validate_lease().await?;
+        self.validate_lease(Some(_gate.phase_permit())).await?;
         let (namespace, _) = self.snapshot()?;
         let inode = resolve(&namespace, path, true, "stat")?;
         self.stat_inode(inode, "stat", &normalize_path(path))
@@ -5814,16 +6048,18 @@ where
 
     async fn lstat(&self, path: &str) -> Result<Stats> {
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.operation_gate().await;
+        let _gate = self.operation_gate(GateKind::Metadata).await;
         drop(gate_profile);
         if self.inner.options.inode_updates {
-            let (_, entry) = self.inode_path_view(path, false, "lstat", None).await?;
+            let (_, entry) = self
+                .inode_path_view(path, false, "lstat", None, _gate.phase_permit())
+                .await?;
             let inode = entry
                 .node
                 .ok_or_else(|| error_with_path(ErrorCode::Enoent, "lstat", path))?;
             return self.stat_inode(inode, "lstat", &normalize_path(path));
         }
-        self.validate_lease().await?;
+        self.validate_lease(Some(_gate.phase_permit())).await?;
         let (namespace, _) = self.snapshot()?;
         let inode = resolve(&namespace, path, false, "lstat")?;
         self.stat_inode(inode, "lstat", &normalize_path(path))
@@ -5831,12 +6067,13 @@ where
 
     async fn statfs(&self, path: &str) -> Result<StatsFs> {
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.operation_gate().await;
+        let _gate = self.operation_gate(GateKind::Metadata).await;
         drop(gate_profile);
         if self.inner.options.compact_inode_updates {
-            self.ensure_operation_lease().await?;
+            self.ensure_operation_lease(Some(_gate.phase_permit()))
+                .await?;
         } else {
-            self.validate_lease().await?;
+            self.validate_lease(Some(_gate.phase_permit())).await?;
         }
         let (namespace, _) = self.snapshot()?;
         resolve(&namespace, path, true, "statfs")?;
@@ -5869,9 +6106,10 @@ where
 
     async fn readdir(&self, path: &str) -> Result<Vec<DirEntry>> {
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.operation_gate().await;
+        let _gate = self.operation_gate(GateKind::Read).await;
         drop(gate_profile);
-        self.ensure_operation_lease().await?;
+        self.ensure_operation_lease(Some(_gate.phase_permit()))
+            .await?;
         let (mut namespace, revision) = self.snapshot()?;
         let normalized = normalize_path(path);
         let inode = resolve(&namespace, &normalized, true, "scandir")?;
@@ -5899,7 +6137,8 @@ where
         if let Some(node) = namespace.nodes.get_mut(&inode) {
             node.stats.atime_ms = now_ms();
         }
-        self.publish_namespace(revision, namespace, false).await?;
+        self.publish_namespace(revision, namespace, false, Some(_gate.phase_permit()))
+            .await?;
         Ok(result)
     }
 
@@ -5909,9 +6148,10 @@ where
                 .with_message("directory entry limit must be positive"));
         }
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.operation_gate().await;
+        let _gate = self.operation_gate(GateKind::Read).await;
         drop(gate_profile);
-        self.ensure_operation_lease().await?;
+        self.ensure_operation_lease(Some(_gate.phase_permit()))
+            .await?;
         let (mut namespace, revision) = self.snapshot()?;
         let normalized = normalize_path(path);
         let inode = resolve(&namespace, &normalized, true, "scandir")?;
@@ -5945,7 +6185,8 @@ where
         if let Some(node) = namespace.nodes.get_mut(&inode) {
             node.stats.atime_ms = now_ms();
         }
-        self.publish_namespace(revision, namespace, false).await?;
+        self.publish_namespace(revision, namespace, false, Some(_gate.phase_permit()))
+            .await?;
         Ok(result)
     }
 
@@ -6092,9 +6333,10 @@ where
 
     async fn readlink(&self, path: &str) -> Result<String> {
         let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.operation_gate().await;
+        let _gate = self.operation_gate(GateKind::Read).await;
         drop(gate_profile);
-        self.ensure_operation_lease().await?;
+        self.ensure_operation_lease(Some(_gate.phase_permit()))
+            .await?;
         let (namespace, _) = self.snapshot()?;
         let normalized = normalize_path(path);
         let inode = resolve(&namespace, &normalized, false, "readlink")?;
@@ -6543,10 +6785,31 @@ fn apply_mknod_mutation(
     Ok(inode)
 }
 
-fn mutation_reply(request: MutationRequest, result: Result<MutationResult>) -> bool {
+fn mutation_reply(mut request: MutationRequest, result: Result<MutationResult>) -> bool {
+    let outcome = match &result {
+        Ok(
+            MutationResult::WholeFile(WholeFileMutationResult::Committed) | MutationResult::Unit,
+        ) => RequestOutcome::Committed,
+        Ok(MutationResult::WholeFile(WholeFileMutationResult::Conflict)) => {
+            RequestOutcome::Conflict
+        }
+        Err(_) => RequestOutcome::Error,
+    };
+    request.observation_mut().outcome(outcome);
     match request {
-        MutationRequest::WholeFile { reply, .. } | MutationRequest::Unlink { reply, .. } => {
-            reply.send(result).is_ok()
+        MutationRequest::WholeFile {
+            reply,
+            mut observation,
+            ..
+        }
+        | MutationRequest::Unlink {
+            reply,
+            mut observation,
+            ..
+        } => {
+            let sent = reply.send(result).is_ok();
+            observation.delivery(sent);
+            sent
         }
     }
 }
@@ -7458,6 +7721,11 @@ async fn read_layout_all<B: BlockStore>(
     Ok(bytes)
 }
 
+struct RewriteContext<'a> {
+    path: &'a str,
+    reason: PutReason,
+}
+
 async fn rewrite_layout<B: BlockStore>(
     blocks: &Arc<B>,
     layout: &FileLayout,
@@ -7465,8 +7733,9 @@ async fn rewrite_layout<B: BlockStore>(
     position: u64,
     input: &[u8],
     new_size: u64,
-    path: &str,
+    context: RewriteContext<'_>,
 ) -> Result<FileLayout> {
+    let RewriteContext { path, reason } = context;
     let chunk_size = fixed_chunk_size(&layout.chunker)?;
     if let Some(chunk_size) = chunk_size {
         let size = u64::try_from(chunk_size)
@@ -7536,10 +7805,10 @@ async fn rewrite_layout<B: BlockStore>(
             }
             chunk[destination..destination_end].copy_from_slice(&input[source..source_end]);
             let replacement = if chunk.iter().any(|byte| *byte != 0) {
-                let block = blocks
-                    .put(&chunk)
-                    .await
-                    .map_err(|error| with_context(error, "block-put", Some(path)))?;
+                let mut observed = PutObservation::new(reason, chunk.len() as u64);
+                let result = blocks.put(&chunk).await;
+                observed.finish(&result);
+                let block = result.map_err(|error| with_context(error, "block-put", Some(path)))?;
                 Some(BlockExtent {
                     file_offset: chunk_start,
                     block,
@@ -7586,10 +7855,10 @@ async fn rewrite_layout<B: BlockStore>(
         let length = u64::try_from(chunk.len())
             .map_err(|_| error_with_path(ErrorCode::Efbig, "write", path))?;
         if chunk.iter().any(|byte| *byte != 0) {
-            let block = blocks
-                .put(chunk)
-                .await
-                .map_err(|error| with_context(error, "block-put", Some(path)))?;
+            let mut observed = PutObservation::new(reason, chunk.len() as u64);
+            let result = blocks.put(chunk).await;
+            observed.finish(&result);
+            let block = result.map_err(|error| with_context(error, "block-put", Some(path)))?;
             extents.push(BlockExtent {
                 file_offset: offset,
                 block,
@@ -7827,7 +8096,10 @@ mod tests {
                 position,
                 &input,
                 expected.len() as u64,
-                "/rewrite",
+                RewriteContext {
+                    path: "/rewrite",
+                    reason: PutReason::Initial,
+                },
             ))
             .unwrap();
             assert_eq!(
@@ -8416,7 +8688,7 @@ mod tests {
                 let latest = remote.state.lock().expect("revision state").clone();
                 let mut namespace = latest.namespace.expect("namespace");
                 namespace.default_gid = 12;
-                block_on(publishing.publish_namespace(latest.revision, namespace, true))
+                block_on(publishing.publish_namespace(latest.revision, namespace, true, None))
                     .expect("local publication acknowledges during load");
             });
             block_on(fs.refresh_concurrent_namespace()).expect("racing refresh");
@@ -8597,7 +8869,7 @@ mod tests {
             assert_eq!(refreshing.snapshot().expect("newer snapshot").1, newer);
         });
 
-        let acknowledged = block_on(fs.publish_namespace(revision, namespace, true))
+        let acknowledged = block_on(fs.publish_namespace(revision, namespace, true, None))
             .expect("local publication acknowledges");
         assert_eq!(acknowledged, revision + 1);
         assert_eq!(
@@ -9340,7 +9612,7 @@ mod tests {
         let futures = (0..PARTICIPANTS)
             .map(|_| {
                 let filesystem = filesystem.clone();
-                Box::pin(async move { filesystem.ensure_operation_lease().await })
+                Box::pin(async move { filesystem.ensure_operation_lease(None).await })
             })
             .collect();
         for result in block_on_all(futures) {
@@ -10308,7 +10580,7 @@ mod delegated_generation_tests {
             b.write_file("/b/new", b"disjoint").await.unwrap();
             a.refresh_concurrent_namespace().await.unwrap();
             assert_eq!(
-                a.publish_namespace_durable(revision, candidate, false)
+                a.publish_namespace_durable(revision, candidate, false, None)
                     .await
                     .unwrap_err()
                     .code,
@@ -10321,7 +10593,7 @@ mod delegated_generation_tests {
             b.unlink("/b/new").await.unwrap();
             // Authority now contains B's orphan but A has not loaded that namespace.
             assert_eq!(
-                a.publish_namespace_durable(revision, candidate, false)
+                a.publish_namespace_durable(revision, candidate, false, None)
                     .await
                     .unwrap_err()
                     .code,

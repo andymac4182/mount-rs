@@ -58,7 +58,68 @@ const profileNames = [
   "provider.compact_anchor_returned_bytes",
   "provider.compact_anchor_serialized_bytes",
   "provider.inode_returned_bytes",
-  "provider.inode_serialized_bytes"
+  "provider.inode_serialized_bytes",
+  "filesystem.block_put.initial",
+  "filesystem.block_put.initial.success",
+  "filesystem.block_put.initial.error",
+  "filesystem.block_put.initial.cancelled",
+  "filesystem.block_put.fallback",
+  "filesystem.block_put.fallback.success",
+  "filesystem.block_put.fallback.error",
+  "filesystem.block_put.fallback.cancelled",
+  "filesystem.block_put.retry_rewrite",
+  "filesystem.block_put.retry_rewrite.success",
+  "filesystem.block_put.retry_rewrite.error",
+  "filesystem.block_put.retry_rewrite.cancelled",
+  "filesystem.block_put.chunker_reprepare",
+  "filesystem.block_put.chunker_reprepare.success",
+  "filesystem.block_put.chunker_reprepare.error",
+  "filesystem.block_put.chunker_reprepare.cancelled",
+  "filesystem.gate_wait.read",
+  "filesystem.gate_hold.read",
+  "filesystem.gate_wait.read.cancelled",
+  "filesystem.gate_wait.metadata",
+  "filesystem.gate_hold.metadata",
+  "filesystem.gate_wait.metadata.cancelled",
+  "filesystem.gate_wait.write_prepare",
+  "filesystem.gate_hold.write_prepare",
+  "filesystem.gate_wait.write_prepare.cancelled",
+  "filesystem.gate_wait.write_commit",
+  "filesystem.gate_hold.write_commit",
+  "filesystem.gate_wait.write_commit.cancelled",
+  "filesystem.gate_wait.write_fallback",
+  "filesystem.gate_hold.write_fallback",
+  "filesystem.gate_wait.write_fallback.cancelled",
+  "filesystem.gate_wait.whole_file_replay",
+  "filesystem.gate_hold.whole_file_replay",
+  "filesystem.gate_wait.whole_file_replay.cancelled",
+  "filesystem.gate_wait.mutation_batch",
+  "filesystem.gate_hold.mutation_batch",
+  "filesystem.gate_wait.mutation_batch.cancelled",
+  "filesystem.gate_wait.maintenance",
+  "filesystem.gate_hold.maintenance",
+  "filesystem.gate_wait.maintenance.cancelled",
+  "filesystem.gate_phase.refresh",
+  "filesystem.gate_phase.recovery",
+  "filesystem.gate_phase.block_rewrite",
+  "filesystem.gate_phase.publication",
+  "filesystem.gate_phase.cas_backoff",
+  "filesystem.mutation.enqueue_requests",
+  "filesystem.mutation.dequeue_requests",
+  "filesystem.mutation.queue_wait_requests",
+  "filesystem.mutation.coalescing_yields",
+  "filesystem.mutation.attempt_requests",
+  "filesystem.mutation.attempt.success",
+  "filesystem.mutation.attempt.conflict",
+  "filesystem.mutation.attempt.no_publication",
+  "filesystem.mutation.attempt.error",
+  "filesystem.mutation.attempt.cancelled",
+  "filesystem.mutation.request.committed",
+  "filesystem.mutation.request.conflict",
+  "filesystem.mutation.request.cancelled",
+  "filesystem.mutation.request.receiver_closed",
+  "filesystem.mutation.request.error",
+  "filesystem.mutation.request.reply_sent",
 ]
 const roles = ["pd-1", "pd-2", "pd-3", "tikv-1", "tikv-2", "tikv-3", "tidb", "rustfs-service"]
 const rawNames = ["put_opts.block_create", "get.block_read", "body_read.block_read", "get.conflict_verify", "body_read.conflict_verify", "get.migration", "body_read.migration", "head.direct_delete", "delete.direct", "delete.reconcile"]
@@ -215,4 +276,25 @@ test("the actual CLI returns a bounded fixed verdict and rejects untrusted build
       return true
     })
   } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test("causal exact contract retains the old prefix and accepts zero new rows losslessly", () => {
+  const { pilot, build } = model()
+  const entries = pilot.native_phases.phases[0].core_profile.entries
+  assert.equal(entries.length, 108)
+  assert.equal(entries[46].name, "provider.inode_serialized_bytes")
+  assert.equal(entries[47].name, "filesystem.block_put.initial")
+  for (const row of entries.slice(47)) Object.assign(row, { calls: "0", elapsed_ns: "0", units: "0" })
+  entries[47].units = "9007199254740993"
+  assert.equal(verifyPilot(pilot, build).status, "verified")
+  assert.equal(entries[47].units, "9007199254740993")
+})
+for (const kind of ["old47", "missing", "duplicate", "unknown"]) test(`causal exact ${kind} rows reject qualification`, () => {
+  const { pilot, build } = model()
+  const rows = pilot.native_phases.phases[0].core_profile.entries
+  if (kind === "old47") rows.splice(47)
+  else if (kind === "missing") rows.splice(47, 1)
+  else if (kind === "duplicate") rows[48] = { ...rows[47] }
+  else rows[47].name = "PRIVATE_CAUSAL_LABEL"
+  assert.throws(() => verifyPilot(pilot, build), { code: "pilot_evidence_rejected", reason: "native_evidence" })
 })
