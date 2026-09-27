@@ -501,6 +501,41 @@ types and enum values. An absent record is not a healthy-sampling assertion.
 This diagnostic locates a failed observation; it does not establish resource
 coverage, drain or successful cleanup.
 
+The outer supervisor also rechecks the same retained worker `Child` with
+WNOWAIT when its typed unavailable RSS sample could be caused by an intervening
+exit. Confirmed exit returns to the original cleanup receipt, process group and
+reap checks. It adds no RSS sample or fabricated zero. An already-fatal controller
+sample, running worker, cap violation, poll error or other read/clock error
+remains a failure. This closes a source-proven retirement race; it does not
+identify the cause of an older hosted failure.
+
+## Layout comparison metric retention
+
+`projectOwnedLayoutPhaseMetrics` retains one original 4096-byte workload phase
+as `mount-rs.owned-layout-phase-metrics.v1`. It validates the original RustFS
+raw diagnostic contract and emits closed names and exact decimal counters:
+
+- Provider and TiDB operations: calls, outcomes, inclusive time, latency buckets,
+  known payload bytes, returned SQL rows and row-observation counts.
+- RustFS instances: logical/cache counts, raw blob operations, upload/read bytes,
+  claim counts and optional digest, encoding, copy, lock and follower-wait work.
+- Process CPU work and observer CPU cost, context switches and fixed memory
+  endpoints when the original process measurements are available.
+- Known forwarding box calls/requested future bytes and fixed core events such
+  as namespace serialization, old-chunk reads and conflicts when available.
+
+Missing optional measurements remain unavailable. Forwarding box counts cover
+one instrumented allocation site; total allocations remain unavailable. Memory
+is an endpoint, and nested elapsed times overlap. Blob calls are adapter calls,
+with internal HTTP retries unobserved. These counters do not establish physical
+device IOPS, SQL wire bytes or exclusive CPU time.
+
+The projection rejects accessors, sparse arrays, malformed counters and evidence
+above its bounds. It retains up to 64 stable registered instances, with an 8 MiB
+private input bound and a 2 MiB closed output bound; required evidence is never
+truncated into an accepted observation. Controls use modeled evidence and open
+no native addon or storage backend.
+
 ## Slow-operation logging
 
 Set `MOUNT_RS_TRACE_STORAGE=1` for storage spans or

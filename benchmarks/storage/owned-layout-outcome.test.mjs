@@ -161,6 +161,42 @@ test("sole original floor failure remains failed while permitting safe continuat
   assert.equal(input.results[0].failures[0].error.code, "IOPS_TARGET_NOT_MET")
 })
 
+function recomputeModeledInterval(benchmark, mutate) {
+  const evidence = benchmark.providers[0].backingObserver.backing_evidence
+  const boundaries = evidence.journal.filter((entry) => entry.type === "boundary")
+  mutate(boundaries)
+  Object.assign(evidence.journal.find((entry) => entry.type === "interval"),
+    summarizeInterval(evidence.allowlist, boundaries[0], boundaries[1], { workload_elapsed_ms: benchmark.results[0].summary.elapsedMs }))
+}
+
+test("missing physical counters preserve settled logical qualification and honest coverage gaps", () => {
+  const benchmark = model()
+  recomputeModeledInterval(benchmark, (boundaries) => {
+    for (const boundary of boundaries) for (const sample of boundary.samples) sample.stats.block_operations = null
+    for (const boundary of boundaries) boundary.samples[0].stats.block_bytes = null
+  })
+  const outcome = assessOwnedLayoutRunnerOutcome(benchmark)
+  assert.equal(outcome.runner_safe_to_continue, true)
+  assert.equal(outcome.floor_qualified, true)
+  assert.equal(outcome.validated_runner_outcome, true)
+  assert.equal(benchmark.providers[0].backingObserver.backing_evidence.journal[3].metrics.block_operations.total, null)
+})
+for (const [name, mutate] of [
+  ["counter reset", (boundaries) => { boundaries[1].samples[0].stats.block_bytes["1:1:Read"] = "0" }],
+  ["changed device keys", (boundaries) => { boundaries[1].samples[0].stats.block_bytes = { "2:2:Read": "3000000000" } }],
+  ["missing container", (boundaries) => { boundaries[0].samples.pop() }],
+  ["nonincreasing timestamp", (boundaries) => { boundaries[1].samples[0].stats.read_ns = "1000000000" }],
+  ["known reset hidden by unavailable interface", (boundaries) => { boundaries[0].samples[0].stats.network_rx_bytes = { a: null, b: "100" }; boundaries[1].samples[0].stats.network_rx_bytes = { a: null, b: "0" } }],
+  ["device component outside u64", (boundaries) => { boundaries[0].samples[0].stats.block_bytes = { "18446744073709551616:1:Read": "100" }; boundaries[1].samples[0].stats.block_bytes = { "18446744073709551616:1:Read": "101" } }],
+]) test(`partial accounting cannot excuse ${name}`, () => {
+  const benchmark = model()
+  recomputeModeledInterval(benchmark, (boundaries) => {
+    for (const boundary of boundaries) for (const sample of boundary.samples) sample.stats.block_operations = null
+    mutate(boundaries)
+  })
+  assert.equal(assessOwnedLayoutRunnerOutcome(benchmark).runner_safe_to_continue, false)
+})
+
 const rejectionCases = [
   ["duplicate provider", (v) => v.providers.push(structuredClone(v.providers[0]))],
   ["duplicate result", (v) => v.results.push(structuredClone(v.results[0]))],
@@ -196,6 +232,8 @@ const rejectionCases = [
   ["duplicate workload phase", (v) => v.providers[0].storageDiagnostics.phases.push(structuredClone(v.providers[0].storageDiagnostics.phases[0]))],
   ["raw pending claim", (v) => { v.providers[0].storageDiagnostics.phases[0].native.rustfs.instances[0].raw_api.pending_claims_end = "1" }],
   ["raw histogram forgery", (v) => { v.providers[0].storageDiagnostics.phases[0].native.rustfs.instances[0].raw_api.entries[0].latency_log2_us[0] = "1" }],
+  ["sparse raw zero histogram", (v) => { v.providers[0].storageDiagnostics.phases[0].native.rustfs.instances[0].raw_api.entries[0].latency_log2_us = Array(32) }],
+  ["sparse native identities", (v) => { v.providers[0].storageDiagnostics.phases[0].native.rustfs.instance_ids_start = Array(1) }],
   ["native elapsed mismatch", (v) => { v.providers[0].storageDiagnostics.phases[0].benchmark_measured_elapsed_ms = 1 }],
   ["native window shorter than measured work", (v) => { v.providers[0].storageDiagnostics.phases[0].elapsed_ms = 0.1 }],
   ["missing claimed factory evidence", (v) => { delete v.providers[0].backingObserver.backing_evidence }],

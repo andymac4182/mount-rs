@@ -34,6 +34,7 @@ function snapshotBenchmark(source) {
     if (keys.length > 200_000 - state.nodes) throw new Error("evidence_cap")
     const length = array ? descriptors.length?.value : null
     if (array && (!Number.isSafeInteger(length) || length < 0 || length > 200_000)) throw new Error("evidence_cap")
+    if (array && (keys.length !== length + 1 || !Array.from({ length }, (_, index) => index).every((index) => Object.hasOwn(descriptors, String(index))))) throw new Error("invalid_evidence")
     const target = array ? Array(length) : {}
     state.seen.set(value, target)
     state.active.add(value)
@@ -163,6 +164,43 @@ function observedLayout(provider, layout, projection) {
   catch { return false }
 }
 
+function observedCounter(value) {
+  return typeof value === "string" && value.length <= 20 && /^(?:0|[1-9]\d*)$/u.test(value) && BigInt(value) <= 18446744073709551615n
+}
+function observedDeviceKey(value) {
+  const parts = /^(0|[1-9][0-9]{0,19}):(0|[1-9][0-9]{0,19}):(Read|Write)$/u.exec(value)
+  return parts !== null && observedCounter(parts[1]) && observedCounter(parts[2])
+}
+function observedCounterMap(value, network) {
+  if (value === null) return true
+  if (!object(value)) return false
+  const entries = Object.entries(value)
+  return entries.length > 0 && entries.length <= (network ? 32 : 128) && entries.every(([key, counter]) =>
+    (network ? /^[A-Za-z][A-Za-z0-9_.-]{0,14}$/u.test(key) && !["constructor", "prototype"].includes(key)
+      : observedDeviceKey(key)) &&
+    (network && counter === null || observedCounter(counter)))
+}
+function observedBoundaryCounters(boundary) {
+  return Array.isArray(boundary.samples) && boundary.samples.length === 8 && boundary.samples.every((sample) =>
+    object(sample) && object(sample.stats) && sample.cid === sample.stats.cid && observedCounter(sample.stats.read_ns) &&
+    (sample.stats.cpu_usage_ns === null || observedCounter(sample.stats.cpu_usage_ns)) &&
+    ["block_bytes", "block_operations", "network_rx_bytes", "network_tx_bytes"].every((key) => observedCounterMap(sample.stats[key], key.startsWith("network_"))))
+}
+function observedCounterPairs(before, after) {
+  const ends = new Map(after.samples.map((sample) => [sample.cid, sample.stats]))
+  const monotonic = (first, last) => first === null || last === null || BigInt(last) >= BigInt(first)
+  return before.samples.every((sample) => {
+    const first = sample.stats, last = ends.get(sample.cid)
+    if (!last || BigInt(last.read_ns) <= BigInt(first.read_ns) || !monotonic(first.cpu_usage_ns, last.cpu_usage_ns)) return false
+    return ["block_bytes", "block_operations", "network_rx_bytes", "network_tx_bytes"].every((key) => {
+      const start = first[key], end = last[key]
+      if (start === null || end === null) return true
+      const keys = Object.keys(start).sort(), endKeys = Object.keys(end).sort()
+      return isDeepStrictEqual(keys, endKeys) && keys.every((item) => monotonic(start[item], end[item]))
+    })
+  })
+}
+
 function observedBacking(provider, elapsed) {
   const observer = provider.backingObserver, evidence = observer?.backing_evidence
   if (observer?.schema !== "mount-rs.runner-backing-observer.v1" || observer.complete !== true || !empty(observer.issues) ||
@@ -181,13 +219,18 @@ function observedBacking(provider, elapsed) {
   if (!Array.isArray(journal) || journal.length > 4 || !journal.every((entry) => object(entry) && ["version", "boundary", "interval"].includes(entry.type))) return false
   const boundaries = journal.filter((entry) => entry.type === "boundary"), intervals = journal.filter((entry) => entry.type === "interval")
   if (boundaries.length !== 2 || intervals.length !== 1 || boundaries[0].id !== `${WORKLOAD}:begin` || boundaries[1].id !== `${WORKLOAD}:end` ||
-      !boundaries.every((boundary) => boundary.kind === "phase" && boundary.complete === true && empty(boundary.issues))) return false
+      !boundaries.every((boundary) => boundary.kind === "phase" && boundary.complete === true && empty(boundary.issues) && observedBoundaryCounters(boundary))) return false
+  if (!observedCounterPairs(boundaries[0], boundaries[1])) return false
   const interval = intervals[0]
-  if (interval.schema !== "mount-rs.backing-interval.v1" || interval.kind !== "phase" || interval.complete !== true ||
+  if (interval.schema !== "mount-rs.backing-interval.v1" || interval.kind !== "phase" || typeof interval.complete !== "boolean" ||
       interval.native_quiescent !== true || interval.owned_operations_settled !== true || interval.native_evidence_state !== "complete" || interval.workload_elapsed_ms !== elapsed) return false
   try {
     const computed = summarizeInterval(evidence.allowlist, boundaries[0], boundaries[1], { workload_elapsed_ms: elapsed })
-    return computed.complete === true && ["containers", "metrics", "endpoints"].every((key) => isDeepStrictEqual(interval[key], computed[key]))
+    // Missing daemon metrics affect descriptive coverage. Resets, drift, lost
+    // members and invalid timestamps remain failures rather than coverage gaps.
+    return interval.complete === computed.complete && computed.containers.every((container) =>
+      Object.values(container.metrics).every((metric) => metric.complete === true || metric.issue === "metric_unavailable")) &&
+      ["containers", "metrics", "endpoints"].every((key) => isDeepStrictEqual(interval[key], computed[key]))
   } catch { return false }
 }
 

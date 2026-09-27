@@ -69,8 +69,11 @@ shutdown cannot permit another reopen.
 and 400 verified reads, every sample, cleanup and original status/failure set.
 It validates the explicit RustFS diagnostic family, compact proof when selected,
 native quiescence and independently recomputes the backing interval. Sparse
-samples, accessors, inconsistent counters and incomplete observations refuse
-continuation. The projection retains fixed categories and numbers, excluding
+samples, accessors, inconsistent counters and incomplete safety observations
+refuse continuation. Missing daemon counters retain null totals and explicit
+per-metric missing members. All observed paired counters must remain monotone;
+a missing value cannot excuse another counter's reset, key drift or a missing
+container. The projection retains fixed categories and numbers, excluding
 credentials, raw errors and layout identities.
 
 `floor_qualified` and `runner_safe_to_continue` are separate fields. A sole
@@ -81,3 +84,24 @@ persistence, native identity, fixture ownership and identity across arms, and
 stop on uncertain work. These helpers add no operation timeout or capacity
 override. Their tests use modeled evidence; no live paired performance result
 is implied.
+
+## Owned ABBA comparison
+
+`createOwnedLayoutComparison` prepares four immutable cohorts before dispatch:
+legacy A1, compact B1, compact B2, legacy A2. Each arm uses the original fixed
+runner options and one fresh original backing observer after preparation. It
+joins the selected native binding and eight owned fixture identities, then
+verifies canary persistence before continuing. Original runner statuses and
+floor qualification remain separate from persistence and comparability.
+
+The public result retains closed native phase metrics and original container
+accounting. Missing physical I/O counters remain unavailable, with partial
+values kept separate from totals. A single-use private capability retains the
+original runner input for independent verification; it is absent from public
+serialization. The comparison stops permanently on missed cooperative deadlines
+or uncertain native work, including work that settles after a delayed timer.
+
+The enclosing owned runtime entry still has to join controller-created endpoints
+to the fixture manifest, retain source/build provenance and confirm final owner
+teardown. Cache state is uncontrolled. Pure controls establish the coordinator
+contracts; they provide no live paired throughput or causal improvement proof.
