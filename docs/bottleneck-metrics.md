@@ -69,6 +69,47 @@ for throughput and warmed recorder allocation controls.
 
 ## Locate the bottleneck in one measured phase
 
+### Authority checks and refresh reasons
+
+The current core bank appends sixteen rows to the 118-row prefix, for 134
+fixed rows. The storage bank remains 85 rows. These observations split the
+repeated compact metadata work seen in the latest lifecycle measurement:
+
+| Fixed row | Scope / units |
+| --- | --- |
+| `sqlite.compact.authority_query` | Authority SELECT and extraction; no units. |
+| `sqlite.compact.authority_path` | Existing physical-file, pathname and local-filesystem qualification; no units. |
+| `sqlite.compact.anchor_query_bytes` | Anchor SELECT and extraction; successfully returned JSON bytes. |
+| `sqlite.compact.anchor_decode_bytes` | Anchor decoding and generation/backing comparison; attempted JSON bytes. |
+| `sqlite.compact.guard_selected_rows` / `guard_full_rows` | Entire selected/full cursor scan, decoding and map insertion; rows yielded before decoding, including malformed rows. |
+| `sqlite.compact.guard_selected_decode_bytes` / `guard_full_decode_bytes` | Existing guard body decode/validation after string extraction; attempted JSON bytes. |
+| `sqlite.compact.read_lock_wait` / `read_begin` | Read-side connection lock acquisition / deferred transaction construction; no units. |
+| `filesystem.refresh.replace_probe` | Existing-file structure probe before whole-file replacement. |
+| `filesystem.refresh.create_capture` | Whole-file preparation capture, including an existing-file fallback. |
+| `filesystem.refresh.batch_capture` | The capture for each actual mutation batch attempt. |
+| `filesystem.refresh.path_structure` | Structure refresh before each path-resolution attempt. |
+| `filesystem.refresh.read_before` / `read_after` | Handle refresh immediately before / after block I/O, including EOF reads. |
+
+Filesystem reason rows have no units and end immediately after their existing
+refresh await. The existing `filesystem.inode_path_guard` counts traversed
+guards. These rows describe particular callers; they are not an exhaustive
+partition of every metadata operation. Guard scans include their decode rows,
+and filesystem refreshes include provider work. Keep these inclusive times
+separate instead of summing them as exclusive CPU time. Started scopes record
+attempted work even when validation fails or an await is cancelled.
+
+The same opt-in recorder and bounded fixed-field slow logs cover these rows.
+No storage key, path, token, file contents or raw error is included. Historical
+118-row measurements lack these stages and cannot satisfy the current exact
+pilot inventory; the general projector preserves their absence.
+
+The isolated CI control runs real SQLite selected and Full reads, checks the
+persisted bodies, and checks fail-closed malformed-anchor and malformed-body
+attempts. The public filesystem control verifies complete bytes through fresh
+SQLite connections and counts both refreshes on a data read and on EOF. The
+warmed allocation control covers actual recorder primitives; it excludes
+initialization, snapshots, provider allocations and diagnostic output.
+
 Use completed workload operations and the workload's own elapsed time for the
 application rate. Keep preparation, observation, persistence verification and
 teardown outside that denominator. Compare the same workload, durability,
@@ -1226,3 +1267,81 @@ SHA-256 `c1d62ed0f9be73577fe3c34742cf56d37931a102c0b7afc71c1cf4ccf35bc225`.
 Focused gate evidence:
 `/private/tmp/mount-rs-compact-work-actual-gates-20260927-nbyw3h7i/summary.json`,
 SHA-256 `7373a752d0a8cdc11f7f65a1d7a881ed97c36d4cfce74f99b221befe3811755a`.
+
+## Refresh-stage observations, 2026-09-27
+
+The sixteen additional fixed rows were measured with a freshly built native
+addon, SHA-256
+`4ce499fbb023cc8e482373528ac61073faa7776f807cc8f05e4d06e541bd8d0d`.
+Its 437 build inputs match the build's before/after hashes and current source;
+each arm pins 451 runtime inputs and that exact addon. The installed addon and
+protected original checkout remain untouched.
+
+Two serial compact SQLite lifecycle arms used the same 400 iterations,
+concurrency 64, 4096-byte payloads, 65536-byte chunks and 1000 logical
+operations/sec floor. Profiling enabled recorded 1992.29 operations/sec;
+profiling disabled recorded 1233.89. Both passed the floor and each verified
+400 complete read payloads through the native read-to-EOF loop, with 1200
+acknowledged operations and no workload error, timeout or cleanup failure.
+These single arms have uncontrolled host/cache activity and do not isolate
+observer overhead or establish a causal speedup. Earlier failures remain
+retained.
+
+| Profiled stage | Calls | Units | Inclusive time |
+| --- | ---: | ---: | ---: |
+| Authority SELECT/extraction | 3670 | — | 30.59 ms |
+| Physical pathname/local-filesystem checks | 3670 | — | 90.27 ms |
+| Anchor SELECT/extraction | 3670 | 4006771 bytes | 5.38 ms |
+| Anchor decode/authority comparison | 3670 | 4006771 bytes | 9.08 ms |
+| Selected guard scan | 3200 | 3200 rows | 13.50 ms |
+| Selected body decode, nested in scan | 3200 | 6063550 bytes | 4.81 ms |
+| Full guard scan | 470 | 83239 rows | 79.21 ms |
+| Full body decode, nested in scan | 83239 | 38272681 bytes | 56.27 ms |
+| Read connection lock acquisition | 3635 | — | 0.09 ms |
+| Read deferred transaction construction | 3635 | — | 0.93 ms |
+| Replace probe refresh | 400 | — | 34.46 ms |
+| Whole-file preparation refresh | 400 | — | 179.99 ms |
+| Mutation batch capture refresh | 35 | — | 18.45 ms |
+| Path structure refresh | 400 | — | 37.44 ms |
+| Handle refresh before block I/O | 800 | — | 38.28 ms |
+| Handle refresh after block I/O | 800 | — | 37.99 ms |
+
+Counts reconcile at the actual boundaries: 3670 authority checks are 3200
+selected loads + 435 snapshots + 35 publications. Read lock/begin observations
+cover the 3635 loads/snapshots; 470 Full scans cover snapshots plus publications.
+The selected loads comprise 400 create probes, 400 open structure checks,
+800 traversed root/file guards and 1600 data/EOF freshness checks. The 435
+snapshots comprise 400 preparations and 35 batch captures. Native reads call
+the handle once for data and once for EOF, explaining 800 before and 800 after
+refreshes for 400 application reads.
+
+The workload returned 86439 inode bodies / 44336231 bytes and executed 22525
+SQLite statements across both stores, with 2082 pager page writes. Initial
+block PUT input was 400 calls / 1638400 bytes, with zero fresh-create guard
+conflicts or whole-file replay holds. Process CPU was 272284 user and 324471
+system microseconds; end RSS was 94273536 bytes. Those process observations
+include other work and do not assign CPU to these stages.
+
+Repeated physical-path qualification and Full guard scanning are measurable
+targets for the next investigation. Preserve authority/fencing, path identity,
+coherent capture and uncertain-commit checks when testing a reduction. These
+inclusive, partly nested spans cannot be summed as exclusive CPU or end-to-end
+latency. SQL calls and pager writes remain distinct from physical device IOPS.
+Creation, workload and cleanup diagnostics are complete and quiescent; shutdown
+diagnostics remain incomplete after SQLite closes.
+
+The focused gates passed 354 Rust test executions and 143 Node controls,
+formatting, strict Clippy, and the actual fixed slow-log check. The warmed
+allocation gate covers all 87 appended recorder events with zero added
+allocations, excluding initialization, snapshots, provider work, futures and
+logging. Independent source review corrected the Unix-only CI condition and
+found no remaining source-contract issue. Hosted CI and full production
+qualification remain separate gates.
+
+The fixed numerical [report](benchmarks/refresh-stage-metrics-20260927/report.json)
+retains the summaries and limitations. Private joined evidence:
+`/private/tmp/mount-rs-refresh-stage-actual-20260927-v7387ycj/summary.json`,
+SHA-256 `e02926da6ee2a89adbc51059e853c89cdb8d422497612a64f3b8dc39273ba774`.
+Focused gates:
+`/private/tmp/mount-rs-refresh-metrics-gates-20260927-fwlkkb_w/summary.json`,
+SHA-256 `ba46eccc7911cd7ff2c1d727bad83ab388025cf6788c9c5b68fceca0bf3368e0`.

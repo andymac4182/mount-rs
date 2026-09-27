@@ -18,7 +18,7 @@ const capturePath = join(directory, "capture-native.cjs")
 const bindingPath = join(repo, "bindings/mount-rs-napi/index.js")
 const require = createRequire(import.meta.url)
 const roles = ["pd-1", "pd-2", "pd-3", "tikv-1", "tikv-2", "tikv-3", "tidb", "rustfs-service"]
-// Fixed 114-row prefix followed by four compact node counters. Missing rows remain unavailable.
+// Fixed 118-row prefix followed by 16 SQLite and refresh rows. Missing rows remain unavailable.
 const profileNames = [
   "wire.json_encode_bytes",
   "wire.json_decode_bytes",
@@ -138,6 +138,22 @@ const profileNames = [
   "filesystem.mutation.candidate_clone_nodes",
   "compact.structure.delta_capture_nodes",
   "compact.structure.expected_guard_nodes",
+  "sqlite.compact.authority_query",
+  "sqlite.compact.authority_path",
+  "sqlite.compact.anchor_query_bytes",
+  "sqlite.compact.anchor_decode_bytes",
+  "sqlite.compact.guard_selected_rows",
+  "sqlite.compact.guard_full_rows",
+  "sqlite.compact.guard_selected_decode_bytes",
+  "sqlite.compact.guard_full_decode_bytes",
+  "sqlite.compact.read_lock_wait",
+  "sqlite.compact.read_begin",
+  "filesystem.refresh.replace_probe",
+  "filesystem.refresh.create_capture",
+  "filesystem.refresh.batch_capture",
+  "filesystem.refresh.path_structure",
+  "filesystem.refresh.read_before",
+  "filesystem.refresh.read_after",
 ]
 const phaseNames = ["create", "workload-4096bytes", "cleanup", "shutdown"]
 const sources = ["scripts/test-rustfs.sh", "scripts/test-tidb.sh", "benchmarks/storage/runner.mjs", "benchmarks/storage/owned-backing-pilot.mjs", "benchmarks/storage/owned-backing-pilot.test.mjs", "benchmarks/storage/README.md"]

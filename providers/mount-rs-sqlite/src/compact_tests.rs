@@ -1424,3 +1424,204 @@ fn compact_enrollment_peer_transition_refuses_invalid_authority_without_mutation
         println!("ENROLLMENT_REFUSAL {damage} terminal=1 raw_unchanged=1");
     }
 }
+
+#[test]
+#[ignore = "requires MOUNT_RS_PROFILE_IO=1 and serial profile stage ownership"]
+fn compact_profile_stages_account_for_selected_full_and_failed_decode() {
+    // Profiling is selected before this test process starts. Never mutate the
+    // process environment after the provider/global recorder has initialized.
+    assert_eq!(std::env::var("MOUNT_RS_PROFILE_IO").as_deref(), Ok("1"));
+    assert_eq!(std::env::var("MOUNT_RS_TRACE_STORAGE").as_deref(), Ok("0"));
+    assert!(profile::enabled());
+
+    const ROWS: [&str; 10] = [
+        "sqlite.compact.authority_query",
+        "sqlite.compact.authority_path",
+        "sqlite.compact.anchor_query_bytes",
+        "sqlite.compact.anchor_decode_bytes",
+        "sqlite.compact.guard_selected_rows",
+        "sqlite.compact.guard_full_rows",
+        "sqlite.compact.guard_selected_decode_bytes",
+        "sqlite.compact.guard_full_decode_bytes",
+        "sqlite.compact.read_lock_wait",
+        "sqlite.compact.read_begin",
+    ];
+    fn metric(delta: &profile::Snapshot, name: &str) -> (u64, u64) {
+        delta
+            .entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .map(|entry| (entry.calls, entry.units))
+            .unwrap_or((0, 0))
+    }
+    fn assert_stage(
+        delta: &profile::Snapshot,
+        stage: &str,
+        anchor_bytes: u64,
+        selected: (u64, u64),
+        full: (u64, u64),
+    ) {
+        for name in [
+            "sqlite.compact.authority_query",
+            "sqlite.compact.authority_path",
+            "sqlite.compact.read_lock_wait",
+            "sqlite.compact.read_begin",
+        ] {
+            assert_eq!(metric(delta, name), (1, 0), "{stage}: {name}");
+        }
+        for name in [
+            "sqlite.compact.anchor_query_bytes",
+            "sqlite.compact.anchor_decode_bytes",
+        ] {
+            assert_eq!(metric(delta, name), (1, anchor_bytes), "{stage}: {name}");
+        }
+        assert_eq!(
+            metric(delta, "sqlite.compact.guard_selected_rows"),
+            (u64::from(selected.0 != 0), selected.0),
+            "{stage}: selected cursor rows"
+        );
+        assert_eq!(
+            metric(delta, "sqlite.compact.guard_full_rows"),
+            (u64::from(full.0 != 0), full.0),
+            "{stage}: full cursor rows"
+        );
+        assert_eq!(
+            metric(delta, "sqlite.compact.guard_selected_decode_bytes"),
+            selected,
+            "{stage}: attempted selected body decodes"
+        );
+        assert_eq!(
+            metric(delta, "sqlite.compact.guard_full_decode_bytes"),
+            full,
+            "{stage}: attempted full body decodes"
+        );
+    }
+    fn report_stage(delta: &profile::Snapshot, stage: &str) {
+        let rows: Vec<_> = ROWS
+            .iter()
+            .map(|name| {
+                let (calls, units) = metric(delta, name);
+                let elapsed_ns = delta
+                    .entries
+                    .iter()
+                    .find(|entry| entry.name == *name)
+                    .map(|entry| entry.elapsed_ns)
+                    .unwrap_or(0);
+                serde_json::json!({"name":name,"calls":calls,"units":units,"elapsed_ns":elapsed_ns})
+            })
+            .collect();
+        // Emit only fixed labels and numeric counters, after the data oracle.
+        println!(
+            "COMPACT_PROFILE_STAGE {}",
+            serde_json::json!({"stage":stage,"rows":rows})
+        );
+    }
+
+    let f = fixture(true);
+    let selected_inode = create(&f, "first");
+    create(&f, "second");
+    let original = raw(&f);
+    let selected_body = &original
+        .2
+        .iter()
+        .find(|row| row.0 == selected_inode.to_string())
+        .unwrap()
+        .4;
+    let anchor_bytes = original.1.len() as u64;
+    let selected_bytes = selected_body.len() as u64;
+    let full_rows = original.2.len() as u64;
+    let full_bytes = original.2.iter().map(|row| row.4.len() as u64).sum();
+    assert_eq!(full_rows, 3);
+
+    let before = profile::snapshot();
+    let loaded = run(f.store.load_compact_inode(f.backing, selected_inode)).unwrap();
+    let selected_delta = profile::snapshot().delta(&before).unwrap();
+    let expected: NodeMetadata = serde_json::from_str(selected_body).unwrap();
+    assert_eq!(loaded.guard.node, expected);
+    assert_eq!(loaded.generation, original.0);
+    assert_eq!(raw(&f), original, "selected read must not mutate SQLite");
+    assert_stage(
+        &selected_delta,
+        "selected",
+        anchor_bytes,
+        (1, selected_bytes),
+        (0, 0),
+    );
+    report_stage(&selected_delta, "selected");
+
+    let before = profile::snapshot();
+    let snapshot = run(f.store.load_compact_snapshot(f.backing)).unwrap();
+    let full_delta = profile::snapshot().delta(&before).unwrap();
+    assert_eq!(snapshot.guards.len() as u64, full_rows);
+    assert_eq!(snapshot.anchor.generation, original.0);
+    for (inode, incarnation, epoch, revision, body) in &original.2 {
+        let guard = &snapshot.guards[&inode.parse::<u64>().unwrap()];
+        assert_eq!(
+            guard.identity,
+            PhysicalInodeIdentity {
+                incarnation: *incarnation,
+                epoch: *epoch,
+                revision: *revision,
+            }
+        );
+        assert_eq!(
+            guard.node,
+            serde_json::from_str::<NodeMetadata>(body).unwrap()
+        );
+    }
+    assert_eq!(raw(&f), original, "full read must not mutate SQLite");
+    assert_stage(
+        &full_delta,
+        "full",
+        anchor_bytes,
+        (0, 0),
+        (full_rows, full_bytes),
+    );
+    report_stage(&full_delta, "full");
+
+    f.store
+        .0
+        .lock()
+        .unwrap()
+        .execute("UPDATE mount_rs_metadata SET namespace='{}' WHERE id=1", [])
+        .unwrap();
+    let damaged_anchor = raw(&f);
+    let before = profile::snapshot();
+    assert!(run(f.store.load_compact_inode(f.backing, selected_inode)).is_err());
+    let anchor_failure_delta = profile::snapshot().delta(&before).unwrap();
+    assert_eq!(raw(&f), damaged_anchor, "bad anchor must not be repaired");
+    assert_stage(&anchor_failure_delta, "invalid_anchor", 2, (0, 0), (0, 0));
+    report_stage(&anchor_failure_delta, "invalid_anchor");
+
+    f.store
+        .0
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE mount_rs_metadata SET namespace=?1 WHERE id=1",
+            [&original.1],
+        )
+        .unwrap();
+    f.store
+        .0
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE mount_rs_compact_guards SET node='{}' WHERE inode=?1",
+            [selected_inode.to_string()],
+        )
+        .unwrap();
+    let damaged_guard = raw(&f);
+    let before = profile::snapshot();
+    assert!(run(f.store.load_compact_inode(f.backing, selected_inode)).is_err());
+    let guard_failure_delta = profile::snapshot().delta(&before).unwrap();
+    assert_eq!(raw(&f), damaged_guard, "bad guard must not be repaired");
+    assert_stage(
+        &guard_failure_delta,
+        "invalid_selected_body",
+        anchor_bytes,
+        (1, 2),
+        (0, 0),
+    );
+    report_stage(&guard_failure_delta, "invalid_selected_body");
+}

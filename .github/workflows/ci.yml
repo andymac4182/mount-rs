@@ -900,6 +900,18 @@ jobs:
             ./scripts/cargo-shared test -p mount-rs-chunked --test filesystem_causal_metrics \
             --locked --offline -- --ignored --test-threads=1 --nocapture \
             2>&1 | tee "$RUNNER_TEMP/filesystem-causal-metrics.log"
+      - name: Verify compact SQLite stage metrics
+        if: runner.os != 'Windows'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -o pipefail
+          MOUNT_RS_PROFILE_IO=1 MOUNT_RS_TRACE_REQUESTS=0 MOUNT_RS_TRACE_STORAGE=0 \
+            ./scripts/cargo-shared test -p mount-rs-sqlite --lib --locked --offline \
+            -- --ignored --exact storage::compact_tests::compact_profile_stages_account_for_selected_full_and_failed_decode \
+            --test-threads=1 --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/sqlite-compact-stage-metrics.log"
+          rg -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/sqlite-compact-stage-metrics.log"
       - name: Verify warmed causal profile allocations
         timeout-minutes: 5
         shell: bash
@@ -973,6 +985,7 @@ jobs:
           path: |
             ${{ runner.temp }}/storage-diagnostic-allocations.log
             ${{ runner.temp }}/filesystem-causal-metrics.log
+            ${{ runner.temp }}/sqlite-compact-stage-metrics.log
             ${{ runner.temp }}/filesystem-causal-profile-allocations.log
             ${{ runner.temp }}/compact-snapshot-revision.log
             ${{ runner.temp }}/current-path-create-rebase.log

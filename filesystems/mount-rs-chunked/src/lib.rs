@@ -2463,7 +2463,11 @@ where
     ) -> Result<(Arc<Namespace>, Entry)> {
         let _refresh = phase.phase(GatePhase::Refresh);
         for _ in 0..MAX_CONCURRENT_CAS_RETRIES {
-            if !self.refresh_inode_structure_for_read().await? {
+            let structure_is_current = {
+                let _profile = Span::new(Event::FilesystemRefreshPathStructure);
+                self.refresh_inode_structure_for_read().await?
+            };
+            if !structure_is_current {
                 continue;
             }
             let (namespace, generation) = {
@@ -2995,7 +2999,10 @@ where
         for attempt in 0..MAX_CONCURRENT_CAS_RETRIES {
             let captured = {
                 let _gate = self.operation_gate(GateKind::WritePrepare).await;
-                self.refresh_inode_structure(_gate.phase_permit()).await?;
+                {
+                    let _profile = Span::new(Event::FilesystemRefreshReplaceProbe);
+                    self.refresh_inode_structure(_gate.phase_permit()).await?;
+                }
                 let (namespace, generation) = {
                     let state = self.lock_state()?;
                     (Arc::clone(&state.namespace), state.persisted_revision)
@@ -3959,10 +3966,12 @@ where
         };
         for attempt in 0..attempts {
             let mut observed = BatchAttemptObservation::new();
-            let prepared = self
-                .ensure_operation_lease(Some(_gate.phase_permit()))
-                .await
-                .and_then(|_| self.snapshot());
+            let refreshed = {
+                let _profile = Span::new(Event::FilesystemRefreshBatchCapture);
+                self.ensure_operation_lease(Some(_gate.phase_permit()))
+                    .await
+            };
+            let prepared = refreshed.and_then(|_| self.snapshot());
             let (mut namespace, revision) = match prepared {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
@@ -4223,12 +4232,15 @@ where
             let gate_profile = Span::new(Event::GateWait);
             let _gate = self.operation_gate(GateKind::Read).await;
             drop(gate_profile);
-            if self.inner.options.inode_updates {
-                self.refresh_selected_inode(inode, _gate.phase_permit())
-                    .await?;
-            } else {
-                self.ensure_operation_lease(Some(_gate.phase_permit()))
-                    .await?;
+            {
+                let _profile = Span::new(Event::FilesystemRefreshReadBefore);
+                if self.inner.options.inode_updates {
+                    self.refresh_selected_inode(inode, _gate.phase_permit())
+                        .await?;
+                } else {
+                    self.ensure_operation_lease(Some(_gate.phase_permit()))
+                        .await?;
+                }
             }
             let (layout, original, orphan, size) = if self.inner.options.inode_updates {
                 let state = self.lock_state()?;
@@ -4351,12 +4363,15 @@ where
         let gate_profile = Span::new(Event::GateWait);
         let _gate = self.operation_gate(GateKind::Read).await;
         drop(gate_profile);
-        if self.inner.options.inode_updates {
-            self.refresh_selected_inode(inode, _gate.phase_permit())
-                .await?;
-        } else {
-            self.ensure_operation_lease(Some(_gate.phase_permit()))
-                .await?;
+        {
+            let _profile = Span::new(Event::FilesystemRefreshReadAfter);
+            if self.inner.options.inode_updates {
+                self.refresh_selected_inode(inode, _gate.phase_permit())
+                    .await?;
+            } else {
+                self.ensure_operation_lease(Some(_gate.phase_permit()))
+                    .await?;
+            }
         }
         if self.inner.options.concurrent_writes {
             return Ok(count);
@@ -4653,10 +4668,13 @@ where
             } else {
                 None
             };
-            self.ensure_operation_lease(
-                _capture_gate.as_ref().map(OperationGateGuard::phase_permit),
-            )
-            .await?;
+            {
+                let _profile = Span::new(Event::FilesystemRefreshCreateCapture);
+                self.ensure_operation_lease(
+                    _capture_gate.as_ref().map(OperationGateGuard::phase_permit),
+                )
+                .await?;
+            }
             let (namespace, revision) = self.snapshot()?;
             let entry = walk(&namespace, &normalized, true, "open", 0)?;
             self.require_inode_authority(&namespace, entry.node.unwrap_or(entry.parent))?;

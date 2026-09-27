@@ -290,10 +290,26 @@ const causalProfileNames = [
   "filesystem.mutation.candidate_clone_nodes",
   "compact.structure.delta_capture_nodes",
   "compact.structure.expected_guard_nodes",
+  "sqlite.compact.authority_query",
+  "sqlite.compact.authority_path",
+  "sqlite.compact.anchor_query_bytes",
+  "sqlite.compact.anchor_decode_bytes",
+  "sqlite.compact.guard_selected_rows",
+  "sqlite.compact.guard_full_rows",
+  "sqlite.compact.guard_selected_decode_bytes",
+  "sqlite.compact.guard_full_decode_bytes",
+  "sqlite.compact.read_lock_wait",
+  "sqlite.compact.read_begin",
+  "filesystem.refresh.replace_probe",
+  "filesystem.refresh.create_capture",
+  "filesystem.refresh.batch_capture",
+  "filesystem.refresh.path_structure",
+  "filesystem.refresh.read_before",
+  "filesystem.refresh.read_after",
 ]
 
 test("causal core projection preserves fixed prefix, new zero rows and exact decimal strings", () => {
-  assert.equal(causalProfileNames.length, 118)
+  assert.equal(causalProfileNames.length, 134)
   assert.equal(causalProfileNames[46], "provider.inode_serialized_bytes")
   assert.equal(causalProfileNames[47], "filesystem.block_put.initial")
   assert.deepEqual(causalProfileNames.slice(108, 114), [
@@ -304,11 +320,29 @@ test("causal core projection preserves fixed prefix, new zero rows and exact dec
     "filesystem.mutation.create_guard.allocation_mismatch",
     "filesystem.mutation.create_guard.path_present",
   ])
-  assert.deepEqual(causalProfileNames.slice(114), [
+  assert.deepEqual(causalProfileNames.slice(114, 118), [
     "compact.namespace.materialize_nodes",
     "filesystem.mutation.candidate_clone_nodes",
     "compact.structure.delta_capture_nodes",
     "compact.structure.expected_guard_nodes",
+  ])
+  assert.deepEqual(causalProfileNames.slice(118), [
+    "sqlite.compact.authority_query",
+    "sqlite.compact.authority_path",
+    "sqlite.compact.anchor_query_bytes",
+    "sqlite.compact.anchor_decode_bytes",
+    "sqlite.compact.guard_selected_rows",
+    "sqlite.compact.guard_full_rows",
+    "sqlite.compact.guard_selected_decode_bytes",
+    "sqlite.compact.guard_full_decode_bytes",
+    "sqlite.compact.read_lock_wait",
+    "sqlite.compact.read_begin",
+    "filesystem.refresh.replace_probe",
+    "filesystem.refresh.create_capture",
+    "filesystem.refresh.batch_capture",
+    "filesystem.refresh.path_structure",
+    "filesystem.refresh.read_before",
+    "filesystem.refresh.read_after",
   ])
   const source = model()
   source.native.measurement.profile = "existing_core_profile_counters"
@@ -318,6 +352,12 @@ test("causal core projection preserves fixed prefix, new zero rows and exact dec
   assert.deepEqual(value.core_profile.entries, source.native.profile.entries)
   assert.equal(value.core_profile.status, "observed")
   assert.equal(value.storage.entries.length, 85)
+  source.native.profile.entries = source.native.profile.entries.slice(0, 118)
+  const previousCompactSnapshot = projectOwnedLayoutPhaseMetrics(source).core_profile
+  assert.equal(previousCompactSnapshot.status, "observed")
+  assert.equal(previousCompactSnapshot.entries.length, 118)
+  assert.equal(previousCompactSnapshot.entries.some((row) => row.name === causalProfileNames[118]), false)
+  assert.match(previousCompactSnapshot.scope, /absent_events_unavailable/u)
   source.native.profile.entries = source.native.profile.entries.slice(0, 114)
   const previousSnapshot = projectOwnedLayoutPhaseMetrics(source).core_profile
   assert.equal(previousSnapshot.status, "observed")
@@ -364,11 +404,11 @@ test("partial projector retains six existing optional compact labels independent
   ]
   const complete = projectOwnedLayoutPhaseMetrics(source).core_profile
   assert.equal(complete.status, "observed")
-  assert.equal(complete.entries.length, 124)
+  assert.equal(complete.entries.length, 140)
   assert.deepEqual(complete.entries, source.native.profile.entries)
 })
 
-test("compact node projection retains each measured node count and inclusive timing as exact strings", () => {
+test("compact and refresh projection retains measured units and inclusive timing as exact strings", () => {
   const source = model()
   source.native.measurement.profile = "existing_core_profile_counters"
   source.native.profile = { entries: causalProfileNames.slice(114).map((name, index) => ({

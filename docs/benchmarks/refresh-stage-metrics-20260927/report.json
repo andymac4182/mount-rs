@@ -1,0 +1,562 @@
+{
+  "schema": "mount-rs.refresh-stage-measurement.v1",
+  "staging_receipt": "/private/tmp/mount-rs-refresh-stage-native-20260927-97ss1jfr/staging-receipt.json",
+  "staging_receipt_sha256": "929c29df9ee92ee596e9db7d011688b0b93d3aa6fee3537d9adf61c02e9be113",
+  "build_source_pins": 437,
+  "core_rows": 134,
+  "storage_rows": 85,
+  "workload": "400 lifecycle iterations; concurrency64; payload4096; chunk65536; logical floor1000",
+  "verified_reads_total": 800,
+  "acknowledged_operations_total": 2400,
+  "arms": [
+    {
+      "kind": "sqlite-compact-profile",
+      "receipt": "/private/tmp/mount-rs-refresh-stage-sqlite-compact-profile-20260927-s07ytxs2/receipt.json",
+      "receipt_sha256": "d39862aed62eec30998f3f474f487862cd32d24a29301dddbdc3dd95c9b3b519",
+      "runtime_source_count": 451,
+      "summary": {
+        "writeMs": {
+          "median": 55.5840005,
+          "p95": 84.95824999999996,
+          "p99": 84.97424999999998
+        },
+        "readMs": {
+          "median": 26.483250000000012,
+          "p95": 27.900082999999995,
+          "p99": 27.991457999999994
+        },
+        "uploadMs": {
+          "median": 55.5840005,
+          "p95": 84.95824999999996,
+          "p99": 84.97424999999998
+        },
+        "downloadMs": {
+          "median": 26.483250000000012,
+          "p95": 27.900082999999995,
+          "p99": 27.991457999999994
+        },
+        "throughputMbps": {
+          "median": 1.2373103755023005,
+          "p95": 1.324318526411118,
+          "p99": 1.3253161306479877
+        },
+        "deleteMs": {
+          "median": 4.838208500000064,
+          "p95": 8.679124999999999,
+          "p99": 8.72808299999997
+        },
+        "successRate": 1,
+        "successfulIterations": 400,
+        "failedIterations": 0,
+        "elapsedMs": 602.320708,
+        "operationsPerLifecycle": 3,
+        "successfulOperations": 1200,
+        "attemptedOperations": 1200,
+        "iops": 1992.2941118604213,
+        "iopsTarget": 1000,
+        "iopsTargetMet": true,
+        "timeoutCount": 0,
+        "cleanupFailureCount": 0,
+        "operationSuccess": {
+          "write": 400,
+          "read": 400,
+          "delete": 400,
+          "verifiedReads": 400
+        },
+        "statSampleCounts": {
+          "writeMs": 400,
+          "readMs": 400,
+          "throughputMbps": 400,
+          "deleteMs": 400
+        }
+      },
+      "verified_samples": 400,
+      "native_sha256": "4ce499fbb023cc8e482373528ac61073faa7776f807cc8f05e4d06e541bd8d0d",
+      "new_core_rows": [
+        {
+          "name": "sqlite.compact.authority_query",
+          "calls": "3670",
+          "elapsed_ns": "30591841",
+          "units": "0"
+        },
+        {
+          "name": "sqlite.compact.authority_path",
+          "calls": "3670",
+          "elapsed_ns": "90268672",
+          "units": "0"
+        },
+        {
+          "name": "sqlite.compact.anchor_query_bytes",
+          "calls": "3670",
+          "elapsed_ns": "5382918",
+          "units": "4006771"
+        },
+        {
+          "name": "sqlite.compact.anchor_decode_bytes",
+          "calls": "3670",
+          "elapsed_ns": "9083229",
+          "units": "4006771"
+        },
+        {
+          "name": "sqlite.compact.guard_selected_rows",
+          "calls": "3200",
+          "elapsed_ns": "13498441",
+          "units": "3200"
+        },
+        {
+          "name": "sqlite.compact.guard_full_rows",
+          "calls": "470",
+          "elapsed_ns": "79212163",
+          "units": "83239"
+        },
+        {
+          "name": "sqlite.compact.guard_selected_decode_bytes",
+          "calls": "3200",
+          "elapsed_ns": "4812337",
+          "units": "6063550"
+        },
+        {
+          "name": "sqlite.compact.guard_full_decode_bytes",
+          "calls": "83239",
+          "elapsed_ns": "56273292",
+          "units": "38272681"
+        },
+        {
+          "name": "sqlite.compact.read_lock_wait",
+          "calls": "3635",
+          "elapsed_ns": "94188",
+          "units": "0"
+        },
+        {
+          "name": "sqlite.compact.read_begin",
+          "calls": "3635",
+          "elapsed_ns": "930706",
+          "units": "0"
+        },
+        {
+          "name": "filesystem.refresh.replace_probe",
+          "calls": "400",
+          "elapsed_ns": "34456918",
+          "units": "0"
+        },
+        {
+          "name": "filesystem.refresh.create_capture",
+          "calls": "400",
+          "elapsed_ns": "179994087",
+          "units": "0"
+        },
+        {
+          "name": "filesystem.refresh.batch_capture",
+          "calls": "35",
+          "elapsed_ns": "18449042",
+          "units": "0"
+        },
+        {
+          "name": "filesystem.refresh.path_structure",
+          "calls": "400",
+          "elapsed_ns": "37443384",
+          "units": "0"
+        },
+        {
+          "name": "filesystem.refresh.read_before",
+          "calls": "800",
+          "elapsed_ns": "38279037",
+          "units": "0"
+        },
+        {
+          "name": "filesystem.refresh.read_after",
+          "calls": "800",
+          "elapsed_ns": "37989586",
+          "units": "0"
+        }
+      ],
+      "storage_rows": [
+        {
+          "name": "metadata.load",
+          "calls": "3200",
+          "success": "3200",
+          "error": "0",
+          "cancelled": "0",
+          "bytes": "0",
+          "returned_rows": "0",
+          "returned_row_observations": "0",
+          "elapsed_ns": "152055349",
+          "latency_log2_us": [
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "3110",
+            "89",
+            "1",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0"
+          ],
+          "in_flight_start": "0",
+          "in_flight_end": "0"
+        },
+        {
+          "name": "metadata.snapshot",
+          "calls": "435",
+          "success": "435",
+          "error": "0",
+          "cancelled": "0",
+          "bytes": "0",
+          "returned_rows": "0",
+          "returned_row_observations": "0",
+          "elapsed_ns": "108475747",
+          "latency_log2_us": [
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "58",
+            "52",
+            "101",
+            "208",
+            "16",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0"
+          ],
+          "in_flight_start": "0",
+          "in_flight_end": "0"
+        },
+        {
+          "name": "metadata.publish",
+          "calls": "35",
+          "success": "35",
+          "error": "0",
+          "cancelled": "0",
+          "bytes": "0",
+          "returned_rows": "0",
+          "returned_row_observations": "0",
+          "elapsed_ns": "33179496",
+          "latency_log2_us": [
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "1",
+            "22",
+            "11",
+            "1",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0"
+          ],
+          "in_flight_start": "0",
+          "in_flight_end": "0"
+        },
+        {
+          "name": "blocks.put",
+          "calls": "400",
+          "success": "400",
+          "error": "0",
+          "cancelled": "0",
+          "bytes": "1638400",
+          "returned_rows": "0",
+          "returned_row_observations": "0",
+          "elapsed_ns": "168891706",
+          "latency_log2_us": [
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "361",
+            "38",
+            "1",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0"
+          ],
+          "in_flight_start": "0",
+          "in_flight_end": "0"
+        },
+        {
+          "name": "blocks.get",
+          "calls": "400",
+          "success": "400",
+          "error": "0",
+          "cancelled": "0",
+          "bytes": "1638400",
+          "returned_rows": "0",
+          "returned_row_observations": "0",
+          "elapsed_ns": "3892832",
+          "latency_log2_us": [
+            "0",
+            "0",
+            "0",
+            "37",
+            "361",
+            "2",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0"
+          ],
+          "in_flight_start": "0",
+          "in_flight_end": "0"
+        },
+        {
+          "name": "blocks.verify_backing",
+          "calls": "1270",
+          "success": "1270",
+          "error": "0",
+          "cancelled": "0",
+          "bytes": "0",
+          "returned_rows": "0",
+          "returned_row_observations": "0",
+          "elapsed_ns": "95683763",
+          "latency_log2_us": [
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "1135",
+            "31",
+            "3",
+            "85",
+            "16",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0"
+          ],
+          "in_flight_start": "0",
+          "in_flight_end": "0"
+        }
+      ],
+      "inode_bodies": {
+        "name": "provider.inode_returned_bytes",
+        "calls": "86439",
+        "elapsed_ns": "0",
+        "units": "44336231"
+      },
+      "sqlite_sql_calls": 22525,
+      "sqlite_pager_writes": 2082,
+      "process": {
+        "cpu_work": {
+          "user_us": "272284",
+          "system_us": "324471"
+        },
+        "cpu_observer": {
+          "user_us": "1065",
+          "system_us": "35"
+        },
+        "memory_end_bytes": {
+          "rss": "94273536",
+          "heapTotal": "19415040",
+          "heapUsed": "12858248",
+          "external": "5086378",
+          "arrayBuffers": "146611"
+        },
+        "resources_work": {
+          "voluntary_context_switches": "2459",
+          "involuntary_context_switches": "4449"
+        },
+        "native_allocation_count": "unavailable",
+        "js_allocation_count": "unavailable"
+      },
+      "shutdown_diagnostics_complete": false
+    },
+    {
+      "kind": "sqlite-compact-off",
+      "receipt": "/private/tmp/mount-rs-refresh-stage-sqlite-compact-off-20260927-cu2iai10/receipt.json",
+      "receipt_sha256": "1bddc9b6f157f29e5b982db5ec66332fb6fc768346588169f7fd2497110f8fd4",
+      "runtime_source_count": 451,
+      "summary": {
+        "writeMs": {
+          "median": 85.00831249999999,
+          "p95": 120.53879099999995,
+          "p99": 120.55379200000004
+        },
+        "readMs": {
+          "median": 25.866583499999997,
+          "p95": 29.816749999999956,
+          "p99": 35.52962499999998
+        },
+        "uploadMs": {
+          "median": 85.00831249999999,
+          "p95": 120.53879099999995,
+          "p99": 120.55379200000004
+        },
+        "downloadMs": {
+          "median": 25.866583499999997,
+          "p95": 29.816749999999956,
+          "p99": 35.52962499999998
+        },
+        "throughputMbps": {
+          "median": 1.2668082017574624,
+          "p95": 1.3167000301931242,
+          "p99": 1.3190519764766917
+        },
+        "deleteMs": {
+          "median": 7.544187499999964,
+          "p95": 213.36545900000002,
+          "p99": 213.480292
+        },
+        "successRate": 1,
+        "successfulIterations": 400,
+        "failedIterations": 0,
+        "elapsedMs": 972.5375829999999,
+        "operationsPerLifecycle": 3,
+        "successfulOperations": 1200,
+        "attemptedOperations": 1200,
+        "iops": 1233.885477513726,
+        "iopsTarget": 1000,
+        "iopsTargetMet": true,
+        "timeoutCount": 0,
+        "cleanupFailureCount": 0,
+        "operationSuccess": {
+          "write": 400,
+          "read": 400,
+          "delete": 400,
+          "verifiedReads": 400
+        },
+        "statSampleCounts": {
+          "writeMs": 400,
+          "readMs": 400,
+          "throughputMbps": 400,
+          "deleteMs": 400
+        }
+      },
+      "verified_samples": 400,
+      "native_sha256": "4ce499fbb023cc8e482373528ac61073faa7776f807cc8f05e4d06e541bd8d0d"
+    }
+  ],
+  "limitations": [
+    "inclusive_nested_wall_time_not_exclusive_cpu",
+    "single_arms_not_causal_speedup_or_isolated_observer_overhead",
+    "no_physical_iops_or_total_native_allocations",
+    "local_direct_api_not_mounted_or_10000_clients",
+    "shutdown_diagnostics_incomplete_after_sqlite_close"
+  ]
+}

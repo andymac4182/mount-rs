@@ -41,7 +41,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
-const CAUSAL_EVENTS: [Event; 71] = [
+const CAUSAL_EVENTS: [Event; 87] = [
     Event::FilesystemBlockPutInitial,
     Event::FilesystemBlockPutInitialSuccess,
     Event::FilesystemBlockPutInitialError,
@@ -113,6 +113,22 @@ const CAUSAL_EVENTS: [Event; 71] = [
     Event::MutationCandidateCloneNodes,
     Event::CompactStructuralDeltaCaptureNodes,
     Event::CompactStructuralExpectedGuardNodes,
+    Event::SqliteCompactAuthorityQuery,
+    Event::SqliteCompactAuthorityPath,
+    Event::SqliteCompactAnchorQueryBytes,
+    Event::SqliteCompactAnchorDecodeBytes,
+    Event::SqliteCompactGuardSelectedRows,
+    Event::SqliteCompactGuardFullRows,
+    Event::SqliteCompactGuardSelectedDecodeBytes,
+    Event::SqliteCompactGuardFullDecodeBytes,
+    Event::SqliteCompactReadLockWait,
+    Event::SqliteCompactReadBegin,
+    Event::FilesystemRefreshReplaceProbe,
+    Event::FilesystemRefreshCreateCapture,
+    Event::FilesystemRefreshBatchCapture,
+    Event::FilesystemRefreshPathStructure,
+    Event::FilesystemRefreshReadBefore,
+    Event::FilesystemRefreshReadAfter,
 ];
 
 #[test]
@@ -144,8 +160,8 @@ fn warmed_causal_profile_rows_record_without_added_allocations() {
         "warmed actual profile Span/add/drop recording added an allocation"
     );
     let delta = profile::snapshot().delta(&before).unwrap();
-    assert_eq!(before.entries.len(), 118);
-    assert_eq!(delta.entries.len(), 71);
+    assert_eq!(before.entries.len(), 134);
+    assert_eq!(delta.entries.len(), 87);
     for (event, row) in CAUSAL_EVENTS.into_iter().zip(delta.entries) {
         assert_eq!(row.name, before.entries[event as usize].name);
         assert_eq!((row.calls, row.units), (3, 8));

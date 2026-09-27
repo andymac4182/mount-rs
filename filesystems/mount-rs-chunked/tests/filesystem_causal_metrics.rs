@@ -1018,7 +1018,9 @@ fn sqlite_compact_selected_gates_and_phases_preserve_payload_after_reopen() {
         let before_create = profile::snapshot();
         fs.write_file("/data", b"abcdefgh").await.unwrap();
         let after_create = profile::snapshot();
+        let before_open = profile::snapshot();
         let handle = fs.open("/data", "r+", 0).await.unwrap();
+        let after_open = profile::snapshot();
 
         let before_write = profile::snapshot();
         assert_eq!(handle.write(b"XY", Some(2)).await.unwrap(), 2);
@@ -1137,6 +1139,10 @@ fn sqlite_compact_selected_gates_and_phases_preserve_payload_after_reopen() {
             ),
             (0, 0)
         );
+        let before_eof = profile::snapshot();
+        assert_eq!(handle.read(&mut bytes, Some(8)).await.unwrap(), 0);
+        let after_eof = profile::snapshot();
+        assert_eq!(&bytes, b"abXYefgh");
         handle.close().await.unwrap();
         drop(handle);
         fs.shutdown().await.unwrap();
@@ -1175,6 +1181,48 @@ fn sqlite_compact_selected_gates_and_phases_preserve_payload_after_reopen() {
             let (calls, nodes) = delta(&before_create, &after_create, name);
             assert!(calls > 0, "{name} must record a create call");
             assert!(nodes > 0, "{name} must record touched nodes");
+        }
+
+        // Classify the actual refresh calls only after complete bytes have
+        // survived fresh SQLite connections. EOF still performs both handle
+        // freshness checks even though it performs no immutable block read.
+        let refresh_names = [
+            "filesystem.refresh.replace_probe",
+            "filesystem.refresh.create_capture",
+            "filesystem.refresh.batch_capture",
+            "filesystem.refresh.path_structure",
+            "filesystem.refresh.read_before",
+            "filesystem.refresh.read_after",
+        ];
+        for (phase, before, after, expected_calls) in [
+            ("create", &before_create, &after_create, [1, 1, 1, 0, 0, 0]),
+            ("open", &before_open, &after_open, [0, 0, 0, 1, 0, 0]),
+            ("write", &before_write, &after_write, [0, 0, 0, 0, 0, 0]),
+            ("stat", &before_stat, &after_stat, [0, 0, 0, 1, 0, 0]),
+            ("read", &before_read, &after_read, [0, 0, 0, 0, 1, 1]),
+            ("eof", &before_eof, &after_eof, [0, 0, 0, 0, 1, 1]),
+        ] {
+            for (name, calls) in refresh_names.into_iter().zip(expected_calls) {
+                assert_eq!(
+                    delta(before, after, name),
+                    (calls, 0),
+                    "{phase} must classify only its actual {name} calls",
+                );
+            }
+        }
+        for (before, after) in [(&before_open, &after_open), (&before_stat, &after_stat)] {
+            assert_eq!(
+                delta(before, after, "filesystem.inode_path_guard"),
+                (2, 0),
+                "the root and file each require a selected path guard",
+            );
+        }
+        for (before, after) in [(&before_read, &after_read), (&before_eof, &after_eof)] {
+            assert_eq!(
+                delta(before, after, "filesystem.inode_path_guard"),
+                (0, 0),
+                "handle reads refresh their selected inode without resolving a path",
+            );
         }
     });
 }

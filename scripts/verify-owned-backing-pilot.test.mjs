@@ -130,6 +130,22 @@ const profileNames = [
   "filesystem.mutation.candidate_clone_nodes",
   "compact.structure.delta_capture_nodes",
   "compact.structure.expected_guard_nodes",
+  "sqlite.compact.authority_query",
+  "sqlite.compact.authority_path",
+  "sqlite.compact.anchor_query_bytes",
+  "sqlite.compact.anchor_decode_bytes",
+  "sqlite.compact.guard_selected_rows",
+  "sqlite.compact.guard_full_rows",
+  "sqlite.compact.guard_selected_decode_bytes",
+  "sqlite.compact.guard_full_decode_bytes",
+  "sqlite.compact.read_lock_wait",
+  "sqlite.compact.read_begin",
+  "filesystem.refresh.replace_probe",
+  "filesystem.refresh.create_capture",
+  "filesystem.refresh.batch_capture",
+  "filesystem.refresh.path_structure",
+  "filesystem.refresh.read_before",
+  "filesystem.refresh.read_after",
 ]
 const roles = ["pd-1", "pd-2", "pd-3", "tikv-1", "tikv-2", "tikv-3", "tidb", "rustfs-service"]
 const rawNames = ["put_opts.block_create", "get.block_read", "body_read.block_read", "get.conflict_verify", "body_read.conflict_verify", "get.migration", "body_read.migration", "head.direct_delete", "delete.direct", "delete.reconcile"]
@@ -291,7 +307,7 @@ test("the actual CLI returns a bounded fixed verdict and rejects untrusted build
 test("causal exact contract retains the old prefix and accepts zero new rows losslessly", () => {
   const { pilot, build } = model()
   const entries = pilot.native_phases.phases[0].core_profile.entries
-  assert.equal(entries.length, 118)
+  assert.equal(entries.length, 134)
   assert.equal(entries[46].name, "provider.inode_serialized_bytes")
   assert.equal(entries[47].name, "filesystem.block_put.initial")
   assert.deepEqual(entries.slice(108, 114).map((row) => row.name), [
@@ -302,11 +318,29 @@ test("causal exact contract retains the old prefix and accepts zero new rows los
     "filesystem.mutation.create_guard.allocation_mismatch",
     "filesystem.mutation.create_guard.path_present",
   ])
-  assert.deepEqual(entries.slice(114).map((row) => row.name), [
+  assert.deepEqual(entries.slice(114, 118).map((row) => row.name), [
     "compact.namespace.materialize_nodes",
     "filesystem.mutation.candidate_clone_nodes",
     "compact.structure.delta_capture_nodes",
     "compact.structure.expected_guard_nodes",
+  ])
+  assert.deepEqual(entries.slice(118).map((row) => row.name), [
+    "sqlite.compact.authority_query",
+    "sqlite.compact.authority_path",
+    "sqlite.compact.anchor_query_bytes",
+    "sqlite.compact.anchor_decode_bytes",
+    "sqlite.compact.guard_selected_rows",
+    "sqlite.compact.guard_full_rows",
+    "sqlite.compact.guard_selected_decode_bytes",
+    "sqlite.compact.guard_full_decode_bytes",
+    "sqlite.compact.read_lock_wait",
+    "sqlite.compact.read_begin",
+    "filesystem.refresh.replace_probe",
+    "filesystem.refresh.create_capture",
+    "filesystem.refresh.batch_capture",
+    "filesystem.refresh.path_structure",
+    "filesystem.refresh.read_before",
+    "filesystem.refresh.read_after",
   ])
   for (const row of entries.slice(47)) Object.assign(row, { calls: "0", elapsed_ns: "0", units: "0" })
   entries[47].units = "9007199254740993"
@@ -318,19 +352,20 @@ test("causal exact contract retains the old prefix and accepts zero new rows los
   assert.equal(entries[47].units, "9007199254740993")
   assert.deepEqual(entries, before)
 })
-for (const kind of ["old47", "old108", "old114", "missing", "missing_create_guard", "duplicate", "unknown"]) test(`causal exact ${kind} rows reject qualification`, () => {
+for (const kind of ["old47", "old108", "old114", "old118", "missing", "missing_create_guard", "duplicate", "unknown"]) test(`causal exact ${kind} rows reject qualification`, () => {
   const { pilot, build } = model()
   const rows = pilot.native_phases.phases[0].core_profile.entries
   if (kind === "old47") rows.splice(47)
   else if (kind === "old108") rows.splice(108)
   else if (kind === "old114") rows.splice(114)
+  else if (kind === "old118") rows.splice(118)
   else if (kind === "missing") rows.splice(47, 1)
   else if (kind === "missing_create_guard") rows.splice(110, 1)
   else if (kind === "duplicate") rows[48] = { ...rows[47] }
   else rows[47].name = "PRIVATE_CAUSAL_LABEL"
   assert.throws(() => verifyPilot(pilot, build), { code: "pilot_evidence_rejected", reason: "native_evidence" })
 })
-for (const name of profileNames.slice(114)) test(`compact exact missing ${name} rejects qualification`, () => {
+for (const name of profileNames.slice(114)) test(`current exact missing ${name} rejects qualification`, () => {
   const { pilot, build } = model()
   const rows = pilot.native_phases.phases[0].core_profile.entries
   rows.splice(rows.findIndex((row) => row.name === name), 1)

@@ -138,6 +138,22 @@ const CORE_NAMES = new Set([
   "filesystem.mutation.candidate_clone_nodes",
   "compact.structure.delta_capture_nodes",
   "compact.structure.expected_guard_nodes",
+  "sqlite.compact.authority_query",
+  "sqlite.compact.authority_path",
+  "sqlite.compact.anchor_query_bytes",
+  "sqlite.compact.anchor_decode_bytes",
+  "sqlite.compact.guard_selected_rows",
+  "sqlite.compact.guard_full_rows",
+  "sqlite.compact.guard_selected_decode_bytes",
+  "sqlite.compact.guard_full_decode_bytes",
+  "sqlite.compact.read_lock_wait",
+  "sqlite.compact.read_begin",
+  "filesystem.refresh.replace_probe",
+  "filesystem.refresh.create_capture",
+  "filesystem.refresh.batch_capture",
+  "filesystem.refresh.path_structure",
+  "filesystem.refresh.read_before",
+  "filesystem.refresh.read_after",
 ])
 const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value)
 const fields = (source, names) => Object.fromEntries(names.map((name) => [name, source[name]]))
