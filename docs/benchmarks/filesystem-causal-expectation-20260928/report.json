@@ -1,0 +1,328 @@
+{
+  "base_commit": "a5fd4b05ba4896683a5a948e4eaf70c163a24270",
+  "baseline_red": {
+    "executed_cases": 12,
+    "failed": 1,
+    "failed_case": "sqlite_compact_selected_gates_and_phases_preserve_payload_after_reopen",
+    "lifecycle_settled": true,
+    "logs": {
+      "stderr": {
+        "bytes": 1457,
+        "sha256": "984021d8b9ab69becf45d069123f24b812f94466b54a2179bd22a9b6301f5769"
+      },
+      "stdout": {
+        "bytes": 1130,
+        "sha256": "bf32cdd66abcf26019496de77db70d981d7f28c77949c8b6e71ace93cccb9e9f"
+      }
+    },
+    "observed_create_path_refresh": [
+      1,
+      0
+    ],
+    "only_sticky_unknown": [
+      "named_suite_not_observed_passed"
+    ],
+    "passed": 11,
+    "receipt_sha256": "b369ac90c4304ba560958fe8d7612c0b2e815dd32f898aacd2ba7afeab673d31",
+    "returncode": 101,
+    "source_count": 505,
+    "source_manifest_sha256": "a6ebef19f351cf64a33d5a0a2c28b4abdf8e8033abf725ab76d8c1e8ae0f3d2d",
+    "source_unchanged": true,
+    "stale_expected_create_path_refresh": [
+      0,
+      0
+    ]
+  },
+  "causal_scope": {
+    "command_matches_ci": "test -p mount-rs-chunked --test filesystem_causal_metrics --locked --offline -- --ignored --test-threads=1 --nocapture",
+    "expectation": "Exactly one path refresh for this uncontended create; all other phase expectations stay unchanged.",
+    "hosted": "The local failure reproduces the concrete stale expectation in source used by the failed hosted command. Hosted raw logs were not inspected, so no unique hosted root cause is asserted.",
+    "persisted_oracles": "Complete payload, EOF and fresh SQLite metadata/block reopen assertions execute before refresh-count assertions.",
+    "profile": "MOUNT_RS_PROFILE_IO=1; request/storage traces=0",
+    "source": "The guarded missing-path create preparation resolves its parent through inode_path_view, whose existing refresh_structure await records filesystem.refresh.path_structure."
+  },
+  "change": "Correct the uncontended compact-create path refresh expectation from zero to one; retain fixed phase counts and gate the full twelve-case suite in the owned CI parent.",
+  "final_refresh_observations": [
+    {
+      "calls": [
+        1,
+        1,
+        1,
+        1,
+        0,
+        0
+      ],
+      "phase": "create",
+      "units": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "calls": [
+        0,
+        0,
+        0,
+        1,
+        0,
+        0
+      ],
+      "phase": "open",
+      "units": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "calls": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "phase": "write",
+      "units": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "calls": [
+        0,
+        0,
+        0,
+        1,
+        0,
+        0
+      ],
+      "phase": "stat",
+      "units": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "calls": [
+        0,
+        0,
+        0,
+        0,
+        1,
+        1
+      ],
+      "phase": "read",
+      "units": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "calls": [
+        0,
+        0,
+        0,
+        0,
+        1,
+        1
+      ],
+      "phase": "eof",
+      "units": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ],
+  "gates": [
+    {
+      "elapsed_seconds": 3.6642326249857433,
+      "exact_selected_case_passed": null,
+      "fixture_root_removed": true,
+      "kind": "filesystemmetrics",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 361,
+          "sha256": "d9730fa9fddb31a089c52c8773b205c65995052744d4cb56820e082ac51f92e0"
+        },
+        "stdout": {
+          "bytes": 1513,
+          "sha256": "b58f617ae2a87112549318403591626b3870b9316d43d578329a6b774be3fae6"
+        }
+      },
+      "named_suite_observed_passed": true,
+      "receipt_sha256": "0521b562ccf4d658097e3d85b429a373c6923124b3be990219418ced4cd766dd",
+      "returncode": 0,
+      "rust_test_executions": 12,
+      "source_count": 505,
+      "source_manifest_sha256": "a481092bf3dfc1534e6957cd2a27e77e3d3baa11b44aed5b24bd4701564ff341",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 2.5992327500134706,
+      "exact_selected_case_passed": true,
+      "fixture_root_removed": true,
+      "kind": "clientmetrics",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 213,
+          "sha256": "38bdf912c967f6100095e9a61aab80947886db05c75cb9a5b02a9c5389b54496"
+        },
+        "stdout": {
+          "bytes": 1201,
+          "sha256": "01a9b99c0dffe577a217edfb82145fc0893fd683423b14849e1d9bf43f976602"
+        }
+      },
+      "named_suite_observed_passed": null,
+      "receipt_sha256": "6ce5d50b39f5a434e362a2273287fdb8d2d4112efda9e70873eb75d87d3dec86",
+      "returncode": 0,
+      "rust_test_executions": 1,
+      "source_count": 505,
+      "source_manifest_sha256": "a481092bf3dfc1534e6957cd2a27e77e3d3baa11b44aed5b24bd4701564ff341",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 5.007734165992588,
+      "exact_selected_case_passed": null,
+      "fixture_root_removed": true,
+      "kind": "createpath",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 363,
+          "sha256": "f0a7d3944b43f55c89fd628ee96a2d20e932e4505bb89adee3a7b41ee72ab171"
+        },
+        "stdout": {
+          "bytes": 3073,
+          "sha256": "de0c2568e58dad6d8dac9c8eb7c27eb88359687603e46be6660057d6c6412f67"
+        }
+      },
+      "named_suite_observed_passed": true,
+      "receipt_sha256": "92cd0be173e2ce52fe686eb29ff39fae6bbe945bd41ebb2f9cc532f78877a24a",
+      "returncode": 0,
+      "rust_test_executions": 5,
+      "source_count": 505,
+      "source_manifest_sha256": "a481092bf3dfc1534e6957cd2a27e77e3d3baa11b44aed5b24bd4701564ff341",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 7.800237375020515,
+      "exact_selected_case_passed": null,
+      "fixture_root_removed": true,
+      "kind": "chunkedclippy",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 814,
+          "sha256": "41b10230207bb052a79c778ee3a49a96bfafe7fdad26e848065eb1a96aa04a69"
+        },
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "named_suite_observed_passed": null,
+      "receipt_sha256": "3d9493e764ea011842cc8d07f518d39adf774592752f6cbd7ad91fefa4633bc9",
+      "returncode": 0,
+      "rust_test_executions": 0,
+      "source_count": 505,
+      "source_manifest_sha256": "a481092bf3dfc1534e6957cd2a27e77e3d3baa11b44aed5b24bd4701564ff341",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 3.8143093749531545,
+      "exact_selected_case_passed": null,
+      "fixture_root_removed": true,
+      "kind": "fmt",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "named_suite_observed_passed": null,
+      "receipt_sha256": "8bf7342cd06343a21966fe11bf827a297e8e6e0553bc3e22be2b55e434f56a56",
+      "returncode": 0,
+      "rust_test_executions": 0,
+      "source_count": 505,
+      "source_manifest_sha256": "a481092bf3dfc1534e6957cd2a27e77e3d3baa11b44aed5b24bd4701564ff341",
+      "source_unchanged": true
+    }
+  ],
+  "limits": [
+    "No production behavior, metric bank, request deadline or wire/security policy changes.",
+    "This is local functional and observer classification evidence, with no new throughput, allocation, physical IOPS or production-capacity measurement.",
+    "Fixture directory removal is observed by the owned parent after reap, group absence and EOF; it is not a general application drain or driver release guarantee.",
+    "No raw Actions logs or artifacts were accessed."
+  ],
+  "production_code_changed": false,
+  "qualification": {
+    "bank_index_sha256": "423e65b8f8e2f3092ac0410fe2bbe4501dcd4e8e85b0b9923fc85e6bfc03c9b2",
+    "controls_logs": {
+      "controls.stderr": {
+        "bytes": 165,
+        "sha256": "6aba501fb5844a7b32e7beb6d14a037ee7c5fdb458f1c9b33362c161f403d400"
+      },
+      "controls.stdout": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    "format_passed": true,
+    "hosted_ci": "Exact new source requires separate hosted qualification.",
+    "modeled_parent_controls": 66,
+    "owned_gate_count": 5,
+    "rust_test_executions": 18,
+    "source_count": 505,
+    "source_pins_current_and_unchanged": true,
+    "source_union_sha256": "a481092bf3dfc1534e6957cd2a27e77e3d3baa11b44aed5b24bd4701564ff341",
+    "strict_chunked_sqlite_all_target_clippy_passed": true
+  },
+  "refresh_row_order": [
+    "filesystem.refresh.replace_probe",
+    "filesystem.refresh.create_capture",
+    "filesystem.refresh.batch_capture",
+    "filesystem.refresh.path_structure",
+    "filesystem.refresh.read_before",
+    "filesystem.refresh.read_after"
+  ],
+  "registry_changed": false,
+  "schema": "mount-rs.filesystem-causal-expectation.v1",
+  "source_inputs": {
+    ".github/workflows/remote-drives.yml": "0b629108423fb35ae4813ba0eb9f005ae8d5871f56bb050b5ea0942fcc69f28f",
+    "filesystems/mount-rs-chunked/tests/filesystem_causal_metrics.rs": "a81279163c329acc234c68fec6283280e4192a75da9d786864e460deb3766dd7",
+    "scripts/test-remote-failures-controls.py": "2ea37854d2365d421b36bd5194a962fc8a9150803f74f8c63083d745798f69b0",
+    "scripts/test-remote-failures.py": "627d90acb72393c26165be4fb6e58a44e9842b04cf6862c31055a90b8c412aaa"
+  }
+}

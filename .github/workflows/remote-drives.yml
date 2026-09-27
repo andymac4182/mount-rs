@@ -181,6 +181,8 @@ jobs:
             > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-create-guard.log" 2>&1
           ./scripts/cargo-shared test --locked -p mount-rs-chunked --lib --no-run \
             > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-create-unit.log" 2>&1
+          ./scripts/cargo-shared test --locked -p mount-rs-chunked --test filesystem_causal_metrics --no-run \
+            > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-filesystem-metrics.log" 2>&1
       - name: Verify ordinary QUIC close natural drain through the owned parent
         timeout-minutes: 5
         run: python3 -B scripts/test-remote-failures.py quinnordinary
@@ -199,6 +201,9 @@ jobs:
       - name: Verify create gate, occupied body and corruption controls through the owned parent
         timeout-minutes: 5
         run: python3 -B scripts/test-remote-failures.py createunit
+      - name: Verify dedicated filesystem causal metrics through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py filesystemmetrics
       - name: Verify cache stage counts and cancellation through the owned parent
         timeout-minutes: 5
         run: python3 -B scripts/test-remote-failures.py cachemetrics

@@ -52,6 +52,19 @@ class ResultControls(unittest.TestCase):
 
 
 class CacheStageSelectors(unittest.TestCase):
+    def test_filesystem_metrics_require_the_complete_profiled_ci_suite(self):
+        command, limit, profile, trace = parent.COMMANDS["filesystemmetrics"]
+        self.assertEqual((limit, profile, trace), (180, 1, 0))
+        self.assertEqual(command, ["./scripts/cargo-shared", "test", "-p", "mount-rs-chunked", "--test", "filesystem_causal_metrics", "--locked", "--offline", "--", "--ignored", "--test-threads=1", "--nocapture"])
+        names = parent.EXPECTED_SUITES["filesystemmetrics"]
+        self.assertEqual(len(names), 12)
+        self.assertEqual(len(set(names)), 12)
+        output = "running 12 tests\n" + "".join(f"test {name} ... phase=observed\nok\n" for name in names) + "test result: ok. 12 passed; 0 failed; 0 ignored;\n"
+        self.assertTrue(parent.named_suite_passed(output, names, nocapture=True))
+        self.assertFalse(parent.named_suite_passed(output.replace(names[0], "other"), names, nocapture=True))
+        self.assertFalse(parent.named_suite_passed(output.replace("12 passed; 0 failed", "11 passed; 1 failed"), names, nocapture=True))
+        self.assertFalse(parent.named_suite_passed("running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored;\n", names, nocapture=True))
+
     def test_client_stream_metrics_require_one_profiled_executed_case(self):
         name = "connection::metrics_tests::quic_stream_acquisition_outcomes_preserve_transactions"
         command, limit, profile, trace = parent.COMMANDS["clientmetrics"]

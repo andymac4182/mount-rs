@@ -1194,17 +1194,27 @@ fn sqlite_compact_selected_gates_and_phases_preserve_payload_after_reopen() {
             "filesystem.refresh.read_before",
             "filesystem.refresh.read_after",
         ];
+        // Guarded missing-path preparation resolves its parent through
+        // inode_path_view, so this uncontended create has one path refresh.
         for (phase, before, after, expected_calls) in [
-            ("create", &before_create, &after_create, [1, 1, 1, 0, 0, 0]),
+            ("create", &before_create, &after_create, [1, 1, 1, 1, 0, 0]),
             ("open", &before_open, &after_open, [0, 0, 0, 1, 0, 0]),
             ("write", &before_write, &after_write, [0, 0, 0, 0, 0, 0]),
             ("stat", &before_stat, &after_stat, [0, 0, 0, 1, 0, 0]),
             ("read", &before_read, &after_read, [0, 0, 0, 0, 1, 1]),
             ("eof", &before_eof, &after_eof, [0, 0, 0, 0, 1, 1]),
         ] {
-            for (name, calls) in refresh_names.into_iter().zip(expected_calls) {
+            let observed = refresh_names.map(|name| delta(before, after, name));
+            println!(
+                "MOUNT_RS_FS_REFRESH phase={phase} calls={:?} units={:?}",
+                observed.map(|row| row.0),
+                observed.map(|row| row.1),
+            );
+            for ((name, actual), calls) in
+                refresh_names.into_iter().zip(observed).zip(expected_calls)
+            {
                 assert_eq!(
-                    delta(before, after, name),
+                    actual,
                     (calls, 0),
                     "{phase} must classify only its actual {name} calls",
                 );

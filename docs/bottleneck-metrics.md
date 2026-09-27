@@ -144,6 +144,29 @@ enabled, operations taking at least 100 ms can emit at most 16 such records per
 process. Paths, storage keys and payloads are excluded. Keep tracing disabled
 for throughput and warmed recorder allocation controls.
 
+### Filesystem refresh classification qualification
+
+The [retained causal expectation report](benchmarks/filesystem-causal-expectation-20260928/report.json)
+reproduces the exact profiled filesystem CI command locally: eleven cases passed,
+and the SQLite compact lifecycle case failed because create observed one
+`filesystem.refresh.path_structure` call while its assertion expected zero.
+Guarded missing-path preparation now resolves its parent through `inode_path_view`.
+The corrected uncontended-create expectation is `[1, 1, 1, 1, 0, 0]` in the order
+replace probe, create capture, batch capture, path structure, read before, read
+after. Other phase expectations remain unchanged. Six fixed numeric phase lines
+are emitted only after full payload, EOF and fresh SQLite reopen checks.
+
+Final local qualification executes all twelve named causal cases, the real
+client stream metric case and five compact-create race cases: eighteen Rust
+test executions, five owned gates and sixty-six modeled parent controls, with
+strict chunked/SQLite all-target Clippy and formatting. All 505 source pins
+agree across the gates and current source. The owned CI parent now warms and
+executes this complete suite, rejecting missing, failed or zero-case results.
+This changes the test expectation and its evidence, with no production or
+metric-registry change. Hosted raw logs were not inspected; the local reproduction
+does not establish a unique cause for the separate hosted failures. Exact new
+source still needs hosted qualification.
+
 ## Locate the bottleneck in one measured phase
 
 ### Client QUIC stream acquisition

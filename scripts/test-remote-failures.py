@@ -10,6 +10,7 @@ import hashlib,json,os,pathlib,re,selectors,signal,stat,subprocess,sys,tempfile,
 BASE=pathlib.Path(__file__).resolve().parent.parent
 COMMANDS={'cachetests': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--all-targets', '--locked', '--offline'], 180, 0, 0), 'redisfault': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'distributed_failure', '--locked', '--offline', '--', '--ignored', '--exact', 'redis_directory_real_peer_failures_preserve_exact_backing', '--test-threads=1', '--nocapture'], 180, 0, 0), 'rediscleanup': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'distributed_failure', '--locked', '--offline', '--', '--ignored', '--exact', 'cancelled_redis_fixture_reaps_owned_child_before_removing_directory', '--test-threads=1', '--nocapture'], 180, 0, 0), 'wsloss': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-remote-client', '--test', 'quic_mount', '--locked', '--offline', '--', '--ignored', '--exact', 'websocket_sqlite_commit_survives_lost_wire_reply_without_replay', '--test-threads=1', '--nocapture'], 180, 0, 0), 'remotetests': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-remote-client', '--all-targets', '--locked', '--offline'], 180, 0, 0), 'faultclippy': (['./scripts/cargo-shared', 'clippy', '-p', 'mount-rs-blob-cache', '-p', 'mount-rs-remote-client', '--all-targets', '--locked', '--offline', '--', '-D', 'warnings'], 180, 0, 0), 'fmt': (['./scripts/cargo-shared', 'fmt', '--all', '--', '--check'], 120, 0, 0)}
 COMMANDS.update({
+    'filesystemmetrics': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-chunked', '--test', 'filesystem_causal_metrics', '--locked', '--offline', '--', '--ignored', '--test-threads=1', '--nocapture'], 180, 1, 0),
     'clientmetrics': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-remote-client', '--lib', '--locked', '--offline', '--', '--ignored', '--exact', 'connection::metrics_tests::quic_stream_acquisition_outcomes_preserve_transactions', '--test-threads=1', '--nocapture'], 180, 1, 0),
     'clidiagnostics': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-cli', '--features', 'io-profiling', '--lib', '--locked', '--offline', 'remote::diagnostics::tests::'], 180, 1, 0),
     'clicompact': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-cli', '--features', 'local-oidc-fixture,io-profiling', '--test', 'configured_remote_compact', '--locked', '--offline', '--', '--exact', 'configured_binary_selects_mrc5_for_signed_quic_and_websocket_reopen', '--test-threads=1', '--nocapture'], 180, 1, 0),
@@ -58,6 +59,20 @@ EXACT_CASES = {
     'corealloc': 'warmed_causal_profile_rows_record_without_added_allocations',
 }
 EXPECTED_SUITES = {
+    'filesystemmetrics': (
+        'partial_overwrite_attributes_initial_fallback_and_retry_puts',
+        'dropped_pending_put_records_attempted_bytes_and_cancellation',
+        'failed_put_preserves_error_and_zero_successful_input_bytes',
+        'coalesced_conflicting_batch_separates_candidate_replay_from_sent_replies',
+        'canceled_queued_request_is_skipped_and_not_counted_as_committed',
+        'canceled_metadata_waiter_has_no_hold_while_publication_owns_gate',
+        'manual_clock_lease_recovery_is_observed_under_an_acquired_gate',
+        'changed_chunker_replay_attributes_only_actual_reprepared_puts',
+        'empty_and_all_zero_whole_files_dispatch_no_block_puts',
+        'cancelled_acquired_fallback_records_hold_and_block_rewrite_phase',
+        'dropped_follower_after_known_commit_retains_commit_and_closed_reply',
+        'sqlite_compact_selected_gates_and_phases_preserve_payload_after_reopen',
+    ),
     'createunit': tuple('compact_preparation_tests::'+name for name in (
         'missing_preparation_waits_for_full_publication_and_releases_gate_before_blocks',
         'canceled_missing_preparation_retains_no_pending_full_capture',
@@ -259,6 +274,7 @@ def main():
     assert os.name=='posix' and hasattr(os,'waitid') and hasattr(os,'WNOWAIT'), 'Unix ownership observer required'
     FAULT_KINDS={'cachetests','redisfault','rediscleanup','wsloss','remotetests','faultclippy','fmt','cachemetrics','peermetrics','peerreconnect','peerport','quinnclose','quinnordinary','quinnruntimeclose','createprep','createpath','createguard','createunit','chunkedtests','chunkedclippy','cacheprofileoff','cacheprofileon','storagealloc','corealloc','coremetrics','cachemetricsclippy','cacheconsumers','cacheconsumerred','clidiagnostics','clicompact','napimetrics','consumerclippy','cachemetricstrace'}
     FAULT_KINDS.add('clientmetrics')
+    FAULT_KINDS.add('filesystemmetrics')
     assert kind in FAULT_KINDS, 'fixed fault qualification commands only'
     root=pathlib.Path(tempfile.mkdtemp(prefix='mount-rs-owned-fault-'+kind+'-',dir=os.environ.get('MOUNT_RS_FAILURE_EVIDENCE_ROOT',tempfile.gettempdir())));os.chmod(root,0o700)
     fixture_tmp=root/'fixtures';fixture_tmp.mkdir(mode=0o700)
@@ -457,7 +473,7 @@ def main():
      selected_suite=EXPECTED_SUITES.get(kind)
      selected_suite_pass=None
      if selected_suite is not None:
-      selected_suite_pass=named_suite_passed((root/'stdout.log').read_text(),selected_suite,nocapture=kind in {'createpath','createunit'})
+      selected_suite_pass=named_suite_passed((root/'stdout.log').read_text(),selected_suite,nocapture=kind in {'createpath','createunit','filesystemmetrics'})
       if not selected_suite_pass:unknown.append('named_suite_not_observed_passed')
      cache_slow_records=None
      if kind=='cachemetricstrace':
