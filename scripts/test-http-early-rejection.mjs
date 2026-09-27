@@ -536,7 +536,7 @@ async function startRust() {
   let child;
   try {
     child = spawn(
-      process.env.CARGO ?? "cargo",
+      process.env.CARGO ?? fileURLToPath(new URL("./cargo-shared", import.meta.url)),
       ["run", "--locked", "--quiet", "--example", "http_oracle", "--"],
       {
         cwd: fileURLToPath(repo),

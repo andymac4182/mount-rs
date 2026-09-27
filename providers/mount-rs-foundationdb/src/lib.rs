@@ -15,16 +15,20 @@
     )
 ))]
 
+mod compact;
+mod transaction_metrics;
 use async_trait::async_trait;
 use foundationdb::api::{FdbApiBuilder, NetworkAutoStop};
 use foundationdb::options::TransactionOption;
 use foundationdb::{Database, FdbError, TransactOption, Transaction};
-use futures_util::TryStreamExt;
+use futures_util::{Stream, TryFutureExt, TryStreamExt, future::Either, stream};
 use mount_rs_core::chunking::{ChunkerConfig, from_config};
 use mount_rs_core::delegation::{
     CheckoutRequest, DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState,
     DirectoryGrant,
 };
+use mount_rs_core::diagnostics::storage;
+use mount_rs_core::storage::compact::*;
 use mount_rs_core::storage::{
     BlockId, BlockStore, ConcurrentBackingId, ConcurrentModeState, InodeId, InodeMetadataSnapshot,
     InodeModeState, InodeVersion, LoadedInode, LoadedMetadata, MetadataStore, Namespace, NodeData,
@@ -42,6 +46,59 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use transaction_metrics::{CoreObserver, Kind, RangeDriver, RetryOptions, TransactionDriver};
+
+/// Closed source-site coverage for the enabled FoundationDB attempt recorder.
+/// Counts describe audited dispatch sites, not RPCs, successful transactions,
+/// key-value rows, drive labels, or physical device operations.
+pub struct FoundationDbDiagnosticCoverage {
+    pub schema: &'static str,
+    pub status: &'static str,
+    pub attempt_scope: &'static str,
+    pub payload_bytes_scope: &'static str,
+    pub returned_rows_scope: &'static str,
+    pub transaction_runner_sites: u32,
+    pub point_get_sites: u32,
+    pub get_key_sites: u32,
+    pub range_consumer_sites: u32,
+    pub operations: &'static [&'static str],
+    pub unavailable: &'static [&'static str],
+}
+
+/// Feature-on coverage only; feature-off and unsupported callers must report
+/// FoundationDB instrumentation unavailable without inventing observed zeros.
+pub const FOUNDATIONDB_DIAGNOSTIC_COVERAGE: FoundationDbDiagnosticCoverage =
+    FoundationDbDiagnosticCoverage {
+        schema: "mount-rs-foundationdb-client-diagnostic-coverage-v1",
+        status: "source_sites_instrumented",
+        attempt_scope: "audited_provider_closure_and_native_client_dispatch_attempts; process_fixed_label_bank",
+        payload_bytes_scope: "successful_get_value_get_key_key_and_range_page_key_value_return_lengths_only; no_key_contents",
+        returned_rows_scope: "unavailable; storage_returned_rows_are_SQL_only",
+        transaction_runner_sites: 6,
+        point_get_sites: 2,
+        get_key_sites: 1,
+        range_consumer_sites: 3,
+        operations: &[
+            "foundationdb.transaction.create",
+            "foundationdb.transaction.closure_attempt",
+            "foundationdb.read.get",
+            "foundationdb.read.get_key",
+            "foundationdb.read.get_range_page",
+            "foundationdb.transaction.commit",
+            "foundationdb.transaction.on_error",
+        ],
+        unavailable: &[
+            "client_internal_retries",
+            "wire_rpc_count",
+            "wire_bytes",
+            "server_execution_time",
+            "physical_device_iops",
+            "exclusive_cpu",
+            "transaction_lifetime",
+            "native_operation_settlement_after_future_drop",
+            "durability_or_rollback_after_commit_error_or_cancellation",
+        ],
+    };
 use tracing::Level;
 use uuid::Uuid;
 
@@ -82,6 +139,7 @@ const METADATA_LEASE_SUFFIX: &[u8] = b"meta/lease";
 const METADATA_FENCE_SUFFIX: &[u8] = b"meta/fence";
 const METADATA_WRITE_MODE_SUFFIX: &[u8] = b"meta/write-mode";
 const METADATA_BACKING_SUFFIX: &[u8] = b"meta/backing-id";
+const BLOCK_AUTHORITY_POLICY_SUFFIX: &[u8] = b"meta/block-policy";
 const CONCURRENT_WRITE_MODE: &[u8; 4] = b"MRC1";
 const BOUND_CONCURRENT_WRITE_MODE: &[u8; 4] = b"MRC2";
 // The old fenced provider decodes this key as a 12-byte MRF1 record. A
@@ -559,7 +617,8 @@ impl LeaseOracle for FoundationDbLeaseOracle {
         let db = Arc::clone(&self.db);
         let key = self.key.clone();
         let limits = self.limits;
-        db.transact_boxed(
+        transact_observed(
+            &db,
             (),
             move |trx, _| {
                 let key = key.clone();
@@ -714,27 +773,27 @@ impl FoundationDbLeaseAuthority {
         let db = Arc::clone(&self.db);
         let key = self.key.clone();
         let limits = self.limits;
-        let result = db
-            .transact_boxed(
-                (),
-                move |trx, _| {
-                    let key = key.clone();
-                    Box::pin(async move {
-                        configure_transaction(trx, limits)?;
-                        let current = get_owned(trx, &key)
-                            .await?
-                            .map(|bytes| decode_oracle_time(&bytes).map_err(TxnError::Fs))
-                            .transpose()?;
-                        let published = authority_time_sample(current, now_ms, max_forward_jump_ms)
-                            .map_err(TxnError::Fs)?;
-                        trx.set(&key, &encode_oracle_time(published));
-                        Ok(published)
-                    })
-                },
-                transaction_options(limits, TransactionPolicy::Idempotent),
-            )
-            .await
-            .map_err(TxnError::into_fs);
+        let result = transact_observed(
+            &db,
+            (),
+            move |trx, _| {
+                let key = key.clone();
+                Box::pin(async move {
+                    configure_transaction(trx, limits)?;
+                    let current = get_owned(trx, &key)
+                        .await?
+                        .map(|bytes| decode_oracle_time(&bytes).map_err(TxnError::Fs))
+                        .transpose()?;
+                    let published = authority_time_sample(current, now_ms, max_forward_jump_ms)
+                        .map_err(TxnError::Fs)?;
+                    trx.set(&key, &encode_oracle_time(published));
+                    Ok(published)
+                })
+            },
+            transaction_options(limits, TransactionPolicy::Idempotent),
+        )
+        .await
+        .map_err(TxnError::into_fs);
         match result {
             Ok(published) => {
                 self.stats.record_success(published);
@@ -858,21 +917,21 @@ impl LeaseOracle for FoundationDbSharedLeaseOracle {
         let db = Arc::clone(&self.db);
         let key = self.key.clone();
         let limits = self.limits;
-        let result = db
-            .transact_boxed(
-                (),
-                move |trx, _| {
-                    let key = key.clone();
-                    Box::pin(async move {
-                        configure_transaction(trx, limits)?;
-                        let published = read_shared_authority_time(trx, &key).await?;
-                        Ok(published)
-                    })
-                },
-                transaction_options(limits, TransactionPolicy::Idempotent),
-            )
-            .await
-            .map_err(TxnError::into_fs);
+        let result = transact_observed(
+            &db,
+            (),
+            move |trx, _| {
+                let key = key.clone();
+                Box::pin(async move {
+                    configure_transaction(trx, limits)?;
+                    let published = read_shared_authority_time(trx, &key).await?;
+                    Ok(published)
+                })
+            },
+            transaction_options(limits, TransactionPolicy::Idempotent),
+        )
+        .await
+        .map_err(TxnError::into_fs);
         match result {
             Ok(observed) => {
                 self.stats.record_success(observed);
@@ -915,6 +974,43 @@ impl LeaseOracle for FoundationDbSharedLeaseOracle {
     }
 }
 
+/// Where the bound block authority is verified for inode metadata.
+/// The choice is immutable after the first MRC2 binding. Split assemblers use
+/// ExternalBlockStore only with the actual BlockStore verification contract.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FoundationDbBlockAuthorityPolicy {
+    /// Preserve the transactionally checked marker in this FDB keyspace.
+    #[default]
+    SameKeyspace,
+    /// The filesystem verifies the independently configured block store.
+    ExternalBlockStore,
+}
+
+impl FoundationDbBlockAuthorityPolicy {
+    fn encode(self) -> &'static [u8] {
+        match self {
+            Self::SameKeyspace => b"MRBP1S",
+            Self::ExternalBlockStore => b"MRBP1E",
+        }
+    }
+
+    fn decode(raw: &[u8]) -> TxnResult<Self> {
+        match raw {
+            b"MRBP1S" => Ok(Self::SameKeyspace),
+            b"MRBP1E" => Ok(Self::ExternalBlockStore),
+            _ => Err(TxnError::Fs(stale_backing())),
+        }
+    }
+
+    fn require(self, actual: Option<Self>) -> TxnResult<()> {
+        if actual.unwrap_or_default() == self {
+            Ok(())
+        } else {
+            Err(TxnError::Fs(stale_backing()))
+        }
+    }
+}
+
 /// Configuration for one independent FoundationDB keyspace.
 #[derive(Clone)]
 pub struct FoundationDbStorageOptions {
@@ -924,6 +1020,7 @@ pub struct FoundationDbStorageOptions {
     oracle: Option<Arc<dyn LeaseOracle>>,
     auto_oracle: bool,
     require_shared_lease_authority: bool,
+    block_authority_policy: FoundationDbBlockAuthorityPolicy,
 }
 
 impl FoundationDbStorageOptions {
@@ -939,7 +1036,17 @@ impl FoundationDbStorageOptions {
             oracle: None,
             auto_oracle: false,
             require_shared_lease_authority: false,
+            block_authority_policy: FoundationDbBlockAuthorityPolicy::SameKeyspace,
         }
+    }
+
+    /// Select the metadata's block verification contract before first binding.
+    /// Existing bindings cannot be changed by reopening with different options.
+    /// External stores must be verified by the composing filesystem; this does
+    /// not create a substitute marker in the metadata keyspace.
+    pub fn with_block_authority_policy(mut self, policy: FoundationDbBlockAuthorityPolicy) -> Self {
+        self.block_authority_policy = policy;
+        self
     }
 
     /// Assert that the selected FoundationDB cluster has the required durable
@@ -1102,6 +1209,15 @@ impl FoundationDbStorage {
                 db,
                 prefix,
                 durable: options.durable,
+                block_authority_policy: options.block_authority_policy,
+                #[cfg(test)]
+                metadata_test_fault: Mutex::new(None),
+                #[cfg(test)]
+                compact_trace: Mutex::new(Vec::new()),
+                #[cfg(test)]
+                compact_control: Mutex::new(None),
+                #[cfg(test)]
+                metadata_test_attempts: Arc::new(AtomicU64::new(0)),
                 limits,
                 oracle,
                 _network: network,
@@ -1157,8 +1273,24 @@ impl FoundationDbStorage {
     }
 }
 
+// Faults are local to one unit-test handle and absent from production builds.
+#[cfg(test)]
+enum MetadataTestFault {
+    BeforeCommitChange { key: Vec<u8>, value: Vec<u8> },
+    AfterCommitAckLoss,
+}
+
 struct Inner {
+    #[cfg(test)]
+    metadata_test_fault: Mutex<Option<MetadataTestFault>>,
+    #[cfg(test)]
+    compact_trace: Mutex<Vec<(&'static str, Vec<u8>, usize)>>,
+    #[cfg(test)]
+    compact_control: Mutex<Option<compact_tests::Control>>,
+    #[cfg(test)]
+    metadata_test_attempts: Arc<AtomicU64>,
     db: Arc<Database>,
+    block_authority_policy: FoundationDbBlockAuthorityPolicy,
     prefix: Vec<u8>,
     durable: bool,
     limits: FoundationDbLimits,
@@ -1204,6 +1336,163 @@ fn transaction_options(limits: FoundationDbLimits, policy: TransactionPolicy) ->
     }
 }
 
+struct NativeTransactionDriver<'db, F, T> {
+    db: &'db Database,
+    data: (),
+    f: F,
+    _item: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<F, T> TransactionDriver for NativeTransactionDriver<'_, F, T>
+where
+    T: Send,
+    F: for<'a> FnMut(
+            &'a Transaction,
+            &'a mut (),
+        ) -> Pin<Box<dyn Future<Output = TxnResult<T>> + Send + 'a>>
+        + Send,
+{
+    type Transaction = Transaction;
+    type Item = T;
+    type Error = TxnError;
+    type RetryError = FdbError;
+    type CommitError = foundationdb::TransactionCommitError;
+
+    fn now(&self) -> std::time::Instant {
+        std::time::Instant::now()
+    }
+    fn create(&mut self) -> TxnResult<Transaction> {
+        self.db.create_trx().map_err(TxnError::from)
+    }
+    fn invoke<'a>(
+        &'a mut self,
+        transaction: &'a Transaction,
+    ) -> impl Future<Output = TxnResult<T>> + Send + 'a {
+        // This is the provider's existing closure future; no diagnostic box.
+        (self.f)(transaction, &mut self.data)
+    }
+    fn commit(
+        &mut self,
+        transaction: Transaction,
+    ) -> impl Future<Output = std::result::Result<(), Self::CommitError>> + Send {
+        transaction.commit().map_ok(|_| ())
+    }
+    fn commit_on_error(
+        &mut self,
+        error: Self::CommitError,
+    ) -> impl Future<Output = TxnResult<Transaction>> + Send {
+        // Keep the failed commit's owned handle until native recovery consumes it.
+        error.on_error().map_err(TxnError::from)
+    }
+    fn on_error(
+        &mut self,
+        transaction: Transaction,
+        error: FdbError,
+    ) -> impl Future<Output = TxnResult<Transaction>> + Send {
+        transaction.on_error(error).map_err(TxnError::from)
+    }
+    fn commit_maybe_committed(error: &Self::CommitError) -> bool {
+        error.is_maybe_committed()
+    }
+    fn retry_maybe_committed(error: &FdbError) -> bool {
+        error.is_maybe_committed()
+    }
+    fn into_retry_error(error: TxnError) -> std::result::Result<FdbError, TxnError> {
+        error.try_into()
+    }
+    fn from_commit_error(error: Self::CommitError) -> TxnError {
+        TxnError::from(FdbError::from(error))
+    }
+    fn from_retry_error(error: FdbError) -> TxnError {
+        TxnError::from(error)
+    }
+}
+
+async fn transact_observed<T, F>(
+    db: &Database,
+    data: (),
+    f: F,
+    options: TransactOption,
+) -> TxnResult<T>
+where
+    T: Send,
+    F: for<'a> FnMut(
+            &'a Transaction,
+            &'a mut (),
+        ) -> Pin<Box<dyn Future<Output = TxnResult<T>> + Send + 'a>>
+        + Send,
+{
+    if !storage::enabled() {
+        return db.transact_boxed(data, f, options).await;
+    }
+    let mut driver = NativeTransactionDriver {
+        db,
+        data,
+        f,
+        _item: std::marker::PhantomData,
+    };
+    transaction_metrics::run_transaction(
+        &mut driver,
+        RetryOptions {
+            retry_limit: options.retry_limit,
+            time_out: options.time_out,
+            is_idempotent: options.is_idempotent,
+        },
+        &CoreObserver,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+struct NativeRangeDriver<'trx> {
+    transaction: &'trx Transaction,
+    snapshot: bool,
+}
+
+impl<'trx> RangeDriver for NativeRangeDriver<'trx> {
+    type Options = foundationdb::RangeOption<'trx>;
+    type Page = foundationdb::future::FdbValues;
+    type Error = FdbError;
+    fn get_range(
+        &self,
+        options: &Self::Options,
+        iteration: usize,
+    ) -> impl Future<Output = foundationdb::FdbResult<Self::Page>> + Send {
+        self.transaction
+            .get_range(options, iteration, self.snapshot)
+    }
+    fn next_range(&self, options: Self::Options, page: &Self::Page) -> Option<Self::Options> {
+        options.next_range(page)
+    }
+    fn successful_bytes(page: &Self::Page) -> u64 {
+        page.iter()
+            .map(|value| (value.key().len() + value.value().len()) as u64)
+            .sum()
+    }
+}
+
+fn ranges_keyvalues_observed<'trx>(
+    transaction: &'trx Transaction,
+    options: foundationdb::RangeOption<'trx>,
+    snapshot: bool,
+) -> impl Stream<Item = foundationdb::FdbResult<foundationdb::future::FdbValue>> + Send + 'trx {
+    if !storage::enabled() {
+        return Either::Left(transaction.get_ranges_keyvalues(options, snapshot));
+    }
+    let driver = NativeRangeDriver {
+        transaction,
+        snapshot,
+    };
+    let pages = stream::unfold((1, Some(options)), move |state| {
+        transaction_metrics::range_step(driver, &CoreObserver, state)
+    });
+    Either::Right(
+        pages
+            .map_ok(|values| stream::iter(values.into_iter().map(Ok)))
+            .try_flatten(),
+    )
+}
+
 impl Inner {
     async fn transact_with_policy<T, F>(
         &self,
@@ -1220,8 +1509,7 @@ impl Inner {
             + Send,
     {
         let options = transaction_options(self.limits, policy);
-        self.db
-            .transact_boxed(data, f, options)
+        transact_observed(&self.db, data, f, options)
             .await
             .map_err(TxnError::into_fs)
     }
@@ -1241,15 +1529,60 @@ impl Inner {
 
     async fn transact_metadata<T, F>(&self, data: (), f: F) -> Result<T>
     where
-        T: Send,
+        T: Send + 'static,
         F: for<'a> FnMut(
                 &'a Transaction,
                 &'a mut (),
             ) -> Pin<Box<dyn Future<Output = TxnResult<T>> + Send + 'a>>
             + Send,
     {
-        self.transact_with_policy(data, f, TransactionPolicy::FailClosedOnMaybeCommitted)
-            .await
+        #[cfg(not(test))]
+        {
+            self.transact_with_policy(data, f, TransactionPolicy::FailClosedOnMaybeCommitted)
+                .await
+        }
+        #[cfg(test)]
+        {
+            let fault = self.metadata_test_fault.lock().unwrap().take();
+            let lose_ack = matches!(fault, Some(MetadataTestFault::AfterCommitAckLoss));
+            let change = Arc::new(Mutex::new(match fault {
+                Some(MetadataTestFault::BeforeCommitChange { key, value }) => Some((key, value)),
+                _ => None,
+            }));
+            let db = Arc::clone(&self.db);
+            let attempts = Arc::clone(&self.metadata_test_attempts);
+            let mut f = f;
+            let result = self
+                .transact_with_policy(
+                    data,
+                    move |trx, data| {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                        let future = f(trx, data);
+                        let change = Arc::clone(&change);
+                        let db = Arc::clone(&db);
+                        Box::pin(async move {
+                            let result = future.await?;
+                            let change = change.lock().unwrap().take();
+                            if let Some((key, value)) = change {
+                                let other = db.create_trx()?;
+                                other.set(&key, &value);
+                                other.commit().await.map_err(FdbError::from)?;
+                            }
+                            Ok(result)
+                        })
+                    },
+                    TransactionPolicy::FailClosedOnMaybeCommitted,
+                )
+                .await;
+            if lose_ack && result.is_ok() {
+                // The real transaction committed once; only its acknowledgement
+                // is hidden from the operation caller. Native 1021 retry policy
+                // is covered separately by the production-options regression.
+                Err(fdb_error(FdbError::from_code(1021)))
+            } else {
+                result
+            }
+        }
     }
 }
 
@@ -1429,8 +1762,41 @@ fn ambiguous_commit_error(code: i32, message: impl std::fmt::Display) -> FsError
     ))
 }
 
+// Decode the six-byte value while borrowing the native result; do not make
+// a separate Vec allocation/copy for this additional authority field.
+async fn get_block_policy(
+    trx: &Transaction,
+    key: &[u8],
+) -> TxnResult<Option<FoundationDbBlockAuthorityPolicy>> {
+    let value = if storage::enabled() {
+        transaction_metrics::call_async(
+            &CoreObserver,
+            Kind::Get,
+            || trx.get(key, false),
+            |value| value.as_ref().map_or(0, |bytes| bytes.len() as u64),
+        )
+        .await?
+    } else {
+        trx.get(key, false).await?
+    };
+    value
+        .map(|value| FoundationDbBlockAuthorityPolicy::decode(value.as_ref()))
+        .transpose()
+}
+
 async fn get_owned(trx: &Transaction, key: &[u8]) -> TxnResult<Option<Vec<u8>>> {
-    Ok(trx.get(key, false).await?.map(|value| value.to_vec()))
+    let value = if storage::enabled() {
+        transaction_metrics::call_async(
+            &CoreObserver,
+            Kind::Get,
+            || trx.get(key, false),
+            |value| value.as_ref().map_or(0, |bytes| bytes.len() as u64),
+        )
+        .await?
+    } else {
+        trx.get(key, false).await?
+    };
+    Ok(value.map(|value| value.to_vec()))
 }
 
 async fn read_shared_authority_time(trx: &Transaction, key: &[u8]) -> TxnResult<u64> {
@@ -2076,6 +2442,10 @@ impl Keyspace {
         self.key(METADATA_WRITE_MODE_SUFFIX)
     }
 
+    fn block_authority_policy(&self) -> Vec<u8> {
+        self.key(BLOCK_AUTHORITY_POLICY_SUFFIX)
+    }
+
     fn metadata_backing(&self) -> Vec<u8> {
         self.key(METADATA_BACKING_SUFFIX)
     }
@@ -2187,6 +2557,7 @@ fn metadata_publication_affected_bytes(
     let fence_key = keyspace.fence();
     let write_mode_key = keyspace.write_mode();
     let metadata_backing_key = keyspace.metadata_backing();
+    let policy_key = keyspace.block_authority_policy();
     let manifest_key = keyspace.manifest();
     let chunk_prefix = keyspace.chunks();
     let chunk_end = range_end(&chunk_prefix)?;
@@ -2209,6 +2580,7 @@ fn metadata_publication_affected_bytes(
         &mut affected,
         key_conflict_range_bytes(metadata_backing_key.len())?,
     )?;
+    add_affected_bytes(&mut affected, key_conflict_range_bytes(policy_key.len())?)?;
     add_affected_bytes(&mut affected, key_conflict_range_bytes(manifest_key.len())?)?;
     // clear_range(chunk_prefix, chunk_end) contributes both its mutation
     // endpoints and its write-conflict range endpoints.
@@ -2494,6 +2866,7 @@ impl FoundationDbMetadataStore {
         let inner = Arc::clone(&self.0);
         let prefix = inner.prefix.clone();
         let limits = inner.limits;
+        let policy = inner.block_authority_policy;
         inner
             .transact_metadata((), move |trx, _| {
                 let prefix = prefix.clone();
@@ -2504,6 +2877,7 @@ impl FoundationDbMetadataStore {
                     let mode_key = keys.write_mode();
                     let backing_key = keys.metadata_backing();
                     let block_authority_key = keys.block_authority();
+                    let policy_key = keys.block_authority_policy();
                     let lease_key = keys.lease();
                     let fence_key = keys.fence();
                     let manifest_key = keys.manifest();
@@ -2515,14 +2889,15 @@ impl FoundationDbMetadataStore {
                     // Issue independent authority and selected-token reads together.
                     // All are ordinary conflict-protected reads at one version;
                     // validate authority before interpreting any selected result.
-                    let (mode, raw_backing, block_authority, lease, fence, raw_manifest, selected_token) = futures_util::try_join!(
+                    let (mode, raw_backing, block_authority, lease, fence, raw_manifest, selected_token, raw_policy) = futures_util::try_join!(
                         get_owned(trx, &mode_key),
                         get_owned(trx, &backing_key),
-                        get_owned(trx, &block_authority_key),
+                        async { if policy == FoundationDbBlockAuthorityPolicy::SameKeyspace { get_owned(trx, &block_authority_key).await } else { Ok(None) } },
                         get_owned(trx, &lease_key),
                         get_owned(trx, &fence_key),
                         get_owned(trx, &manifest_key),
                         async { match token_key.as_ref() { Some(key) => get_owned(trx, key).await, None => Ok(None) } },
+                        get_block_policy(trx, &policy_key),
                     )?;
                     let mut result = InodeResult {
                         state: None,
@@ -2531,10 +2906,14 @@ impl FoundationDbMetadataStore {
                         version: None,
                         generation: 0,
                     };
+                    if mode.as_deref() == Some(b"MRC5") {
+                        return Err(TxnError::Fs(stale_backing()));
+                    }
                     if matches!(command, InodeCommand::Inspect) && mode.as_deref() != Some(b"MRC4")
                     {
                         return Ok(result);
                     }
+                    policy.require(raw_policy)?;
                     let backing = raw_backing
                         .as_deref()
                         .and_then(parse_backing_bytes)
@@ -2548,9 +2927,8 @@ impl FoundationDbMetadataStore {
                         | InodeCommand::Structure(b, ..) => *b,
                     };
                     if backing != expected_backing
-                        || block_authority.as_deref()
-                            .and_then(parse_backing_bytes)
-                            != Some(backing)
+                        || (policy == FoundationDbBlockAuthorityPolicy::SameKeyspace
+                            && block_authority.as_deref().and_then(parse_backing_bytes) != Some(backing))
                     {
                         return Err(TxnError::Fs(stale_backing()));
                     }
@@ -2665,13 +3043,13 @@ impl FoundationDbMetadataStore {
                     if affected > FOUNDATIONDB_MAX_TRANSACTION_BYTES {
                         return Err(TxnError::Fs(metadata_transaction_too_large(affected)));
                     }
-                    let mut stream = trx.get_ranges_keyvalues(
+                    let mut stream = std::pin::pin!(ranges_keyvalues_observed(trx,
                         foundationdb::RangeOption::from((
                             guard_prefix.as_slice(),
                             guard_end.as_slice(),
                         )),
                         false,
-                    );
+                    ));
                     while let Some(value) = stream.try_next().await? {
                         if value.key().len() != guard_prefix.len() + 8 {
                             return Err(TxnError::Fs(backend_error("malformed inode guard key")));
@@ -2703,7 +3081,7 @@ impl FoundationDbMetadataStore {
                     let token_prefix = keys.key(b"meta/inode-version/");
                     let token_end = range_end(&token_prefix).map_err(TxnError::Fs)?;
                     let mut tokens = BTreeMap::new();
-                    let mut token_stream = trx.get_ranges_keyvalues(foundationdb::RangeOption::from((token_prefix.as_slice(), token_end.as_slice())), false);
+                    let mut token_stream = std::pin::pin!(ranges_keyvalues_observed(trx, foundationdb::RangeOption::from((token_prefix.as_slice(), token_end.as_slice())), false));
                     while let Some(value) = token_stream.try_next().await? {
                         if value.key().len() != token_prefix.len() + 8 { return Err(TxnError::Fs(backend_error("malformed inode token key"))); }
                         if prepare { return Err(TxnError::Fs(backend_error("unexpected inode token before enrollment"))); }
@@ -3068,11 +3446,12 @@ impl FoundationDbMetadataStore {
                 let metadata_prefix = metadata_prefix.clone();
                 Box::pin(async move {
                     configure_transaction(trx, limits)?;
-                    if get_owned(trx, &Keyspace::new(&metadata_prefix).write_mode())
-                        .await?
-                        .as_deref()
-                        == Some(b"MRC4")
-                    {
+                    if matches!(
+                        get_owned(trx, &Keyspace::new(&metadata_prefix).write_mode())
+                            .await?
+                            .as_deref(),
+                        Some(b"MRC4" | b"MRC5")
+                    ) {
                         return Err(TxnError::Fs(stale_backing()));
                     }
                     let raw_manifest = get_owned(trx, &manifest_key).await?;
@@ -3095,6 +3474,81 @@ impl FoundationDbMetadataStore {
 
 #[async_trait]
 impl MetadataStore for FoundationDbMetadataStore {
+    fn compact_inode_capability(&self) -> CompactInodeCapability {
+        CompactInodeCapability::V1
+    }
+    async fn compact_inode_mode_state(&self) -> Result<Option<InodeModeState>> {
+        match self.compact_transaction(compact::Command::Inspect).await? {
+            compact::Output::Mode(state) => Ok(state),
+            _ => unreachable!(),
+        }
+    }
+    async fn prepare_compact_inode_mode(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        match self
+            .compact_transaction(compact::Command::Prepare(backing, expected_revision))
+            .await?
+        {
+            compact::Output::Prepared => Ok(()),
+            _ => unreachable!(),
+        }
+    }
+    async fn load_compact_snapshot(&self, backing: ConcurrentBackingId) -> Result<CompactSnapshot> {
+        match self
+            .compact_transaction(compact::Command::Snapshot(backing))
+            .await?
+        {
+            compact::Output::Snapshot(value) => Ok(value),
+            _ => unreachable!(),
+        }
+    }
+    async fn load_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+    ) -> Result<LoadedCompactInode> {
+        match self
+            .compact_transaction(compact::Command::Load(backing, inode))
+            .await?
+        {
+            compact::Output::Inode(value) => Ok(value),
+            _ => unreachable!(),
+        }
+    }
+    async fn publish_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+        generation: u64,
+        expected: PhysicalInodeIdentity,
+        node: NodeMetadata,
+    ) -> Result<LoadedCompactInode> {
+        match self
+            .compact_transaction(compact::Command::Publish(
+                backing, inode, generation, expected, node,
+            ))
+            .await?
+        {
+            compact::Output::Inode(value) => Ok(value),
+            _ => unreachable!(),
+        }
+    }
+    async fn publish_compact_structure(
+        &self,
+        delta: &CompactStructuralDelta,
+    ) -> Result<CompactPublication> {
+        match self
+            .compact_transaction(compact::Command::Structure(delta.clone()))
+            .await?
+        {
+            compact::Output::Structure(value) => Ok(value),
+            _ => unreachable!(),
+        }
+    }
+
     fn durable(&self) -> bool {
         self.0.durable
     }
@@ -3128,6 +3582,26 @@ impl MetadataStore for FoundationDbMetadataStore {
             .await?;
         Ok(())
     }
+    async fn load_inode_snapshot_if_changed(
+        &self,
+        backing: ConcurrentBackingId,
+        known: Option<u64>,
+    ) -> Result<Option<InodeMetadataSnapshot>> {
+        // The compact probe validates authority atomically. A changed response
+        // comes from a separately coherent, fully validated snapshot.
+        let state = self.inode_mode_state().await?.ok_or_else(stale_backing)?;
+        if state.backing != backing
+            || state.structural_generation == 0
+            || known.is_some_and(|generation| generation > state.structural_generation)
+        {
+            return Err(stale_backing());
+        }
+        if known == Some(state.structural_generation) {
+            return Ok(None);
+        }
+        Ok(Some(self.load_inode_snapshot(backing).await?))
+    }
+
     async fn load_inode_snapshot(
         &self,
         backing: ConcurrentBackingId,
@@ -3232,6 +3706,8 @@ impl MetadataStore for FoundationDbMetadataStore {
         let inner = Arc::clone(&self.0);
         let keyspace = Keyspace::new(&inner.prefix);
         let mode_key = keyspace.write_mode();
+        let policy_key = keyspace.block_authority_policy();
+        let policy = inner.block_authority_policy;
         let backing_key = keyspace.metadata_backing();
         let lease_key = keyspace.lease();
         let fence_key = keyspace.fence();
@@ -3239,13 +3715,15 @@ impl MetadataStore for FoundationDbMetadataStore {
         inner
             .transact_idempotent((), move |trx, _| {
                 let mode_key = mode_key.clone();
+                let policy_key = policy_key.clone();
                 let backing_key = backing_key.clone();
                 let lease_key = lease_key.clone();
                 let fence_key = fence_key.clone();
                 Box::pin(async move {
                     configure_transaction(trx, limits)?;
-                    let (raw_mode, raw_backing, raw_lease, raw_fence) =
-                        futures_util::future::try_join4(
+                    let (raw_policy, raw_mode, raw_backing, raw_lease, raw_fence) =
+                        futures_util::future::try_join5(
+                            get_block_policy(trx, &policy_key),
                             get_owned(trx, &mode_key),
                             get_owned(trx, &backing_key),
                             get_owned(trx, &lease_key),
@@ -3253,6 +3731,9 @@ impl MetadataStore for FoundationDbMetadataStore {
                         )
                         .await?;
                     let mode = decode_concurrent_mode_state(raw_mode, raw_backing)?;
+                    if matches!(mode, ConcurrentModeState::Mrc2(_)) {
+                        policy.require(raw_policy)?;
+                    }
                     if mode != ConcurrentModeState::Legacy
                         && (raw_lease.is_some()
                             || raw_fence.as_deref() != Some(CONCURRENT_FENCE_SENTINEL))
@@ -3271,6 +3752,7 @@ impl MetadataStore for FoundationDbMetadataStore {
         let inner = Arc::clone(&self.0);
         let keyspace = Keyspace::new(&inner.prefix);
         let mode_key = keyspace.write_mode();
+        let policy_key = keyspace.block_authority_policy();
         let backing_key = keyspace.metadata_backing();
         let lease_key = keyspace.lease();
         let fence_key = keyspace.fence();
@@ -3278,18 +3760,24 @@ impl MetadataStore for FoundationDbMetadataStore {
         inner
             .transact_idempotent((), move |trx, _| {
                 let mode_key = mode_key.clone();
+                let policy_key = policy_key.clone();
                 let backing_key = backing_key.clone();
                 let lease_key = lease_key.clone();
                 let fence_key = fence_key.clone();
                 Box::pin(async move {
                     configure_transaction(trx, limits)?;
-                    let (mode, backing, lease, fence) = futures_util::future::try_join4(
-                        get_owned(trx, &mode_key),
-                        get_owned(trx, &backing_key),
-                        get_owned(trx, &lease_key),
-                        get_owned(trx, &fence_key),
-                    )
-                    .await?;
+                    let (raw_policy, mode, backing, lease, fence) =
+                        futures_util::future::try_join5(
+                            get_block_policy(trx, &policy_key),
+                            get_owned(trx, &mode_key),
+                            get_owned(trx, &backing_key),
+                            get_owned(trx, &lease_key),
+                            get_owned(trx, &fence_key),
+                        )
+                        .await?;
+                    if raw_policy.is_some() {
+                        return Err(TxnError::Fs(stale_backing()));
+                    }
                     if decode_concurrent_mode_state(mode, backing)? != ConcurrentModeState::Legacy
                         || lease.is_some()
                         || fence.is_some()
@@ -3309,6 +3797,8 @@ impl MetadataStore for FoundationDbMetadataStore {
         let inner = Arc::clone(&self.0);
         let keyspace = Keyspace::new(&inner.prefix);
         let mode_key = keyspace.write_mode();
+        let policy_key = keyspace.block_authority_policy();
+        let policy = inner.block_authority_policy;
         let backing_key = keyspace.metadata_backing();
         let lease_key = keyspace.lease();
         let fence_key = keyspace.fence();
@@ -3316,6 +3806,7 @@ impl MetadataStore for FoundationDbMetadataStore {
         inner
             .transact_metadata((), move |trx, _| {
                 let mode_key = mode_key.clone();
+                let policy_key = policy_key.clone();
                 let backing_key = backing_key.clone();
                 let lease_key = lease_key.clone();
                 let fence_key = fence_key.clone();
@@ -3324,8 +3815,9 @@ impl MetadataStore for FoundationDbMetadataStore {
                     // Mode, backing, lease, and fence share one read version.
                     // A racing legacy lease claimant reads this mode/fence pair
                     // and conflicts with the fresh MRC2 claim.
-                    let (raw_mode, raw_backing, raw_lease, raw_fence) =
-                        futures_util::future::try_join4(
+                    let (raw_policy, raw_mode, raw_backing, raw_lease, raw_fence) =
+                        futures_util::future::try_join5(
+                            get_block_policy(trx, &policy_key),
                             get_owned(trx, &mode_key),
                             get_owned(trx, &backing_key),
                             get_owned(trx, &lease_key),
@@ -3337,6 +3829,7 @@ impl MetadataStore for FoundationDbMetadataStore {
                             Err(TxnError::Fs(stale_backing()))
                         }
                         ConcurrentModeState::Mrc2(_) => {
+                            policy.require(raw_policy)?;
                             if raw_lease.is_none()
                                 && raw_fence.as_deref() == Some(CONCURRENT_FENCE_SENTINEL)
                             {
@@ -3353,6 +3846,9 @@ impl MetadataStore for FoundationDbMetadataStore {
                                 .with_message("MRC1 needs offline migrate-concurrent-backing"),
                         )),
                         ConcurrentModeState::Legacy => {
+                            if raw_policy.is_some() {
+                                return Err(TxnError::Fs(stale_backing()));
+                            }
                             if raw_lease.is_some() || raw_fence.is_some() {
                                 return Err(TxnError::Fs(
                                     FsError::new(ErrorCode::Ebusy)
@@ -3366,6 +3862,7 @@ impl MetadataStore for FoundationDbMetadataStore {
                             }
                             trx.set(&mode_key, BOUND_CONCURRENT_WRITE_MODE);
                             trx.set(&backing_key, &backing.as_bytes());
+                            trx.set(&policy_key, policy.encode());
                             trx.set(&fence_key, CONCURRENT_FENCE_SENTINEL);
                             Ok(())
                         }
@@ -3665,6 +4162,8 @@ impl MetadataStore for FoundationDbMetadataStore {
         });
         let keyspace = Keyspace::new(&inner.prefix);
         let mode_key = keyspace.write_mode();
+        let policy_key = keyspace.block_authority_policy();
+        let policy = inner.block_authority_policy;
         let backing_key = keyspace.metadata_backing();
         let lease_key = keyspace.lease();
         let fence_key = keyspace.fence();
@@ -3675,6 +4174,7 @@ impl MetadataStore for FoundationDbMetadataStore {
         inner
             .transact_metadata((), move |trx, _| {
                 let mode_key = mode_key.clone();
+                let policy_key = policy_key.clone();
                 let backing_key = backing_key.clone();
                 let lease_key = lease_key.clone();
                 let fence_key = fence_key.clone();
@@ -3688,15 +4188,16 @@ impl MetadataStore for FoundationDbMetadataStore {
                     // The authority, legacy fence, and manifest CAS all use
                     // one transaction read version. Compare backing before
                     // revision so a wrong client cannot retry an EAGAIN.
-                    let (raw_mode, raw_backing, raw_lease, raw_fence, raw_manifest) =
-                        futures_util::future::try_join5(
+                    let (raw_policy, raw_mode, raw_backing, raw_lease, raw_fence, raw_manifest) =
+                        futures_util::try_join!(
+                            get_block_policy(trx, &policy_key),
                             get_owned(trx, &mode_key),
                             get_owned(trx, &backing_key),
                             get_owned(trx, &lease_key),
                             get_owned(trx, &fence_key),
                             get_owned(trx, &manifest_key),
-                        )
-                        .await?;
+                        )?;
+                    policy.require(raw_policy)?;
                     match decode_concurrent_mode_state(raw_mode, raw_backing)? {
                         ConcurrentModeState::Mrc2(current) if current != backing => {
                             return Err(TxnError::Fs(stale_backing()));
@@ -3761,6 +4262,8 @@ impl MetadataStore for FoundationDbMetadataStore {
         let inner = Arc::clone(&self.0);
         let keyspace = Keyspace::new(&inner.prefix);
         let mode_key = keyspace.write_mode();
+        let policy_key = keyspace.block_authority_policy();
+        let policy = inner.block_authority_policy;
         let backing_key = keyspace.metadata_backing();
         let lease_key = keyspace.lease();
         let fence_key = keyspace.fence();
@@ -3769,21 +4272,25 @@ impl MetadataStore for FoundationDbMetadataStore {
         inner
             .transact_metadata((), move |trx, _| {
                 let mode_key = mode_key.clone();
+                let policy_key = policy_key.clone();
                 let backing_key = backing_key.clone();
                 let lease_key = lease_key.clone();
                 let fence_key = fence_key.clone();
                 let manifest_key = manifest_key.clone();
                 Box::pin(async move {
                     configure_transaction(trx, limits)?;
-                    let (raw_mode, raw_backing, raw_lease, raw_fence, raw_manifest) =
-                        futures_util::future::try_join5(
+                    let (raw_policy, raw_mode, raw_backing, raw_lease, raw_fence, raw_manifest) =
+                        futures_util::try_join!(
+                            get_block_policy(trx, &policy_key),
                             get_owned(trx, &mode_key),
                             get_owned(trx, &backing_key),
                             get_owned(trx, &lease_key),
                             get_owned(trx, &fence_key),
                             get_owned(trx, &manifest_key),
-                        )
-                        .await?;
+                        )?;
+                    if raw_policy.is_some() {
+                        return Err(TxnError::Fs(stale_backing()));
+                    }
                     if decode_concurrent_mode_state(raw_mode, raw_backing)?
                         != ConcurrentModeState::Mrc1
                     {
@@ -3813,6 +4320,7 @@ impl MetadataStore for FoundationDbMetadataStore {
                     // namespace chunks, revision, and fence unchanged.
                     trx.set(&mode_key, BOUND_CONCURRENT_WRITE_MODE);
                     trx.set(&backing_key, &backing.as_bytes());
+                    trx.set(&policy_key, policy.encode());
                     Ok(())
                 })
             })
@@ -3823,6 +4331,7 @@ impl MetadataStore for FoundationDbMetadataStore {
         let inner = Arc::clone(&self.0);
         let keyspace = Keyspace::new(&inner.prefix);
         let mode_key = keyspace.write_mode();
+        let policy_key = keyspace.block_authority_policy();
         let backing_key = keyspace.metadata_backing();
         let lease_key = keyspace.lease();
         let fence_key = keyspace.fence();
@@ -3831,20 +4340,24 @@ impl MetadataStore for FoundationDbMetadataStore {
         inner
             .transact_idempotent((), move |trx, _| {
                 let mode_key = mode_key.clone();
+                let policy_key = policy_key.clone();
                 let backing_key = backing_key.clone();
                 let lease_key = lease_key.clone();
                 let fence_key = fence_key.clone();
                 let manifest_key = manifest_key.clone();
                 Box::pin(async move {
                     configure_transaction(trx, limits)?;
-                    let (mode, backing, lease, fence, manifest) = futures_util::future::try_join5(
+                    let (policy, mode, backing, lease, fence, manifest) = futures_util::try_join!(
+                        get_block_policy(trx, &policy_key),
                         get_owned(trx, &mode_key),
                         get_owned(trx, &backing_key),
                         get_owned(trx, &lease_key),
                         get_owned(trx, &fence_key),
                         get_owned(trx, &manifest_key),
-                    )
-                    .await?;
+                    )?;
+                    if policy.is_some() {
+                        return Err(TxnError::Fs(stale_backing()));
+                    }
                     if decode_concurrent_mode_state(mode, backing)? != ConcurrentModeState::Mrc1
                         || lease.is_some()
                         || fence.as_deref() != Some(CONCURRENT_FENCE_SENTINEL)
@@ -3901,23 +4414,22 @@ impl FoundationDbBlockStore {
                 .min(CONCURRENT_BLOCK_PREFLIGHT_RETRY_LIMIT),
             ..inner.limits
         };
-        inner
-            .db
-            .transact_boxed(
-                (),
-                move |trx, _| {
-                    let key = key.clone();
-                    Box::pin(async move {
-                        configure_transaction(trx, limits)?;
-                        let _ = get_owned(trx, &key).await?;
-                        Ok(())
-                    })
-                },
-                transaction_options(limits, TransactionPolicy::Idempotent),
-            )
-            .await
-            .map_err(TxnError::into_fs)
-            .map_err(|error| error.with_syscall("probe concurrent FoundationDB blocks"))
+        transact_observed(
+            &inner.db,
+            (),
+            move |trx, _| {
+                let key = key.clone();
+                Box::pin(async move {
+                    configure_transaction(trx, limits)?;
+                    let _ = get_owned(trx, &key).await?;
+                    Ok(())
+                })
+            },
+            transaction_options(limits, TransactionPolicy::Idempotent),
+        )
+        .await
+        .map_err(TxnError::into_fs)
+        .map_err(|error| error.with_syscall("probe concurrent FoundationDB blocks"))
     }
 }
 
@@ -3969,29 +4481,28 @@ impl BlockStore for FoundationDbBlockStore {
                 .min(CONCURRENT_BLOCK_PREFLIGHT_RETRY_LIMIT),
             ..inner.limits
         };
-        inner
-            .db
-            .transact_boxed(
-                (),
-                move |trx, _| {
-                    let key = key.clone();
-                    Box::pin(async move {
-                        configure_transaction(trx, limits)?;
-                        let raw = get_owned(trx, &key).await?;
-                        let actual = raw
-                            .as_deref()
-                            .and_then(parse_backing_bytes)
-                            .ok_or_else(|| TxnError::Fs(stale_backing()))?;
-                        if actual != expected {
-                            return Err(TxnError::Fs(stale_backing()));
-                        }
-                        Ok(())
-                    })
-                },
-                transaction_options(limits, TransactionPolicy::Idempotent),
-            )
-            .await
-            .map_err(TxnError::into_fs)
+        transact_observed(
+            &inner.db,
+            (),
+            move |trx, _| {
+                let key = key.clone();
+                Box::pin(async move {
+                    configure_transaction(trx, limits)?;
+                    let raw = get_owned(trx, &key).await?;
+                    let actual = raw
+                        .as_deref()
+                        .and_then(parse_backing_bytes)
+                        .ok_or_else(|| TxnError::Fs(stale_backing()))?;
+                    if actual != expected {
+                        return Err(TxnError::Fs(stale_backing()));
+                    }
+                    Ok(())
+                })
+            },
+            transaction_options(limits, TransactionPolicy::Idempotent),
+        )
+        .await
+        .map_err(TxnError::into_fs)
     }
 
     async fn get_for_migration(&self, id: &BlockId) -> Result<Vec<u8>> {
@@ -4107,6 +4618,27 @@ impl BlockStore for FoundationDbBlockStore {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn block_policy_absence_is_conservative_and_unknown_versions_fail_closed() {
+        use FoundationDbBlockAuthorityPolicy::{ExternalBlockStore, SameKeyspace};
+        assert!(SameKeyspace.require(None).is_ok());
+        assert!(ExternalBlockStore.require(None).is_err());
+        for policy in [SameKeyspace, ExternalBlockStore] {
+            assert!(
+                policy
+                    .require(Some(
+                        FoundationDbBlockAuthorityPolicy::decode(policy.encode()).unwrap()
+                    ))
+                    .is_ok()
+            );
+            assert!(FoundationDbBlockAuthorityPolicy::decode(b"MRBP2E").is_err());
+            assert!(FoundationDbBlockAuthorityPolicy::decode(b"MRBP1").is_err());
+            assert!(FoundationDbBlockAuthorityPolicy::decode(b"").is_err());
+        }
+        assert!(SameKeyspace.require(Some(ExternalBlockStore)).is_err());
+        assert!(ExternalBlockStore.require(Some(SameKeyspace)).is_err());
+    }
+
     #[test]
     fn delegation_budget_includes_full_reads_and_authority_even_without_publication() {
         let prefix = b"volume";
@@ -5170,3 +5702,9 @@ mod tests {
         assert_eq!(closure_runs, 2);
     }
 }
+
+#[cfg(test)]
+mod authority_fault_tests;
+
+#[cfg(test)]
+mod compact_tests;

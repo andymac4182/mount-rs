@@ -116,9 +116,54 @@ Each future harness needs its own property, input assumptions, bound, and result
 
 MRC4 enrollment advances the persisted structural generation and stores the base namespace inside an exact `{"format":"MRC4","namespace":...}` envelope. Both changes must commit with the mode marker and complete inode guards. Already running MRC2 readers that check only the global revision therefore invalidate their cached namespace and fail plain `Namespace` decoding. The envelope remains mandatory on every structural publication; new MRC4 readers use the shared strict codec. This fences old metadata decoding in addition to the separate mode checks that fence old writes. It is a compatibility contract and unit-test slice, not a proof of provider transaction atomicity.
 
-The remote provider has a separate six-harness runner,
+The remote provider has a separate ten-harness runner,
 [`scripts/verify-remote-formal`](../scripts/verify-remote-formal). Its executed
 results, input domains, and limits are documented in
 [Remote verification](remote-verification.md). These decision proofs supplement
 the inventory above; they do not verify TLS, OIDC cryptography, or the complete
 asynchronous service state machine.
+
+The full hosted qualification at `ca5ebbbc` reached 53 of 55 proofs before its
+unchanged 100-minute job deadline: 44 general proofs and nine remote proofs
+completed, while `remote_io_completion_bounds_counts_and_closes_uncertainty`
+remained incomplete and the cache runner was never reached. Completed proofs
+reported 9,409 checks and 253 satisfied covers. This is partial qualification,
+with no disproved assertion established. The retained incomplete harness log
+ended during CBMC symbolic execution, expanding a `memcmp` loop reached through
+`Result<usize, ClientError>` equality; no SAT result or verification completion
+was reported. See [the retained run](https://github.com/andymac4182/mount-rs/actions/runs/36259363630).
+
+### Full hosted result (2026-09-27 UTC)
+
+At commit `bdfc61f8591e4abb78f64eecdd3419636a640079`,
+[run 36286504292, attempt 1](https://github.com/andymac4182/mount-rs/actions/runs/36286504292/job/108528173756)
+completed all 55 named proofs with Kani 0.68.0 / CBMC 6.11.0 on x86_64 Linux.
+The retained inventory, individual harness logs and committed source hashes
+were independently joined and rechecked:
+
+| Runner | Proofs | Checks | Failed checks | Satisfied covers |
+| --- | ---: | ---: | ---: | ---: |
+| General | 44 | 8,340 | 0 | 219/219 |
+| Remote | 10 | 1,227 | 0 | 39/39 |
+| Cache | 1 | 74 | 0 | 3/3 |
+| Total | 55 | 9,641 | 0 | 261/261 |
+
+The completion harness now uses scalar and exhaustive error-variant assertions
+instead of aggregate `Result` equality. Its input domains, five covers and
+production helper are unchanged. It completed 158 checks and 5/5 covers;
+Kani reported 0.599 seconds verification time. That is a symbolic invocation
+time, not a storage throughput measurement or controlled performance comparison.
+The full job took 11 minutes 25 seconds under the existing 100-minute limit.
+
+Artifact `10920916342` retains the summary, 55 harness logs, source and tool
+manifests, and equal before/after root and FSKit lock hashes. The downloaded ZIP
+SHA256 is `3274eae07b748fc4a871175943d849ed579ed3fa70c683a7b323238390bc729d`,
+matching the artifact API digest. All 87 retained files and 429 recorded source
+hashes were rechecked against the archive and this exact commit. Tool and model
+hashes are runner records: their binaries and model bytes were not archived or
+independently rehashed. Kani 0.68 does not forward `--locked`; the lock claim is
+before/after digest equality.
+
+This qualifies the bounded decisions at `bdfc61f8`. Provider transactions,
+asynchronous cancellation, TLS/OIDC implementations, cache fault recovery,
+physical IOPS and production capacity require their separate runtime gates.

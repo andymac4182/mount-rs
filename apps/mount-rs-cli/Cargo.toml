@@ -8,6 +8,8 @@ license = "Apache-2.0"
 
 [features]
 default = []
+local-oidc-fixture = []
+io-profiling = ["mount-rs-service/io-profiling"]
 observability = [
     "dep:mount-rs-observability",
     "mount-rs-http/observability",
@@ -47,7 +49,11 @@ tokio = { version = "1", default-features = false, features = ["macros", "proces
 libc = "0.2"
 
 [dev-dependencies]
+base64 = "0.22"
 mount-rs-memfs = { path = "../../filesystems/mount-rs-memfs" }
+mount-rs-remote-protocol = { path = "../../crates/mount-rs-remote-protocol" }
 mount-rs-sqlite = { path = "../../providers/mount-rs-sqlite" }
+rcgen = { version = "=0.14.8", default-features = false, features = ["crypto", "ring"] }
+ring = "0.17"
 rusqlite = { version = "=0.39.0", features = ["bundled", "fallible_uint"] }
 tempfile = "3"

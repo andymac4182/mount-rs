@@ -1,0 +1,660 @@
+{
+  "schema": "mount-rs-pool-retention-control-v1",
+  "fixed_source": {
+    "commit": "0015437d0faa33ff50e366fdda60278ac310c1bc",
+    "features": [
+      "resource-profiling"
+    ],
+    "binary": "/private/tmp/mount-rs-qualification-baseline/bin/quic_saturation-0015437d",
+    "sha256": "fce061d93f8224906adc9374f0fa6dc5f1dca5a7b7d6753d339bda2317763f1e"
+  },
+  "order": [
+    "retention-before-1",
+    "retention-after-1",
+    "retention-before-2",
+    "retention-after-2",
+    "retention-after-virgin"
+  ],
+  "configuration": {
+    "servers": 10,
+    "clients": 10,
+    "active_clients": 10,
+    "drives": 10,
+    "partitions": 1,
+    "files_per_drive": 1,
+    "file_bytes": 131072,
+    "transfer_bytes": 4096,
+    "depth_per_client": 1,
+    "warmup_seconds": 1,
+    "measured_seconds": 3,
+    "inode_updates": true,
+    "pool_max_per_server_per_connection_identity": 16
+  },
+  "scope": "One process, ten loopback QUIC coordinators; synthetic authentication; single TiDB Docker VM. No cache, 10k scale, production topology, OIDC-signature capacity, native mount capacity, Rust allocation count or physical SSD IOPS claim.",
+  "findings": {
+    "retained_client_sessions_before": 310,
+    "retained_client_sessions_after": 20,
+    "queries_per_read_after": 3,
+    "queries_per_write_after": 10,
+    "startup": "final virgin all10 fresh file oracles and cleanup pass",
+    "throughput": "two short alternating pairs vary; no steady-state speedup claim",
+    "unresolved": "earlier50559c51 preprovisioned warmup serverEIO retained in tidb-pool-churn.json; five controls passed but underlying error not captured"
+  },
+  "trials": [
+    {
+      "trial": "retention-before-1",
+      "source_commit": "cd92c7d4c4a46f5752c2f2af0d6983b6e4a3e39d plus planning-only c74ca180",
+      "run": {
+        "exit_code": 0,
+        "elapsed_seconds": 12.573628666024888,
+        "binary": "/private/tmp/mount-rs-qualification-baseline/bin/quic_saturation",
+        "clients": 10,
+        "active": 10,
+        "provision": true,
+        "servers": 10,
+        "timeout_seconds": 240
+      },
+      "driver_setup_seconds": 1.166878084,
+      "setup_seconds": 0.161240416,
+      "provisioning_seconds": 0.564169541,
+      "drives_provisioned_before_startup": true,
+      "verification_status": "passed",
+      "verified_files": 10,
+      "cleanup_error": null,
+      "work_error": null,
+      "failed_phase": null,
+      "stages": [
+        {
+          "mode": "Read",
+          "read": {
+            "completed": 5114,
+            "p50_us_upper": 8192,
+            "p95_us_upper": 8192,
+            "p99_us_upper": 16384
+          },
+          "write": {
+            "completed": 0,
+            "p50_us_upper": 0,
+            "p95_us_upper": 0,
+            "p99_us_upper": 0
+          },
+          "read_iops": 1701.5674742083304,
+          "write_iops": 0.0,
+          "failures": 0,
+          "start_unix_ms": 1790315747502,
+          "finish_unix_ms": 1790315750507,
+          "process_resources": {
+            "cpu_user_us": 828700,
+            "cpu_system_us": 1904307,
+            "rss_start_bytes": 43548672,
+            "rss_end_bytes": 43581440,
+            "lifetime_peak_rss_bytes": 43581440,
+            "rust_allocator_instrumented": false,
+            "rust_allocations": null
+          }
+        },
+        {
+          "mode": "Write",
+          "read": {
+            "completed": 0,
+            "p50_us_upper": 0,
+            "p95_us_upper": 0,
+            "p99_us_upper": 0
+          },
+          "write": {
+            "completed": 1571,
+            "p50_us_upper": 32768,
+            "p95_us_upper": 32768,
+            "p99_us_upper": 65536
+          },
+          "read_iops": 0.0,
+          "write_iops": 521.1477352213838,
+          "failures": 0,
+          "start_unix_ms": 1790315752619,
+          "finish_unix_ms": 1790315755634,
+          "process_resources": {
+            "cpu_user_us": 537508,
+            "cpu_system_us": 1039616,
+            "rss_start_bytes": 44482560,
+            "rss_end_bytes": 29769728,
+            "lifetime_peak_rss_bytes": 44498944,
+            "rust_allocator_instrumented": false,
+            "rust_allocations": null
+          }
+        }
+      ],
+      "datastore": [
+        {
+          "mode": "read",
+          "logical_successes": 5114,
+          "logical_failures": 0,
+          "queries_per_success": 3.0,
+          "statements_per_success": 3.0,
+          "sessions": {
+            "end": {
+              "tidb_server_connections{resource_group=\"default\"}": 310.0,
+              "tidb_server_internal_sessions": 13.0
+            },
+            "start": {
+              "tidb_server_connections{resource_group=\"default\"}": 310.0,
+              "tidb_server_internal_sessions": 13.0
+            }
+          },
+          "counter_resets": [],
+          "series_coverage_incomplete": false
+        },
+        {
+          "mode": "write",
+          "logical_successes": 1571,
+          "logical_failures": 0,
+          "queries_per_success": 10.0,
+          "statements_per_success": 10.0,
+          "sessions": {
+            "end": {
+              "tidb_server_connections{resource_group=\"default\"}": 310.0,
+              "tidb_server_internal_sessions": 13.0
+            },
+            "start": {
+              "tidb_server_connections{resource_group=\"default\"}": 310.0,
+              "tidb_server_internal_sessions": 13.0
+            }
+          },
+          "counter_resets": [],
+          "series_coverage_incomplete": false
+        }
+      ]
+    },
+    {
+      "trial": "retention-after-1",
+      "source_commit": "0015437d0faa33ff50e366fdda60278ac310c1bc",
+      "run": {
+        "exit_code": 0,
+        "elapsed_seconds": 12.031956416001776,
+        "binary": "/private/tmp/mount-rs-qualification-baseline/bin/quic_saturation-0015437d",
+        "clients": 10,
+        "active": 10,
+        "provision": true,
+        "servers": 10,
+        "timeout_seconds": 240
+      },
+      "driver_setup_seconds": 0.717753042,
+      "setup_seconds": 0.157985583,
+      "provisioning_seconds": 0.526814042,
+      "drives_provisioned_before_startup": true,
+      "verification_status": "passed",
+      "verified_files": 10,
+      "cleanup_error": null,
+      "work_error": null,
+      "failed_phase": null,
+      "stages": [
+        {
+          "mode": "Read",
+          "read": {
+            "completed": 5066,
+            "p50_us_upper": 8192,
+            "p95_us_upper": 8192,
+            "p99_us_upper": 16384
+          },
+          "write": {
+            "completed": 0,
+            "p50_us_upper": 0,
+            "p95_us_upper": 0,
+            "p99_us_upper": 0
+          },
+          "read_iops": 1683.6008749432474,
+          "write_iops": 0.0,
+          "failures": 0,
+          "start_unix_ms": 1790315767641,
+          "finish_unix_ms": 1790315770650,
+          "process_resources": {
+            "cpu_user_us": 797449,
+            "cpu_system_us": 1861011,
+            "rss_start_bytes": 34603008,
+            "rss_end_bytes": 34668544,
+            "lifetime_peak_rss_bytes": 34668544,
+            "rust_allocator_instrumented": false,
+            "rust_allocations": null
+          }
+        },
+        {
+          "mode": "Write",
+          "read": {
+            "completed": 0,
+            "p50_us_upper": 0,
+            "p95_us_upper": 0,
+            "p99_us_upper": 0
+          },
+          "write": {
+            "completed": 1841,
+            "p50_us_upper": 16384,
+            "p95_us_upper": 32768,
+            "p99_us_upper": 32768
+          },
+          "read_iops": 0.0,
+          "write_iops": 610.9427782896622,
+          "failures": 0,
+          "start_unix_ms": 1790315772714,
+          "finish_unix_ms": 1790315775727,
+          "process_resources": {
+            "cpu_user_us": 546971,
+            "cpu_system_us": 1134767,
+            "rss_start_bytes": 35454976,
+            "rss_end_bytes": 35504128,
+            "lifetime_peak_rss_bytes": 35504128,
+            "rust_allocator_instrumented": false,
+            "rust_allocations": null
+          }
+        }
+      ],
+      "datastore": [
+        {
+          "mode": "read",
+          "logical_successes": 5066,
+          "logical_failures": 0,
+          "queries_per_success": 3.0,
+          "statements_per_success": 3.0,
+          "sessions": {
+            "end": {
+              "tidb_server_connections{resource_group=\"default\"}": 20.0,
+              "tidb_server_internal_sessions": 13.0
+            },
+            "start": {
+              "tidb_server_connections{resource_group=\"default\"}": 20.0,
+              "tidb_server_internal_sessions": 13.0
+            }
+          },
+          "counter_resets": [],
+          "series_coverage_incomplete": false
+        },
+        {
+          "mode": "write",
+          "logical_successes": 1841,
+          "logical_failures": 0,
+          "queries_per_success": 10.0,
+          "statements_per_success": 10.0,
+          "sessions": {
+            "end": {
+              "tidb_server_connections{resource_group=\"default\"}": 20.0,
+              "tidb_server_internal_sessions": 13.0
+            },
+            "start": {
+              "tidb_server_connections{resource_group=\"default\"}": 20.0,
+              "tidb_server_internal_sessions": 13.0
+            }
+          },
+          "counter_resets": [],
+          "series_coverage_incomplete": false
+        }
+      ]
+    },
+    {
+      "trial": "retention-before-2",
+      "source_commit": "cd92c7d4c4a46f5752c2f2af0d6983b6e4a3e39d plus planning-only c74ca180",
+      "run": {
+        "exit_code": 0,
+        "elapsed_seconds": 13.125905666995095,
+        "binary": "/private/tmp/mount-rs-qualification-baseline/bin/quic_saturation",
+        "clients": 10,
+        "active": 10,
+        "provision": true,
+        "servers": 10,
+        "timeout_seconds": 240
+      },
+      "driver_setup_seconds": 1.230520792,
+      "setup_seconds": 0.168287917,
+      "provisioning_seconds": 0.63121025,
+      "drives_provisioned_before_startup": true,
+      "verification_status": "passed",
+      "verified_files": 10,
+      "cleanup_error": null,
+      "work_error": null,
+      "failed_phase": null,
+      "stages": [
+        {
+          "mode": "Read",
+          "read": {
+            "completed": 5152,
+            "p50_us_upper": 8192,
+            "p95_us_upper": 8192,
+            "p99_us_upper": 16384
+          },
+          "write": {
+            "completed": 0,
+            "p50_us_upper": 0,
+            "p95_us_upper": 0,
+            "p99_us_upper": 0
+          },
+          "read_iops": 1715.277549747834,
+          "write_iops": 0.0,
+          "failures": 0,
+          "start_unix_ms": 1790315790150,
+          "finish_unix_ms": 1790315793154,
+          "process_resources": {
+            "cpu_user_us": 826080,
+            "cpu_system_us": 1910975,
+            "rss_start_bytes": 43565056,
+            "rss_end_bytes": 42221568,
+            "lifetime_peak_rss_bytes": 43565056,
+            "rust_allocator_instrumented": false,
+            "rust_allocations": null
+          }
+        },
+        {
+          "mode": "Write",
+          "read": {
+            "completed": 0,
+            "p50_us_upper": 0,
+            "p95_us_upper": 0,
+            "p99_us_upper": 0
+          },
+          "write": {
+            "completed": 1793,
+            "p50_us_upper": 16384,
+            "p95_us_upper": 32768,
+            "p99_us_upper": 32768
+          },
+          "read_iops": 0.0,
+          "write_iops": 595.5555627478384,
+          "failures": 0,
+          "start_unix_ms": 1790315795589,
+          "finish_unix_ms": 1790315798600,
+          "process_resources": {
+            "cpu_user_us": 546969,
+            "cpu_system_us": 1122406,
+            "rss_start_bytes": 29982720,
+            "rss_end_bytes": 30031872,
+            "lifetime_peak_rss_bytes": 43565056,
+            "rust_allocator_instrumented": false,
+            "rust_allocations": null
+          }
+        }
+      ],
+      "datastore": [
+        {
+          "mode": "read",
+          "logical_successes": 5152,
+          "logical_failures": 0,
+          "queries_per_success": 3.0,
+          "statements_per_success": 3.0,
+          "sessions": {
+            "end": {
+              "tidb_server_connections{resource_group=\"default\"}": 310.0,
+              "tidb_server_internal_sessions": 13.0
+            },
+            "start": {
+              "tidb_server_connections{resource_group=\"default\"}": 310.0,
+              "tidb_server_internal_sessions": 13.0
+            }
+          },
+          "counter_resets": [],
+          "series_coverage_incomplete": false
+        },
+        {
+          "mode": "write",
+          "logical_successes": 1793,
+          "logical_failures": 0,
+          "queries_per_success": 10.0,
+          "statements_per_success": 10.0,
+          "sessions": {
+            "end": {
+              "tidb_server_connections{resource_group=\"default\"}": 310.0,
+              "tidb_server_internal_sessions": 13.0
+            },
+            "start": {
+              "tidb_server_connections{resource_group=\"default\"}": 310.0,
+              "tidb_server_internal_sessions": 13.0
+            }
+          },
+          "counter_resets": [],
+          "series_coverage_incomplete": false
+        }
+      ]
+    },
+    {
+      "trial": "retention-after-2",
+      "source_commit": "0015437d0faa33ff50e366fdda60278ac310c1bc",
+      "run": {
+        "exit_code": 0,
+        "elapsed_seconds": 13.124208958004601,
+        "binary": "/private/tmp/mount-rs-qualification-baseline/bin/quic_saturation-0015437d",
+        "clients": 10,
+        "active": 10,
+        "provision": true,
+        "servers": 10,
+        "timeout_seconds": 240
+      },
+      "driver_setup_seconds": 1.012629083,
+      "setup_seconds": 0.2077,
+      "provisioning_seconds": 0.736659791,
+      "drives_provisioned_before_startup": true,
+      "verification_status": "passed",
+      "verified_files": 10,
+      "cleanup_error": null,
+      "work_error": null,
+      "failed_phase": null,
+      "stages": [
+        {
+          "mode": "Read",
+          "read": {
+            "completed": 4717,
+            "p50_us_upper": 8192,
+            "p95_us_upper": 16384,
+            "p99_us_upper": 16384
+          },
+          "write": {
+            "completed": 0,
+            "p50_us_upper": 0,
+            "p95_us_upper": 0,
+            "p99_us_upper": 0
+          },
+          "read_iops": 1569.5308919788401,
+          "write_iops": 0.0,
+          "failures": 0,
+          "start_unix_ms": 1790315814394,
+          "finish_unix_ms": 1790315817399,
+          "process_resources": {
+            "cpu_user_us": 789878,
+            "cpu_system_us": 1770153,
+            "rss_start_bytes": 33816576,
+            "rss_end_bytes": 25575424,
+            "lifetime_peak_rss_bytes": 34553856,
+            "rust_allocator_instrumented": false,
+            "rust_allocations": null
+          }
+        },
+        {
+          "mode": "Write",
+          "read": {
+            "completed": 0,
+            "p50_us_upper": 0,
+            "p95_us_upper": 0,
+            "p99_us_upper": 0
+          },
+          "write": {
+            "completed": 1164,
+            "p50_us_upper": 32768,
+            "p95_us_upper": 65536,
+            "p99_us_upper": 65536
+          },
+          "read_iops": 0.0,
+          "write_iops": 385.4513688247028,
+          "failures": 0,
+          "start_unix_ms": 1790315819607,
+          "finish_unix_ms": 1790315822627,
+          "process_resources": {
+            "cpu_user_us": 451722,
+            "cpu_system_us": 805473,
+            "rss_start_bytes": 26771456,
+            "rss_end_bytes": 26017792,
+            "lifetime_peak_rss_bytes": 34553856,
+            "rust_allocator_instrumented": false,
+            "rust_allocations": null
+          }
+        }
+      ],
+      "datastore": [
+        {
+          "mode": "read",
+          "logical_successes": 4717,
+          "logical_failures": 0,
+          "queries_per_success": 3.0,
+          "statements_per_success": 3.0,
+          "sessions": {
+            "end": {
+              "tidb_server_connections{resource_group=\"default\"}": 20.0,
+              "tidb_server_internal_sessions": 13.0
+            },
+            "start": {
+              "tidb_server_connections{resource_group=\"default\"}": 20.0,
+              "tidb_server_internal_sessions": 13.0
+            }
+          },
+          "counter_resets": [],
+          "series_coverage_incomplete": false
+        },
+        {
+          "mode": "write",
+          "logical_successes": 1164,
+          "logical_failures": 0,
+          "queries_per_success": 10.0,
+          "statements_per_success": 10.0,
+          "sessions": {
+            "end": {
+              "tidb_server_connections{resource_group=\"default\"}": 20.0,
+              "tidb_server_internal_sessions": 13.0
+            },
+            "start": {
+              "tidb_server_connections{resource_group=\"default\"}": 20.0,
+              "tidb_server_internal_sessions": 13.0
+            }
+          },
+          "counter_resets": [],
+          "series_coverage_incomplete": false
+        }
+      ]
+    },
+    {
+      "trial": "retention-after-virgin",
+      "source_commit": "0015437d0faa33ff50e366fdda60278ac310c1bc",
+      "run": {
+        "exit_code": 0,
+        "elapsed_seconds": 12.698538625001675,
+        "binary": "/private/tmp/mount-rs-qualification-baseline/bin/quic_saturation-0015437d",
+        "clients": 10,
+        "active": 10,
+        "provision": false,
+        "servers": 10,
+        "timeout_seconds": 240
+      },
+      "driver_setup_seconds": 0.704581959,
+      "setup_seconds": 0.340043708,
+      "provisioning_seconds": null,
+      "drives_provisioned_before_startup": false,
+      "verification_status": "passed",
+      "verified_files": 10,
+      "cleanup_error": null,
+      "work_error": null,
+      "failed_phase": null,
+      "stages": [
+        {
+          "mode": "Read",
+          "read": {
+            "completed": 4759,
+            "p50_us_upper": 8192,
+            "p95_us_upper": 16384,
+            "p99_us_upper": 16384
+          },
+          "write": {
+            "completed": 0,
+            "p50_us_upper": 0,
+            "p95_us_upper": 0,
+            "p99_us_upper": 0
+          },
+          "read_iops": 1584.9525316691409,
+          "write_iops": 0.0,
+          "failures": 0,
+          "start_unix_ms": 1790315835752,
+          "finish_unix_ms": 1790315838754,
+          "process_resources": {
+            "cpu_user_us": 769828,
+            "cpu_system_us": 1779481,
+            "rss_start_bytes": 31522816,
+            "rss_end_bytes": 25100288,
+            "lifetime_peak_rss_bytes": 33751040,
+            "rust_allocator_instrumented": false,
+            "rust_allocations": null
+          }
+        },
+        {
+          "mode": "Write",
+          "read": {
+            "completed": 0,
+            "p50_us_upper": 0,
+            "p95_us_upper": 0,
+            "p99_us_upper": 0
+          },
+          "write": {
+            "completed": 1974,
+            "p50_us_upper": 16384,
+            "p95_us_upper": 32768,
+            "p99_us_upper": 32768
+          },
+          "read_iops": 0.0,
+          "write_iops": 656.0524353052917,
+          "failures": 0,
+          "start_unix_ms": 1790315841296,
+          "finish_unix_ms": 1790315844305,
+          "process_resources": {
+            "cpu_user_us": 550698,
+            "cpu_system_us": 1191956,
+            "rss_start_bytes": 26279936,
+            "rss_end_bytes": 26296320,
+            "lifetime_peak_rss_bytes": 33751040,
+            "rust_allocator_instrumented": false,
+            "rust_allocations": null
+          }
+        }
+      ],
+      "datastore": [
+        {
+          "mode": "read",
+          "logical_successes": 4759,
+          "logical_failures": 0,
+          "queries_per_success": 3.0,
+          "statements_per_success": 3.0,
+          "sessions": {
+            "end": {
+              "tidb_server_connections{resource_group=\"default\"}": 20.0,
+              "tidb_server_internal_sessions": 13.0
+            },
+            "start": {
+              "tidb_server_connections{resource_group=\"default\"}": 20.0,
+              "tidb_server_internal_sessions": 13.0
+            }
+          },
+          "counter_resets": [],
+          "series_coverage_incomplete": false
+        },
+        {
+          "mode": "write",
+          "logical_successes": 1974,
+          "logical_failures": 0,
+          "queries_per_success": 10.0,
+          "statements_per_success": 10.0,
+          "sessions": {
+            "end": {
+              "tidb_server_connections{resource_group=\"default\"}": 20.0,
+              "tidb_server_internal_sessions": 13.0
+            },
+            "start": {
+              "tidb_server_connections{resource_group=\"default\"}": 20.0,
+              "tidb_server_internal_sessions": 13.0
+            }
+          },
+          "counter_resets": [],
+          "series_coverage_incomplete": false
+        }
+      ]
+    }
+  ]
+}

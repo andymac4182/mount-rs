@@ -17,7 +17,7 @@ use mount_rs_memfs::{MemoryFs, MemoryOptions};
 use mount_rs_sqlite_fs::{SqliteFs, open_sqlite};
 
 use crate::options::{FoundationDbLeaseAuthority, SplitOptions, StoreConfig};
-use crate::providers::{StorageResources, open_storage, open_storage_decorated};
+use crate::providers::{StorageContext, StorageResources, open_storage, open_storage_in_context};
 use crate::stores::{ErasedBlockStore, ErasedMetadataStore};
 #[cfg(feature = "observability")]
 use crate::{Telemetry, global_telemetry};
@@ -80,7 +80,7 @@ impl Filesystem {
 
     /// Open a filesystem composed from independent metadata and block stores.
     pub async fn split(options: SplitOptions) -> Result<Self> {
-        Self::split_impl(options, None).await
+        Self::split_impl(options, None, None).await
     }
 
     /// Open split storage with an application-owned block provider decorator.
@@ -88,12 +88,30 @@ impl Filesystem {
         options: SplitOptions,
         decorator: &dyn BlockStoreDecorator,
     ) -> Result<Self> {
-        Self::split_impl(options, Some(decorator)).await
+        Self::split_impl(options, Some(decorator), None).await
+    }
+
+    /// Open split storage borrowing pools owned by an explicit server context.
+    pub async fn split_with_context(
+        options: SplitOptions,
+        context: &StorageContext,
+    ) -> Result<Self> {
+        Self::split_impl(options, None, Some(context)).await
+    }
+
+    /// Context-backed variant preserving the application's block decorator.
+    pub async fn split_with_context_and_block_decorator(
+        options: SplitOptions,
+        context: &StorageContext,
+        decorator: &dyn BlockStoreDecorator,
+    ) -> Result<Self> {
+        Self::split_impl(options, Some(decorator), Some(context)).await
     }
 
     async fn split_impl(
         options: SplitOptions,
         decorator: Option<&dyn BlockStoreDecorator>,
+        context: Option<&StorageContext>,
     ) -> Result<Self> {
         if options.chunk_size_bytes == 0 {
             return Err(FsError::new(ErrorCode::Einval)
@@ -104,6 +122,7 @@ impl Filesystem {
             .with_lease_ttl(options.lease_ttl)
             .with_concurrent_writes(options.concurrent_writes)
             .with_inode_updates(options.inode_updates)
+            .with_compact_inode_updates(options.compact_inode_updates)
             .with_writeback(options.writeback)
             .with_identity(options.uid, options.gid, options.umask);
         if options.delegated {
@@ -113,7 +132,8 @@ impl Filesystem {
                 chunk_options = chunk_options.with_checkout_path(path);
             }
         }
-        let opened = open_storage_decorated(&options.metadata, &options.blocks, decorator).await?;
+        let opened =
+            open_storage_in_context(&options.metadata, &options.blocks, decorator, context).await?;
         let resources = opened.resources.clone();
         match ChunkedFs::open(opened.metadata, opened.blocks, chunk_options).await {
             Ok(driver) => Ok(Self {
@@ -362,6 +382,17 @@ async fn complete_migration_after_teardown(
 }
 
 fn validate_concurrent_split_options(options: &SplitOptions) -> Result<()> {
+    if options.compact_inode_updates
+        && (!options.inode_updates
+            || !options.concurrent_writes
+            || options.delegated
+            || options.writeback
+            || options.checkout_path.is_some())
+    {
+        return Err(FsError::new(ErrorCode::Einval).with_message(
+            "compact_inode_updates requires shared write-through inode updates without checkout",
+        ));
+    }
     if options.inode_updates
         && (!options.concurrent_writes || options.delegated || options.writeback)
     {
@@ -488,6 +519,44 @@ mod tests {
         assert!(base.with_inode_updates(true).concurrent_writes);
     }
 
+    #[test]
+    fn compact_options_preserve_explicit_selection_and_reject_raw_contradictions() {
+        let selected =
+            SplitOptions::memory("compact-options", 4096).with_compact_inode_updates(true);
+        assert!(selected.compact_inode_updates);
+        assert!(selected.inode_updates && selected.concurrent_writes);
+        for options in [
+            SplitOptions {
+                inode_updates: false,
+                ..selected.clone()
+            },
+            SplitOptions {
+                concurrent_writes: false,
+                ..selected.clone()
+            },
+            SplitOptions {
+                delegated: true,
+                ..selected.clone()
+            },
+            SplitOptions {
+                writeback: true,
+                ..selected.clone()
+            },
+            SplitOptions {
+                checkout_path: Some("/".into()),
+                ..selected.clone()
+            },
+        ] {
+            assert_eq!(
+                validate_concurrent_split_options(&options)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Einval
+            );
+        }
+        assert!(selected.with_compact_inode_updates(false).inode_updates);
+    }
+
     #[tokio::test]
     async fn concurrent_tidb_validates_shared_pairing_before_connecting() {
         let tidb = StoreConfig::Tidb {
@@ -516,6 +585,27 @@ mod tests {
             assert_eq!(error.code, ErrorCode::Einval);
             assert!(error.to_string().contains("shared block"));
         }
+    }
+
+    #[tokio::test]
+    async fn concurrent_slatedb_is_rejected_before_opening_backing() {
+        let mut options =
+            SplitOptions::memory("unqualified-slate", 4096).with_concurrent_writes(true);
+        options.metadata = StoreConfig::SlateDb {
+            endpoint: "http://127.0.0.1:1".into(),
+            bucket: "metadata".into(),
+            region: "us-east-1".into(),
+            path: "metadata".into(),
+            access_key_id: "test-key".into(),
+            secret_access_key: "test-secret".into(),
+            durable: false,
+        };
+        let error = Filesystem::split(options)
+            .await
+            .err()
+            .expect("single-writer metadata must be rejected before connecting");
+        assert_eq!(error.code, ErrorCode::Einval);
+        assert!(error.to_string().contains("revision-CAS metadata"));
     }
 
     #[tokio::test]

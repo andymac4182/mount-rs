@@ -1,7 +1,9 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use mount_rs_core::{FsDriver, Loopback};
 use mount_rs_remote_client::{
-    connection::RemoteConnection, credentials::CredentialSource, driver::RemoteFsDriver,
+    connection::{ConnectionTransport, RemoteConnection},
+    credentials::CredentialSource,
+    driver::RemoteFsDriver,
 };
 use mount_rs_service::{
     auth::{AuthError, CatalogAuthenticator, Jwk, OidcKeySource, OidcVerifier},
@@ -11,6 +13,7 @@ use mount_rs_service::{
     },
     dispatch::DriveDispatcher,
     server::RemoteServer,
+    websocket::WebSocketServer,
 };
 use ring::{
     rand::SystemRandom,
@@ -52,6 +55,38 @@ fn token() -> (String, String, Jwk) {
 }
 #[tokio::test]
 async fn signed_oidc_multiple_drives_persistence_and_revocation() {
+    signed_oidc_roundtrip(0).await;
+}
+
+#[tokio::test]
+async fn websocket_signed_oidc_multiple_drives_persistence_and_revocation() {
+    signed_oidc_roundtrip(1).await;
+}
+
+#[tokio::test]
+async fn udp_unavailable_falls_back_before_oidc_and_roundtrips() {
+    signed_oidc_roundtrip(2).await;
+}
+
+enum TestServer {
+    Quic(RemoteServer),
+    WebSocket(WebSocketServer),
+}
+impl TestServer {
+    fn local_addr(&self) -> std::net::SocketAddr {
+        match self {
+            Self::Quic(s) => s.local_addr(),
+            Self::WebSocket(s) => s.local_addr(),
+        }
+    }
+    async fn close(self) {
+        match self {
+            Self::Quic(s) => s.close().await,
+            Self::WebSocket(s) => s.close().await,
+        }
+    }
+}
+async fn signed_oidc_roundtrip(mode: u8) {
     let directory = tempfile::tempdir().unwrap();
     let db = directory.path().join("drive.sqlite");
     let catalog = Arc::new(
@@ -118,49 +153,77 @@ async fn signed_oidc_multiple_drives_persistence_and_revocation() {
     let cert = certificate.cert.der().clone();
     let key =
         rustls::pki_types::PrivatePkcs8KeyDer::from(certificate.signing_key.serialize_der()).into();
-    let server = RemoteServer::bind(
-        "127.0.0.1:0".parse().unwrap(),
-        vec![cert.clone()],
-        key,
-        Arc::new(dispatcher),
-        Arc::new(CatalogAuthenticator::with_key_source(
-            catalog.clone(),
-            Arc::new(Keys(jwk)),
-        )),
-    )
-    .await
-    .unwrap();
+    let dispatcher = Arc::new(dispatcher);
+    let authenticator = Arc::new(CatalogAuthenticator::with_key_source(
+        catalog.clone(),
+        Arc::new(Keys(jwk)),
+    ));
+    let server = if mode == 0 {
+        TestServer::Quic(
+            RemoteServer::bind(
+                "127.0.0.1:0".parse().unwrap(),
+                vec![cert.clone()],
+                key,
+                dispatcher,
+                authenticator,
+            )
+            .await
+            .unwrap(),
+        )
+    } else {
+        TestServer::WebSocket(
+            WebSocketServer::bind(
+                "127.0.0.1:0".parse().unwrap(),
+                vec![cert.clone()],
+                key,
+                dispatcher,
+                authenticator,
+            )
+            .await
+            .unwrap(),
+        )
+    };
+    let selection = match mode {
+        0 => ConnectionTransport::Quic,
+        1 => ConnectionTransport::WebSocket(server.local_addr()),
+        _ => ConnectionTransport::Auto {
+            websocket: server.local_addr(),
+        },
+    };
     let mut roots = rustls::RootCertStore::empty();
     roots.add(cert).unwrap();
     let credentials = CredentialSource::File(token_path.clone());
     assert!(
-        RemoteConnection::connect(
+        RemoteConnection::connect_with_transport(
             server.local_addr(),
             "localhost",
             roots.clone(),
             "blue".into(),
-            credentials.clone()
+            credentials.clone(),
+            selection
         )
         .await
         .is_err()
     );
     assert!(
-        RemoteConnection::connect(
+        RemoteConnection::connect_with_transport(
             server.local_addr(),
             "localhost",
             rustls::RootCertStore::empty(),
             "red".into(),
-            credentials.clone()
+            credentials.clone(),
+            selection
         )
         .await
         .is_err()
     );
-    let connection = RemoteConnection::connect(
+    let connection = RemoteConnection::connect_with_transport(
         server.local_addr(),
         "localhost",
         roots,
         "red".into(),
         credentials,
+        selection,
     )
     .await
     .unwrap();
@@ -172,12 +235,17 @@ async fn signed_oidc_multiple_drives_persistence_and_revocation() {
         .await
         .unwrap();
     assert!(logs.capabilities().read_only);
+    assert!(
+        matches!(connection.request("blue/data", mount_rs_remote_protocol::Operation { name: mount_rs_remote_protocol::OperationName::Stat, body: json!({"path":"/"}) }).await, Err(mount_rs_remote_client::connection::ClientError::Remote(code)) if code == "EACCES")
+    );
     assert_eq!(
         logs.write_file("/denied", b"x").await.unwrap_err().code,
         mount_rs_core::ErrorCode::Eacces
     );
     let writer = data.open("/binary", "w+", 0o644).await.unwrap();
-    let payload: Vec<u8> = (0..4096).map(|n| n as u8).collect();
+    let payload: Vec<u8> = (0..mount_rs_remote_protocol::binary::MAX_IO_BYTES)
+        .map(|n| n as u8)
+        .collect();
     assert_eq!(
         writer.write(&payload, Some(0)).await.unwrap(),
         payload.len()

@@ -1,0 +1,597 @@
+{
+  "source": {
+    "commit": "50559c51c337ec16b7833b53ed885035f65cc2f6",
+    "features": [
+      "resource-profiling"
+    ],
+    "binary": "/private/tmp/mount-rs-qualification-baseline/bin/quic_saturation-50559c51",
+    "sha256": "c9dbafb7ce5118985c98dcaa583216c3ec195a69c4bd793acf6163297b7685fd"
+  },
+  "scope": "Matched ten-server, ten-Drive diagnostic; synthetic authentication; one loopback process; single TiDB Docker VM; not 10k capacity or physical SSD IOPS. Failed trial retained.",
+  "finding": "PoolConstraints min=0 plus default inactive_connection_ttl=0 makes pinned mysql_async active_bound=0 and discards every returned connection. Reconnect/session setup amplifies SQL. Initial server-side EIO remains unexplained.",
+  "baseline_queries_per_read": 3,
+  "baseline_queries_per_write": 10,
+  "trials": [
+    {
+      "clients": 10,
+      "servers": 10,
+      "drive_count": 10,
+      "driver_replicas": 100,
+      "inode_updates": true,
+      "tidb_pool": {
+        "max_connections": 16,
+        "schema_initialization": "once per context and role",
+        "scope": "per server per exact connection identity"
+      },
+      "driver_setup_seconds": 1.682718291,
+      "setup_seconds": 0.509649625,
+      "provisioning_seconds": null,
+      "verification_status": "passed",
+      "verified_files": 10,
+      "cleanup_error": null,
+      "work_error": null,
+      "failed_phase": null,
+      "trial": "after-50559c51-virgin",
+      "run": {
+        "exit_code": 0,
+        "elapsed_seconds": 13.571460957988165,
+        "binary": "/private/tmp/mount-rs-qualification-baseline/bin/quic_saturation-50559c51",
+        "clients": 10,
+        "active": 10,
+        "provision": false,
+        "servers": 10,
+        "timeout_seconds": 240
+      },
+      "stages": [
+        {
+          "mode": "Read",
+          "read": {
+            "completed": 970,
+            "p50_us_upper": 32768,
+            "p95_us_upper": 65536,
+            "p99_us_upper": 65536
+          },
+          "write": {
+            "completed": 0,
+            "p50_us_upper": 0,
+            "p95_us_upper": 0,
+            "p99_us_upper": 0
+          },
+          "read_iops": 322.106407693717,
+          "write_iops": 0.0,
+          "failures": 0,
+          "resources": {
+            "block_inputs": 0,
+            "block_outputs": 0,
+            "cpu_system_us": 1464545,
+            "cpu_user_us": 486410,
+            "involuntary_context_switches": 70558,
+            "lifetime_peak_rss_bytes": 34258944,
+            "major_faults": 0,
+            "minor_faults": 20,
+            "quic_client_side": {
+              "congestion_events": 0,
+              "lost_bytes": 0,
+              "lost_packets": 0,
+              "rx_bytes": 4133397,
+              "rx_datagrams": 3927,
+              "rx_ios": 3927,
+              "sent_packets": 2117,
+              "tx_bytes": 131907,
+              "tx_datagrams": 2117,
+              "tx_ios": 2117
+            },
+            "rss_end_bytes": 34258944,
+            "rss_start_bytes": 33931264,
+            "rust_allocated_bytes": null,
+            "rust_allocations": null,
+            "rust_allocator_instrumented": false,
+            "rust_deallocations": null,
+            "rust_freed_bytes": null,
+            "rust_live_end_bytes": null,
+            "rust_live_start_bytes": null,
+            "rust_reallocations": null,
+            "schema": "mount-rs-process-resource-v1",
+            "scope": "one process includes clients, servers, verification and background; System Rust allocations exclude foreign C allocators; QUIC UDP bytes exclude IP/UDP headers; atomic allocator instrumentation affects throughput",
+            "sqlite_heap_end_bytes": 6462560,
+            "sqlite_heap_lifetime_peak_bytes": 6470752,
+            "sqlite_heap_start_bytes": 6462560,
+            "voluntary_context_switches": 0
+          },
+          "start_unix_ms": 1790315162105,
+          "finish_unix_ms": 1790315165117
+        },
+        {
+          "mode": "Write",
+          "read": {
+            "completed": 0,
+            "p50_us_upper": 0,
+            "p95_us_upper": 0,
+            "p99_us_upper": 0
+          },
+          "write": {
+            "completed": 493,
+            "p50_us_upper": 65536,
+            "p95_us_upper": 131072,
+            "p99_us_upper": 131072
+          },
+          "read_iops": 0.0,
+          "write_iops": 162.20699562086352,
+          "failures": 0,
+          "resources": {
+            "block_inputs": 0,
+            "block_outputs": 0,
+            "cpu_system_us": 1235823,
+            "cpu_user_us": 450777,
+            "involuntary_context_switches": 60317,
+            "lifetime_peak_rss_bytes": 35127296,
+            "major_faults": 0,
+            "minor_faults": 5,
+            "quic_client_side": {
+              "congestion_events": 0,
+              "lost_bytes": 0,
+              "lost_packets": 0,
+              "rx_bytes": 62316,
+              "rx_datagrams": 1214,
+              "rx_ios": 1214,
+              "sent_packets": 1573,
+              "tx_bytes": 2102701,
+              "tx_datagrams": 1573,
+              "tx_ios": 1573
+            },
+            "rss_end_bytes": 35127296,
+            "rss_start_bytes": 35045376,
+            "rust_allocated_bytes": null,
+            "rust_allocations": null,
+            "rust_allocator_instrumented": false,
+            "rust_deallocations": null,
+            "rust_freed_bytes": null,
+            "rust_live_end_bytes": null,
+            "rust_live_start_bytes": null,
+            "rust_reallocations": null,
+            "schema": "mount-rs-process-resource-v1",
+            "scope": "one process includes clients, servers, verification and background; System Rust allocations exclude foreign C allocators; QUIC UDP bytes exclude IP/UDP headers; atomic allocator instrumentation affects throughput",
+            "sqlite_heap_end_bytes": 6462560,
+            "sqlite_heap_lifetime_peak_bytes": 6470752,
+            "sqlite_heap_start_bytes": 6462560,
+            "voluntary_context_switches": 0
+          },
+          "start_unix_ms": 1790315167326,
+          "finish_unix_ms": 1790315170365
+        }
+      ],
+      "datastore": [
+        {
+          "mode": "read",
+          "logical_successes": 970,
+          "logical_failures": 0,
+          "sessions_by_source": {
+            "mount-rs-tidb-mount-rs-tidb-GSTKki-pd1": {
+              "end": {},
+              "start": {}
+            },
+            "mount-rs-tidb-mount-rs-tidb-GSTKki-tidb": {
+              "end": {
+                "tidb_server_connections{resource_group=\"default\"}": 0.0,
+                "tidb_server_internal_sessions": 13.0
+              },
+              "start": {
+                "tidb_server_connections{resource_group=\"default\"}": 0.0,
+                "tidb_server_internal_sessions": 13.0
+              }
+            },
+            "mount-rs-tidb-mount-rs-tidb-GSTKki-tikv1": {
+              "end": {},
+              "start": {}
+            }
+          },
+          "series_coverage_incomplete": false,
+          "counter_resets": [],
+          "per_logical_success": {
+            "pd": {
+              "process_cpu_seconds_total": 0.0016391752577319917
+            },
+            "tidb": {
+              "process_cpu_seconds_total": 0.008206185567010346,
+              "tidb_executor_statement_total": 27.0,
+              "tidb_server_query_total": 30.0
+            },
+            "tikv": {
+              "process_cpu_seconds_total": 0.0010309278350515464
+            }
+          }
+        },
+        {
+          "mode": "write",
+          "logical_successes": 493,
+          "logical_failures": 0,
+          "sessions_by_source": {
+            "mount-rs-tidb-mount-rs-tidb-GSTKki-pd1": {
+              "end": {},
+              "start": {}
+            },
+            "mount-rs-tidb-mount-rs-tidb-GSTKki-tidb": {
+              "end": {
+                "tidb_server_connections{resource_group=\"default\"}": 0.0,
+                "tidb_server_internal_sessions": 13.0
+              },
+              "start": {
+                "tidb_server_connections{resource_group=\"default\"}": 0.0,
+                "tidb_server_internal_sessions": 13.0
+              }
+            },
+            "mount-rs-tidb-mount-rs-tidb-GSTKki-tikv1": {
+              "end": {},
+              "start": {}
+            }
+          },
+          "series_coverage_incomplete": false,
+          "counter_resets": [],
+          "per_logical_success": {
+            "pd": {
+              "process_cpu_seconds_total": 0.00350912778904669
+            },
+            "tidb": {
+              "process_cpu_seconds_total": 0.014949290060851937,
+              "tidb_executor_statement_total": 50.0,
+              "tidb_server_query_total": 56.0
+            },
+            "tikv": {
+              "process_cpu_seconds_total": 0.002028397565922921
+            }
+          }
+        }
+      ]
+    },
+    {
+      "clients": 10,
+      "servers": 10,
+      "drive_count": 10,
+      "driver_replicas": 100,
+      "inode_updates": true,
+      "tidb_pool": {
+        "max_connections": 16,
+        "schema_initialization": "once per context and role",
+        "scope": "per server per exact connection identity"
+      },
+      "driver_setup_seconds": 1.414195709,
+      "setup_seconds": 0.546460083,
+      "provisioning_seconds": 0.645944958,
+      "verification_status": "skipped",
+      "verified_files": 0,
+      "cleanup_error": null,
+      "work_error": "stage failures: count=10 samples=[\"EIO\", \"EIO\", \"EIO\", \"EIO\", \"EIO\", \"EIO\", \"EIO\", \"EIO\"]",
+      "failed_phase": {
+        "error_samples": [
+          "EIO",
+          "EIO",
+          "EIO",
+          "EIO",
+          "EIO",
+          "EIO",
+          "EIO",
+          "EIO"
+        ],
+        "failure_count": 10,
+        "measured": false,
+        "report": {
+          "active_clients": 10,
+          "cache": "cache-warm randomized dataset; no cold-cache claim",
+          "clients": 10,
+          "codec": "binary",
+          "elapsed_seconds_including_drain": 0.745774208,
+          "failures": 10,
+          "finish_unix_ms": 1790315189693,
+          "mode": "Read",
+          "nominal_seconds": 1,
+          "payload_mib_per_second": 1.1523259865806461,
+          "per_client_depth": 1,
+          "read": {
+            "completed": 220,
+            "p50_us_upper": 32768,
+            "p95_us_upper": 65536,
+            "p99_us_upper": 65536
+          },
+          "read_iops": 294.9954525646454,
+          "reference_target_iops": 100000,
+          "resources": {
+            "block_inputs": 0,
+            "block_outputs": 0,
+            "cpu_system_us": 350565,
+            "cpu_user_us": 119837,
+            "involuntary_context_switches": 16806,
+            "lifetime_peak_rss_bytes": 33849344,
+            "major_faults": 0,
+            "minor_faults": 53,
+            "quic_client_side": {
+              "congestion_events": 0,
+              "lost_bytes": 0,
+              "lost_packets": 0,
+              "rx_bytes": 938204,
+              "rx_datagrams": 907,
+              "rx_ios": 907,
+              "sent_packets": 492,
+              "tx_bytes": 31535,
+              "tx_datagrams": 502,
+              "tx_ios": 502
+            },
+            "rss_end_bytes": 33849344,
+            "rss_start_bytes": 33046528,
+            "rust_allocated_bytes": null,
+            "rust_allocations": null,
+            "rust_allocator_instrumented": false,
+            "rust_deallocations": null,
+            "rust_freed_bytes": null,
+            "rust_live_end_bytes": null,
+            "rust_live_start_bytes": null,
+            "rust_reallocations": null,
+            "schema": "mount-rs-process-resource-v1",
+            "scope": "one process includes clients, servers, verification and background; System Rust allocations exclude foreign C allocators; QUIC UDP bytes exclude IP/UDP headers; atomic allocator instrumentation affects throughput",
+            "sqlite_heap_end_bytes": 6462560,
+            "sqlite_heap_lifetime_peak_bytes": 6466656,
+            "sqlite_heap_start_bytes": 6120160,
+            "voluntary_context_switches": 0
+          },
+          "servers": 10,
+          "start_unix_ms": 1790315188947,
+          "target_attainment": 0.002949954525646454,
+          "total_iops": 294.9954525646454,
+          "total_queue_depth": 10,
+          "write": {
+            "completed": 0,
+            "p50_us_upper": 0,
+            "p95_us_upper": 0,
+            "p99_us_upper": 0
+          },
+          "write_iops": 0.0
+        },
+        "timeout_failures": 0
+      },
+      "trial": "after-50559c51-provisioned",
+      "run": {
+        "exit_code": 101,
+        "elapsed_seconds": 2.8528379169874825,
+        "binary": "/private/tmp/mount-rs-qualification-baseline/bin/quic_saturation-50559c51",
+        "clients": 10,
+        "active": 10,
+        "provision": true,
+        "servers": 10,
+        "timeout_seconds": 240
+      },
+      "stages": [],
+      "datastore": []
+    },
+    {
+      "clients": 10,
+      "servers": 10,
+      "drive_count": 10,
+      "driver_replicas": 100,
+      "inode_updates": true,
+      "tidb_pool": {
+        "max_connections": 16,
+        "schema_initialization": "once per context and role",
+        "scope": "per server per exact connection identity"
+      },
+      "driver_setup_seconds": 8.320453042,
+      "setup_seconds": 3.934603084,
+      "provisioning_seconds": 3.342828708,
+      "verification_status": "passed",
+      "verified_files": 10,
+      "cleanup_error": null,
+      "work_error": null,
+      "failed_phase": null,
+      "trial": "after-50559c51-provisioned-repeat",
+      "run": {
+        "exit_code": 0,
+        "elapsed_seconds": 28.885866625001654,
+        "binary": "/private/tmp/mount-rs-qualification-baseline/bin/quic_saturation-50559c51",
+        "clients": 10,
+        "active": 10,
+        "provision": true,
+        "servers": 10,
+        "timeout_seconds": 240
+      },
+      "stages": [
+        {
+          "mode": "Read",
+          "read": {
+            "completed": 150,
+            "p50_us_upper": 262144,
+            "p95_us_upper": 524288,
+            "p99_us_upper": 524288
+          },
+          "write": {
+            "completed": 0,
+            "p50_us_upper": 0,
+            "p95_us_upper": 0,
+            "p99_us_upper": 0
+          },
+          "read_iops": 47.706297135809336,
+          "write_iops": 0.0,
+          "failures": 0,
+          "resources": {
+            "block_inputs": 0,
+            "block_outputs": 0,
+            "cpu_system_us": 262959,
+            "cpu_user_us": 134967,
+            "involuntary_context_switches": 10846,
+            "lifetime_peak_rss_bytes": 31670272,
+            "major_faults": 0,
+            "minor_faults": 9,
+            "quic_client_side": {
+              "congestion_events": 0,
+              "lost_bytes": 0,
+              "lost_packets": 0,
+              "rx_bytes": 641052,
+              "rx_datagrams": 618,
+              "rx_ios": 618,
+              "sent_packets": 335,
+              "tx_bytes": 20326,
+              "tx_datagrams": 335,
+              "tx_ios": 335
+            },
+            "rss_end_bytes": 24805376,
+            "rss_start_bytes": 31080448,
+            "rust_allocated_bytes": null,
+            "rust_allocations": null,
+            "rust_allocator_instrumented": false,
+            "rust_deallocations": null,
+            "rust_freed_bytes": null,
+            "rust_live_end_bytes": null,
+            "rust_live_start_bytes": null,
+            "rust_reallocations": null,
+            "schema": "mount-rs-process-resource-v1",
+            "scope": "one process includes clients, servers, verification and background; System Rust allocations exclude foreign C allocators; QUIC UDP bytes exclude IP/UDP headers; atomic allocator instrumentation affects throughput",
+            "sqlite_heap_end_bytes": 6462560,
+            "sqlite_heap_lifetime_peak_bytes": 6468704,
+            "sqlite_heap_start_bytes": 6462560,
+            "voluntary_context_switches": 1
+          },
+          "start_unix_ms": 1790315296993,
+          "finish_unix_ms": 1790315300137
+        },
+        {
+          "mode": "Write",
+          "read": {
+            "completed": 0,
+            "p50_us_upper": 0,
+            "p95_us_upper": 0,
+            "p99_us_upper": 0
+          },
+          "write": {
+            "completed": 140,
+            "p50_us_upper": 262144,
+            "p95_us_upper": 524288,
+            "p99_us_upper": 524288
+          },
+          "read_iops": 0.0,
+          "write_iops": 44.559606271318984,
+          "failures": 0,
+          "resources": {
+            "block_inputs": 0,
+            "block_outputs": 0,
+            "cpu_system_us": 394747,
+            "cpu_user_us": 196363,
+            "involuntary_context_switches": 16928,
+            "lifetime_peak_rss_bytes": 31670272,
+            "major_faults": 0,
+            "minor_faults": 5,
+            "quic_client_side": {
+              "congestion_events": 0,
+              "lost_bytes": 0,
+              "lost_packets": 0,
+              "rx_bytes": 17166,
+              "rx_datagrams": 323,
+              "rx_ios": 323,
+              "sent_packets": 448,
+              "tx_bytes": 597186,
+              "tx_datagrams": 448,
+              "tx_ios": 448
+            },
+            "rss_end_bytes": 25559040,
+            "rss_start_bytes": 25542656,
+            "rust_allocated_bytes": null,
+            "rust_allocations": null,
+            "rust_allocator_instrumented": false,
+            "rust_deallocations": null,
+            "rust_freed_bytes": null,
+            "rust_live_end_bytes": null,
+            "rust_live_start_bytes": null,
+            "rust_reallocations": null,
+            "schema": "mount-rs-process-resource-v1",
+            "scope": "one process includes clients, servers, verification and background; System Rust allocations exclude foreign C allocators; QUIC UDP bytes exclude IP/UDP headers; atomic allocator instrumentation affects throughput",
+            "sqlite_heap_end_bytes": 6462560,
+            "sqlite_heap_lifetime_peak_bytes": 6468704,
+            "sqlite_heap_start_bytes": 6462560,
+            "voluntary_context_switches": 1
+          },
+          "start_unix_ms": 1790315304344,
+          "finish_unix_ms": 1790315307486
+        }
+      ],
+      "datastore": [
+        {
+          "mode": "read",
+          "logical_successes": 150,
+          "logical_failures": 0,
+          "sessions_by_source": {
+            "mount-rs-tidb-mount-rs-tidb-GSTKki-pd1": {
+              "end": {},
+              "start": {}
+            },
+            "mount-rs-tidb-mount-rs-tidb-GSTKki-tidb": {
+              "end": {
+                "tidb_server_connections{resource_group=\"default\"}": 0.0,
+                "tidb_server_internal_sessions": 13.0
+              },
+              "start": {
+                "tidb_server_connections{resource_group=\"default\"}": 0.0,
+                "tidb_server_internal_sessions": 13.0
+              }
+            },
+            "mount-rs-tidb-mount-rs-tidb-GSTKki-tikv1": {
+              "end": {},
+              "start": {}
+            }
+          },
+          "series_coverage_incomplete": false,
+          "counter_resets": [],
+          "per_logical_success": {
+            "pd": {
+              "process_cpu_seconds_total": 0.005533333333332848
+            },
+            "tidb": {
+              "process_cpu_seconds_total": 0.024133333333332986,
+              "tidb_executor_statement_total": 27.0,
+              "tidb_server_query_total": 30.0
+            },
+            "tikv": {
+              "process_cpu_seconds_total": 0.006666666666666667
+            }
+          }
+        },
+        {
+          "mode": "write",
+          "logical_successes": 140,
+          "logical_failures": 0,
+          "sessions_by_source": {
+            "mount-rs-tidb-mount-rs-tidb-GSTKki-pd1": {
+              "end": {},
+              "start": {}
+            },
+            "mount-rs-tidb-mount-rs-tidb-GSTKki-tidb": {
+              "end": {
+                "tidb_server_connections{resource_group=\"default\"}": 0.0,
+                "tidb_server_internal_sessions": 13.0
+              },
+              "start": {
+                "tidb_server_connections{resource_group=\"default\"}": 0.0,
+                "tidb_server_internal_sessions": 13.0
+              }
+            },
+            "mount-rs-tidb-mount-rs-tidb-GSTKki-tikv1": {
+              "end": {},
+              "start": {}
+            }
+          },
+          "series_coverage_incomplete": false,
+          "counter_resets": [],
+          "per_logical_success": {
+            "pd": {
+              "process_cpu_seconds_total": 0.008214285714285553
+            },
+            "tidb": {
+              "process_cpu_seconds_total": 0.031642857142857195,
+              "tidb_executor_statement_total": 50.0,
+              "tidb_server_query_total": 56.0
+            },
+            "tikv": {
+              "process_cpu_seconds_total": 0.007142857142857143
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "acceptance": "Performance regression found; correction and fresh measurements pending."
+}

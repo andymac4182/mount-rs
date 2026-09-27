@@ -1,0 +1,57 @@
+{
+  "schema": "mount-rs-task4-population-support-source-v1",
+  "verdict": "SPEC/QUALITY PASS source only; actual loads pending",
+  "manifest": {
+    "head": "859cf73868e5d2508318c304d69ad42fe75810eb",
+    "implementation_baseline": "805c35c7",
+    "changed_source": [
+      "crates/mount-rs-service/tests/support/production_checkpoint.rs"
+    ],
+    "source_sha256_diff_then_helper": "47118e9856bd2177712e88721947022787dbe9b585e096f3440b4ae34d98303a",
+    "helper_sha256": "9755cc2b09f7e2fa07c509d6ca5f848f2a276dbf30e65ffb7bba288c452e9f0f",
+    "binary_no_run": "/private/tmp/mount-rs-remote-drive-target/debug/deps/quic_tidb_saturation-9c470db47913f9bb",
+    "binary_sha256": "dc912b625f59fa33450735dff3d51c989788a29a46dd2896a2d5409e964c8723",
+    "binary_is_mutable_shared_target_not_actual_load_evidence": true,
+    "supersedes_for_acceptance": "/private/tmp/task4-open4-cancellation-freeze (lifetime mechanism reviewed correct but orchestration test scope insufficient)",
+    "validation": "42pass4ignored; exact --locked default and resource-profiling service/protocol/client/CLI all-targetClippy -Dwarnings; touchedfmt/diffcheck logs; actualtest --no-run",
+    "sensitivity": "removing owner.take in shared production run_preparation_work finalization makes SAME real enclosing-timeout test fail, exit101; restored green",
+    "initial_red": "compile-only missing shared owner orchestration; separate behavior sensitivity log retained",
+    "test_scope": "actual shared production timeout/drop/take-once and phase collector orchestration;40first-polled fakeworkers dropped, knownACK1/pending39/peak40/perDrive4/partialnetworkdelta40; normal+returnederror complete labels once/no duplicate",
+    "unchanged": "QUIC scheduler/path/flags/payload/serialoracle/phasebodybudgets/security/nonReplay",
+    "load_executed": false,
+    "commands": [
+      "CARGO_TARGET_DIR=/private/tmp/mount-rs-remote-drive-target scripts/cargo-shared test --locked -p mount-rs-service --test quic_tidb_saturation --features resource-profiling -- --test-threads=1",
+      "CARGO_TARGET_DIR=/private/tmp/mount-rs-remote-drive-target scripts/cargo-shared clippy --locked -p mount-rs-service -p mount-rs-remote-protocol -p mount-rs-remote-client -p mount-rs-cli --all-targets -- -D warnings",
+      "same four-crate Clippy with --features mount-rs-service/resource-profiling",
+      "same test with --no-run",
+      "rustfmt --edition 2024 --check touched helper; git diff --check"
+    ]
+  },
+  "raw_hashes": {
+    "/private/tmp/task4-owner-orchestration-freeze/delta-from-previous-freeze.patch": "8526f7ea9ebb2995a707b385cb3b504a03346ae62b7070279515d1e7044ff715",
+    "/private/tmp/task4-owner-orchestration-freeze/manifest.json": "370c6bf4801fc0fe92942ceaec15568e14c14f68876c6d730ede44dd2463b03d",
+    "/private/tmp/task4-owner-orchestration-freeze/production_checkpoint.rs": "9755cc2b09f7e2fa07c509d6ca5f848f2a276dbf30e65ffb7bba288c452e9f0f",
+    "/private/tmp/task4-owner-orchestration-freeze/source.patch": "25930122fa007f16b084798d45c94a19cbd9d5f39adf104deea57a11b74a58d2",
+    "/private/tmp/task4-owner-orchestration-freeze/task4-owner-orchestration-compile-red.log": "e422b3a063779fdd6da1e7e4ae5e8c3cf01a17267689463abd2f2d6e066c23f2",
+    "/private/tmp/task4-owner-orchestration-freeze/task4-owner-orchestration-default-clippy.log": "29f9376f572cafff3393724d023207d31f65ccba66cb884be5c6b207544dcd2f",
+    "/private/tmp/task4-owner-orchestration-freeze/task4-owner-orchestration-diffcheck.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "/private/tmp/task4-owner-orchestration-freeze/task4-owner-orchestration-finalizer-removal-red.log": "f2f43a1a0d0aca19a34c5e68c834ec406eb22a14e32711564dfd5aee6a41c2dc",
+    "/private/tmp/task4-owner-orchestration-freeze/task4-owner-orchestration-fmt.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "/private/tmp/task4-owner-orchestration-freeze/task4-owner-orchestration-green.log": "4b269963be4f96e24f9b46e1e8b1b0e58ac2fa245f197f3c48d9d14ce889dd40",
+    "/private/tmp/task4-owner-orchestration-freeze/task4-owner-orchestration-helper-tests.log": "346ea8717ad8cb5068688318c6ed68b8651c5d9d8dbd89c17ad227cb74ee0113",
+    "/private/tmp/task4-owner-orchestration-freeze/task4-owner-orchestration-no-run.log": "38f902f8cb7586e3278c365b6cbac95feaf866e415f93da6e94d0757060137d3",
+    "/private/tmp/task4-owner-orchestration-freeze/task4-owner-orchestration-profile-clippy.log": "3789bf89d0979cd242585cc7bdc50b695d56da04db884ade0ed06cb997f68053"
+  },
+  "independent_review": {
+    "path": "/private/tmp/mount-rs-task4-owner-orchestration-review.md",
+    "sha256": "c4577fc26e943bcb00e0e18fb08315f735148f0c94be41fcbe49d4abb6b8dcce"
+  },
+  "limits": [
+    "Default10Drives/Open1 unchanged; permitted10/25Drives andnamespace depth1/4 only",
+    "Open creates use direct publication; no cooperative batching claim",
+    "42helpertests;4actualworkloads ignored; no-run is not runtime qualification",
+    "Cancellation regressions use shared actual orchestration with fake workers/traffic, not liveQUIC",
+    "Prior two freezes did not satisfy cancellation evidence gates; this source resolves both findings",
+    "No production provider/security/admission/flags/payload/oracle/budget change"
+  ]
+}

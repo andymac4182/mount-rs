@@ -1,6 +1,12 @@
 #!/bin/sh
 set -eu
 
+backing_pilot=0
+if [ "${MOUNT_RS_BACKING_PILOT:-0}" = "1" ]; then
+  backing_pilot=1
+  umask 077
+fi
+
 # This harness deliberately uses the official PingCAP component images rather
 # than a MySQL-compatible substitute or TiDB's unistore/mocktikv test mode.
 # The default topology has three PD nodes and three TiKV nodes so the test's
@@ -163,6 +169,15 @@ case "$allow_underprovisioned" in
     exit 2
     ;;
 esac
+if [ "$backing_pilot" -eq 1 ]; then
+  if [ "$topology" != durable ] || [ "$run_napi" -ne 1 ] || [ "$run_iops" -ne 1 ] ||
+     [ "$allow_underprovisioned" != 0 ] || [ -z "${MOUNT_RS_BACKING_RUSTFS_RECEIPT:-}" ] ||
+     [ -z "${MOUNT_RS_BACKING_RUSTFS_OWNER:-}" ] || [ -z "${MOUNT_RS_BACKING_ENGINE_CAPABILITY:-}" ] ||
+     [ -z "${MOUNT_RS_BACKING_PILOT_OUTPUT:-}" ]; then
+    echo "OWNED_BACKING_PILOT_FAILURE pilot_cell_rejected" >&2
+    exit 2
+  fi
+fi
 durable_min_memory_bytes=10737418240
 durable_min_cpu_count=4
 capacity_issue=0
@@ -191,6 +206,7 @@ if [ "$temp_root" != "/" ]; then
 fi
 run_dir=$(mktemp -d "$temp_root/mount-rs-tidb.XXXXXX")
 run_id=$(basename "$run_dir" | tr '.' '-')
+tidb_generation=1
 network_name="mount-rs-tidb-net-$run_id"
 resource_label="mount-rs.tidb.run=$run_id"
 resource_value="$run_id"
@@ -462,7 +478,11 @@ start_pd() {
   pd_container=$2
   pd_volume=$3
   pd_ip=$(pd_ip_for_number "$pd_number")
-  docker run --detach \
+  set --
+  if [ "$backing_pilot" = 1 ]; then
+    set -- --cidfile "$run_dir/pd-$pd_number-$tidb_generation.cid"
+  fi
+  docker run --detach "$@" \
     --platform "$docker_platform" \
     --name "$pd_container" \
     --label "$resource_label" \
@@ -488,7 +508,11 @@ start_tikv() {
   tikv_container=$2
   tikv_volume=$3
   tikv_ip=$(tikv_ip_for_number "$tikv_number")
-  docker run --detach \
+  set --
+  if [ "$backing_pilot" = 1 ]; then
+    set -- --cidfile "$run_dir/tikv-$tikv_number-$tidb_generation.cid"
+  fi
+  docker run --detach "$@" \
     --platform "$docker_platform" \
     --ulimit "nofile=$tikv_nofile_limit:$tikv_nofile_limit" \
     --name "$tikv_container" \
@@ -608,7 +632,11 @@ wait_for_tidb() {
 
 start_tidb() {
   tidb_container_name=$1
-  docker run --detach \
+  set --
+  if [ "$backing_pilot" = 1 ]; then
+    set -- --cidfile "$run_dir/tidb-$tidb_generation.cid"
+  fi
+  docker run --detach "$@" \
     --platform "$docker_platform" \
     --name "$tidb_container_name" \
     --label "$resource_label" \
@@ -695,11 +723,50 @@ run_node_provider_test() {
   if [ "$run_napi" -ne 1 ]; then
     return 0
   fi
+  if [ "$backing_pilot" -eq 1 ]; then
+    # Preserve an inherited higher-precedence selection as evidence of a
+    # mismatch; do not conceal it with the fixture's child-only URI assignment.
+    inherited_tidb_url=${MOUNT_RS_TIDB_URL:-${TIDB_URL:-}}
+    if [ -n "$inherited_tidb_url" ] && [ "$inherited_tidb_url" != "$tidb_url" ]; then
+      echo "OWNED_BACKING_PILOT_FAILURE pilot_endpoint_binding_rejected" >&2
+      return 2
+    fi
+  fi
   node_prefix=${MOUNT_RS_TIDB_NODE_PREFIX:-${MOUNT_RS_TIDB_RUSTFS_PREFIX:-mount-rs-tidb/$run_id}/napi}
   MOUNT_RS_TIDB_NAPI=1 \
   MOUNT_RS_TIDB_URL="$tidb_url" \
   MOUNT_RS_TIDB_NODE_PREFIX="$node_prefix" \
     node "$repo_dir/bindings/mount-rs-napi/test/tidb.mjs"
+  if [ "$backing_pilot" -eq 1 ]; then
+    # One diagnostic generation before restart; this branch never emits the
+    # original Ozone qualification marker or substitutes its artifact.
+    if [ "$topology" != durable ] || [ "$run_iops" -ne 1 ] ||
+       [ "${MOUNT_RS_TIDB_IOPS_SIZE_MIB:-1}" != 1 ] ||
+       [ "${MOUNT_RS_TIDB_IOPS_PAYLOAD_BYTES:-4096}" != 4096 ] ||
+       [ "${MOUNT_RS_TIDB_IOPS_ITERATIONS:-400}" != 400 ] ||
+       [ "${MOUNT_RS_TIDB_IOPS_CONCURRENCY:-64}" != 64 ] ||
+       [ "${MOUNT_RS_TIDB_IOPS_MIN:-1000}" != 1000 ]; then
+      echo "OWNED_BACKING_PILOT_FAILURE pilot_cell_rejected" >&2
+      return 2
+    fi
+    MOUNT_RS_BACKING_CID_DIR="$run_dir" \
+    MOUNT_RS_BACKING_TIDB_OWNER="$run_id" \
+    MOUNT_RS_BACKING_GENERATION=1 \
+    MOUNT_RS_BACKING_EXPECT_TIDB_URL="$tidb_url" \
+    MOUNT_RS_BACKING_CID_RECEIPT="$run_dir/backing-cids.json" \
+    MOUNT_RS_TIDB_URL="$tidb_url" \
+      node "$repo_dir/benchmarks/storage/owned-backing-pilot.mjs" fixture-tidb
+    MOUNT_RS_BACKING_TIDB_OWNER="$run_id" \
+    MOUNT_RS_BACKING_GENERATION=1 \
+    MOUNT_RS_BACKING_EXPECT_TIDB_URL="$tidb_url" \
+    MOUNT_RS_BACKING_CID_RECEIPT="$run_dir/backing-cids.json" \
+    MOUNT_RS_TIDB_URL="$tidb_url" \
+    MOUNT_RS_TIDB_DURABLE=1 \
+    MOUNT_RS_PROFILE_IO=1 \
+    MOUNT_RS_TRACE_STORAGE=0 \
+      node "$repo_dir/benchmarks/storage/owned-backing-pilot.mjs" run
+    return "$?"
+  fi
   if [ "$run_iops" -eq 1 ]; then
     iops_output=${MOUNT_RS_TIDB_IOPS_OUTPUT:-$run_dir/tidb-ozone-iops.json}
     iops_size_mib=${MOUNT_RS_TIDB_IOPS_SIZE_MIB:-1}
@@ -821,6 +888,7 @@ if [ "$topology" = durable ]; then
   # in DDL/domain bootstrap after its graceful shutdown has completed.
   docker stop --time 30 "$tidb_container" >/dev/null
   docker rm "$tidb_container" >/dev/null
+  tidb_generation=2
   start_tidb "$tidb_container"
   tidb_url="mysql://root@127.0.0.1:$tidb_sql_port/test"
   wait_for_tidb

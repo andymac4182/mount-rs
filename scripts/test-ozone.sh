@@ -6,6 +6,7 @@ set -eu
 # apache/ozone-docker project; do not replace them with a floating tag.
 # Digest source: https://github.com/apache/ozone-docker/pkgs/container/ozone
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+. "$repo_dir/scripts/foundationdb-napi-fixture-env.sh"
 . "$repo_dir/scripts/cargo-shared-env.sh"
 ozone_image_repository="ghcr.io/apache/ozone"
 ozone_version="2.2.1"
@@ -23,6 +24,9 @@ ozone_composition_timeout=${MOUNT_RS_OZONE_COMPOSITION_TIMEOUT_SECONDS:-1200}
 ozone_composition_stop_grace=${MOUNT_RS_OZONE_COMPOSITION_STOP_GRACE_SECONDS:-30}
 ozone_publish_host=127.0.0.1
 if [ "${MOUNT_RS_OZONE_FOUNDATIONDB_COMPOSITION:-0}" = "1" ]; then
+  if [ "${MOUNT_RS_FOUNDATIONDB_NAPI:-0}" = "1" ]; then
+    validate_foundationdb_napi_fixture_provider ozone
+  fi
   # The FoundationDB child runs in a Docker client container and reaches the
   # host-published gateway through host.docker.internal. Keep the default
   # contract loopback-only, but make this explicit opt-in composition
@@ -726,6 +730,10 @@ if [ "${MOUNT_RS_OZONE_FOUNDATIONDB_COMPOSITION:-0}" = "1" ]; then
   # Docker host gateway and owns its own cluster/network cleanup.
   export RUSTFS_COMBO_PREFIX="$OZONE_TEST_PREFIX/foundationdb-blocks"
   export MOUNT_RS_FOUNDATIONDB_TEST_PREFIX="$RUSTFS_COMBO_PREFIX"
+  if [ "${MOUNT_RS_FOUNDATIONDB_NAPI:-0}" = "1" ]; then
+    configure_foundationdb_napi_fixture ozone "$ozone_region"
+    echo "FOUNDATIONDB_NAPI_EXTERNAL_BLOCK_FIXTURE service=ozone adapter=$MOUNT_RS_NAPI_FOUNDATIONDB_EXTERNAL_BLOCK_PROVIDER region=$RUSTFS_REGION endpoint=$R2_ENDPOINT"
+  fi
   # The composition supervisor gives the child cleanup trap a longer grace
   # than the short Docker-action watchdog before it reaps a stuck process.
   bounded_composition_script "ozone-foundationdb-composition" "sh scripts/test-foundationdb.sh"

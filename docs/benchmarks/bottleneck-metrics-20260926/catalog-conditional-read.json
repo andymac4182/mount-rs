@@ -1,0 +1,267 @@
+{
+  "schema": "mount-rs.catalog-conditional-read-control.v1",
+  "base_commit": "6f31fc748032404548b968686402dec6c2b8cf00",
+  "receipt_sha256": "6540e3852faf5237ef76626f4e6d88c57dde2ca75d81e9c689215ad1bbe4be2c",
+  "source_sha256": {
+    "crates/mount-rs-service/src/catalog.rs": "138d546d0d34729e87df133eddbccd4fbc4b31a98856d11d5cbe91f83c301f25",
+    "crates/mount-rs-service/src/catalog/conditional_read_tests.rs": "ae3814850307a8aa583c6a81238a11f105fb94ed6e1def08c257e45a50dd0051",
+    "crates/mount-rs-service/tests/catalog_conditional.rs": "4789bf2b21738c641e85799748d256b2d7b4e5c4949fd96259538dee8a25c67b",
+    "crates/mount-rs-service/tests/catalog_conditional_wire.rs": "904449e9bd3fb235634fb111d0a1e97b197cc176fad9bdf71176906931288764",
+    "crates/mount-rs-service/tests/support/production_scale.rs": "92bf462863324fd2996e086ff926df5498e27ede9dbbf84c3ab78d8da0e117b2",
+    "docs/superpowers/plans/catalog-conditional-read.md": "2b941846945b42588083ec117a0b644061f3150a23647ef25f2b3341e02a881f"
+  },
+  "unit_binary_sha256": "9fa897f4eb287cc95bbc652ced26d9a5ea16b4092ea8c43fc53713d138b5a95f",
+  "geometry": {
+    "catalog_drives": 10000,
+    "catalog_partitions": 5000,
+    "catalog_grants": 10000,
+    "document_bytes": 2271257,
+    "pooled_handles": 8,
+    "reads_per_mode_per_round": 40,
+    "rounds_per_profile_mode": 3,
+    "mode_order": [
+      "full_row",
+      "conditional"
+    ]
+  },
+  "windows": [
+    {
+      "profile_enabled": true,
+      "log_sha256": "ae12e3a7caa18cca71cca6b6d497064d3edacd5282ac1500d8b3dc9c807cf747",
+      "samples": [
+        {
+          "conditional": {
+            "certified_cache_hits": 40,
+            "full_blob_queries": 0,
+            "pager_sample_available": 40,
+            "pager_sample_calls": 40,
+            "process_system_us": 1193,
+            "process_user_us": 391,
+            "returned_document_bytes": 0,
+            "rust_alloc_calls": 440,
+            "rust_alloc_requested_bytes": 66160,
+            "sqlite_pager_hits": 35,
+            "sqlite_pager_misses": 5,
+            "sqlite_pager_writes": 0,
+            "token_probe_calls": 40,
+            "wall_us": 3320
+          },
+          "document_bytes": 2271257,
+          "full_row": {
+            "full_blob_queries": 40,
+            "pager_sample_available": 40,
+            "pager_sample_calls": 40,
+            "process_system_us": 9760,
+            "process_user_us": 8939,
+            "returned_document_bytes": 90850280,
+            "rust_alloc_calls": 480,
+            "rust_alloc_requested_bytes": 70320,
+            "sqlite_pager_hits": 70,
+            "sqlite_pager_misses": 22210,
+            "sqlite_pager_writes": 0,
+            "wall_us": 20717
+          },
+          "profile_enabled": true,
+          "round": 0,
+          "scope": "40 synchronous calls inside actual SQLite blocking loader per mode; Rust allocator is current thread only; CPU is whole process; SQLite C allocations and physical I/O excluded"
+        },
+        {
+          "conditional": {
+            "certified_cache_hits": 40,
+            "full_blob_queries": 0,
+            "pager_sample_available": 40,
+            "pager_sample_calls": 40,
+            "process_system_us": 1148,
+            "process_user_us": 338,
+            "returned_document_bytes": 0,
+            "rust_alloc_calls": 440,
+            "rust_alloc_requested_bytes": 66160,
+            "sqlite_pager_hits": 35,
+            "sqlite_pager_misses": 5,
+            "sqlite_pager_writes": 0,
+            "token_probe_calls": 40,
+            "wall_us": 3102
+          },
+          "document_bytes": 2271257,
+          "full_row": {
+            "full_blob_queries": 40,
+            "pager_sample_available": 40,
+            "pager_sample_calls": 40,
+            "process_system_us": 9229,
+            "process_user_us": 8517,
+            "returned_document_bytes": 90850280,
+            "rust_alloc_calls": 480,
+            "rust_alloc_requested_bytes": 70320,
+            "sqlite_pager_hits": 70,
+            "sqlite_pager_misses": 22210,
+            "sqlite_pager_writes": 0,
+            "wall_us": 19521
+          },
+          "profile_enabled": true,
+          "round": 1,
+          "scope": "40 synchronous calls inside actual SQLite blocking loader per mode; Rust allocator is current thread only; CPU is whole process; SQLite C allocations and physical I/O excluded"
+        },
+        {
+          "conditional": {
+            "certified_cache_hits": 40,
+            "full_blob_queries": 0,
+            "pager_sample_available": 40,
+            "pager_sample_calls": 40,
+            "process_system_us": 1344,
+            "process_user_us": 458,
+            "returned_document_bytes": 0,
+            "rust_alloc_calls": 440,
+            "rust_alloc_requested_bytes": 66160,
+            "sqlite_pager_hits": 35,
+            "sqlite_pager_misses": 5,
+            "sqlite_pager_writes": 0,
+            "token_probe_calls": 40,
+            "wall_us": 3424
+          },
+          "document_bytes": 2271257,
+          "full_row": {
+            "full_blob_queries": 40,
+            "pager_sample_available": 40,
+            "pager_sample_calls": 40,
+            "process_system_us": 10864,
+            "process_user_us": 9275,
+            "returned_document_bytes": 90850280,
+            "rust_alloc_calls": 480,
+            "rust_alloc_requested_bytes": 70320,
+            "sqlite_pager_hits": 70,
+            "sqlite_pager_misses": 22210,
+            "sqlite_pager_writes": 0,
+            "wall_us": 21879
+          },
+          "profile_enabled": true,
+          "round": 2,
+          "scope": "40 synchronous calls inside actual SQLite blocking loader per mode; Rust allocator is current thread only; CPU is whole process; SQLite C allocations and physical I/O excluded"
+        }
+      ]
+    },
+    {
+      "profile_enabled": false,
+      "log_sha256": "abebdcc6e83bfdfcfb4580186f25cc4a940d22abd68344a6cce04d6052909b7b",
+      "samples": [
+        {
+          "conditional": {
+            "certified_cache_hits": 0,
+            "full_blob_queries": 0,
+            "pager_sample_available": 0,
+            "pager_sample_calls": 0,
+            "process_system_us": 998,
+            "process_user_us": 179,
+            "returned_document_bytes": 0,
+            "rust_alloc_calls": 0,
+            "rust_alloc_requested_bytes": 0,
+            "sqlite_pager_hits": 0,
+            "sqlite_pager_misses": 0,
+            "sqlite_pager_writes": 0,
+            "token_probe_calls": 0,
+            "wall_us": 1598
+          },
+          "document_bytes": 2271257,
+          "full_row": {
+            "full_blob_queries": 0,
+            "pager_sample_available": 0,
+            "pager_sample_calls": 0,
+            "process_system_us": 10309,
+            "process_user_us": 9589,
+            "returned_document_bytes": 0,
+            "rust_alloc_calls": 40,
+            "rust_alloc_requested_bytes": 4160,
+            "sqlite_pager_hits": 0,
+            "sqlite_pager_misses": 0,
+            "sqlite_pager_writes": 0,
+            "wall_us": 20440
+          },
+          "profile_enabled": false,
+          "round": 0,
+          "scope": "40 synchronous calls inside actual SQLite blocking loader per mode; Rust allocator is current thread only; CPU is whole process; SQLite C allocations and physical I/O excluded"
+        },
+        {
+          "conditional": {
+            "certified_cache_hits": 0,
+            "full_blob_queries": 0,
+            "pager_sample_available": 0,
+            "pager_sample_calls": 0,
+            "process_system_us": 1027,
+            "process_user_us": 178,
+            "returned_document_bytes": 0,
+            "rust_alloc_calls": 0,
+            "rust_alloc_requested_bytes": 0,
+            "sqlite_pager_hits": 0,
+            "sqlite_pager_misses": 0,
+            "sqlite_pager_writes": 0,
+            "token_probe_calls": 0,
+            "wall_us": 1711
+          },
+          "document_bytes": 2271257,
+          "full_row": {
+            "full_blob_queries": 0,
+            "pager_sample_available": 0,
+            "pager_sample_calls": 0,
+            "process_system_us": 10718,
+            "process_user_us": 9953,
+            "returned_document_bytes": 0,
+            "rust_alloc_calls": 40,
+            "rust_alloc_requested_bytes": 4160,
+            "sqlite_pager_hits": 0,
+            "sqlite_pager_misses": 0,
+            "sqlite_pager_writes": 0,
+            "wall_us": 21282
+          },
+          "profile_enabled": false,
+          "round": 1,
+          "scope": "40 synchronous calls inside actual SQLite blocking loader per mode; Rust allocator is current thread only; CPU is whole process; SQLite C allocations and physical I/O excluded"
+        },
+        {
+          "conditional": {
+            "certified_cache_hits": 0,
+            "full_blob_queries": 0,
+            "pager_sample_available": 0,
+            "pager_sample_calls": 0,
+            "process_system_us": 924,
+            "process_user_us": 155,
+            "returned_document_bytes": 0,
+            "rust_alloc_calls": 0,
+            "rust_alloc_requested_bytes": 0,
+            "sqlite_pager_hits": 0,
+            "sqlite_pager_misses": 0,
+            "sqlite_pager_writes": 0,
+            "token_probe_calls": 0,
+            "wall_us": 1462
+          },
+          "document_bytes": 2271257,
+          "full_row": {
+            "full_blob_queries": 0,
+            "pager_sample_available": 0,
+            "pager_sample_calls": 0,
+            "process_system_us": 11267,
+            "process_user_us": 10291,
+            "returned_document_bytes": 0,
+            "rust_alloc_calls": 40,
+            "rust_alloc_requested_bytes": 4160,
+            "sqlite_pager_hits": 0,
+            "sqlite_pager_misses": 0,
+            "sqlite_pager_writes": 0,
+            "wall_us": 22140
+          },
+          "profile_enabled": false,
+          "round": 2,
+          "scope": "40 synchronous calls inside actual SQLite blocking loader per mode; Rust allocator is current thread only; CPU is whole process; SQLite C allocations and physical I/O excluded"
+        }
+      ]
+    }
+  ],
+  "scope": [
+    "Same-binary serial private full-row selector and warmed conditional selector in the actual synchronous SQLite loader. All eight pool slots warmed/observed; full-row selector shares borrowed decoder and has no token probes.",
+    "This is a local combined dirty-checkout control. Its exact six owned source hashes and copied executable are retained; clean committed CI acceptance is separate.",
+    "Disabled diagnostic query/token/pager/hit zero fields mean unavailable, not measured zero. Profiling-enabled positive full-row/load/pager controls establish observed query avoidance.",
+    "Rust allocation calls and requested bytes are scoped to the current thread inside the synchronous loader. SQLite C allocations, async scheduling, end-to-end RPC, device operations and total process allocation churn are excluded.",
+    "Enabled pager sampling allocates JSON; disabled conditional observations do not establish globally allocation-free metadata.",
+    "CPU fields are whole-process deltas and can include other process work. Samples are short ordered control windows, not a production-capacity benchmark or backend ranking.",
+    "Catalog shape represents definitions, not 10000 simultaneously connected or continuously active clients. Direct NAPI legacy storage does not traverse this catalog.",
+    "Eight prior snapshots can be retained by certificates until their handles are revisited. Supported SQLite-managed writes and own CAS invalidate trust; unsupported raw file/WAL tampering is outside data_version freshness."
+  ]
+}

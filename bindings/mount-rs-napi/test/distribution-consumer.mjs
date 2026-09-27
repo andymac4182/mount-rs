@@ -6,6 +6,7 @@ import { join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
 import { NATIVE_TARGETS } from "../scripts/aggregate-artifacts.mjs";
+import { makeConsumerFixture, readProducerTypeVersions } from "./distribution-consumer-fixture.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -77,20 +78,13 @@ try {
     overrides[target.packageName] = packageSpecifier(consumerDir, targetTarball);
   }
 
-  await writeFile(
-    join(consumerDir, "package.json"),
-    `${JSON.stringify(
-      {
-        name: "mount-rs-consumer-smoke",
-        private: true,
-        dependencies: {
-          "@mount-rs/core": packageSpecifier(consumerDir, rootTarball),
-        },
-        pnpm: { overrides },
-      },
-      null,
-    )}\n`,
+  const fixture = makeConsumerFixture(
+    packageSpecifier(consumerDir, rootTarball),
+    overrides,
+    await readProducerTypeVersions(),
   );
+  await writeFile(join(consumerDir, "package.json"), `${JSON.stringify(fixture.packageJson, null, 2)}\n`);
+  await writeFile(join(consumerDir, "pnpm-workspace.yaml"), fixture.workspaceYaml);
   await writeFile(
     join(consumerDir, "smoke.mjs"),
     `import assert from "node:assert/strict";

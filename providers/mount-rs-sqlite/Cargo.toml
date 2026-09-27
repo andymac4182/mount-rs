@@ -23,3 +23,4 @@ libc = "0.2"
 [dev-dependencies]
 futures-lite = "2"
 mount-rs-memfs = { path = "../../filesystems/mount-rs-memfs" }
+tempfile = "3"

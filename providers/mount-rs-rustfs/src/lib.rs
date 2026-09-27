@@ -11,18 +11,25 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use mount_rs_core::storage::{BlockId, BlockReconcileReport, BlockStore};
-use mount_rs_core::{FsError, Result, backend_error};
+use mount_rs_core::{ErrorCode, FsError, Result, backend_error};
 use mount_rs_object_store_blocks::{
     ObjectStoreBlockStore, generate_private_qualification_prefix, prepare_configured_backing_id,
     probe_configured_concurrent_prefix, prove_two_configured_clients, verify_configured_backing_id,
 };
-use object_store::aws::{AmazonS3Builder, S3ConditionalPut};
+use object_store::aws::{AmazonS3, AmazonS3Builder, S3ConditionalPut};
+use object_store::list::{PaginatedListOptions, PaginatedListStore};
 use object_store::{ClientOptions, ObjectStore, RetryConfig};
 
 pub use mount_rs_object_store_blocks::{
     ObjectStoreBlockStoreErrorClass as RustFsBlockStoreErrorClass,
     ObjectStoreBlockStoreStats as RustFsBlockStoreStats,
 };
+
+#[cfg(test)]
+mod owned_prefix_tests;
+
+const OWNED_PREFIX_MAX_BYTES: usize = 512;
+const OWNED_PREFIX_OBSERVATION_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Signed RustFS S3 endpoint and bucket configuration.
 #[derive(Clone)]
@@ -51,6 +58,31 @@ impl fmt::Debug for RustFsConfig {
 }
 
 impl RustFsConfig {
+    /// Observe whether the API reports no descendants below one owned prefix.
+    ///
+    /// The prefix must use canonical URI unreserved ASCII components, without
+    /// leading or trailing slashes, empty components, or dot components, and
+    /// must be at most 512 bytes. Validation precedes client construction.
+    ///
+    /// A signed list requests the exact `prefix/` scope with `max_keys = 1`.
+    /// `true` means zero objects, zero common prefixes, and no continuation
+    /// token were returned; `false` means a validated descendant was returned.
+    /// Incomplete, unexpected, failed, and timed out results return an error.
+    /// The entire awaited observation has a fixed 30 second deadline, using
+    /// the existing startup probe client budgets. Cancellation drops the
+    /// awaited listing. This method performs no writes.
+    ///
+    /// This is an API observation, not an atomic reservation or proof of a
+    /// response byte bound or the server's truncation state. Another writer
+    /// can populate the prefix after the observation.
+    pub async fn observe_owned_prefix_absence(&self, prefix: &str) -> Result<bool> {
+        validate_owned_prefix(prefix)?;
+        let store = self.build_client_with_probe_limits(true).map_err(|_| {
+            FsError::backend("RustFS owned prefix observation client construction failed")
+        })?;
+        observe_owned_prefix_absence_with(&store, prefix, OWNED_PREFIX_OBSERVATION_DEADLINE).await
+    }
+
     /// Reject malformed or unsafe remote endpoints before any network request.
     pub fn validate(&self) -> Result<()> {
         validate_endpoint(&self.endpoint)?;
@@ -71,6 +103,10 @@ impl RustFsConfig {
     }
 
     fn build_store_with_probe_limits(&self, probe: bool) -> Result<Arc<dyn ObjectStore>> {
+        Ok(Arc::new(self.build_client_with_probe_limits(probe)?))
+    }
+
+    fn build_client_with_probe_limits(&self, probe: bool) -> Result<AmazonS3> {
         self.validate()?;
         let endpoint = self.endpoint.trim_end_matches('/');
         let mut builder = AmazonS3Builder::new()
@@ -99,8 +135,70 @@ impl RustFsConfig {
         if endpoint.starts_with("http://") {
             builder = builder.with_allow_http(true);
         }
-        Ok(Arc::new(builder.build().map_err(backend_error)?))
+        builder.build().map_err(backend_error)
     }
+}
+
+async fn observe_owned_prefix_absence_with(
+    store: &dyn PaginatedListStore,
+    prefix: &str,
+    deadline: Duration,
+) -> Result<bool> {
+    validate_owned_prefix(prefix)?;
+    let exact_scope = format!("{prefix}/");
+    tokio::time::timeout(deadline, async {
+        let page = store
+            .list_paginated(
+                Some(&exact_scope),
+                PaginatedListOptions {
+                    max_keys: Some(1),
+                    ..PaginatedListOptions::default()
+                },
+            )
+            .await
+            .map_err(|_| FsError::backend("RustFS owned prefix observation listing failed"))?;
+        if page.page_token.is_some()
+            || !page.result.common_prefixes.is_empty()
+            || page.result.objects.len() > 1
+        {
+            return Err(FsError::backend(
+                "RustFS owned prefix observation returned an incomplete or unexpected page",
+            ));
+        }
+        let Some(object) = page.result.objects.first() else {
+            return Ok(true);
+        };
+        if object
+            .location
+            .as_ref()
+            .strip_prefix(exact_scope.as_str())
+            .is_none_or(str::is_empty)
+        {
+            return Err(FsError::backend(
+                "RustFS owned prefix observation returned an out-of-scope object",
+            ));
+        }
+        Ok(false)
+    })
+    .await
+    .map_err(|_| FsError::backend("RustFS owned prefix observation timed out"))?
+}
+
+fn validate_owned_prefix(prefix: &str) -> Result<()> {
+    if prefix.is_empty()
+        || prefix.len() > OWNED_PREFIX_MAX_BYTES
+        || !prefix
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/'))
+        || prefix
+            .split('/')
+            .any(|component| matches!(component, "" | "." | ".."))
+    {
+        return Err(FsError::new(ErrorCode::Einval).with_message(
+            "RustFS owned prefix must be canonical URI unreserved ASCII components within 512 bytes",
+        ));
+    }
+    Ok(())
 }
 
 fn debug_endpoint_authority(endpoint: &str) -> String {

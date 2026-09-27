@@ -16,9 +16,13 @@
 //! order or its scheduler separately.
 
 use async_trait::async_trait;
+use mount_rs_core::storage::compact::{
+    CompactInodeCapability, CompactPublication, CompactSnapshot, CompactStructuralDelta,
+    LoadedCompactInode, PhysicalInodeIdentity,
+};
 use mount_rs_core::storage::{
     BlockId, BlockReconcileReport, BlockStore, ConcurrentBackingId, ConcurrentModeState,
-    LoadedMetadata, MetadataStore, Namespace, WriterLease,
+    InodeModeState, LoadedMetadata, MetadataStore, Namespace, NodeMetadata, WriterLease,
 };
 use mount_rs_core::versioning::VolumeId;
 use mount_rs_core::{ErrorCode, FsError, Result};
@@ -294,6 +298,26 @@ impl FaultPlan {
                 return Err(PlanError::DuplicateSelector { rule_index });
             }
             match rule.action {
+                FaultAction::Error(ErrorCode::Eagain | ErrorCode::Estale)
+                    if rule.boundary == FaultBoundary::Metadata
+                        && rule.operation == FaultOperation::Publish
+                        && rule.phase == FaultPhase::After =>
+                {
+                    return Err(PlanError::InvalidAction {
+                        rule_index,
+                        reason: "a successful metadata publish cannot report a definite conflict or stale lease",
+                    });
+                }
+                FaultAction::LeaseFailure
+                    if rule.boundary == FaultBoundary::Metadata
+                        && rule.operation == FaultOperation::Publish
+                        && rule.phase == FaultPhase::After =>
+                {
+                    return Err(PlanError::InvalidAction {
+                        rule_index,
+                        reason: "a successful metadata publish cannot report a definite lease failure",
+                    });
+                }
                 FaultAction::CasConflict
                     if rule.boundary != FaultBoundary::Metadata
                         || rule.operation != FaultOperation::Publish
@@ -830,6 +854,96 @@ impl<S> MetadataStore for FaultMetadataStore<S>
 where
     S: MetadataStore,
 {
+    fn compact_inode_capability(&self) -> CompactInodeCapability {
+        self.inner.compact_inode_capability()
+    }
+
+    async fn compact_inode_mode_state(&self) -> Result<Option<InodeModeState>> {
+        self.injector
+            .before(FaultBoundary::Metadata, FaultOperation::Load)
+            .await?;
+        self.injector
+            .after(FaultBoundary::Metadata, FaultOperation::Load, || {
+                self.inner.compact_inode_mode_state()
+            })
+            .await
+    }
+
+    async fn prepare_compact_inode_mode(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        self.injector
+            .before(FaultBoundary::Metadata, FaultOperation::Publish)
+            .await?;
+        self.injector
+            .after(FaultBoundary::Metadata, FaultOperation::Publish, || {
+                self.inner
+                    .prepare_compact_inode_mode(backing, expected_revision)
+            })
+            .await
+    }
+
+    async fn load_compact_snapshot(&self, backing: ConcurrentBackingId) -> Result<CompactSnapshot> {
+        self.injector
+            .before(FaultBoundary::Metadata, FaultOperation::Load)
+            .await?;
+        self.injector
+            .after(FaultBoundary::Metadata, FaultOperation::Load, || {
+                self.inner.load_compact_snapshot(backing)
+            })
+            .await
+    }
+
+    async fn load_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: u64,
+    ) -> Result<LoadedCompactInode> {
+        self.injector
+            .before(FaultBoundary::Metadata, FaultOperation::Load)
+            .await?;
+        self.injector
+            .after(FaultBoundary::Metadata, FaultOperation::Load, || {
+                self.inner.load_compact_inode(backing, inode)
+            })
+            .await
+    }
+
+    async fn publish_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: u64,
+        generation: u64,
+        expected: PhysicalInodeIdentity,
+        node: NodeMetadata,
+    ) -> Result<LoadedCompactInode> {
+        self.injector
+            .before(FaultBoundary::Metadata, FaultOperation::Publish)
+            .await?;
+        self.injector
+            .after(FaultBoundary::Metadata, FaultOperation::Publish, || {
+                self.inner
+                    .publish_compact_inode(backing, inode, generation, expected, node)
+            })
+            .await
+    }
+
+    async fn publish_compact_structure(
+        &self,
+        delta: &CompactStructuralDelta,
+    ) -> Result<CompactPublication> {
+        self.injector
+            .before(FaultBoundary::Metadata, FaultOperation::Publish)
+            .await?;
+        self.injector
+            .after(FaultBoundary::Metadata, FaultOperation::Publish, || {
+                self.inner.publish_compact_structure(delta)
+            })
+            .await
+    }
+
     fn durable(&self) -> bool {
         self.inner.durable()
     }
@@ -984,6 +1098,605 @@ where
                 self.inner.flush()
             })
             .await
+    }
+}
+
+#[cfg(test)]
+mod compact_wrapper_tests {
+    use super::*;
+    use mount_rs_core::chunking::ChunkerConfig;
+    use mount_rs_core::storage::{DirectoryEntry, FileLayout, NodeData, NodeMetadata, compact::*};
+    use mount_rs_sqlite::SqliteMetadataStore;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct PendingCompactStore {
+        backing: ConcurrentBackingId,
+        gate: Arc<AtomicBool>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    struct ModeProbeStore {
+        state: InodeModeState,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl MetadataStore for ModeProbeStore {
+        fn compact_inode_capability(&self) -> CompactInodeCapability {
+            CompactInodeCapability::V1
+        }
+        async fn compact_inode_mode_state(&self) -> Result<Option<InodeModeState>> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            Ok(Some(self.state))
+        }
+        fn durable(&self) -> bool {
+            true
+        }
+        async fn load(&self) -> Result<LoadedMetadata> {
+            unreachable!()
+        }
+        async fn acquire_writer(&self, _: &str, _: Duration) -> Result<WriterLease> {
+            unreachable!()
+        }
+        async fn renew_writer(&self, _: &WriterLease, _: Duration) -> Result<WriterLease> {
+            unreachable!()
+        }
+        async fn release_writer(&self, _: &WriterLease) -> Result<()> {
+            unreachable!()
+        }
+        async fn publish(&self, _: u64, _: &WriterLease, _: Namespace) -> Result<u64> {
+            unreachable!()
+        }
+        async fn flush(&self) -> Result<()> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn compact_mode_faults_preserve_exact_state_and_before_skips_delegate() {
+        let state = InodeModeState {
+            backing: ConcurrentBackingId::from_bytes([0xc9; 16]).unwrap(),
+            structural_generation: 9,
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let before = FaultMetadataStore::new(
+            ModeProbeStore {
+                state,
+                calls: calls.clone(),
+            },
+            injector(
+                FaultPhase::Before,
+                FaultOperation::Load,
+                FaultAction::Error(ErrorCode::Eio),
+            ),
+        );
+        assert_eq!(
+            before.compact_inode_mode_state().await.unwrap_err().code,
+            ErrorCode::Eio
+        );
+        assert_eq!(calls.load(Ordering::Acquire), 0);
+        let after = FaultMetadataStore::new(
+            ModeProbeStore {
+                state,
+                calls: calls.clone(),
+            },
+            injector(
+                FaultPhase::After,
+                FaultOperation::Load,
+                FaultAction::Error(ErrorCode::Eio),
+            ),
+        );
+        assert_eq!(
+            after.compact_inode_mode_state().await.unwrap_err().code,
+            ErrorCode::Eio
+        );
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        let plain = FaultMetadataStore::new(
+            ModeProbeStore {
+                state,
+                calls: calls.clone(),
+            },
+            FaultInjector::disabled(99),
+        );
+        assert_eq!(plain.compact_inode_mode_state().await.unwrap(), Some(state));
+        assert_eq!(calls.load(Ordering::Acquire), 2);
+    }
+
+    #[async_trait]
+    impl MetadataStore for PendingCompactStore {
+        fn compact_inode_capability(&self) -> CompactInodeCapability {
+            CompactInodeCapability::V1
+        }
+
+        async fn prepare_compact_inode_mode(
+            &self,
+            backing: ConcurrentBackingId,
+            revision: u64,
+        ) -> Result<()> {
+            assert_eq!((backing, revision), (self.backing, 37));
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            std::future::poll_fn(|_| {
+                if self.gate.load(Ordering::Acquire) {
+                    std::task::Poll::Ready(())
+                } else {
+                    std::task::Poll::Pending
+                }
+            })
+            .await;
+            Err(FsError::new(ErrorCode::Eperm)
+                .with_syscall("compact-probe:prepare")
+                .with_message("delegate refused compact prepare"))
+        }
+
+        fn durable(&self) -> bool {
+            true
+        }
+        async fn load(&self) -> Result<LoadedMetadata> {
+            unreachable!("alternate load")
+        }
+        async fn acquire_writer(&self, _: &str, _: Duration) -> Result<WriterLease> {
+            unreachable!("alternate acquire")
+        }
+        async fn renew_writer(&self, _: &WriterLease, _: Duration) -> Result<WriterLease> {
+            unreachable!("alternate renew")
+        }
+        async fn release_writer(&self, _: &WriterLease) -> Result<()> {
+            unreachable!("alternate release")
+        }
+        async fn publish(&self, _: u64, _: &WriterLease, _: Namespace) -> Result<u64> {
+            unreachable!("alternate publish")
+        }
+        async fn flush(&self) -> Result<()> {
+            unreachable!("alternate flush")
+        }
+    }
+
+    #[tokio::test]
+    async fn fault_compact_prepare_waits_for_one_delegate_and_preserves_its_error() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        let backing = ConcurrentBackingId::from_bytes([0xc9; 16]).unwrap();
+        let gate = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let store = FaultMetadataStore::new(
+            PendingCompactStore {
+                backing,
+                gate: gate.clone(),
+                calls: calls.clone(),
+            },
+            injector(
+                FaultPhase::After,
+                FaultOperation::Publish,
+                FaultAction::Error(ErrorCode::Eio),
+            ),
+        );
+        assert_eq!(store.compact_inode_capability(), CompactInodeCapability::V1);
+        let mut call = Box::pin(store.prepare_compact_inode_mode(backing, 37));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(call.as_mut().poll(&mut context), Poll::Pending));
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        assert!(matches!(call.as_mut().poll(&mut context), Poll::Pending));
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        gate.store(true, Ordering::Release);
+        let Poll::Ready(Err(error)) = call.as_mut().poll(&mut context) else {
+            panic!("delegate error must be returned after release");
+        };
+        assert_eq!(error.code, ErrorCode::Eperm);
+        assert_eq!(error.syscall.as_deref(), Some("compact-probe:prepare"));
+        assert_eq!(error.to_string(), "delegate refused compact prepare");
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        assert_eq!(
+            store.injector().trace().events[0].outcome,
+            FaultOutcome::DelegateError {
+                code: ErrorCode::Eperm
+            }
+        );
+    }
+
+    fn namespace() -> Namespace {
+        let stats = mount_rs_core::types::Stats {
+            dev: 0,
+            ino: 1,
+            mode: mount_rs_core::S_IFDIR | 0o755,
+            nlink: 2,
+            uid: 3,
+            gid: 4,
+            rdev: 0,
+            size: 0,
+            blksize: 4096,
+            blocks: 0,
+            atime_ms: 1,
+            mtime_ms: 2,
+            ctime_ms: 3,
+            birthtime_ms: 4,
+        };
+        Namespace {
+            format_version: 1,
+            root: 1,
+            next_inode: 2,
+            default_uid: 3,
+            default_gid: 4,
+            umask: 0o027,
+            default_chunker: ChunkerConfig {
+                algorithm: "fixed-size".into(),
+                version: 1,
+                parameters: BTreeMap::from([("chunk_size".into(), 4096)]),
+            },
+            nodes: BTreeMap::from([(
+                1,
+                NodeMetadata {
+                    stats,
+                    data: NodeData::Directory { entries: vec![] },
+                },
+            )]),
+        }
+    }
+
+    fn injector(
+        phase: FaultPhase,
+        operation: FaultOperation,
+        action: FaultAction,
+    ) -> FaultInjector {
+        FaultInjector::new(
+            FaultPlan::new(
+                97,
+                1,
+                vec![FaultRule::new(
+                    FaultBoundary::Metadata,
+                    operation,
+                    phase,
+                    FaultOccurrence::Once,
+                    action,
+                )],
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn after_publish_cannot_report_a_definite_conflict_after_successful_delegate() {
+        let after = FaultRule::new(
+            FaultBoundary::Metadata,
+            FaultOperation::Publish,
+            FaultPhase::After,
+            FaultOccurrence::Once,
+            FaultAction::Error(ErrorCode::Eagain),
+        );
+        assert!(matches!(
+            FaultPlan::new(99, 1, vec![after]),
+            Err(PlanError::InvalidAction { .. }),
+        ));
+        let before = FaultRule {
+            phase: FaultPhase::Before,
+            ..after
+        };
+        assert!(FaultPlan::new(100, 1, vec![before]).is_ok());
+    }
+
+    #[test]
+    fn after_publish_cannot_report_a_definite_lease_failure_after_commit() {
+        for action in [
+            FaultAction::LeaseFailure,
+            FaultAction::Error(ErrorCode::Estale),
+        ] {
+            let after = FaultRule::new(
+                FaultBoundary::Metadata,
+                FaultOperation::Publish,
+                FaultPhase::After,
+                FaultOccurrence::Once,
+                action,
+            );
+            assert!(matches!(
+                FaultPlan::new(101, 1, vec![after]),
+                Err(PlanError::InvalidAction { .. }),
+            ));
+            assert!(
+                FaultPlan::new(
+                    102,
+                    1,
+                    vec![FaultRule {
+                        phase: FaultPhase::Before,
+                        ..after
+                    }]
+                )
+                .is_ok()
+            );
+        }
+        assert!(
+            FaultPlan::new(
+                103,
+                1,
+                vec![FaultRule::new(
+                    FaultBoundary::Metadata,
+                    FaultOperation::Publish,
+                    FaultPhase::After,
+                    FaultOccurrence::Once,
+                    FaultAction::LostAcknowledgment,
+                )]
+            )
+            .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_prepare_before_and_after_faults_distinguish_no_call_from_committed_lost_ack() {
+        let directory = tempfile::tempdir().unwrap();
+        let raw = SqliteMetadataStore::open(directory.path().join("metadata.db")).unwrap();
+        let backing = ConcurrentBackingId::from_bytes([0xc7; 16]).unwrap();
+        if !cfg!(unix) {
+            assert_eq!(
+                raw.compact_inode_capability(),
+                CompactInodeCapability::Unsupported
+            );
+            assert_eq!(
+                raw.compact_inode_mode_state().await.unwrap_err().code,
+                ErrorCode::Enotsup
+            );
+            assert_eq!(
+                raw.prepare_compact_inode_mode(backing, 1)
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Enotsup
+            );
+            return;
+        }
+        assert_eq!(raw.compact_inode_capability(), CompactInodeCapability::V1);
+        raw.prepare_bound_concurrent_mode(backing).await.unwrap();
+        raw.publish_bound_if_revision(backing, 0, namespace())
+            .await
+            .unwrap();
+        let before = FaultMetadataStore::new(
+            raw.clone(),
+            injector(
+                FaultPhase::Before,
+                FaultOperation::Publish,
+                FaultAction::Error(ErrorCode::Eio),
+            ),
+        );
+        assert_eq!(
+            before.compact_inode_capability(),
+            CompactInodeCapability::V1
+        );
+        assert_eq!(
+            before
+                .prepare_compact_inode_mode(backing, 1)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Eio
+        );
+        assert_eq!(
+            raw.load_compact_snapshot(backing).await.unwrap_err().code,
+            ErrorCode::Estale
+        );
+        assert_eq!(
+            before.injector().trace().events[0].phase,
+            FaultPhase::Before
+        );
+
+        let after = FaultMetadataStore::new(
+            raw.clone(),
+            injector(
+                FaultPhase::After,
+                FaultOperation::Publish,
+                FaultAction::LostAcknowledgment,
+            ),
+        );
+        let error = after
+            .prepare_compact_inode_mode(backing, 1)
+            .await
+            .unwrap_err();
+        assert!(is_commit_unknown(&error));
+        let snapshot = raw.load_compact_snapshot(backing).await.unwrap();
+        assert_eq!(snapshot.anchor.generation, 2);
+        assert_eq!(
+            after.injector().trace().events[0].outcome,
+            FaultOutcome::CommitUnknown
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_read_and_publication_faults_preserve_exact_backend_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let raw = SqliteMetadataStore::open(directory.path().join("metadata.db")).unwrap();
+        let backing = ConcurrentBackingId::from_bytes([0xc8; 16]).unwrap();
+        if !cfg!(unix) {
+            assert_eq!(
+                raw.compact_inode_capability(),
+                CompactInodeCapability::Unsupported
+            );
+            assert_eq!(
+                raw.compact_inode_mode_state().await.unwrap_err().code,
+                ErrorCode::Enotsup
+            );
+            assert_eq!(
+                raw.prepare_compact_inode_mode(backing, 1)
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Enotsup
+            );
+            return;
+        }
+        assert_eq!(raw.compact_inode_capability(), CompactInodeCapability::V1);
+        raw.prepare_bound_concurrent_mode(backing).await.unwrap();
+        raw.publish_bound_if_revision(backing, 0, namespace())
+            .await
+            .unwrap();
+        raw.prepare_compact_inode_mode(backing, 1).await.unwrap();
+
+        let load_before = FaultMetadataStore::new(
+            raw.clone(),
+            injector(
+                FaultPhase::Before,
+                FaultOperation::Load,
+                FaultAction::Error(ErrorCode::Eio),
+            ),
+        );
+        assert_eq!(
+            load_before
+                .load_compact_snapshot(backing)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Eio
+        );
+        let load_after = FaultMetadataStore::new(
+            raw.clone(),
+            injector(
+                FaultPhase::After,
+                FaultOperation::Load,
+                FaultAction::Error(ErrorCode::Eio),
+            ),
+        );
+        assert_eq!(
+            load_after
+                .load_compact_inode(backing, 1)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Eio
+        );
+        let wrapper = FaultMetadataStore::new(raw.clone(), FaultInjector::disabled(98));
+        assert_eq!(
+            wrapper.load_compact_snapshot(backing).await.unwrap(),
+            raw.load_compact_snapshot(backing).await.unwrap()
+        );
+
+        let snapshot = wrapper.load_compact_snapshot(backing).await.unwrap();
+        let mut candidate = snapshot.namespace().unwrap();
+        let inode = candidate.next_inode;
+        let mut stats = candidate.nodes[&1].stats.clone();
+        stats.ino = inode;
+        stats.mode = mount_rs_core::S_IFREG | 0o644;
+        stats.nlink = 1;
+        candidate.nodes.insert(
+            inode,
+            NodeMetadata {
+                stats,
+                data: NodeData::File(FileLayout {
+                    chunker: candidate.default_chunker.clone(),
+                    extents: vec![],
+                }),
+            },
+        );
+        let NodeData::Directory { entries } = &mut candidate.nodes.get_mut(&1).unwrap().data else {
+            panic!()
+        };
+        entries.push(DirectoryEntry {
+            name: "file".into(),
+            inode,
+        });
+        candidate.next_inode += 1;
+        let delta =
+            CompactStructuralDelta::capture(&snapshot, &candidate, StructuralScope::FileCreate)
+                .unwrap();
+        let structure = FaultMetadataStore::new(
+            raw.clone(),
+            injector(
+                FaultPhase::After,
+                FaultOperation::Publish,
+                FaultAction::LostAcknowledgment,
+            ),
+        );
+        assert!(is_commit_unknown(
+            &structure
+                .publish_compact_structure(&delta)
+                .await
+                .unwrap_err()
+        ));
+        let current = raw.load_compact_snapshot(backing).await.unwrap();
+        assert_eq!(current.anchor, *delta.next_anchor());
+        let loaded = wrapper.load_compact_inode(backing, inode).await.unwrap();
+        let mut updated = loaded.guard.node.clone();
+        updated.stats.mtime_ms += 1;
+        let selected = FaultMetadataStore::new(
+            raw.clone(),
+            injector(
+                FaultPhase::After,
+                FaultOperation::Publish,
+                FaultAction::LostAcknowledgment,
+            ),
+        );
+        assert!(is_commit_unknown(
+            &selected
+                .publish_compact_inode(
+                    backing,
+                    inode,
+                    loaded.generation,
+                    loaded.guard.identity,
+                    updated.clone(),
+                )
+                .await
+                .unwrap_err()
+        ));
+        let stored = raw.load_compact_inode(backing, inode).await.unwrap();
+        assert_eq!(stored.guard.node, updated);
+        assert_eq!(
+            stored.guard.identity.revision,
+            loaded.guard.identity.revision + 1
+        );
+        assert_eq!(
+            selected.injector().trace().events[0].outcome,
+            FaultOutcome::CommitUnknown
+        );
+        let incapable = FaultMetadataStore::new(
+            mount_rs_memory::MemoryMetadataStore::new(),
+            FaultInjector::disabled(101),
+        );
+        assert_eq!(
+            incapable.compact_inode_capability(),
+            CompactInodeCapability::Unsupported
+        );
+        assert_eq!(
+            incapable
+                .prepare_compact_inode_mode(backing, 1)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Enotsup
+        );
+        assert_eq!(
+            incapable
+                .load_compact_snapshot(backing)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Enotsup
+        );
+        assert_eq!(
+            incapable
+                .load_compact_inode(backing, inode)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Enotsup
+        );
+        assert_eq!(
+            incapable
+                .publish_compact_inode(
+                    backing,
+                    inode,
+                    loaded.generation,
+                    loaded.guard.identity,
+                    updated
+                )
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Enotsup
+        );
+        assert_eq!(
+            incapable
+                .publish_compact_structure(&delta)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Enotsup
+        );
     }
 }
 

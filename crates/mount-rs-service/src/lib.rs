@@ -4,7 +4,10 @@ pub mod auth;
 pub mod catalog;
 pub mod dispatch;
 pub mod server;
+pub mod startup;
 
 mod transfer;
 
 mod request_metadata;
+
+pub mod websocket;

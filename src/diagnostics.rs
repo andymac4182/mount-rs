@@ -8,6 +8,8 @@
 
 #[doc(hidden)]
 pub mod profile;
+#[doc(hidden)]
+pub mod storage;
 
 use std::fmt;
 use std::io::{self, Write};

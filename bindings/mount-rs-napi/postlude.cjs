@@ -129,6 +129,7 @@ module.exports = function install(binding) {
     "mknod",
     "shutdown",
     "reconcileBlocks",
+    "inspectCompactLayout",
     "checkoutScope",
     "checkinScope",
     "delegationStatus",
@@ -199,6 +200,28 @@ module.exports = function install(binding) {
       enumerable: true,
       writable: true,
       value: createChunkedDriver,
+    })
+  }
+
+  const nativeInspectSplitNamespacePresence = binding.inspectSplitNamespacePresence
+  if (typeof nativeInspectSplitNamespacePresence === "function" && !nativeInspectSplitNamespacePresence.__mountRsWrapped) {
+    function inspectSplitNamespacePresence(...args) {
+      let result
+      try {
+        result = nativeInspectSplitNamespacePresence.apply(binding, args)
+      } catch (error) {
+        throw structuredError(error)
+      }
+      return Promise.resolve(result).catch((error) => {
+        throw structuredError(error)
+      })
+    }
+    Object.defineProperty(inspectSplitNamespacePresence, "__mountRsWrapped", { value: true })
+    Object.defineProperty(binding, "inspectSplitNamespacePresence", {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: inspectSplitNamespacePresence,
     })
   }
 

@@ -209,6 +209,7 @@ async fn open_sdk_split(
         lease_ttl: Duration::from_secs(30),
         concurrent_writes: false,
         inode_updates: false,
+        compact_inode_updates: false,
         writeback: false,
         delegated: false,
         checkout_path: None,

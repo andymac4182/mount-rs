@@ -267,6 +267,9 @@ pub struct SplitOptions {
     pub concurrent_writes: bool,
     /// Explicitly enroll and use per-inode metadata publication (MRC4).
     pub inode_updates: bool,
+    /// Explicit compact MRC5 inode layout; default remains MRC4 when only
+    /// `inode_updates` is selected.
+    pub compact_inode_updates: bool,
     /// Defer exclusive namespace publication until synchronization.
     pub writeback: bool,
     /// Persisted directory checkout authority (MRC3), distinct from legacy CAS.
@@ -289,6 +292,7 @@ impl SplitOptions {
             lease_ttl: Duration::from_secs(30),
             concurrent_writes: false,
             inode_updates: false,
+            compact_inode_updates: false,
             writeback: false,
             delegated: false,
             checkout_path: None,
@@ -321,6 +325,15 @@ impl SplitOptions {
     pub fn with_inode_updates(mut self, inode_updates: bool) -> Self {
         self.inode_updates = inode_updates;
         if inode_updates {
+            self.concurrent_writes = true;
+        }
+        self
+    }
+
+    pub fn with_compact_inode_updates(mut self, enabled: bool) -> Self {
+        self.compact_inode_updates = enabled;
+        if enabled {
+            self.inode_updates = true;
             self.concurrent_writes = true;
         }
         self

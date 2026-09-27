@@ -10,3 +10,6 @@ cd "$(dirname "$0")/.."
 ./scripts/cargo-shared kani -p mount-rs-remote-protocol --harness remote_readonly_flags_require_explicit_nonmutating_values
 ./scripts/cargo-shared kani -p mount-rs-service --harness remote_read_grants_cannot_authorize_mutations
 ./scripts/cargo-shared kani -p mount-rs-service --harness remote_handles_require_exact_drive_and_revision
+./scripts/cargo-shared kani -p mount-rs-remote-client --harness initial_auto_fallback_requires_uncontacted_unavailability
+./scripts/cargo-shared kani -p mount-rs-remote-client --harness acquired_transaction_cannot_reuse_an_incomplete_response
+./scripts/cargo-shared kani -p mount-rs-remote-client --harness remote_io_completion_bounds_counts_and_closes_uncertainty

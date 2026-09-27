@@ -12,6 +12,7 @@ use std::time::Duration;
 use url::Url;
 
 use crate::catalog::{CatalogSnapshot, Permission};
+use crate::server::{AuthStage, Outcome, auth_span};
 
 const MAX_TOKEN_BYTES: usize = 16 * 1024;
 const MAX_JWKS_BYTES: usize = 256 * 1024;
@@ -595,37 +596,75 @@ impl crate::server::Authenticator for CatalogAuthenticator {
         token: &str,
         partition_id: &str,
     ) -> Result<crate::dispatch::SessionIdentity, ()> {
-        if token.len() > MAX_TOKEN_BYTES {
+        let mut decode = auth_span(AuthStage::Decode);
+        let decoded = (|| {
+            if token.len() > MAX_TOKEN_BYTES {
+                return Err(());
+            }
+            let payload = token.split('.').nth(1).ok_or(())?;
+            let unverified: Value =
+                serde_json::from_slice(&decode_b64(payload).map_err(|_| ())?).map_err(|_| ())?;
+            let header: JoseHeader = serde_json::from_slice(
+                &decode_b64(token.split('.').next().ok_or(())?).map_err(|_| ())?,
+            )
+            .map_err(|_| ())?;
+            Ok((unverified, header))
+        })();
+        let (unverified, header) = match decoded {
+            Ok(value) => value,
+            Err(()) => {
+                decode.finish(Outcome::Error);
+                return Err(());
+            }
+        };
+        let Some(claimed_issuer) = unverified.get("iss").and_then(Value::as_str) else {
+            decode.finish(Outcome::Error);
             return Err(());
-        }
-        let payload = token.split('.').nth(1).ok_or(())?;
-        let unverified: Value =
-            serde_json::from_slice(&decode_b64(payload).map_err(|_| ())?).map_err(|_| ())?;
-        let header: JoseHeader = serde_json::from_slice(
-            &decode_b64(token.split('.').next().ok_or(())?).map_err(|_| ())?,
-        )
-        .map_err(|_| ())?;
-        let claimed_issuer = unverified.get("iss").and_then(Value::as_str).ok_or(())?;
-        let catalog = self.catalog.load_current().await.map_err(|_| ())?;
-        let partition = catalog.partitions.get(partition_id).ok_or(())?;
+        };
+        decode.finish(Outcome::Success);
+        drop(decode);
+        let mut catalog_load = auth_span(AuthStage::Catalog);
+        let catalog = match self.catalog.load_shared_current().await {
+            Ok(catalog) => catalog,
+            Err(_) => {
+                catalog_load.finish(Outcome::Error);
+                return Err(());
+            }
+        };
+        let Some(partition) = catalog.partitions.get(partition_id) else {
+            catalog_load.finish(Outcome::Error);
+            return Err(());
+        };
+        catalog_load.finish(Outcome::Success);
+        drop(catalog_load);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| ())?
             .as_secs() as i64;
-        let mut cache = self.cache.lock().await;
+        let mut cache = {
+            let mut cache_wait = auth_span(AuthStage::CacheWait);
+            let cache = self.cache.lock().await;
+            cache_wait.finish(Outcome::Success);
+            cache
+        };
         cache.retain(|id, _| catalog.issuer_policies.contains_key(id));
         let mut matched = None;
         for (id, configuration) in &catalog.issuer_policies {
+            let mut selection = auth_span(AuthStage::PolicySelect);
             if !catalog
                 .grants
                 .values()
                 .any(|grant| grant.partition_id == partition_id && grant.policy_id == *id)
             {
+                selection.finish(Outcome::Success);
                 continue;
             }
             let policy: crate::catalog::IssuerPolicyDefinition =
-                serde_json::from_value(configuration.clone()).map_err(|_| ())?;
+                serde_json::from_value(configuration.clone()).map_err(|_| {
+                    selection.finish(Outcome::Error);
+                })?;
             if policy.issuer != claimed_issuer || !policy.algorithms.contains(&header.alg) {
+                selection.finish(Outcome::Success);
                 continue;
             }
             let fresh = cache.get(id).is_some_and(|entry| {
@@ -636,12 +675,15 @@ impl crate::server::Authenticator for CatalogAuthenticator {
                         entry.attempted.elapsed().as_secs() < 60
                     })
             });
+            selection.finish(Outcome::Success);
+            drop(selection);
             if !fresh {
-                let verifier = self
-                    .source
-                    .fetch(&policy.issuer, &policy.audiences)
-                    .await
-                    .ok();
+                let verifier = {
+                    let mut fetching = auth_span(AuthStage::KeyFetch);
+                    let fetched = self.source.fetch(&policy.issuer, &policy.audiences).await;
+                    fetching.finish(Outcome::result(&fetched));
+                    fetched.ok()
+                };
                 cache.insert(
                     id.clone(),
                     CachedPolicy {
@@ -656,12 +698,25 @@ impl crate::server::Authenticator for CatalogAuthenticator {
             let Some(verifier) = &entry.verifier else {
                 continue;
             };
-            let mut principal = verifier.verify(token, now);
+            let mut principal = {
+                let mut verifying = auth_span(AuthStage::JwtVerify);
+                let principal = verifier.verify(token, now);
+                verifying.finish(Outcome::result(&principal));
+                principal
+            };
             // At most one discovery/JWKS refresh per minute, including unknown keys.
             if principal.is_err() && entry.attempted.elapsed().as_secs() >= 60 {
                 entry.attempted = tokio::time::Instant::now();
-                if let Ok(verifier) = self.source.fetch(&policy.issuer, &policy.audiences).await {
+                let fetched = {
+                    let mut fetching = auth_span(AuthStage::KeyFetch);
+                    let fetched = self.source.fetch(&policy.issuer, &policy.audiences).await;
+                    fetching.finish(Outcome::result(&fetched));
+                    fetched
+                };
+                if let Ok(verifier) = fetched {
+                    let mut verifying = auth_span(AuthStage::JwtVerify);
                     principal = verifier.verify(token, now);
+                    verifying.finish(Outcome::result(&principal));
                     entry.verifier = Some(verifier);
                     entry.fetched = tokio::time::Instant::now();
                 }
@@ -669,11 +724,17 @@ impl crate::server::Authenticator for CatalogAuthenticator {
             let Ok(principal) = principal else {
                 continue;
             };
-            if principal.expires_at <= now
+            let mut authorizing = auth_span(AuthStage::GrantAuthorize);
+            let denied = principal.expires_at <= now
                 || !partition.drives.keys().any(|drive| {
                     authorize_drive(&catalog, id, &principal.claims, partition_id, drive).is_some()
-                })
-            {
+                });
+            authorizing.finish(if denied {
+                Outcome::Error
+            } else {
+                Outcome::Success
+            });
+            if denied {
                 continue;
             }
             if matched.is_some() {

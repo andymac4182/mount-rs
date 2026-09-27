@@ -15,6 +15,8 @@ use crate::Result;
 use crate::types::{S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK, Stats};
 use crate::versioning::VolumeId;
 
+pub mod compact;
+
 pub use crate::delegation::{
     CheckoutRequest, DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState,
     DirectoryGrant, GrantToken,
@@ -982,6 +984,65 @@ pub struct WriterLease {
 
 #[async_trait]
 pub trait MetadataStore: Send + Sync {
+    /// Explicit optional compact-layout support. This advertisement neither
+    /// enrolls a volume nor changes any MRC4 method's contract. Resolve it before
+    /// mutation; unsupported providers must not be used for compact publication.
+    /// Never change publication methods after an uncertain commit outcome.
+    fn compact_inode_capability(&self) -> compact::CompactInodeCapability {
+        compact::CompactInodeCapability::Unsupported
+    }
+    /// Inspect exact persisted MRC5 authority without enrollment or repair.
+    /// `None` denotes a coherently recognized noncompact mode, not a fresh volume.
+    async fn compact_inode_mode_state(&self) -> Result<Option<InodeModeState>> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Enroll only fresh root-only, initialized, same-backing MRC2 metadata.
+    /// Atomically advance the generation and fence old namespace readers/writers.
+    async fn prepare_compact_inode_mode(
+        &self,
+        _backing: ConcurrentBackingId,
+        _expected_revision: u64,
+    ) -> Result<()> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Read anchor and exact complete guard keyspace in ONE coherent transaction.
+    async fn load_compact_snapshot(
+        &self,
+        _backing: ConcurrentBackingId,
+    ) -> Result<compact::CompactSnapshot> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Fresh selected body with generation and exact physical identity. A logical
+    /// reset token alone never establishes freshness of a retained body.
+    async fn load_compact_inode(
+        &self,
+        _backing: ConcurrentBackingId,
+        _inode: InodeId,
+    ) -> Result<compact::LoadedCompactInode> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Atomically validate anchor generation and physical identity, then update
+    /// only the selected guard. Immutable blocks must be durable before this call.
+    /// EAGAIN is a proven noncommit; uncertain outcomes must never be replayed.
+    async fn publish_compact_inode(
+        &self,
+        _backing: ConcurrentBackingId,
+        _inode: InodeId,
+        _generation: u64,
+        _expected: compact::PhysicalInodeIdentity,
+        _node: NodeMetadata,
+    ) -> Result<compact::LoadedCompactInode> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Publish an immutable captured delta under anchor and guard protection.
+    /// Full scope enumerates the entire guarded range; FileCreate fetches only
+    /// its expected affected parent. Return only the acknowledged write set.
+    async fn publish_compact_structure(
+        &self,
+        _delta: &compact::CompactStructuralDelta,
+    ) -> Result<compact::CompactPublication> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
     /// False for volatile stores; never advertise durable commits for memfs.
     fn durable(&self) -> bool;
     async fn load(&self) -> Result<LoadedMetadata>;
@@ -1006,6 +1067,23 @@ pub trait MetadataStore: Send + Sync {
         _backing: ConcurrentBackingId,
     ) -> Result<InodeMetadataSnapshot> {
         Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Reuse a coherent MRC4 structural snapshot only after a fresh authority
+    /// check against `backing` and an exact positive generation match. `None`
+    /// means unchanged structure, not unchanged file contents: selected inode
+    /// revisions must still be checked. Missing or invalid authority is an error.
+    /// `known=None` forces a full, independently validated snapshot.
+    ///
+    /// Like selected conditional reads, a hit does not audit body edits that
+    /// preserve generation/version tokens, or corruption in untouched guards.
+    /// Unconditional snapshots and reopen retain the full validation path.
+    /// The default deliberately loads everything for custom providers.
+    async fn load_inode_snapshot_if_changed(
+        &self,
+        backing: ConcurrentBackingId,
+        _known: Option<u64>,
+    ) -> Result<Option<InodeMetadataSnapshot>> {
+        Ok(Some(self.load_inode_snapshot(backing).await?))
     }
     /// Read authority, structural generation and complete inode guard atomically.
     /// Missing guards and malformed records must never fall back to stale base nodes.
