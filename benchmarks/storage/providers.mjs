@@ -157,6 +157,9 @@ function gitRevision(source) {
       cwd: source,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
+      timeout: 5000,
+      maxBuffer: 1_048_576,
+      killSignal: "SIGKILL",
     }).trim() || null
   } catch {
     return null

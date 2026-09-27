@@ -28,6 +28,8 @@ const directory = dirname(fileURLToPath(import.meta.url)), repo = resolve(direct
 const bindingPath = join(repo, "bindings/mount-rs-napi/index.js"), require = createRequire(import.meta.url)
 const INPUT_CAP = 16_384, BUILD_CAP = 65_536, SOURCE_CAP = 2_097_152, ADDON_CAP = 134_217_728, OUTCOME_RESERVE = 65_536
 const INPUT_PATH_KEYS = Object.freeze(["MOUNT_RS_BACKING_CID_RECEIPT", "MOUNT_RS_BACKING_ENGINE_CAPABILITY", "MOUNT_RS_OWNED_LAYOUT_CONTROLLER_RECEIPT", "MOUNT_RS_OWNED_LAYOUT_BUILD_RECEIPT"])
+const OUTPUT_PATH_KEYS = Object.freeze(["MOUNT_RS_OWNED_LAYOUT_OUTPUT", "MOUNT_RS_OWNED_LAYOUT_ORIGINALS_OUTPUT"])
+const ORIGINALS_SCHEMA = "mount-rs.owned-layout-originals.v1"
 const ROLES = Object.freeze(["pd-1", "pd-2", "pd-3", "tikv-1", "tikv-2", "tikv-3", "tidb", "rustfs-service"])
 const ORDER = Object.freeze(["A1", "B1", "B2", "A2"]), LAYOUTS = Object.freeze(["legacy", "compact", "compact", "legacy"])
 const ENV_KEYS = Object.freeze([
@@ -36,7 +38,7 @@ const ENV_KEYS = Object.freeze([
   "MOUNT_RS_RUSTFS_ACCESS_KEY_ID", "MOUNT_RS_RUSTFS_SECRET_ACCESS_KEY", "MOUNT_RS_RUSTFS_DURABLE", "MOUNT_RS_BACKING_GENERATION",
   "MOUNT_RS_BACKING_TIDB_OWNER", "MOUNT_RS_BACKING_RUSTFS_OWNER", "MOUNT_RS_BACKING_EXPECT_TIDB_URL", "MOUNT_RS_BACKING_EXPECT_R2_ENDPOINT",
   "MOUNT_RS_BACKING_EXPECT_R2_BUCKET", "MOUNT_RS_BACKING_CID_RECEIPT", "MOUNT_RS_BACKING_ENGINE_CAPABILITY",
-  "MOUNT_RS_OWNED_LAYOUT_CONTROLLER_RECEIPT", "MOUNT_RS_OWNED_LAYOUT_BUILD_RECEIPT", "MOUNT_RS_OWNED_LAYOUT_OUTPUT", "DOCKER_HOST", "DOCKER_CONTEXT",
+  "MOUNT_RS_OWNED_LAYOUT_CONTROLLER_RECEIPT", "MOUNT_RS_OWNED_LAYOUT_BUILD_RECEIPT", "MOUNT_RS_OWNED_LAYOUT_OUTPUT", "MOUNT_RS_OWNED_LAYOUT_ORIGINALS_OUTPUT", "DOCKER_HOST", "DOCKER_CONTEXT",
   "DOCKER_TLS", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "MOUNTX_SOURCE",
 ])
 const SUFFIXES = Object.freeze(["CONFIG_INVALID", "HANDOFF_REJECTED", "ENDPOINT_BINDING_REJECTED", "ENGINE_BINDING_REJECTED", "SCOPE_REJECTED",
@@ -120,7 +122,7 @@ async function privateParent(path) {
   const parent = await lstat(dirname(path))
   if (!parent.isDirectory() || parent.uid !== process.getuid() || (parent.mode & 0o777) !== 0o700) fail("PRIVATE_FILE_REJECTED")
 }
-async function boundedRead(path, maximum, privateFile = false) {
+async function boundedRead(path, maximum, privateFile = false, expectedIdentity = null) {
   let file
   try {
     if (!pathText(path)) fail("PRIVATE_FILE_REJECTED")
@@ -128,11 +130,20 @@ async function boundedRead(path, maximum, privateFile = false) {
     file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
     const first = await file.stat()
     if (!first.isFile() || first.size < 1 || first.size > maximum || privateFile && (first.uid !== process.getuid() || (first.mode & 0o777) !== 0o600 || first.nlink !== 1)) fail("PRIVATE_FILE_REJECTED")
+    if (expectedIdentity) {
+      const exact = await file.stat({ bigint: true })
+      if (exact.dev !== expectedIdentity.dev || exact.ino !== expectedIdentity.ino) fail("PRIVATE_FILE_REJECTED")
+    }
     const buffer = Buffer.alloc(first.size + 1)
     let used = 0
     while (used < buffer.length) { const { bytesRead } = await file.read(buffer, used, buffer.length - used, null); if (!bytesRead) break; used += bytesRead }
     const last = await file.stat()
     if (used !== first.size || last.size !== first.size || last.mtimeMs !== first.mtimeMs || last.ctimeMs !== first.ctimeMs || last.ino !== first.ino || last.dev !== first.dev) fail("PRIVATE_FILE_REJECTED")
+    if (expectedIdentity) {
+      const current = await lstat(path, { bigint: true })
+      if (!current.isFile() || current.dev !== expectedIdentity.dev || current.ino !== expectedIdentity.ino || current.uid !== BigInt(process.getuid()) ||
+          (current.mode & 0o777n) !== 0o600n || current.nlink !== 1n) fail("PRIVATE_FILE_REJECTED")
+    }
     return buffer.subarray(0, used)
   } catch { fail("PRIVATE_FILE_REJECTED") }
   finally { await file?.close() }
@@ -285,37 +296,59 @@ function incompleteComparison(source) {
 }
 function publicationPaths(environment) {
   if (!object(environment)) fail("PRIVATE_FILE_REJECTED")
-  const values = ["MOUNT_RS_OWNED_LAYOUT_OUTPUT", ...INPUT_PATH_KEYS].map((key) => {
+  const values = [...OUTPUT_PATH_KEYS, ...INPUT_PATH_KEYS, "NAPI_RS_NATIVE_LIBRARY_PATH"].map((key) => {
     const descriptor = Object.getOwnPropertyDescriptor(environment, key)
     if (!descriptor || !Object.hasOwn(descriptor, "value") || !pathText(descriptor.value)) fail("PRIVATE_FILE_REJECTED")
     return descriptor.value
   })
-  return { output: values[0], inputs: values.slice(1) }
+  return { outputs: values.slice(0, 2), inputs: values.slice(2) }
 }
 // Keep receipt protection independent of setup success. Canonical paths cover
-// ancestor symlinks; exact device/inode pairs also cover existing hardlinks.
-async function separatePublicationTarget(paths, observed = []) {
+// ancestor symlinks; exact device/inode pairs cover receipt/native hardlinks.
+// Retain initial identities as well as checking both current output identities.
+async function separatePublicationTargets(paths, observed = { inputs: [], outputs: [] }) {
   try {
     const inputs = []
     for (const path of paths.inputs) {
       const canonical = await realpath(path), identity = await lstat(canonical, { bigint: true })
       inputs.push({ canonical, dev: identity.dev, ino: identity.ino })
     }
-    let canonical, identity
-    try { canonical = await realpath(paths.output); identity = await lstat(canonical, { bigint: true }) }
-    catch (error) {
-      if (error.code !== "ENOENT") throw error
-      canonical = join(await realpath(dirname(paths.output)), basename(paths.output))
+    const outputs = []
+    for (const path of paths.outputs) {
+      let canonical, identity
+      try { canonical = await realpath(path); identity = await lstat(canonical, { bigint: true }) }
+      catch (error) {
+        if (error.code !== "ENOENT") throw error
+        canonical = join(await realpath(dirname(path)), basename(path))
+      }
+      outputs.push({ canonical, ...(identity ? { dev: identity.dev, ino: identity.ino } : {}) })
     }
-    if (paths.inputs.includes(paths.output) || [...inputs, ...observed].some((input) => input.canonical === canonical || identity && input.dev === identity.dev && input.ino === identity.ino)) fail("PRIVATE_FILE_REJECTED")
-    return inputs
+    for (const [index, output] of outputs.entries()) {
+      const protectedIdentities = [...inputs, ...observed.inputs, outputs[1 - index], ...observed.outputs.filter((_, peer) => peer !== index), ...(paths.published || []).filter((receipt) => receipt.index !== index)]
+      if (paths.inputs.includes(paths.outputs[index]) || paths.outputs[index] === paths.outputs[1 - index] || protectedIdentities.some((input) => input.canonical === output.canonical ||
+          output.dev !== undefined && input.dev === output.dev && input.ino === output.ino)) fail("PRIVATE_FILE_REJECTED")
+    }
+    return { inputs, outputs }
   } catch { fail("PRIVATE_FILE_REJECTED") }
 }
-async function privateWrite(target, bytes) {
-  const path = target.output
+async function recheckPublication(target) {
+  if (target.revoked) fail("PUBLICATION_FAILED")
+  try {
+    for (const receipt of target.published) {
+      try {
+        const bytes = await boundedRead(target.outputs[receipt.index], OUTPUT_CAP, true, receipt)
+        if (bytes.length !== receipt.bytes || sha(bytes) !== receipt.sha256) fail("PRIVATE_FILE_REJECTED")
+      } catch (error) { if (receipt.index === 1) target.originalsInvalid = true; throw error }
+    }
+    await separatePublicationTargets(target, target.observed)
+  }
+  catch { target.revoked = true; fail("PUBLICATION_FAILED") }
+}
+async function privateWrite(target, index, bytes) {
+  const path = target.outputs[index]
   let file, temporary
   try {
-    await separatePublicationTarget(target, target.observed)
+    await recheckPublication(target)
     await privateParent(path)
     try {
       const target = await lstat(path)
@@ -323,8 +356,17 @@ async function privateWrite(target, bytes) {
     } catch (error) { if (error.code !== "ENOENT") throw error }
     temporary = join(dirname(path), `.mount-rs-owned-layout-${randomBytes(12).toString("hex")}.tmp`)
     file = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
-    await file.writeFile(bytes); await file.close(); file = null
+    await file.writeFile(bytes)
+    const owned = await file.stat({ bigint: true })
+    if (!owned.isFile() || owned.size !== BigInt(bytes.length)) fail("PUBLICATION_FAILED")
+    const receipt = frozen({ index, canonical: target.observed.outputs[index].canonical, dev: owned.dev, ino: owned.ino, bytes: bytes.length, sha256: sha(bytes) })
+    await file.close(); file = null
+    await recheckPublication(target)
     await rename(temporary, path)
+    // Bind the actual owned temporary inode and verify stable current bytes.
+    // These are publication boundary observations, not interval immutability.
+    target.published.push(receipt)
+    await recheckPublication(target)
   } catch { fail("PUBLICATION_FAILED") }
   finally { await file?.close(); if (temporary) await unlink(temporary).catch(() => {}) }
 }
@@ -332,6 +374,7 @@ export async function runOwnedLayoutEntry(environment = process.env, testing = {
   let publicationTarget, maximum = OUTPUT_CAP, comparisonCapability
   const result = { schema: "mount-rs.owned-layout-entry.v1", runtime_scope: "production_entry_attempt", failure_code: null,
     publication: { status: "incomplete", reason: null }, comparison: null, handoff: null,
+    originals: { schema: ORIGINALS_SCHEMA, status: "unavailable", sha256: null, bytes: null, count: null },
     identity: { kind: "selected_native_file", native_sha256: null, native_used_identity: "unverified", profiling_enabled_before_load: false },
     build: { status: "unavailable" }, ownership: { tidb_owner: null, rustfs_owner: null, generation: null, scope_sha256: null,
       final_teardown: { status: "unverified" }, namespace_purge: "unverified" },
@@ -339,10 +382,10 @@ export async function runOwnedLayoutEntry(environment = process.env, testing = {
     evidence_scope: { controller: "new_private_handoff_contract; producer_integration_not_established_here", source_and_build: "boundary_hash_and_clean_git_build_seal_observations; not_immutable_interval_proof",
       resource_floor: "unchanged_owned_controller_prerequisite; unobserved_here", execution: "production_entry_attempt; qualification_requires_separate_verifier" } }
   try {
-    const paths = publicationPaths(environment), observed = await separatePublicationTarget(paths)
-    publicationTarget = { ...paths, observed }
+    const paths = publicationPaths(environment), observed = await separatePublicationTargets(paths)
+    publicationTarget = { ...paths, observed, published: [] }
     const options = testingOptions(testing), env = pinEnvironment(environment)
-    if (env.MOUNT_RS_OWNED_LAYOUT_OUTPUT !== paths.output || INPUT_PATH_KEYS.some((key, index) => env[key] !== paths.inputs[index])) fail("CONFIG_INVALID")
+    if (OUTPUT_PATH_KEYS.some((key, index) => env[key] !== paths.outputs[index]) || INPUT_PATH_KEYS.some((key, index) => env[key] !== paths.inputs[index]) || env.NAPI_RS_NATIVE_LIBRARY_PATH !== paths.inputs[4]) fail("CONFIG_INVALID")
     if (options.modeled) {
       result.runtime_scope = "modeled_controls"
       result.evidence_scope.execution = "pure_injected_model; not_live_or_performance_evidence"
@@ -376,7 +419,18 @@ export async function runOwnedLayoutEntry(environment = process.env, testing = {
     }
     comparisonCapability = createOwnedLayoutComparison({ binding, environment: env, identity, fixtures: handoff.fixtures, engine: handoff.engine, scope: handoff.scope }, options.comparisonDependencies || {})
     result.comparison = await comparisonCapability.run()
-    captureJoin(result.comparison, comparisonCapability.takePrivateEvidence())
+    const evidence = comparisonCapability.takePrivateEvidence()
+    captureJoin(result.comparison, evidence)
+    // The private sidecar retains the exact one-use source snapshot. Public
+    // output contains only its current successful byte receipt, never a path.
+    const originals = { schema: ORIGINALS_SCHEMA, runtime_scope: result.runtime_scope,
+      joins: { fixtures: fixture, controller, engine, build: seal,
+        native: { sha256: identity.sha256, selection: identity.selection, kind: result.identity.kind,
+          native_used_identity: result.identity.native_used_identity, profiling_enabled_before_load: result.identity.profiling_enabled_before_load },
+        scope: { sha256: handoff.public.scope_sha256, value: handoff.scope } }, evidence }
+    const originalsBytes = encode(originals, OUTPUT_CAP)
+    await privateWrite(publicationTarget, 1, originalsBytes)
+    result.originals = { schema: ORIGINALS_SCHEMA, status: "retained", sha256: sha(originalsBytes), bytes: originalsBytes.length, count: evidence.arms.length }
     result.publication.status = "complete"
   } catch (error) {
     if (!result.comparison && comparisonCapability) result.comparison = comparisonCapability.snapshot()
@@ -393,8 +447,10 @@ export async function runOwnedLayoutEntry(environment = process.env, testing = {
       qualification: { ...result.qualification, comparable: false, safe_to_continue: false } }
     bytes = encode(published, OUTCOME_RESERVE)
   }
-  try { if (publicationTarget) await privateWrite(publicationTarget, bytes) }
-  catch (error) { const reason = ownCode(error, "PUBLICATION_FAILED"); published = { ...published, failure_code: published.failure_code || reason, publication: { status: "incomplete", reason }, qualification: { ...published.qualification, comparable: false, safe_to_continue: false } } }
+  try { if (publicationTarget) await privateWrite(publicationTarget, 0, bytes) }
+  catch (error) { const reason = ownCode(error, "PUBLICATION_FAILED"); published = { ...published, failure_code: published.failure_code || reason, publication: { status: "incomplete", reason },
+    ...(publicationTarget.originalsInvalid ? { originals: { schema: ORIGINALS_SCHEMA, status: "unavailable", sha256: null, bytes: null, count: null } } : {}),
+    qualification: { ...published.qualification, comparable: false, safe_to_continue: false } } }
   return frozen(published)
 }
 export async function main(argv = process.argv.slice(2), environment = process.env) {

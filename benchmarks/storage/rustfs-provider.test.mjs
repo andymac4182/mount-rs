@@ -1,9 +1,35 @@
 import assert from "node:assert/strict"
-import { createRequire } from "node:module"
+import childProcess from "node:child_process"
+import fs from "node:fs"
+import { createRequire, syncBuiltinESMExports } from "node:module"
+import { join } from "node:path"
 import { test } from "node:test"
 import { fileURLToPath } from "node:url"
 
-import { providerById, providerSummary } from "./providers.mjs"
+import { MOUNTX_PINNED_REVISION, providerById, providerSummary } from "./providers.mjs"
+
+// Instrument the existing builtin seams; no Git process or TypeScript oracle
+// is needed to inspect eager provider metadata.
+const oracleSource = fileURLToPath(new URL("./MOCK_MOUNTX_SOURCE", import.meta.url))
+const oraclePaths = new Set([join(oracleSource, "src/drivers/memory.ts"), join(oracleSource, "src/harness.ts")])
+const originalExecFileSync = childProcess.execFileSync
+const originalExistsSync = fs.existsSync
+const gitCalls = []
+let gitResult = `${MOUNTX_PINNED_REVISION}\n`
+let oracleFilesPresent = true
+childProcess.execFileSync = (file, args, options) => {
+  gitCalls.push({ file, args, options })
+  if (file !== "git") throw new Error("provider test forbids other subprocesses")
+  if (gitResult instanceof Error) throw gitResult
+  return gitResult
+}
+fs.existsSync = (path) => oraclePaths.has(path) ? oracleFilesPresent : originalExistsSync(path)
+syncBuiltinESMExports()
+test.after(() => {
+  childProcess.execFileSync = originalExecFileSync
+  fs.existsSync = originalExistsSync
+  syncBuiltinESMExports()
+})
 
 const id = "mount-rs-split-tidb-rustfs"
 const environment = Object.freeze({
@@ -92,4 +118,81 @@ test("legacy, inode and compact select RustFS and distinct per-run keys through 
     if (previous === undefined) delete process.env.NAPI_RS_NATIVE_LIBRARY_PATH
     else process.env.NAPI_RS_NATIVE_LIBRARY_PATH = previous
   }
+})
+
+function inspectOracle(result) {
+  gitCalls.length = 0
+  gitResult = result
+  oracleFilesPresent = true
+  return providerById({ ...environment, MOUNTX_SOURCE: oracleSource })
+}
+
+test("RustFS selection retains eager oracle inspection with a bounded fixed Git read", () => {
+  const definitions = inspectOracle(`${MOUNTX_PINNED_REVISION}\n`)
+  assert.equal(definitions.get(id).availability().configured, true)
+  assert.deepEqual(gitCalls, [{
+    file: "git",
+    args: ["rev-parse", "HEAD"],
+    options: {
+      cwd: oracleSource,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 5000,
+      maxBuffer: 1_048_576,
+      killSignal: "SIGKILL",
+    },
+  }])
+  const oracle = definitions.get("mountx-memory")
+  const availability = oracle.availability()
+  assert.equal(availability.configured, true)
+  assert.equal(availability.sourceRevision, MOUNTX_PINNED_REVISION)
+  assert.equal(availability.sourceRevisionVerified, true)
+  assert.equal(availability.revisionMatchesPinned, true)
+  assert.equal(availability.revisionMismatch, false)
+  assert.equal(availability.reason, undefined)
+  assert.deepEqual(oracle.availability(), availability)
+  assert.equal(gitCalls.length, 1, "availability must retain its eager snapshot")
+})
+
+test("an observed oracle revision mismatch remains configured and unqualified", () => {
+  const revision = "f".repeat(40)
+  const availability = inspectOracle(`${revision}\n`).get("mountx-memory").availability()
+  assert.equal(availability.configured, true)
+  assert.equal(availability.sourceRevision, revision)
+  assert.equal(availability.sourceRevisionVerified, true)
+  assert.equal(availability.revisionMatchesPinned, false)
+  assert.equal(availability.revisionMismatch, true)
+  assert.match(availability.reason, /does not match pinned/)
+})
+
+for (const code of ["ETIMEDOUT", "ENOBUFS", "GIT_FAILED"]) {
+  test(`oracle Git ${code} failure returns null without exposing subprocess details`, () => {
+    const availability = inspectOracle(Object.assign(new Error("private Git failure detail"), { code }))
+      .get("mountx-memory").availability()
+    assert.equal(gitCalls.length, 1)
+    assert.equal(availability.configured, true)
+    assert.equal(availability.sourceRevision, null)
+    assert.equal(availability.sourceRevisionVerified, false)
+    assert.equal(availability.revisionMatchesPinned, false)
+    assert.equal(availability.revisionMismatch, true)
+    assert.equal(availability.reason, `mountx source revision could not be read; expected pinned ${MOUNTX_PINNED_REVISION}`)
+    assert.equal(JSON.stringify(availability).includes("private Git failure detail"), false)
+  })
+}
+
+test("empty oracle Git output returns null", () => {
+  for (const output of ["", " \n\t"]) {
+    const availability = inspectOracle(output).get("mountx-memory").availability()
+    assert.equal(availability.sourceRevision, null)
+    assert.equal(availability.sourceRevisionVerified, false)
+    assert.equal(availability.revisionMismatch, true)
+  }
+})
+
+test("oracle construction rechecks missing source files before any import or Git read", async () => {
+  const oracle = inspectOracle(`${MOUNTX_PINNED_REVISION}\n`).get("mountx-memory")
+  oracleFilesPresent = false
+  await assert.rejects(oracle.create({ environment: { MOUNTX_SOURCE: oracleSource } }), { code: "ORACLE_UNAVAILABLE" })
+  assert.equal(gitCalls.length, 1)
+  assert.equal(oracle.availability().sourceRevision, MOUNTX_PINNED_REVISION)
 })

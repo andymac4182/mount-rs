@@ -125,17 +125,40 @@ exact native file before the public binding loader and joins both cached exports
 A selected native load failure stops before automatic fallback can run.
 
 After comparison, the entry consumes the one-use original evidence and recomputes
-each arm's outcome and native metric projection. Its private output is capped at
-32 MiB. Output must be distinct from all four input receipts by canonical path
-and file identity; the writer rechecks separation before publication. A
-publication or size failure reports an incomplete result while retaining
+each arm's outcome and native metric projection. It requires two output paths:
+`MOUNT_RS_OWNED_LAYOUT_OUTPUT` for the closed projection and
+`MOUNT_RS_OWNED_LAYOUT_ORIGINALS_OUTPUT` for the private originals sidecar. Each
+has an independent 32 MiB cap. The sidecar retains the original runner records,
+cohorts and pinned handoff/build/native joins under
+`mount-rs.owned-layout-originals.v1`. It can contain private configuration and
+must remain in the owned 0700 directory as a 0600 file; do not upload it as a
+public artifact.
+
+Both outputs must be distinct from all four input receipts, the selected native
+file and each other by canonical path and file identity. Writers recheck
+separation before temporary-file creation and before rename. The projection
+contains only the sidecar's schema, capture status, byte count, arm count and
+actual byte digest. A previous file does not establish a current capture.
+Successful writes are checked against their owned temporary inode and actual
+stable bytes after rename. The retained sidecar's identity and digest are checked
+again before projection publication. Sidecar invalidation clears its receipt;
+an intact sidecar retains its receipt if only projection publication fails.
+These are boundary checks, rather than interval immutability proof.
+Publication completes only after capture verification and both writes succeed.
+A publication or size failure reports an incomplete result while retaining
 original supported statuses, floor failures and native uncertainty. Missing
 physical counters remain unavailable.
 
-The new controller and build seal producers, final owner-verified teardown and
-namespace purge, independent artifact verifier and live workflow integration are
-still outstanding. The entry always records hosted qualification as false.
+The new controller and build seal producers, final owner-verified teardown,
+independent artifact verifier and live workflow integration are still
+outstanding. The planned owned-fixture teardown destroys its backing resources;
+it must report logical namespace purge as not performed unless separate deletion
+and absence observations exist. The entry always records hosted qualification
+as false.
 Its controls use modeled dependencies and denied native/network dispatches; they
-do not establish live throughput. The existing provider map also eagerly checks
-the optional mountx checkout; when present, that Git lookup is currently unbounded
-and must be resolved before a bounded production comparison is qualified.
+do not establish live throughput. The provider map also eagerly checks the
+optional mountx checkout. Its Git read requests a five-second timeout, a one-MiB
+buffer cap and SIGKILL on timeout. Eager selection and constructor rechecking
+remain unchanged. This synchronous call can block the event loop; configured
+limits do not establish an unconditional wall-clock or descendant-retirement
+bound. Local controls mock the builtin call and its failures.

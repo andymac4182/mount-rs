@@ -1,7 +1,8 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import { createHash } from "node:crypto"
-import { chmod, link, lstat, mkdtemp, readFile, readdir, realpath, rm, symlink, truncate, writeFile } from "node:fs/promises"
+import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, truncate, writeFile } from "node:fs/promises"
+import fsPromises from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -99,7 +100,7 @@ async function context(t) {
   await chmod(root, 0o700)
   t.after(() => rm(root, { recursive: true, force: true }))
   const paths = Object.fromEntries(["fixtures", "engine", "controller", "build"].map((key) => [key, join(root, `${key}.json`)]))
-  paths.native = join(root, `${secret}.node`); paths.output = join(root, "artifact.json")
+  paths.native = join(root, `${secret}.node`); paths.output = join(root, "artifact.json"); paths.originals = join(root, "originals.json")
   await writeFile(paths.native, "inert selected file; never a real native addon\n", { mode: 0o600 })
   const id = `layout-${"a".repeat(32)}`, fixtures = fixtureReceipt(), engine = { socket_path: "/var/run/docker.sock" }
   const fixtureBytes = Buffer.from(JSON.stringify(fixtures, null, 2) + "\n"), engineBytes = Buffer.from(JSON.stringify(engine, null, 2) + "\n")
@@ -113,6 +114,7 @@ async function context(t) {
   const environment = { NAPI_RS_NATIVE_LIBRARY_PATH: paths.native, MOUNT_RS_PROFILE_IO: "1", MOUNT_RS_TRACE_STORAGE: "0",
     DOCKER_HOST: "unix:///var/run/docker.sock", MOUNT_RS_BACKING_CID_RECEIPT: paths.fixtures, MOUNT_RS_BACKING_ENGINE_CAPABILITY: paths.engine,
     MOUNT_RS_OWNED_LAYOUT_CONTROLLER_RECEIPT: paths.controller, MOUNT_RS_OWNED_LAYOUT_BUILD_RECEIPT: paths.build, MOUNT_RS_OWNED_LAYOUT_OUTPUT: paths.output,
+    MOUNT_RS_OWNED_LAYOUT_ORIGINALS_OUTPUT: paths.originals,
     MOUNT_RS_BACKING_TIDB_OWNER: fixtures.tidb_owner, MOUNT_RS_BACKING_RUSTFS_OWNER: fixtures.rustfs_owner, MOUNT_RS_BACKING_GENERATION: "1",
     MOUNT_RS_TIDB_URL: controller.tidb_url, MOUNT_RS_TIDB_DURABLE: "1", MOUNT_RS_BACKING_EXPECT_TIDB_URL: controller.tidb_url,
     MOUNT_RS_RUSTFS_ENDPOINT: controller.rustfs_endpoint, MOUNT_RS_RUSTFS_BUCKET: controller.rustfs_bucket, MOUNT_RS_RUSTFS_REGION: "us-east-1",
@@ -394,6 +396,26 @@ function comparisonModel(fixture, behavior = {}) {
   return { testing, events, native, runners, observers }
 }
 async function readArtifact(fixture) { return JSON.parse(await readFile(fixture.paths.output, "utf8")) }
+async function readOriginals(fixture, record) {
+  const bytes = await readFile(fixture.paths.originals), value = JSON.parse(bytes)
+  assert.deepEqual(record.originals, { schema: "mount-rs.owned-layout-originals.v1", status: "retained", sha256: sha(bytes), bytes: bytes.length, count: value.evidence.arms.length })
+  assert.equal(value.schema, "mount-rs.owned-layout-originals.v1")
+  assert.equal(value.runtime_scope, record.runtime_scope)
+  assert.equal((await lstat(fixture.paths.originals)).mode & 0o777, 0o600)
+  assert.equal((await lstat(fixture.root)).mode & 0o777, 0o700)
+  return { bytes, value }
+}
+function unavailableOriginals(record) {
+  assert.deepEqual(record.originals, { schema: "mount-rs.owned-layout-originals.v1", status: "unavailable", sha256: null, bytes: null, count: null })
+}
+function afterLastRunner(model, action) {
+  const run = model.testing.comparisonDependencies.runBenchmark
+  model.testing.comparisonDependencies.runBenchmark = async (...args) => {
+    const value = await run(...args)
+    if (model.runners.length === 4) await action()
+    return value
+  }
+}
 function assertIncomplete(record) {
   assert.equal(record.schema, "mount-rs.owned-layout-entry.v1")
   assert.equal(record.publication.status, "incomplete")
@@ -430,6 +452,341 @@ test("SOURCE_PATHS is the exact frozen ordered 28-path runtime and controller se
   assert.equal(Object.isFrozen(api.SOURCE_PATHS), true)
   assert.equal(new Set(api.SOURCE_PATHS).size, 28)
   assert.equal(api.SOURCE_PATHS.includes("benchmarks/storage/owned-layout-entry.test.mjs"), false)
+})
+
+test("private originals retain exact captured samples, independent projections and actual immutable joins", async (t) => {
+  const fixture = await context(t), model = comparisonModel(fixture, { mutate: addMeasuredNativeCounters })
+  const record = await api.runOwnedLayoutEntry(fixture.environment, model.testing)
+  assert.equal(record.publication.status, "complete")
+  const { bytes, value } = await readOriginals(fixture, record)
+  assert.deepEqual(Object.keys(value).sort(), ["evidence", "joins", "runtime_scope", "schema"])
+  assert.equal(value.evidence.schema, "mount-rs.owned-layout-private-evidence.v1")
+  assert.equal(value.evidence.complete, true); assert.equal(value.evidence.arms.length, 4)
+  for (const [index, role] of ["A1", "B1", "B2", "A2"].entries()) {
+    const retained = value.evidence.arms[index], arm = record.comparison.arms[index]
+    assert.equal(retained.role, role)
+    assert.deepEqual(retained.benchmark, model.runners[index])
+    assert.equal(retained.benchmark.results[0].rawSamples.length, 400)
+    assert.deepEqual(retained.cohort, { id: `${fixture.controller.scope.id}/${role}`, layout: ["legacy", "compact", "compact", "legacy"][index],
+      metadataKey: `${fixture.controller.scope.metadataPrefix}/${role}`, blockPrefix: `${fixture.controller.scope.blockPrefix}/${role}`, owner: fixture.controller.scope.owner })
+    assert.deepEqual(assessOwnedLayoutRunnerOutcome(retained.benchmark), arm.outcome)
+    assert.deepEqual(projectOwnedLayoutPhaseMetrics(retained.benchmark.providers[0].storageDiagnostics.phases[0]), arm.native_metrics)
+  }
+  for (const [key, path] of [["fixtures", fixture.paths.fixtures], ["controller", fixture.paths.controller], ["engine", fixture.paths.engine], ["build", fixture.paths.build]]) {
+    const input = await readFile(path)
+    assert.deepEqual(value.joins[key], { sha256: sha(input), value: JSON.parse(input) })
+  }
+  assert.deepEqual(value.joins.scope, { sha256: record.ownership.scope_sha256, value: fixture.controller.scope })
+  assert.deepEqual(value.joins.native, { sha256: fixture.build.native_sha256, selection: fixture.paths.native, kind: "selected_native_file",
+    native_used_identity: "unverified", profiling_enabled_before_load: true })
+  assert.match(bytes.toString("utf8"), new RegExp(`${secret}|arbitrary_private_config|mysql://|metadataKey`, "u"))
+  const publicBytes = await readFile(fixture.paths.output)
+  assert.deepEqual(JSON.parse(publicBytes), record)
+  assert.doesNotMatch(publicBytes.toString("utf8"), new RegExp(`${secret}|arbitrary_private_config|mysql://|metadataKey|blockPrefix|originals.json|foreign.invalid`, "u"))
+  model.runners[0].results[0].rawSamples[0].path = secret + "changed"
+  assert.equal((await readFile(fixture.paths.originals)).equals(bytes), true)
+  deeplyFrozen(record)
+})
+
+test("below-floor originals preserve all failed statuses and private full original failures", async (t) => {
+  const fixture = await context(t), model = comparisonModel(fixture, { floor: () => false })
+  const record = await api.runOwnedLayoutEntry(fixture.environment, model.testing), retained = await readOriginals(fixture, record)
+  assert.equal(record.publication.status, "complete"); assert.equal(record.qualification.floor_qualified, false)
+  assert.equal(retained.value.evidence.arms.length, 4)
+  for (const [index, arm] of retained.value.evidence.arms.entries()) {
+    assert.equal(arm.benchmark.status, "failed")
+    assert.equal(arm.benchmark.results[0].failures[0].error.message, "PRIVATE_FLOOR_MESSAGE")
+    assert.equal(record.comparison.arms[index].outcome.status, "failed")
+    assert.equal(record.comparison.arms[index].outcome.runner_safe_to_continue, true)
+  }
+  assert.doesNotMatch(await readFile(fixture.paths.output, "utf8"), /PRIVATE_FLOOR_MESSAGE/u)
+})
+
+test("stopped uncertain original is retained without changing its floor or uncertainty", async (t) => {
+  const fixture = await context(t), model = comparisonModel(fixture, { mutate: (result) => {
+    for (const terminal of [result.providers[0].backingObserver.terminal, result.providers[0].backingObserver.backing_evidence.terminal]) {
+      terminal.prior_native_uncertainty = true; terminal.safe_to_continue_pair = false
+    }
+  } })
+  const record = await api.runOwnedLayoutEntry(fixture.environment, model.testing), retained = await readOriginals(fixture, record)
+  assert.equal(record.publication.status, "complete"); assert.equal(record.comparison.status, "stopped")
+  assert.equal(retained.value.evidence.complete, false); assert.equal(retained.value.evidence.arms.length, 1)
+  assert.equal(record.comparison.native_uncertainty, true); assert.equal(record.comparison.arms[0].outcome.floor_qualified, true)
+  assert.equal(retained.value.evidence.arms[0].benchmark.providers[0].backingObserver.terminal.prior_native_uncertainty, true)
+})
+
+test("a prepare failure retains an actual empty capture without inventing runner originals", async (t) => {
+  const fixture = await context(t), model = comparisonModel(fixture, { preflightError: true })
+  const record = await api.runOwnedLayoutEntry(fixture.environment, model.testing), retained = await readOriginals(fixture, record)
+  assert.equal(record.publication.status, "complete"); assert.equal(record.comparison.status, "stopped")
+  assert.equal(retained.value.evidence.complete, false); assert.deepEqual(retained.value.evidence.arms, [])
+  assert.equal(model.runners.length, 0)
+})
+
+test("honest partial daemon metrics remain null in exact originals and retain original interval completeness", async (t) => {
+  const fixture = await context(t), model = comparisonModel(fixture, { mutate: partialDaemonCounters })
+  const record = await api.runOwnedLayoutEntry(fixture.environment, model.testing), retained = await readOriginals(fixture, record)
+  assert.equal(record.publication.status, "complete"); assert.equal(record.comparison.comparable, true)
+  for (const arm of retained.value.evidence.arms) {
+    const journal = arm.benchmark.providers[0].backingObserver.backing_evidence.journal
+    assert.equal(journal.find(({ type }) => type === "interval").complete, false)
+    for (const boundary of journal.filter(({ type }) => type === "boundary")) assert.equal(boundary.samples[0].stats.block_operations, null)
+  }
+})
+
+test("private originals use their own full32MiB cap and never link a stale file after cap failure", async (t) => {
+  const fixture = await context(t), stale = Buffer.from("prior private originals\n")
+  await writeFile(fixture.paths.originals, stale, { mode: 0o600 })
+  const model = comparisonModel(fixture, { floor: () => false, mutate: (result) => { result.private_note = "p".repeat(9 * 1024 * 1024) } })
+  const record = await api.runOwnedLayoutEntry(fixture.environment, model.testing)
+  assertIncomplete(record); assert.equal(record.failure_code, "OWNED_LAYOUT_ENTRY_OUTPUT_CAP")
+  unavailableOriginals(record); assert.equal((await readFile(fixture.paths.originals)).equals(stale), true)
+  assert.equal(record.comparison.status, "complete"); assert.equal(record.comparison.floor_qualified, false)
+  for (const arm of record.comparison.arms) assert.equal(arm.outcome.status, "failed")
+  assert.equal(model.runners.length, 4); assert.deepEqual(await readArtifact(fixture), record)
+})
+
+test("sidecar publication failure preserves below-floor originals in memory without linking stale bytes", async (t) => {
+  const fixture = await context(t), stale = Buffer.from("prior private originals\n")
+  await writeFile(fixture.paths.originals, stale, { mode: 0o600 })
+  const model = comparisonModel(fixture, { floor: () => false })
+  afterLastRunner(model, () => chmod(fixture.paths.originals, 0o644))
+  const record = await api.runOwnedLayoutEntry(fixture.environment, model.testing)
+  assertIncomplete(record); assert.equal(record.failure_code, "OWNED_LAYOUT_ENTRY_PUBLICATION_FAILED")
+  unavailableOriginals(record); assert.equal((await readFile(fixture.paths.originals)).equals(stale), true)
+  assert.equal(record.comparison.status, "complete"); assert.equal(record.qualification.floor_qualified, false)
+  for (const arm of record.comparison.arms) assert.equal(arm.outcome.status, "failed")
+  assert.deepEqual(await readArtifact(fixture), record)
+})
+
+test("failed private publication retains pending native uncertainty and supported original floor", async (t) => {
+  const fixture = await context(t), model = comparisonModel(fixture, { mutate: (result) => {
+    for (const terminal of [result.providers[0].backingObserver.terminal, result.providers[0].backingObserver.backing_evidence.terminal]) {
+      terminal.prior_native_uncertainty = true; terminal.safe_to_continue_pair = false
+    }
+  } })
+  const run = model.testing.comparisonDependencies.runBenchmark
+  model.testing.comparisonDependencies.runBenchmark = async (...args) => { const value = await run(...args); await mkdir(fixture.paths.originals); return value }
+  const record = await api.runOwnedLayoutEntry(fixture.environment, model.testing)
+  assertIncomplete(record); unavailableOriginals(record)
+  assert.equal(record.comparison.status, "stopped"); assert.equal(record.comparison.native_uncertainty, true)
+  assert.equal(record.comparison.arms[0].outcome.floor_qualified, true); assert.equal(model.runners.length, 1)
+})
+
+test("projection failure after sidecar retention keeps current private receipt and refuses complete publication", async (t) => {
+  const fixture = await context(t), model = comparisonModel(fixture, { floor: () => false })
+  afterLastRunner(model, () => mkdir(fixture.paths.output))
+  const record = await api.runOwnedLayoutEntry(fixture.environment, model.testing)
+  assertIncomplete(record); assert.equal(record.failure_code, "OWNED_LAYOUT_ENTRY_PUBLICATION_FAILED")
+  await readOriginals(fixture, record)
+  assert.equal(record.comparison.floor_qualified, false); assert.equal(record.qualification.safe_to_continue, false)
+})
+
+test("new mutual output inode alias after capture disables both writers and preserves prior bytes", async (t) => {
+  const fixture = await context(t), model = comparisonModel(fixture, { floor: () => false }), stale = Buffer.from("mutual prior bytes\n")
+  afterLastRunner(model, async () => { await writeFile(fixture.paths.originals, stale, { mode: 0o600 }); await link(fixture.paths.originals, fixture.paths.output) })
+  const record = await api.runOwnedLayoutEntry(fixture.environment, model.testing)
+  assertIncomplete(record); unavailableOriginals(record)
+  assert.equal((await readFile(fixture.paths.originals)).equals(stale), true); assert.equal((await readFile(fixture.paths.output)).equals(stale), true)
+  assert.equal(record.comparison.floor_qualified, false); assert.equal(model.runners.length, 4)
+})
+
+test("input alias created during awaited sidecar temporary write is rejected before rename", async (t) => {
+  const fixture = await context(t), model = comparisonModel(fixture), before = await readFile(fixture.paths.controller)
+  const originalOpen = fsPromises.open; let changed = false
+  fsPromises.open = async (...args) => {
+    const file = await originalOpen(...args)
+    if (typeof args[0] === "string" && basename(args[0]).startsWith(".mount-rs-owned-layout-")) {
+      const originalWrite = file.writeFile.bind(file)
+      file.writeFile = async (...writeArgs) => {
+        await originalWrite(...writeArgs)
+        if (!changed) { changed = true; await link(fixture.paths.controller, fixture.paths.originals) }
+      }
+    }
+    return file
+  }
+  syncBuiltinESMExports()
+  let record
+  try { record = await api.runOwnedLayoutEntry(fixture.environment, model.testing) }
+  finally { fsPromises.open = originalOpen; syncBuiltinESMExports() }
+  assert.equal(changed, true, "the control must mutate the target during an actual awaited temporary write")
+  assertIncomplete(record); unavailableOriginals(record)
+  assert.equal((await readFile(fixture.paths.controller)).equals(before), true)
+  assert.equal((await readFile(fixture.paths.originals)).equals(before), true)
+  assert.equal((await readdir(fixture.root)).includes("artifact.json"), false)
+  assert.equal((await readdir(fixture.root)).some((name) => name.startsWith(".mount-rs-owned-layout-")), false, "the owned temporary must be removed after refusal")
+})
+
+test("actual successful sidecar rename inode cannot be moved to projection and overwritten", async (t) => {
+  const fixture = await context(t), model = comparisonModel(fixture, { floor: () => false }), replacement = Buffer.from("distinct replacement sidecar\n")
+  const originalRename = fsPromises.rename; let moved = false, written
+  fsPromises.rename = async (...args) => {
+    await originalRename(...args)
+    if (!moved && args[1] === fixture.paths.originals) {
+      moved = true; written = await readFile(fixture.paths.originals)
+      await originalRename(fixture.paths.originals, fixture.paths.output)
+      await writeFile(fixture.paths.originals, replacement, { mode: 0o600 })
+    }
+  }
+  syncBuiltinESMExports()
+  let record
+  try { record = await api.runOwnedLayoutEntry(fixture.environment, model.testing) }
+  finally { fsPromises.rename = originalRename; syncBuiltinESMExports() }
+  assert.equal(moved, true, "the control must move the successfully published sidecar inode")
+  assertIncomplete(record); unavailableOriginals(record)
+  assert.equal(record.failure_code, "OWNED_LAYOUT_ENTRY_PUBLICATION_FAILED")
+  assert.equal((await readFile(fixture.paths.output)).equals(written), true, "projection publication cannot overwrite retained originals moved to its path")
+  assert.equal((await readFile(fixture.paths.originals)).equals(replacement), true)
+  assert.equal(record.comparison.floor_qualified, false)
+  for (const arm of record.comparison.arms) assert.equal(arm.outcome.status, "failed")
+  assert.equal((await readdir(fixture.root)).some((name) => name.startsWith(".mount-rs-owned-layout-")), false)
+})
+
+for (const change of ["replacement", "in-place content mutation"]) test(`published sidecar ${change} before projection loses current-success linkage`, async (t) => {
+  const fixture = await context(t), model = comparisonModel(fixture), replacement = Buffer.from("changed private originals\n")
+  const originalRename = fsPromises.rename, originalUnlink = fsPromises.unlink
+  let renamed = false, mutated = false, beforeIdentity, afterIdentity
+  fsPromises.rename = async (...args) => { await originalRename(...args); if (args[1] === fixture.paths.originals) renamed = true }
+  fsPromises.unlink = async (...args) => {
+    if (renamed && !mutated && typeof args[0] === "string" && basename(args[0]).startsWith(".mount-rs-owned-layout-")) {
+      mutated = true; beforeIdentity = await lstat(fixture.paths.originals, { bigint: true })
+      if (change === "replacement") await originalUnlink(fixture.paths.originals)
+      await writeFile(fixture.paths.originals, replacement, { mode: 0o600 })
+      afterIdentity = await lstat(fixture.paths.originals, { bigint: true })
+    }
+    return originalUnlink(...args)
+  }
+  syncBuiltinESMExports()
+  let record
+  try { record = await api.runOwnedLayoutEntry(fixture.environment, model.testing) }
+  finally { fsPromises.rename = originalRename; fsPromises.unlink = originalUnlink; syncBuiltinESMExports() }
+  assert.equal(mutated, true, "the control must alter the sidecar after successful rename and before projection publication")
+  assert.equal(beforeIdentity.ino === afterIdentity.ino, change === "in-place content mutation")
+  assertIncomplete(record); unavailableOriginals(record)
+  assert.equal(record.failure_code, "OWNED_LAYOUT_ENTRY_PUBLICATION_FAILED")
+  assert.equal((await readFile(fixture.paths.originals)).equals(replacement), true)
+  assert.equal((await readdir(fixture.root)).includes("artifact.json"), false)
+  assert.equal((await readdir(fixture.root)).some((name) => name.startsWith(".mount-rs-owned-layout-")), false)
+})
+
+test("sidecar mutation during projection temporary write revokes current private metadata before rename", async (t) => {
+  const fixture = await context(t), model = comparisonModel(fixture, { floor: () => false }), replacement = Buffer.from("sidecar changed during projection write\n")
+  const originalOpen = fsPromises.open; let writes = 0, changed = false
+  fsPromises.open = async (...args) => {
+    const file = await originalOpen(...args)
+    if (typeof args[0] === "string" && basename(args[0]).startsWith(".mount-rs-owned-layout-")) {
+      const originalWrite = file.writeFile.bind(file)
+      file.writeFile = async (...writeArgs) => {
+        await originalWrite(...writeArgs)
+        if (++writes === 2) { changed = true; await writeFile(fixture.paths.originals, replacement) }
+      }
+    }
+    return file
+  }
+  syncBuiltinESMExports()
+  let record
+  try { record = await api.runOwnedLayoutEntry(fixture.environment, model.testing) }
+  finally { fsPromises.open = originalOpen; syncBuiltinESMExports() }
+  assert.equal(changed, true, "the sidecar must change during the actual projection temporary write")
+  assertIncomplete(record); unavailableOriginals(record)
+  assert.equal(record.failure_code, "OWNED_LAYOUT_ENTRY_PUBLICATION_FAILED")
+  assert.equal((await readFile(fixture.paths.originals)).equals(replacement), true)
+  assert.equal((await readdir(fixture.root)).includes("artifact.json"), false)
+  assert.equal((await readdir(fixture.root)).some((name) => name.startsWith(".mount-rs-owned-layout-")), false)
+  assert.equal(record.comparison.floor_qualified, false)
+  for (const arm of record.comparison.arms) assert.equal(arm.outcome.status, "failed")
+})
+
+test("projection-only native alias rejection preserves a verified intact private sidecar receipt", async (t) => {
+  const fixture = await context(t), model = comparisonModel(fixture), nativeBytes = await readFile(fixture.paths.native)
+  const originalRename = fsPromises.rename, originalUnlink = fsPromises.unlink; let renamed = false, changed = false
+  fsPromises.rename = async (...args) => { await originalRename(...args); if (args[1] === fixture.paths.originals) renamed = true }
+  fsPromises.unlink = async (...args) => {
+    if (renamed && !changed && typeof args[0] === "string" && basename(args[0]).startsWith(".mount-rs-owned-layout-")) {
+      changed = true; await symlink(fixture.paths.native, fixture.paths.output)
+    }
+    return originalUnlink(...args)
+  }
+  syncBuiltinESMExports()
+  let record
+  try { record = await api.runOwnedLayoutEntry(fixture.environment, model.testing) }
+  finally { fsPromises.rename = originalRename; fsPromises.unlink = originalUnlink; syncBuiltinESMExports() }
+  assert.equal(changed, true)
+  assertIncomplete(record); assert.equal(record.failure_code, "OWNED_LAYOUT_ENTRY_PUBLICATION_FAILED")
+  await readOriginals(fixture, record)
+  assert.equal((await readFile(fixture.paths.native)).equals(nativeBytes), true)
+  assert.equal((await lstat(fixture.paths.output)).isSymbolicLink(), true)
+  assert.equal(record.qualification.safe_to_continue, false)
+})
+
+for (const failure of ["none", "configuration", "testing", "preflight"]) test(`mutual output path alias preserves bytes on ${failure} path`, async (t) => {
+  const fixture = await context(t), model = comparisonModel(fixture), before = Buffer.from("existing public bytes\n")
+  await writeFile(fixture.paths.output, before, { mode: 0o600 })
+  fixture.environment.MOUNT_RS_OWNED_LAYOUT_ORIGINALS_OUTPUT = fixture.paths.output
+  if (failure === "configuration") Object.defineProperty(fixture.environment, "MOUNT_RS_RUSTFS_REGION", { get() { throw new Error(secret) } })
+  if (failure === "testing") model.testing.unknown_dependency = secret
+  if (failure === "preflight") fixture.environment.MOUNT_RS_PROFILE_IO = "0"
+  const record = await api.runOwnedLayoutEntry(fixture.environment, model.testing)
+  assert.equal((await readFile(fixture.paths.output)).equals(before), true)
+  assertIncomplete(record); unavailableOriginals(record); assert.equal(model.events.length, 0)
+})
+
+for (const target of ["controller", "output", "native"]) test(`sidecar hardlink alias to ${target} is rejected before any publication`, async (t) => {
+  const fixture = await context(t), model = comparisonModel(fixture)
+  if (target === "output") await writeFile(fixture.paths.output, "prior public\n", { mode: 0o600 })
+  const before = await readFile(fixture.paths[target])
+  await link(fixture.paths[target], fixture.paths.originals)
+  const record = await api.runOwnedLayoutEntry(fixture.environment, model.testing)
+  assertIncomplete(record); unavailableOriginals(record); assert.equal(model.events.length, 0)
+  assert.equal((await readFile(fixture.paths[target])).equals(before), true); assert.equal((await readFile(fixture.paths.originals)).equals(before), true)
+  if (target !== "output") assert.equal((await readdir(fixture.root)).includes("artifact.json"), false)
+})
+
+for (const target of ["controller", "output", "native"]) test(`sidecar ancestor alias to ${target} protects both outputs`, async (t) => {
+  const fixture = await context(t), model = comparisonModel(fixture), alias = join(fixture.root, "ancestor-alias")
+  if (target === "output") await writeFile(fixture.paths.output, "prior public\n", { mode: 0o600 })
+  const before = await readFile(fixture.paths[target])
+  await symlink(dirname(fixture.root), alias)
+  fixture.environment.MOUNT_RS_OWNED_LAYOUT_ORIGINALS_OUTPUT = join(alias, basename(fixture.root), basename(fixture.paths[target]))
+  const record = await api.runOwnedLayoutEntry(fixture.environment, model.testing)
+  assertIncomplete(record); unavailableOriginals(record); assert.equal(model.events.length, 0)
+  assert.equal((await readFile(fixture.paths[target])).equals(before), true)
+  if (target !== "output") assert.equal((await readdir(fixture.root)).includes("artifact.json"), false)
+})
+
+for (const output of ["MOUNT_RS_OWNED_LAYOUT_OUTPUT", "MOUNT_RS_OWNED_LAYOUT_ORIGINALS_OUTPUT"]) {
+  for (const failure of ["none", "configuration", "testing", "preflight"]) test(`${output} selected-native alias preserves addon bytes on ${failure} path`, async (t) => {
+    const fixture = await context(t), model = comparisonModel(fixture), before = await readFile(fixture.paths.native)
+    fixture.environment[output] = fixture.paths.native
+    if (failure === "configuration") Object.defineProperty(fixture.environment, "MOUNT_RS_RUSTFS_REGION", { get() { throw new Error(secret) } })
+    if (failure === "testing") model.testing.unknown_dependency = secret
+    if (failure === "preflight") fixture.environment.MOUNT_RS_PROFILE_IO = "0"
+    const record = await api.runOwnedLayoutEntry(fixture.environment, model.testing)
+    assert.equal((await readFile(fixture.paths.native)).equals(before), true)
+    assertIncomplete(record); unavailableOriginals(record); assert.equal(model.events.length, 0)
+    assert.equal((await readdir(fixture.root)).includes("artifact.json"), false)
+    assert.equal((await readdir(fixture.root)).includes("originals.json"), false)
+  })
+}
+
+for (const [name, mutate] of [
+  ["missing", (env) => { delete env.MOUNT_RS_OWNED_LAYOUT_ORIGINALS_OUTPUT }],
+  ["relative", (env) => { env.MOUNT_RS_OWNED_LAYOUT_ORIGINALS_OUTPUT = "originals.json" }],
+  ["numeric", (env) => { env.MOUNT_RS_OWNED_LAYOUT_ORIGINALS_OUTPUT = 1 }],
+  ["inaccessible parent", (env, f) => { env.MOUNT_RS_OWNED_LAYOUT_ORIGINALS_OUTPUT = join(f.root, "missing-parent", "originals.json") }],
+]) test(`${name} mandatory sidecar target rejects publication before setup`, async (t) => {
+  const fixture = await context(t), model = comparisonModel(fixture); mutate(fixture.environment, fixture)
+  const record = await api.runOwnedLayoutEntry(fixture.environment, model.testing)
+  assertIncomplete(record); unavailableOriginals(record); assert.equal(model.events.length, 0)
+  assert.equal((await readdir(fixture.root)).includes("artifact.json"), false)
+})
+
+test("sidecar target getter is rejected without executing it or enabling either publication", async (t) => {
+  const fixture = await context(t), model = comparisonModel(fixture); let reads = 0
+  Object.defineProperty(fixture.environment, "MOUNT_RS_OWNED_LAYOUT_ORIGINALS_OUTPUT", { get() { reads++; throw new Error(secret) } })
+  const record = await api.runOwnedLayoutEntry(fixture.environment, model.testing)
+  assertIncomplete(record); unavailableOriginals(record); assert.equal(reads, 0); assert.equal(model.events.length, 0)
+  assert.equal((await readdir(fixture.root)).includes("artifact.json"), false)
 })
 
 test("valid handoff joins exact private file hashes, eight fixtures, fixed Engine and owner-scoped prefixes", async (t) => {
@@ -674,9 +1031,10 @@ const privateFaults = [
 
 for (const [input, variable] of [["fixtures", "MOUNT_RS_BACKING_CID_RECEIPT"], ["engine", "MOUNT_RS_BACKING_ENGINE_CAPABILITY"],
   ["controller", "MOUNT_RS_OWNED_LAYOUT_CONTROLLER_RECEIPT"], ["build", "MOUNT_RS_OWNED_LAYOUT_BUILD_RECEIPT"]]) {
-  for (const failure of ["none", "configuration", "testing", "preflight"]) test(`output alias to ${input} preserves receipt bytes after ${failure} setup`, async (t) => {
+  for (const output of ["MOUNT_RS_OWNED_LAYOUT_OUTPUT", "MOUNT_RS_OWNED_LAYOUT_ORIGINALS_OUTPUT"]) {
+  for (const failure of ["none", "configuration", "testing", "preflight"]) test(`${output} alias to ${input} preserves receipt bytes after ${failure} setup`, async (t) => {
     const fixture = await context(t), model = comparisonModel(fixture)
-    fixture.environment.MOUNT_RS_OWNED_LAYOUT_OUTPUT = fixture.environment[variable]
+    fixture.environment[output] = fixture.environment[variable]
     if (failure === "configuration") Object.defineProperty(fixture.environment, "MOUNT_RS_RUSTFS_REGION", { get() { throw new Error(secret) } })
     if (failure === "testing") model.testing.unknown_dependency = secret
     if (failure === "preflight") fixture.environment.MOUNT_RS_PROFILE_IO = "0"
@@ -685,7 +1043,9 @@ for (const [input, variable] of [["fixtures", "MOUNT_RS_BACKING_CID_RECEIPT"], [
     assert.equal((await readFile(fixture.paths[input])).equals(before), true, "publication must never overwrite a private input, even after earlier rejection")
     assertIncomplete(record); assert.equal(record.comparison, null)
     assert.equal(model.events.length, 0); assert.equal(model.runners.length, 0)
+    assert.equal((await readdir(fixture.root)).includes(output === "MOUNT_RS_OWNED_LAYOUT_OUTPUT" ? "originals.json" : "artifact.json"), false, "a rejected output disables both publications")
   })
+  }
 }
 
 test("canonical output alias through an ancestor symlink preserves a private receipt", async (t) => {
@@ -777,6 +1137,8 @@ test("modeled lowered publication cap retains original floor statuses in a fixed
   assert.equal(model.runners.length, 4)
   const bytes = await readFile(fixture.paths.output)
   assert.ok(bytes.length <= 65_536); assert.deepEqual(JSON.parse(bytes), record)
+  const retained = await readOriginals(fixture, record)
+  assert.ok(retained.bytes.length > 65_536, "the modeled projection ceiling must not lower the private originals ceiling")
   assert.equal(Object.hasOwn(record, "publicationMaximum"), false)
   assert.doesNotMatch(bytes.toString("utf8"), new RegExp(`${secret}|PRIVATE_FLOOR_MESSAGE`, "u"))
 })
@@ -900,6 +1262,7 @@ test("actual CLI rejects disabled profiling before Git metadata or native load",
   const record = await readArtifact(fixture)
   assertIncomplete(record); assert.equal(record.failure_code, "OWNED_LAYOUT_ENTRY_NATIVE_SELECTION_REJECTED")
   assert.equal(record.comparison, null); assert.equal(record.identity.profiling_enabled_before_load, false)
+  unavailableOriginals(record); assert.equal((await readdir(fixture.root)).includes("originals.json"), false)
 })
 
 for (const metadata of [false, true]) test(`actual Node24 CLI settles under deny guards with modeled Git callbacks ${metadata}`, {
@@ -928,6 +1291,7 @@ for (const metadata of [false, true]) test(`actual Node24 CLI settles under deny
   assert.equal(record.runtime_scope, "production_entry_attempt")
   assert.equal(record.failure_code, metadata ? "OWNED_LAYOUT_ENTRY_NATIVE_LOAD_FAILED" : "OWNED_LAYOUT_ENTRY_BUILD_IDENTITY_REJECTED")
   assert.equal(record.comparison, null); assert.equal(record.identity.native_used_identity, "unverified")
+  unavailableOriginals(record); assert.equal((await readdir(fixture.root)).includes("originals.json"), false)
   assert.match(result.stdout, /^OWNED_LAYOUT_ENTRY /mu)
   assert.doesNotMatch(result.stdout + result.stderr, new RegExp(`${secret}|OWNED_ENTRY_TEST_NATIVE_DENIED|OWNED_ENTRY_TEST_PROCESS_DENIED|at .*\\.mjs`, "u"))
   t.diagnostic(JSON.stringify({ scope: "actual_repository_CLI_with_denied_boundaries", actual_native_loads: guards.actual_native_loads,
