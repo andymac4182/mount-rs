@@ -221,6 +221,32 @@ the cache family, but that addon has no blob-cache dependency: its audited
 instrumented-operation counts remain 78 feature-off and 85 with FoundationDB.
 Cache rows therefore remain unavailable in native-addon coverage.
 
+### Hosted peer reconnect diagnostics
+
+The owned failure annotation for `peerreconnect` now adds
+`last_sampled_progress_marker` and `progress_sample_window`. These contain only
+authored phase labels or fixed `invalid`/`unobserved` states. The observer reads
+the existing first/last 2,048-byte stdout windows, keeps their cut boundaries
+separate, and accepts complete newline-delimited records. A cut record or an
+unknown tail-line start cannot supply a marker. Stderr has separate ordering
+and does not supply peer progress.
+
+The marker identifies the last retained observation, rather than the last
+executed or completed phase. Middle and boundary records can be unavailable.
+A `before_*` marker records intent; `after_public_get` establishes byte equality,
+and the subsequent amplification checks establish backing/cache outcomes.
+Incoming-owner observation does not establish TLS readiness. Cleanup success
+precedes the final amplification and stage assertions. The test now emits fixed
+markers around those assertions so their observations can appear in the tail.
+
+The [diagnostic report](benchmarks/peer-reconnect-progress-20260927/report.json)
+joins 48 Rust test executions, 63 modeled parent controls, formatting and strict
+cache/remote Clippy. The real successful reconnect supplies
+`after_amplification_assertions` from the last window and emits no fatal
+diagnostic. Failure classification, process ownership, deadlines and output
+caps retain their existing contracts. This change gathers evidence for the
+hosted failure; it does not establish its cause or a throughput improvement.
+
 ### Authority checks and refresh reasons
 
 The authority/refresh slice appended sixteen rows to the 118-row prefix, for

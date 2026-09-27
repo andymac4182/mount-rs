@@ -114,6 +114,59 @@ def cache_slow_logging_records(output):
     return records
 
 
+PEER_RECONNECT_PROGRESS = frozenset((
+    'before_stop_a', 'after_stop_a',
+    'before_blackhole_bind', 'after_blackhole_bind',
+    'before_replica_first_poll', 'after_replica_first_poll',
+    'before_initial_receive', 'after_initial_receive',
+    'before_restart_a', 'after_restart_a', 'incoming_replica_observed',
+    'before_store_prepare', 'after_store_prepare',
+    'before_public_get', 'after_public_get',
+    'before_drop_replica_put', 'after_drop_replica_put',
+    'before_direct_get', 'after_direct_get',
+    'before_healthy_put', 'after_healthy_put',
+    'before_replica_readback_get', 'after_replica_readback_get',
+    'before_partition_control', 'after_partition_control',
+    'before_runtime_shutdown', 'after_runtime_shutdown',
+    'before_pair_shutdown', 'after_server_shutdown', 'after_requester_shutdown',
+    'after_pair_shutdown', 'before_cleanup_receipt', 'after_cleanup_receipt',
+    'before_amplification_assertions', 'after_amplification_assertions',
+))
+
+
+def peer_reconnect_sampled_progress(data):
+    # The caller retains at most first/last 2048 raw bytes. Keep their boundary
+    # lines separate: a synthetic sample separator cannot complete a record.
+    # This is the last observed marker in those windows, not the last phase run.
+    windows = [('short_input', data, False)] if len(data) <= 2048 else [
+        ('first_window', data[:2048], False),
+        ('last_window', data[-2048:], True),
+    ]
+    prefix = b'peer_read_reconnect_progress='
+    header = ('test '+EXACT_CASES['peerreconnect']+' ... ').encode('ascii')
+    marker, window, invalid = 'unobserved', 'unobserved', None
+    for location, fragment, omit_boundary in windows:
+        lines = fragment.split(b'\n')[:-1]  # Exclude an unterminated last line.
+        if omit_boundary:
+            lines = lines[1:]  # Its original start may be outside the sample.
+        for line in lines:
+            if line.startswith(header):
+                line = line[len(header):]
+            if not line.startswith(prefix):
+                continue
+            try:
+                value = line[len(prefix):].decode('ascii')
+            except UnicodeDecodeError:
+                value = None
+            if value not in PEER_RECONNECT_PROGRESS:
+                invalid = location
+            else:
+                marker, window = value, location
+    if invalid is not None:
+        marker, window = 'invalid', invalid
+    return {'last_sampled_progress_marker': marker, 'progress_sample_window': window}
+
+
 def gate_failure_diagnostic(kind, receipt, stdout_bytes, stderr_bytes):
     if kind not in COMMANDS:
         return None
@@ -152,11 +205,14 @@ def gate_failure_diagnostic(kind, receipt, stdout_bytes, stderr_bytes):
         elif (re.search(r'^running 0 tests$', stdout, re.M)
               and re.search(r'^test result: ok\. 0 passed; 0 failed; 0 ignored;', stdout, re.M)):
             failure_class = 'zero_tests'
-    return {
+    diagnostic = {
         'kind': kind, 'failure_class': failure_class, 'returncode': status,
         'deadline_exceeded': deadline, 'lifecycle_unsettled': lifecycle,
         'sticky_unknown': unknown, 'source_changed': changed, 'output_overflow': overflow,
     }
+    if kind == 'peerreconnect':
+        diagnostic.update(peer_reconnect_sampled_progress(stdout_bytes))
+    return diagnostic
 
 
 def gate_failure_log_sample(path):
@@ -418,6 +474,8 @@ def main():
       fields=['kind='+diagnostic['kind'], 'class='+diagnostic['failure_class'], 'returncode_known='+str(int(diagnostic['returncode'] is not None))]
       if diagnostic['returncode'] is not None:fields.append('returncode='+str(diagnostic['returncode']))
       fields.extend(field+'='+str(int(diagnostic[field])) for field in ['deadline_exceeded','lifecycle_unsettled','sticky_unknown','source_changed','output_overflow'])
+      if diagnostic['kind']=='peerreconnect':
+       fields.extend(field+'='+diagnostic[field] for field in ['last_sampled_progress_marker','progress_sample_window'])
       try:print('::error title=Owned gate failure::'+' '.join(fields),file=sys.stderr)
       except OSError:pass
     except BaseException:

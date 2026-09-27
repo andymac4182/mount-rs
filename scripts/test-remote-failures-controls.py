@@ -287,6 +287,65 @@ class GateFailureDiagnosticControls(unittest.TestCase):
         self.assertIsNone(self.diagnostic(stderr=b"failed to download private-package --offline", kind="/private/token-kind"))
 
 
+class PeerProgressDiagnosticControls(unittest.TestCase):
+    receipt = GateFailureDiagnosticControls.receipt
+    expected = GateFailureDiagnosticControls.expected
+    diagnostic = GateFailureDiagnosticControls.diagnostic
+
+    def peer(self, stdout=b"", stderr=b"", receipt=None):
+        return self.diagnostic(stdout, stderr, receipt, kind="peerreconnect")
+
+    def expected_peer(self, marker="unobserved", window="unobserved", **changes):
+        return self.expected(kind="peerreconnect", last_sampled_progress_marker=marker,
+                             progress_sample_window=window, **changes)
+
+    def test_complete_fixed_markers_retain_stream_order(self):
+        output = b"peer_read_reconnect_progress=after_requester_shutdown\npeer_read_reconnect_progress=after_server_shutdown\n"
+        self.assertEqual(self.peer(output), self.expected_peer("after_server_shutdown", "short_input"))
+
+    def test_first_marker_can_follow_the_exact_libtest_header(self):
+        output = b"test peer_read_reconnect_bypasses_pending_replica_handshake ... peer_read_reconnect_progress=before_stop_a\n"
+        self.assertEqual(self.peer(output), self.expected_peer("before_stop_a", "short_input"))
+        self.assertEqual(self.peer(output.replace(b"bypasses_pending_replica_handshake", b"unrelated")), self.expected_peer())
+
+    def test_only_complete_newline_delimited_markers_are_observed(self):
+        for output in [b"peer_read_reconnect_progress=before_stop_a", b"private-prefix peer_read_reconnect_progress=before_stop_a\n"]:
+            self.assertEqual(self.peer(output), self.expected_peer())
+
+    def test_malformed_marker_has_a_fixed_invalid_state(self):
+        for marker in [b"/private/token", b"before_stop_a private-data", b"before_stop_a\x1b[31m", b"before_stop_a\xff"]:
+            output=b"peer_read_reconnect_progress=before_stop_a\npeer_read_reconnect_progress="+marker+b"\n"
+            self.assertEqual(self.peer(output), self.expected_peer("invalid", "short_input"))
+            self.assertEqual(self.peer(output+b"peer_read_reconnect_progress=after_stop_a\n"), self.expected_peer("invalid", "short_input"))
+
+    def test_samples_cannot_join_or_complete_boundary_markers(self):
+        head=b"x"*(2047-len(b"peer_read_reconnect_progress=before_stop_a"))+b"\npeer_read_reconnect_progress=before_stop_a"
+        tail=b"\npeer_read_reconnect_progress=after_stop_a\n"+b"y"*3000
+        self.assertEqual(self.peer(head+tail), self.expected_peer())
+        # The valid-looking suffix starts at an unknown tail boundary and is
+        # excluded; no synthetic separator establishes its original line start.
+        head=b"x"*2048
+        tail=b"peer_read_reconnect_progress=after_stop_a\n"+b"y"*(2048-len(b"peer_read_reconnect_progress=after_stop_a\n"))
+        self.assertEqual(self.peer(head+b"omitted"+tail), self.expected_peer())
+
+    def test_complete_suffix_marker_supersedes_an_observed_prefix(self):
+        head=b"peer_read_reconnect_progress=before_stop_a\n"+b"x"*3000
+        tail=b"\npeer_read_reconnect_progress=before_amplification_assertions\n"
+        self.assertEqual(self.peer(head+tail), self.expected_peer("before_amplification_assertions", "last_window"))
+        self.assertEqual(self.peer(b"peer_read_reconnect_progress=before_stop_a\n"+b"x"*8192), self.expected_peer("before_stop_a", "first_window"))
+
+    def test_middle_only_or_stderr_markers_are_unobserved(self):
+        marker=b"peer_read_reconnect_progress=after_cleanup_receipt\n"
+        self.assertEqual(self.peer(b"x"*4096+marker+b"y"*4096), self.expected_peer())
+        self.assertEqual(self.peer(stderr=marker), self.expected_peer())
+
+    def test_progress_does_not_change_failure_or_lifecycle_classification(self):
+        marker=b"peer_read_reconnect_progress=before_blackhole_bind\n"
+        self.assertEqual(self.peer(marker, b"could not compile private-package"), self.expected_peer("before_blackhole_bind", "short_input", failure_class="compile_failed"))
+        self.assertEqual(self.peer(marker, receipt=self.receipt(returncode=0, owned_group_absent=False)), self.expected_peer("before_blackhole_bind", "short_input", returncode=0, lifecycle_unsettled=True))
+        self.assertIsNone(self.peer(marker, receipt=self.receipt(returncode=0)))
+
+
 class DarwinSignalControls(unittest.TestCase):
     # Missing implementation models the previous sticky-error behavior, so
     # positive controls fail semantically before the portability correction.

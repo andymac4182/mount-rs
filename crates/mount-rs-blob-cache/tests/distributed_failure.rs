@@ -1842,6 +1842,7 @@ async fn peer_read_reconnect_bypasses_pending_replica_handshake() {
                 observation.cancelled, observation.inflight
             );
         }
+        println!("peer_read_reconnect_progress=before_amplification_assertions");
         assert_eq!(read_backing_bytes, read_backing_gets * bytes.len() as u64);
         assert_eq!(read_backing_gets, 0, "pending replica must not amplify read backing GETs");
         assert_eq!(read_backing_bytes, 0);
@@ -1866,6 +1867,7 @@ async fn peer_read_reconnect_bypasses_pending_replica_handshake() {
         assert_eq!(settled_put.cancelled, 1);
         assert_eq!(settled_put.inflight, 0);
         checks.verify();
+        println!("peer_read_reconnect_progress=after_amplification_assertions");
     })
     .await
     .expect("bounded isolated peer reconnect amplification qualification");
