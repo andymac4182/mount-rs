@@ -149,9 +149,16 @@ A publication or size failure reports an incomplete result while retaining
 original supported statuses, floor failures and native uncertainty. Missing
 physical counters remain unavailable.
 
-The new controller and build seal producers, final owner-verified teardown,
-independent artifact verifier and live workflow integration are still
-outstanding. The planned owned-fixture teardown destroys its backing resources;
+`scripts/verify-owned-layout-comparison.mjs` independently checks the retained
+projection, private originals, actual handoff/build/native bytes and the 28
+reviewed source seams. It recomputes original outcomes, persistence joins and
+selected resource intervals without loading native code or contacting a backend.
+Its consistency result always leaves hosted qualification false. Usage and
+measurement limits are in [the bottleneck guide](bottleneck-metrics.md#independently-check-retained-comparison-records).
+
+The new controller and build seal producers, final owner-verified teardown and
+live workflow integration are still outstanding. The planned owned-fixture
+teardown destroys its backing resources;
 it must report logical namespace purge as not performed unless separate deletion
 and absence observations exist. The entry always records hosted qualification
 as false.

@@ -15,7 +15,7 @@ control when measuring the cost of the observers.
 | TiDB adapter | Pool checkout, session setup, schema/open, transaction begin/commit/explicit rollback, SQL families and known returned rows | Checkout includes lazy connection/setup work. SQL calls are distinct from MySQL commands, TiKV requests and device I/O |
 | Object-store block adapter | Actual get/put/head/delete invocations and body reads, reason, outcomes, claim leader/follower counters | Adapter API calls and known body bytes; internal HTTP retries and reconciliation listing remain unavailable |
 | QUIC server | TLS/application handshake, authentication, admission, request/read/dispatch/encode/submit/cleanup, latency buckets and gauges | Inclusive application spans; submission to Quinn does not establish peer acknowledgment |
-| Authentication | Token decode, catalog load, key-cache wait, policy selection, key fetch, JWT verification and grant authorization | Inclusive stage times within the existing handshake/renewal deadline; key fetch is only recorded when requested |
+| QUIC authentication | Token decode, catalog load, key-cache wait, policy selection, key fetch, JWT verification and grant authorization | Inclusive stage times within the existing handshake/renewal deadline; key fetch is only recorded when requested |
 | Accepted QUIC connections | UDP bytes/datagrams/I/O calls, frame counters, path observations, retained retired-connection totals | Accepted connection lifetime through session retirement; excludes refused/failed TLS connections and subsequent transport traffic |
 | Process | CPU, RSS, optional Rust allocation churn and process disk accounting | Includes observer/background work; process disk bytes are not physical operation counts |
 | Selected host device | Optional block/driver operation and byte counters | Shared device activity, including other processes; requires stable device identity and is not NAND I/O |
@@ -53,6 +53,52 @@ Unix CI requests a per-platform `owned-layout-controls` artifact containing TAP
 output from the comparison controls, including on failure. The pipeline retains
 the test exit status and existing deadlines. Verify the uploaded artifact before
 using its test names or counts; an empty check-API response supplies neither.
+
+## Independently check retained comparison records
+
+Using Node 24, run the offline verifier against the two retained outputs, the four original
+handoff files, the exact selected native file and the source checkout:
+
+```sh
+node scripts/verify-owned-layout-comparison.mjs \
+  --projection /private/owned/comparison.json \
+  --originals /private/owned/originals.json \
+  --fixtures /private/owned/fixtures.json \
+  --controller /private/owned/controller.json \
+  --engine /private/owned/engine.json \
+  --build /private/owned/build.json \
+  --native /private/owned/mount-rs.node \
+  --checkout /absolute/source/checkout
+```
+
+The Linux/macOS CLI reads bounded regular files and rechecks all 35 file
+identities, nanosecond timestamps and canonical paths before replay. JSON inputs
+require current-user ownership, mode 0600 and a mode 0700 parent. Keep the
+originals private: they can contain configuration and raw benchmark errors.
+Read checks observe boundaries; they do not prove interval immutability or an
+unconditional filesystem deadline. The verifier dispatches no native code,
+benchmark, backend request or subprocess.
+
+The closed `mount-rs.owned-layout-independent-check.v1` report separates:
+
+| Field | Meaning |
+| --- | --- |
+| `status` | Retained records are consistent, incomplete or rejected; exit 0 means consistent only |
+| `floor_qualified` | Original workload floor checks passed; a sole floor failure retains its original failed status |
+| `comparable`, `safe_to_continue` | Recomputed four-arm consistency and continuation safety, separate from the floor |
+| `native_uncertainty` | Retained uncertainty remains sticky; absent evidence is not a zero counter |
+| `hosted_qualified` | Always false: actual owner capacity and final teardown evidence are still missing |
+
+Each receipt digest is checked against its actual bytes and its parsed value.
+The 28 source hashes cover reviewed runtime/controller seams, rather than the
+full native build dependency closure. Build flags are retained declarations;
+the verifier does not independently observe a clean build. It reconstructs
+selected counter intervals, preserving null totals and separate partial totals.
+Discarded inspect/stats bodies cannot be independently rehashed. ABBA accounting
+remains descriptive; this check does not establish a causal speedup or physical
+IOPS. Unix CI retains the verifier controls in the existing TAP artifact.
+
+## Native diagnostic schemas
 
 Native storage diagnostics use `mount-rs.storage-diagnostics.v3`, with exact
 decimal strings for counters. The closed row registry and the instrumented-row
