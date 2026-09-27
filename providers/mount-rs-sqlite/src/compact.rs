@@ -322,7 +322,7 @@ impl SqliteMetadataStore {
         }
         self.0.with_concurrent_publish_timeout(|connection| {
             let was_autocommit = connection.is_autocommit();
-            let tx = match connection.transaction_with_behavior(TransactionBehavior::Immediate) {
+            let tx = match self.0.observed_immediate_transaction(connection) {
                 Ok(tx) => tx,
                 Err(error) => {
                     return Err(sqlite_busy_known_noncommit(

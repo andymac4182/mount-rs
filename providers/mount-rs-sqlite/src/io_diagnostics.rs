@@ -9,11 +9,13 @@ use std::{
         Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::Instant,
 };
 
 const CATEGORIES: [&str; 9] = [
     "SELECT", "INSERT", "UPDATE", "DELETE", "BEGIN", "COMMIT", "ROLLBACK", "PRAGMA", "OTHER",
 ];
+const OBSERVER_SCOPE: &str = "Instant wall time for sequential registry lock and per-connection observer collection; excludes final outer JSON serialization; not workload time";
 fn checked_add(counter: &AtomicU64, overflow: &AtomicBool, amount: u64) {
     if counter
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
@@ -78,6 +80,9 @@ pub(crate) struct Counts {
     profiles: [Timing; 9],
     lock_wait: Timing,
     lock_errors: AtomicU64,
+    lock_hold: Timing,
+    provider_begin: Timing,
+    provider_begin_errors: AtomicU64,
     provider_commit: Timing,
     provider_commit_errors: AtomicU64,
     observer_suppressed: AtomicBool,
@@ -93,6 +98,15 @@ impl Counts {
         self.provider_commit.record(Some(elapsed_ns));
         if !success {
             checked_add(&self.provider_commit_errors, &self.overflow, 1);
+        }
+    }
+    pub(crate) fn lock_hold_finished(&self, elapsed_ns: u64) {
+        self.lock_hold.record(Some(elapsed_ns));
+    }
+    pub(crate) fn begin_finished(&self, elapsed_ns: u64, success: bool) {
+        self.provider_begin.record(Some(elapsed_ns));
+        if !success {
+            checked_add(&self.provider_begin_errors, &self.overflow, 1);
         }
     }
     fn suppress_observer(&self) -> ObserverGuard<'_> {
@@ -111,6 +125,9 @@ impl Counts {
         }
         self.lock_wait.reset();
         self.lock_errors.store(0, Ordering::Relaxed);
+        self.lock_hold.reset();
+        self.provider_begin.reset();
+        self.provider_begin_errors.store(0, Ordering::Relaxed);
         self.provider_commit.reset();
         self.provider_commit_errors.store(0, Ordering::Relaxed);
     }
@@ -297,13 +314,44 @@ fn configuration(connection: &Connection) -> Result<serde_json::Value> {
     }
     Ok(result)
 }
+fn wal_state(
+    connection: &Connection,
+    configuration: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    if configuration["journal_mode"] != "wal" {
+        return Ok(serde_json::json!({"status":"not_wal"}));
+    }
+    // Bundled SQLite accepts NOOP through OP_Checkpoint (the PRAGMA), while
+    // its sqlite3_wal_checkpoint_v2 API rejects the negative NOOP mode. This
+    // observes existing frames without backfilling them. This pinned NOOP
+    // implementation skips the checkpoint lock, but may initialize/recover
+    // WAL read state, take read-related locks and invalidate cached headers.
+    let (busy, log, checkpointed): (i64, i64, i64) = connection
+        .query_row("PRAGMA main.wal_checkpoint(NOOP)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(backend_error)?;
+    if busy == 1 {
+        return Ok(serde_json::json!({"status":"busy"}));
+    }
+    if busy == 0 && log == -1 && checkpointed == -1 {
+        return Ok(serde_json::json!({"status":"unavailable"}));
+    }
+    if busy != 0 || log < 0 || checkpointed < 0 || checkpointed > log {
+        return Err(backend_error("SQLite WAL frame gauge invalid"));
+    }
+    Ok(serde_json::json!({"status":"available","log_frames":log,
+        "checkpointed_frames":checkpointed,"uncheckpointed_frames":log-checkpointed}))
+}
 /// Sample/reset all live opt-in provider connections at a drained phase boundary.
 /// No SQL text, values, paths, namespace names or credentials are retained.
 /// Match connection_id; missing IDs cannot provide complete stage attribution.
 pub fn sqlite_io_diagnostics(reset: bool) -> serde_json::Value {
     let Some(registry) = REGISTRY.get() else {
-        return serde_json::json!({"connections":[],"sql_statements":0});
+        return serde_json::json!({"connections":[],"sql_statements":0,
+            "observer_elapsed_ns":0,"observer_scope":OBSERVER_SCOPE});
     };
+    let observer_started = Instant::now();
     let Ok(mut entries) = registry.lock() else {
         return serde_json::json!({"error":"SQLite diagnostic registry poisoned"});
     };
@@ -318,6 +366,7 @@ pub fn sqlite_io_diagnostics(reset: bool) -> serde_json::Value {
         let sample = (|| {
             let mut value = connection_page_diagnostics(&connection, false)?;
             value["configuration"] = configuration(&connection)?;
+            value["wal_state"] = wal_state(&connection, &value["configuration"])?;
             Ok::<_, mount_rs_core::FsError>(value)
         })();
         // Reset after ALL observer queries, even when a query failed. Capture
@@ -339,6 +388,12 @@ pub fn sqlite_io_diagnostics(reset: bool) -> serde_json::Value {
         value["sql_profile_scope"] = serde_json::json!("SQLite PROFILE completion notifications, not successes; approximate VFS wall clock, bundled SQLite 1ms resolution; excludes post-PROFILE WAL callbacks");
         value["connection_lock"] = counts.lock_wait.snapshot();
         value["connection_lock"]["errors"] = serde_json::json!(counts.lock_errors.load(Ordering::Relaxed));
+        value["connection_lock_hold"] = counts.lock_hold.snapshot();
+        value["connection_lock_hold_scope"] = serde_json::json!("Instant wall time from acquired provider connection mutex guard to guard Drop before unlock; includes SQL, busy waits and commit; excludes acquisition and observer locks");
+        value["provider_begin"] = counts.provider_begin.snapshot();
+        value["provider_begin"]["errors"] = serde_json::json!(counts.provider_begin_errors.load(Ordering::Relaxed));
+        value["provider_begin_scope"] = serde_json::json!("Instant wall time for BEGIN IMMEDIATE call including SQLite busy waiting; block_put and all MRC5 compact transactions only; encloses BEGIN SQL PROFILE interval");
+        value["wal_state_scope"] = serde_json::json!("sequential main WAL frame gauges from drained observer PRAGMA wal_checkpoint(NOOP); no backfill; may initialize or read WAL state; gauges are shared across connections to one database and are not additive or checkpoint work counts");
         value["provider_commit"] = counts.provider_commit.snapshot();
         value["provider_commit"]["errors"] = serde_json::json!(counts.provider_commit_errors.load(Ordering::Relaxed));
         value["provider_commit_scope"] = serde_json::json!("Instant wall time for Transaction::commit call including error Drop rollback; block_put and all MRC5 compact transactions only; encloses COMMIT SQL PROFILE interval");
@@ -349,7 +404,9 @@ pub fn sqlite_io_diagnostics(reset: bool) -> serde_json::Value {
         .iter()
         .filter_map(|v| v["sql_statements"].as_u64())
         .try_fold(0u64, |sum, value| sum.checked_add(value));
-    serde_json::json!({"connections":samples,"sql_statements":total})
+    serde_json::json!({"connections":samples,"sql_statements":total,
+        "observer_elapsed_ns":observer_started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
+        "observer_scope":OBSERVER_SCOPE})
 }
 
 #[cfg(test)]

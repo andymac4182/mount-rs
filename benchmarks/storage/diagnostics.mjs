@@ -3,6 +3,33 @@ import { isDeepStrictEqual } from "node:util"
 // Opt-in quiescent phase snapshots. Native counters are exact decimal strings.
 const decimal = /^(?:0|[1-9]\d*)$/u
 const u64Maximum = 18446744073709551615n
+const signedDecimal = /^(?:0|[1-9]\d*|-[1-9]\d*)$/u
+const i64Minimum = -9223372036854775808n
+const i64Maximum = 9223372036854775807n
+const sqliteCategories = ["SELECT", "INSERT", "UPDATE", "DELETE", "BEGIN", "COMMIT", "ROLLBACK", "PRAGMA", "OTHER"]
+const sqlitePagerFields = ["cache_hits", "cache_misses", "page_writes", "cache_spills"]
+const sqliteConfigurationFields = ["journal_mode", "locking_mode", "is_autocommit", "synchronous", "busy_timeout_ms", "fullfsync", "checkpoint_fullfsync", "wal_autocheckpoint_pages", "cache_size"]
+const sqliteJournalModes = ["delete", "truncate", "persist", "memory", "wal", "off"]
+const sqliteLockingModes = ["normal", "exclusive"]
+const sqliteTimingFields = ["completed", "overflow", "elapsed_ns", "max_elapsed_ns", "invalid_elapsed", "histogram_log2_us"]
+const sqliteScopes = {
+  pager_sampling: "before observer queries; reset after queries; repeated nonreset samples may include prior observer pager work",
+  sql_profile_scope: "SQLite PROFILE completion notifications, not successes; approximate VFS wall clock, bundled SQLite 1ms resolution; excludes post-PROFILE WAL callbacks",
+  connection_lock_hold_scope: "Instant wall time from acquired provider connection mutex guard to guard Drop before unlock; includes SQL, busy waits and commit; excludes acquisition and observer locks",
+  provider_begin_scope: "Instant wall time for BEGIN IMMEDIATE call including SQLite busy waiting; block_put and all MRC5 compact transactions only; encloses BEGIN SQL PROFILE interval",
+  provider_commit_scope: "Instant wall time for Transaction::commit call including error Drop rollback; block_put and all MRC5 compact transactions only; encloses COMMIT SQL PROFILE interval",
+  wal_state_scope: "sequential main WAL frame gauges from drained observer PRAGMA wal_checkpoint(NOOP); no backfill; may initialize or read WAL state; gauges are shared across connections to one database and are not additive or checkpoint work counts",
+}
+const sqliteTimingMeasurement = {
+  duration: "inclusive_wall_nanoseconds; lock_wait_hold_begin_commit_and_sql_profile_overlap",
+  latency_max: "cumulative_per_connection; exact_phase_max_unavailable",
+  latency_histogram: { unit: "microseconds", intervals: Array.from({ length: 32 }, (_, bucket) => ({
+    lower_inclusive_us: bucket === 0 ? "0" : String(2 ** bucket),
+    upper_exclusive_us: bucket === 31 ? null : String(2 ** (bucket + 1)),
+    ...(bucket === 31 ? { terminal_overflow: true } : {}),
+  })) },
+}
+const sqliteObserverScope = "Instant wall time for sequential registry lock and per-connection observer collection; excludes final outer JSON serialization; not workload time"
 export const NATIVE_DIAGNOSTICS_SCHEMA = "mount-rs.storage-diagnostics.v3"
 const rawSchema = "mount-rs.object-store-api.v1"
 const rawScope = "one_object_store_block_store_instance"
@@ -357,26 +384,166 @@ function validateStorageRows(entries, phase = false) {
     } else integer(entry.in_flight)
   }
 }
+function exactFields(value, fields, reason) {
+  if (!object(value) || Object.keys(value).length !== fields.length || !fields.every((field) => Object.hasOwn(value, field))) invalid(reason)
+}
+function checkedTotal(values, reason) {
+  const total = values.reduce((sum, value) => sum + integer(value), 0n)
+  if (total > u64Maximum) invalid(reason)
+  return total
+}
+function signedInteger(value) {
+  if (typeof value !== "string" || value.length > 20 || !signedDecimal.test(value)) invalid("invalid SQLite configuration integer")
+  const number = BigInt(value)
+  if (number < i64Minimum || number > i64Maximum) invalid("SQLite configuration exceeds i64")
+  return number
+}
+function validateSqliteConfiguration(configuration) {
+  exactFields(configuration, sqliteConfigurationFields, "SQLite configuration fields unavailable")
+  if (!sqliteJournalModes.includes(configuration.journal_mode) || !sqliteLockingModes.includes(configuration.locking_mode) || typeof configuration.is_autocommit !== "boolean") invalid("SQLite configuration enum unavailable")
+  if (!configuration.is_autocommit) invalid("SQLite transaction crossed phase boundary")
+  for (const field of sqliteConfigurationFields.slice(3)) {
+    const number = signedInteger(configuration[field])
+    if (field !== "cache_size" && number < 0n) invalid("negative SQLite configuration")
+    if (["fullfsync", "checkpoint_fullfsync"].includes(field) && number > 1n) invalid("SQLite boolean configuration unavailable")
+    if (field === "synchronous" && number > 3n) invalid("SQLite synchronous configuration unavailable")
+  }
+}
+function validateSqliteTiming(timing, errors = false, phase = false) {
+  const maximumFields = phase ? ["max_elapsed_ns_start", "max_elapsed_ns_end", "exact_phase_max_ns"] : ["max_elapsed_ns"]
+  exactFields(timing, [...sqliteTimingFields.filter((field) => field !== "max_elapsed_ns"), ...maximumFields, ...(errors ? ["errors"] : [])], "SQLite timing fields unavailable")
+  if (timing.overflow !== false) invalid("SQLite timing overflow state unavailable")
+  const completed = integer(timing.completed)
+  const elapsed = integer(timing.elapsed_ns)
+  const invalidElapsed = integer(timing.invalid_elapsed)
+  if (!Array.isArray(timing.histogram_log2_us) || timing.histogram_log2_us.length !== 32) invalid("SQLite timing histogram shape changed")
+  const valid = checkedTotal(timing.histogram_log2_us, "SQLite timing histogram overflow")
+  if (valid + invalidElapsed !== completed) invalid("SQLite timing histogram does not reconcile")
+  if (invalidElapsed > 0n) invalid("SQLite duration samples unavailable")
+  if (errors && integer(timing.errors) > completed) invalid("SQLite timing errors exceed completions")
+  if (valid === 0n && elapsed !== 0n) invalid("SQLite elapsed time has no valid observations")
+  // Duration-invalid callbacks have no bucket; valid zero-nanosecond callbacks do.
+  const minimum = timing.histogram_log2_us.reduce((sum, count, bucket) => sum + BigInt(count) * (bucket === 0 ? 0n : (1n << BigInt(bucket)) * 1000n), 0n)
+  if (elapsed < minimum) invalid("SQLite timing below histogram bounds")
+  const maximum = integer(phase ? timing.max_elapsed_ns_end : timing.max_elapsed_ns)
+  const upper = timing.histogram_log2_us.reduce((sum, count, bucket) => {
+    const bucketMaximum = bucket === 31 ? maximum : (1n << BigInt(bucket + 1)) * 1000n - 1n
+    return sum + BigInt(count) * (maximum < bucketMaximum ? maximum : bucketMaximum)
+  }, 0n)
+  if (elapsed > upper) invalid("SQLite elapsed time exceeds histogram and maximum bounds")
+  if (!phase) {
+    if (maximum > elapsed || (valid === 0n && maximum !== 0n)) invalid("SQLite cumulative maximum inconsistent")
+    if (valid > 0n) {
+      const top = timing.histogram_log2_us.findLastIndex((count) => count !== "0")
+      const lower = top === 0 ? 0n : (1n << BigInt(top)) * 1000n
+      const upper = top === 31 ? null : (1n << BigInt(top + 1)) * 1000n
+      if (maximum < lower || (upper !== null && maximum >= upper)) invalid("SQLite maximum outside histogram bounds")
+    }
+  } else {
+    const start = integer(timing.max_elapsed_ns_start)
+    const end = integer(timing.max_elapsed_ns_end)
+    if (end < start) invalid("SQLite cumulative maximum reset")
+    if ((valid === 0n && end !== start) || (end > start && end > elapsed)) invalid("SQLite phase maximum inconsistent")
+    if (timing.exact_phase_max_ns !== "unavailable") invalid("exact SQLite phase maximum unavailable")
+  }
+}
+function validateSqliteWalState(state, configuration) {
+  if (configuration.journal_mode !== "wal") {
+    exactFields(state, ["status"], "SQLite WAL state fields unavailable")
+    if (state.status !== "not_wal") invalid("SQLite WAL state does not match configuration")
+  } else {
+    if (state?.status !== "available") invalid("SQLite WAL boundary gauges unavailable")
+    exactFields(state, ["status", "log_frames", "checkpointed_frames", "uncheckpointed_frames"], "SQLite WAL state fields unavailable")
+    const log = integer(state.log_frames)
+    const checkpointed = integer(state.checkpointed_frames)
+    if (checkpointed > log || integer(state.uncheckpointed_frames) !== log - checkpointed) invalid("SQLite WAL frame gauges do not reconcile")
+  }
+}
+function validateSqliteConnection(entry) {
+  if (!object(entry) || Object.hasOwn(entry, "error")) invalid("SQLite counter unavailable")
+  exactFields(entry, ["connection_id", "counter_overflow", "pager", "page_size", "pager_read_bytes_estimate", "pager_write_bytes_estimate", "sql_statements", "sql_categories", "configuration", "sql_profile", "connection_lock", "connection_lock_hold", "provider_begin", "provider_commit", "wal_state", ...Object.keys(sqliteScopes)], "SQLite connection fields unavailable")
+  if (integer(entry.connection_id) === 0n) invalid("SQLite connection identity unavailable")
+  if (entry.counter_overflow !== false) invalid("SQLite counter overflow state unavailable")
+  exactFields(entry.pager, sqlitePagerFields, "SQLite pager fields unavailable")
+  sqlitePagerFields.forEach((field) => integer(entry.pager[field]))
+  const pageSize = integer(entry.page_size)
+  if (pageSize === 0n) invalid("SQLite page size unavailable")
+  for (const [estimate, field] of [["pager_read_bytes_estimate", "cache_misses"], ["pager_write_bytes_estimate", "page_writes"]]) {
+    if (integer(entry[estimate]) !== integer(entry.pager[field]) * pageSize) invalid("SQLite pager byte estimate inconsistent")
+  }
+  if (!object(entry.sql_categories) || Object.keys(entry.sql_categories).some((name) => !sqliteCategories.includes(name))) invalid("SQLite SQL category coverage unavailable")
+  if (checkedTotal(Object.values(entry.sql_categories), "SQLite statement counter overflow") !== integer(entry.sql_statements)) invalid("SQLite statement categories do not reconcile")
+  exactFields(entry.sql_profile, sqliteCategories, "SQLite SQL profile coverage unavailable")
+  sqliteCategories.forEach((name) => validateSqliteTiming(entry.sql_profile[name]))
+  validateSqliteTiming(entry.connection_lock, true)
+  validateSqliteTiming(entry.connection_lock_hold)
+  validateSqliteTiming(entry.provider_begin, true)
+  validateSqliteTiming(entry.provider_commit, true)
+  for (const [field, scope] of Object.entries(sqliteScopes)) if (entry[field] !== scope) invalid("SQLite measurement scope unavailable")
+  validateSqliteConfiguration(entry.configuration)
+  validateSqliteWalState(entry.wal_state, entry.configuration)
+}
+function sqliteConnectionMap(bank) {
+  exactFields(bank, ["connections", "sql_statements", "observer_elapsed_ns", "observer_scope"], "SQLite connection registry unavailable")
+  if (!Array.isArray(bank.connections)) invalid("SQLite connection registry unavailable")
+  integer(bank.observer_elapsed_ns)
+  if (bank.observer_scope !== sqliteObserverScope) invalid("SQLite observer measurement scope unavailable")
+  const map = new Map()
+  for (const entry of bank.connections) {
+    validateSqliteConnection(entry)
+    if (map.has(entry.connection_id)) invalid("duplicate SQLite connection identity")
+    map.set(entry.connection_id, entry)
+  }
+  if (checkedTotal(bank.connections.map((entry) => entry.sql_statements), "SQLite registry counter overflow") !== integer(bank.sql_statements)) invalid("SQLite registry statement total does not reconcile")
+  return map
+}
+function sqliteTimingDelta(before, after, errors = false) {
+  const old = before ?? { completed: "0", overflow: false, elapsed_ns: "0", max_elapsed_ns: "0", invalid_elapsed: "0", histogram_log2_us: Array(32).fill("0"), ...(errors ? { errors: "0" } : {}) }
+  const delta = { completed: subtract(after.completed, old.completed), overflow: false,
+    elapsed_ns: subtract(after.elapsed_ns, old.elapsed_ns), invalid_elapsed: subtract(after.invalid_elapsed, old.invalid_elapsed),
+    histogram_log2_us: after.histogram_log2_us.map((count, index) => subtract(count, old.histogram_log2_us[index])),
+    max_elapsed_ns_start: old.max_elapsed_ns, max_elapsed_ns_end: after.max_elapsed_ns, exact_phase_max_ns: "unavailable",
+    ...(errors ? { errors: subtract(after.errors, old.errors) } : {}) }
+  validateSqliteTiming(delta, errors, true)
+  return delta
+}
 function connectionDelta(before, after) {
-  const previous = new Map(before.map((entry) => [entry.connection_id, entry]))
-  const current = new Map(after.map((entry) => [entry.connection_id, entry]))
+  const previous = sqliteConnectionMap(before)
+  const current = sqliteConnectionMap(after)
   const missing = [...previous.keys()].filter((id) => !current.has(id))
-  const connections = after.map((entry) => {
+  const connections = after.connections.map((entry) => {
     const old = previous.get(entry.connection_id)
-    if (entry.error || old?.error) invalid("SQLite counter unavailable")
+    if (old && (!isDeepStrictEqual(old.configuration, entry.configuration) || old.page_size !== entry.page_size)) invalid("SQLite connection configuration changed")
     const pager = {}
-    for (const label of ["cache_hits", "cache_misses", "page_writes", "cache_spills"]) pager[label] = subtract(entry.pager[label], old?.pager?.[label])
+    for (const label of sqlitePagerFields) pager[label] = subtract(entry.pager[label], old ? old.pager[label] : "0")
     const sql_categories = {}
-    for (const label of new Set([...Object.keys(old?.sql_categories || {}), ...Object.keys(entry.sql_categories || {})])) {
-      sql_categories[label] = subtract(entry.sql_categories?.[label] ?? "0", old?.sql_categories?.[label])
+    for (const label of sqliteCategories.filter((name) => Object.hasOwn(entry.sql_categories, name) || (old && Object.hasOwn(old.sql_categories, name)))) {
+      sql_categories[label] = subtract(entry.sql_categories[label] ?? "0", old?.sql_categories[label] ?? "0")
     }
     return { connection_id: entry.connection_id, page_size: entry.page_size, pager,
       pager_read_bytes_estimate: subtract(entry.pager_read_bytes_estimate, old?.pager_read_bytes_estimate),
       pager_write_bytes_estimate: subtract(entry.pager_write_bytes_estimate, old?.pager_write_bytes_estimate),
       sql_statements: subtract(entry.sql_statements, old?.sql_statements), sql_categories,
+      counter_overflow_start: old ? old.counter_overflow : "unavailable", counter_overflow_end: entry.counter_overflow,
+      configuration: structuredClone(entry.configuration), configuration_start: old ? structuredClone(old.configuration) : "unavailable",
+      configuration_unchanged: old ? true : "unavailable", boundary_gauges_complete: Boolean(old),
+      ...sqliteScopes,
+      sql_profile: Object.fromEntries(sqliteCategories.map((name) => [name, sqliteTimingDelta(old?.sql_profile[name], entry.sql_profile[name])])),
+      connection_lock: sqliteTimingDelta(old?.connection_lock, entry.connection_lock, true),
+      connection_lock_hold: sqliteTimingDelta(old?.connection_lock_hold, entry.connection_lock_hold),
+      provider_begin: sqliteTimingDelta(old?.provider_begin, entry.provider_begin, true),
+      provider_commit: sqliteTimingDelta(old?.provider_commit, entry.provider_commit, true),
+      wal_state_start: old ? structuredClone(old.wal_state) : { status: "unavailable", reason: "connection_opened_during_phase" },
+      wal_state_end: structuredClone(entry.wal_state),
       opened_during_phase: !old }
   })
-  return { connections, missing_connection_ids: missing, complete: missing.length === 0 }
+  return { scope: "process_live_connections", status: previous.size || current.size ? "observed" : "no_live_connections",
+    timing_measurement: structuredClone(sqliteTimingMeasurement),
+    observer_elapsed_ns_start: before.observer_elapsed_ns, observer_elapsed_ns_end: after.observer_elapsed_ns,
+    observer_scope: sqliteObserverScope,
+    connection_ids_start: [...previous.keys()], connection_ids_end: [...current.keys()],
+    sql_statements: missing.length ? "unavailable" : subtract(after.sql_statements, before.sql_statements),
+    connections, missing_connection_ids: missing, complete: missing.length === 0 }
 }
 function validateClaims(claims) {
   if (!object(claims) || Object.keys(claims).length !== claimFields.length) invalid("raw claim fields unavailable")
@@ -542,6 +709,35 @@ function sanitizedObservations(before, after) {
     ...Object.fromEntries(fields.map((field) => [field, counter(entry?.[field])])),
     latency_log2_us: array(entry?.latency_log2_us, 32, counter),
   }))
+  const signedCounter = (value) => typeof value === "string" && value.length <= 20 && signedDecimal.test(value) && BigInt(value) >= i64Minimum && BigInt(value) <= i64Maximum ? value : { unavailable: "invalid_signed_integer" }
+  const sqliteTiming = (value, errors = false) => ({
+    ...Object.fromEntries(["completed", "elapsed_ns", "max_elapsed_ns", "invalid_elapsed", ...(errors ? ["errors"] : [])].map((field) => [field, counter(value?.[field])])),
+    overflow: typeof value?.overflow === "boolean" ? value.overflow : "unavailable",
+    histogram_log2_us: array(value?.histogram_log2_us, 32, counter),
+  })
+  const sqlite = (value) => ({
+    available: object(value) && !Object.hasOwn(value, "error") && Array.isArray(value.connections),
+    sql_statements: counter(value?.sql_statements), observer_elapsed_ns: counter(value?.observer_elapsed_ns),
+    observer_scope: value?.observer_scope === sqliteObserverScope ? sqliteObserverScope : "unavailable",
+    connections: array(value?.connections, 32, (entry) => ({
+      connection_id: counter(entry?.connection_id), counter_overflow: typeof entry?.counter_overflow === "boolean" ? entry.counter_overflow : "unavailable",
+      ...(entry && Object.hasOwn(entry, "error") ? { error: "unavailable" } : {}),
+      pager: Object.fromEntries(sqlitePagerFields.map((field) => [field, counter(entry?.pager?.[field])])),
+      ...Object.fromEntries(["page_size", "pager_read_bytes_estimate", "pager_write_bytes_estimate", "sql_statements"].map((field) => [field, counter(entry?.[field])])),
+      sql_categories: Object.fromEntries(sqliteCategories.filter((name) => Object.hasOwn(entry?.sql_categories ?? {}, name)).map((name) => [name, counter(entry.sql_categories[name])])),
+      sql_profile: Object.fromEntries(sqliteCategories.map((name) => [name, sqliteTiming(entry?.sql_profile?.[name])])),
+      ...Object.fromEntries(["connection_lock", "connection_lock_hold", "provider_begin", "provider_commit"].map((field) => [field, sqliteTiming(entry?.[field], field !== "connection_lock_hold")])),
+      ...Object.fromEntries(Object.entries(sqliteScopes).map(([field, scope]) => [field, entry?.[field] === scope ? scope : "unavailable"])),
+      configuration: {
+        journal_mode: sqliteJournalModes.includes(entry?.configuration?.journal_mode) ? entry.configuration.journal_mode : "unavailable",
+        locking_mode: sqliteLockingModes.includes(entry?.configuration?.locking_mode) ? entry.configuration.locking_mode : "unavailable",
+        is_autocommit: typeof entry?.configuration?.is_autocommit === "boolean" ? entry.configuration.is_autocommit : "unavailable",
+        ...Object.fromEntries(sqliteConfigurationFields.slice(3).map((field) => [field, signedCounter(entry?.configuration?.[field])])),
+      },
+      wal_state: { status: ["not_wal", "available", "busy", "unavailable"].includes(entry?.wal_state?.status) ? entry.wal_state.status : "unavailable",
+        ...Object.fromEntries(["log_frames", "checkpointed_frames", "uncheckpointed_frames"].filter((field) => Object.hasOwn(entry?.wal_state ?? {}, field)).map((field) => [field, counter(entry.wal_state[field])])) },
+    })),
+  })
   const registry = (value) => ({ scope: value?.scope === "process_live_instances" ? "process_live_instances" : "unavailable",
     available: value?.available !== false && Array.isArray(value?.instances),
     instances: array(value?.instances, 32, (entry) => ({
@@ -579,6 +775,7 @@ function sanitizedObservations(before, after) {
         } : {}),
         latency_histogram: isDeepStrictEqual(value.measurement?.latency_histogram, { unit: "microseconds", intervals: histogramIntervals }) ? { unit: "microseconds", intervals: histogramIntervals } : "unavailable" },
       storage: { in_flight: counter(value.storage?.in_flight), entries: rows(value.storage?.entries, storageNames, ["calls", "success", "error", "cancelled", "bytes", "returned_rows", "returned_row_observations", "in_flight", "elapsed_ns"]) },
+      sqlite: sqlite(value.sqlite),
       r2: registry(value.r2),
       ...(Object.hasOwn(value, "rustfs") ? { rustfs: registry(value.rustfs) } : {}),
     }
@@ -639,7 +836,7 @@ export function deltaNativeSnapshots(before, after) {
       })) }
     validateStorageRows(storage.entries, true)
     const profile = { entries: entriesDelta(before.profile.entries, after.profile.entries, "name", ["calls", "elapsed_ns", "units"]) }
-    const sqlite = connectionDelta(before.sqlite.connections, after.sqlite.connections)
+    const sqlite = connectionDelta(before.sqlite, after.sqlite)
     const r2 = objectStoreDelta(before.r2, after.r2, before.measurement.r2_local, after.measurement.r2_local)
     let rustfs
     if (Object.hasOwn(before, "rustfs") || Object.hasOwn(after, "rustfs")) {

@@ -1753,6 +1753,13 @@ are outside this registry):
 - Nine fixed SQL categories with SQLite PROFILE notification counts, approximate
   elapsed nanoseconds, maxima, and 32 logarithmic microsecond buckets.
 - Monotonic connection mutex acquisition wall time and acquisition errors.
+- Monotonic provider connection mutex hold time, recorded by a stack guard
+  before unlock. It includes SQL, SQLite busy handling, commit and Rust work
+  inside the guard. Direct registry observer locks are excluded.
+- Monotonic `BEGIN IMMEDIATE` call wall time and errors for block PUT and the
+  shared MRC5 compact helper. It includes preparation, locking/recovery and busy
+  handling; it is not an isolated busy-wait measurement. Existing timeouts,
+  retries and returned errors are preserved.
 - Monotonic `Transaction::commit` call wall time and errors for block PUT and
   the shared MRC5 compact transaction helper. This includes automatic checkpoint
   work and error-path transaction Drop rollback before the call returns.
@@ -1768,10 +1775,28 @@ exported. Invalid durations and overflow flags make a timing sample incomplete.
 The fixed callback counters do not acquire Rust locks or allocate Rust objects;
 whole provider calls, JSON snapshots and SQLite allocations remain distinct.
 
-Lock acquisition, SQL PROFILE, provider COMMIT and SDK spans overlap. Do not
-add their totals as exclusive CPU time or distinct I/O. Connection-lock timing
-excludes lock hold time and SQLite busy waiting. The commit counters cover the
-specified helper calls, not every SQLite transaction in the workspace.
+Lock acquisition, hold, SQL PROFILE, provider BEGIN/COMMIT and SDK spans overlap.
+Do not add their totals as exclusive CPU time or distinct I/O. Connection
+acquisition timing excludes hold time and SQLite busy waiting. BEGIN and commit
+counters cover the specified helper calls, not every SQLite transaction in the
+workspace. Successful instrumented acquisitions have one completed hold after
+their guard drops; poisoned acquisitions have an error and no successful hold.
+The guard and fixed counters add no Rust heap allocation per call; this is not a
+whole-provider allocation claim. Disabled diagnostics evaluate no added hot-path
+clocks.
+
+WAL connections additionally expose current log frames, checkpointed frames and
+their difference through an observer `PRAGMA main.wal_checkpoint(NOOP)`. These
+are sequential gauges shared by connections to one database: do not sum them or
+subtract them across log resets. They are not checkpoint counts, duration or
+frames copied by the last checkpoint. Non-WAL connections report `not_wal`;
+busy/unavailable probes retain that status. The pinned SQLite implementation
+accepts NOOP through the PRAGMA but rejects its negative mode in the `_v2` API.
+It skips the checkpoint lock and backfill, but can read/initialize/recover WAL
+state and invalidate cached headers. This observer is not stat-only and can
+perturb subsequent work. Registry collection wall time is reported separately;
+it includes sequential observer locking/queries and excludes final outer JSON
+serialization. It is not workload time or exclusively the WAL probe's time.
 
 Drain the workload before sampling. A resetting snapshot returns prior totals,
 runs observer queries under callback suppression, then clears counters **after**
@@ -1784,8 +1809,23 @@ overflows and incomplete workload boundaries. These sequential observations do
 not establish global background-task quiescence.
 
 The raw Rust saturation artifact and raw N-API snapshot retain these fields.
-The current JavaScript benchmark `connectionDelta` projector omits the added
-configuration/profile/lock/commit fields; that transformed coverage is unavailable.
+The JavaScript benchmark projector validates and retains configuration, SQL
+profiles, lock acquisition/hold and provider BEGIN/COMMIT counters. It rejects
+invalid durations, overflow, resets, unknown labels, changed configuration,
+inconsistent histograms and unavailable WAL gauges. Cumulative maxima retain
+start/end values with exact phase maxima marked unavailable; maxima are never
+subtracted. WAL gauges and observer durations retain endpoint observations.
+Newly opened connections have no observed initial configuration/WAL gauge and
+explicit incomplete boundary-gauge coverage, even when their counters started
+at zero. Raw counters stay decimal u64 strings through the N-API projector.
+
+The [30-second write controls](benchmarks/sqlite-wait-backlog-diagnostic-20260928/README.md)
+retain four fresh DELETE/WAL runs with full stored/fresh payload checks. They
+separate monotonic BEGIN/hold/commit observations from one invalid SQL PROFILE
+duration, preserve observer costs and report WAL backlog without claiming
+checkpoint work or physical flash amplification. Qualification requiring both
+configuration/WAL boundaries must check each projected connection's
+`boundary_gauges_complete`, including connections opened during a phase.
 
 ### Controlled runtime-worker experiment
 

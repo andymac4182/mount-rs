@@ -295,6 +295,31 @@ struct Database {
     local_file_qualified: Arc<AtomicBool>,
 }
 
+struct ObservedConnectionGuard<'a> {
+    inner: MutexGuard<'a, Connection>,
+    started: Option<Instant>,
+    counts: Option<&'a super::io_diagnostics::Counts>,
+}
+impl std::ops::Deref for ObservedConnectionGuard<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+impl std::ops::DerefMut for ObservedConnectionGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+impl Drop for ObservedConnectionGuard<'_> {
+    fn drop(&mut self) {
+        if let (Some(counts), Some(started)) = (self.counts, self.started) {
+            counts
+                .lock_hold_finished(started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
+        }
+    }
+}
+
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FileStamp {
@@ -609,16 +634,43 @@ impl Database {
         Ok(())
     }
 
-    fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
+    fn lock(&self) -> Result<ObservedConnectionGuard<'_>> {
         let started = self._io_diagnostics.as_ref().map(|_| Instant::now());
         let result = self.connection.lock();
-        if let (Some(counts), Some(started)) = (&self._io_diagnostics, started) {
+        let acquired = self._io_diagnostics.as_ref().map(|_| Instant::now());
+        if let (Some(counts), Some(started), Some(acquired)) =
+            (&self._io_diagnostics, started, acquired)
+        {
             counts.lock_finished(
+                acquired
+                    .duration_since(started)
+                    .as_nanos()
+                    .min(u128::from(u64::MAX)) as u64,
+                result.is_ok(),
+            );
+        }
+        result
+            .map(|inner| ObservedConnectionGuard {
+                inner,
+                started: acquired,
+                counts: self._io_diagnostics.as_deref(),
+            })
+            .map_err(|_| backend_error("SQLite storage lock poisoned"))
+    }
+
+    fn observed_immediate_transaction<'a>(
+        &self,
+        connection: &'a mut Connection,
+    ) -> rusqlite::Result<rusqlite::Transaction<'a>> {
+        let started = self._io_diagnostics.as_ref().map(|_| Instant::now());
+        let result = connection.transaction_with_behavior(TransactionBehavior::Immediate);
+        if let (Some(counts), Some(started)) = (&self._io_diagnostics, started) {
+            counts.begin_finished(
                 started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
                 result.is_ok(),
             );
         }
-        result.map_err(|_| backend_error("SQLite storage lock poisoned"))
+        result
     }
 
     fn observed_commit(&self, transaction: rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
@@ -1521,8 +1573,7 @@ impl SqliteBlockStore {
             .query_row("SELECT lower(hex(randomblob(32)))", [], |row| row.get(0))
             .map_err(backend_error)?;
         let was_autocommit = connection.is_autocommit();
-        let transaction = match connection.transaction_with_behavior(TransactionBehavior::Immediate)
-        {
+        let transaction = match self.0.observed_immediate_transaction(&mut connection) {
             Ok(transaction) => transaction,
             Err(error) => {
                 return Err(
@@ -4490,6 +4541,118 @@ mod tests {
             rusqlite::version_number(),
             rusqlite::ffi::SQLITE_VERSION_NUMBER,
             "runtime SQLite must match the bundled headers",
+        );
+    }
+
+    #[test]
+    #[ignore = "requires MOUNT_RS_PROFILE_IO=1 and exclusive registry phase ownership"]
+    fn provider_begin_wait_hold_and_wal_backlog_preserve_blocks() {
+        use crate::sqlite_io_diagnostics;
+        assert_eq!(std::env::var("MOUNT_RS_PROFILE_IO").as_deref(), Ok("1"));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("private-begin-backlog.sqlite");
+        let store = SqliteBlockStore::open(&path).unwrap();
+        store
+            .0
+            .lock()
+            .unwrap()
+            .busy_timeout(Duration::from_millis(40))
+            .unwrap();
+        let blocker = Connection::open(&path).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        sqlite_io_diagnostics(true);
+        let error = store.put_once(b"must-not-commit").unwrap_err();
+        assert_eq!(error.code, ErrorCode::Eagain);
+        let blocked = sqlite_io_diagnostics(false);
+        let row = &blocked["connections"][0];
+        assert_eq!(
+            row["provider_begin"]["completed"], 1,
+            "BEGIN wait metric missing"
+        );
+        assert_eq!(row["provider_begin"]["errors"], 1);
+        let begin_ns = row["provider_begin"]["elapsed_ns"].as_u64().unwrap();
+        assert!(
+            begin_ns >= 20_000_000,
+            "real writer contention must be observed"
+        );
+        assert_eq!(row["connection_lock_hold"]["completed"], 1);
+        assert!(row["connection_lock_hold"]["elapsed_ns"].as_u64().unwrap() >= begin_ns);
+        assert_eq!(row["provider_commit"]["completed"], 0);
+        assert_eq!(row["wal_state"]["status"], "not_wal");
+        blocker.execute_batch("ROLLBACK").unwrap();
+        drop(blocker);
+        {
+            let connection = store.0.lock().unwrap();
+            connection
+                .execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0")
+                .unwrap();
+        }
+        sqlite_io_diagnostics(true);
+        // This known held interval must not become mutex acquisition time.
+        {
+            let _guard = store.0.lock().unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let first = store.put_once(b"first-acknowledged-payload").unwrap();
+        let second = store.put_once(b"second-acknowledged-payload").unwrap();
+        let queued = sqlite_io_diagnostics(false);
+        let row = &queued["connections"][0];
+        assert_eq!(row["provider_begin"]["completed"], 2);
+        assert_eq!(row["provider_begin"]["errors"], 0);
+        assert_eq!(row["provider_commit"]["completed"], 2);
+        assert!(row["connection_lock_hold"]["elapsed_ns"].as_u64().unwrap() >= 20_000_000);
+        assert_eq!(row["wal_state"]["status"], "available");
+        assert!(row["wal_state"]["log_frames"].as_u64().unwrap() > 0);
+        assert_eq!(row["wal_state"]["checkpointed_frames"], 0);
+        assert_eq!(
+            row["wal_state"]["uncheckpointed_frames"],
+            row["wal_state"]["log_frames"]
+        );
+        let repeated = sqlite_io_diagnostics(false);
+        for field in [
+            "provider_begin",
+            "connection_lock_hold",
+            "wal_state",
+            "sql_categories",
+            "sql_profile",
+        ] {
+            assert_eq!(
+                row[field], repeated["connections"][0][field],
+                "observer changed {field}"
+            );
+        }
+        assert!(!queued.to_string().contains("private-begin-backlog"));
+        sqlite_io_diagnostics(true);
+        let reset = sqlite_io_diagnostics(false);
+        assert_eq!(reset["connections"][0]["provider_begin"]["completed"], 0);
+        assert_eq!(
+            reset["connections"][0]["connection_lock_hold"]["completed"],
+            0
+        );
+        drop(store);
+        let fresh = SqliteBlockStore::open(&path).unwrap();
+        futures_lite::future::block_on(async {
+            assert_eq!(
+                fresh.get(&first).await.unwrap(),
+                b"first-acknowledged-payload"
+            );
+            assert_eq!(
+                fresh.get(&second).await.unwrap(),
+                b"second-acknowledged-payload"
+            );
+        });
+        let raw = Connection::open(&path).unwrap();
+        let count: u64 = raw
+            .query_row("SELECT count(*) FROM mount_rs_blocks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2, "failed BEGIN must not insert a block");
+        drop(raw);
+        drop(fresh);
+        assert!(
+            sqlite_io_diagnostics(false)["connections"]
+                .as_array()
+                .unwrap()
+                .is_empty()
         );
     }
 
