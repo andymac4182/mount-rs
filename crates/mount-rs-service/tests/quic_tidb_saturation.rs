@@ -557,8 +557,8 @@ async fn stage(
     expected: &[Vec<(usize, u64)>],
 ) -> (Value, Vec<(usize, usize, usize, u64)>, Vec<String>) {
     #[cfg(all(feature = "resource-profiling", unix))]
-    let resources_before =
-        resource_profile::Snapshot::capture(clients).expect("process resource profile unavailable");
+    let resources_before = resource_profile::Snapshot::capture_io_boundary(clients)
+        .expect("process resource profile unavailable");
     let start_unix_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -620,7 +620,7 @@ async fn stage(
     let elapsed = start.elapsed().as_secs_f64();
     let iops = (read.count + write.count) as f64 / elapsed;
     #[cfg(all(feature = "resource-profiling", unix))]
-    let resources = resource_profile::Snapshot::capture(clients)
+    let resources = resource_profile::Snapshot::capture_io_boundary(clients)
         .expect("process resource profile unavailable")
         .delta(&resources_before)
         .expect("process resource counters invalid");

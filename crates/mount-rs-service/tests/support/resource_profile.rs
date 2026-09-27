@@ -247,6 +247,14 @@ impl Snapshot {
         Self::capture_network(network)
     }
 
+    /// Client/network and OS I/O observations at workload boundaries only.
+    /// The periodic sampler continues to use the ordinary disk-disabled path.
+    pub fn capture_io_boundary(clients: &[super::Client]) -> Result<Self, &'static str> {
+        let mut snapshot = Self::capture(clients)?;
+        snapshot.os_io = device_io::Snapshot::capture_from_env();
+        Ok(snapshot)
+    }
+
     /// Boundary-only network capture; never used by the100ms process sampler.
     pub fn capture_connections(connections: &[quinn::Connection]) -> Result<Self, &'static str> {
         Self::capture_network(connections.iter().map(Network::capture).collect())

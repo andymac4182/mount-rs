@@ -33,6 +33,71 @@ microseconds. Logs contain no storage keys, paths or raw errors. Leave tracing
 off for the allocation and throughput baseline; writing diagnostic output adds
 observer work.
 
+### Process resource observations
+
+Phase reports now retain the resource counters already sampled at each boundary.
+`resource_measurement.schema` is `mount-rs.process-resources.v1`. No new Node
+sampler calls are added, and the core, storage and QUIC row inventories remain
+134, 85 and 21 respectively.
+
+| Report field | Meaning |
+| --- | --- |
+| `resources_work.minor_page_faults` / `major_page_faults` | Process fault-counter deltas between the end of the first snapshot and start of the second. |
+| `resources_work.filesystem_input_operations` / `filesystem_output_operations` | Process `getrusage` block-accounting deltas; distinct from syscall counts, device IOPS and datastore daemon I/O. |
+| `resources_observer` | The same four counters during the two boundary snapshots, kept separately from workload observations. |
+| `memory_start_bytes` / `memory_end_bytes` | Fixed RSS, heap and external-memory endpoint gauges. |
+| `memory_delta_bytes` | Signed end-minus-start gauges; a decrease is valid. These do not measure allocation churn or a phase peak. |
+| `lifetime_peak_rss_bytes` | Before/after process lifetime high-water marks, converting Node's KiB values to exact decimal bytes. These are never subtracted as a phase peak. |
+
+The added cumulative rows require matching Linux or macOS endpoint platforms.
+Windows libuv fault/I/O fields have different support or meanings and remain
+unavailable for this POSIX measurement. Missing, negative, fractional, unsafe
+or reset counters also remain unavailable per row; observed zero is retained.
+The public projector accepts exact measurement metadata and fixed fields only,
+checks signed memory changes against their endpoints, and retains old CPU and
+end-memory evidence when historical reports lack the additions. These units
+follow [Node's process resource API](https://nodejs.org/docs/latest-v24.x/api/process.html#processresourceusage)
+and its [bundled Windows libuv implementation](https://github.com/nodejs/node/blob/v24.18.0/deps/uv/src/win/util.c).
+
+The QUIC saturation runner now enables its existing `os_io` observer at the two
+workload boundaries when `MOUNT_RS_PROFILE_IO=1`. Its periodic process sampler
+continues to leave disk observations disabled. The observer retains own-process
+disk accounting, process identity, elapsed interval and observation cost. Device
+operation/byte counters require one explicit `MOUNT_RS_PROFILE_BLOCK_DEVICE`
+(Linux) or `MOUNT_RS_PROFILE_IOREGISTRY_ENTRY_ID` (macOS) selection; an unset
+selector stays `unselected`. Device totals include other processes and kernel
+writeback. They do not establish which datastore generated the activity.
+
+The controls cover workload/observer separation, exact integer conversion,
+unavailable/reset cases, historical absence, and private-field exclusion. The
+real Mac gate observes its own PID and start token with no selected device.
+CI runs the Node controls on its existing platforms and the exact OS gate on
+Unix, retaining its output even on failure and rejecting a zero-case pass.
+
+Remaining transport/cache timing gaps are explicit: client stream/socket waits,
+distributed-cache miss admission and singleflight waits, RAM versus disk hit
+latency, directory/peer lookup timing, and WebSocket/peer transport stage
+observers. Existing hit/backing counters and QUIC service measurements remain
+useful; they cannot supply these missing stage times.
+
+The [retained resource report](benchmarks/process-resource-metrics-20260927/report.json)
+contains two serial 400-lifecycle compact SQLite runs: 800 verified full reads
+and 2,400 acknowledged write/read/delete operations altogether. The local
+public NAPI workload measured 1,914.46 operations/sec with profiling and
+1,947.38 with profiling disabled, both meeting the unchanged 1,000-operation
+floor. Two arms do not isolate observer overhead or establish a speedup.
+The disabled arm has no resource/native phase snapshot and retains that absence.
+
+The profiled arm recorded 22,525 SQLite statement calls, 2,112 pager writes,
+1,072 minor and two major faults, 268,475/332,648 microseconds of user/system
+CPU, and an RSS endpoint increase of 15,794,176 bytes. Authority-path checks
+took 90.16 ms across 3,670 calls; Full scans took 77.79 ms across 83,387 guards,
+including their nested 55.66 ms decode work. These inclusive spans locate
+repeated metadata work. CPU, memory, pager and statement observations have
+separate scopes; the process block-accounting deltas of zero do not establish
+zero disk activity. No device IOPS, total allocations, remote transport or
+full production-capacity claim follows from these local runs.
+
 ## Compact metadata work
 
 The compact path has separate observations for local work before provider I/O:

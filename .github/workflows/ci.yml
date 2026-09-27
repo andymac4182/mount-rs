@@ -912,6 +912,20 @@ jobs:
             --test-threads=1 --nocapture \
             2>&1 | tee "$RUNNER_TEMP/sqlite-compact-stage-metrics.log"
           rg -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/sqlite-compact-stage-metrics.log"
+      - name: Verify own-process OS I/O boundary metrics
+        if: runner.os != 'Windows'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -o pipefail
+          unset MOUNT_RS_PROFILE_BLOCK_DEVICE MOUNT_RS_PROFILE_IOREGISTRY_ENTRY_ID
+          MOUNT_RS_PROFILE_IO=1 MOUNT_RS_TRACE_REQUESTS=0 MOUNT_RS_TRACE_STORAGE=0 \
+            ./scripts/cargo-shared test -p mount-rs-service --features resource-profiling \
+            --test quic_tidb_saturation --locked --offline \
+            -- --ignored --exact resource_profile::device_io::own_process_os_io_boundary_retains_native_identity_and_observer_cost \
+            --test-threads=1 --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/process-os-io-boundary.log"
+          rg -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/process-os-io-boundary.log"
       - name: Verify warmed causal profile allocations
         timeout-minutes: 5
         shell: bash
@@ -986,6 +1000,7 @@ jobs:
             ${{ runner.temp }}/storage-diagnostic-allocations.log
             ${{ runner.temp }}/filesystem-causal-metrics.log
             ${{ runner.temp }}/sqlite-compact-stage-metrics.log
+            ${{ runner.temp }}/process-os-io-boundary.log
             ${{ runner.temp }}/filesystem-causal-profile-allocations.log
             ${{ runner.temp }}/compact-snapshot-revision.log
             ${{ runner.temp }}/current-path-create-rebase.log
@@ -1029,7 +1044,7 @@ jobs:
         run: node --test --test-timeout=10000 benchmarks/storage/namespace-presence.test.mjs bindings/mount-rs-napi/test/namespace-presence-postlude.test.mjs
       - name: Verify owned layout comparison and bottleneck metrics controls
         timeout-minutes: 1
-        run: node --test --test-timeout=10000 benchmarks/storage/owned-layout-arm.test.mjs benchmarks/storage/owned-layout-outcome.test.mjs benchmarks/storage/owned-layout-comparison.test.mjs benchmarks/storage/owned-layout-metrics.test.mjs
+        run: node --test --test-timeout=10000 benchmarks/storage/owned-layout-arm.test.mjs benchmarks/storage/owned-layout-outcome.test.mjs benchmarks/storage/owned-layout-comparison.test.mjs benchmarks/storage/owned-layout-metrics.test.mjs benchmarks/storage/process-resource-metrics.test.mjs
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
         with:
           version: 11
@@ -1108,7 +1123,7 @@ jobs:
         timeout-minutes: 1
         run: |
           set -o pipefail
-          node --test --test-reporter=tap --test-timeout=10000 benchmarks/storage/owned-layout-arm.test.mjs benchmarks/storage/owned-layout-outcome.test.mjs benchmarks/storage/owned-layout-comparison.test.mjs benchmarks/storage/owned-layout-metrics.test.mjs benchmarks/storage/owned-layout-entry.test.mjs scripts/verify-owned-layout-comparison.test.mjs 2>&1 | tee "$RUNNER_TEMP/owned-layout-controls.log"
+          node --test --test-reporter=tap --test-timeout=10000 benchmarks/storage/owned-layout-arm.test.mjs benchmarks/storage/owned-layout-outcome.test.mjs benchmarks/storage/owned-layout-comparison.test.mjs benchmarks/storage/owned-layout-metrics.test.mjs benchmarks/storage/process-resource-metrics.test.mjs benchmarks/storage/owned-layout-entry.test.mjs scripts/verify-owned-layout-comparison.test.mjs 2>&1 | tee "$RUNNER_TEMP/owned-layout-controls.log"
       - name: Verify receipt producers and readonly handoff CLI
         timeout-minutes: 1
         run: |

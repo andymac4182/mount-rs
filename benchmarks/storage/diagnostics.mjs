@@ -676,6 +676,53 @@ export function validateRawPhaseDiagnostics(phase, family = "r2") {
   return expectedIds
 }
 
+export const PROCESS_RESOURCE_MEASUREMENT = Object.freeze({
+  schema: "mount-rs.process-resources.v1",
+  filesystem_operations: "process_getrusage_block_accounting; not_syscalls_or_device_iops",
+  page_faults: "process_getrusage_minor_and_major_faults",
+  memory: "endpoint_gauges; signed_delta_not_allocation_churn",
+  peak_rss: "process_lifetime_high_water_mark; not_phase_peak",
+})
+const processMemoryFields = ["rss", "heapTotal", "heapUsed", "external", "arrayBuffers"]
+const processResourceRows = {
+  minor_page_faults: "minorPageFault", major_page_faults: "majorPageFault",
+  filesystem_input_operations: "fsRead", filesystem_output_operations: "fsWrite",
+}
+function sampledInteger(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? BigInt(value) : undefined
+}
+function sampledDelta(before, after) {
+  const start = sampledInteger(before), end = sampledInteger(after)
+  return start !== undefined && end !== undefined && end >= start ? end - start : undefined
+}
+function sampledMemory(source) {
+  return Object.fromEntries(processMemoryFields.map((field) => [field, sampledInteger(source?.[field])?.toString() ?? "unavailable"]))
+}
+function processResources(before, after) {
+  const samePlatform = typeof before.platform === "string" && before.platform === after.platform
+  // libuv's Windows fault and I/O fields do not have these POSIX meanings.
+  const supported = samePlatform && ["linux", "darwin"].includes(before.platform)
+  const resources_work = {}, resources_observer = {}
+  for (const [field, input] of Object.entries(processResourceRows)) {
+    const work = supported ? sampledDelta(before.resourcesEnd?.[input], after.resourcesStart?.[input]) : undefined
+    const first = supported ? sampledDelta(before.resourcesStart?.[input], before.resourcesEnd?.[input]) : undefined
+    const last = supported ? sampledDelta(after.resourcesStart?.[input], after.resourcesEnd?.[input]) : undefined
+    resources_work[field] = work?.toString() ?? "unavailable"
+    resources_observer[field] = first !== undefined && last !== undefined ? (first + last).toString() : "unavailable"
+  }
+  const memory_start_bytes = sampledMemory(before.memory), memory_end_bytes = sampledMemory(after.memory)
+  const memory_delta_bytes = Object.fromEntries(processMemoryFields.map((field) => {
+    const start = sampledInteger(before.memory?.[field]), end = sampledInteger(after.memory?.[field])
+    return [field, start !== undefined && end !== undefined ? (end - start).toString() : "unavailable"]
+  }))
+  const peakStart = sampledInteger(before.resourcesEnd?.maxRSS), peakEnd = sampledInteger(after.resourcesStart?.maxRSS)
+  return { resources_work, resources_observer, memory_start_bytes, memory_end_bytes, memory_delta_bytes,
+    lifetime_peak_rss_bytes: { start: peakStart !== undefined ? (peakStart * 1024n).toString() : "unavailable",
+      end: samePlatform && peakStart !== undefined && peakEnd !== undefined && peakEnd >= peakStart ? (peakEnd * 1024n).toString() : "unavailable",
+      scope: PROCESS_RESOURCE_MEASUREMENT.peak_rss },
+    resource_measurement: { ...PROCESS_RESOURCE_MEASUREMENT } }
+}
+
 export function takePhaseSnapshot(nativeSnapshot, samplers = {
   now: () => performance.now(), cpu: () => process.cpuUsage(),
   resources: () => process.resourceUsage(), memory: () => process.memoryUsage(),
@@ -689,7 +736,7 @@ export function takePhaseSnapshot(nativeSnapshot, samplers = {
   // Endpoints follow all substantial snapshot work, including memoryUsage.
   const resourcesEnd = samplers.resources()
   const cpuEnd = samplers.cpu()
-  return { started, ended: samplers.now(), cpuStart, cpuEnd, resourcesStart, resourcesEnd, memory, native }
+  return { started, ended: samplers.now(), cpuStart, cpuEnd, resourcesStart, resourcesEnd, memory, native, platform: samplers.platform ?? process.platform }
 }
 
 export function finishPhase(name, before, after, quiescent = true) {
@@ -705,7 +752,8 @@ export function finishPhase(name, before, after, quiescent = true) {
   const cpu = { user_us: String(after.cpuStart.user - before.cpuEnd.user), system_us: String(after.cpuStart.system - before.cpuEnd.system) }
   const observerCpu = { user_us: String((before.cpuEnd.user - before.cpuStart.user) + (after.cpuEnd.user - after.cpuStart.user)), system_us: String((before.cpuEnd.system - before.cpuStart.system) + (after.cpuEnd.system - after.cpuStart.system)) }
   const resources = { voluntary_context_switches: String(after.resourcesStart.voluntaryContextSwitches - before.resourcesEnd.voluntaryContextSwitches), involuntary_context_switches: String(after.resourcesStart.involuntaryContextSwitches - before.resourcesEnd.involuntaryContextSwitches) }
-  return { name, elapsed_ms: after.started - before.ended, observer_snapshot_ms: (before.ended - before.started) + (after.ended - after.started), quiescent, native: delta, process: { cpu_work: cpu, cpu_observer: observerCpu, memory_end_bytes: Object.fromEntries(Object.entries(after.memory).map(([key, value]) => [key, String(value)])), resources_work: resources, native_allocation_count: "unavailable", js_allocation_count: "unavailable" } }
+  const observations = processResources(before, after)
+  return { name, elapsed_ms: after.started - before.ended, observer_snapshot_ms: (before.ended - before.started) + (after.ended - after.started), quiescent, native: delta, process: { cpu_work: cpu, cpu_observer: observerCpu, ...observations, resources_work: { ...resources, ...observations.resources_work }, native_allocation_count: "unavailable", js_allocation_count: "unavailable" } }
 }
 
 export function logPhaseSummary(phase) {
