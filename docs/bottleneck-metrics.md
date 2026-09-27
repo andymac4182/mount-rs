@@ -59,7 +59,7 @@ observer work.
 Phase reports now retain the resource counters already sampled at each boundary.
 `resource_measurement.schema` is `mount-rs.process-resources.v1`. No new Node
 sampler calls are added. The current core, storage and service row inventories are
-136, 108 and 22 respectively; the cache and client additions are described below.
+136, 110 and 22 respectively; the cache and client additions are described below.
 
 | Report field | Meaning |
 | --- | --- |
@@ -95,8 +95,8 @@ real Mac gate observes its own PID and start token with no selected device.
 CI runs the Node controls on its existing platforms and the exact OS gate on
 Unix, retaining its output even on failure and rejecting a zero-case pass.
 
-Remaining transport/cache timing gaps are QUIC client connection establishment,
-incoming peer establishment, and directory/discovery lookup.
+Client QUIC setup and directory/discovery lookup now have the fixed rows below.
+Incoming peer establishment remains a timing gap.
 Client send/receive and peer quota/open/send/receive/GET stages are described
 below. Cache lookup histograms include misses; isolated warm phases are needed
 to qualify RAM or disk hit latency. Peer send backpressure/error and stream-open
@@ -189,6 +189,37 @@ source still needs hosted qualification.
 
 ## Locate the bottleneck in one measured phase
 
+### QUIC setup and cache discovery
+
+| Row | Scope | Terminal meaning |
+| --- | --- | --- |
+| `client.quic.connection_setup` | TLS/config and endpoint construction through actual QUIC connection, failure classification and negotiated ALPN validation. | Success returns a transport; all setup errors, including its internal deadline, are errors. Caller drop is cancellation. Credentials, hello authentication and WebSocket fallback are excluded. |
+| `blob_cache.discovery.locate` | Exactly the discovery await inside the existing peer deadline, before deduplication, filtering and hedged peer requests. | Empty and fallback lists are successful lookup results; trait errors are errors. The outer peer deadline and caller drop cancel this span. Success does not prove directory health. |
+
+These append at storage ordinals 108 and 109, preserving all previous ordinals.
+The bank has 110 rows and 23 units families; the core Event bank stays at 136.
+Both stages expose calls, success/error/cancellation, in-flight gauges, inclusive
+wall time and 32 latency buckets. Their bytes and SQL returned rows are unavailable.
+Their timings overlap other work and cannot be added as exclusive CPU time.
+Discovery has no backing-read or peer-query units; those are separate counters.
+
+Use `MOUNT_RS_PROFILE_IO=1` before constructing the client or cache. Read
+`mount_rs_core::diagnostics::storage::snapshot()` in that same process. Set
+`MOUNT_RS_TRACE_STORAGE=1` for fixed-label slow records at 100 ms or longer,
+sharing the existing limit of 16 records per process. Keep tracing disabled for
+throughput/allocation measurements. Logs exclude credentials, storage keys,
+paths, peer IDs and payloads. Native addon declarations include these rows,
+but its audited source coverage remains unchanged at 78/85: declared zero rows
+do not establish observed client setup or discovery. A server CLI shutdown
+record cannot see a separate client's counters.
+
+The isolated qualification commands are `scripts/test-remote-failures.py
+clientsetupmetrics` and `scripts/test-remote-failures.py discoverymetrics`.
+Both require an explicit checkout-isolated `CARGO_TARGET_DIR` and use the fixed
+owned parent. The first uses real local QUIC; the second exercises the public
+cache path with controlled discovery and peer adapters. These are local observer
+controls, not production-capacity or Redis/network-directory benchmarks.
+
 ### Client QUIC stream acquisition
 
 `client.quic.open_bi` appends at storage ordinal 91. The existing 91-row prefix
@@ -249,7 +280,7 @@ snapshots can observe this row.
 The [retained transport report](benchmarks/transport-stage-metrics-20260928/report.json)
 qualifies eight appended storage rows, preserving the original 92-row prefix.
 That slice produced 100 rows and 20 distinct units families. The current bank,
-including the WebSocket stages below, has 108 rows and 21 families.
+including the WebSocket stages below, has 110 rows and 23 families.
 
 | Fixed row | Timed boundary | Successful bytes |
 | --- | --- | --- |
@@ -314,9 +345,9 @@ JS and NAPI exports declare stage-specific bytes. The addon still audits 78
 storage producers by default or 85 with FoundationDB; its transport families
 remain unavailable. Literal historical 92-row records retain missing rows and
 histograms as null/unavailable. Strict current validators reject missing rows
-and the historical payload-only descriptor on a current 108-row inventory.
+and the historical payload-only descriptor on a current 110-row inventory.
 Server CLI shutdown banks remain process-local; a dedicated client CLI shutdown
-export and incoming peer/discovery timings remain open.
+export and incoming peer setup timings remain open.
 
 ### WebSocket client and service observations
 
@@ -386,8 +417,8 @@ The cache slice appends six storage rows at indexes 85 through 90 and two core
 hit counters at 134 and 135. The existing 85 storage and 134 core rows retain
 their offsets. This cache slice produced 91 storage rows; client stream acquisition
 brought that slice to 92 storage and 136 core rows; the request-stage slice
-above produced 100 storage rows; the WebSocket stages bring the current bank to
-108.
+above produced 100 storage rows; the WebSocket stages produced 108 rows; setup/discovery bring the current bank to
+110.
 
 | Fixed storage row | Measured boundary | Successful bytes |
 | --- | --- | --- |
@@ -508,7 +539,7 @@ The authority/refresh slice appended sixteen rows to the 118-row prefix, for
 those unchanged prefixes, producing 136 core and 91 storage rows. Client stream
 acquisition subsequently appended storage row 91, producing 92 rows. The
 request-stage slice produced 100 storage rows; WebSocket stages subsequently
-bring the current bank to 108.
+produced 108 rows; setup/discovery bring the current bank to 110.
 The authority/refresh observations split the
 repeated compact metadata work seen in the latest lifecycle measurement:
 
@@ -1174,14 +1205,14 @@ overlapping wall durations. Global banks survive provider retirement without
 retaining stores or connections. They do not attribute totals to a particular
 drive or provider instance, and zero in-flight gauges do not prove drain.
 
-Storage retains all 108 ordered rows, outcomes, known successful bytes by
+Storage retains all 110 ordered rows, outcomes, known successful bytes by
 operation (payload or peer plaintext envelope as documented above),
 returned rows and row-observation availability, global/per-row in-flight
 gauges, 32 latency buckets and forwarding-box provenance. Coverage labels are
 derived from the producer registry: 47 `sdk.*` erased-method rows, 18 `tidb.*`
 source-instrumented adapter rows, 12 NAPI `metadata.*`/`blocks.*` forwarding
 rows that this CLI does not use, and one `pglite.client_lock_wait` row selected
-only by that provider. The seven FoundationDB, twelve cache, three client QUIC
+only by that provider. The seven FoundationDB, thirteen cache, four client QUIC
 and eight client WebSocket rows are also declared in the bank. The additional
 `client_websocket` coverage family is marked
 `declared_not_cli_server_source_instrumented`; these declarations do not

@@ -127,8 +127,10 @@ pub enum Operation {
     RemoteClientWebSocketRequestSend,
     RemoteClientWebSocketResponseReceive,
     RemoteClientWebSocketResponseDecode,
+    RemoteClientQuicConnectionSetup,
+    BlobCacheDiscoveryLocate,
 }
-const NAMES: [&str; 108] = [
+const NAMES: [&str; 110] = [
     "metadata.load",
     "metadata.load_if_changed",
     "metadata.snapshot",
@@ -237,6 +239,8 @@ const NAMES: [&str; 108] = [
     "client.websocket.request_send",
     "client.websocket.response_receive",
     "client.websocket.response_decode",
+    "client.quic.connection_setup",
+    "blob_cache.discovery.locate",
 ];
 
 /// Fixed serialized row order. Appended families have separate invocation semantics.
@@ -659,6 +663,8 @@ mod tests {
             Operation::RemoteClientWebSocketRequestSend,
             Operation::RemoteClientWebSocketResponseReceive,
             Operation::RemoteClientWebSocketResponseDecode,
+            Operation::RemoteClientQuicConnectionSetup,
+            Operation::BlobCacheDiscoveryLocate,
         ];
         let names = [
             "blocks.put",
@@ -670,6 +676,8 @@ mod tests {
             "client.websocket.request_send",
             "client.websocket.response_receive",
             "client.websocket.response_decode",
+            "client.quic.connection_setup",
+            "blob_cache.discovery.locate",
         ];
         for operation in operations.into_iter().cycle().take(32) {
             let _ = write_slow_record(&mut output, operation, Outcome::Error, 999_000_000);
@@ -726,7 +734,7 @@ mod tests {
     #[test]
     fn fixed_names_match_appended_sdk_tidb_and_foundationdb_rows() {
         let names = operation_names();
-        assert_eq!(names.len(), 108);
+        assert_eq!(names.len(), 110);
         assert_eq!(
             names[Operation::SdkMetadataLoadIfChanged as usize],
             "sdk.metadata.load_if_changed"
@@ -833,6 +841,15 @@ mod tests {
                 "client.websocket.request_send",
                 "client.websocket.response_receive",
                 "client.websocket.response_decode",
+            ]
+        );
+        assert_eq!(Operation::RemoteClientQuicConnectionSetup as usize, 108);
+        assert_eq!(Operation::BlobCacheDiscoveryLocate as usize, 109);
+        assert_eq!(
+            &names[108..],
+            &[
+                "client.quic.connection_setup",
+                "blob_cache.discovery.locate"
             ]
         );
         assert_eq!(

@@ -360,8 +360,8 @@ impl ServerProcess {
         let storage = &process["storage"]["snapshot"];
         let storage_entries = storage["entries"].as_array().unwrap();
         let names = mount_rs_core::diagnostics::storage::operation_names();
-        assert_eq!(storage_entries.len(), 108);
-        assert_eq!(names.len(), 108);
+        assert_eq!(storage_entries.len(), 110);
+        assert_eq!(names.len(), 110);
         assert_eq!(storage_entries[77]["name"], "tidb.sql.flush_probe");
         assert_eq!(
             storage_entries[78..85]

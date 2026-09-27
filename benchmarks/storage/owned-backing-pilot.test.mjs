@@ -1206,7 +1206,7 @@ const historical92Families = {
   client_quic: { operations: ["client.quic.open_bi"], calls: "stream_acquisition_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_open_bi_await_nanoseconds; not_exclusive_cpu_or_network_time" },
 }
 
-test("historical 85-row storage snapshot leaves twenty-three appended cache and client stages unavailable", () => {
+test("historical 85-row storage snapshot leaves twenty-five appended cache and client stages unavailable", () => {
   const fixture = resultFixture()
   assert.equal(historical85Names.length, 85)
   const oldStorage = historical85Names.map((name) => ({ name, calls: "0", success: "0", error: "0", cancelled: "0" }))
@@ -1217,7 +1217,7 @@ test("historical 85-row storage snapshot leaves twenty-three appended cache and 
   const phase = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1]
   const projected = phase.storage
   assert.equal(phase.status, "incomplete")
-  assert.equal(projected.length, 108)
+  assert.equal(projected.length, 110)
   assert.deepEqual(projected.slice(85, 100).map((row) => row.name), [
     "blob_cache.miss.admission_wait", "blob_cache.miss.singleflight_wait",
     "blob_cache.ram.lookup", "blob_cache.disk.lookup",
@@ -1232,7 +1232,7 @@ test("historical 85-row storage snapshot leaves twenty-three appended cache and 
     "blob_cache.peer.get",
     "blob_cache.peer.get_miss",
   ])
-  assert.deepEqual(projected.slice(100).map((row) => row.name), [
+  assert.deepEqual(projected.slice(100, 108).map((row) => row.name), [
     "client.websocket.tcp_connect", "client.websocket.tls_handshake",
     "client.websocket.upgrade", "client.websocket.socket_lock_wait",
     "client.websocket.request_encode", "client.websocket.request_send",
@@ -1246,7 +1246,7 @@ test("historical 85-row storage snapshot leaves twenty-three appended cache and 
   assert.deepEqual(fixture, before)
 })
 
-test("historical 91-row storage snapshot leaves seventeen client and peer stages unavailable", () => {
+test("historical 91-row storage snapshot leaves nineteen client and peer stages unavailable", () => {
   const fixture = resultFixture()
   assert.equal(historical91Names.length, 91)
   const oldStorage = historical91Names.map((name) => ({ name, calls: "0", success: "0", error: "0", cancelled: "0" }))
@@ -1257,7 +1257,7 @@ test("historical 91-row storage snapshot leaves seventeen client and peer stages
   const phase = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1]
   const projected = phase.storage
   assert.equal(phase.status, "incomplete")
-  assert.equal(projected.length, 108)
+  assert.equal(projected.length, 110)
   assert.ok(projected.slice(0, 91).every((row) => row.calls === "0"))
   assert.equal(projected[91].name, "client.quic.open_bi")
   for (const row of projected.slice(91)) {
@@ -1267,7 +1267,7 @@ test("historical 91-row storage snapshot leaves seventeen client and peer stages
   assert.deepEqual(fixture, before)
 })
 
-test("literal historical 92-row v3 descriptor leaves all sixteen appended transport rows unavailable", () => {
+test("literal historical 92-row v3 descriptor leaves all eighteen appended transport rows unavailable", () => {
   const fixture = resultFixture()
   assert.equal(historical92Names.length, 92)
   const oldStorage = historical92Names.map((name) => ({ name, calls: "0", success: "0", error: "0", cancelled: "0" }))
@@ -1279,7 +1279,7 @@ test("literal historical 92-row v3 descriptor leaves all sixteen appended transp
   const before = structuredClone(fixture)
   const phase = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1]
   assert.equal(phase.status, "incomplete")
-  assert.equal(phase.storage.length, 108)
+  assert.equal(phase.storage.length, 110)
   assert.ok(phase.storage.slice(0, 92).every((row) => row.calls === "0"))
   assert.deepEqual(phase.storage.slice(92, 100).map((row) => row.name), [
     "client.quic.request_send", "client.quic.response_receive",
@@ -1287,7 +1287,7 @@ test("literal historical 92-row v3 descriptor leaves all sixteen appended transp
     "blob_cache.peer.request_send", "blob_cache.peer.response_receive",
     "blob_cache.peer.get", "blob_cache.peer.get_miss",
   ])
-  assert.deepEqual(phase.storage.slice(100).map((row) => row.name), [
+  assert.deepEqual(phase.storage.slice(100, 108).map((row) => row.name), [
     "client.websocket.tcp_connect", "client.websocket.tls_handshake",
     "client.websocket.upgrade", "client.websocket.socket_lock_wait",
     "client.websocket.request_encode", "client.websocket.request_send",
@@ -1319,4 +1319,29 @@ test("compact, refresh, and cache pilot projection retains measured units withou
   ])
   assert.deepEqual(fixture, before)
   assert.match(core.scope, /inclusive_elapsed_and_event_specific_units/u)
+})
+
+test("historical 108-row storage projection leaves setup and discovery unavailable", () => {
+  const fixture = resultFixture()
+  const oldNames = [...historical92Names,
+    "client.quic.request_send", "client.quic.response_receive",
+    "blob_cache.peer.request_byte_admission_wait", "blob_cache.peer.open_bi",
+    "blob_cache.peer.request_send", "blob_cache.peer.response_receive",
+    "blob_cache.peer.get", "blob_cache.peer.get_miss",
+    "client.websocket.tcp_connect", "client.websocket.tls_handshake",
+    "client.websocket.upgrade", "client.websocket.socket_lock_wait",
+    "client.websocket.request_encode", "client.websocket.request_send",
+    "client.websocket.response_receive", "client.websocket.response_decode"]
+  assert.equal(oldNames.length, 108)
+  fixture.providers[0].storageDiagnostics = { phases: [{ name: "workload-4096bytes", native: {
+    complete: false, storage: { entries: oldNames.map((name) => ({ name, calls: "0", success: "0", error: "0", cancelled: "0" })) },
+  } }] }
+  const phase = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1]
+  assert.equal(phase.status, "incomplete")
+  assert.equal(phase.storage.length, 110)
+  assert.deepEqual(phase.storage.slice(108).map((row) => row.name), ["client.quic.connection_setup", "blob_cache.discovery.locate"])
+  for (const row of phase.storage.slice(108)) {
+    for (const field of ["calls", "success", "error", "cancelled", "bytes", "returned_rows", "returned_row_observations", "elapsed_ns", "in_flight_start", "in_flight_end"]) assert.equal(row[field], null)
+    assert.deepEqual(row.latency_log2_us, Array(32).fill(null))
+  }
 })

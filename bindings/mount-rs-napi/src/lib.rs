@@ -317,7 +317,15 @@ fn storage_operation_families() -> Value {
             "client.websocket.response_decode"],
             "calls":"client_stage_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments",
             "bytes":"unavailable","returned_rows":"unavailable",
-            "duration":"inclusive_stage_wall_nanoseconds; nested_and_parallel_spans_overlap; not_exclusive_cpu_or_network_time"}
+            "duration":"inclusive_stage_wall_nanoseconds; nested_and_parallel_spans_overlap; not_exclusive_cpu_or_network_time"},
+        "client_quic_connection_setup":{"operations":["client.quic.connection_setup"],
+            "calls":"quic_transport_setup_attempts; excludes_credentials_hello_and_websocket_fallback",
+            "bytes":"unavailable","returned_rows":"unavailable",
+            "duration":"inclusive_tls_config_endpoint_connect_and_alpn_validation_nanoseconds; not_exclusive_cpu_or_network_time"},
+        "blob_cache_discovery":{"operations":["blob_cache.discovery.locate"],
+            "calls":"discovery_locate_invocations; empty_and_fallback_peer_lists_are_success; not_peer_gets_or_directory_health",
+            "bytes":"unavailable","returned_rows":"unavailable",
+            "duration":"inclusive_locate_await_nanoseconds; excludes_peer_filtering_queries_and_hedging"}
     })
 }
 
@@ -7451,13 +7459,13 @@ mod tests {
         let families = snapshot["measurement"]["storage_families"]
             .as_object()
             .unwrap();
-        assert_eq!(families.len(), 21);
+        assert_eq!(families.len(), 23);
         let declared = families
             .values()
             .flat_map(|family| family["operations"].as_array().unwrap())
             .map(|name| name.as_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(declared.len(), 108);
+        assert_eq!(declared.len(), 110);
         assert_eq!(
             declared
                 .into_iter()
@@ -7487,7 +7495,7 @@ mod tests {
             "known_selected_successful_returned_value_key_and_range_page_key_value_payload_bytes_only"
         );
         let names = storage::operation_names();
-        assert_eq!(names.len(), 108);
+        assert_eq!(names.len(), 110);
         assert_eq!(
             &names[78..85],
             &[
@@ -7647,7 +7655,7 @@ mod tests {
         }
         assert_eq!(
             snapshot["storage"]["entries"].as_array().unwrap().len(),
-            108
+            110
         );
         for (index, name) in names[91..].iter().enumerate() {
             let transport_row = &snapshot["storage"]["entries"][91 + index];
@@ -7752,7 +7760,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            108
+            110
         );
         assert!(
             instrumented

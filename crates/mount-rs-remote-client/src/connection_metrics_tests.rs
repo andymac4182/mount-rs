@@ -15,6 +15,146 @@ const LABEL: &str = "client.quic.open_bi";
 const SEND_LABEL: &str = "client.quic.request_send";
 const RECEIVE_LABEL: &str = "client.quic.response_receive";
 
+fn setup_server(alpn: &[u8]) -> (quinn::Endpoint, rustls::RootCertStore) {
+    let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let cert = certificate.cert.der().clone();
+    let key =
+        rustls::pki_types::PrivatePkcs8KeyDer::from(certificate.signing_key.serialize_der()).into();
+    let mut tls = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(vec![cert.clone()], key)
+    .unwrap();
+    tls.alpn_protocols = vec![alpn.to_vec()];
+    let config = quinn::ServerConfig::with_crypto(Arc::new(
+        quinn::crypto::rustls::QuicServerConfig::try_from(tls).unwrap(),
+    ));
+    let server = quinn::Endpoint::server(config, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(cert).unwrap();
+    (server, roots)
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "isolated process: MOUNT_RS_PROFILE_IO=1, storage/request traces=0"]
+async fn quic_connection_setup_metrics_preserve_outcomes() {
+    // A literal permits the pre-instrumentation bank to compile and reach RED
+    // only after the real transport behavior and endpoint cleanup complete.
+    const SETUP: &str = "client.quic.connection_setup";
+    assert_eq!(std::env::var("MOUNT_RS_PROFILE_IO").as_deref(), Ok("1"));
+    assert_eq!(std::env::var("MOUNT_RS_TRACE_STORAGE").as_deref(), Ok("0"));
+    assert!(storage::enabled());
+    timeout(Duration::from_secs(15), async {
+        let mut phases = Vec::new();
+        let (server, roots) = setup_server(b"mount-rs/2");
+        let before = storage::snapshot();
+        let (result, accepted) = tokio::join!(
+            RemoteConnection::connect_quic_transport(
+                server.local_addr().unwrap(), "localhost", roots,
+                Duration::from_secs(2), false,
+            ),
+            async { server.accept().await.unwrap().await.unwrap() },
+        );
+        let transport = match result {
+            Ok(transport) => transport,
+            Err(_) => panic!("trusted negotiated QUIC must establish"),
+        };
+        assert_eq!(transport.version(), PROTOCOL_VERSION);
+        let handshake = accepted.handshake_data().unwrap()
+            .downcast::<quinn::crypto::rustls::HandshakeData>().unwrap();
+        assert_eq!(handshake.protocol.as_deref(), Some(b"mount-rs/2".as_slice()));
+        phases.push(("negotiated_success", delta(&before), (1, 0, 0)));
+        transport.close();
+        drop(transport);
+        accepted.close(0u32.into(), b"fixture shutdown");
+        drop(accepted);
+        server.close(0u32.into(), b"fixture shutdown");
+        timeout(Duration::from_secs(2), server.wait_idle()).await.unwrap();
+
+        for (phase, alpn, name) in [
+            ("tls_name_error", b"mount-rs/2".as_slice(), "untrusted.invalid"),
+            ("alpn_error", b"mount-rs/other".as_slice(), "localhost"),
+        ] {
+            let (server, roots) = setup_server(alpn);
+            let before = storage::snapshot();
+            let (result, accepted) = tokio::join!(
+                RemoteConnection::connect_quic_transport(
+                    server.local_addr().unwrap(), name, roots,
+                    Duration::from_secs(2), true,
+                ),
+                async { server.accept().await.unwrap().await },
+            );
+            assert!(matches!(result, Err(QuicEstablishment::Fatal(_))), "{phase}");
+            assert!(accepted.is_err(), "{phase}");
+            phases.push((phase, delta(&before), (0, 1, 0)));
+            server.close(0u32.into(), b"fixture shutdown");
+            timeout(Duration::from_secs(2), server.wait_idle()).await.unwrap();
+        }
+
+        let blackhole = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut datagram = [0u8; 2048];
+        let before = storage::snapshot();
+        let mut connecting = Box::pin(RemoteConnection::connect_quic_transport(
+            blackhole.local_addr().unwrap(), "localhost", rustls::RootCertStore::empty(),
+            Duration::from_secs(2), true,
+        ));
+        let (length, source) = tokio::select! {
+            packet = blackhole.recv_from(&mut datagram) => packet.unwrap(),
+            _ = &mut connecting => panic!("blackhole establishment completed before contact"),
+        };
+        assert!(length >= 1200);
+        assert!(source.ip().is_loopback());
+        let pending_gauge = storage::snapshot();
+        drop(connecting);
+        phases.push(("caller_cancellation", delta(&before), (0, 0, 1)));
+        // A separate socket prevents a queued cancellation datagram from
+        // serving as the deadline attempt's contact oracle.
+        drop(blackhole);
+        let blackhole = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let before = storage::snapshot();
+        let mut connecting = Box::pin(RemoteConnection::connect_quic_transport(
+            blackhole.local_addr().unwrap(), "localhost", rustls::RootCertStore::empty(),
+            Duration::from_millis(100), true,
+        ));
+        let (length, source) = tokio::select! {
+            packet = blackhole.recv_from(&mut datagram) => packet.unwrap(),
+            _ = &mut connecting => panic!("deadline attempt completed before contact"),
+        };
+        assert!(length >= 1200);
+        assert!(source.ip().is_loopback());
+        assert!(matches!(connecting.await, Err(QuicEstablishment::Unavailable)));
+        phases.push(("internal_deadline", delta(&before), (0, 1, 0)));
+        drop(blackhole);
+        println!("MOUNT_RS_CLIENT_SETUP behavior_oracles=complete negotiated_v2=true tls_alpn_fatal=true cancellation_contact=true deadline_unavailable=true observed_server_endpoints_drained=true");
+        for (phase, snapshot, _) in &phases {
+            if let Some(row) = snapshot.entries.iter().find(|row| row.name == SETUP) {
+                println!("MOUNT_RS_CLIENT_SETUP_METRIC phase={phase} available=true calls={} success={} error={} cancelled={} in_flight={} bytes={} elapsed_ns={} returned_rows={} returned_row_observations={} histogram_total={} histogram={:?}", row.calls, row.success, row.error, row.cancelled, row.in_flight, row.bytes, row.elapsed_ns, row.returned_rows, row.returned_row_observations, row.latency_log2_us.iter().sum::<u64>(), row.latency_log2_us);
+            } else {
+                println!("MOUNT_RS_CLIENT_SETUP_METRIC phase={phase} available=false");
+            }
+        }
+        if let Some(row) = pending_gauge.entries.iter().find(|row| row.name == SETUP) {
+            println!("MOUNT_RS_CLIENT_SETUP_GAUGE phase=caller_cancellation_pending available=true in_flight={} bank_in_flight={}", row.in_flight, pending_gauge.in_flight);
+        } else {
+            println!("MOUNT_RS_CLIENT_SETUP_GAUGE phase=caller_cancellation_pending available=false");
+        }
+        for (phase, snapshot, expected) in phases {
+            let row = snapshot.entries.iter().find(|row| row.name == SETUP)
+                .expect("missing connection setup metric after complete behavior oracles");
+            assert_eq!((row.success, row.error, row.cancelled), expected, "{phase}");
+            assert_eq!(row.calls, 1, "{phase}");
+            assert_eq!(row.latency_log2_us.iter().sum::<u64>(), 1, "{phase}");
+            assert_eq!((row.in_flight, snapshot.in_flight, row.bytes, row.returned_rows,
+                row.returned_row_observations), (0, 0, 0, 0, 0), "{phase}");
+        }
+        let row = pending_gauge.entries.iter().find(|row| row.name == SETUP).unwrap();
+        assert_eq!((row.in_flight, pending_gauge.in_flight), (1, 1));
+    }).await.expect("bounded connection setup qualification");
+}
+
 fn io_outcomes(phase: &str) -> ((u64, u64, u64), (u64, u64, u64)) {
     match phase {
         "cancel_before_acquisition" | "closed_connection_acquisition_error" => {

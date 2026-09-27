@@ -408,100 +408,114 @@ impl RemoteConnection {
         connect_timeout: Duration,
         classify_unavailable: bool,
     ) -> Result<Arc<dyn Transport>, QuicEstablishment> {
-        let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .map_err(|_| ClientError::Transport)?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-        tls.alpn_protocols = vec![b"mount-rs/2".to_vec()];
-        let mut config = quinn::ClientConfig::new(Arc::new(
-            QuicClientConfig::try_from(tls).map_err(|_| ClientError::Transport)?,
-        ));
-        // Modest per-connection queues still stream the full 8MiB generic
-        // control cap; application admission independently bounds allocations.
-        let mut windows = quinn::TransportConfig::default();
-        windows.stream_receive_window((512 * 1024_u32).into());
-        windows.receive_window((4 * 1024 * 1024_u32).into());
-        windows.send_window(1024 * 1024);
-        windows.max_concurrent_bidi_streams(0_u32.into());
-        windows.max_concurrent_uni_streams(0_u32.into());
-        config.transport_config(Arc::new(windows));
-        let bind: SocketAddr = if address.is_ipv4() {
-            "0.0.0.0:0"
-        } else {
-            "[::]:0"
-        }
-        .parse()
-        .map_err(|_| ClientError::Transport)?;
-        let received = Arc::new(AtomicBool::new(false));
-        let mut endpoint = if classify_unavailable {
-            use quinn::Runtime;
-            let udp = std::net::UdpSocket::bind(bind).map_err(|_| ClientError::Transport)?;
-            udp.set_nonblocking(true)
-                .map_err(|_| ClientError::Transport)?;
-            let runtime = Arc::new(quinn::TokioRuntime);
-            let inner = runtime
-                .wrap_udp_socket(udp)
-                .map_err(|_| ClientError::Transport)?;
-            let socket = Arc::new(ContactSocket {
-                inner,
-                received: received.clone(),
-            });
-            quinn::Endpoint::new_with_abstract_socket(
-                quinn::EndpointConfig::default(),
-                None,
-                socket,
-                runtime,
-            )
+        let mut span = StorageSpan::new(StorageOperation::RemoteClientQuicConnectionSetup);
+        let result: Result<Arc<dyn Transport>, QuicEstablishment> = async {
+            let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
             .map_err(|_| ClientError::Transport)?
-        } else {
-            quinn::Endpoint::client(bind).map_err(|_| ClientError::Transport)?
-        };
-        endpoint.set_default_client_config(config);
-        let connection = tokio::time::timeout(
-            connect_timeout,
-            endpoint
-                .connect(address, server_name)
-                .map_err(|_| ClientError::Transport)?,
-        )
-        .await
-        .map_err(|_| {
-            QuicEstablishment::from(classify_quic_failure(
-                received.load(Ordering::Acquire),
-                QuicFailure::Deadline,
-            ))
-        })?
-        .map_err(|error| {
-            let failure = match error {
-                quinn::ConnectionError::TimedOut => QuicFailure::TimedOut,
-                quinn::ConnectionError::ConnectionClosed(ref close)
-                    if close.error_code == quinn::TransportErrorCode::CONNECTION_REFUSED =>
-                {
-                    QuicFailure::Refused
-                }
-                _ => QuicFailure::Other,
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+            tls.alpn_protocols = vec![b"mount-rs/2".to_vec()];
+            let mut config = quinn::ClientConfig::new(Arc::new(
+                QuicClientConfig::try_from(tls).map_err(|_| ClientError::Transport)?,
+            ));
+            // Modest per-connection queues still stream the full 8MiB generic
+            // control cap; application admission independently bounds allocations.
+            let mut windows = quinn::TransportConfig::default();
+            windows.stream_receive_window((512 * 1024_u32).into());
+            windows.receive_window((4 * 1024 * 1024_u32).into());
+            windows.send_window(1024 * 1024);
+            windows.max_concurrent_bidi_streams(0_u32.into());
+            windows.max_concurrent_uni_streams(0_u32.into());
+            config.transport_config(Arc::new(windows));
+            let bind: SocketAddr = if address.is_ipv4() {
+                "0.0.0.0:0"
+            } else {
+                "[::]:0"
+            }
+            .parse()
+            .map_err(|_| ClientError::Transport)?;
+            let received = Arc::new(AtomicBool::new(false));
+            let mut endpoint = if classify_unavailable {
+                use quinn::Runtime;
+                let udp = std::net::UdpSocket::bind(bind).map_err(|_| ClientError::Transport)?;
+                udp.set_nonblocking(true)
+                    .map_err(|_| ClientError::Transport)?;
+                let runtime = Arc::new(quinn::TokioRuntime);
+                let inner = runtime
+                    .wrap_udp_socket(udp)
+                    .map_err(|_| ClientError::Transport)?;
+                let socket = Arc::new(ContactSocket {
+                    inner,
+                    received: received.clone(),
+                });
+                quinn::Endpoint::new_with_abstract_socket(
+                    quinn::EndpointConfig::default(),
+                    None,
+                    socket,
+                    runtime,
+                )
+                .map_err(|_| ClientError::Transport)?
+            } else {
+                quinn::Endpoint::client(bind).map_err(|_| ClientError::Transport)?
             };
-            QuicEstablishment::from(classify_quic_failure(
-                received.load(Ordering::Acquire),
-                failure,
-            ))
-        })?;
-        let handshake = connection
-            .handshake_data()
-            .ok_or(ClientError::Protocol)?
-            .downcast::<quinn::crypto::rustls::HandshakeData>()
-            .map_err(|_| ClientError::Protocol)?;
-        if handshake.protocol.as_deref() != Some(b"mount-rs/2") {
-            return Err(ClientError::Protocol.into());
+            endpoint.set_default_client_config(config);
+            let connection = tokio::time::timeout(
+                connect_timeout,
+                endpoint
+                    .connect(address, server_name)
+                    .map_err(|_| ClientError::Transport)?,
+            )
+            .await
+            .map_err(|_| {
+                QuicEstablishment::from(classify_quic_failure(
+                    received.load(Ordering::Acquire),
+                    QuicFailure::Deadline,
+                ))
+            })?
+            .map_err(|error| {
+                let failure = match error {
+                    quinn::ConnectionError::TimedOut => QuicFailure::TimedOut,
+                    quinn::ConnectionError::ConnectionClosed(ref close)
+                        if close.error_code == quinn::TransportErrorCode::CONNECTION_REFUSED =>
+                    {
+                        QuicFailure::Refused
+                    }
+                    _ => QuicFailure::Other,
+                };
+                QuicEstablishment::from(classify_quic_failure(
+                    received.load(Ordering::Acquire),
+                    failure,
+                ))
+            })?;
+            let handshake = connection
+                .handshake_data()
+                .ok_or(ClientError::Protocol)?
+                .downcast::<quinn::crypto::rustls::HandshakeData>()
+                .map_err(|_| ClientError::Protocol)?;
+            if handshake.protocol.as_deref() != Some(b"mount-rs/2") {
+                return Err(ClientError::Protocol.into());
+            }
+            let transport: Arc<dyn Transport> = Arc::new(QuicTransport {
+                _endpoint: endpoint,
+                connection,
+                version: PROTOCOL_VERSION,
+            });
+            Ok(transport)
         }
-        let transport: Arc<dyn Transport> = Arc::new(QuicTransport {
-            _endpoint: endpoint,
-            connection,
-            version: PROTOCOL_VERSION,
-        });
-        Ok(transport)
+        .await;
+        match result {
+            Ok(transport) => {
+                span.finish_success(0);
+                Ok(transport)
+            }
+            Err(error) => {
+                span.finish_error();
+                Err(error)
+            }
+        }
     }
 
     async fn connect_websocket_transport(

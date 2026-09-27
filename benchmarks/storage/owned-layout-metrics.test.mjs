@@ -68,7 +68,7 @@ test("preserves audited FoundationDB source coverage and precise returned payloa
   Object.assign(entry, { calls: "1", success: "1", bytes: "9007199254740993", elapsed_ns: "9007199254740995", latency_log2_us: ["1", ...Array(31).fill("0")] })
   const value = projectOwnedLayoutPhaseMetrics(source)
   assert.equal(value.status, "observed")
-  assert.equal(value.storage.entries.length, 108)
+  assert.equal(value.storage.entries.length, 110)
   assert.deepEqual(value.storage.foundationdb_coverage, FOUNDATIONDB_DIAGNOSTIC_COVERAGE)
   assert.deepEqual(value.storage.instrumented_operations.slice(-7), FOUNDATIONDB_DIAGNOSTIC_COVERAGE.operations)
   const projected = value.storage.entries.find((row) => row.name === "foundationdb.read.get")
@@ -78,7 +78,7 @@ test("preserves audited FoundationDB source coverage and precise returned payloa
 })
 test("feature-off fixed FoundationDB rows retain explicit unavailable coverage", () => {
   const value = projectOwnedLayoutPhaseMetrics(model())
-  assert.equal(value.status, "observed"); assert.equal(value.storage.entries.length, 108)
+  assert.equal(value.status, "observed"); assert.equal(value.storage.entries.length, 110)
   assert.deepEqual(value.storage.foundationdb_coverage, FOUNDATIONDB_DIAGNOSTIC_UNAVAILABLE)
   assert.equal(value.storage.instrumented_operations.some((name) => name.startsWith("foundationdb.")), false)
   assert.match(value.storage.scope, /audited_instrumented_operations_separately_declared/u)
@@ -93,7 +93,7 @@ test("declared WebSocket rows retain exact large counters without entering addon
   })
   const value = projectOwnedLayoutPhaseMetrics(source)
   assert.equal(value.status, "observed")
-  assert.equal(value.storage.entries.length, 108)
+  assert.equal(value.storage.entries.length, 110)
   assert.equal(value.storage.instrumented_operations.some((name) => name.startsWith("client.")), false)
   for (const name of names) {
     const row = value.storage.entries.find((entry) => entry.name === name)
@@ -392,7 +392,7 @@ test("causal core projection preserves fixed prefix, new zero rows and exact dec
   const value = projectOwnedLayoutPhaseMetrics(source)
   assert.deepEqual(value.core_profile.entries, source.native.profile.entries)
   assert.equal(value.core_profile.status, "observed")
-  assert.equal(value.storage.entries.length, 108)
+  assert.equal(value.storage.entries.length, 110)
   source.native.profile.entries = source.native.profile.entries.slice(0, 134)
   const previousCacheSnapshot = projectOwnedLayoutPhaseMetrics(source).core_profile
   assert.equal(previousCacheSnapshot.status, "observed")

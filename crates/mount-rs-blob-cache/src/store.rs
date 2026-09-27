@@ -476,7 +476,19 @@ impl CachedBlockStore {
         }
         if let Some(d) = &self.distributed {
             let peer_result = timeout(d.config.deadline, async {
-                let peers = d.discovery.locate(scope, id).await?;
+                let peers = {
+                    let mut span = Span::new(Operation::BlobCacheDiscoveryLocate);
+                    match d.discovery.locate(scope, id).await {
+                        Ok(peers) => {
+                            span.finish_success(0);
+                            peers
+                        }
+                        Err(error) => {
+                            span.finish_error();
+                            return Err(error);
+                        }
+                    }
+                };
                 let mut peers=distributed::unique(peers,&d.local,d.config.max_peer_queries).into_iter();
                 let mut queries=tokio::task::JoinSet::new();
                 let start=|queries: &mut tokio::task::JoinSet<_>, peer: PeerId| {

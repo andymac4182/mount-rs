@@ -494,6 +494,22 @@ class CacheStageSelectors(unittest.TestCase):
             self.assertEqual(parent.EXACT_CASES[kind], name)
             self.assertEqual(command[command.index("--exact")+1], name)
 
+    def test_setup_and_discovery_commands_are_fixed_exact_enabled_and_bounded(self):
+        for kind, case, target in [
+            ("clientsetupmetrics", "connection::metrics_tests::quic_connection_setup_metrics_preserve_outcomes", "--lib"),
+            ("discoverymetrics", "discovery_locate_metrics_preserve_bytes_outcomes_and_cancellation", "discovery_metrics"),
+        ]:
+            command, limit, profile, trace = parent.COMMANDS[kind]
+            self.assertEqual((limit, profile, trace), (180, 1, 0))
+            self.assertIn(target, command)
+            self.assertEqual(parent.EXACT_CASES[kind], case)
+            self.assertIn("--ignored", command)
+            self.assertIn("--exact", command)
+            self.assertIn("--locked", command)
+            self.assertIn("--offline", command)
+            self.assertIn(case, command)
+            self.assertFalse(parent.exact_case_passed("running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored;\n", case))
+
     def test_quinn_close_regressions_require_the_selected_executed_case(self):
         expected = {
             "quinnordinary": ("tests::ordinary_initial_then_close_drains_without_waiting_for_idle_timeout", False),

@@ -130,7 +130,9 @@ const websocketNames = Object.freeze([
   "client.websocket.response_receive",
   "client.websocket.response_decode",
 ])
-const operationNames = Object.freeze([...preTransportNames, ...transportNames, ...websocketNames])
+const setupDiscoveryNames = Object.freeze(["client.quic.connection_setup", "blob_cache.discovery.locate"])
+const historical108Names = Object.freeze([...preTransportNames, ...transportNames, ...websocketNames])
+const operationNames = Object.freeze([...historical108Names, ...setupDiscoveryNames])
 // Literal historical 100-row inventory, independent of the current declaration.
 const historical100Names = Object.freeze([
   "metadata.load",
@@ -359,6 +361,12 @@ const historical100Families = {
   blob_cache_peer_get_miss: { operations: ["blob_cache.peer.get_miss"], calls: "successful_get_miss_classifications; not_peer_requests", bytes: "unavailable", returned_rows: "unavailable", duration: "classification_marker_nanoseconds; excludes_get_request_duration" },
 }
 
+// Literal 108-row descriptor preserves its original 21 families.
+const historical108Families = {
+  ...historical100Families,
+  client_websocket: { operations: [...websocketNames], calls: "client_stage_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_stage_wall_nanoseconds; nested_and_parallel_spans_overlap; not_exclusive_cpu_or_network_time" },
+}
+
 const duration = "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap"
 const foundationdbCoverage = {
   schema: "mount-rs-foundationdb-client-diagnostic-coverage-v1",
@@ -401,11 +409,11 @@ function emptySqliteVfs() {
     entries: SQLITE_VFS_ENTRY_NAMES.map((name) => ({ name, ...timing(), ...zero(["errors", "requested_bytes", "confirmed_bytes", "short_reads"]) })),
     checkpoint: { ...zero(["starts", "dones", "unmatched_starts", "unmatched_dones", "aborted_windows", "active_windows"]), paired: timing() } }
 }
-function snapshot({ legacy = false, preCache = false, preClient = false, preTransport = false, preWebSocket = false, feature = true } = {}) {
+function snapshot({ legacy = false, preCache = false, preClient = false, preTransport = false, preWebSocket = false, preSetup = false, feature = true } = {}) {
   const historical = legacy || preCache || preClient || preTransport
-  const names = legacy ? legacyNames : preCache ? preCacheNames : preClient ? preClientNames : preTransport ? historical92Names : preWebSocket ? historical100Names : operationNames
+  const names = legacy ? legacyNames : preCache ? preCacheNames : preClient ? preClientNames : preTransport ? historical92Names : preWebSocket ? historical100Names : preSetup ? historical108Names : operationNames
   const families = historical ? Object.fromEntries(Object.entries(historical92Families)
-    .filter(([, family]) => family.operations.every((name) => names.includes(name)))) : preWebSocket ? historical100Families : STORAGE_OPERATION_FAMILIES
+    .filter(([, family]) => family.operations.every((name) => names.includes(name)))) : preWebSocket ? historical100Families : preSetup ? historical108Families : STORAGE_OPERATION_FAMILIES
   return {
     schema_version: NATIVE_DIAGNOSTICS_SCHEMA, enabled: true, scope: "process",
     quiescent_snapshot_required: true, elapsed_semantics: "inclusive_wall_nanoseconds",
@@ -466,9 +474,9 @@ function summary(native) {
   return JSON.parse(lines[0].replace(/^MOUNT_RS_STORAGE_PHASE /u, ""))
 }
 
-test("new 108-row fixture has reconciled exact decimal endpoints before consumer validation", () => {
+test("new 110-row fixture has reconciled exact decimal endpoints before consumer validation", () => {
   const value = snapshot()
-  assert.equal(value.storage.entries.length, 108)
+  assert.equal(value.storage.entries.length, 110)
   assert.deepEqual(value.storage.entries.map((entry) => entry.name), operationNames)
   assert.deepEqual(value.storage.entries.slice(78, 85).map((entry) => entry.name), foundationdbNames)
   assert.deepEqual(value.storage.entries.slice(85, 91).map((entry) => entry.name), cacheNames)
@@ -476,6 +484,8 @@ test("new 108-row fixture has reconciled exact decimal endpoints before consumer
   assert.deepEqual(value.storage.entries.slice(92, 100).map((entry) => entry.name), transportNames)
   assert.deepEqual(value.storage.entries.slice(100, 108).map((entry) => entry.name), websocketNames)
   assert.deepEqual(value.storage.entries.slice(0, 100).map((entry) => entry.name), historical100Names)
+  assert.deepEqual(value.storage.entries.slice(0, 108).map((entry) => entry.name), historical108Names)
+  assert.deepEqual(value.storage.entries.slice(108).map((entry) => entry.name), setupDiscoveryNames)
   for (const entry of value.storage.entries) {
     assert.equal(BigInt(entry.calls), BigInt(entry.success) + BigInt(entry.error) + BigInt(entry.cancelled))
     assert.equal(entry.latency_log2_us.reduce((sum, count) => sum + BigInt(count), 0n), BigInt(entry.calls))
@@ -540,7 +550,7 @@ test("literal historical 100-row inventory stays incomplete without invented Web
   assert.equal(value.observations.after.storage.entries.values.some((entry) => websocketNames.includes(entry.name)), false)
   assert.equal(value.observations.after.storage.entries.values.find((entry) => entry.name === "client.quic.request_send").calls, base)
 })
-test("current 108-row inventory refuses the historical payload-only byte descriptor", () => {
+test("current 110-row inventory refuses the historical payload-only byte descriptor", () => {
   const before = snapshot(), after = snapshot()
   before.measurement.storage_bytes = historical92ByteSemantics
   after.measurement.storage_bytes = historical92ByteSemantics
@@ -582,13 +592,13 @@ test("successful empty get payload is a known zero without inventing SQL rows", 
   assert.match(value.measurement.storage_bytes, /zero_does_not_establish_no_payload/u)
   assert.equal(value.measurement.storage_families.foundationdb_read.returned_rows, "unavailable")
 })
-test("feature-off 108-row phase keeps FDB and cache source coverage unavailable", () => {
+test("feature-off 110-row phase keeps FDB and cache source coverage unavailable", () => {
   const value = observed(snapshot({ feature: false }), snapshot({ feature: false }))
   assert.deepEqual(value.measurement.foundationdb_coverage, disabledCoverage)
   assert.equal(value.measurement.storage_instrumented_operations.some((name) => name.startsWith("foundationdb.")), false)
   assert.equal(value.measurement.storage_instrumented_operations.length, 78)
   assert.equal(value.measurement.storage_instrumented_operations.some((name) => name.startsWith("blob_cache.")), false)
-  assert.equal(value.storage.entries.length, 108)
+  assert.equal(value.storage.entries.length, 110)
   assert.equal(value.measurement.storage_instrumented_operations.some((name) => name.startsWith("client.")), false)
 })
 test("declared cache family stays unavailable in addon summaries with FDB enabled or disabled", () => {
@@ -622,10 +632,10 @@ test("eight transport families retain separate units without claiming addon sour
     blob_cache_peer_request_send: transportNames[4], blob_cache_peer_response_receive: transportNames[5],
     blob_cache_peer_get: transportNames[6], blob_cache_peer_get_miss: transportNames[7],
   }
-  assert.equal(Object.keys(STORAGE_OPERATION_FAMILIES).length, 21)
+  assert.equal(Object.keys(STORAGE_OPERATION_FAMILIES).length, 23)
   const declared = Object.values(STORAGE_OPERATION_FAMILIES).flatMap((family) => family.operations)
-  assert.equal(declared.length, 108)
-  assert.equal(new Set(declared).size, 108)
+  assert.equal(declared.length, 110)
+  assert.equal(new Set(declared).size, 110)
   assert.deepEqual(STORAGE_OPERATION_FAMILIES.blob_cache.operations, cacheNames)
   assert.equal(STORAGE_OPERATION_FAMILIES.blob_cache_peer_request_send.bytes, "known_successfully_submitted_plaintext_request_header_and_payload_bytes; not_wire_bytes_or_acknowledgments")
   assert.equal(STORAGE_OPERATION_FAMILIES.blob_cache_peer_response_receive.bytes, "known_successfully_validated_plaintext_status_and_body_bytes; not_wire_bytes")
@@ -731,4 +741,42 @@ test("arbitrary FoundationDB coverage data is rejected and never emitted as meta
   const value = incomplete(before, after, /metadata|coverage/u)
   assert.equal(value.observations.after.measurement.foundationdb_coverage, "unavailable")
   assert.equal(JSON.stringify(value).includes(sentinel), false)
+})
+
+for (const [family, name] of [["client_quic_connection_setup", "client.quic.connection_setup"], ["blob_cache_discovery", "blob_cache.discovery.locate"]]) test(`setup/discovery ${family} is declared but addon source coverage stays unavailable`, () => {
+  const before = snapshot(), after = snapshot()
+  const value = deltaNativeSnapshots(before, after)
+  assert.equal(value.complete, true)
+  assert.deepEqual(STORAGE_OPERATION_FAMILIES[family].operations, [name])
+  assert.equal(STORAGE_OPERATION_FAMILIES[family].bytes, "unavailable")
+  assert.equal(STORAGE_OPERATION_FAMILIES[family].returned_rows, "unavailable")
+  assert.equal(value.measurement.storage_instrumented_operations.includes(name), false)
+  const observed = summary(value).families[family]
+  assert.equal(observed.available, false)
+  assert.equal(observed.instrumented, false)
+  assert.deepEqual(observed.instrumented_operations, [])
+})
+
+test("literal historical 108-row descriptor stays incomplete without invented setup or discovery", () => {
+  const before = snapshot({ preSetup: true }), after = snapshot({ preSetup: true })
+  assert.equal(Object.keys(after.measurement.storage_families).length, 21)
+  assert.deepEqual(after.measurement.storage_operations, historical108Names)
+  const value = deltaNativeSnapshots(before, after)
+  assert.equal(value.complete, false)
+  assert.equal(Object.hasOwn(value, "storage"), false)
+  assert.equal(value.observations.after.storage.entries.length, 108)
+  assert.equal(value.observations.after.storage.entries.values.some((entry) => setupDiscoveryNames.includes(entry.name)), false)
+})
+
+test("setup and discovery deltas retain exact large counters", () => {
+  const before = snapshot(), after = snapshot(), base = 9007199254740993n
+  for (const name of setupDiscoveryNames) {
+    Object.assign(find(before, name), { calls: String(base), success: String(base), elapsed_ns: String(base), latency_log2_us: [String(base), ...Array(31).fill("0")] })
+    Object.assign(find(after, name), { calls: String(base + 1n), success: String(base + 1n), elapsed_ns: String(base + 9007199254740995n), latency_log2_us: [String(base + 1n), ...Array(31).fill("0")] })
+  }
+  const value = observed(before, after)
+  for (const name of setupDiscoveryNames) {
+    assert.equal(find(value, name).calls, "1")
+    assert.equal(find(value, name).elapsed_ns, "9007199254740995")
+  }
 })

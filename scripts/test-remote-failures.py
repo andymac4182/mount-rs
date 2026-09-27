@@ -10,6 +10,8 @@ import hashlib,json,os,pathlib,re,selectors,signal,stat,subprocess,sys,tempfile,
 BASE=pathlib.Path(__file__).resolve().parent.parent
 COMMANDS={'cachetests': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--all-targets', '--locked', '--offline'], 180, 0, 0), 'redisfault': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'distributed_failure', '--locked', '--offline', '--', '--ignored', '--exact', 'redis_directory_real_peer_failures_preserve_exact_backing', '--test-threads=1', '--nocapture'], 180, 0, 0), 'rediscleanup': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'distributed_failure', '--locked', '--offline', '--', '--ignored', '--exact', 'cancelled_redis_fixture_reaps_owned_child_before_removing_directory', '--test-threads=1', '--nocapture'], 180, 0, 0), 'wsloss': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-remote-client', '--test', 'quic_mount', '--locked', '--offline', '--', '--ignored', '--exact', 'websocket_sqlite_commit_survives_lost_wire_reply_without_replay', '--test-threads=1', '--nocapture'], 180, 0, 0), 'remotetests': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-remote-client', '--all-targets', '--locked', '--offline'], 180, 0, 0), 'faultclippy': (['./scripts/cargo-shared', 'clippy', '-p', 'mount-rs-blob-cache', '-p', 'mount-rs-remote-client', '--all-targets', '--locked', '--offline', '--', '-D', 'warnings'], 180, 0, 0), 'fmt': (['./scripts/cargo-shared', 'fmt', '--all', '--', '--check'], 120, 0, 0)}
 COMMANDS.update({
+    'clientsetupmetrics': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-remote-client', '--lib', '--locked', '--offline', '--', '--ignored', '--exact', 'connection::metrics_tests::quic_connection_setup_metrics_preserve_outcomes', '--test-threads=1', '--nocapture'], 180, 1, 0),
+    'discoverymetrics': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'discovery_metrics', '--locked', '--offline', '--', '--ignored', '--exact', 'discovery_locate_metrics_preserve_bytes_outcomes_and_cancellation', '--test-threads=1', '--nocapture'], 180, 1, 0),
     'wsautoloss': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-remote-client', '--test', 'quic_mount', '--locked', '--offline', '--', '--ignored', '--exact', 'automatic_fallback_sqlite_commit_survives_lost_wire_reply_without_replay', '--test-threads=1', '--nocapture'], 180, 0, 0),
     'wsservicedefault': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-service', '--test', 'websocket_diagnostics', '--locked', '--offline', '--', '--test-threads=1'], 180, 0, 0),
     'wsserviceon': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-service', '--features', 'io-profiling', '--test', 'websocket_diagnostics', '--locked', '--offline', '--', '--test-threads=1'], 180, 1, 0),
@@ -52,6 +54,8 @@ COMMANDS.update({
     'cacheconsumers': (['fnm', 'exec', '--using', 'v24.18.0', 'node', '--test', 'benchmarks/storage/test.mjs', 'benchmarks/storage/foundationdb-diagnostics.test.mjs', 'benchmarks/storage/owned-layout-metrics.test.mjs', 'benchmarks/storage/owned-backing-pilot.test.mjs', 'scripts/verify-owned-backing-pilot.test.mjs'], 180, 0, 0),
 })
 EXACT_CASES = {
+    'clientsetupmetrics': 'connection::metrics_tests::quic_connection_setup_metrics_preserve_outcomes',
+    'discoverymetrics': 'discovery_locate_metrics_preserve_bytes_outcomes_and_cancellation',
     'wsautoloss': 'automatic_fallback_sqlite_commit_survives_lost_wire_reply_without_replay',
     'wsclientmetrics': 'websocket::metrics_tests::websocket_stages_preserve_serialized_transactions',
     'sqlitecache': 'sqlite_backed_authenticated_cache_failures_preserve_exact_backing_savings',
@@ -461,6 +465,7 @@ def main():
     kind=sys.argv[1];command,limit,profile,trace=COMMANDS[kind]
     assert os.name=='posix' and hasattr(os,'waitid') and hasattr(os,'WNOWAIT'), 'Unix ownership observer required'
     FAULT_KINDS={'cachetests','redisfault','rediscleanup','wsloss','remotetests','faultclippy','fmt','cachemetrics','peermetrics','peerreconnect','peerport','quinnclose','quinnordinary','quinnruntimeclose','createprep','createpath','createguard','createunit','chunkedtests','chunkedclippy','cacheprofileoff','cacheprofileon','storagealloc','corealloc','coremetrics','cachemetricsclippy','cacheconsumers','cacheconsumerred','clidiagnostics','clicompact','napimetrics','consumerclippy','cachemetricstrace'}
+    FAULT_KINDS.update({'clientsetupmetrics','discoverymetrics'})
     FAULT_KINDS.add('clientmetrics')
     FAULT_KINDS.add('filesystemmetrics')
     FAULT_KINDS.add('peeriometrics')
@@ -510,6 +515,7 @@ def main():
      paths.extend(BASE/v for v in ['filesystems/mount-rs-chunked/src/causal_metrics.rs','filesystems/mount-rs-chunked/tests/filesystem_causal_metrics.rs','tests/filesystem_causal_profile_allocations.rs','filesystems/mount-rs-chunked/tests/current_path_create_rebase.rs','filesystems/mount-rs-chunked/tests/compact_snapshot_revision.rs','filesystems/mount-rs-chunked/src/create_guard_metrics_tests.rs','filesystems/mount-rs-chunked/src/create_rebase.rs'] if (BASE/v).is_file())
      paths.append(BASE/'crates/mount-rs-blob-cache/tests/quinn_close.rs')
      paths.append(BASE/'crates/mount-rs-remote-client/src/connection_metrics_tests.rs')
+     if (BASE/'crates/mount-rs-blob-cache/tests/discovery_metrics.rs').is_file():paths.append(BASE/'crates/mount-rs-blob-cache/tests/discovery_metrics.rs')
      # Pin the complete scoped dependency, including upstream provenance and
      # licenses, even before new vendor files have entered the Git index.
      vendor=BASE/'vendor/quinn-proto-0.11.18'

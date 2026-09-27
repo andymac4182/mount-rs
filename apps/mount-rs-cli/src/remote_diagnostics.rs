@@ -291,7 +291,7 @@ mod tests {
         let entries = process["storage"]["snapshot"]["entries"]
             .as_array()
             .unwrap();
-        assert_eq!(entries.len(), 108);
+        assert_eq!(entries.len(), 110);
         for (actual, expected) in entries.iter().zip(&storage.entries) {
             assert_eq!(actual["name"], expected.name);
             assert_eq!(actual["calls"].as_u64(), Some(exact));
@@ -395,7 +395,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            108
+            110
         );
         assert_eq!(
             process["coverage"]["client_websocket"]["observation"],
@@ -534,7 +534,7 @@ mod tests {
                     .as_array()
                     .unwrap()
                     .len(),
-                108
+                110
             );
             for index in [134, 135] {
                 let row = &banks["profile"]["snapshot"]["entries"][index];

@@ -188,7 +188,7 @@ fn gauge(expected: [u64; 8]) {
 fn phase(before: &storage::Snapshot, expected: Outcomes) -> storage::Snapshot {
     let delta = storage::snapshot().delta(before).unwrap();
     assert_eq!(delta.in_flight, 0);
-    assert_eq!(delta.entries.len(), 108);
+    assert_eq!(delta.entries.len(), 110);
     for (operation, expected) in OPERATIONS.into_iter().zip(expected) {
         let row = &delta.entries[operation as usize];
         assert_eq!(
