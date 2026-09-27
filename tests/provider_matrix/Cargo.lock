@@ -1529,6 +1529,7 @@ dependencies = [
  "mount-rs-core",
  "mount-rs-object-store-blocks",
  "object_store 0.12.5",
+ "tokio",
 ]
 
 [[package]]

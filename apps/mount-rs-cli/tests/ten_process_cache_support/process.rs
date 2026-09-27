@@ -1754,42 +1754,137 @@ fn outer_acquire(
         .map(|value| value.observation)
         .map_err(|error| error.message)
 }
+enum OuterWorkerAcquisition {
+    Observed(RssObservation),
+    Exited,
+}
+fn outer_worker_acquire(
+    run: &ResourceRun,
+    sequence: u64,
+    child: &Child,
+    first: &mut Option<FirstRssFailure>,
+    measure: &mut impl FnMut(RssIdentity, bool) -> RssReadResult<RssAcquisition>,
+    poll: &mut impl FnMut(&Child) -> Result<bool>,
+) -> Result<OuterWorkerAcquisition> {
+    if child.id() != run.worker_pid || run.group != run.worker_pid {
+        return Err("outer RSS worker ownership mismatch".into());
+    }
+    let identity = supervisor_identity("worker", run.worker_pid);
+    let capture = measure(identity.clone(), false);
+    let (mut category, observed_ns, bytes) = match &capture {
+        Ok(value) => (
+            value.category(),
+            Some(value.observation.finished_ns),
+            value.observation.bytes,
+        ),
+        Err(error) => (Some(error.category), error.observed_ns, error.bytes),
+    };
+    let mut retirement = RssPoll::NotApplicable;
+    let mut poll_error = None;
+    if bytes.is_none() && category.is_some_and(RssCategory::permits_retirement) {
+        match poll(child) {
+            // WNOWAIT observes this retained Child without releasing its original group identity.
+            // The supervisor's existing exit branch must still validate closure and actually reap.
+            Ok(true) => return Ok(OuterWorkerAcquisition::Exited),
+            Ok(false) => retirement = RssPoll::Running,
+            Err(error) => {
+                category = Some(RssCategory::RetirementPollFailed);
+                retirement = RssPoll::PollError;
+                poll_error = Some(error);
+            }
+        }
+    }
+    if first.is_none()
+        && let Some(category) = category
+        && let Some(candidate) = RssCandidate::from_identity(
+            &identity,
+            RssSite::OuterWorker,
+            category,
+            retirement,
+            observed_ns,
+            bytes,
+        )
+    {
+        *first = Some(FirstRssFailure::new(
+            run,
+            RssProducer::Controller,
+            sequence,
+            candidate,
+        ));
+    }
+    if let Some(error) = poll_error {
+        return Err(error);
+    }
+    capture
+        .map(|value| OuterWorkerAcquisition::Observed(value.observation))
+        .map_err(|error| error.message)
+}
+fn worker_cleanup_receipt_closed(root: &Path, run: &ResourceRun) -> bool {
+    receipt_value(&root.join("receipt.json"))
+        .map(|value| {
+            value["owned_cleanup_closed"] == true
+                && value["worker_pid"] == run.worker_pid
+                && value["supervisor_pid"] == run.controller_pid
+                && value["process_group"] == run.group
+        })
+        .unwrap_or(false)
+}
 fn outer_sample(
     root: &Path,
     run: &ResourceRun,
     sequence: u64,
     first: &mut Option<FirstRssFailure>,
-) -> Result<OuterResourceSample> {
+    child: &Child,
+) -> Result<Option<OuterResourceSample>> {
+    outer_sample_with(
+        root,
+        run,
+        sequence,
+        first,
+        child,
+        &mut measured,
+        &mut exited_without_reap,
+    )
+}
+fn outer_sample_with(
+    root: &Path,
+    run: &ResourceRun,
+    sequence: u64,
+    first: &mut Option<FirstRssFailure>,
+    child: &Child,
+    measure: &mut impl FnMut(RssIdentity, bool) -> RssReadResult<RssAcquisition>,
+    poll: &mut impl FnMut(&Child) -> Result<bool>,
+) -> Result<Option<OuterResourceSample>> {
     let frame: ResourceFrame = resource_read(&root.join("resource.json"))?;
     frame.validate(run, sequence, monotonic_ns()?)?;
     // Replace producer supervisor samples; only child observations/subtotal cross the IPC seam.
-    let supervisors = [
-        outer_acquire(
-            run,
-            frame.sequence,
-            supervisor_identity("controller", run.controller_pid),
-            RssSite::OuterController,
-            first,
-            &mut measured,
-        )?,
-        outer_acquire(
-            run,
-            frame.sequence,
-            supervisor_identity("worker", run.worker_pid),
-            RssSite::OuterWorker,
-            first,
-            &mut measured,
-        )?,
-    ];
+    let controller = outer_acquire(
+        run,
+        frame.sequence,
+        supervisor_identity("controller", run.controller_pid),
+        RssSite::OuterController,
+        first,
+        measure,
+    )?;
+    // A later worker exit must not discard an already-fatal controller observation.
+    rss_totals(
+        std::slice::from_ref(&controller.identity),
+        std::slice::from_ref(&controller),
+    )?;
+    let worker = match outer_worker_acquire(run, frame.sequence, child, first, measure, poll)? {
+        OuterWorkerAcquisition::Observed(value) => value,
+        OuterWorkerAcquisition::Exited => return Ok(None),
+    };
+    let supervisors = [controller, worker];
     let (totals, observations) =
         frame.recompose_observed(run, sequence, monotonic_ns()?, supervisors)?;
     let limit_error = rss_caps(&totals, &observations).err();
-    Ok(OuterResourceSample {
+    Ok(Some(OuterResourceSample {
         frame,
         totals,
         observations,
         limit_error,
-    })
+    }))
 }
 
 pub fn supervise() {
@@ -1897,14 +1992,7 @@ pub fn supervise() {
             panic!("worker reap budget exhausted; retained incomplete evidence");
         }
         if exited_without_reap(&worker.child).expect("worker WNOWAIT poll") {
-            let cleanup_receipt = receipt_value(&root.join("receipt.json"))
-                .map(|value| {
-                    value["owned_cleanup_closed"] == true
-                        && value["worker_pid"] == group
-                        && value["supervisor_pid"] == std::process::id()
-                        && value["process_group"] == group
-                })
-                .unwrap_or(false);
+            let cleanup_receipt = worker_cleanup_receipt_closed(&root, &run);
             if !cleanup_receipt {
                 forced = true;
                 failure.get_or_insert(
@@ -1953,7 +2041,13 @@ pub fn supervise() {
         }
         if initial_observed {
             let had_rss_failure = first_rss_failure.is_some();
-            let sampled = outer_sample(&root, &run, last_sequence, &mut first_rss_failure);
+            let sampled = outer_sample(
+                &root,
+                &run,
+                last_sequence,
+                &mut first_rss_failure,
+                &worker.child,
+            );
             if !had_rss_failure && first_rss_failure.is_some() {
                 initial["first_rss_failure"] = serde_json::to_value(first_rss_failure).unwrap();
                 initial["first_rss_failure_retention"] =
@@ -1970,12 +2064,14 @@ pub fn supervise() {
                 };
             }
             match sampled {
-                Ok(OuterResourceSample {
+                // Confirmed WNOWAIT exit returns to the existing closure/group/reap branch.
+                Ok(None) => continue,
+                Ok(Some(OuterResourceSample {
                     frame,
                     totals,
                     observations,
                     limit_error,
-                }) => {
+                })) => {
                     max_total = max_total.max(totals.total);
                     controller_max_rss = controller_max_rss
                         .max(observations[0].bytes.expect("validated controller RSS"));
@@ -2805,6 +2901,369 @@ mod tests {
         assert!(!directory.path().join("rss-first-failure.json").exists());
         cleanup_inert_child(&mut fleet.processes[0]);
     }
+    fn outer_worker_run(root: &Path, child: &Child) -> ResourceRun {
+        ResourceRun {
+            root: root.to_string_lossy().into_owned(),
+            controller_pid: std::process::id(),
+            worker_pid: child.id(),
+            group: child.id(),
+        }
+    }
+
+    #[test]
+    fn rss_outer_worker_retirement_rejects_earlier_controller_sample_failures() {
+        for unavailable in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let (mut process, mut input) = inert_process(directory.path());
+            let run = outer_worker_run(directory.path(), &process.child);
+            let mut frame = resource_frame(monotonic_ns().unwrap());
+            frame.run = run.clone();
+            frame.expected = vec![
+                supervisor_identity("controller", run.controller_pid),
+                supervisor_identity("worker", run.worker_pid),
+            ];
+            for (observation, identity) in frame.observations.iter_mut().zip(&frame.expected) {
+                observation.identity = identity.clone();
+            }
+            resource_write(directory.path(), "resource.json", &frame).unwrap();
+            let mut first = None;
+            let mut worker_reads = 0;
+            let mut polls = 0;
+            let result = outer_sample_with(
+                directory.path(),
+                &run,
+                0,
+                &mut first,
+                &process.child,
+                &mut |identity, _| {
+                    if identity.role == "controller" {
+                        let mut value = fixture_observation(identity, unavailable)?;
+                        if !unavailable {
+                            value.observation.bytes = Some(RSS_CAP);
+                        }
+                        Ok(value)
+                    } else {
+                        worker_reads += 1;
+                        release_inert_child(&mut input, identity.pid)?;
+                        fixture_observation(identity, true)
+                    }
+                },
+                &mut |child| {
+                    polls += 1;
+                    exited_without_reap(child)
+                },
+            );
+            process.poll_exit().unwrap();
+            cleanup_inert_child(&mut process);
+            assert!(result.is_err());
+            assert_eq!((worker_reads, polls), (0, 0));
+            let record = first.unwrap();
+            assert_eq!(record.site, RssSite::OuterController);
+            assert_eq!(
+                record.category,
+                if unavailable {
+                    RssReadError::unavailable().category
+                } else {
+                    RssCategory::PidRssCapExceeded
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn rss_outer_worker_retirement_confirms_the_exit_between_poll_and_sample() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, mut input) = inert_process(directory.path());
+        let run = outer_worker_run(directory.path(), &process.child);
+        assert!(!exited_without_reap(&process.child).unwrap());
+        let mut first = None;
+        let mut reads = 0;
+        let mut polls = 0;
+        let result = outer_worker_acquire(
+            &run,
+            9,
+            &process.child,
+            &mut first,
+            &mut |identity, verify_parent| {
+                assert_eq!(identity, supervisor_identity("worker", run.worker_pid));
+                assert!(!verify_parent);
+                reads += 1;
+                release_inert_child(&mut input, identity.pid)?;
+                fixture_observation(identity, true)
+            },
+            &mut |child| {
+                assert_eq!(child.id(), run.worker_pid);
+                polls += 1;
+                exited_without_reap(child)
+            },
+        );
+        let terminal = exited_without_reap(&process.child).unwrap();
+        process.poll_exit().unwrap();
+        cleanup_inert_child(&mut process);
+        assert!(matches!(result, Ok(OuterWorkerAcquisition::Exited)));
+        assert!(terminal);
+        assert!(first.is_none());
+        assert_eq!((reads, polls), (1, 1));
+        assert_eq!(process.receipt.rss_samples, 0);
+        assert!(!directory.path().join("rss-first-failure.json").exists());
+    }
+
+    #[test]
+    fn rss_outer_worker_retirement_keeps_a_running_worker_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, _input) = inert_process(directory.path());
+        let run = outer_worker_run(directory.path(), &process.child);
+        let mut first = None;
+        let mut polls = 0;
+        let result = outer_worker_acquire(
+            &run,
+            9,
+            &process.child,
+            &mut first,
+            &mut |identity, _| fixture_observation(identity, true),
+            &mut |child| {
+                polls += 1;
+                exited_without_reap(child)
+            },
+        );
+        cleanup_inert_child(&mut process);
+        let Ok(OuterWorkerAcquisition::Observed(observation)) = result else {
+            panic!("live owned worker unavailable must remain an observation failure")
+        };
+        assert!(
+            rss_totals(
+                std::slice::from_ref(&observation.identity),
+                std::slice::from_ref(&observation)
+            )
+            .is_err()
+        );
+        let record = first.unwrap();
+        assert_eq!(record.category, RssReadError::unavailable().category);
+        assert_eq!(record.retirement_poll, RssPoll::Running);
+        assert_eq!(polls, 1);
+    }
+
+    #[test]
+    fn rss_outer_worker_retirement_poll_failure_is_fatal_and_typed() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, _input) = inert_process(directory.path());
+        let run = outer_worker_run(directory.path(), &process.child);
+        let mut first = None;
+        let mut polls = 0;
+        let result = outer_worker_acquire(
+            &run,
+            9,
+            &process.child,
+            &mut first,
+            &mut |identity, _| fixture_observation(identity, true),
+            &mut |child| {
+                assert_eq!(child.id(), run.worker_pid);
+                polls += 1;
+                Err("injected owned WNOWAIT failure".into())
+            },
+        );
+        cleanup_inert_child(&mut process);
+        assert!(matches!(result, Err(error) if error == "injected owned WNOWAIT failure"));
+        let record = first.unwrap();
+        assert_eq!(record.category, RssCategory::RetirementPollFailed);
+        assert_eq!(record.retirement_poll, RssPoll::PollError);
+        assert_eq!(polls, 1);
+    }
+
+    #[test]
+    fn rss_outer_worker_retirement_cannot_excuse_a_cap_sample_after_exit() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, mut input) = inert_process(directory.path());
+        let run = outer_worker_run(directory.path(), &process.child);
+        let mut first = None;
+        let mut polls = 0;
+        let result = outer_worker_acquire(
+            &run,
+            9,
+            &process.child,
+            &mut first,
+            &mut |identity, _| {
+                release_inert_child(&mut input, identity.pid)?;
+                let mut value = fixture_observation(identity, false)?;
+                value.observation.bytes = Some(RSS_CAP);
+                Ok(value)
+            },
+            &mut |_| {
+                polls += 1;
+                Ok(true)
+            },
+        );
+        process.poll_exit().unwrap();
+        cleanup_inert_child(&mut process);
+        let Ok(OuterWorkerAcquisition::Observed(observation)) = result else {
+            panic!("owned worker RSS cap must remain an observed cap violation")
+        };
+        assert!(
+            rss_totals(
+                std::slice::from_ref(&observation.identity),
+                std::slice::from_ref(&observation)
+            )
+            .is_err()
+        );
+        let record = first.unwrap();
+        assert_eq!(record.category, RssCategory::PidRssCapExceeded);
+        assert_eq!(record.candidate_bytes, Some(RSS_CAP));
+        assert_eq!(record.retirement_poll, RssPoll::NotApplicable);
+        assert_eq!(polls, 0);
+    }
+
+    #[test]
+    fn rss_outer_worker_retirement_rejects_another_retained_child_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, _input) = inert_process(directory.path());
+        let mut run = outer_worker_run(directory.path(), &process.child);
+        run.worker_pid += 1;
+        run.group = run.worker_pid;
+        let mut first = None;
+        let mut reads = 0;
+        let mut polls = 0;
+        let result = outer_worker_acquire(
+            &run,
+            9,
+            &process.child,
+            &mut first,
+            &mut |identity, _| {
+                reads += 1;
+                fixture_observation(identity, true)
+            },
+            &mut |_| {
+                polls += 1;
+                Ok(true)
+            },
+        );
+        cleanup_inert_child(&mut process);
+        assert!(matches!(result, Err(error) if error == "outer RSS worker ownership mismatch"));
+        assert_eq!((reads, polls), (0, 0));
+        assert!(first.is_none());
+    }
+
+    #[test]
+    fn rss_outer_worker_retirement_does_not_excuse_a_controller_or_untyped_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, _input) = inert_process(directory.path());
+        let run = outer_worker_run(directory.path(), &process.child);
+        let identity = supervisor_identity("controller", run.controller_pid);
+        let mut first = None;
+        let observation = outer_acquire(
+            &run,
+            9,
+            identity.clone(),
+            RssSite::OuterController,
+            &mut first,
+            &mut |identity, _| fixture_observation(identity, true),
+        )
+        .unwrap();
+        assert!(rss_totals(&[identity], &[observation]).is_err());
+        assert_eq!(first.unwrap().site, RssSite::OuterController);
+        for category in [
+            RssCategory::ProcStatusReadFailed,
+            RssCategory::VmrssValueMissing,
+            RssCategory::VmrssValueInvalid,
+            RssCategory::SampleClockBeforeFailed,
+            RssCategory::SampleClockAfterFailed,
+            RssCategory::OtherRssError,
+        ] {
+            let mut first = None;
+            let mut polls = 0;
+            let result = outer_worker_acquire(
+                &run,
+                9,
+                &process.child,
+                &mut first,
+                &mut |_, _| Err(RssReadError::new(category, RSS_UNAVAILABLE)),
+                &mut |_| {
+                    polls += 1;
+                    Ok(true)
+                },
+            );
+            assert!(matches!(result, Err(error) if error == RSS_UNAVAILABLE));
+            assert_eq!(first.unwrap().category, category);
+            assert_eq!(polls, 0);
+        }
+        cleanup_inert_child(&mut process);
+    }
+
+    #[test]
+    fn rss_outer_worker_retirement_preserves_an_existing_first_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, mut input) = inert_process(directory.path());
+        let run = outer_worker_run(directory.path(), &process.child);
+        let mut first = None;
+        let _ = outer_acquire(
+            &run,
+            8,
+            supervisor_identity("controller", run.controller_pid),
+            RssSite::OuterController,
+            &mut first,
+            &mut |_, _| {
+                Err(RssReadError::new(
+                    RssCategory::OtherRssError,
+                    "earlier failure",
+                ))
+            },
+        );
+        let before = serde_json::to_value(first).unwrap();
+        let result = outer_worker_acquire(
+            &run,
+            9,
+            &process.child,
+            &mut first,
+            &mut |identity, _| {
+                release_inert_child(&mut input, identity.pid)?;
+                fixture_observation(identity, true)
+            },
+            &mut exited_without_reap,
+        );
+        process.poll_exit().unwrap();
+        cleanup_inert_child(&mut process);
+        assert!(matches!(result, Ok(OuterWorkerAcquisition::Exited)));
+        assert_eq!(serde_json::to_value(first).unwrap(), before);
+    }
+
+    #[test]
+    fn rss_outer_worker_retirement_keeps_failed_cleanup_receipts_and_exit_status() {
+        for status in [0, 7] {
+            for receipt in [None, Some(false), Some(true)] {
+                let directory = tempfile::tempdir().unwrap();
+                let (mut process, mut input) = inert_process_status(directory.path(), status);
+                let run = outer_worker_run(directory.path(), &process.child);
+                if let Some(closed) = receipt {
+                    fs::write(
+                        directory.path().join("receipt.json"),
+                        json!({"owned_cleanup_closed":closed,"worker_pid":run.worker_pid,
+                            "supervisor_pid":run.controller_pid,"process_group":if closed {run.group + 1} else {run.group}}).to_string(),
+                    )
+                    .unwrap();
+                }
+                let mut first = None;
+                let result = outer_worker_acquire(
+                    &run,
+                    9,
+                    &process.child,
+                    &mut first,
+                    &mut |identity, _| {
+                        release_inert_child(&mut input, identity.pid)?;
+                        fixture_observation(identity, true)
+                    },
+                    &mut exited_without_reap,
+                );
+                assert!(!worker_cleanup_receipt_closed(directory.path(), &run));
+                let exit = process.child.try_wait().unwrap().unwrap();
+                process.terminal = true;
+                process.receipt.reaped = true;
+                process.receipt.success = exit.success();
+                assert!(matches!(result, Ok(OuterWorkerAcquisition::Exited)));
+                assert_eq!(process.receipt.success, status == 0);
+                assert!(first.is_none());
+            }
+        }
+    }
+
     #[test]
     fn rss_first_failure_outer_source_is_typed_sticky_and_has_no_shared_file() {
         let directory = tempfile::tempdir().unwrap();
@@ -2924,7 +3383,16 @@ mod tests {
         )
         .unwrap();
         let mut first = None;
-        assert!(outer_sample(directory.path(), &fleet.resources.run, 0, &mut first).is_err());
+        assert!(
+            outer_sample(
+                directory.path(),
+                &fleet.resources.run,
+                0,
+                &mut first,
+                &fleet.processes[0].child,
+            )
+            .is_err()
+        );
         assert!(first.is_none());
     }
     #[test]
