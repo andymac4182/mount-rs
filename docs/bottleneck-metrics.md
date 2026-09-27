@@ -54,6 +54,44 @@ output from the comparison controls, including on failure. The pipeline retains
 the test exit status and existing deadlines. Verify the uploaded artifact before
 using its test names or counts; an empty check-API response supplies neither.
 
+## Retained example: FoundationDB and Ozone
+
+The [Ozone FoundationDB job](https://github.com/andymac4182/mount-rs/actions/runs/36286931056/job/108529427341)
+retained a legacy-layout run with 400 lifecycle iterations, concurrency 64,
+4,096-byte payloads and 65,536-byte chunks. Its verified artifact
+`10920877514` contains matching standalone and log-embedded benchmark JSON.
+All 400 writes, reads and deletes succeeded; 1,200 logical operations over
+2,389.66 ms produced **502.16 IOPS**, below the unchanged 1,000 floor.
+The recorded failure is `IOPS_TARGET_NOT_MET`, with zero timeouts or cleanup
+failures in the workload summary.
+
+| Workload observation | Retained value |
+| --- | --- |
+| Write latency, median / p95 / p99 | 345.96 / 429.26 / 431.06 ms |
+| Read latency, median / p95 / p99 | 33.07 / 155.38 / 174.08 ms |
+| Filesystem gate waits | 2,968 calls; 93.85 s summed inclusive time |
+| Blob upload follower waits | 688 calls; 15.60 s summed inclusive time |
+| Namespace serialization | 15,337,494 bytes across 650 publications |
+| Block put / get adapter calls | 707 / 400 |
+| Object create calls / conditional conflicts | 19 / 18 |
+| Read cache hits | 400 |
+| Node process CPU, user / system | 538,983 / 177,420 microseconds |
+| Node process RSS at workload end | 120,762,368 bytes |
+| Dynamic provider forwarding futures | 2,771 requests; 255,160 requested object bytes |
+
+These counters expose contention and repeated work at different boundaries.
+The concurrent wait sums exceed workload wall time and cannot be added or
+treated as exclusive time shares. The 707 adapter puts are not 707 physical
+uploads; the cached reads do not measure backing-store read saturation.
+
+This artifact supplies no physical operation counts, HTTP wire attempts,
+total allocator counts, FoundationDB transaction/RPC breakdown or container CPU
+intervals. Its declared native hash has no independently verified source/build
+join. It therefore identifies this job's threshold failure and descriptive
+hotspots, while a matched comparison is still needed to isolate their cost.
+The forwarding-future counter covers one specific boxing site; requested object
+bytes are separate from allocator traffic, retained memory and lifetime peaks.
+
 ## Independently check retained comparison records
 
 Using Node 24, run the offline verifier against the two retained outputs, the four original
@@ -97,6 +135,27 @@ selected counter intervals, preserving null totals and separate partial totals.
 Discarded inspect/stats bodies cannot be independently rehashed. ABBA accounting
 remains descriptive; this check does not establish a causal speedup or physical
 IOPS. Unix CI retains the verifier controls in the existing TAP artifact.
+
+## Comparison receipt producers
+
+`scripts/owned-layout-handoff.mjs` exposes five pure receipt APIs for supplied
+controller observations, native/source bytes, Engine capacity, resource
+observations and final owner cleanup. Each returns private receipt JSON and a
+closed public summary containing status, digest, size and counts. Preserve
+`private_json` privately because it can contain endpoints and resource identities.
+The public `hosted_qualified` field remains false; actual owner execution,
+native builds and joined lifecycle verification are pending.
+
+`scripts/owned_layout_process.py` supplies the pure supervision and
+retain-before-release logic. Its exact 19-field receipts preserve raw child
+return codes, observed supervisor signals, timeouts and unavailable wait/group
+observations, even after later settlement. Modeled controls exercise injected
+process, group and clock operations. Filesystem receipt writing and integration
+with the actual owner helpers remain pending.
+
+Unix CI retains the Node receipt controls with `owned-layout-controls.log` and
+the Python models with `owned-layout-process-controls.log`. Test success covers
+these controls; owner teardown and workload qualification require actual runs.
 
 ## Native diagnostic schemas
 
