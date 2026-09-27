@@ -323,6 +323,291 @@ fn rejected_mode_receipt_or_owned_count_writes_failed_artifact() {
         }
     }
 }
+
+// Both banks use the existing drained-stage boundaries. Snapshots are relaxed,
+// sequential observations, not an atomic cut of all background/server activity.
+struct StageDiagnostics {
+    core: mount_rs_core::diagnostics::profile::Snapshot,
+    storage: Option<mount_rs_core::diagnostics::storage::Snapshot>,
+}
+impl StageDiagnostics {
+    fn capture(storage_enabled: bool) -> Self {
+        Self {
+            core: mount_rs_core::diagnostics::profile::snapshot(),
+            storage: storage_enabled.then(mount_rs_core::diagnostics::storage::snapshot),
+        }
+    }
+
+    fn finish_into(self, report: &mut Value) -> Result<(), String> {
+        let core_after = mount_rs_core::diagnostics::profile::snapshot();
+        report["io_profile"] = serde_json::to_value(core_after.delta(&self.core)?)
+            .map_err(|_| "profile encode failed")?;
+        let observed = match self.storage {
+            Some(before) => {
+                let after = mount_rs_core::diagnostics::storage::snapshot();
+                // Fail on changed identity/shape or a reset; never fabricate a
+                // zero delta or repeat a snapshot to hide a pending operation.
+                let delta = after.delta(&before)?;
+                let pending = [&before, &after].iter().any(|snapshot| {
+                    snapshot.in_flight != 0 || snapshot.entries.iter().any(|row| row.in_flight != 0)
+                });
+                let consistent = [&before, &after].iter().all(|snapshot| {
+                    snapshot.entries.iter().all(|row| {
+                        row.success
+                            .checked_add(row.error)
+                            .and_then(|n| n.checked_add(row.cancelled))
+                            == Some(row.calls)
+                            && row
+                                .latency_log2_us
+                                .iter()
+                                .try_fold(0u64, |n, count| n.checked_add(*count))
+                                == Some(row.calls)
+                    })
+                });
+                json!({
+                    "enabled":true,
+                    "complete":!pending && consistent,
+                    "status":if pending {"nonquiescent"} else if consistent {"complete"} else {"inconsistent"},
+                    "before":before,"after":after,"delta":delta,
+                })
+            }
+            None => {
+                json!({"enabled":false,"complete":false,"status":"disabled","before":null,"after":null,"delta":null})
+            }
+        };
+        let enabled = observed["enabled"] == true;
+        report["storage_profile"] = json!({
+            "schema":"mount-rs.remote-stage-storage.v1",
+            "operations":mount_rs_core::diagnostics::storage::operation_names(),
+            "measurement":{
+                "calls":"completed_instrumented_method_or_stage_invocations; success_error_cancelled_are_distinct",
+                "bytes":"known_successful_stage_specific_bytes; payload_or_plaintext_envelope_as_declared_by_family; zero_does_not_establish_no_payload",
+                "known_byte_families":{"direct_sdk_blocks":"successful_put_input_and_get_or_migration_payload_bytes; SDK_metadata_bytes_unavailable","tidb_sql":"known_successful_returned_query_bytes; not_base_datastore_IOPS","production_remote_client":"unavailable","peer_blob_cache":"not_configured"},
+                "returned_rows":"known_successful_returned_SQL_rows; zero_observations_means_unavailable",
+                "duration":"inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap",
+                "latency_histogram":"32_log2_microsecond_buckets; bucket0_below1us; bucket_n_[2^(n-1),2^n)_us; final_bucket_includes_higher_latencies",
+                "in_flight":"before_and_after_are_endpoint_gauges; delta_retains_after_gauge_without_subtraction",
+                "forwarding_boxes":"unavailable; this_fixture_does_not_call_NAPI_forwarding_sites"
+            },
+            "coverage":{
+                "direct_sdk_storage":{"configured":true,"available":enabled,"status":if enabled {"observed"}else{"disabled"}},
+                "production_remote_client":{"available":false,"status":"unavailable","reason":"direct test wire bypasses production remote client"},
+                "peer_blob_cache":{"available":false,"status":"not_configured","reason":"peer blob cache not configured"},
+                "service_stage_observer":{"available":false,"status":"unavailable","reason":"fixture binds without service diagnostics observer"},
+                "oidc_authentication":{"available":false,"status":"unavailable","reason":"synthetic fixture authenticator bypasses OIDC signature validation"}
+            },
+            "scope":"one process hosts all client and server coordinators; one shared Partition; one file per active client; shared or separate Drives as selected by the artifact; direct SDK method boundaries overlap core/provider wall; no independent server process, production topology or physical IOPS qualification",
+            "boundary_scope":"stage workers drained; complete means consistent observed zero instrumented global and per-row boundary gauges only; relaxed sequential snapshots are not an atomic cut or proof of all server/provider/background quiescence"
+        });
+        let Value::Object(observed) = observed else {
+            unreachable!()
+        };
+        report["storage_profile"]
+            .as_object_mut()
+            .unwrap()
+            .extend(observed);
+        Ok(())
+    }
+}
+
+#[test]
+#[ignore = "isolated enabled storage export behavioral gate"]
+fn storage_stage_artifact_preserves_public_spans_and_disabled_coverage() {
+    use mount_rs_core::diagnostics::{profile, storage};
+    assert!(
+        storage::enabled(),
+        "explicit MOUNT_RS_PROFILE_IO=1 required"
+    );
+    assert!(profile::enabled());
+    let actual_before = storage::snapshot();
+    assert_eq!(actual_before.in_flight, 0);
+    let boundary = StageDiagnostics::capture(true);
+    let mut put = storage::Span::new(storage::Operation::SdkBlocksPut);
+    put.finish_success(4096);
+    let mut failed = storage::Span::new(storage::Operation::SdkMetadataFlush);
+    failed.finish_error();
+    drop(storage::Span::new(storage::Operation::SdkBlocksGet));
+    let mut rows = storage::Span::new(storage::Operation::TidbSqlBlockRead);
+    rows.finish_success_with_rows(17, 0);
+    drop(profile::Span::new(profile::Event::BlockPut).units(4096));
+
+    let actual = storage::snapshot().delta(&actual_before).unwrap();
+    let real_row = |name: &str| actual.entries.iter().find(|row| row.name == name).unwrap();
+    assert_eq!(real_row("sdk.blocks.put").success, 1);
+    assert_eq!(real_row("sdk.blocks.put").bytes, 4096);
+    assert_eq!(real_row("sdk.metadata.flush").error, 1);
+    assert_eq!(real_row("sdk.blocks.get").cancelled, 1);
+    assert_eq!(real_row("tidb.sql.block_read").returned_rows, 0);
+    assert_eq!(real_row("tidb.sql.block_read").returned_row_observations, 1);
+    assert_eq!(actual.in_flight, 0);
+
+    let mut completed = json!({"case":"completed"});
+    boundary.finish_into(&mut completed).unwrap();
+    let pending_boundary = StageDiagnostics::capture(true);
+    let pending = storage::Span::new(storage::Operation::SdkMetadataLoad);
+    let pending_actual = storage::snapshot();
+    assert_eq!(pending_actual.in_flight, 1);
+    assert_eq!(
+        pending_actual
+            .entries
+            .iter()
+            .find(|row| row.name == "sdk.metadata.load")
+            .unwrap()
+            .in_flight,
+        1
+    );
+    let mut nonquiescent = json!({"case":"nonquiescent"});
+    pending_boundary.finish_into(&mut nonquiescent).unwrap();
+    drop(pending);
+    assert_eq!(storage::snapshot().in_flight, 0);
+
+    let disabled_boundary = StageDiagnostics::capture(false);
+    let mut disabled = json!({"case":"disabled"});
+    disabled_boundary.finish_into(&mut disabled).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("stage.json");
+    let artifact = json!({"stages":[completed,nonquiescent,disabled]});
+    write_saturation_artifact(&artifact, Some(&path), "storage-stage").unwrap();
+    let observed: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let retained: Value = serde_json::from_slice(
+        &std::fs::read(directory.path().join("stage-storage-stage.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(observed, retained);
+    let core_put = observed["stages"][0]["io_profile"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == "provider.blocks.put_bytes")
+        .unwrap();
+    assert_eq!(core_put["calls"], 1);
+    assert_eq!(core_put["units"], 4096);
+    println!(
+        "MOUNT_RS_STORAGE_STAGE_EXPORT behavior_oracles=complete public_success_error_cancel_verified=true known_zero_rows_verified=true pending_gauge_verified=true core_profile_preserved=true retained_artifact_equal=true"
+    );
+
+    let complete = &observed["stages"][0]["storage_profile"];
+    assert!(
+        complete.is_object(),
+        "measured stage artifact omitted storage bank after public span and encoding oracles"
+    );
+    assert_eq!(complete["enabled"], true);
+    assert_eq!(complete["complete"], true);
+    assert_eq!(complete["status"], "complete");
+    let names: Vec<_> = storage::operation_names()
+        .iter()
+        .copied()
+        .map(Value::from)
+        .collect();
+    assert_eq!(complete["operations"], json!(names));
+    assert_eq!(
+        complete["measurement"]["bytes"],
+        "known_successful_stage_specific_bytes; payload_or_plaintext_envelope_as_declared_by_family; zero_does_not_establish_no_payload"
+    );
+    assert_eq!(
+        complete["measurement"]["returned_rows"],
+        "known_successful_returned_SQL_rows; zero_observations_means_unavailable"
+    );
+    assert_eq!(
+        complete["measurement"]["duration"],
+        "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap"
+    );
+    let entries = complete["delta"]["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), names.len());
+    let row = |name: &str| entries.iter().find(|row| row["name"] == name).unwrap();
+    for (name, success, error, cancelled, bytes, returned_observations) in [
+        ("sdk.blocks.put", 1, 0, 0, 4096, 0),
+        ("sdk.metadata.flush", 0, 1, 0, 0, 0),
+        ("sdk.blocks.get", 0, 0, 1, 0, 0),
+        ("tidb.sql.block_read", 1, 0, 0, 17, 1),
+    ] {
+        assert_eq!(row(name)["calls"], 1);
+        assert_eq!(row(name)["success"], success);
+        assert_eq!(row(name)["error"], error);
+        assert_eq!(row(name)["cancelled"], cancelled);
+        assert_eq!(row(name)["bytes"], bytes);
+        assert_eq!(row(name)["returned_rows"], 0);
+        assert_eq!(
+            row(name)["returned_row_observations"],
+            returned_observations
+        );
+        assert_eq!(row(name)["in_flight"], 0);
+        assert_eq!(
+            row(name)["latency_log2_us"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_u64().unwrap())
+                .sum::<u64>(),
+            1
+        );
+    }
+    assert_eq!(complete["before"]["in_flight"], 0);
+    assert_eq!(complete["after"]["in_flight"], 0);
+    assert_eq!(
+        complete["coverage"]["production_remote_client"]["available"],
+        false
+    );
+    assert_eq!(
+        complete["coverage"]["production_remote_client"]["status"],
+        "unavailable"
+    );
+    assert_eq!(
+        complete["coverage"]["production_remote_client"]["reason"],
+        "direct test wire bypasses production remote client"
+    );
+    assert_eq!(complete["coverage"]["peer_blob_cache"]["available"], false);
+    assert_eq!(
+        complete["coverage"]["peer_blob_cache"]["status"],
+        "not_configured"
+    );
+    assert_eq!(
+        complete["coverage"]["peer_blob_cache"]["reason"],
+        "peer blob cache not configured"
+    );
+    assert_eq!(
+        complete["coverage"]["service_stage_observer"]["available"],
+        false
+    );
+    assert_eq!(
+        complete["coverage"]["service_stage_observer"]["reason"],
+        "fixture binds without service diagnostics observer"
+    );
+    assert_eq!(
+        complete["coverage"]["oidc_authentication"]["available"],
+        false
+    );
+    assert_eq!(
+        complete["coverage"]["oidc_authentication"]["reason"],
+        "synthetic fixture authenticator bypasses OIDC signature validation"
+    );
+
+    let pending = &observed["stages"][1]["storage_profile"];
+    assert_eq!(pending["complete"], false);
+    assert_eq!(pending["status"], "nonquiescent");
+    assert_eq!(pending["before"]["in_flight"], 0);
+    assert_eq!(pending["after"]["in_flight"], 1);
+    assert_eq!(pending["delta"]["in_flight"], 1);
+    assert_eq!(
+        pending["after"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == "sdk.metadata.load")
+            .unwrap()["in_flight"],
+        1
+    );
+    let disabled = &observed["stages"][2]["storage_profile"];
+    assert_eq!(disabled["enabled"], false);
+    assert_eq!(disabled["complete"], false);
+    assert_eq!(disabled["status"], "disabled");
+    for field in ["before", "after", "delta"] {
+        assert!(
+            disabled[field].is_null(),
+            "disabled storage cannot export observations"
+        );
+    }
+}
 #[test]
 fn diagnostic_codec_selection_and_numeric_oracles_are_explicit() {
     assert_eq!(Codec::parse("binary").unwrap(), Codec::Binary);
@@ -921,7 +1206,7 @@ async fn packet() -> Result<(), String> {
                     phase += 1;
                     let stage_id = format!("{key}-{phase}");
                     if measured { stage_observer("begin", *mode, depth, &stage_id, 0, 0, active_clients).await?; }
-                    let profile_before = mount_rs_core::diagnostics::profile::snapshot();
+                    let stage_diagnostics = StageDiagnostics::capture(measured && mount_rs_core::diagnostics::storage::enabled());
                     let sqlite_before = if measured && backend.name == "sqlite" && mount_rs_core::diagnostics::profile::enabled() {
                         Some(mount_rs_sqlite::sqlite_io_diagnostics(true))
                     } else { None };
@@ -940,8 +1225,7 @@ async fn packet() -> Result<(), String> {
                     )
                     .await;
                     if measured {
-                        let profile_after = mount_rs_core::diagnostics::profile::snapshot();
-                        report["io_profile"] = serde_json::to_value(profile_after.delta(&profile_before)?).map_err(|_| "profile encode failed")?;
+                        stage_diagnostics.finish_into(&mut report)?;
                         if let Some(before) = sqlite_before {
                             report["sqlite_io_begin"] = before;
                             report["sqlite_io_end"] = mount_rs_sqlite::sqlite_io_diagnostics(false);

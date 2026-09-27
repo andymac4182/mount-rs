@@ -1705,3 +1705,23 @@ SHA-256 `e02926da6ee2a89adbc51059e853c89cdb8d422497612a64f3b8dc39273ba774`.
 Focused gates:
 `/private/tmp/mount-rs-refresh-metrics-gates-20260927-fwlkkb_w/summary.json`,
 SHA-256 `ba46eccc7911cd7ff2c1d727bad83ab388025cf6788c9c5b68fceca0bf3368e0`.
+
+## Saturation storage-bank export and measured SQLite leads
+
+The small `quic_tidb_saturation` runner exports `storage_profile` at its drained
+measured boundaries. With `MOUNT_RS_PROFILE_IO=1`, it includes fixed operation
+identities, raw before/after snapshots and checked deltas. Nonzero boundary
+gauges or unreconciled terminal counters produce incomplete observations;
+disabled recording exports null snapshots rather than zero-cost observations.
+
+Coverage labels explicitly identify its direct test-wire caller, absent peer
+cache and service observer, and synthetic authentication. It does not exercise
+the production client's `client.quic.*` spans. Snapshots and JSON export happen
+at stage boundaries and are outside the warmed allocation-free recorder claim.
+
+The [measured SQLite diagnostic](benchmarks/sqlite-causal-diagnostic-20260928/README.md)
+separates logical blob payload, provider statements/pager work, process disk
+accounting and whole-disk driver counters. It finds 1x blob payload amplification,
+full inode extent-list metadata publication, and a source-supported blocking
+SQLite worker-ceiling hypothesis. None of those accounting layers establishes
+physical SSD IOPS.
