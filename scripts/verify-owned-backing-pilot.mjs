@@ -155,6 +155,8 @@ const PROFILE_NAMES = [
   "filesystem.refresh.path_structure",
   "filesystem.refresh.read_before",
   "filesystem.refresh.read_after",
+  "blob_cache.ram.hit_bytes",
+  "blob_cache.disk.hit_bytes",
 ]
 const RAW_NAMES = ["put_opts.block_create", "get.block_read", "body_read.block_read", "get.conflict_verify", "body_read.conflict_verify", "get.migration", "body_read.migration", "head.direct_delete", "delete.direct", "delete.reconcile"]
 const CLAIMS = ["leader_claims", "leader_success", "leader_error", "leader_cancelled", "follower_claims", "follower_success", "follower_error", "follower_cancelled"]

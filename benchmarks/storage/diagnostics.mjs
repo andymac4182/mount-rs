@@ -114,6 +114,12 @@ export const STORAGE_OPERATION_NAMES = [
   "foundationdb.read.get_range_page",
   "foundationdb.transaction.commit",
   "foundationdb.transaction.on_error",
+  "blob_cache.miss.admission_wait",
+  "blob_cache.miss.singleflight_wait",
+  "blob_cache.ram.lookup",
+  "blob_cache.disk.lookup",
+  "blob_cache.peer.connection_lock_wait",
+  "blob_cache.peer.connection_establish",
 ]
 const storageNames = STORAGE_OPERATION_NAMES
 export const STORAGE_CALL_SEMANTICS = "fixed_label_provider_and_driver_operations; families_overlap_and_are_not_application_iops"
@@ -130,6 +136,7 @@ export const STORAGE_OPERATION_FAMILIES = {
   tidb_sql: { operations: STORAGE_OPERATION_NAMES.filter((name) => name.startsWith("tidb.sql.")), calls: "categorized_sql_adapter_invocations; not_internal_requests", bytes: "known_selected_successful_payload_bytes_only; other_sql_bytes_unavailable", returned_rows: STORAGE_ROW_SEMANTICS, duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
   foundationdb_transaction: { operations: ["foundationdb.transaction.create", "foundationdb.transaction.closure_attempt", "foundationdb.transaction.commit", "foundationdb.transaction.on_error"], calls: "provider_closure_attempts_and_native_create_commit_on_error_invocations; distinct_units_not_logical_transactions", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
   foundationdb_read: { operations: ["foundationdb.read.get", "foundationdb.read.get_key", "foundationdb.read.get_range_page"], calls: "native_client_read_method_invocations; range_page_calls_not_key_value_count", bytes: "known_selected_successful_returned_value_key_and_range_page_key_value_payload_bytes_only", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  blob_cache: { operations: STORAGE_OPERATION_NAMES.filter((name) => name.startsWith("blob_cache.")), calls: "cache_stage_invocations; lookups_include_hits_and_misses; waits_count_acquisitions_or_termination", bytes: "known_successful_ram_and_disk_lookup_returned_payload_bytes_only; waits_and_connection_stages_zero; misses_zero", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
 }
 export const TIDB_DIAGNOSTIC_COVERAGE = {
   schema: "mount-rs-tidb-client-diagnostic-coverage-v1", status: "source_sites_instrumented",

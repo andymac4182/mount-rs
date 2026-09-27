@@ -329,11 +329,11 @@ impl ServerProcess {
         let storage = &process["storage"]["snapshot"];
         let storage_entries = storage["entries"].as_array().unwrap();
         let names = mount_rs_core::diagnostics::storage::operation_names();
-        assert_eq!(storage_entries.len(), 85);
-        assert_eq!(names.len(), 85);
+        assert_eq!(storage_entries.len(), 91);
+        assert_eq!(names.len(), 91);
         assert_eq!(storage_entries[77]["name"], "tidb.sql.flush_probe");
         assert_eq!(
-            storage_entries[78..]
+            storage_entries[78..85]
                 .iter()
                 .map(|entry| entry["name"].as_str().unwrap())
                 .collect::<Vec<_>>(),
@@ -345,6 +345,20 @@ impl ServerProcess {
                 "foundationdb.read.get_range_page",
                 "foundationdb.transaction.commit",
                 "foundationdb.transaction.on_error",
+            ]
+        );
+        assert_eq!(
+            storage_entries[85..]
+                .iter()
+                .map(|entry| entry["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "blob_cache.miss.admission_wait",
+                "blob_cache.miss.singleflight_wait",
+                "blob_cache.ram.lookup",
+                "blob_cache.disk.lookup",
+                "blob_cache.peer.connection_lock_wait",
+                "blob_cache.peer.connection_establish",
             ]
         );
         for (entry, name) in storage_entries.iter().zip(names) {

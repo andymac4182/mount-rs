@@ -146,6 +146,8 @@ const profileNames = [
   "filesystem.refresh.path_structure",
   "filesystem.refresh.read_before",
   "filesystem.refresh.read_after",
+  "blob_cache.ram.hit_bytes",
+  "blob_cache.disk.hit_bytes",
 ]
 const roles = ["pd-1", "pd-2", "pd-3", "tikv-1", "tikv-2", "tikv-3", "tidb", "rustfs-service"]
 const rawNames = ["put_opts.block_create", "get.block_read", "body_read.block_read", "get.conflict_verify", "body_read.conflict_verify", "get.migration", "body_read.migration", "head.direct_delete", "delete.direct", "delete.reconcile"]
@@ -304,10 +306,10 @@ test("the actual CLI returns a bounded fixed verdict and rejects untrusted build
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
-test("causal exact contract retains the old prefix and accepts zero new rows losslessly", () => {
+test("causal exact contract retains the old prefix and accepts appended rows losslessly", () => {
   const { pilot, build } = model()
   const entries = pilot.native_phases.phases[0].core_profile.entries
-  assert.equal(entries.length, 134)
+  assert.equal(entries.length, 136)
   assert.equal(entries[46].name, "provider.inode_serialized_bytes")
   assert.equal(entries[47].name, "filesystem.block_put.initial")
   assert.deepEqual(entries.slice(108, 114).map((row) => row.name), [
@@ -324,7 +326,7 @@ test("causal exact contract retains the old prefix and accepts zero new rows los
     "compact.structure.delta_capture_nodes",
     "compact.structure.expected_guard_nodes",
   ])
-  assert.deepEqual(entries.slice(118).map((row) => row.name), [
+  assert.deepEqual(entries.slice(118, 134).map((row) => row.name), [
     "sqlite.compact.authority_query",
     "sqlite.compact.authority_path",
     "sqlite.compact.anchor_query_bytes",
@@ -342,23 +344,37 @@ test("causal exact contract retains the old prefix and accepts zero new rows los
     "filesystem.refresh.read_before",
     "filesystem.refresh.read_after",
   ])
+  assert.deepEqual(entries.slice(134).map((row) => row.name), ["blob_cache.ram.hit_bytes", "blob_cache.disk.hit_bytes"])
   for (const row of entries.slice(47)) Object.assign(row, { calls: "0", elapsed_ns: "0", units: "0" })
   entries[47].units = "9007199254740993"
   for (const [index, row] of entries.slice(114).entries()) Object.assign(row, {
     elapsed_ns: String(9007199254740993n + BigInt(index)), units: String(18446744073709551615n - BigInt(index)),
   })
+  entries[134].units = "18446744073709551615"
+  entries[135].units = "9007199254740993"
   const before = structuredClone(entries)
   assert.equal(verifyPilot(pilot, build).status, "verified")
   assert.equal(entries[47].units, "9007199254740993")
+  assert.deepEqual(entries.slice(134).map((row) => row.units), ["18446744073709551615", "9007199254740993"])
   assert.deepEqual(entries, before)
 })
-for (const kind of ["old47", "old108", "old114", "old118", "missing", "missing_create_guard", "duplicate", "unknown"]) test(`causal exact ${kind} rows reject qualification`, () => {
+test("current verifier refuses a complete historical 134-core / 85-storage snapshot", () => {
+  const { pilot, build } = model()
+  const workload = pilot.native_phases.phases[0]
+  assert.equal(workload.core_profile.entries.length, 136)
+  assert.equal(workload.storage.length, 91)
+  workload.core_profile.entries.splice(134)
+  workload.storage.splice(85)
+  assert.throws(() => verifyPilot(pilot, build), { code: "pilot_evidence_rejected", reason: "native_evidence" })
+})
+for (const kind of ["old47", "old108", "old114", "old118", "old134", "missing", "missing_create_guard", "duplicate", "unknown"]) test(`causal exact ${kind} rows reject qualification`, () => {
   const { pilot, build } = model()
   const rows = pilot.native_phases.phases[0].core_profile.entries
   if (kind === "old47") rows.splice(47)
   else if (kind === "old108") rows.splice(108)
   else if (kind === "old114") rows.splice(114)
   else if (kind === "old118") rows.splice(118)
+  else if (kind === "old134") rows.splice(134)
   else if (kind === "missing") rows.splice(47, 1)
   else if (kind === "missing_create_guard") rows.splice(110, 1)
   else if (kind === "duplicate") rows[48] = { ...rows[47] }
@@ -368,6 +384,17 @@ for (const kind of ["old47", "old108", "old114", "old118", "missing", "missing_c
 for (const name of profileNames.slice(114)) test(`current exact missing ${name} rejects qualification`, () => {
   const { pilot, build } = model()
   const rows = pilot.native_phases.phases[0].core_profile.entries
+  rows.splice(rows.findIndex((row) => row.name === name), 1)
+  assert.throws(() => verifyPilot(pilot, build), { code: "pilot_evidence_rejected", reason: "native_evidence" })
+})
+for (const name of [
+  "blob_cache.miss.admission_wait", "blob_cache.miss.singleflight_wait",
+  "blob_cache.ram.lookup", "blob_cache.disk.lookup",
+  "blob_cache.peer.connection_lock_wait", "blob_cache.peer.connection_establish",
+]) test(`current exact missing ${name} storage row rejects qualification`, () => {
+  const { pilot, build } = model()
+  const rows = pilot.native_phases.phases[0].storage
+  assert.equal(rows.length, 91)
   rows.splice(rows.findIndex((row) => row.name === name), 1)
   assert.throws(() => verifyPilot(pilot, build), { code: "pilot_evidence_rejected", reason: "native_evidence" })
 })

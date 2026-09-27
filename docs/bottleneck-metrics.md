@@ -15,6 +15,7 @@ control when measuring the cost of the observers.
 | TiDB adapter | Pool checkout, session setup, schema/open, transaction begin/commit/explicit rollback, SQL families and known returned rows | Checkout includes lazy connection/setup work. SQL calls are distinct from MySQL commands, TiKV requests and device I/O |
 | FoundationDB adapter | Transaction creation, closure attempts, point reads, selected-key reads, range pages, commit and explicit retry recovery | Client dispatch and closure attempts; range pages are distinct from returned keys, wire RPCs and device I/O |
 | Object-store block adapter | Actual get/put/head/delete invocations and body reads, reason, outcomes, claim leader/follower counters | Adapter API calls and known body bytes; internal HTTP retries and reconciliation listing remain unavailable |
+| Distributed blob cache | Miss admission/singleflight waits, RAM/disk lookups and hit bytes, outbound peer connection lock/establishment | Lookup times include misses; disk timing includes the bounded helper, and connection stages preserve the existing serialization |
 | QUIC server | TLS/application handshake, authentication, admission, request/read/dispatch/encode/submit/cleanup, latency buckets and gauges | Inclusive application spans; submission to Quinn does not establish peer acknowledgment |
 | QUIC authentication | Token decode, catalog load, key-cache wait, policy selection, key fetch, JWT verification and grant authorization | Inclusive stage times within the existing handshake/renewal deadline; key fetch is only recorded when requested |
 | Accepted QUIC connections | UDP bytes/datagrams/I/O calls, frame counters, path observations, retained retired-connection totals | Accepted connection lifetime through session retirement; excludes refused/failed TLS connections and subsequent transport traffic |
@@ -37,8 +38,8 @@ observer work.
 
 Phase reports now retain the resource counters already sampled at each boundary.
 `resource_measurement.schema` is `mount-rs.process-resources.v1`. No new Node
-sampler calls are added, and the core, storage and QUIC row inventories remain
-134, 85 and 21 respectively.
+sampler calls are added. The current core, storage and QUIC row inventories are
+136, 91 and 21 respectively; the cache additions are described below.
 
 | Report field | Meaning |
 | --- | --- |
@@ -75,10 +76,11 @@ CI runs the Node controls on its existing platforms and the exact OS gate on
 Unix, retaining its output even on failure and rejecting a zero-case pass.
 
 Remaining transport/cache timing gaps are explicit: client stream/socket waits,
-distributed-cache miss admission and singleflight waits, RAM versus disk hit
-latency, directory/peer lookup timing, and WebSocket/peer transport stage
-observers. Existing hit/backing counters and QUIC service measurements remain
-useful; they cannot supply these missing stage times.
+peer request-byte admission and stream open/send/receive, incoming peer
+establishment, directory/discovery lookup and peer GET outcomes, and WebSocket
+transport stages. Cache lookup histograms include misses; isolated warm phases
+are needed to qualify RAM or disk hit latency. Existing hit/backing counters
+and QUIC service measurements cannot supply the remaining stage times.
 
 The [retained resource report](benchmarks/process-resource-metrics-20260927/report.json)
 contains two serial 400-lifecycle compact SQLite runs: 800 verified full reads
@@ -134,10 +136,87 @@ for throughput and warmed recorder allocation controls.
 
 ## Locate the bottleneck in one measured phase
 
+### Distributed cache lookup and peer connection stages
+
+The [public CLI diagnostic export](#public-cli-diagnostic-export) describes how
+to build the profiled server and capture its bounded shutdown record.
+
+The cache slice appends six storage rows at indexes 85 through 90 and two core
+hit counters at 134 and 135. The existing 85 storage and 134 core rows retain
+their offsets. The current declared banks contain 91 storage and 136 core rows.
+
+| Fixed storage row | Measured boundary | Successful bytes |
+| --- | --- | --- |
+| `blob_cache.miss.admission_wait` | Existing distributed miss semaphore await only | 0 |
+| `blob_cache.miss.singleflight_wait` | Existing per-block flight mutex await only | 0 |
+| `blob_cache.ram.lookup` | Existing synchronous RAM probes, including misses and owner/follower rechecks | Returned payload length on Some, otherwise 0 |
+| `blob_cache.disk.lookup` | Existing bounded disk helper: permit/worker queueing, read and verification | Returned payload length on Some, otherwise 0 |
+| `blob_cache.peer.connection_lock_wait` | Existing per-peer connection slot mutex await only | 0 |
+| `blob_cache.peer.connection_establish` | Existing outbound connect, TLS establishment, authenticated peer-ID check and slot installation | 0 |
+
+Wait rows finish immediately on acquisition. They exclude flight-map
+bookkeeping and the lifetime of acquired guards. A pending caller drop records
+cancellation. RAM and successful disk misses are successful zero-byte lookups;
+internal cache/join/read failures already collapsed into None remain successful
+disk misses. The disk helper's outer deadline is an explicit error, while
+caller abandonment is cancelled. Timed-out or dropped blocking disk work can
+continue after the observer settles; helper latency does not establish worker
+completion, device failure, physical IOPS or durability.
+
+Known-peer and partition checks retain their current positions. A live reused
+connection has a lock row and no establishment row. Establishment covers
+explicit connect/handshake/identity errors; the existing outer request timeout
+or caller drop records cancelled establishment. The connection mutex remains
+held through establishment. These client boundaries exclude stream creation,
+send/receive and remote server execution. Their bytes and SQL row observations
+are zero.
+
+`blob_cache.ram.hit_bytes` and `blob_cache.disk.hit_bytes` count only Some
+results. Calls count hits and units count returned payload bytes; an empty hit
+is one call with zero units. They do not measure allocation churn or QUIC wire
+bytes. Mixed lookup histograms include misses, so use isolated warm RAM and
+disk phases for hit latency.
+
+The existing storage recorder supplies terminal outcomes, in-flight gauges,
+inclusive nanoseconds and 32 latency buckets. Its existing 100 ms slow threshold
+and limit of 16 records per process cover these rows automatically. With tracing
+enabled, completion can write diagnostic stderr while the existing connection guard is
+held; use trace-off controls for clean latency/allocation baselines. No peer,
+block, key, path, token or raw error enters a metric label or slow record.
+
+The ignored exact `cachemetrics` and `peermetrics` parent gates isolate processes
+with profiling enabled and storage/request traces disabled. They qualify full binary
+bytes, counted backing GETs and actual peer attempts before checking stage
+deltas. Controls cover 100 cold coalesced reads, RAM/disk and empty hits, admission,
+singleflight and disk cancellation, the existing disk deadline's healthy peer
+fallback, real cold/reused mTLS, held connection mutex cancellation, an owned
+blackhole PUT/GET overlap, and rejected identity/no admission. Fixed-label
+`MOUNT_RS_CACHE_STAGE` JSON preserves actual phase deltas and pending gauges
+before assertions; unavailable labels remain unavailable.
+
+`storagealloc` exercises all six new operations through actual warmed public
+success/error/drop primitives; `corealloc` adds both hit events to the warmed
+Span/add/drop window. The controls count alloc, alloc_zeroed and realloc calls,
+excluding initialization, snapshots, diagnostic output, returned payloads and
+async work. Separate `cacheprofileoff`/`cacheprofileon` processes preserve the
+existing RAM-hit ready-future benchmark. Finished wait/RAM spans leave their
+lexical blocks before later work or the ready future; cold async future objects
+can still grow to retain pending observers. These controls do not imply that
+whole cache/transport futures or file operations allocate zero.
+
+Historical observations with 85 storage and 134 core rows lack the cache additions.
+Projectors retain those missing rows as unavailable/null; exact current
+qualification requires the new bank. Native-addon storage declarations contain
+the cache family, but that addon has no blob-cache dependency: its audited
+instrumented-operation counts remain 78 feature-off and 85 with FoundationDB.
+Cache rows therefore remain unavailable in native-addon coverage.
+
 ### Authority checks and refresh reasons
 
-The current core bank appends sixteen rows to the 118-row prefix, for 134
-fixed rows. The storage bank remains 85 rows. These observations split the
+The authority/refresh slice appended sixteen rows to the 118-row prefix, for
+134 core rows, while storage then remained 85 rows. The cache slice appends to
+those unchanged prefixes, producing the current 136 core and 91 storage rows.
+The authority/refresh observations split the
 repeated compact metadata work seen in the latest lifecycle measurement:
 
 | Fixed row | Scope / units |
@@ -736,6 +815,8 @@ records can still be forwarded and the diagnostic gate fails. A forced kill can
 leave only the last periodic record. Do not infer a zero error count, a completed open or a
 successful cleanup from an absent terminal record.
 
+### Public CLI diagnostic export
+
 The ordinary server constructors keep the new observer disabled. Service
 embedders can explicitly use `RemoteServer::bind_with_diagnostics(..., true)` in
 an `io-profiling` build, retain `server.diagnostics()`, and call its `snapshot()`
@@ -797,13 +878,15 @@ overlapping wall durations. Global banks survive provider retirement without
 retaining stores or connections. They do not attribute totals to a particular
 drive or provider instance, and zero in-flight gauges do not prove drain.
 
-Storage retains all 78 ordered rows, outcomes, known successful payload bytes,
+Storage retains all 91 ordered rows, outcomes, known successful payload bytes,
 returned rows and row-observation availability, global/per-row in-flight
 gauges, 32 latency buckets and forwarding-box provenance. Coverage labels are
 derived from the producer registry: 47 `sdk.*` erased-method rows, 18 `tidb.*`
 source-instrumented adapter rows, 12 NAPI `metadata.*`/`blocks.*` forwarding
 rows that this CLI does not use, and one `pglite.client_lock_wait` row selected
-only by that provider. Zero TiDB rows do not prove TiDB use or complete
+only by that provider. The seven FoundationDB and six cache rows are also
+declared in the bank; these four CLI coverage labels do not establish their
+use or instrumentation in every process. Zero TiDB rows do not prove TiDB use or complete
 SQL/network coverage. Core profile rows retain fixed names, calls, elapsed
 nanoseconds and event-specific units.
 

@@ -1,5 +1,9 @@
 use crate::*;
 use async_trait::async_trait;
+use mount_rs_core::diagnostics::{
+    profile,
+    storage::{Operation, Span},
+};
 use mount_rs_core::storage::{BlockReconcileReport, BlockStore};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -353,7 +357,8 @@ impl CachedBlockStore {
             .as_ref()
             .map(|d| d.config.deadline)
             .unwrap_or(Duration::from_millis(500));
-        timeout(deadline, async {
+        let mut span = Span::new(Operation::BlobCacheDiskLookup);
+        let result = timeout(deadline, async {
             let permit = self.cache.io_permit().await.ok()?;
             let cache = self.cache.clone();
             let scope = scope.clone();
@@ -367,9 +372,21 @@ impl CachedBlockStore {
             .ok()
             .flatten()
         })
-        .await
-        .ok()
-        .flatten()
+        .await;
+        match result {
+            Ok(bytes) => {
+                let returned = bytes.as_ref().map_or(0, |bytes| bytes.len() as u64);
+                span.finish_success(returned);
+                if bytes.is_some() {
+                    profile::add(profile::Event::BlobCacheDiskHitBytes, returned);
+                }
+                bytes
+            }
+            Err(_) => {
+                span.finish_error();
+                None
+            }
+        }
     }
     async fn fill(
         &self,
@@ -419,7 +436,17 @@ impl CachedBlockStore {
         });
     }
     async fn fetch(&self, scope: &Arc<CacheScope>, id: &BlockId) -> Result<Vec<u8>> {
-        if let Some(bytes) = self.cache.get_memory(scope, id, self.policy) {
+        let bytes = {
+            let mut span = Span::new(Operation::BlobCacheRamLookup);
+            let bytes = self.cache.get_memory(scope, id, self.policy);
+            let returned = bytes.as_ref().map_or(0, |bytes| bytes.len() as u64);
+            span.finish_success(returned);
+            if bytes.is_some() {
+                profile::add(profile::Event::BlobCacheRamHitBytes, returned);
+            }
+            bytes
+        };
+        if let Some(bytes) = bytes {
             self.metrics.local_hit(bytes.len());
             if let Some(d) = &self.distributed {
                 d.touch(
@@ -586,7 +613,17 @@ impl BlockStore for CachedBlockStore {
             return self.backing.get(id);
         };
         let key = LocalCache::key_hashed(&fingerprint, id);
-        if let Some(bytes) = self.cache.get_memory_hashed(&key) {
+        let bytes = {
+            let mut span = Span::new(Operation::BlobCacheRamLookup);
+            let bytes = self.cache.get_memory_hashed(&key);
+            let returned = bytes.as_ref().map_or(0, |bytes| bytes.len() as u64);
+            span.finish_success(returned);
+            if bytes.is_some() {
+                profile::add(profile::Event::BlobCacheRamHitBytes, returned);
+            }
+            bytes
+        };
+        if let Some(bytes) = bytes {
             self.metrics.local_hit(bytes.len());
             if let Some(d) = &self.distributed {
                 d.touch(&self.cache, &scope, id, &key);
@@ -596,14 +633,26 @@ impl BlockStore for CachedBlockStore {
         }
         Box::pin(async move {
             if let Some(d) = &self.distributed {
-                let _permit = d
-                    .misses
-                    .clone()
-                    .acquire_owned()
-                    .await
-                    .map_err(|_| error())?;
+                let _permit = {
+                    let mut span = Span::new(Operation::BlobCacheMissAdmissionWait);
+                    match d.misses.clone().acquire_owned().await {
+                        Ok(permit) => {
+                            span.finish_success(0);
+                            permit
+                        }
+                        Err(_) => {
+                            span.finish_error();
+                            return Err(error());
+                        }
+                    }
+                };
                 let flight = d.flight(digest(&[scope.digest().as_bytes(), id.0.as_bytes()]))?;
-                let _guard = flight.lock().await;
+                let _guard = {
+                    let mut span = Span::new(Operation::BlobCacheMissSingleflightWait);
+                    let guard = flight.lock().await;
+                    span.finish_success(0);
+                    guard
+                };
                 return self.fetch(&scope, id).await;
             }
             self.fetch(&scope, id).await

@@ -46,6 +46,8 @@ fn selected_bytes(operation: Operation) -> u64 {
         Operation::FoundationDbReadGet
             | Operation::FoundationDbReadGetKey
             | Operation::FoundationDbReadGetRangePage
+            | Operation::BlobCacheRamLookup
+            | Operation::BlobCacheDiskLookup
     ) {
         3
     } else {
@@ -74,6 +76,12 @@ fn warmed_core_spans_record_without_added_allocations() {
         Operation::FoundationDbReadGetRangePage,
         Operation::FoundationDbTransactionCommit,
         Operation::FoundationDbTransactionOnError,
+        Operation::BlobCacheMissAdmissionWait,
+        Operation::BlobCacheMissSingleflightWait,
+        Operation::BlobCacheRamLookup,
+        Operation::BlobCacheDiskLookup,
+        Operation::BlobCachePeerConnectionLockWait,
+        Operation::BlobCachePeerConnectionEstablish,
     ];
     ALLOCATION_CALLS.with(|calls| calls.set(0));
     COUNT_ALLOCATIONS.with(|enabled| enabled.set(true));
@@ -85,12 +93,18 @@ fn warmed_core_spans_record_without_added_allocations() {
         drop(Span::new(operation));
     }
     COUNT_ALLOCATIONS.with(|enabled| enabled.set(false));
+    let allocation_calls = ALLOCATION_CALLS.with(Cell::get);
+    println!(
+        "MOUNT_RS_CACHE_RECORDER_ALLOCATION bank=storage selected_rows={} declared_rows={} allocation_calls={allocation_calls}",
+        operations.len(),
+        before.entries.len()
+    );
     assert_eq!(
-        ALLOCATION_CALLS.with(Cell::get),
-        0,
+        allocation_calls, 0,
         "warmed actual core Span added an allocation"
     );
     let delta = storage::snapshot().delta(&before).unwrap();
+    assert_eq!(before.entries.len(), 91);
     assert_eq!(delta.in_flight, 0);
     for operation in operations {
         let row = &delta.entries[operation as usize];

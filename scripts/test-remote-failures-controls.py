@@ -51,6 +51,92 @@ class ResultControls(unittest.TestCase):
         self.assertFalse(parent.exact_case_passed(f"running 1 test\ntest fixture::nameXwithXdot ... ok\n{SUMMARY}", literal))
 
 
+class CacheStageSelectors(unittest.TestCase):
+    def test_profiled_exact_cases_have_one_literal_selector(self):
+        expected = {
+            "cachemetrics": "cache_lookup_stage_metrics_preserve_bytes_and_cancellation",
+            "peermetrics": "peer::tests::peer_connection_stage_metrics_preserve_bytes_and_cancellation",
+            "storagealloc": "warmed_core_spans_record_without_added_allocations",
+            "corealloc": "warmed_causal_profile_rows_record_without_added_allocations",
+        }
+        for kind, name in expected.items():
+            command, limit, profile, trace = parent.COMMANDS[kind]
+            self.assertEqual((limit, profile, trace), (180, 1, 0))
+            self.assertEqual(parent.EXACT_CASES[kind], name)
+            self.assertIn("--ignored", command)
+            self.assertEqual(command[command.index("--exact") + 1], name)
+            self.assertIn("--test-threads=1", command)
+            self.assertTrue(parent.exact_case_passed(f"running 1 test\ntest {name} ... behavior_oracles=complete\nok\n{SUMMARY}", name))
+            self.assertFalse(parent.exact_case_passed(f"running 1 test\ntest other ... ok\n{SUMMARY}", name))
+
+    def test_ready_future_baselines_are_separate_profile_processes(self):
+        for kind, enabled in [("cacheprofileoff", 0), ("cacheprofileon", 1)]:
+            command, limit, profile, trace = parent.COMMANDS[kind]
+            self.assertEqual((limit, profile, trace), (180, enabled, 0))
+            self.assertEqual(command, ["./scripts/cargo-shared", "run", "--locked", "--offline", "-p", "mount-rs-blob-cache", "--example", "cache_profile"])
+            self.assertNotIn(kind, parent.EXACT_CASES)
+
+    def test_cache_consumers_are_fixed_node24_pure_fixture_controls(self):
+        command, limit, profile, trace = parent.COMMANDS["cacheconsumers"]
+        self.assertEqual((limit, profile, trace), (180, 0, 0))
+        self.assertEqual(command, ["fnm", "exec", "--using", "v24.18.0", "node", "--test", "benchmarks/storage/test.mjs", "benchmarks/storage/foundationdb-diagnostics.test.mjs", "benchmarks/storage/owned-layout-metrics.test.mjs", "benchmarks/storage/owned-backing-pilot.test.mjs", "scripts/verify-owned-backing-pilot.test.mjs"])
+        self.assertNotIn("cacheconsumers", parent.EXACT_CASES)
+
+
+class CacheDeliverySelectors(unittest.TestCase):
+    def test_signed_cli_selector_executes_one_nonignored_case(self):
+        command, limit, profile, trace = parent.COMMANDS["clicompact"]
+        self.assertEqual((limit, profile, trace), (180, 1, 0))
+        self.assertEqual(command[command.index("--features") + 1], "local-oidc-fixture,io-profiling")
+        self.assertEqual(command[command.index("--exact") + 1], parent.EXACT_CASES["clicompact"])
+        self.assertNotIn("--ignored", command)
+
+    def test_trace_is_separate_from_allocation_and_stage_measurements(self):
+        off, limit, profile, trace = parent.COMMANDS["cachemetrics"]
+        on, on_limit, on_profile, on_trace = parent.COMMANDS["cachemetricstrace"]
+        self.assertEqual(off, on)
+        self.assertEqual((limit, profile, trace), (180, 1, 0))
+        self.assertEqual((on_limit, on_profile, on_trace), (180, 1, 1))
+        self.assertEqual(parent.EXACT_CASES["cachemetrics"], parent.EXACT_CASES["cachemetricstrace"])
+
+
+class NamedSuiteControls(unittest.TestCase):
+    def test_current_cli_suite_requires_every_named_case(self):
+        names = parent.EXPECTED_SUITES["clidiagnostics"]
+        output = "running 7 tests\n" + "".join(f"test {name} ... ok\n" for name in names) + "test result: ok. 7 passed; 0 failed; 0 ignored;\n"
+        self.assertTrue(parent.named_suite_passed(output, names))
+        self.assertFalse(parent.named_suite_passed(output.replace(names[0], "other"), names))
+
+    def test_successful_zero_test_run_cannot_qualify_cli_suite(self):
+        self.assertFalse(parent.named_suite_passed("running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored;\n", parent.EXPECTED_SUITES["clidiagnostics"]))
+
+    def test_cli_suite_selector_matches_nested_module(self):
+        self.assertEqual(parent.COMMANDS["clidiagnostics"][0][-1], "remote::diagnostics::tests::")
+        self.assertIn("--lib", parent.COMMANDS["clidiagnostics"][0])
+        self.assertNotIn("--bin", parent.COMMANDS["clidiagnostics"][0])
+
+
+class CacheSlowLogControls(unittest.TestCase):
+    LINE = "MOUNT_RS_STORAGE_SLOW operation=blob_cache.disk.lookup outcome=error elapsed_us=600000\n"
+
+    def test_fixed_disk_deadline_record_is_observed(self):
+        self.assertEqual(parent.cache_slow_logging_records("compile status\n"+self.LINE), [{"operation":"blob_cache.disk.lookup", "outcome":"error", "elapsed_us":600000}])
+
+    def test_absent_record_cannot_qualify_logging(self):
+        self.assertIsNone(parent.cache_slow_logging_records("test passed\n"))
+
+    def test_private_or_unknown_label_is_rejected(self):
+        self.assertIsNone(parent.cache_slow_logging_records(self.LINE+self.LINE.replace("blob_cache.disk.lookup", "private-drive")))
+
+    def test_earlier_slow_flight_burst_can_consume_the_shared_budget(self):
+        line = self.LINE.replace("blob_cache.disk.lookup", "blob_cache.miss.singleflight_wait").replace("outcome=error", "outcome=success")
+        self.assertEqual(len(parent.cache_slow_logging_records(line*16)), 16)
+
+    def test_budget_and_threshold_are_enforced(self):
+        self.assertIsNone(parent.cache_slow_logging_records(self.LINE*17))
+        self.assertIsNone(parent.cache_slow_logging_records(self.LINE.replace("600000", "99999")))
+
+
 class DarwinSignalControls(unittest.TestCase):
     # Missing implementation models the previous sticky-error behavior, so
     # positive controls fail semantically before the portability correction.

@@ -649,7 +649,7 @@ test("current core row coverage excludes optional compatibility labels and unrel
   // Independent fixed profile contract, rather than the dirty
   // recorder or the projection's own label list.
   const committedNames = modelCommittedProfileNames
-  assert.equal(committedNames.length, 134)
+  assert.equal(committedNames.length, 136)
   assert.deepEqual(committedNames.slice(108, 114), [
     "filesystem.mutation.create_guard.evaluated",
     "filesystem.mutation.create_guard.passed",
@@ -664,7 +664,7 @@ test("current core row coverage excludes optional compatibility labels and unrel
     "compact.structure.delta_capture_nodes",
     "compact.structure.expected_guard_nodes",
   ])
-  assert.deepEqual(committedNames.slice(118), [
+  assert.deepEqual(committedNames.slice(118, 134), [
     "sqlite.compact.authority_query",
     "sqlite.compact.authority_path",
     "sqlite.compact.anchor_query_bytes",
@@ -682,6 +682,7 @@ test("current core row coverage excludes optional compatibility labels and unrel
     "filesystem.refresh.read_before",
     "filesystem.refresh.read_after",
   ])
+  assert.deepEqual(committedNames.slice(134), ["blob_cache.ram.hit_bytes", "blob_cache.disk.hit_bytes"])
   const fixture = resultFixture()
   fixture.providers[0].storageDiagnostics = { phases: [{ name: "workload-4096bytes", native: { complete: false,
     profile: { entries: [...committedNames.map((name) => ({ name, calls: "0", elapsed_ns: "0", units: "0" })),
@@ -700,7 +701,7 @@ test("current core row coverage excludes optional compatibility labels and unrel
   fixture.providers[0].storageDiagnostics.phases[0].native.profile.entries = committedNames.slice(0, 108).map((name) => ({ name, calls: "0", elapsed_ns: "0", units: "0" }))
   const oldSnapshot = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1]
   assert.equal(oldSnapshot.core_profile.status, "unavailable")
-  assert.equal(oldSnapshot.core_profile.entries.length, 134)
+  assert.equal(oldSnapshot.core_profile.entries.length, 136)
   assert.equal(oldSnapshot.core_profile.entries[108].calls, null)
   assert.equal(oldSnapshot.projected_component_complete, false)
   fixture.providers[0].storageDiagnostics.phases[0].native.r2 = { instances: Array.from({ length: 17 }, (_, index) => ({ id: String(index + 1) })) }
@@ -848,6 +849,8 @@ const modelCommittedProfileNames = [
   "filesystem.refresh.path_structure",
   "filesystem.refresh.read_before",
   "filesystem.refresh.read_after",
+  "blob_cache.ram.hit_bytes",
+  "blob_cache.disk.hit_bytes",
 ]
 
 function modelNativeSnapshot(live) {
@@ -1038,30 +1041,59 @@ test("causal pilot requires new rows without manufacturing old-snapshot zeros", 
     profile: { entries: modelCommittedProfileNames.slice(0, 47).map((name) => ({ name, calls: "0", elapsed_ns: "0", units: "0" })) } } }] }
   const core = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1].core_profile
   assert.equal(core.status, "unavailable")
-  assert.equal(core.entries.length, 134)
+  assert.equal(core.entries.length, 136)
   assert.equal(core.entries[46].name, "provider.inode_serialized_bytes")
   assert.equal(core.entries[47].name, "filesystem.block_put.initial")
   assert.equal(core.entries[47].calls, null)
   fixture.providers[0].storageDiagnostics.phases[0].native.profile.entries = modelCommittedProfileNames.slice(0, 114).map((name) => ({ name, calls: "0", elapsed_ns: "0", units: "0" }))
   const previousCore = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1].core_profile
   assert.equal(previousCore.status, "unavailable")
-  assert.equal(previousCore.entries.length, 134)
+  assert.equal(previousCore.entries.length, 136)
   assert.ok(previousCore.entries.slice(0, 114).every((row) => row.calls === "0"))
   assert.ok(previousCore.entries.slice(114).every((row) => row.calls === null && row.elapsed_ns === null && row.units === null))
   fixture.providers[0].storageDiagnostics.phases[0].native.profile.entries = modelCommittedProfileNames.slice(0, 118).map((name) => ({ name, calls: "0", elapsed_ns: "0", units: "0" }))
   const previousCompactCore = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1].core_profile
   assert.equal(previousCompactCore.status, "unavailable")
-  assert.equal(previousCompactCore.entries.length, 134)
+  assert.equal(previousCompactCore.entries.length, 136)
   assert.ok(previousCompactCore.entries.slice(0, 118).every((row) => row.calls === "0"))
   assert.ok(previousCompactCore.entries.slice(118).every((row) => row.calls === null && row.elapsed_ns === null && row.units === null))
+  fixture.providers[0].storageDiagnostics.phases[0].native.profile.entries = modelCommittedProfileNames.slice(0, 134).map((name) => ({ name, calls: "0", elapsed_ns: "0", units: "0" }))
+  const priorCachePhase = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1]
+  const priorCacheCore = priorCachePhase.core_profile
+  assert.equal(priorCacheCore.status, "unavailable")
+  assert.equal(priorCachePhase.projected_component_complete, false)
+  assert.equal(priorCacheCore.entries.length, 136)
+  assert.ok(priorCacheCore.entries.slice(0, 134).every((row) => row.calls === "0"))
+  assert.deepEqual(priorCacheCore.entries.slice(134), [
+    { name: "blob_cache.ram.hit_bytes", calls: null, elapsed_ns: null, units: null },
+    { name: "blob_cache.disk.hit_bytes", calls: null, elapsed_ns: null, units: null },
+  ])
   fixture.providers[0].storageDiagnostics.phases[0].native.profile.entries = modelCommittedProfileNames.map((name) => ({ name, calls: "0", elapsed_ns: "0", units: "0" }))
   fixture.providers[0].storageDiagnostics.phases[0].native.profile.entries[47].units = "9007199254740993"
   const complete = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1].core_profile
   assert.equal(complete.status, "observed")
   assert.equal(complete.entries[47].units, "9007199254740993")
+  assert.deepEqual(complete.entries.slice(134).map((row) => row.name), ["blob_cache.ram.hit_bytes", "blob_cache.disk.hit_bytes"])
 })
 
-test("compact and refresh pilot projection retains measured units and inclusive timing without numeric coercion", () => {
+test("historical 85-row storage snapshot leaves six appended cache stages unavailable", () => {
+  const fixture = resultFixture()
+  const oldStorage = STORAGE_OPERATION_NAMES.slice(0, 85).map((name) => ({ name, calls: "0", success: "0", error: "0", cancelled: "0" }))
+  fixture.providers[0].storageDiagnostics = { phases: [{ name: "workload-4096bytes", native: {
+    complete: false, storage: { entries: oldStorage },
+  } }] }
+  const projected = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1].storage
+  assert.equal(projected.length, 91)
+  assert.deepEqual(projected.slice(85).map((row) => row.name), [
+    "blob_cache.miss.admission_wait", "blob_cache.miss.singleflight_wait",
+    "blob_cache.ram.lookup", "blob_cache.disk.lookup",
+    "blob_cache.peer.connection_lock_wait", "blob_cache.peer.connection_establish",
+  ])
+  assert.ok(projected.slice(0, 85).every((row) => row.calls === "0"))
+  assert.ok(projected.slice(85).every((row) => row.calls === null && row.success === null && row.error === null && row.cancelled === null))
+})
+
+test("compact, refresh, and cache pilot projection retains measured units without numeric coercion", () => {
   const fixture = resultFixture()
   const entries = modelCommittedProfileNames.map((name) => ({ name, calls: "0", elapsed_ns: "0", units: "0" }))
   for (const [index, row] of entries.slice(114).entries()) Object.assign(row, {
@@ -1075,6 +1107,9 @@ test("compact and refresh pilot projection retains measured units and inclusive 
   const core = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1].core_profile
   assert.equal(core.status, "observed")
   assert.deepEqual(core.entries, entries)
+  assert.deepEqual(core.entries.slice(134).map((row) => row.units), [
+    String(18446744073709551615n - 20n), String(18446744073709551615n - 21n),
+  ])
   assert.deepEqual(fixture, before)
   assert.match(core.scope, /inclusive_elapsed_and_event_specific_units/u)
 })

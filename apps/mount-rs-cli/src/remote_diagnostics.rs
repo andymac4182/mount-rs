@@ -257,7 +257,7 @@ mod tests {
         let entries = process["storage"]["snapshot"]["entries"]
             .as_array()
             .unwrap();
-        assert_eq!(entries.len(), 85);
+        assert_eq!(entries.len(), 91);
         for (actual, expected) in entries.iter().zip(&storage.entries) {
             assert_eq!(actual["name"], expected.name);
             assert_eq!(actual["calls"].as_u64(), Some(exact));
@@ -267,7 +267,7 @@ mod tests {
         }
         assert_eq!(entries[77]["name"], "tidb.sql.flush_probe");
         assert_eq!(
-            entries[78..]
+            entries[78..85]
                 .iter()
                 .map(|entry| entry["name"].as_str().unwrap())
                 .collect::<Vec<_>>(),
@@ -279,6 +279,20 @@ mod tests {
                 "foundationdb.read.get_range_page",
                 "foundationdb.transaction.commit",
                 "foundationdb.transaction.on_error",
+            ]
+        );
+        assert_eq!(
+            entries[85..]
+                .iter()
+                .map(|entry| entry["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "blob_cache.miss.admission_wait",
+                "blob_cache.miss.singleflight_wait",
+                "blob_cache.ram.lookup",
+                "blob_cache.disk.lookup",
+                "blob_cache.peer.connection_lock_wait",
+                "blob_cache.peer.connection_establish",
             ]
         );
         assert_eq!(
@@ -313,7 +327,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            85
+            91
         );
         for name in [
             "raw_object_store",
@@ -375,6 +389,38 @@ mod tests {
         assert_eq!(value["capture_context"], "shutdown");
         assert_eq!(value["snapshot"]["counter"].as_u64(), Some(exact));
         assert!(!value["snapshot"]["counter"].is_string());
+    }
+
+    #[test]
+    fn full_current_banks_with_maximum_u64_fit_existing_record_limit() {
+        let storage = representative_storage(u64::MAX);
+        let mut profile = profile::snapshot();
+        assert_eq!(profile.entries.len(), 136);
+        for entry in &mut profile.entries {
+            entry.calls = u64::MAX;
+            entry.elapsed_ns = u64::MAX;
+            entry.units = u64::MAX;
+        }
+        let process = process_diagnostics(
+            capture_bank(true, || storage),
+            capture_bank(true, || profile),
+        );
+        let record = encode_record(&json!({}), 123, &process);
+        let value = parse_record(&record);
+        assert!(value.get("diagnostic_incomplete").is_none());
+        let banks = &value["process_diagnostics"];
+        assert_eq!(
+            banks["storage"]["snapshot"]["entries"]
+                .as_array()
+                .unwrap()
+                .len(),
+            91
+        );
+        for index in [134, 135] {
+            let row = &banks["profile"]["snapshot"]["entries"][index];
+            assert_eq!(row["units"].as_u64(), Some(u64::MAX));
+            assert_eq!(row["calls"].as_u64(), Some(u64::MAX));
+        }
     }
 
     #[test]

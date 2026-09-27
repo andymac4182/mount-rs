@@ -262,6 +262,10 @@ fn storage_operation_families() -> Value {
                 "foundationdb.read.get","foundationdb.read.get_key","foundationdb.read.get_range_page"],
             "calls":"native_client_read_method_invocations; range_page_calls_not_key_value_count",
             "bytes":"known_selected_successful_returned_value_key_and_range_page_key_value_payload_bytes_only",
+            "returned_rows":"unavailable","duration":duration},
+        "blob_cache":{"operations":matching(&["blob_cache."]),
+            "calls":"cache_stage_invocations; lookups_include_hits_and_misses; waits_count_acquisitions_or_termination",
+            "bytes":"known_successful_ram_and_disk_lookup_returned_payload_bytes_only; waits_and_connection_stages_zero; misses_zero",
             "returned_rows":"unavailable","duration":duration}
     })
 }
@@ -7270,13 +7274,13 @@ mod tests {
         let families = snapshot["measurement"]["storage_families"]
             .as_object()
             .unwrap();
-        assert_eq!(families.len(), 10);
+        assert_eq!(families.len(), 11);
         let declared = families
             .values()
             .flat_map(|family| family["operations"].as_array().unwrap())
             .map(|name| name.as_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(declared.len(), 85);
+        assert_eq!(declared.len(), 91);
         assert_eq!(
             declared
                 .into_iter()
@@ -7306,9 +7310,9 @@ mod tests {
             "known_selected_successful_returned_value_key_and_range_page_key_value_payload_bytes_only"
         );
         let names = storage::operation_names();
-        assert_eq!(names.len(), 85);
+        assert_eq!(names.len(), 91);
         assert_eq!(
-            &names[78..],
+            &names[78..85],
             &[
                 "foundationdb.transaction.create",
                 "foundationdb.transaction.closure_attempt",
@@ -7318,6 +7322,23 @@ mod tests {
                 "foundationdb.transaction.commit",
                 "foundationdb.transaction.on_error",
             ]
+        );
+        assert_eq!(
+            &names[85..],
+            &[
+                "blob_cache.miss.admission_wait",
+                "blob_cache.miss.singleflight_wait",
+                "blob_cache.ram.lookup",
+                "blob_cache.disk.lookup",
+                "blob_cache.peer.connection_lock_wait",
+                "blob_cache.peer.connection_establish",
+            ]
+        );
+        assert_eq!(families["blob_cache"]["operations"], json!(&names[85..]));
+        assert_eq!(families["blob_cache"]["returned_rows"], "unavailable");
+        assert_eq!(
+            families["blob_cache"]["bytes"],
+            "known_successful_ram_and_disk_lookup_returned_payload_bytes_only; waits_and_connection_stages_zero; misses_zero"
         );
         assert_eq!(LEGACY_NON_TIDB_INSTRUMENTED_OPERATIONS.len(), 60);
         assert_eq!(&names[..60], LEGACY_NON_TIDB_INSTRUMENTED_OPERATIONS);
@@ -7351,8 +7372,8 @@ mod tests {
                 "exact static site count {field}"
             );
         }
-        assert_eq!(snapshot["storage"]["entries"].as_array().unwrap().len(), 85);
-        for (index, name) in names[78..].iter().enumerate() {
+        assert_eq!(snapshot["storage"]["entries"].as_array().unwrap().len(), 91);
+        for (index, name) in names[78..85].iter().enumerate() {
             let row = &snapshot["storage"]["entries"][78 + index];
             assert_eq!(row["name"], *name);
             assert_eq!(row["returned_rows"], "0");
@@ -7387,6 +7408,15 @@ mod tests {
         assert!(snapshot["storage"]["entries"][0]["calls"].is_string());
         assert!(snapshot["storage"]["forwarding_boxes"]["calls"].is_string());
         assert!(snapshot["storage"]["forwarding_boxes"]["requested_object_bytes"].is_string());
+        let profile = snapshot["profile"]["entries"].as_array().unwrap();
+        assert_eq!(profile.len(), 136);
+        assert_eq!(profile[134]["name"], "blob_cache.ram.hit_bytes");
+        assert_eq!(profile[135]["name"], "blob_cache.disk.hit_bytes");
+        for row in &profile[134..] {
+            for field in ["calls", "elapsed_ns", "units"] {
+                assert!(row[field].is_string(), "exact cache hit counter {field}");
+            }
+        }
         assert_eq!(
             snapshot["measurement"]["latency_histogram"]["intervals"]
                 .as_array()
@@ -7428,7 +7458,13 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            85
+            91
+        );
+        assert!(
+            instrumented
+                .iter()
+                .all(|name| !name.as_str().unwrap().starts_with("blob_cache.")),
+            "cache bank declarations do not establish addon source coverage"
         );
         #[cfg(all(
             feature = "foundationdb",

@@ -155,6 +155,8 @@ const CORE_NAMES = new Set([
   "filesystem.refresh.path_structure",
   "filesystem.refresh.read_before",
   "filesystem.refresh.read_after",
+  "blob_cache.ram.hit_bytes",
+  "blob_cache.disk.hit_bytes",
 ])
 const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value)
 const fields = (source, names) => Object.fromEntries(names.map((name) => [name, source[name]]))

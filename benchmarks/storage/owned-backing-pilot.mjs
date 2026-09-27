@@ -154,6 +154,8 @@ const profileNames = [
   "filesystem.refresh.path_structure",
   "filesystem.refresh.read_before",
   "filesystem.refresh.read_after",
+  "blob_cache.ram.hit_bytes",
+  "blob_cache.disk.hit_bytes",
 ]
 const phaseNames = ["create", "workload-4096bytes", "cleanup", "shutdown"]
 const sources = ["scripts/test-rustfs.sh", "scripts/test-tidb.sh", "benchmarks/storage/runner.mjs", "benchmarks/storage/owned-backing-pilot.mjs", "benchmarks/storage/owned-backing-pilot.test.mjs", "benchmarks/storage/README.md"]

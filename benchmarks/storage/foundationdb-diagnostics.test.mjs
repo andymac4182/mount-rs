@@ -97,7 +97,16 @@ const foundationdbNames = Object.freeze([
   "foundationdb.transaction.commit",
   "foundationdb.transaction.on_error",
 ])
-const operationNames = Object.freeze([...legacyNames, ...foundationdbNames])
+const preCacheNames = Object.freeze([...legacyNames, ...foundationdbNames])
+const cacheNames = Object.freeze([
+  "blob_cache.miss.admission_wait",
+  "blob_cache.miss.singleflight_wait",
+  "blob_cache.ram.lookup",
+  "blob_cache.disk.lookup",
+  "blob_cache.peer.connection_lock_wait",
+  "blob_cache.peer.connection_establish",
+])
+const operationNames = Object.freeze([...preCacheNames, ...cacheNames])
 const duration = "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap"
 const foundationdbFamilies = {
   foundationdb_transaction: {
@@ -145,15 +154,15 @@ const row = (name) => ({
   name, ...zeros(["calls", "success", "error", "cancelled", "bytes", "returned_rows", "returned_row_observations", "in_flight", "elapsed_ns"]),
   latency_log2_us: Array(32).fill("0"),
 })
-function snapshot({ legacy = false, feature = true } = {}) {
-  const names = legacy ? legacyNames : operationNames
-  const families = Object.fromEntries(Object.entries(STORAGE_OPERATION_FAMILIES).filter(([name]) => !name.startsWith("foundationdb_")))
+function snapshot({ legacy = false, preCache = false, feature = true } = {}) {
+  const names = legacy ? legacyNames : preCache ? preCacheNames : operationNames
+  const families = Object.fromEntries(Object.entries(STORAGE_OPERATION_FAMILIES).filter(([name]) => !name.startsWith("foundationdb_") && name !== "blob_cache"))
   return {
     schema_version: NATIVE_DIAGNOSTICS_SCHEMA, enabled: true, scope: "process",
     quiescent_snapshot_required: true, elapsed_semantics: "inclusive_wall_nanoseconds",
     measurement: {
       storage_calls: STORAGE_CALL_SEMANTICS, storage_bytes: STORAGE_BYTE_SEMANTICS, storage_rows: STORAGE_ROW_SEMANTICS,
-      storage_operations: [...names], storage_families: { ...structuredClone(families), ...(legacy ? {} : structuredClone(foundationdbFamilies)) },
+      storage_operations: [...names], storage_families: { ...structuredClone(families), ...(legacy ? {} : structuredClone(foundationdbFamilies)), ...(!legacy && !preCache ? { blob_cache: structuredClone(STORAGE_OPERATION_FAMILIES.blob_cache) } : {}) },
       storage_instrumented_operations: [...legacyNames, ...(!legacy && feature ? foundationdbNames : [])],
       tidb_coverage: structuredClone(TIDB_DIAGNOSTIC_COVERAGE),
       ...(legacy ? {} : { foundationdb_coverage: structuredClone(feature ? foundationdbCoverage : disabledCoverage) }),
@@ -204,10 +213,12 @@ function summary(native) {
   return JSON.parse(lines[0].replace(/^MOUNT_RS_STORAGE_PHASE /u, ""))
 }
 
-test("new 85-row fixture has reconciled exact decimal endpoints before consumer validation", () => {
+test("new 91-row fixture has reconciled exact decimal endpoints before consumer validation", () => {
   const value = snapshot()
-  assert.equal(value.storage.entries.length, 85)
+  assert.equal(value.storage.entries.length, 91)
   assert.deepEqual(value.storage.entries.map((entry) => entry.name), operationNames)
+  assert.deepEqual(value.storage.entries.slice(78, 85).map((entry) => entry.name), foundationdbNames)
+  assert.deepEqual(value.storage.entries.slice(85).map((entry) => entry.name), cacheNames)
   for (const entry of value.storage.entries) {
     assert.equal(BigInt(entry.calls), BigInt(entry.success) + BigInt(entry.error) + BigInt(entry.cancelled))
     assert.equal(entry.latency_log2_us.reduce((sum, count) => sum + BigInt(count), 0n), BigInt(entry.calls))
@@ -222,6 +233,17 @@ test("old 78-row observation remains incomplete without seven invented zero rows
   assert.equal(value.observations.after.storage.entries.length, 78)
   assert.equal(value.observations.after.storage.entries.values.some((entry) => foundationdbNames.includes(entry.name)), false)
   assert.equal(value.observations.after.measurement.foundationdb_coverage, "unavailable")
+})
+test("old 85-row observation remains incomplete without six invented cache rows", () => {
+  const before = snapshot({ preCache: true }), after = snapshot({ preCache: true })
+  Object.assign(find(after, foundationdbNames[2]), { calls: "1", success: "1", bytes: "9007199254740993", elapsed_ns: "1000", latency_log2_us: ["0", "1", ...Array(30).fill("0")] })
+  const value = deltaNativeSnapshots(before, after)
+  assert.equal(value.complete, false)
+  assert.equal(Object.hasOwn(value, "storage"), false)
+  assert.equal(value.observations.after.storage.entries.length, 85)
+  assert.equal(value.observations.after.storage.entries.values.length, 85)
+  assert.equal(value.observations.after.storage.entries.values.some((entry) => cacheNames.includes(entry.name)), false)
+  assert.equal(value.observations.after.storage.entries.values.find((entry) => entry.name === foundationdbNames[2]).bytes, "9007199254740993")
 })
 test("seven FoundationDB terminal outcomes and histograms reconcile independently", () => {
   const before = snapshot(), after = snapshot()
@@ -256,11 +278,25 @@ test("successful empty get payload is a known zero without inventing SQL rows", 
   assert.match(value.measurement.storage_bytes, /zero_does_not_establish_no_payload/u)
   assert.equal(value.measurement.storage_families.foundationdb_read.returned_rows, "unavailable")
 })
-test("feature-off 85-row phase remains complete for other banks while FDB coverage is unavailable", () => {
+test("feature-off 91-row phase keeps FDB and cache source coverage unavailable", () => {
   const value = observed(snapshot({ feature: false }), snapshot({ feature: false }))
   assert.deepEqual(value.measurement.foundationdb_coverage, disabledCoverage)
   assert.equal(value.measurement.storage_instrumented_operations.some((name) => name.startsWith("foundationdb.")), false)
-  assert.equal(value.storage.entries.length, 85)
+  assert.equal(value.measurement.storage_instrumented_operations.length, 78)
+  assert.equal(value.measurement.storage_instrumented_operations.some((name) => name.startsWith("blob_cache.")), false)
+  assert.equal(value.storage.entries.length, 91)
+})
+test("declared cache family stays unavailable in addon summaries with FDB enabled or disabled", () => {
+  for (const feature of [true, false]) {
+    const value = observed(snapshot({ feature }), snapshot({ feature }))
+    assert.equal(value.measurement.storage_instrumented_operations.length, feature ? 85 : 78)
+    assert.equal(value.measurement.storage_instrumented_operations.some((name) => cacheNames.includes(name)), false)
+    const family = summary(value).families.blob_cache
+    assert.equal(family.available, false)
+    assert.equal(family.instrumented, false)
+    assert.deepEqual(family.instrumented_operations, [])
+    for (const field of ["calls", "bytes", "error", "cancelled", "elapsed_ns", "returned_rows", "returned_row_observations"]) assert.equal(Object.hasOwn(family, field), false)
+  }
 })
 test("feature-off family summaries do not publish fixed zero rows as observed FDB attempts", () => {
   const logged = summary(observed(snapshot({ feature: false }), snapshot({ feature: false })))

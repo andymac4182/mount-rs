@@ -41,7 +41,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
-const CAUSAL_EVENTS: [Event; 87] = [
+const CAUSAL_EVENTS: [Event; 89] = [
     Event::FilesystemBlockPutInitial,
     Event::FilesystemBlockPutInitialSuccess,
     Event::FilesystemBlockPutInitialError,
@@ -129,6 +129,8 @@ const CAUSAL_EVENTS: [Event; 87] = [
     Event::FilesystemRefreshPathStructure,
     Event::FilesystemRefreshReadBefore,
     Event::FilesystemRefreshReadAfter,
+    Event::BlobCacheRamHitBytes,
+    Event::BlobCacheDiskHitBytes,
 ];
 
 #[test]
@@ -154,14 +156,19 @@ fn warmed_causal_profile_rows_record_without_added_allocations() {
         drop(Span::new(event));
     }
     COUNT_ALLOCATIONS.with(|enabled| enabled.set(false));
+    let allocation_calls = ALLOCATION_CALLS.with(Cell::get);
+    println!(
+        "MOUNT_RS_CACHE_RECORDER_ALLOCATION bank=core selected_rows={} declared_rows={} allocation_calls={allocation_calls}",
+        CAUSAL_EVENTS.len(),
+        before.entries.len()
+    );
     assert_eq!(
-        ALLOCATION_CALLS.with(Cell::get),
-        0,
+        allocation_calls, 0,
         "warmed actual profile Span/add/drop recording added an allocation"
     );
     let delta = profile::snapshot().delta(&before).unwrap();
-    assert_eq!(before.entries.len(), 134);
-    assert_eq!(delta.entries.len(), 87);
+    assert_eq!(before.entries.len(), 136);
+    assert_eq!(delta.entries.len(), 89);
     for (event, row) in CAUSAL_EVENTS.into_iter().zip(delta.entries) {
         assert_eq!(row.name, before.entries[event as usize].name);
         assert_eq!((row.calls, row.units), (3, 8));

@@ -1,6 +1,7 @@
 use crate::*;
 use async_trait::async_trait;
 use bytes::Bytes;
+use mount_rs_core::diagnostics::storage::{Operation, Span};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -209,23 +210,46 @@ impl QuicPeerTransport {
     async fn connection(&self, id: &PeerId) -> Result<quinn::Connection> {
         let peer = self.config.trusted.get(id).ok_or_else(error)?;
         let slot = self.connections.get(id).ok_or_else(error)?;
-        let mut slot = slot.lock().await;
+        let mut slot = {
+            let mut span = Span::new(Operation::BlobCachePeerConnectionLockWait);
+            let slot = slot.lock().await;
+            span.finish_success(0);
+            slot
+        };
         if let Some(connection) = slot.as_ref()
             && connection.close_reason().is_none()
         {
             return Ok(connection.clone());
         }
-        let connection = self
-            .endpoint
-            .connect(peer.address, &peer.server_name)
-            .map_err(|_| error())?
-            .await
-            .map_err(|_| error())?;
-        if &self.authenticated(&connection)? != id {
+        let mut span = Span::new(Operation::BlobCachePeerConnectionEstablish);
+        let connecting = match self.endpoint.connect(peer.address, &peer.server_name) {
+            Ok(connecting) => connecting,
+            Err(_) => {
+                span.finish_error();
+                return Err(error());
+            }
+        };
+        let connection = match connecting.await {
+            Ok(connection) => connection,
+            Err(_) => {
+                span.finish_error();
+                return Err(error());
+            }
+        };
+        let authenticated = match self.authenticated(&connection) {
+            Ok(authenticated) => authenticated,
+            Err(error) => {
+                span.finish_error();
+                return Err(error);
+            }
+        };
+        if &authenticated != id {
             connection.close(1u32.into(), b"untrusted peer");
+            span.finish_error();
             return Err(error());
         }
         *slot = Some(connection.clone());
+        span.finish_success(0);
         Ok(connection)
     }
     async fn accept(self: Arc<Self>, incoming: quinn::Incoming) -> Result<()> {
@@ -672,6 +696,212 @@ mod tests {
             cert.der().clone(),
             rustls::pki_types::PrivatePkcs8KeyDer::from(key.serialize_der()).into(),
         )
+    }
+    #[allow(dead_code)]
+    mod stage_metrics {
+        include!("../tests/support/stage_metrics.rs");
+    }
+    struct MetricPeers {
+        a: Arc<QuicPeerTransport>,
+        b: Arc<QuicPeerTransport>,
+        b_cache: Arc<LocalCache>,
+        blackhole: std::net::UdpSocket,
+        scope: CacheScope,
+    }
+    impl MetricPeers {
+        fn new(wrong_pin: bool, unknown_ca: bool) -> Self {
+            let make_ca = || {
+                let mut params = rcgen::CertificateParams::new(vec!["cache-ca".into()]).unwrap();
+                params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+                rcgen::CertifiedIssuer::self_signed(params, rcgen::KeyPair::generate().unwrap())
+                    .unwrap()
+            };
+            let ca = make_ca();
+            let foreign = make_ca();
+            let (ac, ak) = cert(if unknown_ca { &foreign } else { &ca });
+            let (bc, bk) = cert(&ca);
+            let mut roots = rustls::RootCertStore::empty();
+            roots.add(ca.der().clone()).unwrap();
+            // Retain before any service starts: startup panic, cancellation and
+            // bounded shutdown all leave removal to the owned parent barrier.
+            let directory = tempfile::tempdir().unwrap().keep();
+            let cache = |name| {
+                LocalCache::new(LocalCacheConfig {
+                    directory: directory.join(name),
+                    memory_bytes: 1024,
+                    disk_bytes: 2048,
+                    max_entries: 10,
+                    max_blob_bytes: 1024,
+                })
+                .unwrap()
+            };
+            let a_cache = cache("a");
+            let b_cache = cache("b");
+            let scope = CacheScope {
+                identity: ScopeIdentity {
+                    cluster: "c".into(),
+                    partition: "p".into(),
+                    drive: "d".into(),
+                },
+                backing: ConcurrentBackingId::from_bytes([2; 16]).unwrap(),
+            };
+            a_cache
+                .register_scope(scope.clone(), IntegrityPolicy::Opaque)
+                .unwrap();
+            b_cache
+                .register_scope(scope.clone(), IntegrityPolicy::Opaque)
+                .unwrap();
+            let endpoint = |address, cert: &CertificateDer<'static>| PeerEndpoint {
+                address,
+                server_name: "localhost".into(),
+                certificate_sha256: Sha256::digest(cert.as_ref()).into(),
+                partitions: BTreeSet::from(["p".into()]),
+            };
+            let config = |local: &str, cert, key, trusted| QuicPeerConfig {
+                local: PeerId(local.into()),
+                bind: "127.0.0.1:0".parse().unwrap(),
+                certificates: vec![cert],
+                private_key: key,
+                roots: roots.clone(),
+                trusted,
+                max_blob_bytes: 1024,
+                max_inflight: 128,
+                transfer_bytes: 128 * 1024 * 1024,
+                deadline: if wrong_pin || unknown_ca {
+                    Duration::from_millis(500)
+                } else {
+                    Duration::from_secs(2)
+                },
+            };
+            // B's inbound authentication uses the pin, so no outbound address reservation is needed.
+            let b = QuicPeerTransport::bind(
+                config(
+                    "b",
+                    bc.clone(),
+                    bk,
+                    BTreeMap::from([(
+                        PeerId("a".into()),
+                        endpoint("127.0.0.1:0".parse().unwrap(), &ac),
+                    )]),
+                ),
+                b_cache.clone(),
+            )
+            .unwrap();
+            let blackhole = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let mut target = endpoint(b.local_addr().unwrap(), &bc);
+            if wrong_pin {
+                target.certificate_sha256 = [99; 32];
+            }
+            let a = QuicPeerTransport::bind(
+                config(
+                    "a",
+                    ac,
+                    ak,
+                    BTreeMap::from([
+                        (PeerId("b".into()), target),
+                        (
+                            PeerId("blackhole".into()),
+                            PeerEndpoint {
+                                address: blackhole.local_addr().unwrap(),
+                                server_name: "localhost".into(),
+                                certificate_sha256: [77; 32],
+                                partitions: BTreeSet::from(["p".into()]),
+                            },
+                        ),
+                    ]),
+                ),
+                a_cache,
+            )
+            .unwrap();
+            Self {
+                a,
+                b,
+                b_cache,
+                blackhole,
+                scope,
+            }
+        }
+        async fn shutdown(&self) {
+            self.a.shutdown().await;
+            self.b.shutdown().await;
+            self.a.cache.shutdown().await;
+            self.b_cache.shutdown().await;
+        }
+    }
+    impl Drop for MetricPeers {
+        fn drop(&mut self) {
+            // Files were retained before startup. Shutdown's bounded worker
+            // drain is not permission to delete them before the process barrier.
+            self.a.endpoint.close(0u32.into(), b"fixture dropped");
+            self.b.endpoint.close(0u32.into(), b"fixture dropped");
+        }
+    }
+    #[tokio::test]
+    #[ignore = "isolated process: MOUNT_RS_PROFILE_IO=1, storage/request traces=0"]
+    async fn peer_connection_stage_metrics_preserve_bytes_and_cancellation() {
+        use mount_rs_core::diagnostics::{profile, storage};
+        use stage_metrics::*;
+        use std::{future::poll_fn, task::Poll};
+        timeout(Duration::from_secs(15),async {
+            assert!(storage::enabled() && profile::enabled(),"parent must isolate the enabled profiler");
+            let mut checks = Checks::default();
+            let peers = MetricPeers::new(false,false);
+            let peer = PeerId("b".into()); let blackhole = PeerId("blackhole".into());
+            let id = BlockId("opaque".into()); let bytes = b"peer stages\0\xffcomplete binary bytes";
+            peers.b_cache.insert(&peers.scope,&id,bytes,IntegrityPolicy::Opaque).unwrap();
+            let before = storage::snapshot();
+            assert_eq!(peers.a.get(&peer,&peers.scope,&id).await.unwrap(),Some(bytes.to_vec()));
+            checks.phase("cold authenticated connection",&before,vec![Expected(LOCK,1,0,0,0),Expected(ESTABLISH,1,0,0,0)]);
+            let before = storage::snapshot();
+            assert_eq!(peers.a.get(&peer,&peers.scope,&id).await.unwrap(),Some(bytes.to_vec()));
+            checks.phase("reused authenticated connection",&before,vec![Expected(LOCK,1,0,0,0),Expected(ESTABLISH,0,0,0,0)]);
+            let mut denied = peers.scope.clone(); denied.identity.partition = "other".into();
+            let before = storage::snapshot();
+            assert!(peers.a.get(&peer,&denied,&id).await.is_err());
+            checks.phase("partition rejected before connection",&before,vec![Expected(LOCK,0,0,0,0),Expected(ESTABLISH,0,0,0,0)]);
+            let slot = peers.a.connections.get(&peer).unwrap().clone();
+            let held = slot.lock().await;
+            let before = storage::snapshot();
+            let mut read = peers.a.get(&peer,&peers.scope,&id);
+            poll_fn(|cx| { assert!(read.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
+            checks.pending("held live connection mutex",1,vec![(LOCK,1),(ESTABLISH,0)]);
+            drop(read); drop(held);
+            checks.phase("connection mutex cancellation",&before,vec![Expected(LOCK,0,0,1,0),Expected(ESTABLISH,0,0,0,0)]);
+            let before = storage::snapshot();
+            assert_eq!(peers.a.get(&peer,&peers.scope,&id).await.unwrap(),Some(bytes.to_vec()));
+            checks.phase("live connection survives cancelled waiter",&before,vec![Expected(LOCK,1,0,0,0),Expected(ESTABLISH,0,0,0,0)]);
+            let before = storage::snapshot();
+            let mut put = peers.a.put(&blackhole,&peers.scope,&id,bytes);
+            poll_fn(|cx| { assert!(put.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
+            assert!(peers.a.connections.get(&blackhole).unwrap().try_lock().is_err(),"cold PUT holds its existing connection slot");
+            checks.pending("blackhole PUT establishment",1,vec![(LOCK,0),(ESTABLISH,1)]);
+            let mut get = peers.a.get(&blackhole,&peers.scope,&id);
+            poll_fn(|cx| { assert!(get.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
+            checks.pending("blackhole PUT and same-peer GET",2,vec![(LOCK,1),(ESTABLISH,1)]);
+            // A different peer's reused connection remains functional while the
+            // owned blackhole holds establishment and its same-peer GET queues.
+            assert_eq!(peers.a.get(&peer,&peers.scope,&id).await.unwrap(),Some(bytes.to_vec()));
+            drop(get);
+            checks.pending("blackhole PUT after GET cancellation",1,vec![(LOCK,0),(ESTABLISH,1)]);
+            drop(put);
+            checks.phase("overlapping establishment cancellation",&before,vec![Expected(LOCK,2,0,1,0),Expected(ESTABLISH,0,0,1,0)]);
+            assert!(peers.blackhole.local_addr().unwrap().ip().is_loopback());
+            peers.shutdown().await; drop(slot); drop(peers);
+            for unknown_ca in [false,true] {
+                let peers = MetricPeers::new(!unknown_ca,unknown_ca);
+                let rejected = BlockId("rejected".into()); let before = storage::snapshot();
+                assert!(peers.a.put(&peer,&peers.scope,&rejected,bytes).await.is_err());
+                assert!(peers.b_cache.get(&peers.scope,&rejected,IntegrityPolicy::Opaque).is_none(),"rejected identity cannot admit bytes");
+                if !unknown_ca {
+                    checks.phase("mismatched certificate pin",&before,vec![Expected(LOCK,1,0,0,0),Expected(ESTABLISH,0,1,0,0)]);
+                }
+                // Unknown CA can fail after TLS establishment in stream work;
+                // only rejection/no-admission is required for this existing arm.
+                peers.shutdown().await; drop(peers);
+            }
+            println!("peer_stage_behavior_oracles=complete bytes_verified=true denied_identity_admission=false");
+            checks.verify();
+        }).await.expect("bounded isolated peer connection stage qualification");
     }
     #[tokio::test]
     async fn actual_mtls_quic_cache_only_roundtrip_and_partition_denial() {

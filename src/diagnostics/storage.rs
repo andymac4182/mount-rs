@@ -104,8 +104,14 @@ pub enum Operation {
     FoundationDbReadGetRangePage,
     FoundationDbTransactionCommit,
     FoundationDbTransactionOnError,
+    BlobCacheMissAdmissionWait,
+    BlobCacheMissSingleflightWait,
+    BlobCacheRamLookup,
+    BlobCacheDiskLookup,
+    BlobCachePeerConnectionLockWait,
+    BlobCachePeerConnectionEstablish,
 }
-const NAMES: [&str; 85] = [
+const NAMES: [&str; 91] = [
     "metadata.load",
     "metadata.load_if_changed",
     "metadata.snapshot",
@@ -191,6 +197,12 @@ const NAMES: [&str; 85] = [
     "foundationdb.read.get_range_page",
     "foundationdb.transaction.commit",
     "foundationdb.transaction.on_error",
+    "blob_cache.miss.admission_wait",
+    "blob_cache.miss.singleflight_wait",
+    "blob_cache.ram.lookup",
+    "blob_cache.disk.lookup",
+    "blob_cache.peer.connection_lock_wait",
+    "blob_cache.peer.connection_establish",
 ];
 
 /// Fixed serialized row order. Appended families have separate invocation semantics.
@@ -656,7 +668,7 @@ mod tests {
     #[test]
     fn fixed_names_match_appended_sdk_tidb_and_foundationdb_rows() {
         let names = operation_names();
-        assert_eq!(names.len(), 85);
+        assert_eq!(names.len(), 91);
         assert_eq!(
             names[Operation::SdkMetadataLoadIfChanged as usize],
             "sdk.metadata.load_if_changed"
@@ -672,7 +684,7 @@ mod tests {
         assert_eq!(Operation::FoundationDbTransactionCreate as usize, 78);
         assert_eq!(Operation::FoundationDbTransactionOnError as usize, 84);
         assert_eq!(
-            &names[78..],
+            &names[78..85],
             &[
                 "foundationdb.transaction.create",
                 "foundationdb.transaction.closure_attempt",
@@ -681,6 +693,30 @@ mod tests {
                 "foundationdb.read.get_range_page",
                 "foundationdb.transaction.commit",
                 "foundationdb.transaction.on_error",
+            ]
+        );
+        for (offset, operation) in [
+            Operation::BlobCacheMissAdmissionWait,
+            Operation::BlobCacheMissSingleflightWait,
+            Operation::BlobCacheRamLookup,
+            Operation::BlobCacheDiskLookup,
+            Operation::BlobCachePeerConnectionLockWait,
+            Operation::BlobCachePeerConnectionEstablish,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(operation as usize, 85 + offset);
+        }
+        assert_eq!(
+            &names[85..91],
+            &[
+                "blob_cache.miss.admission_wait",
+                "blob_cache.miss.singleflight_wait",
+                "blob_cache.ram.lookup",
+                "blob_cache.disk.lookup",
+                "blob_cache.peer.connection_lock_wait",
+                "blob_cache.peer.connection_establish",
             ]
         );
         assert_eq!(

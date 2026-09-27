@@ -68,7 +68,7 @@ test("preserves audited FoundationDB source coverage and precise returned payloa
   Object.assign(entry, { calls: "1", success: "1", bytes: "9007199254740993", elapsed_ns: "9007199254740995", latency_log2_us: ["1", ...Array(31).fill("0")] })
   const value = projectOwnedLayoutPhaseMetrics(source)
   assert.equal(value.status, "observed")
-  assert.equal(value.storage.entries.length, 85)
+  assert.equal(value.storage.entries.length, 91)
   assert.deepEqual(value.storage.foundationdb_coverage, FOUNDATIONDB_DIAGNOSTIC_COVERAGE)
   assert.deepEqual(value.storage.instrumented_operations.slice(-7), FOUNDATIONDB_DIAGNOSTIC_COVERAGE.operations)
   const projected = value.storage.entries.find((row) => row.name === "foundationdb.read.get")
@@ -78,7 +78,7 @@ test("preserves audited FoundationDB source coverage and precise returned payloa
 })
 test("feature-off fixed FoundationDB rows retain explicit unavailable coverage", () => {
   const value = projectOwnedLayoutPhaseMetrics(model())
-  assert.equal(value.status, "observed"); assert.equal(value.storage.entries.length, 85)
+  assert.equal(value.status, "observed"); assert.equal(value.storage.entries.length, 91)
   assert.deepEqual(value.storage.foundationdb_coverage, FOUNDATIONDB_DIAGNOSTIC_UNAVAILABLE)
   assert.equal(value.storage.instrumented_operations.some((name) => name.startsWith("foundationdb.")), false)
   assert.match(value.storage.scope, /audited_instrumented_operations_separately_declared/u)
@@ -151,6 +151,7 @@ const faults = [
   ["partial FoundationDB source audit", (p) => { p.native.measurement.foundationdb_coverage = structuredClone(FOUNDATIONDB_DIAGNOSTIC_COVERAGE); p.native.measurement.foundationdb_coverage.operations.pop(); return p }],
   ["private FoundationDB source metadata", (p) => { p.native.measurement.foundationdb_coverage.private_key = "PRIVATE_SECRET"; return p }],
   ["legacy78 row inventory", (p) => { p.native.storage.entries.length = 78; p.native.measurement.storage_operations.length = 78; delete p.native.measurement.foundationdb_coverage; return p }],
+  ["legacy85 row inventory", (p) => { p.native.storage.entries.length = 85; p.native.measurement.storage_operations.length = 85; delete p.native.measurement.storage_families.blob_cache; return p }],
   ["cyclic input", (p) => { p.native.storage.circular = p; return p }],
   ["overcap evidence", (p) => { p.native.secret = "PRIVATE".repeat(1_300_000); return p }],
 ]
@@ -306,10 +307,12 @@ const causalProfileNames = [
   "filesystem.refresh.path_structure",
   "filesystem.refresh.read_before",
   "filesystem.refresh.read_after",
+  "blob_cache.ram.hit_bytes",
+  "blob_cache.disk.hit_bytes",
 ]
 
 test("causal core projection preserves fixed prefix, new zero rows and exact decimal strings", () => {
-  assert.equal(causalProfileNames.length, 134)
+  assert.equal(causalProfileNames.length, 136)
   assert.equal(causalProfileNames[46], "provider.inode_serialized_bytes")
   assert.equal(causalProfileNames[47], "filesystem.block_put.initial")
   assert.deepEqual(causalProfileNames.slice(108, 114), [
@@ -326,7 +329,7 @@ test("causal core projection preserves fixed prefix, new zero rows and exact dec
     "compact.structure.delta_capture_nodes",
     "compact.structure.expected_guard_nodes",
   ])
-  assert.deepEqual(causalProfileNames.slice(118), [
+  assert.deepEqual(causalProfileNames.slice(118, 134), [
     "sqlite.compact.authority_query",
     "sqlite.compact.authority_path",
     "sqlite.compact.anchor_query_bytes",
@@ -344,6 +347,7 @@ test("causal core projection preserves fixed prefix, new zero rows and exact dec
     "filesystem.refresh.read_before",
     "filesystem.refresh.read_after",
   ])
+  assert.deepEqual(causalProfileNames.slice(134), ["blob_cache.ram.hit_bytes", "blob_cache.disk.hit_bytes"])
   const source = model()
   source.native.measurement.profile = "existing_core_profile_counters"
   source.native.profile = { entries: causalProfileNames.map((name) => ({ name, calls: "0", elapsed_ns: "0", units: "0" })) }
@@ -351,7 +355,13 @@ test("causal core projection preserves fixed prefix, new zero rows and exact dec
   const value = projectOwnedLayoutPhaseMetrics(source)
   assert.deepEqual(value.core_profile.entries, source.native.profile.entries)
   assert.equal(value.core_profile.status, "observed")
-  assert.equal(value.storage.entries.length, 85)
+  assert.equal(value.storage.entries.length, 91)
+  source.native.profile.entries = source.native.profile.entries.slice(0, 134)
+  const previousCacheSnapshot = projectOwnedLayoutPhaseMetrics(source).core_profile
+  assert.equal(previousCacheSnapshot.status, "observed")
+  assert.equal(previousCacheSnapshot.entries.length, 134)
+  assert.equal(previousCacheSnapshot.entries.some((row) => row.name.startsWith("blob_cache.")), false)
+  assert.match(previousCacheSnapshot.scope, /absent_events_unavailable/u)
   source.native.profile.entries = source.native.profile.entries.slice(0, 118)
   const previousCompactSnapshot = projectOwnedLayoutPhaseMetrics(source).core_profile
   assert.equal(previousCompactSnapshot.status, "observed")
@@ -404,8 +414,22 @@ test("partial projector retains six existing optional compact labels independent
   ]
   const complete = projectOwnedLayoutPhaseMetrics(source).core_profile
   assert.equal(complete.status, "observed")
-  assert.equal(complete.entries.length, 140)
+  assert.equal(complete.entries.length, 142)
   assert.deepEqual(complete.entries, source.native.profile.entries)
+})
+
+test("cache hit-byte events retain zero-byte hits and exact u64 payload units", () => {
+  const source = model()
+  source.native.measurement.profile = "existing_core_profile_counters"
+  source.native.profile = { entries: [
+    { name: "blob_cache.ram.hit_bytes", calls: "1", elapsed_ns: "0", units: "0" },
+    { name: "blob_cache.disk.hit_bytes", calls: "9007199254740993", elapsed_ns: "0", units: "18446744073709551615" },
+  ] }
+  const before = structuredClone(source)
+  const value = projectOwnedLayoutPhaseMetrics(source).core_profile
+  assert.equal(value.status, "observed")
+  assert.deepEqual(value.entries, source.native.profile.entries)
+  assert.deepEqual(source, before)
 })
 
 test("compact and refresh projection retains measured units and inclusive timing as exact strings", () => {

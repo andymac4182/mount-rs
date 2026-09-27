@@ -31,6 +31,9 @@ use tokio::{
 const BOUND: Duration = Duration::from_secs(15);
 const REDIS_BOUND: Duration = Duration::from_secs(3);
 const CLEANUP_BOUND: Duration = Duration::from_secs(3);
+#[path = "support/stage_metrics.rs"]
+#[allow(dead_code)]
+mod stage_metrics;
 fn io_error() -> FsError {
     FsError::new(ErrorCode::Eio)
 }
@@ -1565,6 +1568,398 @@ async fn authenticated_hierarchy_saves_reads_and_reconnects_to_persisted_peer() 
     })
     .await
     .unwrap();
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "isolated process: MOUNT_RS_PROFILE_IO=1, storage/request traces=0"]
+async fn cache_lookup_stage_metrics_preserve_bytes_and_cancellation() {
+    use mount_rs_core::diagnostics::{profile, storage};
+    use stage_metrics::*;
+    fn runtime(pair: &Pair, permits: usize) -> Arc<DistributedRuntime> {
+        DistributedRuntime::new(
+            Arc::new(Hint { placement: false }),
+            pair.counted.clone(),
+            PeerId("b".into()),
+            DistributedConfig {
+                max_inflight_misses: permits,
+                deadline: Duration::from_millis(600),
+                hedge_delay: Duration::from_millis(300),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+    timeout(BOUND, async {
+        assert!(
+            storage::enabled() && profile::enabled(),
+            "parent must isolate the enabled profiler"
+        );
+        let mut checks = Checks::default();
+        let mut pair = Pair::new(8192, 32768);
+        let cleanup = pair.cleanup_completion();
+        let backing = Backing::new();
+        let bytes = b"cache stages\0\xffcomplete binary bytes";
+        let id = backing.seed(bytes);
+        pair.a_cache
+            .as_ref()
+            .unwrap()
+            .insert(&scope(), &id, bytes, IntegrityPolicy::Sha256Prefixed)
+            .unwrap();
+        let rt = runtime(&pair, 128);
+        let store = pair.store(backing.clone(), rt.clone()).await;
+        let (release, _) = tokio::sync::watch::channel(false);
+        let gate = Arc::new(ResponseGate {
+            arrived: Semaphore::new(0),
+            release,
+        });
+        *pair.counted.gate.lock().unwrap() = Some(gate.clone());
+        let entered = Arc::new(AtomicU64::new(0));
+        let before = storage::snapshot();
+        let hits = profile::snapshot();
+        let mut readers = tokio::task::JoinSet::new();
+        for _ in 0..100 {
+            let store = store.clone();
+            let id = id.clone();
+            let entered = entered.clone();
+            readers.spawn(async move {
+                let mut read = std::pin::pin!(store.get(&id));
+                let mut first = true;
+                poll_fn(|cx| {
+                    let state = read.as_mut().poll(cx);
+                    if first {
+                        assert!(state.is_pending(), "every cold reader first polls Pending");
+                        first = false;
+                        entered.fetch_add(1, Ordering::SeqCst);
+                    }
+                    state
+                })
+                .await
+                .unwrap()
+            });
+        }
+        eventually(async || entered.load(Ordering::SeqCst) == 100).await;
+        gate.arrived.acquire().await.unwrap().forget();
+        assert!(readers.try_join_next().is_none());
+        assert_eq!(pair.b_cache.usage().2, 0);
+        assert_eq!(pair.counted.gets.load(Ordering::SeqCst), 1);
+        assert_eq!(backing.reads(), 0);
+        checks.pending(
+            "cold100 held response",
+            99,
+            vec![(FLIGHT, 99), (ADMISSION, 0)],
+        );
+        gate.release.send(true).unwrap();
+        while let Some(read) = readers.join_next().await {
+            assert_eq!(read.unwrap(), bytes);
+        }
+        *pair.counted.gate.lock().unwrap() = None;
+        assert_eq!(pair.counted.gets.load(Ordering::SeqCst), 1);
+        assert_eq!(backing.reads(), 0);
+        assert_eq!(
+            pair.counted.put_snapshot().started,
+            0,
+            "read fixture has no replica placement"
+        );
+        checks.phase(
+            "cold100",
+            &before,
+            vec![
+                Expected(ADMISSION, 100, 0, 0, 0),
+                Expected(FLIGHT, 100, 0, 0, 0),
+                Expected(RAM, 200, 0, 0, 99 * bytes.len() as u64),
+                Expected(DISK, 1, 0, 0, 0),
+                Expected(LOCK, 1, 0, 0, 0),
+                Expected(ESTABLISH, 1, 0, 0, 0),
+            ],
+        );
+        checks.hit("cold100", &hits, RAM_HIT, 99, 99 * bytes.len() as u64);
+        checks.hit("cold100", &hits, DISK_HIT, 0, 0);
+        let before = storage::snapshot();
+        let hits = profile::snapshot();
+        for _ in 0..20 {
+            assert_eq!(store.get(&id).await.unwrap(), bytes);
+        }
+        assert_eq!(
+            (backing.reads(), pair.counted.gets.load(Ordering::SeqCst)),
+            (0, 1)
+        );
+        checks.phase(
+            "warm RAM20",
+            &before,
+            vec![
+                Expected(RAM, 20, 0, 0, 20 * bytes.len() as u64),
+                Expected(DISK, 0, 0, 0, 0),
+                Expected(ADMISSION, 0, 0, 0, 0),
+                Expected(FLIGHT, 0, 0, 0, 0),
+                Expected(LOCK, 0, 0, 0, 0),
+                Expected(ESTABLISH, 0, 0, 0, 0),
+            ],
+        );
+        checks.hit("warm RAM20", &hits, RAM_HIT, 20, 20 * bytes.len() as u64);
+        let empty = backing.seed(b"");
+        pair.b_cache
+            .insert(&scope(), &empty, b"", IntegrityPolicy::Sha256Prefixed)
+            .unwrap();
+        let before = storage::snapshot();
+        let hits = profile::snapshot();
+        assert_eq!(store.get(&empty).await.unwrap(), b"");
+        assert_eq!(
+            (backing.reads(), pair.counted.gets.load(Ordering::SeqCst)),
+            (0, 1)
+        );
+        checks.phase(
+            "empty RAM hit",
+            &before,
+            vec![Expected(RAM, 1, 0, 0, 0), Expected(DISK, 0, 0, 0, 0)],
+        );
+        checks.hit("empty RAM hit", &hits, RAM_HIT, 1, 0);
+        drop(store);
+        rt.shutdown().await;
+        drop(rt);
+
+        for (phase, permits, same_key) in [
+            ("admission cancellation", 1, false),
+            ("singleflight cancellation", 128, true),
+        ] {
+            let leader_bytes = if same_key {
+                b"flight\0leader".as_slice()
+            } else {
+                b"admission\0leader".as_slice()
+            };
+            let leader_id = backing.seed(leader_bytes);
+            let follower_id = if same_key {
+                leader_id.clone()
+            } else {
+                backing.seed(b"different\0follower")
+            };
+            pair.a_cache
+                .as_ref()
+                .unwrap()
+                .insert(
+                    &scope(),
+                    &leader_id,
+                    leader_bytes,
+                    IntegrityPolicy::Sha256Prefixed,
+                )
+                .unwrap();
+            let rt = runtime(&pair, permits);
+            let store = pair.store(backing.clone(), rt.clone()).await;
+            let (release, _) = tokio::sync::watch::channel(false);
+            let gate = Arc::new(ResponseGate {
+                arrived: Semaphore::new(0),
+                release,
+            });
+            *pair.counted.gate.lock().unwrap() = Some(gate.clone());
+            let attempts = pair.counted.gets.load(Ordering::SeqCst);
+            let before = storage::snapshot();
+            let leader_store = store.clone();
+            let read_id = leader_id.clone();
+            let leader = tokio::spawn(async move { leader_store.get(&read_id).await.unwrap() });
+            gate.arrived.acquire().await.unwrap().forget();
+            let mut follower = store.get(&follower_id);
+            poll_fn(|cx| {
+                assert!(follower.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            checks.pending(
+                phase,
+                1,
+                vec![
+                    (if same_key { FLIGHT } else { ADMISSION }, 1),
+                    (if same_key { ADMISSION } else { FLIGHT }, 0),
+                ],
+            );
+            drop(follower);
+            assert_eq!(pair.counted.gets.load(Ordering::SeqCst) - attempts, 1);
+            assert_eq!(backing.reads(), 0);
+            gate.release.send(true).unwrap();
+            assert_eq!(leader.await.unwrap(), leader_bytes);
+            *pair.counted.gate.lock().unwrap() = None;
+            assert_eq!(pair.counted.gets.load(Ordering::SeqCst) - attempts, 1);
+            assert_eq!(backing.reads(), 0);
+            checks.phase(
+                phase,
+                &before,
+                vec![
+                    Expected(
+                        ADMISSION,
+                        if same_key { 2 } else { 1 },
+                        0,
+                        u64::from(!same_key),
+                        0,
+                    ),
+                    Expected(FLIGHT, 1, 0, u64::from(same_key), 0),
+                    Expected(RAM, 3, 0, 0, 0),
+                    Expected(DISK, 1, 0, 0, 0),
+                    Expected(LOCK, 1, 0, 0, 0),
+                    Expected(ESTABLISH, 0, 0, 0, 0),
+                ],
+            );
+            drop(store);
+            rt.shutdown().await;
+            drop(rt);
+        }
+
+        let disk = cache(
+            &pair.dir.as_ref().unwrap().path().join("metrics-disk"),
+            0,
+            32768,
+        );
+        pair.track_cache(&disk);
+        disk.insert(&scope(), &id, bytes, IntegrityPolicy::Sha256Prefixed)
+            .unwrap();
+        let rt = runtime(&pair, 128);
+        let store = Arc::new(
+            CachedBlockStore::new(
+                backing.clone(),
+                disk.clone(),
+                scope().identity,
+                IntegrityPolicy::Sha256Prefixed,
+            )
+            .with_runtime(rt.clone()),
+        );
+        store.prepare_concurrent_backing().await.unwrap();
+        let attempts = pair.counted.gets.load(Ordering::SeqCst);
+        let before = storage::snapshot();
+        let hits = profile::snapshot();
+        assert_eq!(disk.usage().0, 0);
+        assert_eq!(store.get(&id).await.unwrap(), bytes);
+        assert_eq!(disk.usage().0, 0);
+        assert_eq!(
+            (backing.reads(), pair.counted.gets.load(Ordering::SeqCst)),
+            (0, attempts)
+        );
+        checks.phase(
+            "disk-only hit",
+            &before,
+            vec![
+                Expected(RAM, 2, 0, 0, 0),
+                Expected(DISK, 1, 0, 0, bytes.len() as u64),
+                Expected(ADMISSION, 1, 0, 0, 0),
+                Expected(FLIGHT, 1, 0, 0, 0),
+                Expected(LOCK, 0, 0, 0, 0),
+            ],
+        );
+        checks.hit("disk-only hit", &hits, DISK_HIT, 1, bytes.len() as u64);
+        checks.hit("disk-only hit", &hits, RAM_HIT, 0, 0);
+        let mut held = Vec::new();
+        for _ in 0..8 {
+            held.push(disk.io_permit().await.unwrap());
+        }
+        let before = storage::snapshot();
+        let mut read = store.get(&id);
+        poll_fn(|cx| {
+            assert!(read.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        checks.pending("disk permit cancellation", 1, vec![(DISK, 1)]);
+        drop(read);
+        drop(held);
+        assert_eq!(
+            (backing.reads(), pair.counted.gets.load(Ordering::SeqCst)),
+            (0, attempts)
+        );
+        checks.phase(
+            "disk permit cancellation",
+            &before,
+            vec![
+                Expected(DISK, 0, 0, 1, 0),
+                Expected(RAM, 2, 0, 0, 0),
+                Expected(ADMISSION, 1, 0, 0, 0),
+                Expected(FLIGHT, 1, 0, 0, 0),
+            ],
+        );
+        assert_eq!(
+            store.get(&id).await.unwrap(),
+            bytes,
+            "disk still readable after cancellation"
+        );
+        let mut held = Vec::new();
+        for _ in 0..8 {
+            held.push(disk.io_permit().await.unwrap());
+        }
+        let before = storage::snapshot();
+        let hits = profile::snapshot();
+        assert_eq!(
+            store.get(&id).await.unwrap(),
+            bytes,
+            "existing disk deadline falls through to full healthy peer bytes"
+        );
+        assert_eq!(backing.reads(), 0);
+        assert_eq!(pair.counted.gets.load(Ordering::SeqCst) - attempts, 1);
+        drop(held);
+        checks.phase(
+            "disk deadline peer fallback",
+            &before,
+            vec![
+                Expected(DISK, 0, 1, 0, 0),
+                Expected(RAM, 2, 0, 0, 0),
+                Expected(ADMISSION, 1, 0, 0, 0),
+                Expected(FLIGHT, 1, 0, 0, 0),
+                Expected(LOCK, 1, 0, 0, 0),
+                Expected(ESTABLISH, 0, 0, 0, 0),
+            ],
+        );
+        checks.hit("disk deadline peer fallback", &hits, DISK_HIT, 0, 0);
+        checks.hit("disk deadline peer fallback", &hits, RAM_HIT, 0, 0);
+        let attempts = pair.counted.gets.load(Ordering::SeqCst);
+        drop(store);
+        rt.shutdown().await;
+        drop(rt);
+        disk.shutdown().await;
+        drop(disk);
+
+        let path = pair.dir.as_ref().unwrap().path().join("metrics-empty-disk");
+        let seed = cache(&path, 0, 32768);
+        pair.track_cache(&seed);
+        seed.insert(&scope(), &empty, b"", IntegrityPolicy::Sha256Prefixed)
+            .unwrap();
+        seed.shutdown().await;
+        drop(seed);
+        let disk = cache(&path, 0, 32768);
+        pair.track_cache(&disk);
+        let store = CachedBlockStore::new(
+            backing.clone(),
+            disk.clone(),
+            scope().identity,
+            IntegrityPolicy::Sha256Prefixed,
+        );
+        store.prepare_concurrent_backing().await.unwrap();
+        assert!(
+            disk.get_memory(&scope(), &empty, IntegrityPolicy::Sha256Prefixed)
+                .is_none(),
+            "reopened empty block starts disk-only"
+        );
+        let before = storage::snapshot();
+        let hits = profile::snapshot();
+        assert_eq!(store.get(&empty).await.unwrap(), b"");
+        assert_eq!(
+            (backing.reads(), pair.counted.gets.load(Ordering::SeqCst)),
+            (0, attempts)
+        );
+        checks.phase(
+            "empty disk hit",
+            &before,
+            vec![Expected(RAM, 2, 0, 0, 0), Expected(DISK, 1, 0, 0, 0)],
+        );
+        checks.hit("empty disk hit", &hits, DISK_HIT, 1, 0);
+        checks.hit("empty disk hit", &hits, RAM_HIT, 0, 0);
+        drop(store);
+        disk.shutdown().await;
+        drop(disk);
+        pair.shutdown().await;
+        drop(pair);
+        timeout(CLEANUP_BOUND, cleanup)
+            .await
+            .expect("bounded cache owner cleanup")
+            .expect("cleanup observed")
+            .expect("all cache owners released");
+        println!("cache_stage_behavior_oracles=complete coalesced_readers=100 backing_get_calls=0");
+        checks.verify();
+    })
+    .await
+    .expect("bounded isolated cache stage qualification");
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn corrupt_disk_capacity_eviction_and_stale_hint_fall_back_to_exact_backing() {

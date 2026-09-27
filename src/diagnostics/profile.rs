@@ -156,6 +156,8 @@ events! {
     FilesystemRefreshPathStructure => "filesystem.refresh.path_structure",
     FilesystemRefreshReadBefore => "filesystem.refresh.read_before",
     FilesystemRefreshReadAfter => "filesystem.refresh.read_after",
+    BlobCacheRamHitBytes => "blob_cache.ram.hit_bytes",
+    BlobCacheDiskHitBytes => "blob_cache.disk.hit_bytes",
 }
 
 #[derive(Default)]
@@ -796,11 +798,17 @@ mod tests {
                 "filesystem.refresh.read_after",
             ),
         ];
-        assert_eq!(NAMES.len(), 134);
+        assert_eq!(NAMES.len(), 136);
         for (offset, (event, name)) in expected.into_iter().enumerate() {
             assert_eq!(event as usize, 47 + offset);
             assert_eq!(NAMES[47 + offset], name);
         }
+        assert_eq!(Event::BlobCacheRamHitBytes as usize, 134);
+        assert_eq!(Event::BlobCacheDiskHitBytes as usize, 135);
+        assert_eq!(
+            &NAMES[134..136],
+            &["blob_cache.ram.hit_bytes", "blob_cache.disk.hit_bytes",]
+        );
     }
 
     #[test]

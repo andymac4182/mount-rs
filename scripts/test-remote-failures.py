@@ -9,6 +9,77 @@ Postterminal group signals provide containment, not fixture graceful-cleanup pro
 import hashlib,json,os,pathlib,re,selectors,signal,stat,subprocess,sys,tempfile,time,shutil
 BASE=pathlib.Path(__file__).resolve().parent.parent
 COMMANDS={'cachetests': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--all-targets', '--locked', '--offline'], 180, 0, 0), 'redisfault': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'distributed_failure', '--locked', '--offline', '--', '--ignored', '--exact', 'redis_directory_real_peer_failures_preserve_exact_backing', '--test-threads=1', '--nocapture'], 180, 0, 0), 'rediscleanup': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'distributed_failure', '--locked', '--offline', '--', '--ignored', '--exact', 'cancelled_redis_fixture_reaps_owned_child_before_removing_directory', '--test-threads=1', '--nocapture'], 180, 0, 0), 'wsloss': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-remote-client', '--test', 'quic_mount', '--locked', '--offline', '--', '--ignored', '--exact', 'websocket_sqlite_commit_survives_lost_wire_reply_without_replay', '--test-threads=1', '--nocapture'], 180, 0, 0), 'remotetests': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-remote-client', '--all-targets', '--locked', '--offline'], 180, 0, 0), 'faultclippy': (['./scripts/cargo-shared', 'clippy', '-p', 'mount-rs-blob-cache', '-p', 'mount-rs-remote-client', '--all-targets', '--locked', '--offline', '--', '-D', 'warnings'], 180, 0, 0), 'fmt': (['./scripts/cargo-shared', 'fmt', '--all', '--', '--check'], 120, 0, 0)}
+COMMANDS.update({
+    'clidiagnostics': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-cli', '--features', 'io-profiling', '--lib', '--locked', '--offline', 'remote::diagnostics::tests::'], 180, 1, 0),
+    'clicompact': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-cli', '--features', 'local-oidc-fixture,io-profiling', '--test', 'configured_remote_compact', '--locked', '--offline', '--', '--exact', 'configured_binary_selects_mrc5_for_signed_quic_and_websocket_reopen', '--test-threads=1', '--nocapture'], 180, 1, 0),
+    'napimetrics': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-napi', '--lib', '--locked', '--offline'], 180, 1, 0),
+    'consumerclippy': (['./scripts/cargo-shared', 'clippy', '-p', 'mount-rs-cli', '-p', 'mount-rs-napi', '--features', 'mount-rs-cli/local-oidc-fixture,mount-rs-cli/io-profiling', '--all-targets', '--locked', '--offline', '--', '-D', 'warnings'], 180, 0, 0),
+    'cachemetricstrace': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'distributed_failure', '--locked', '--offline', '--', '--ignored', '--exact', 'cache_lookup_stage_metrics_preserve_bytes_and_cancellation', '--test-threads=1', '--nocapture'], 180, 1, 1),
+    'cacheconsumerred': (['fnm', 'exec', '--using', 'v24.18.0', 'node', '--test', '--test-name-pattern=old 85-row observation|cache hit-byte events|causal exact old134', 'benchmarks/storage/foundationdb-diagnostics.test.mjs', 'benchmarks/storage/owned-layout-metrics.test.mjs', 'scripts/verify-owned-backing-pilot.test.mjs'], 180, 0, 0),
+    'cachemetrics': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'distributed_failure', '--locked', '--offline', '--', '--ignored', '--exact', 'cache_lookup_stage_metrics_preserve_bytes_and_cancellation', '--test-threads=1', '--nocapture'], 180, 1, 0),
+    'peermetrics': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--lib', '--locked', '--offline', '--', '--ignored', '--exact', 'peer::tests::peer_connection_stage_metrics_preserve_bytes_and_cancellation', '--test-threads=1', '--nocapture'], 180, 1, 0),
+    'cacheprofileoff': (['./scripts/cargo-shared', 'run', '--locked', '--offline', '-p', 'mount-rs-blob-cache', '--example', 'cache_profile'], 180, 0, 0),
+    'cacheprofileon': (['./scripts/cargo-shared', 'run', '--locked', '--offline', '-p', 'mount-rs-blob-cache', '--example', 'cache_profile'], 180, 1, 0),
+    'storagealloc': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-core', '--test', 'storage_diagnostics_allocations', '--locked', '--offline', '--', '--ignored', '--exact', 'warmed_core_spans_record_without_added_allocations', '--test-threads=1', '--nocapture'], 180, 1, 0),
+    'corealloc': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-core', '--test', 'filesystem_causal_profile_allocations', '--locked', '--offline', '--', '--ignored', '--exact', 'warmed_causal_profile_rows_record_without_added_allocations', '--test-threads=1', '--nocapture'], 180, 1, 0),
+    'coremetrics': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-core', '--lib', '--locked', '--offline', 'diagnostics::'], 180, 1, 0),
+    'cachemetricsclippy': (['./scripts/cargo-shared', 'clippy', '-p', 'mount-rs-core', '-p', 'mount-rs-blob-cache', '--all-targets', '--locked', '--offline', '--', '-D', 'warnings'], 180, 0, 0),
+    'cacheconsumers': (['fnm', 'exec', '--using', 'v24.18.0', 'node', '--test', 'benchmarks/storage/test.mjs', 'benchmarks/storage/foundationdb-diagnostics.test.mjs', 'benchmarks/storage/owned-layout-metrics.test.mjs', 'benchmarks/storage/owned-backing-pilot.test.mjs', 'scripts/verify-owned-backing-pilot.test.mjs'], 180, 0, 0),
+})
+EXACT_CASES = {
+    'clicompact': 'configured_binary_selects_mrc5_for_signed_quic_and_websocket_reopen',
+    'cachemetricstrace': 'cache_lookup_stage_metrics_preserve_bytes_and_cancellation',
+    'redisfault': 'redis_directory_real_peer_failures_preserve_exact_backing',
+    'rediscleanup': 'cancelled_redis_fixture_reaps_owned_child_before_removing_directory',
+    'wsloss': 'websocket_sqlite_commit_survives_lost_wire_reply_without_replay',
+    'cachemetrics': 'cache_lookup_stage_metrics_preserve_bytes_and_cancellation',
+    'peermetrics': 'peer::tests::peer_connection_stage_metrics_preserve_bytes_and_cancellation',
+    'storagealloc': 'warmed_core_spans_record_without_added_allocations',
+    'corealloc': 'warmed_causal_profile_rows_record_without_added_allocations',
+}
+EXPECTED_SUITES = {
+    'clidiagnostics': tuple('remote::diagnostics::tests::'+name for name in (
+        'typed_process_banks_preserve_registry_scopes_and_raw_u64',
+        'disabled_process_banks_do_not_capture_or_export_zero_snapshots',
+        'only_exact_profile_one_selects_a_compiled_service_observer',
+        'generic_encoding_preserves_raw_u64_above_javascript_integer_precision',
+        'full_current_banks_with_maximum_u64_fit_existing_record_limit',
+        'oversized_serializable_value_emits_only_a_bounded_incomplete_record',
+        'serialization_failure_uses_a_fixed_incomplete_record',
+    )),
+}
+def named_suite_passed(output, names):
+    count=len(names)
+    return bool(
+        re.search(r'^running '+str(count)+r' tests$', output, re.M)
+        and re.search(r'^test result: ok\. '+str(count)+r' passed; 0 failed; 0 ignored;', output, re.M)
+        and all(re.search(r'^test '+re.escape(name)+r' \.\.\. ok$', output, re.M) for name in names)
+    )
+
+
+def cache_slow_logging_records(output):
+    names = {
+        'blob_cache.miss.admission_wait', 'blob_cache.miss.singleflight_wait',
+        'blob_cache.ram.lookup', 'blob_cache.disk.lookup',
+        'blob_cache.peer.connection_lock_wait', 'blob_cache.peer.connection_establish',
+    }
+    records = []
+    for line in output.splitlines():
+        if not line.startswith('MOUNT_RS_STORAGE_SLOW'):
+            continue
+        match = re.fullmatch(r'MOUNT_RS_STORAGE_SLOW operation=([^ ]+) outcome=(success|error|cancelled) elapsed_us=([0-9]{1,20})', line)
+        if match is None or match[1] not in names or len((line+'\n').encode()) > 512:
+            return None
+        elapsed = int(match[3])
+        if not 100000 <= elapsed <= (1 << 64)-1:
+            return None
+        records.append({'operation': match[1], 'outcome': match[2], 'elapsed_us': elapsed})
+    if not 1 <= len(records) <= 16:
+        return None
+    # Earlier slow stages may legitimately consume the shared record budget.
+    return records
+
+
 def exact_case_passed(output, selected_test):
     # Nocapture output may separate the selected name and its trailing "ok".
     # The fixed --exact command plus one executed, nonignored passing case is
@@ -32,7 +103,7 @@ def terminal_eperm_settled(reaped, group_absent, eof, deadline, lifecycle_unknow
 def main():
     kind=sys.argv[1];command,limit,profile,trace=COMMANDS[kind]
     assert os.name=='posix' and hasattr(os,'waitid') and hasattr(os,'WNOWAIT'), 'Unix ownership observer required'
-    FAULT_KINDS={'cachetests','redisfault','rediscleanup','wsloss','remotetests','faultclippy','fmt'}
+    FAULT_KINDS={'cachetests','redisfault','rediscleanup','wsloss','remotetests','faultclippy','fmt','cachemetrics','peermetrics','cacheprofileoff','cacheprofileon','storagealloc','corealloc','coremetrics','cachemetricsclippy','cacheconsumers','cacheconsumerred','clidiagnostics','clicompact','napimetrics','consumerclippy','cachemetricstrace'}
     assert kind in FAULT_KINDS, 'fixed fault qualification commands only'
     root=pathlib.Path(tempfile.mkdtemp(prefix='mount-rs-owned-fault-'+kind+'-',dir=os.environ.get('MOUNT_RS_FAILURE_EVIDENCE_ROOT',tempfile.gettempdir())));os.chmod(root,0o700)
     fixture_tmp=root/'fixtures';fixture_tmp.mkdir(mode=0o700)
@@ -47,7 +118,7 @@ def main():
     def write(name,value):
      data=(json.dumps(value,sort_keys=True,indent=2)+'\n').encode();fd=os.open(root/name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600);assert os.write(fd,data)==len(data);os.close(fd);return hashlib.sha256(data).hexdigest()
     def frozen():
-     if kind in {'node','processnode','diagnosticnode'}:
+     if kind in {'node','processnode','diagnosticnode','cacheconsumers','cacheconsumerred'}:
       pending=[BASE/v for v in command if v.endswith('.mjs')];found=set()
       while pending:
        path=pending.pop().resolve(strict=True);assert path.is_relative_to(BASE) and path not in [BASE]
@@ -55,6 +126,8 @@ def main():
        found.add(path)
        for spec in re.findall(r'(?:from\s+|import\s*\(?\s*)[\"\x27](\.[^\"\x27]+\.mjs)[\"\x27]',path.read_text()):pending.append(path.parent/spec)
       paths=sorted(found | {BASE/'benchmarks/storage/capture-native.cjs',BASE/'bindings/mount-rs-napi/index.js'})
+      paths.extend([pathlib.Path(__file__).resolve(),BASE/'scripts/test-remote-failures-controls.py',BASE/'.github/workflows/ci.yml',BASE/'.github/workflows/remote-drives.yml',BASE/'crates/mount-rs-blob-cache/tests/support/stage_metrics.rs'])
+      paths.extend(BASE/v for v in ['scripts/test-foundationdb.sh','tests/ozone/production-rollout-contract.json','scripts/test-tidb.sh','scripts/test-rustfs.sh'])
      else:
       tracked=subprocess.check_output(['git','ls-files','-z'],cwd=BASE).decode().split('\0')
       paths=[BASE/v for v in tracked if v and (v.endswith(('.rs','.toml','.lock')) or v=='scripts/cargo-shared')]
@@ -63,10 +136,17 @@ def main():
       paths.append(BASE/'scripts/test-remote-failures-controls.py')
       paths.append(BASE/'.github/workflows/remote-drives.yml')
       paths.append(BASE/'crates/mount-rs-remote-client/tests/quic_mount_reply_loss/mod.rs')
+      paths.append(BASE/'crates/mount-rs-blob-cache/tests/support/stage_metrics.rs')
       paths.extend(BASE/v for v in ['filesystems/mount-rs-chunked/src/causal_metrics.rs','filesystems/mount-rs-chunked/tests/filesystem_causal_metrics.rs','tests/filesystem_causal_profile_allocations.rs','filesystems/mount-rs-chunked/tests/compact_snapshot_revision.rs','filesystems/mount-rs-chunked/src/create_guard_metrics_tests.rs','filesystems/mount-rs-chunked/src/create_rebase.rs','filesystems/mount-rs-chunked/tests/current_path_create_rebase.rs'] if (BASE/v).is_file())
+     paths.append(BASE/'scripts/cargo-shared-env.sh')
      return {str(p.relative_to(BASE)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(set(paths))}
     before=frozen();write('source-before.json',before)
     env=os.environ.copy();env.update({'MOUNT_RS_PROFILE_IO':str(profile),'MOUNT_RS_TRACE_STORAGE':str(trace),'MOUNT_RS_TRACE_REQUESTS':'0','CARGO_TARGET_DIR':os.environ.get('CARGO_TARGET_DIR',os.environ.get('MOUNT_RS_CARGO_TARGET_DIR',str(root/'cargo-target')))})
+    if kind in {'cacheconsumers','cacheconsumerred'}:
+     # Pure suites forbid loading a real addon or latching native profiling.
+     for key in ['MOUNT_RS_PROFILE_IO','MOUNT_RS_TRACE_STORAGE','MOUNT_RS_TRACE_REQUESTS','NAPI_RS_FORCE_WASI','NAPI_RS_WASI_FLAVOR','NODE_PATH']:
+      env.pop(key,None)
+     env['NAPI_RS_NATIVE_LIBRARY_PATH']=str(BASE/'benchmarks/storage/capture-native.cjs')
     env['TMPDIR']=str(fixture_tmp)
     env.pop('MOUNT_RS_CACHE_REDIS_SERVER',None)
     if redis_pin is not None:env['MOUNT_RS_CACHE_REDIS_SERVER']=redis_pin['path']
@@ -207,12 +287,21 @@ def main():
     try:
      for name,item in logs.items():
       raw=(root/(name+'.log')).read_bytes();item.update({'bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest(),'path':str(root/(name+'.log'))})
-     selected_test={'redisfault':'redis_directory_real_peer_failures_preserve_exact_backing','rediscleanup':'cancelled_redis_fixture_reaps_owned_child_before_removing_directory','wsloss':'websocket_sqlite_commit_survives_lost_wire_reply_without_replay'}.get(kind)
+     selected_test=EXACT_CASES.get(kind)
      selected_test_pass=None
      if selected_test is not None:
       output=(root/'stdout.log').read_text(errors='replace')
       selected_test_pass=exact_case_passed(output, selected_test)
       if not selected_test_pass:unknown.append('exact_named_case_not_observed_passed')
+     selected_suite=EXPECTED_SUITES.get(kind)
+     selected_suite_pass=None
+     if selected_suite is not None:
+      selected_suite_pass=named_suite_passed((root/'stdout.log').read_text(),selected_suite)
+      if not selected_suite_pass:unknown.append('named_suite_not_observed_passed')
+     cache_slow_records=None
+     if kind=='cachemetricstrace':
+      cache_slow_records=cache_slow_logging_records((root/'stderr.log').read_text(errors='replace'))
+      if cache_slow_records is None:unknown.append('cache_slow_logging_not_observed_valid')
      after=frozen();write('source-after.json',after)
      redis_unchanged=None if redis_pin is None else redis_path.is_file() and redis_path.stat().st_size==redis_pin['size'] and hashlib.sha256(redis_path.read_bytes()).hexdigest()==redis_pin['sha256']
      if redis_unchanged is False:unknown.append('redis_executable_changed')
@@ -222,7 +311,7 @@ def main():
       assert shutil.rmtree.avoids_symlink_attacks, 'require fd-based removal of owned fixture root'
       shutil.rmtree(fixture_tmp);fixture_removed=not fixture_tmp.exists()
      else:unknown.append('fixture_directory_retained_unknown_process_ownership')
-     receipt={'schema':'mount-rs.causal-bounded-local-gate.v2','kind':kind,'command':command,'elapsed_seconds':time.monotonic()-start,'parent_limit_seconds':limit,'cleanup_reserved_seconds':5,'returncode':code,'owned_pid':owned,'new_session':True,'wnowait_owner_pin':True,'signal_decisions_finished':signal_decisions_finished,'owned_child_reaped':code is not None,'owned_group_absent':absent,'pipes_eof':eof,'deadline_exceeded':deadline,'signals':signals,'sticky_unknown':unknown,'primary_failure':None if primary is None else {'type':type(primary).__name__,'errno':getattr(primary,'errno',None)},'logs':logs,'source_count':len(before),'source_unchanged':before==after,'head':subprocess.check_output(['git','rev-parse','HEAD'],cwd=BASE).decode().strip(),'runner_sha256':hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest(),'profile':env.get('MOUNT_RS_PROFILE_IO'),'trace':env.get('MOUNT_RS_TRACE_STORAGE'),'native_capture_binding':str(BASE/'benchmarks/storage/capture-native.cjs') if kind in {'node','processnode','diagnosticnode'} else None,'automatic_retry':False,'selected_test':selected_test,'exact_named_case_observed_passed':selected_test_pass,'redis_executable':redis_pin,'redis_executable_unchanged':redis_unchanged,'fixture_tmpdir':str(fixture_tmp),'fixture_children_before_postprocess_removal':fixture_children,'fixture_tmpdir_removed_after_reap_group_absence_eof':fixture_removed,'postterminal_group_sweep':'containment_only; fixture_cleanup_requires_in_test_assertions'}
+     receipt={'schema':'mount-rs.causal-bounded-local-gate.v2','kind':kind,'command':command,'elapsed_seconds':time.monotonic()-start,'parent_limit_seconds':limit,'cleanup_reserved_seconds':5,'returncode':code,'owned_pid':owned,'new_session':True,'wnowait_owner_pin':True,'signal_decisions_finished':signal_decisions_finished,'owned_child_reaped':code is not None,'owned_group_absent':absent,'pipes_eof':eof,'deadline_exceeded':deadline,'signals':signals,'sticky_unknown':unknown,'primary_failure':None if primary is None else {'type':type(primary).__name__,'errno':getattr(primary,'errno',None)},'logs':logs,'source_count':len(before),'source_unchanged':before==after,'head':subprocess.check_output(['git','rev-parse','HEAD'],cwd=BASE).decode().strip(),'runner_sha256':hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest(),'profile':env.get('MOUNT_RS_PROFILE_IO'),'trace':env.get('MOUNT_RS_TRACE_STORAGE'),'native_capture_binding':str(BASE/'benchmarks/storage/capture-native.cjs') if kind in {'node','processnode','diagnosticnode','cacheconsumers','cacheconsumerred'} else None,'automatic_retry':False,'cache_slow_records':cache_slow_records,'selected_suite':selected_suite,'named_suite_observed_passed':selected_suite_pass,'selected_test':selected_test,'exact_named_case_observed_passed':selected_test_pass,'redis_executable':redis_pin,'redis_executable_unchanged':redis_unchanged,'fixture_tmpdir':str(fixture_tmp),'fixture_children_before_postprocess_removal':fixture_children,'fixture_tmpdir_removed_after_reap_group_absence_eof':fixture_removed,'postterminal_group_sweep':'containment_only; fixture_cleanup_requires_in_test_assertions'}
      sha=write('receipt.json',receipt);print(json.dumps({'path':str(root/'receipt.json'),'sha256':sha,'returncode':code,'elapsed_seconds':receipt['elapsed_seconds'],'source_unchanged':before==after,'unknown':unknown,'group_absent':absent,'pipes_eof':eof}))
     except BaseException:
      if primary is not None:raise primary
