@@ -128,6 +128,12 @@ const CORE_NAMES = new Set([
   "filesystem.mutation.request.receiver_closed",
   "filesystem.mutation.request.error",
   "filesystem.mutation.request.reply_sent",
+  "filesystem.mutation.create_guard.evaluated",
+  "filesystem.mutation.create_guard.passed",
+  "filesystem.mutation.create_guard.conflict",
+  "filesystem.mutation.create_guard.revision_mismatch",
+  "filesystem.mutation.create_guard.allocation_mismatch",
+  "filesystem.mutation.create_guard.path_present",
 ])
 const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value)
 const fields = (source, names) => Object.fromEntries(names.map((name) => [name, source[name]]))

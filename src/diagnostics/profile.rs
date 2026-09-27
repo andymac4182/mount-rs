@@ -130,6 +130,12 @@ events! {
     FilesystemMutationRequestReceiverClosed => "filesystem.mutation.request.receiver_closed",
     FilesystemMutationRequestError => "filesystem.mutation.request.error",
     FilesystemMutationRequestReplySent => "filesystem.mutation.request.reply_sent",
+    FilesystemMutationCreateGuardEvaluated => "filesystem.mutation.create_guard.evaluated",
+    FilesystemMutationCreateGuardPassed => "filesystem.mutation.create_guard.passed",
+    FilesystemMutationCreateGuardConflict => "filesystem.mutation.create_guard.conflict",
+    FilesystemMutationCreateGuardRevisionMismatch => "filesystem.mutation.create_guard.revision_mismatch",
+    FilesystemMutationCreateGuardAllocationMismatch => "filesystem.mutation.create_guard.allocation_mismatch",
+    FilesystemMutationCreateGuardPathPresent => "filesystem.mutation.create_guard.path_present",
 }
 
 #[derive(Default)]
@@ -668,8 +674,32 @@ mod tests {
                 Event::FilesystemMutationRequestReplySent,
                 "filesystem.mutation.request.reply_sent",
             ),
+            (
+                Event::FilesystemMutationCreateGuardEvaluated,
+                "filesystem.mutation.create_guard.evaluated",
+            ),
+            (
+                Event::FilesystemMutationCreateGuardPassed,
+                "filesystem.mutation.create_guard.passed",
+            ),
+            (
+                Event::FilesystemMutationCreateGuardConflict,
+                "filesystem.mutation.create_guard.conflict",
+            ),
+            (
+                Event::FilesystemMutationCreateGuardRevisionMismatch,
+                "filesystem.mutation.create_guard.revision_mismatch",
+            ),
+            (
+                Event::FilesystemMutationCreateGuardAllocationMismatch,
+                "filesystem.mutation.create_guard.allocation_mismatch",
+            ),
+            (
+                Event::FilesystemMutationCreateGuardPathPresent,
+                "filesystem.mutation.create_guard.path_present",
+            ),
         ];
-        assert_eq!(NAMES.len(), 108);
+        assert_eq!(NAMES.len(), 114);
         for (offset, (event, name)) in expected.into_iter().enumerate() {
             assert_eq!(event as usize, 47 + offset);
             assert_eq!(NAMES[47 + offset], name);

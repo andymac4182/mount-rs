@@ -120,6 +120,12 @@ const profileNames = [
   "filesystem.mutation.request.receiver_closed",
   "filesystem.mutation.request.error",
   "filesystem.mutation.request.reply_sent",
+  "filesystem.mutation.create_guard.evaluated",
+  "filesystem.mutation.create_guard.passed",
+  "filesystem.mutation.create_guard.conflict",
+  "filesystem.mutation.create_guard.revision_mismatch",
+  "filesystem.mutation.create_guard.allocation_mismatch",
+  "filesystem.mutation.create_guard.path_present",
 ]
 const roles = ["pd-1", "pd-2", "pd-3", "tikv-1", "tikv-2", "tikv-3", "tidb", "rustfs-service"]
 const rawNames = ["put_opts.block_create", "get.block_read", "body_read.block_read", "get.conflict_verify", "body_read.conflict_verify", "get.migration", "body_read.migration", "head.direct_delete", "delete.direct", "delete.reconcile"]
@@ -281,19 +287,29 @@ test("the actual CLI returns a bounded fixed verdict and rejects untrusted build
 test("causal exact contract retains the old prefix and accepts zero new rows losslessly", () => {
   const { pilot, build } = model()
   const entries = pilot.native_phases.phases[0].core_profile.entries
-  assert.equal(entries.length, 108)
+  assert.equal(entries.length, 114)
   assert.equal(entries[46].name, "provider.inode_serialized_bytes")
   assert.equal(entries[47].name, "filesystem.block_put.initial")
+  assert.deepEqual(entries.slice(108).map((row) => row.name), [
+    "filesystem.mutation.create_guard.evaluated",
+    "filesystem.mutation.create_guard.passed",
+    "filesystem.mutation.create_guard.conflict",
+    "filesystem.mutation.create_guard.revision_mismatch",
+    "filesystem.mutation.create_guard.allocation_mismatch",
+    "filesystem.mutation.create_guard.path_present",
+  ])
   for (const row of entries.slice(47)) Object.assign(row, { calls: "0", elapsed_ns: "0", units: "0" })
   entries[47].units = "9007199254740993"
   assert.equal(verifyPilot(pilot, build).status, "verified")
   assert.equal(entries[47].units, "9007199254740993")
 })
-for (const kind of ["old47", "missing", "duplicate", "unknown"]) test(`causal exact ${kind} rows reject qualification`, () => {
+for (const kind of ["old47", "old108", "missing", "missing_create_guard", "duplicate", "unknown"]) test(`causal exact ${kind} rows reject qualification`, () => {
   const { pilot, build } = model()
   const rows = pilot.native_phases.phases[0].core_profile.entries
   if (kind === "old47") rows.splice(47)
+  else if (kind === "old108") rows.splice(108)
   else if (kind === "missing") rows.splice(47, 1)
+  else if (kind === "missing_create_guard") rows.splice(110, 1)
   else if (kind === "duplicate") rows[48] = { ...rows[47] }
   else rows[47].name = "PRIVATE_CAUSAL_LABEL"
   assert.throws(() => verifyPilot(pilot, build), { code: "pilot_evidence_rejected", reason: "native_evidence" })

@@ -48,6 +48,23 @@ fn calls(snapshot: &Snapshot, name: &str) -> u64 {
         .calls
 }
 
+fn guard_delta(before: &Snapshot, after: &Snapshot, name: &str) -> (u64, u64) {
+    let find = |snapshot: &Snapshot| {
+        let entry = snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .unwrap_or_else(|| panic!("missing fresh-create guard row {name}"));
+        (entry.calls, entry.units)
+    };
+    let old = find(before);
+    let new = find(after);
+    (
+        new.0.checked_sub(old.0).expect("monotonic calls"),
+        new.1.checked_sub(old.1).expect("monotonic units"),
+    )
+}
+
 async fn read_created(fs: &ChunkedFs<SqliteMetadataStore, SqliteBlockStore>) -> Vec<u8> {
     let reader = fs.open("/created", "r", 0).await.unwrap();
     let mut bytes = Vec::new();
@@ -74,7 +91,7 @@ fn unchanged_compact_refresh_preserves_prepared_create() {
     let volume = PrivateVolume::new();
     let metadata_path = volume.0.join("metadata.sqlite");
     let blocks_path = volume.0.join("blocks.sqlite");
-    let (conflicts, replays, committed, replies) = block_on(async {
+    let (conflicts, replays, committed, replies, before, after) = block_on(async {
         let fs = ChunkedFs::open(
             SqliteMetadataStore::open(&metadata_path).unwrap(),
             SqliteBlockStore::open(&blocks_path).unwrap(),
@@ -115,7 +132,7 @@ fn unchanged_compact_refresh_preserves_prepared_create() {
             b"complete acknowledged bytes",
         );
         reopened.shutdown().await.unwrap();
-        (conflicts, replays, committed, replies)
+        (conflicts, replays, committed, replies, before, after)
     });
     assert_eq!(
         conflicts, 0,
@@ -127,6 +144,46 @@ fn unchanged_compact_refresh_preserves_prepared_create() {
     );
     assert_eq!(committed, 1, "the prepared request must commit directly");
     assert_eq!(replies, 1, "the committed request must deliver its reply");
+    assert_eq!(
+        guard_delta(
+            &before,
+            &after,
+            "filesystem.mutation.create_guard.evaluated"
+        ),
+        (1, 1)
+    );
+    assert_eq!(
+        guard_delta(&before, &after, "filesystem.mutation.create_guard.passed"),
+        (1, 1)
+    );
+    assert_eq!(
+        guard_delta(&before, &after, "filesystem.mutation.create_guard.conflict"),
+        (0, 0)
+    );
+    assert_eq!(
+        guard_delta(
+            &before,
+            &after,
+            "filesystem.mutation.create_guard.revision_mismatch"
+        ),
+        (0, 0)
+    );
+    assert_eq!(
+        guard_delta(
+            &before,
+            &after,
+            "filesystem.mutation.create_guard.allocation_mismatch"
+        ),
+        (0, 0)
+    );
+    assert_eq!(
+        guard_delta(
+            &before,
+            &after,
+            "filesystem.mutation.create_guard.path_present"
+        ),
+        (0, 0)
+    );
 }
 
 #[cfg(unix)]
@@ -338,6 +395,46 @@ fn peer_selected_inode_update_invalidates_prepared_create() {
             assert_file_bytes(&reopened, "/seed", b"PEER0000").await;
             assert_file_bytes(&reopened, "/created", b"complete acknowledged bytes").await;
             reopened.shutdown().await.unwrap();
+            assert_eq!(
+                guard_delta(
+                    &before,
+                    &after,
+                    "filesystem.mutation.create_guard.evaluated"
+                ),
+                (1, 1)
+            );
+            assert_eq!(
+                guard_delta(&before, &after, "filesystem.mutation.create_guard.passed"),
+                (0, 0)
+            );
+            assert_eq!(
+                guard_delta(&before, &after, "filesystem.mutation.create_guard.conflict"),
+                (1, 1)
+            );
+            assert_eq!(
+                guard_delta(
+                    &before,
+                    &after,
+                    "filesystem.mutation.create_guard.revision_mismatch"
+                ),
+                (1, 1)
+            );
+            assert_eq!(
+                guard_delta(
+                    &before,
+                    &after,
+                    "filesystem.mutation.create_guard.allocation_mismatch"
+                ),
+                (0, 0)
+            );
+            assert_eq!(
+                guard_delta(
+                    &before,
+                    &after,
+                    "filesystem.mutation.create_guard.path_present"
+                ),
+                (0, 0)
+            );
         },
         async {
             async_io::Timer::after(Duration::from_secs(10)).await;

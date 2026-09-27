@@ -649,6 +649,15 @@ test("clean committed core row coverage excludes protected compact additions and
   // Independent frozen committed profile contract, rather than the dirty
   // recorder or the projection's own label list.
   const committedNames = modelCommittedProfileNames
+  assert.equal(committedNames.length, 114)
+  assert.deepEqual(committedNames.slice(108), [
+    "filesystem.mutation.create_guard.evaluated",
+    "filesystem.mutation.create_guard.passed",
+    "filesystem.mutation.create_guard.conflict",
+    "filesystem.mutation.create_guard.revision_mismatch",
+    "filesystem.mutation.create_guard.allocation_mismatch",
+    "filesystem.mutation.create_guard.path_present",
+  ])
   const fixture = resultFixture()
   fixture.providers[0].storageDiagnostics = { phases: [{ name: "workload-4096bytes", native: { complete: false,
     profile: { entries: [...committedNames.map((name) => ({ name, calls: "0", elapsed_ns: "0", units: "0" })),
@@ -664,6 +673,12 @@ test("clean committed core row coverage excludes protected compact additions and
   assert.equal(duplicate.core_profile.status, "unavailable_duplicate_required_labels")
   assert.equal(duplicate.core_profile.entries.find((row) => row.name === "filesystem.gate_wait").calls, null)
   assert.equal(duplicate.projected_component_complete, false)
+  fixture.providers[0].storageDiagnostics.phases[0].native.profile.entries = committedNames.slice(0, 108).map((name) => ({ name, calls: "0", elapsed_ns: "0", units: "0" }))
+  const oldSnapshot = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1]
+  assert.equal(oldSnapshot.core_profile.status, "unavailable")
+  assert.equal(oldSnapshot.core_profile.entries.length, 114)
+  assert.equal(oldSnapshot.core_profile.entries[108].calls, null)
+  assert.equal(oldSnapshot.projected_component_complete, false)
   fixture.providers[0].storageDiagnostics.phases[0].native.r2 = { instances: Array.from({ length: 17 }, (_, index) => ({ id: String(index + 1) })) }
   const capped = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1]
   assert.deepEqual(capped.raw_projection, { status: "truncated_unavailable", instance_count: 17, omitted_instances: 1 })
@@ -783,6 +798,12 @@ const modelCommittedProfileNames = [
   "filesystem.mutation.request.receiver_closed",
   "filesystem.mutation.request.error",
   "filesystem.mutation.request.reply_sent",
+  "filesystem.mutation.create_guard.evaluated",
+  "filesystem.mutation.create_guard.passed",
+  "filesystem.mutation.create_guard.conflict",
+  "filesystem.mutation.create_guard.revision_mismatch",
+  "filesystem.mutation.create_guard.allocation_mismatch",
+  "filesystem.mutation.create_guard.path_present",
 ]
 
 function modelNativeSnapshot(live) {
@@ -973,7 +994,7 @@ test("causal pilot requires new rows without manufacturing old-snapshot zeros", 
     profile: { entries: modelCommittedProfileNames.slice(0, 47).map((name) => ({ name, calls: "0", elapsed_ns: "0", units: "0" })) } } }] }
   const core = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1].core_profile
   assert.equal(core.status, "unavailable")
-  assert.equal(core.entries.length, 108)
+  assert.equal(core.entries.length, 114)
   assert.equal(core.entries[46].name, "provider.inode_serialized_bytes")
   assert.equal(core.entries[47].name, "filesystem.block_put.initial")
   assert.equal(core.entries[47].calls, null)

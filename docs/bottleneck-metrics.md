@@ -943,15 +943,16 @@ cleanup controls establish correctness, not TiDB throughput.
 
 ## Filesystem causal profile rows
 
-The opt-in core profile contract retains its original 47 names and appends 61
-fixed causal rows, for 108 total. This is separate from the unchanged 85-row
+The opt-in core profile contract retains its original 47 names and appends 67
+fixed causal rows, for 114 total. The latest six rows preserve the preceding
+108-row prefix. This is separate from the unchanged 85-row
 storage operation bank. Each core row retains decimal-string `calls`,
 `elapsed_ns` and event-specific `units` in the Node consumer; use a lossless
 parser for raw Rust JSON integers above 2^53. The phase metrics projector can
 retain a valid partial profile without inventing absent rows. Its allowed-label
-set also preserves six existing optional compact capture/COW labels (114 allowed
-labels); this compatibility allowance is separate from the 108-row bank. The
-exact backing pilot and verifier require all 108 rows; an old 47-row snapshot is incomplete,
+set also preserves six existing optional compact capture/COW labels (120 allowed
+labels); this compatibility allowance is separate from the 114-row bank. The
+exact backing pilot and verifier require all 114 rows; an old 47- or 108-row snapshot is incomplete,
 rather than evidence of zero causal traffic. Unknown labels are excluded from
 the pilot's closed projection, while unknown or duplicate projected labels fail
 verification. Explicit new zero rows are valid observations.
@@ -964,6 +965,23 @@ verification. Explicit new zero rows are valid observations.
 | `filesystem.mutation.{enqueue_requests,dequeue_requests,queue_wait_requests,coalescing_yields,attempt_requests}` | Request/yield units are actual considered counts; queue wait runs until dequeue or queue cancellation. Coalescing observes its actual adaptive window/yields. An attempt includes only open-reply candidates considered in that iteration. It is not a CAS dispatch count. |
 | `filesystem.mutation.attempt.{success,conflict,no_publication,error,cancelled}` | One terminal outcome per attempt; `no_publication` includes candidates producing no namespace change and does not imply a dispatched CAS. |
 | `filesystem.mutation.request.{committed,conflict,cancelled,receiver_closed,error,reply_sent}` | Committed/conflict/cancelled/error are terminal request observations. Delivery rows classify observed sends or closed-receiver skips; dropping a request before either boundary records no delivery. Successful channel send does not prove consumption or application acknowledgement. A receiver lost after known commit retains the committed observation. |
+| `filesystem.mutation.create_guard.{evaluated,passed,conflict,revision_mismatch,allocation_mismatch,path_present}` | Count one completed fresh-create guard evaluation, its pass/conflict, and every true overlapping predicate. Calls and units each increment by one; elapsed time is zero. These rows cover the shared legacy/compact whole-file helper after successful path resolution. |
+
+At a quiescent snapshot, create-guard `evaluated = passed + conflict`; each
+predicate count is at most `conflict`, but their sum may exceed it. The rows
+observe the post-remap mutation against the batch's accumulated candidate:
+same-revision fresh creates already use its current `next_inode`, so an
+allocation mismatch does not report the originally captured inode. A confirmed
+CAS loss can cause another evaluation; these are distinct from final request
+outcomes and provider attempts.
+
+Path resolution errors precede evaluation. `path_present` describes the resolved
+final node with symlinks followed, rather than lexical directory-entry existence.
+Passing this guard still permits later inode-overflow, namespace, timestamp or
+publication failures; it does not establish a committed write. The private
+production control exercises all eight predicate combinations, unresolved-parent
+exclusion, and passed-guard inode overflow; the public controls additionally
+exercise the actual batch pipeline and full readback after reopening.
 
 Cancellation records the Rust observer future/guard drop once; it does not
 prove rollback or native operation settlement. Use acknowledged workload
@@ -997,6 +1015,8 @@ complete `filesystem-causal-metrics.log` and
 `filesystem-causal-profile-allocations.log`, together with the existing
 `storage-diagnostic-allocations.log`, using an always-upload artifact. Helper
 controls retain `filesystem-causal-helpers.log`. A separate
+Unix guard predicate control retains `filesystem-create-guard-metrics.log`; the
+public revision controls retain `compact-snapshot-revision.log`. A separate
 trace-enabled smoke runs `causal_profile_slow_span_emits_fixed_stderr` and retains
 `filesystem-causal-profile-slow.log`; CI requires its fixed slow-record line.
 `pipefail` preserves the test failure through `tee`. Hosted coverage requires the actual
@@ -1010,3 +1030,83 @@ and tracing-on evidence separately. Sampling/log bounds do not make the observer
 free, and the warmed allocation gate does not include formatting or output.
 The retained Ozone floor failures and their source/build uncertainty above
 remain unchanged; these rows do not establish their cause or a speedup.
+
+## Fresh-create guard attribution: local SQLite, 2026-09-27
+
+The six guard counters were measured with a fresh native addon, SHA-256
+`ab744ea8ae4b4ddcc1743db832c539539ec3cdee357dff9f04f451b5b9284fb9`,
+built from 435 frozen source inputs. Each runtime also pins its 449 source
+inputs and reports that exact staged addon. The unchanged lifecycle control
+uses 400 iterations, concurrency 64, 4096-byte payloads, 65536-byte chunks and
+a 1000 logical operations/sec floor. Every arm completed 400 full verified
+readbacks and acknowledged 1200 write/read/delete operations without timeouts,
+late operations or cleanup failures.
+
+| Local native SQLite arm | Logical operations/sec | Original floor |
+| --- | ---: | --- |
+| Compact, profiling enabled | 1031.70 | Passed |
+| Compact, profiling disabled | 1030.96 | Passed |
+| Legacy, profiling enabled | 1514.75 | Passed |
+| Legacy, profiling disabled | 1369.13 | Passed |
+
+These are single arms. They establish neither a causal speedup nor isolated
+observer overhead. The earlier compact/profile 947.80 floor failure remains
+retained. Profiling-disabled counters are unavailable, and shutdown diagnostics
+remain incomplete. Create, workload and cleanup diagnostic phases are complete
+and quiescent in the profiling-enabled arms, with 114 core and 85 storage rows.
+
+| Workload observation | Compact/profile | Legacy/profile |
+| --- | ---: | ---: |
+| Fresh-create guard evaluations | 400 | 400 |
+| Guard passed / conflict | 7 / 393 | 37 / 363 |
+| Revision mismatch | 393 | 363 |
+| Allocation mismatch, after existing batch remapping | 393 | 283 |
+| Resolved path present | 0 | 0 |
+| Whole-file replay gate holds | 393 | 0 |
+| Metadata snapshot / publication calls | 833 / 420 | 0 / 783 |
+| Inode body returns / bytes returned | 245004 / 118759807 | 0 / 0 |
+| Whole namespace bytes serialized | 0 | 20661225 |
+| Initial block PUT calls / attempted chunk input bytes | 400 / 1638400 | 763 / 3125248 |
+| SQLite statements | 28378 | 4235 |
+| SQLite pager writes | 4653 | 11262 |
+
+Every compact guard conflict has both the revision and allocation predicates
+set; their equal counts each exhaust the 393 conflict observations. The zero
+path-present count rules out that predicate for these evaluated creates. In
+legacy, 80 conflict evaluations have revision mismatch without allocation
+mismatch. These are overlapping guard observations, not evidence of which
+writer caused each change. A revision mismatch also prevents the existing
+same-revision inode remapping before this guard runs.
+
+Compact request-conflict and replay-hold counts are each 393, and its 40 batch
+attempts considered 800 requests: 27 successful publication attempts considered
+407, and 13 no-publication attempts considered 393. No batch attempt recorded a
+provider CAS conflict. The 833 snapshots comprise 400 preparation captures,
+393 replay captures and 40 batch captures; 420 publications comprise 393 replay
+publications and 27 batch publications. These relationships agree with the
+controlled workload and the reviewed source; counters alone are not a complete
+per-request timeline.
+
+The next optimization target is fresh-create rebasing against a validated
+current batch candidate, followed by reducing full metadata captures and guard
+scans. The compact workload still returns approximately 118.8 MB of inode
+metadata for 1.64 MB of acknowledged write payload. Its block PUT input is
+already one times that payload. Retain fresh path/parent, allocation, chunker,
+authority, flush and uncertain-commit checks when evaluating a rebase change.
+The legacy reentry path records its additional block writes under the immediate
+`initial` caller reason; zero lower-level `fallback` PUT rows do not establish
+that whole-file fallback did no work.
+
+SQL statements and pager writes are backing-store observations with different
+units from physical device IOPS. These local native controls do not qualify
+mounted clients, transports, distributed caching or the production topology.
+The new guard matrix and public controls, causal helpers, warmed allocation
+recording and slow-log check passed alongside the focused storage regressions:
+245 Rust tests and 119 Node consumer controls, formatting and strict Clippy.
+The parallel compact-install test fixture now includes a unique sequence in its
+private directory name after an observed clock-name collision; directory
+creation remains exclusive. The warmed zero-allocation claim covers recorder
+primitives, excluding complete filesystem operations, snapshots and logging.
+
+Retained joined evidence: `/private/tmp/mount-rs-create-guard-actual-summary-20260927-kva9g3x1/summary.json`,
+SHA-256 `a6d572aff2921b05ffbd36233ddbb2ba9923059bd9d037de33f0400c9ffd091b`.

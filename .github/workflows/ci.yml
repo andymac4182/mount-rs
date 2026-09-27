@@ -905,6 +905,16 @@ jobs:
             ./scripts/cargo-shared test -p mount-rs-chunked --test compact_snapshot_revision \
             --locked --offline -- --ignored --test-threads=1 --nocapture \
             2>&1 | tee "$RUNNER_TEMP/compact-snapshot-revision.log"
+      - name: Verify fresh create guard predicate accounting
+        if: runner.os != 'Windows'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -o pipefail
+          MOUNT_RS_PROFILE_IO=1 MOUNT_RS_TRACE_REQUESTS=0 MOUNT_RS_TRACE_STORAGE=0 \
+            ./scripts/cargo-shared test -p mount-rs-chunked --lib --locked --offline \
+            -- --ignored --exact create_guard_metrics_tests::fresh_create_guard_records_overlapping_predicates --test-threads=1 --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/filesystem-create-guard-metrics.log"
       - name: Verify causal helper lifecycle accounting
         timeout-minutes: 5
         shell: bash
@@ -941,6 +951,7 @@ jobs:
             ${{ runner.temp }}/filesystem-causal-metrics.log
             ${{ runner.temp }}/filesystem-causal-profile-allocations.log
             ${{ runner.temp }}/compact-snapshot-revision.log
+            ${{ runner.temp }}/filesystem-create-guard-metrics.log
             ${{ runner.temp }}/filesystem-causal-helpers.log
             ${{ runner.temp }}/filesystem-causal-profile-slow.log
           if-no-files-found: warn

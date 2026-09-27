@@ -7,6 +7,34 @@ use mount_rs_core::Result;
 use mount_rs_core::diagnostics::profile::{self, Event, Span};
 use std::marker::PhantomData;
 
+/// Count this resolved fresh-create guard, including overlapping predicates.
+/// A pass is not a mutation or publication result. Batch remapping is already
+/// applied by the caller before this guard evaluates its candidate.
+pub(super) fn observe_create_guard(
+    revision_mismatch: bool,
+    allocation_mismatch: bool,
+    path_present: bool,
+) {
+    profile::add(Event::FilesystemMutationCreateGuardEvaluated, 1);
+    profile::add(
+        if revision_mismatch || allocation_mismatch || path_present {
+            Event::FilesystemMutationCreateGuardConflict
+        } else {
+            Event::FilesystemMutationCreateGuardPassed
+        },
+        1,
+    );
+    if revision_mismatch {
+        profile::add(Event::FilesystemMutationCreateGuardRevisionMismatch, 1);
+    }
+    if allocation_mismatch {
+        profile::add(Event::FilesystemMutationCreateGuardAllocationMismatch, 1);
+    }
+    if path_present {
+        profile::add(Event::FilesystemMutationCreateGuardPathPresent, 1);
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum PutReason {
     Initial,
