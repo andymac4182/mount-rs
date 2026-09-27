@@ -10,6 +10,8 @@ import hashlib,json,os,pathlib,re,selectors,signal,stat,subprocess,sys,tempfile,
 BASE=pathlib.Path(__file__).resolve().parent.parent
 COMMANDS={'cachetests': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--all-targets', '--locked', '--offline'], 180, 0, 0), 'redisfault': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'distributed_failure', '--locked', '--offline', '--', '--ignored', '--exact', 'redis_directory_real_peer_failures_preserve_exact_backing', '--test-threads=1', '--nocapture'], 180, 0, 0), 'rediscleanup': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'distributed_failure', '--locked', '--offline', '--', '--ignored', '--exact', 'cancelled_redis_fixture_reaps_owned_child_before_removing_directory', '--test-threads=1', '--nocapture'], 180, 0, 0), 'wsloss': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-remote-client', '--test', 'quic_mount', '--locked', '--offline', '--', '--ignored', '--exact', 'websocket_sqlite_commit_survives_lost_wire_reply_without_replay', '--test-threads=1', '--nocapture'], 180, 0, 0), 'remotetests': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-remote-client', '--all-targets', '--locked', '--offline'], 180, 0, 0), 'faultclippy': (['./scripts/cargo-shared', 'clippy', '-p', 'mount-rs-blob-cache', '-p', 'mount-rs-remote-client', '--all-targets', '--locked', '--offline', '--', '-D', 'warnings'], 180, 0, 0), 'fmt': (['./scripts/cargo-shared', 'fmt', '--all', '--', '--check'], 120, 0, 0)}
 COMMANDS.update({
+    'peeriometricstrace': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--lib', '--locked', '--offline', '--', '--ignored', '--exact', 'peer::tests::peer_request_stage_metrics_preserve_bytes_outcomes_and_cancellation', '--test-threads=1', '--nocapture'], 180, 1, 1),
+    'peeriometrics': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--lib', '--locked', '--offline', '--', '--ignored', '--exact', 'peer::tests::peer_request_stage_metrics_preserve_bytes_outcomes_and_cancellation', '--test-threads=1', '--nocapture'], 180, 1, 0),
     'filesystemmetrics': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-chunked', '--test', 'filesystem_causal_metrics', '--locked', '--offline', '--', '--ignored', '--test-threads=1', '--nocapture'], 180, 1, 0),
     'clientmetrics': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-remote-client', '--lib', '--locked', '--offline', '--', '--ignored', '--exact', 'connection::metrics_tests::quic_stream_acquisition_outcomes_preserve_transactions', '--test-threads=1', '--nocapture'], 180, 1, 0),
     'clidiagnostics': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-cli', '--features', 'io-profiling', '--lib', '--locked', '--offline', 'remote::diagnostics::tests::'], 180, 1, 0),
@@ -40,6 +42,8 @@ COMMANDS.update({
     'cacheconsumers': (['fnm', 'exec', '--using', 'v24.18.0', 'node', '--test', 'benchmarks/storage/test.mjs', 'benchmarks/storage/foundationdb-diagnostics.test.mjs', 'benchmarks/storage/owned-layout-metrics.test.mjs', 'benchmarks/storage/owned-backing-pilot.test.mjs', 'scripts/verify-owned-backing-pilot.test.mjs'], 180, 0, 0),
 })
 EXACT_CASES = {
+    'peeriometricstrace': 'peer::tests::peer_request_stage_metrics_preserve_bytes_outcomes_and_cancellation',
+    'peeriometrics': 'peer::tests::peer_request_stage_metrics_preserve_bytes_outcomes_and_cancellation',
     'clientmetrics': 'connection::metrics_tests::quic_stream_acquisition_outcomes_preserve_transactions',
     'peerport': 'stopped_peer_udp_rebind_waits_for_real_driver_release',
     'clicompact': 'configured_binary_selects_mrc5_for_signed_quic_and_websocket_reopen',
@@ -115,11 +119,18 @@ def cache_slow_logging_records(output):
         'blob_cache.miss.admission_wait', 'blob_cache.miss.singleflight_wait',
         'blob_cache.ram.lookup', 'blob_cache.disk.lookup',
         'blob_cache.peer.connection_lock_wait', 'blob_cache.peer.connection_establish',
+        'blob_cache.peer.request_byte_admission_wait', 'blob_cache.peer.open_bi',
+        'blob_cache.peer.request_send', 'blob_cache.peer.response_receive',
+        'blob_cache.peer.get', 'blob_cache.peer.get_miss',
     }
     records = []
-    for line in output.splitlines():
+    # Only complete LF-terminated frames from writeln can qualify a record.
+    lines = output.split('\n')
+    for index, line in enumerate(lines):
         if not line.startswith('MOUNT_RS_STORAGE_SLOW'):
             continue
+        if index == len(lines)-1:
+            return None
         match = re.fullmatch(r'MOUNT_RS_STORAGE_SLOW operation=([^ ]+) outcome=(success|error|cancelled) elapsed_us=([0-9]{1,20})', line)
         if match is None or match[1] not in names or len((line+'\n').encode()) > 512:
             return None
@@ -131,6 +142,22 @@ def cache_slow_logging_records(output):
         return None
     # Earlier slow stages may legitimately consume the shared record budget.
     return records
+
+
+def peer_slow_logging_records(output):
+    records = cache_slow_logging_records(output)
+    if records is None:
+        return None
+    observed = {(row['operation'], row['outcome']) for row in records}
+    required = {('blob_cache.peer.request_byte_admission_wait', 'cancelled'),
+                ('blob_cache.peer.get', 'error')}
+    return records if required <= observed else None
+
+
+def slow_logging_file_records(path, peer=False):
+    # Preserve physical frame bytes; text-mode universal newlines alter CR/CRLF.
+    output = path.read_bytes().decode('utf-8', errors='replace')
+    return peer_slow_logging_records(output) if peer else cache_slow_logging_records(output)
 
 
 PEER_RECONNECT_PROGRESS = frozenset((
@@ -275,6 +302,8 @@ def main():
     FAULT_KINDS={'cachetests','redisfault','rediscleanup','wsloss','remotetests','faultclippy','fmt','cachemetrics','peermetrics','peerreconnect','peerport','quinnclose','quinnordinary','quinnruntimeclose','createprep','createpath','createguard','createunit','chunkedtests','chunkedclippy','cacheprofileoff','cacheprofileon','storagealloc','corealloc','coremetrics','cachemetricsclippy','cacheconsumers','cacheconsumerred','clidiagnostics','clicompact','napimetrics','consumerclippy','cachemetricstrace'}
     FAULT_KINDS.add('clientmetrics')
     FAULT_KINDS.add('filesystemmetrics')
+    FAULT_KINDS.add('peeriometrics')
+    FAULT_KINDS.add('peeriometricstrace')
     assert kind in FAULT_KINDS, 'fixed fault qualification commands only'
     root=pathlib.Path(tempfile.mkdtemp(prefix='mount-rs-owned-fault-'+kind+'-',dir=os.environ.get('MOUNT_RS_FAILURE_EVIDENCE_ROOT',tempfile.gettempdir())));os.chmod(root,0o700)
     fixture_tmp=root/'fixtures';fixture_tmp.mkdir(mode=0o700)
@@ -477,8 +506,11 @@ def main():
       if not selected_suite_pass:unknown.append('named_suite_not_observed_passed')
      cache_slow_records=None
      if kind=='cachemetricstrace':
-      cache_slow_records=cache_slow_logging_records((root/'stderr.log').read_text(errors='replace'))
+      cache_slow_records=slow_logging_file_records(root/'stderr.log')
       if cache_slow_records is None:unknown.append('cache_slow_logging_not_observed_valid')
+     if kind=='peeriometricstrace':
+      cache_slow_records=slow_logging_file_records(root/'stderr.log', peer=True)
+      if cache_slow_records is None:unknown.append('peer_slow_logging_not_observed_valid')
      after=frozen();write('source-after.json',after)
      redis_unchanged=None if redis_pin is None else redis_path.is_file() and redis_path.stat().st_size==redis_pin['size'] and hashlib.sha256(redis_path.read_bytes()).hexdigest()==redis_pin['sha256']
      if redis_unchanged is False:unknown.append('redis_executable_changed')

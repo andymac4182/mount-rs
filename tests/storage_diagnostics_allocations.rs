@@ -48,6 +48,9 @@ fn selected_bytes(operation: Operation) -> u64 {
             | Operation::FoundationDbReadGetRangePage
             | Operation::BlobCacheRamLookup
             | Operation::BlobCacheDiskLookup
+            | Operation::BlobCachePeerRequestSend
+            | Operation::BlobCachePeerResponseReceive
+            | Operation::BlobCachePeerGet
     ) {
         3
     } else {
@@ -83,6 +86,14 @@ fn warmed_core_spans_record_without_added_allocations() {
         Operation::BlobCachePeerConnectionLockWait,
         Operation::BlobCachePeerConnectionEstablish,
         Operation::RemoteClientQuicOpenBi,
+        Operation::RemoteClientQuicRequestSend,
+        Operation::RemoteClientQuicResponseReceive,
+        Operation::BlobCachePeerRequestByteAdmissionWait,
+        Operation::BlobCachePeerOpenBi,
+        Operation::BlobCachePeerRequestSend,
+        Operation::BlobCachePeerResponseReceive,
+        Operation::BlobCachePeerGet,
+        Operation::BlobCachePeerGetMiss,
     ];
     ALLOCATION_CALLS.with(|calls| calls.set(0));
     COUNT_ALLOCATIONS.with(|enabled| enabled.set(true));
@@ -105,7 +116,7 @@ fn warmed_core_spans_record_without_added_allocations() {
         "warmed actual core Span added an allocation"
     );
     let delta = storage::snapshot().delta(&before).unwrap();
-    assert_eq!(before.entries.len(), 92);
+    assert_eq!(before.entries.len(), 100);
     assert_eq!(delta.in_flight, 0);
     for operation in operations {
         let row = &delta.entries[operation as usize];

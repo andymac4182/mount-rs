@@ -1076,36 +1076,183 @@ test("causal pilot requires new rows without manufacturing old-snapshot zeros", 
   assert.deepEqual(complete.entries.slice(134).map((row) => row.name), ["blob_cache.ram.hit_bytes", "blob_cache.disk.hit_bytes"])
 })
 
-test("historical 85-row storage snapshot leaves seven appended cache and client stages unavailable", () => {
+// Literal v3 descriptor at 56b9; never substitute the current family metadata.
+const historical92ByteSemantics = "known_successful_payload_bytes_only; zero_does_not_establish_no_payload"
+const historical92Names = Object.freeze([
+  "metadata.load",
+  "metadata.load_if_changed",
+  "metadata.snapshot",
+  "metadata.publish",
+  "metadata.flush",
+  "blocks.put",
+  "blocks.get",
+  "blocks.flush",
+  "blocks.verify_backing",
+  "blocks.prepare_backing",
+  "blocks.delete",
+  "blocks.reconcile",
+  "pglite.client_lock_wait",
+  "sdk.metadata.compact_inode_capability",
+  "sdk.metadata.compact_inode_mode_state",
+  "sdk.metadata.prepare_compact_inode_mode",
+  "sdk.metadata.load_compact_snapshot",
+  "sdk.metadata.load_compact_inode",
+  "sdk.metadata.publish_compact_inode",
+  "sdk.metadata.publish_compact_structure",
+  "sdk.metadata.inode_mode_state",
+  "sdk.metadata.prepare_inode_mode",
+  "sdk.metadata.load_inode_snapshot_if_changed",
+  "sdk.metadata.load_inode_snapshot",
+  "sdk.metadata.load_inode",
+  "sdk.metadata.load_inode_if_changed",
+  "sdk.metadata.publish_inode_if_version",
+  "sdk.metadata.publish_structure_if_versions",
+  "sdk.metadata.delegation_state",
+  "sdk.metadata.prepare_delegated_mode",
+  "sdk.metadata.checkout",
+  "sdk.metadata.publish_delegated",
+  "sdk.metadata.checkin",
+  "sdk.metadata.recover",
+  "sdk.metadata.durable",
+  "sdk.metadata.publish_includes_flush_barrier",
+  "sdk.metadata.load",
+  "sdk.metadata.load_if_changed",
+  "sdk.metadata.concurrent_mode_state",
+  "sdk.metadata.preflight_new_bound_mode",
+  "sdk.metadata.prepare_bound_concurrent_mode",
+  "sdk.metadata.acquire_writer",
+  "sdk.metadata.renew_writer",
+  "sdk.metadata.release_writer",
+  "sdk.metadata.publish",
+  "sdk.metadata.publish_bound_if_revision",
+  "sdk.metadata.migrate_mrc1_to_bound_mode",
+  "sdk.metadata.preflight_mrc1_to_bound_mode",
+  "sdk.metadata.preflight_trusted_unstamped_mrc1",
+  "sdk.metadata.migrate_trusted_unstamped_mrc1",
+  "sdk.metadata.flush",
+  "sdk.blocks.durable",
+  "sdk.blocks.prepare_concurrent_backing",
+  "sdk.blocks.verify_concurrent_backing",
+  "sdk.blocks.get_for_migration",
+  "sdk.blocks.put",
+  "sdk.blocks.get",
+  "sdk.blocks.flush",
+  "sdk.blocks.delete",
+  "sdk.blocks.reconcile",
+  "tidb.pool.checkout",
+  "tidb.session.configure",
+  "tidb.open.schema",
+  "tidb.open.metadata_row",
+  "tidb.tx.begin.metadata",
+  "tidb.tx.begin.inode",
+  "tidb.tx.begin.compact_read",
+  "tidb.tx.commit",
+  "tidb.tx.rollback",
+  "tidb.sql.session",
+  "tidb.sql.ddl",
+  "tidb.sql.metadata_read",
+  "tidb.sql.metadata_write",
+  "tidb.sql.inode_read",
+  "tidb.sql.inode_write",
+  "tidb.sql.block_read",
+  "tidb.sql.block_write",
+  "tidb.sql.flush_probe",
+  "foundationdb.transaction.create",
+  "foundationdb.transaction.closure_attempt",
+  "foundationdb.read.get",
+  "foundationdb.read.get_key",
+  "foundationdb.read.get_range_page",
+  "foundationdb.transaction.commit",
+  "foundationdb.transaction.on_error",
+  "blob_cache.miss.admission_wait",
+  "blob_cache.miss.singleflight_wait",
+  "blob_cache.ram.lookup",
+  "blob_cache.disk.lookup",
+  "blob_cache.peer.connection_lock_wait",
+  "blob_cache.peer.connection_establish",
+  "client.quic.open_bi",
+])
+const historical92Families = {
+  napi_provider: { operations: historical92Names.filter((name) => name.startsWith("metadata.") || name.startsWith("blocks.")), calls: "napi_dynamic_provider_method_invocations", bytes: "known_successful_block_put_input_and_get_or_migration_payload_bytes; metadata_bytes_unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  sdk_provider: { operations: historical92Names.filter((name) => name.startsWith("sdk.")), calls: "direct_sdk_provider_method_invocations_including_synchronous_methods", bytes: "known_successful_block_put_input_and_get_or_migration_payload_bytes; metadata_bytes_unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  pglite_client_lock: { operations: ["pglite.client_lock_wait"], calls: "client_lock_acquisition_invocations", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_client_lock_await_nanoseconds" },
+  tidb_pool_checkout: { operations: ["tidb.pool.checkout"], calls: "pool_checkout_invocations", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_checkout_nanoseconds_including_lazy_connect_and_session_configuration; queue_only_wait_unavailable" },
+  tidb_session: { operations: ["tidb.session.configure"], calls: "session_configuration_invocations", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  tidb_open: { operations: historical92Names.filter((name) => name.startsWith("tidb.open.")), calls: "open_schema_and_metadata_initialization_invocations", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  tidb_transaction: { operations: historical92Names.filter((name) => name.startsWith("tidb.tx.")), calls: "transaction_lifecycle_invocations", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  tidb_sql: { operations: historical92Names.filter((name) => name.startsWith("tidb.sql.")), calls: "categorized_sql_adapter_invocations; not_internal_requests", bytes: "known_selected_successful_payload_bytes_only; other_sql_bytes_unavailable", returned_rows: "known_returned_sql_rows; observations_count_successes_with_known_rows; excludes_affected_rows", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  foundationdb_transaction: { operations: ["foundationdb.transaction.create", "foundationdb.transaction.closure_attempt", "foundationdb.transaction.commit", "foundationdb.transaction.on_error"], calls: "provider_closure_attempts_and_native_create_commit_on_error_invocations; distinct_units_not_logical_transactions", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  foundationdb_read: { operations: ["foundationdb.read.get", "foundationdb.read.get_key", "foundationdb.read.get_range_page"], calls: "native_client_read_method_invocations; range_page_calls_not_key_value_count", bytes: "known_selected_successful_returned_value_key_and_range_page_key_value_payload_bytes_only", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  blob_cache: { operations: ["blob_cache.miss.admission_wait", "blob_cache.miss.singleflight_wait", "blob_cache.ram.lookup", "blob_cache.disk.lookup", "blob_cache.peer.connection_lock_wait", "blob_cache.peer.connection_establish"], calls: "cache_stage_invocations; lookups_include_hits_and_misses; waits_count_acquisitions_or_termination", bytes: "known_successful_ram_and_disk_lookup_returned_payload_bytes_only; waits_and_connection_stages_zero; misses_zero", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  client_quic: { operations: ["client.quic.open_bi"], calls: "stream_acquisition_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_open_bi_await_nanoseconds; not_exclusive_cpu_or_network_time" },
+}
+
+test("historical 85-row storage snapshot leaves fifteen appended cache and client stages unavailable", () => {
   const fixture = resultFixture()
   const oldStorage = STORAGE_OPERATION_NAMES.slice(0, 85).map((name) => ({ name, calls: "0", success: "0", error: "0", cancelled: "0" }))
   fixture.providers[0].storageDiagnostics = { phases: [{ name: "workload-4096bytes", native: {
     complete: false, storage: { entries: oldStorage },
   } }] }
   const projected = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1].storage
-  assert.equal(projected.length, 92)
+  assert.equal(projected.length, 100)
   assert.deepEqual(projected.slice(85).map((row) => row.name), [
     "blob_cache.miss.admission_wait", "blob_cache.miss.singleflight_wait",
     "blob_cache.ram.lookup", "blob_cache.disk.lookup",
     "blob_cache.peer.connection_lock_wait", "blob_cache.peer.connection_establish",
     "client.quic.open_bi",
+    "client.quic.request_send",
+    "client.quic.response_receive",
+    "blob_cache.peer.request_byte_admission_wait",
+    "blob_cache.peer.open_bi",
+    "blob_cache.peer.request_send",
+    "blob_cache.peer.response_receive",
+    "blob_cache.peer.get",
+    "blob_cache.peer.get_miss",
   ])
   assert.ok(projected.slice(0, 85).every((row) => row.calls === "0"))
   assert.ok(projected.slice(85).every((row) => row.calls === null && row.success === null && row.error === null && row.cancelled === null))
 })
 
-test("historical 91-row storage snapshot leaves the client stream stage unavailable", () => {
+test("historical 91-row storage snapshot leaves nine client and peer stages unavailable", () => {
   const fixture = resultFixture()
   const oldStorage = STORAGE_OPERATION_NAMES.slice(0, 91).map((name) => ({ name, calls: "0", success: "0", error: "0", cancelled: "0" }))
   fixture.providers[0].storageDiagnostics = { phases: [{ name: "workload-4096bytes", native: {
     complete: false, storage: { entries: oldStorage },
   } }] }
   const projected = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1].storage
-  assert.equal(projected.length, 92)
+  assert.equal(projected.length, 100)
   assert.ok(projected.slice(0, 91).every((row) => row.calls === "0"))
   assert.equal(projected[91].name, "client.quic.open_bi")
-  for (const field of ["calls", "success", "error", "cancelled", "bytes", "returned_rows", "returned_row_observations", "elapsed_ns", "in_flight_start", "in_flight_end"]) assert.equal(projected[91][field], null)
-  assert.deepEqual(projected[91].latency_log2_us, Array(32).fill(null))
+  for (const row of projected.slice(91)) {
+    for (const field of ["calls", "success", "error", "cancelled", "bytes", "returned_rows", "returned_row_observations", "elapsed_ns", "in_flight_start", "in_flight_end"]) assert.equal(row[field], null)
+    assert.deepEqual(row.latency_log2_us, Array(32).fill(null))
+  }
+})
+
+test("literal historical 92-row v3 descriptor leaves all eight transport rows unavailable", () => {
+  const fixture = resultFixture()
+  const oldStorage = historical92Names.map((name) => ({ name, calls: "0", success: "0", error: "0", cancelled: "0" }))
+  fixture.providers[0].storageDiagnostics = { phases: [{ name: "workload-4096bytes", native: {
+    complete: false,
+    measurement: { storage_bytes: historical92ByteSemantics, storage_operations: historical92Names, storage_families: structuredClone(historical92Families) },
+    storage: { entries: oldStorage },
+  } }] }
+  const before = structuredClone(fixture)
+  const phase = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1]
+  assert.equal(phase.status, "incomplete")
+  assert.equal(phase.storage.length, 100)
+  assert.ok(phase.storage.slice(0, 92).every((row) => row.calls === "0"))
+  assert.deepEqual(phase.storage.slice(92).map((row) => row.name), [
+    "client.quic.request_send", "client.quic.response_receive",
+    "blob_cache.peer.request_byte_admission_wait", "blob_cache.peer.open_bi",
+    "blob_cache.peer.request_send", "blob_cache.peer.response_receive",
+    "blob_cache.peer.get", "blob_cache.peer.get_miss",
+  ])
+  for (const row of phase.storage.slice(92)) {
+    for (const field of ["calls", "success", "error", "cancelled", "bytes", "returned_rows", "returned_row_observations", "elapsed_ns", "in_flight_start", "in_flight_end"]) assert.equal(row[field], null)
+    assert.deepEqual(row.latency_log2_us, Array(32).fill(null))
+  }
+  assert.deepEqual(fixture, before)
 })
 
 test("compact, refresh, and cache pilot projection retains measured units without numeric coercion", () => {

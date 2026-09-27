@@ -389,15 +389,30 @@ impl QuicPeerTransport {
             return Err(error());
         }
         timeout(self.config.deadline, async {
-            let charge = Arc::new(
-                self.request_bytes
+            let charge = {
+                let mut admission = Span::new(Operation::BlobCachePeerRequestByteAdmissionWait);
+                let permit = self
+                    .request_bytes
                     .clone()
                     .acquire_many_owned(self.transfer_charge)
                     .await
-                    .map_err(|_| error())?,
-            );
+                    .map_err(|_| {
+                        admission.finish_error();
+                        error()
+                    })?;
+                admission.finish_success(0);
+                Arc::new(permit)
+            };
             let connection = self.connection(peer, bytes.is_some()).await?;
-            let (mut send, mut recv) = connection.open_bi().await.map_err(|_| error())?;
+            let (mut send, mut recv) = {
+                let mut opening = Span::new(Operation::BlobCachePeerOpenBi);
+                let stream = connection.open_bi().await.map_err(|_| {
+                    opening.finish_error();
+                    error()
+                })?;
+                opening.finish_success(0);
+                stream
+            };
             let header = encode_header(
                 scope,
                 id,
@@ -413,13 +428,28 @@ impl QuicPeerTransport {
                 bytes: bytes.map(PeerPayload::owned).unwrap_or_default(),
                 _charge: charge.clone(),
             });
+            // Capture protocol submission bytes before Quinn mutates the chunks.
+            // Success describes local submission, not acknowledgment or UDP bytes.
+            let submitted_bytes = (header.len() + body.len()) as u64;
             let mut chunks = [header, body];
-            send.write_all_chunks(&mut chunks)
-                .await
-                .map_err(|_| error())?;
-            send.finish().map_err(|_| error())?;
+            {
+                let mut sending = Span::new(Operation::BlobCachePeerRequestSend);
+                send.write_all_chunks(&mut chunks).await.map_err(|_| {
+                    sending.finish_error();
+                    error()
+                })?;
+                send.finish().map_err(|_| {
+                    sending.finish_error();
+                    error()
+                })?;
+                sending.finish_success(submitted_bytes);
+            }
+            let mut receiving = Span::new(Operation::BlobCachePeerResponseReceive);
             let mut status = [0];
-            recv.read_exact(&mut status).await.map_err(|_| error())?;
+            recv.read_exact(&mut status).await.map_err(|_| {
+                receiving.finish_error();
+                error()
+            })?;
             let body = recv
                 .read_to_end(if put || status[0] == 0 {
                     0
@@ -427,15 +457,25 @@ impl QuicPeerTransport {
                     self.config.max_blob_bytes
                 })
                 .await
-                .map_err(|_| error())?;
-            match status[0] {
-                0 => Ok(None),
-                1 => Ok(Some(Bytes::from_owner(ChargedPayload {
+                .map_err(|_| {
+                    receiving.finish_error();
+                    error()
+                })?;
+            let received_bytes = 1 + body.len() as u64;
+            let response = match status[0] {
+                0 => None,
+                1 => Some(Bytes::from_owner(ChargedPayload {
                     bytes: Bytes::from(body),
                     _charge: charge,
-                }))),
-                _ => Err(error()),
-            }
+                })),
+                _ => {
+                    receiving.finish_error();
+                    return Err(error());
+                }
+            };
+            // A valid peer response is not yet an integrity/admission decision.
+            receiving.finish_success(received_bytes);
+            Ok(response)
         })
         .await
         .map_err(|_| error())?
@@ -459,16 +499,36 @@ impl Drop for QuicPeerTransport {
         self.endpoint.close(0u32.into(), b"shutdown");
     }
 }
+// The GET span includes the caller's existing payload conversion. A miss is a
+// separate classification event: zero-byte successful hits remain distinguishable.
+fn finish_peer_get<T: AsRef<[u8]>>(getting: &mut Span<'_>, result: &Result<Option<T>>) {
+    match result {
+        Ok(Some(bytes)) => getting.finish_success(bytes.as_ref().len() as u64),
+        Ok(None) => {
+            getting.finish_success(0);
+            let mut miss = Span::new(Operation::BlobCachePeerGetMiss);
+            miss.finish_success(0);
+        }
+        Err(_) => getting.finish_error(),
+    }
+}
+
 #[async_trait]
 impl PeerTransport for QuicPeerTransport {
     async fn get(&self, p: &PeerId, s: &CacheScope, id: &BlockId) -> Result<Option<Vec<u8>>> {
-        Ok(self
+        let mut getting = Span::new(Operation::BlobCachePeerGet);
+        let result = self
             .request(p, s, id, None)
-            .await?
-            .map(|bytes| bytes.to_vec()))
+            .await
+            .map(|bytes| bytes.map(|bytes| bytes.to_vec()));
+        finish_peer_get(&mut getting, &result);
+        result
     }
     async fn get_shared(&self, p: &PeerId, s: &CacheScope, id: &BlockId) -> Result<Option<Bytes>> {
-        self.request(p, s, id, None).await
+        let mut getting = Span::new(Operation::BlobCachePeerGet);
+        let result = self.request(p, s, id, None).await;
+        finish_peer_get(&mut getting, &result);
+        result
     }
     async fn put_shared(
         &self,
@@ -858,6 +918,209 @@ mod tests {
             self.b.endpoint.close(0u32.into(), b"fixture dropped");
         }
     }
+    // Literal labels allow this real-transport qualification to compile before producers exist.
+    #[tokio::test]
+    #[ignore = "isolated process: MOUNT_RS_PROFILE_IO=1, storage/request traces=0"]
+    async fn peer_request_stage_metrics_preserve_bytes_outcomes_and_cancellation() {
+        use mount_rs_core::diagnostics::storage;
+        use stage_metrics::{Checks, Expected};
+        use std::{future::poll_fn, task::Poll};
+
+        const BYTE: &str = "blob_cache.peer.request_byte_admission_wait";
+        const OPEN: &str = "blob_cache.peer.open_bi";
+        const SEND: &str = "blob_cache.peer.request_send";
+        const RECEIVE: &str = "blob_cache.peer.response_receive";
+        const GET: &str = "blob_cache.peer.get";
+        const MISS: &str = "blob_cache.peer.get_miss";
+
+        async fn cleanup(peers: MetricPeers) {
+            let addresses = [peers.a.local_addr().unwrap(), peers.b.local_addr().unwrap()];
+            let lifetimes = [
+                Arc::downgrade(&peers.a.cache),
+                Arc::downgrade(&peers.b_cache),
+            ];
+            timeout(Duration::from_secs(3), async {
+                peers.shutdown().await;
+                drop(peers);
+                loop {
+                    if lifetimes.iter().all(|owner| owner.upgrade().is_none()) {
+                        match (
+                            std::net::UdpSocket::bind(addresses[0]),
+                            std::net::UdpSocket::bind(addresses[1]),
+                        ) {
+                            (Ok(a), Ok(b)) => {
+                                assert_eq!(a.local_addr().unwrap(), addresses[0]);
+                                assert_eq!(b.local_addr().unwrap(), addresses[1]);
+                                break;
+                            }
+                            (a, b) => {
+                                for result in [a, b] {
+                                    if let Err(error) = result {
+                                        assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("bounded real peer/cache owner and UDP release");
+        }
+
+        timeout(Duration::from_secs(20), async {
+            assert!(storage::enabled(), "parent must isolate the enabled profiler");
+            let mut checks = Checks::default();
+            let peers = MetricPeers::new(false, false);
+            let peer = PeerId("b".into());
+            let id = BlockId("request stages".into());
+            let empty = BlockId("empty hit".into());
+            let absent = BlockId("remote miss".into());
+            let bytes = b"peer request stages\0\xffcomplete bytes";
+            peers.b_cache.insert(&peers.scope, &id, bytes, IntegrityPolicy::Opaque).unwrap();
+            peers.b_cache.insert(&peers.scope, &empty, b"", IntegrityPolicy::Opaque).unwrap();
+
+            for (phase, block, expected, miss) in [
+                ("full GET", &id, Some(bytes.as_slice()), 0),
+                ("empty GET hit", &empty, Some(b"".as_slice()), 0),
+                ("remote GET miss", &absent, None, 1),
+            ] {
+                let before = storage::snapshot();
+                assert_eq!(peers.a.get(&peer, &peers.scope, block).await.unwrap().as_deref(), expected);
+                let length = expected.map_or(0, <[u8]>::len) as u64;
+                let header = encode_header(&peers.scope, block, None, 1024).unwrap().len() as u64;
+                checks.phase(phase, &before, vec![
+                    Expected(BYTE, 1, 0, 0, 0), Expected(OPEN, 1, 0, 0, 0),
+                    Expected(SEND, 1, 0, 0, header), Expected(RECEIVE, 1, 0, 0, 1 + length),
+                    Expected(GET, 1, 0, 0, length), Expected(MISS, miss, 0, 0, 0),
+                ]);
+            }
+            for (phase, block, expected, miss) in [
+                ("full shared GET", &id, Some(bytes.as_slice()), 0),
+                ("empty shared GET hit", &empty, Some(b"".as_slice()), 0),
+                ("remote shared GET miss", &absent, None, 1),
+            ] {
+                let before = storage::snapshot();
+                assert_eq!(peers.a.get_shared(&peer, &peers.scope, block).await.unwrap().as_deref(), expected);
+                let length = expected.map_or(0, <[u8]>::len) as u64;
+                let header = encode_header(&peers.scope, block, None, 1024).unwrap().len() as u64;
+                checks.phase(phase, &before, vec![
+                    Expected(BYTE, 1, 0, 0, 0), Expected(OPEN, 1, 0, 0, 0),
+                    Expected(SEND, 1, 0, 0, header), Expected(RECEIVE, 1, 0, 0, 1 + length),
+                    Expected(GET, 1, 0, 0, length), Expected(MISS, miss, 0, 0, 0),
+                ]);
+            }
+            let connection = peers.a.connection(&peer, false).await.unwrap();
+            let stable_id = connection.stable_id();
+
+            let budget = peers.a.request_bytes.clone().acquire_many_owned(
+                (peers.a.config.transfer_bytes / 2) as u32,
+            ).await.unwrap();
+            let before = storage::snapshot();
+            let mut request = peers.a.get(&peer, &peers.scope, &id);
+            poll_fn(|cx| { assert!(request.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
+            checks.pending("held request byte quota", 2, vec![(BYTE, 1), (GET, 1), (OPEN, 0)]);
+            drop(request);
+            checks.phase("byte quota caller cancellation", &before, vec![
+                Expected(BYTE, 0, 0, 1, 0), Expected(GET, 0, 0, 1, 0), Expected(OPEN, 0, 0, 0, 0),
+            ]);
+            let before = storage::snapshot();
+            assert!(peers.a.get(&peer, &peers.scope, &id).await.is_err());
+            checks.phase("byte quota existing deadline", &before, vec![
+                Expected(BYTE, 0, 0, 1, 0), Expected(GET, 0, 1, 0, 0),
+            ]);
+            drop(budget);
+
+            let mut streams = Vec::new();
+            loop {
+                // Exhaust currently granted credit, including replenishment from
+                // earlier completed streams; unopened streams send no request.
+                let mut opening = std::pin::pin!(connection.open_bi());
+                let stream = poll_fn(|cx| match opening.as_mut().poll(cx) {
+                    Poll::Ready(result) => Poll::Ready(Some(result.unwrap())),
+                    Poll::Pending => Poll::Ready(None),
+                }).await;
+                let Some(stream) = stream else { break };
+                streams.push(stream);
+                assert!(streams.len() < 512, "bounded real stream-credit exhaustion");
+            }
+            let before = storage::snapshot();
+            let mut request = peers.a.get(&peer, &peers.scope, &id);
+            poll_fn(|cx| { assert!(request.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
+            checks.pending("all real bidi credits owned", 2, vec![(OPEN, 1), (GET, 1), (SEND, 0)]);
+            drop(request);
+            checks.phase("stream credit caller cancellation", &before, vec![
+                Expected(BYTE, 1, 0, 0, 0), Expected(OPEN, 0, 0, 1, 0), Expected(GET, 0, 0, 1, 0),
+            ]);
+            for (mut send, mut recv) in streams {
+                let _ = send.reset(0u32.into());
+                let _ = recv.stop(0u32.into());
+            }
+            assert_eq!(peers.a.get(&peer, &peers.scope, &id).await.unwrap(), Some(bytes.to_vec()));
+            assert_eq!(peers.a.connection(&peer, false).await.unwrap().stable_id(), stable_id);
+
+            let quota = peers.b.receive_bytes.clone().acquire_many_owned(
+                (peers.b.config.transfer_bytes / 2) as u32,
+            ).await.unwrap();
+            let before = storage::snapshot();
+            let mut request = peers.a.get(&peer, &peers.scope, &id);
+            poll_fn(|cx| { assert!(request.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
+            checks.pending("real receiver byte quota held", 2, vec![(RECEIVE, 1), (GET, 1), (SEND, 0)]);
+            drop(request);
+            checks.phase("response caller cancellation", &before, vec![
+                Expected(BYTE, 1, 0, 0, 0), Expected(OPEN, 1, 0, 0, 0),
+                Expected(SEND, 1, 0, 0, encode_header(&peers.scope, &id, None, 1024).unwrap().len() as u64),
+                Expected(RECEIVE, 0, 0, 1, 0), Expected(GET, 0, 0, 1, 0),
+            ]);
+            drop(quota);
+            assert_eq!(peers.a.get(&peer, &peers.scope, &id).await.unwrap(), Some(bytes.to_vec()));
+            assert_eq!(peers.a.connection(&peer, false).await.unwrap().stable_id(), stable_id);
+
+            let mut unregistered = peers.scope.clone();
+            unregistered.identity.drive = "unregistered sibling".into();
+            let before = storage::snapshot();
+            assert!(peers.a.get(&peer, &unregistered, &id).await.is_err());
+            checks.phase("server rejects unregistered exact scope", &before, vec![
+                Expected(GET, 0, 1, 0, 0), Expected(BYTE, 1, 0, 0, 0), Expected(OPEN, 1, 0, 0, 0),
+                Expected(SEND, 1, 0, 0, encode_header(&unregistered, &id, None, 1024).unwrap().len() as u64),
+                Expected(RECEIVE, 0, 1, 0, 0), Expected(MISS, 0, 0, 0, 0),
+            ]);
+            assert_eq!(peers.a.get(&peer, &peers.scope, &id).await.unwrap(), Some(bytes.to_vec()));
+            assert_eq!(peers.a.connection(&peer, false).await.unwrap().stable_id(), stable_id);
+
+            let mut denied = peers.scope.clone();
+            denied.identity.partition = "forbidden".into();
+            let before = storage::snapshot();
+            assert!(peers.a.get(&peer, &denied, &id).await.is_err());
+            checks.phase("partition denied before transport work", &before, vec![
+                Expected(GET, 0, 1, 0, 0), Expected(BYTE, 0, 0, 0, 0), Expected(OPEN, 0, 0, 0, 0),
+            ]);
+            let permits = peers.a.permits.clone().acquire_many_owned(peers.a.config.max_inflight as u32).await.unwrap();
+            let before = storage::snapshot();
+            assert!(peers.a.get(&peer, &peers.scope, &id).await.is_err());
+            checks.phase("fail fast operation admission", &before, vec![Expected(GET, 0, 1, 0, 0), Expected(BYTE, 0, 0, 0, 0)]);
+            drop(permits);
+            let placement = BlockId("placement preserved".into());
+            peers.a.put(&peer, &peers.scope, &placement, bytes).await.unwrap();
+            assert_eq!(peers.b_cache.get(&peers.scope, &placement, IntegrityPolicy::Opaque), Some(bytes.to_vec()));
+            assert_eq!(peers.a.connection(&peer, true).await.unwrap().stable_id(), stable_id);
+            drop(connection);
+            cleanup(peers).await;
+
+            for unknown_ca in [false, true] {
+                let peers = MetricPeers::new(!unknown_ca, unknown_ca);
+                let before = storage::snapshot();
+                assert!(peers.a.get(&peer, &peers.scope, &id).await.is_err());
+                checks.phase("rejected mTLS identity GET", &before, vec![Expected(GET, 0, 1, 0, 0), Expected(MISS, 0, 0, 0, 0)]);
+                assert!(peers.b_cache.get(&peers.scope, &id, IntegrityPolicy::Opaque).is_none());
+                cleanup(peers).await;
+            }
+            println!("peer_request_stage_behavior_oracles=complete full_empty_miss_verified=true connection_reuse_verified=true security_verified=true cache_owners_and_udp_released=true send_backpressure_unqualified=true");
+            checks.verify();
+        }).await.expect("bounded isolated peer request stage qualification");
+    }
+
     #[tokio::test]
     #[ignore = "isolated process: MOUNT_RS_PROFILE_IO=1, storage/request traces=0"]
     async fn peer_connection_stage_metrics_preserve_bytes_and_cancellation() {
@@ -892,7 +1155,7 @@ mod tests {
             let before = storage::snapshot();
             let mut read = peers.a.get(&peer,&peers.scope,&id);
             poll_fn(|cx| { assert!(read.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
-            checks.pending("held live connection mutex",1,vec![(LOCK,1),(ESTABLISH,0)]);
+            checks.pending("held live connection mutex",2,vec![(LOCK,1),(ESTABLISH,0)]);
             drop(read); drop(held);
             checks.phase("connection mutex cancellation",&before,vec![Expected(LOCK,0,0,1,0),Expected(ESTABLISH,0,0,0,0)]);
             let before = storage::snapshot();
@@ -906,7 +1169,7 @@ mod tests {
             let mut get = peers.a.get(&blackhole,&peers.scope,&id);
             poll_fn(|cx| { assert!(get.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
             assert!(peers.a.connections.get(&blackhole).unwrap().reads.try_lock().is_err(),"cold GET owns its independent read negotiation slot");
-            checks.pending("blackhole PUT and same-peer GET",2,vec![(LOCK,0),(ESTABLISH,2)]);
+            checks.pending("blackhole PUT and same-peer GET",3,vec![(LOCK,0),(ESTABLISH,2)]);
             // A different peer's reused connection remains functional while the
             // owned blackhole holds two independent role negotiations.
             assert_eq!(peers.a.get(&peer,&peers.scope,&id).await.unwrap(),Some(bytes.to_vec()));
@@ -922,16 +1185,16 @@ mod tests {
             poll_fn(|cx| { assert!(read.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
             let mut placement = peers.a.put(&blackhole,&peers.scope,&id,b"");
             poll_fn(|cx| { assert!(placement.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
-            checks.pending("cold GET and empty PUT negotiate independently",2,vec![(LOCK,0),(ESTABLISH,2)]);
+            checks.pending("cold GET and empty PUT negotiate independently",3,vec![(LOCK,0),(ESTABLISH,2)]);
             let mut same_lane = peers.a.get(&blackhole,&peers.scope,&id);
             poll_fn(|cx| { assert!(same_lane.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
-            checks.pending("same read role coalesces behind negotiation",3,vec![(LOCK,1),(ESTABLISH,2)]);
+            checks.pending("same read role coalesces behind negotiation",5,vec![(LOCK,1),(ESTABLISH,2)]);
             drop(placement);
             assert!(blackhole_slots.placements.try_lock().is_ok());
             assert!(blackhole_slots.reads.try_lock().is_err());
-            checks.pending("read negotiation survives empty PUT cancellation",2,vec![(LOCK,1),(ESTABLISH,1)]);
+            checks.pending("read negotiation survives empty PUT cancellation",4,vec![(LOCK,1),(ESTABLISH,1)]);
             drop(same_lane);
-            checks.pending("read negotiation survives same-role waiter cancellation",1,vec![(LOCK,0),(ESTABLISH,1)]);
+            checks.pending("read negotiation survives same-role waiter cancellation",2,vec![(LOCK,0),(ESTABLISH,1)]);
             drop(read);
             checks.phase("reverse role negotiation and waiter cancellation",&before,vec![Expected(LOCK,2,0,1,0),Expected(ESTABLISH,0,0,2,0)]);
             assert!(blackhole_slots.reads.try_lock().is_ok());
@@ -941,10 +1204,10 @@ mod tests {
             poll_fn(|cx| { assert!(owner.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
             let mut waiter = peers.a.get(&blackhole,&peers.scope,&id);
             poll_fn(|cx| { assert!(waiter.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
-            checks.pending("same read role has one negotiation",2,vec![(LOCK,1),(ESTABLISH,1)]);
+            checks.pending("same read role has one negotiation",4,vec![(LOCK,1),(ESTABLISH,1)]);
             drop(owner);
             poll_fn(|cx| { assert!(waiter.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
-            checks.pending("waiter negotiates after owner cancellation",1,vec![(LOCK,0),(ESTABLISH,1)]);
+            checks.pending("waiter negotiates after owner cancellation",2,vec![(LOCK,0),(ESTABLISH,1)]);
             assert!(blackhole_slots.reads.try_lock().is_err());
             drop(waiter);
             checks.phase("same role recovers from owner cancellation",&before,vec![Expected(LOCK,2,0,0,0),Expected(ESTABLISH,0,0,2,0)]);

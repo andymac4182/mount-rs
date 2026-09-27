@@ -132,16 +132,31 @@ impl Transport for QuicTransport {
             transport: self,
             completion: TransactionCompletion::default(),
         };
-        write_frame(&mut send, &message)
-            .await
-            .map_err(|_| ClientError::Transport)?;
-        send.finish().map_err(|_| ClientError::Transport)?;
-        let response = read_frame(&mut recv)
-            .await
-            .map_err(|_| ClientError::Protocol)?;
-        recv.read_to_end(0)
-            .await
-            .map_err(|_| ClientError::Protocol)?;
+        {
+            let mut span = StorageSpan::new(StorageOperation::RemoteClientQuicRequestSend);
+            write_frame(&mut send, &message).await.map_err(|_| {
+                span.finish_error();
+                ClientError::Transport
+            })?;
+            send.finish().map_err(|_| {
+                span.finish_error();
+                ClientError::Transport
+            })?;
+            span.finish_success(0);
+        }
+        let response = {
+            let mut span = StorageSpan::new(StorageOperation::RemoteClientQuicResponseReceive);
+            let response = read_frame(&mut recv).await.map_err(|_| {
+                span.finish_error();
+                ClientError::Protocol
+            })?;
+            recv.read_to_end(0).await.map_err(|_| {
+                span.finish_error();
+                ClientError::Protocol
+            })?;
+            span.finish_success(0);
+            response
+        };
         transaction.completion.complete_response();
         Ok(response)
     }
@@ -157,16 +172,35 @@ impl Transport for QuicTransport {
             transport: self,
             completion: TransactionCompletion::default(),
         };
-        binary::write_request(&mut send, id, request, buffer.len(), None)
-            .await
-            .map_err(|_| ClientError::Protocol)?;
-        send.finish().map_err(|_| ClientError::Transport)?;
-        let result = binary::read_result(&mut recv, id, true, buffer, 0)
-            .await
-            .map_err(|_| ClientError::Protocol)?;
-        recv.read_to_end(0)
-            .await
-            .map_err(|_| ClientError::Protocol)?;
+        {
+            let mut span = StorageSpan::new(StorageOperation::RemoteClientQuicRequestSend);
+            binary::write_request(&mut send, id, request, buffer.len(), None)
+                .await
+                .map_err(|_| {
+                    span.finish_error();
+                    ClientError::Protocol
+                })?;
+            send.finish().map_err(|_| {
+                span.finish_error();
+                ClientError::Transport
+            })?;
+            span.finish_success(0);
+        }
+        let result = {
+            let mut span = StorageSpan::new(StorageOperation::RemoteClientQuicResponseReceive);
+            let result = binary::read_result(&mut recv, id, true, buffer, 0)
+                .await
+                .map_err(|_| {
+                    span.finish_error();
+                    ClientError::Protocol
+                })?;
+            recv.read_to_end(0).await.map_err(|_| {
+                span.finish_error();
+                ClientError::Protocol
+            })?;
+            span.finish_success(0);
+            result
+        };
         transaction.completion.complete_response();
         result.map_err(|e| ClientError::Remote(e.code))
     }
@@ -181,16 +215,35 @@ impl Transport for QuicTransport {
             transport: self,
             completion: TransactionCompletion::default(),
         };
-        binary::write_request(&mut send, id, request, 0, Some(data))
-            .await
-            .map_err(|_| ClientError::Protocol)?;
-        send.finish().map_err(|_| ClientError::Transport)?;
-        let result = binary::read_result(&mut recv, id, false, &mut [], data.len())
-            .await
-            .map_err(|_| ClientError::Protocol)?;
-        recv.read_to_end(0)
-            .await
-            .map_err(|_| ClientError::Protocol)?;
+        {
+            let mut span = StorageSpan::new(StorageOperation::RemoteClientQuicRequestSend);
+            binary::write_request(&mut send, id, request, 0, Some(data))
+                .await
+                .map_err(|_| {
+                    span.finish_error();
+                    ClientError::Protocol
+                })?;
+            send.finish().map_err(|_| {
+                span.finish_error();
+                ClientError::Transport
+            })?;
+            span.finish_success(0);
+        }
+        let result = {
+            let mut span = StorageSpan::new(StorageOperation::RemoteClientQuicResponseReceive);
+            let result = binary::read_result(&mut recv, id, false, &mut [], data.len())
+                .await
+                .map_err(|_| {
+                    span.finish_error();
+                    ClientError::Protocol
+                })?;
+            recv.read_to_end(0).await.map_err(|_| {
+                span.finish_error();
+                ClientError::Protocol
+            })?;
+            span.finish_success(0);
+            result
+        };
         transaction.completion.complete_response();
         result.map_err(|e| ClientError::Remote(e.code))
     }

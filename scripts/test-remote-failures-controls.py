@@ -52,6 +52,15 @@ class ResultControls(unittest.TestCase):
 
 
 class CacheStageSelectors(unittest.TestCase):
+    def test_peer_request_stages_require_one_profiled_executed_case(self):
+        name = "peer::tests::peer_request_stage_metrics_preserve_bytes_outcomes_and_cancellation"
+        command, limit, profile, trace = parent.COMMANDS["peeriometrics"]
+        self.assertEqual((limit, profile, trace), (180, 1, 0))
+        self.assertEqual(command, ["./scripts/cargo-shared", "test", "-p", "mount-rs-blob-cache", "--lib", "--locked", "--offline", "--", "--ignored", "--exact", name, "--test-threads=1", "--nocapture"])
+        self.assertEqual(parent.EXACT_CASES["peeriometrics"], name)
+        self.assertTrue(parent.exact_case_passed(f"running 1 test\ntest {name} ... behavior_oracles=complete\nok\n{SUMMARY}", name))
+        self.assertFalse(parent.exact_case_passed("running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored;\n", name))
+
     def test_filesystem_metrics_require_the_complete_profiled_ci_suite(self):
         command, limit, profile, trace = parent.COMMANDS["filesystemmetrics"]
         self.assertEqual((limit, profile, trace), (180, 1, 0))
@@ -204,6 +213,85 @@ class CacheSlowLogControls(unittest.TestCase):
 
     def test_fixed_disk_deadline_record_is_observed(self):
         self.assertEqual(parent.cache_slow_logging_records("compile status\n"+self.LINE), [{"operation":"blob_cache.disk.lookup", "outcome":"error", "elapsed_us":600000}])
+
+    def test_new_peer_stage_fixed_labels_and_outcomes_are_observed(self):
+        names = ['blob_cache.peer.request_byte_admission_wait', 'blob_cache.peer.open_bi',
+                 'blob_cache.peer.request_send', 'blob_cache.peer.response_receive',
+                 'blob_cache.peer.get', 'blob_cache.peer.get_miss']
+        for name in names:
+            for outcome in ['success', 'error', 'cancelled']:
+                line = f'MOUNT_RS_STORAGE_SLOW operation={name} outcome={outcome} elapsed_us=2000000\n'
+                self.assertEqual(parent.cache_slow_logging_records(line),
+                                 [{'operation':name, 'outcome':outcome, 'elapsed_us':2000000}])
+
+    def test_mixed_old_and_new_labels_preserve_the_shared_budget(self):
+        peer = self.LINE.replace('blob_cache.disk.lookup', 'blob_cache.peer.get')
+        self.assertEqual(len(parent.cache_slow_logging_records((self.LINE + peer) * 8)), 16)
+        self.assertIsNone(parent.cache_slow_logging_records((self.LINE + peer) * 8 + peer))
+
+    def test_similar_private_peer_label_is_rejected(self):
+        self.assertIsNone(parent.cache_slow_logging_records(self.LINE.replace(
+            'blob_cache.disk.lookup', 'blob_cache.peer.get.private-drive')))
+
+    def test_real_peer_trace_requires_quota_cancellation_and_inclusive_error(self):
+        quota = self.LINE.replace('blob_cache.disk.lookup', 'blob_cache.peer.request_byte_admission_wait').replace('outcome=error', 'outcome=cancelled')
+        get = self.LINE.replace('blob_cache.disk.lookup', 'blob_cache.peer.get')
+        self.assertEqual(len(parent.peer_slow_logging_records(quota + get)), 2)
+        self.assertIsNone(parent.peer_slow_logging_records(quota))
+        self.assertIsNone(parent.peer_slow_logging_records(get))
+        self.assertIsNone(parent.peer_slow_logging_records(quota + get.replace('outcome=error', 'outcome=success')))
+
+    def test_peer_trace_selector_preserves_one_serial_real_case(self):
+        off, off_limit, off_profile, off_trace = parent.COMMANDS['peeriometrics']
+        on, on_limit, on_profile, on_trace = parent.COMMANDS['peeriometricstrace']
+        self.assertEqual(on, off)
+        self.assertEqual((off_limit, off_profile, off_trace), (180, 1, 0))
+        self.assertEqual((on_limit, on_profile, on_trace), (180, 1, 1))
+        self.assertEqual(parent.EXACT_CASES['peeriometricstrace'], parent.EXACT_CASES['peeriometrics'])
+
+    def test_unterminated_fixed_record_cannot_qualify_logging(self):
+        self.assertIsNone(parent.cache_slow_logging_records(self.LINE.rstrip('\n')))
+        self.assertIsNone(parent.cache_slow_logging_records(self.LINE + self.LINE.rstrip('\n')))
+
+    def test_alternate_separators_cannot_complete_a_fixed_record(self):
+        for separator in ['\r', '\r\n', '\v', '\f', '\x85', '\u2028', '\u2029']:
+            malformed = self.LINE.rstrip('\n') + separator
+            self.assertIsNone(parent.cache_slow_logging_records(malformed))
+            self.assertIsNone(parent.cache_slow_logging_records(self.LINE + malformed))
+
+    def test_raw_cache_file_preserves_physical_record_terminators(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'stderr.log'
+            path.write_bytes(self.LINE.encode())
+            self.assertEqual(len(parent.slow_logging_file_records(path)), 1)
+            for separator in [b'', b'\r', b'\r\n', b'\v', b'\f', b'\xc2\x85', b'\xe2\x80\xa8', b'\xe2\x80\xa9']:
+                path.write_bytes(self.LINE.rstrip('\n').encode() + separator)
+                self.assertIsNone(parent.slow_logging_file_records(path))
+
+    def test_raw_peer_file_preserves_both_required_record_terminators(self):
+        import tempfile
+        from pathlib import Path
+        quota = self.LINE.replace('blob_cache.disk.lookup', 'blob_cache.peer.request_byte_admission_wait').replace('outcome=error', 'outcome=cancelled').encode()
+        get = self.LINE.replace('blob_cache.disk.lookup', 'blob_cache.peer.get').encode()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'stderr.log'
+            path.write_bytes(quota + get)
+            self.assertEqual(len(parent.slow_logging_file_records(path, peer=True)), 2)
+            for separator in [b'', b'\r', b'\r\n', b'\v', b'\f', b'\xc2\x85', b'\xe2\x80\xa8', b'\xe2\x80\xa9']:
+                path.write_bytes(quota + get.rstrip(b'\n') + separator)
+                self.assertIsNone(parent.slow_logging_file_records(path, peer=True))
+                path.write_bytes(quota.rstrip(b'\n') + separator + get)
+                self.assertIsNone(parent.slow_logging_file_records(path, peer=True))
+
+    def test_raw_file_invalid_utf8_cannot_supply_a_recognized_frame(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'stderr.log'
+            path.write_bytes(self.LINE.rstrip('\n').encode() + b'\xff\n')
+            self.assertIsNone(parent.slow_logging_file_records(path))
 
     def test_absent_record_cannot_qualify_logging(self):
         self.assertIsNone(parent.cache_slow_logging_records("test passed\n"))

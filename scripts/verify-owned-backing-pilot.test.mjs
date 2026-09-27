@@ -362,9 +362,17 @@ test("current verifier refuses a complete historical 134-core / 85-storage snaps
   const { pilot, build } = model()
   const workload = pilot.native_phases.phases[0]
   assert.equal(workload.core_profile.entries.length, 136)
-  assert.equal(workload.storage.length, 92)
+  assert.equal(workload.storage.length, 100)
   workload.core_profile.entries.splice(134)
   workload.storage.splice(85)
+  assert.throws(() => verifyPilot(pilot, build), { code: "pilot_evidence_rejected", reason: "native_evidence" })
+})
+test("current verifier refuses a complete historical 136-core / 92-storage snapshot", () => {
+  const { pilot, build } = model()
+  const workload = pilot.native_phases.phases[0]
+  assert.equal(workload.core_profile.entries.length, 136)
+  assert.equal(workload.storage.length, 100)
+  workload.storage.splice(92)
   assert.throws(() => verifyPilot(pilot, build), { code: "pilot_evidence_rejected", reason: "native_evidence" })
 })
 for (const kind of ["old47", "old108", "old114", "old118", "old134", "missing", "missing_create_guard", "duplicate", "unknown"]) test(`causal exact ${kind} rows reject qualification`, () => {
@@ -392,10 +400,14 @@ for (const name of [
   "blob_cache.ram.lookup", "blob_cache.disk.lookup",
   "blob_cache.peer.connection_lock_wait", "blob_cache.peer.connection_establish",
   "client.quic.open_bi",
+  "client.quic.request_send", "client.quic.response_receive",
+  "blob_cache.peer.request_byte_admission_wait", "blob_cache.peer.open_bi",
+  "blob_cache.peer.request_send", "blob_cache.peer.response_receive",
+  "blob_cache.peer.get", "blob_cache.peer.get_miss",
 ]) test(`current exact missing ${name} storage row rejects qualification`, () => {
   const { pilot, build } = model()
   const rows = pilot.native_phases.phases[0].storage
-  assert.equal(rows.length, 92)
+  assert.equal(rows.length, 100)
   rows.splice(rows.findIndex((row) => row.name === name), 1)
   assert.throws(() => verifyPilot(pilot, build), { code: "pilot_evidence_rejected", reason: "native_evidence" })
 })

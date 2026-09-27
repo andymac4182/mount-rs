@@ -165,6 +165,8 @@ jobs:
           umask 077
           ./scripts/cargo-shared test --locked -p mount-rs-blob-cache --test distributed_failure --no-run \
             > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-cache.log" 2>&1
+          ./scripts/cargo-shared test --locked -p mount-rs-blob-cache --lib --no-run \
+            > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-peer-metrics.log" 2>&1
           ./scripts/cargo-shared test --locked -p mount-rs-remote-client --test quic_mount --no-run \
             > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-remote.log" 2>&1
           ./scripts/cargo-shared test --locked -p mount-rs-remote-client --lib --no-run \
@@ -210,13 +212,19 @@ jobs:
       - name: Verify authenticated peer connection stages through the owned parent
         timeout-minutes: 5
         run: python3 -B scripts/test-remote-failures.py peermetrics
+      - name: Verify peer request stages and byte units through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py peeriometrics
+      - name: Verify bounded peer timeout slow logging through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py peeriometricstrace
       - name: Verify peer read reconnect bypasses pending replica handshake through the owned parent
         timeout-minutes: 5
         run: python3 -B scripts/test-remote-failures.py peerreconnect
       - name: Verify real UDP stopped-peer port release through the owned parent
         timeout-minutes: 5
         run: python3 -B scripts/test-remote-failures.py peerport
-      - name: Verify client QUIC stream acquisition outcomes through the owned parent
+      - name: Verify client QUIC stream, send and receive outcomes through the owned parent
         timeout-minutes: 5
         run: python3 -B scripts/test-remote-failures.py clientmetrics
       - name: Verify warmed storage recorder allocations through the owned parent

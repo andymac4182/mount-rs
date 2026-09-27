@@ -39,7 +39,7 @@ observer work.
 Phase reports now retain the resource counters already sampled at each boundary.
 `resource_measurement.schema` is `mount-rs.process-resources.v1`. No new Node
 sampler calls are added. The current core, storage and QUIC row inventories are
-136, 92 and 21 respectively; the cache and client additions are described below.
+136, 100 and 21 respectively; the cache and client additions are described below.
 
 | Report field | Meaning |
 | --- | --- |
@@ -75,12 +75,12 @@ real Mac gate observes its own PID and start token with no selected device.
 CI runs the Node controls on its existing platforms and the exact OS gate on
 Unix, retaining its output even on failure and rejecting a zero-case pass.
 
-Remaining transport/cache timing gaps are explicit: client socket and send/receive waits,
-peer request-byte admission and stream open/send/receive, incoming peer
-establishment, directory/discovery lookup and peer GET outcomes, and WebSocket
-transport stages. Cache lookup histograms include misses; isolated warm phases
-are needed to qualify RAM or disk hit latency. Existing hit/backing counters
-and QUIC service measurements cannot supply the remaining stage times.
+Remaining transport/cache timing gaps are client connection/socket details,
+incoming peer establishment, directory/discovery lookup, and WebSocket stages.
+Client send/receive and peer quota/open/send/receive/GET stages are described
+below. Cache lookup histograms include misses; isolated warm phases are needed
+to qualify RAM or disk hit latency. Peer send backpressure/error and stream-open
+error remain unqualified by the current peer fixture.
 
 The [retained resource report](benchmarks/process-resource-metrics-20260927/report.json)
 contains two serial 400-lifecycle compact SQLite runs: 800 verified full reads
@@ -211,8 +211,8 @@ formatting. Each bank retains unchanged source inputs: 505 Rust pins and 93
 Node pins, with a 530-file union. The earlier failed consumer gate is retained
 separately; two stale row-count assertions were corrected in its JavaScript test.
 The warmed public recorder covers 14 selected storage rows with zero allocation
-calls. Actual boxed trait futures remain 608/464/464 bytes for exchange/read/write
-in the baseline and instrumented debug arm64 Rust 1.95 build. This is an object
+calls. In that stream-only slice, boxed trait futures were 608/464/464 bytes
+for exchange/read/write in both debug arm64 Rust 1.95 arms. This is an object
 size observation; whole-client allocation counts remain unmeasured.
 
 The Node and native exporters declare the row and its `client_quic` units family.
@@ -224,6 +224,79 @@ cannot observe counters in a separate client process. A dedicated shutdown
 export for client CLI mounts remains open; library and owned load-runner process
 snapshots can observe this row.
 
+### Client and peer QUIC request stages
+
+The [retained transport report](benchmarks/transport-stage-metrics-20260928/report.json)
+qualifies eight appended storage rows, preserving the original 92-row prefix.
+The current bank has 100 rows and 20 distinct units families.
+
+| Fixed row | Timed boundary | Successful bytes |
+| --- | --- | --- |
+| `client.quic.request_send` | Existing control/binary encoding, write and FIN submission | Unavailable |
+| `client.quic.response_receive` | Existing frame/result decode and EOF validation | Unavailable |
+| `blob_cache.peer.request_byte_admission_wait` | Existing outbound transfer-byte permit await | Unavailable |
+| `blob_cache.peer.open_bi` | Existing peer stream acquisition await | Unavailable |
+| `blob_cache.peer.request_send` | Existing chunk write and FIN submission | Plaintext header plus body submitted |
+| `blob_cache.peer.response_receive` | Status and bounded body read, EOF/status validation and existing owner wrap | Plaintext status byte plus body |
+| `blob_cache.peer.get` | Inclusive `get` or `get_shared`, including existing return conversion | Logical returned payload length |
+| `blob_cache.peer.get_miss` | Successful `None` classification marker | Unavailable |
+
+Send success means local submission to Quinn. It does not establish peer
+acknowledgment or backing durability. Receive success means the existing
+transport validation completed. A valid remote application error can therefore
+be a successful receive. GET includes the existing Vec conversion only for
+`get`; `get_shared` retains its existing Bytes result. Empty `Some` is a hit;
+only `None` emits the miss marker. Miss duration measures marker work, not a
+network request. Nested GET and transport durations overlap.
+
+Caller drop records cancellation. The existing peer deadline drops an active
+inner stage as cancelled and returns a GET error. These counters preserve the
+existing error mapping, security checks, deadlines, connection roles and
+uncertain acquired client transaction closure. They add no framing pass,
+spawned task or explicit Box. RPC allocation counts remain unmeasured.
+
+Actual missing-row RED fixtures precede the producers. Final qualification runs
+20 owned gates: 172 Rust test executions, 204 Node tests and 77 modeled parent
+controls, including strict Clippy and formatting. Real client controls include
+stream-credit waits, held response cancellation, delayed/blocked sends, stopped
+streams, malformed data and extra response bytes after a valid frame. Real peer
+controls include byte quota/deadline, stream credits, response pending, full and
+empty payloads, misses, `get_shared`, reuse, mTLS and partition rejection.
+Peer send success is qualified; peer send pending/error and stream-open error
+remain open. Client send controls do not qualify peer send backpressure.
+
+With profiling and tracing enabled, the real peer quota timeout emits
+`request_byte_admission_wait` cancelled and inclusive `get` error records at
+about two seconds. The shared 100 ms threshold and 16-record limit remain.
+The validator accepts the six new fixed peer labels and rejects private or
+unknown labels, invalid durations and over-budget records. The actual file reader
+preserves raw bytes; recognized records must be complete LF frames. Real-file
+controls reject truncation, CR/CRLF, alternate separators and invalid UTF-8.
+Slow logging adds
+observer work; keep it off for allocation and throughput measurements.
+
+The warmed recorder measures zero alloc/alloc_zeroed/realloc calls across
+22 selected rows and 66 success/error/drop lifecycles. This excludes setup,
+snapshots, output and complete RPCs. Existing boxed client futures grow from
+608/464/464 to 648/544/544 bytes for exchange/read/write in the debug arm64
+Rust 1.95 build: increases of 40/80/80 bytes. No throughput improvement or
+whole-RPC allocation claim follows from these instrumentation tests.
+
+Both real fixtures complete cleanup checks before metric assertions. Client
+`wait_idle` follows explicit closure of all 16 endpoints and observes idle
+connections; it does not prove driver joins or UDP release. The peer fixture
+observes weak cache owners gone and both actual UDP addresses rebound.
+The owned parent independently observes reap, absent process group and EOF
+before removing its private fixtures.
+
+JS and NAPI exports declare stage-specific bytes. The addon still audits 78
+storage producers by default or 85 with FoundationDB; its transport families
+remain unavailable. Literal historical 92-row records retain missing rows and
+histograms as null/unavailable. Strict current validators reject missing rows
+and the historical payload-only descriptor on a current 100-row inventory.
+Server CLI shutdown banks remain process-local; a dedicated client CLI shutdown
+export, incoming peer/discovery timings and WebSocket stages remain open.
+
 ### Distributed cache lookup and peer connection stages
 
 The [public CLI diagnostic export](#public-cli-diagnostic-export) describes how
@@ -232,7 +305,8 @@ to build the profiled server and capture its bounded shutdown record.
 The cache slice appends six storage rows at indexes 85 through 90 and two core
 hit counters at 134 and 135. The existing 85 storage and 134 core rows retain
 their offsets. This cache slice produced 91 storage rows; client stream acquisition
-now brings the current bank to 92 storage and 136 core rows.
+brought that slice to 92 storage and 136 core rows; the request-stage slice
+above expands the current storage bank to 100.
 
 | Fixed storage row | Measured boundary | Successful bytes |
 | --- | --- | --- |
@@ -351,7 +425,8 @@ hosted failure's cause or measure throughput.
 The authority/refresh slice appended sixteen rows to the 118-row prefix, for
 134 core rows, while storage then remained 85 rows. The cache slice appends to
 those unchanged prefixes, producing 136 core and 91 storage rows. Client stream
-acquisition subsequently appends storage row 91, producing the current 92-row bank.
+acquisition subsequently appended storage row 91, producing 92 rows. The
+request-stage slice adds eight more rows to the current 100-row storage bank.
 The authority/refresh observations split the
 repeated compact metadata work seen in the latest lifecycle measurement:
 
@@ -1014,14 +1089,15 @@ overlapping wall durations. Global banks survive provider retirement without
 retaining stores or connections. They do not attribute totals to a particular
 drive or provider instance, and zero in-flight gauges do not prove drain.
 
-Storage retains all 92 ordered rows, outcomes, known successful payload bytes,
+Storage retains all 100 ordered rows, outcomes, known successful bytes by
+operation (payload or peer plaintext envelope as documented above),
 returned rows and row-observation availability, global/per-row in-flight
 gauges, 32 latency buckets and forwarding-box provenance. Coverage labels are
 derived from the producer registry: 47 `sdk.*` erased-method rows, 18 `tidb.*`
 source-instrumented adapter rows, 12 NAPI `metadata.*`/`blocks.*` forwarding
 rows that this CLI does not use, and one `pglite.client_lock_wait` row selected
-only by that provider. The seven FoundationDB, six cache and one client stream
-rows are also declared in the bank; these four CLI coverage labels do not establish their
+only by that provider. The seven FoundationDB, twelve cache and three client
+QUIC rows are also declared in the bank; these four CLI coverage labels do not establish their
 use or instrumentation in every process. Zero TiDB rows do not prove TiDB use or complete
 SQL/network coverage. Core profile rows retain fixed names, calls, elapsed
 nanoseconds and event-specific units.

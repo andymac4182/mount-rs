@@ -263,14 +263,51 @@ fn storage_operation_families() -> Value {
             "calls":"native_client_read_method_invocations; range_page_calls_not_key_value_count",
             "bytes":"known_selected_successful_returned_value_key_and_range_page_key_value_payload_bytes_only",
             "returned_rows":"unavailable","duration":duration},
-        "blob_cache":{"operations":matching(&["blob_cache."]),
+        "blob_cache":{"operations":[
+                "blob_cache.miss.admission_wait","blob_cache.miss.singleflight_wait",
+                "blob_cache.ram.lookup","blob_cache.disk.lookup",
+                "blob_cache.peer.connection_lock_wait","blob_cache.peer.connection_establish"],
             "calls":"cache_stage_invocations; lookups_include_hits_and_misses; waits_count_acquisitions_or_termination",
             "bytes":"known_successful_ram_and_disk_lookup_returned_payload_bytes_only; waits_and_connection_stages_zero; misses_zero",
             "returned_rows":"unavailable","duration":duration},
         "client_quic":{"operations":["client.quic.open_bi"],
             "calls":"stream_acquisition_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments",
             "bytes":"unavailable","returned_rows":"unavailable",
-            "duration":"inclusive_open_bi_await_nanoseconds; not_exclusive_cpu_or_network_time"}
+            "duration":"inclusive_open_bi_await_nanoseconds; not_exclusive_cpu_or_network_time"},
+        "client_quic_request_send":{"operations":["client.quic.request_send"],
+            "calls":"request_send_stage_invocations; includes_success_error_and_cancellation; not_acknowledgments",
+            "bytes":"unavailable","returned_rows":"unavailable",
+            "duration":"inclusive_write_and_fin_submission_nanoseconds; not_acknowledgment_or_exclusive_cpu_time"},
+        "client_quic_response_receive":{"operations":["client.quic.response_receive"],
+            "calls":"response_receive_stage_invocations; includes_success_error_and_cancellation; not_server_operations",
+            "bytes":"unavailable","returned_rows":"unavailable",
+            "duration":"inclusive_decode_and_eof_validation_nanoseconds; not_exclusive_cpu_or_network_time"},
+        "blob_cache_peer_request_byte_admission_wait":{"operations":["blob_cache.peer.request_byte_admission_wait"],
+            "calls":"request_byte_permit_acquisition_invocations; includes_success_error_and_cancellation",
+            "bytes":"unavailable","returned_rows":"unavailable",
+            "duration":"inclusive_request_byte_permit_await_nanoseconds; overlaps_get_duration"},
+        "blob_cache_peer_open_bi":{"operations":["blob_cache.peer.open_bi"],
+            "calls":"stream_acquisition_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments",
+            "bytes":"unavailable","returned_rows":"unavailable",
+            "duration":"inclusive_open_bi_await_nanoseconds; overlaps_get_duration"},
+        "blob_cache_peer_request_send":{"operations":["blob_cache.peer.request_send"],
+            "calls":"request_send_stage_invocations; includes_success_error_and_cancellation; not_acknowledgments",
+            "bytes":"known_successfully_submitted_plaintext_request_header_and_payload_bytes; not_wire_bytes_or_acknowledgments",
+            "returned_rows":"unavailable",
+            "duration":"inclusive_write_and_fin_submission_nanoseconds; overlaps_get_duration"},
+        "blob_cache_peer_response_receive":{"operations":["blob_cache.peer.response_receive"],
+            "calls":"response_receive_stage_invocations; includes_success_error_and_cancellation; not_backing_reads",
+            "bytes":"known_successfully_validated_plaintext_status_and_body_bytes; not_wire_bytes",
+            "returned_rows":"unavailable",
+            "duration":"inclusive_response_read_and_validation_nanoseconds; overlaps_get_duration"},
+        "blob_cache_peer_get":{"operations":["blob_cache.peer.get"],
+            "calls":"logical_peer_get_and_get_shared_invocations; includes_hits_misses_errors_and_cancellation",
+            "bytes":"known_successful_logical_get_payload_bytes; misses_zero","returned_rows":"unavailable",
+            "duration":"inclusive_get_method_nanoseconds; includes_request_and_existing_return_conversion; overlaps_transport_stages"},
+        "blob_cache_peer_get_miss":{"operations":["blob_cache.peer.get_miss"],
+            "calls":"successful_get_miss_classifications; not_peer_requests",
+            "bytes":"unavailable","returned_rows":"unavailable",
+            "duration":"classification_marker_nanoseconds; excludes_get_request_duration"}
     })
 }
 
@@ -472,7 +509,7 @@ pub fn storage_diagnostics() -> String {
         "physical_device_iops":"unavailable",
         "measurement":{
             "storage_calls":"fixed_label_provider_and_driver_operations; families_overlap_and_are_not_application_iops",
-            "storage_bytes":"known_successful_payload_bytes_only; zero_does_not_establish_no_payload",
+            "storage_bytes":"known_successful_stage_specific_bytes; payload_or_plaintext_envelope_as_declared_by_family; zero_does_not_establish_no_payload",
             "storage_rows":"known_returned_sql_rows; observations_count_successes_with_known_rows; excludes_affected_rows",
             "storage_operations":storage::operation_names(),
             "storage_families":storage_operation_families(),
@@ -7278,13 +7315,13 @@ mod tests {
         let families = snapshot["measurement"]["storage_families"]
             .as_object()
             .unwrap();
-        assert_eq!(families.len(), 12);
+        assert_eq!(families.len(), 20);
         let declared = families
             .values()
             .flat_map(|family| family["operations"].as_array().unwrap())
             .map(|name| name.as_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(declared.len(), 92);
+        assert_eq!(declared.len(), 100);
         assert_eq!(
             declared
                 .into_iter()
@@ -7314,7 +7351,7 @@ mod tests {
             "known_selected_successful_returned_value_key_and_range_page_key_value_payload_bytes_only"
         );
         let names = storage::operation_names();
-        assert_eq!(names.len(), 92);
+        assert_eq!(names.len(), 100);
         assert_eq!(
             &names[78..85],
             &[
@@ -7344,11 +7381,70 @@ mod tests {
             families["blob_cache"]["bytes"],
             "known_successful_ram_and_disk_lookup_returned_payload_bytes_only; waits_and_connection_stages_zero; misses_zero"
         );
-        assert_eq!(&names[91..], &["client.quic.open_bi"]);
-        assert_eq!(families["client_quic"]["operations"], json!(&names[91..]));
+        assert_eq!(&names[91..92], &["client.quic.open_bi"]);
+        assert_eq!(families["client_quic"]["operations"], json!(&names[91..92]));
         assert_eq!(families["client_quic"]["bytes"], "unavailable");
         assert_eq!(families["client_quic"]["returned_rows"], "unavailable");
         assert!(!storage_instrumented_operation_names().contains(&"client.quic.open_bi"));
+        assert_eq!(
+            &names[92..],
+            &[
+                "client.quic.request_send",
+                "client.quic.response_receive",
+                "blob_cache.peer.request_byte_admission_wait",
+                "blob_cache.peer.open_bi",
+                "blob_cache.peer.request_send",
+                "blob_cache.peer.response_receive",
+                "blob_cache.peer.get",
+                "blob_cache.peer.get_miss",
+            ]
+        );
+        for (index, family) in [
+            "client_quic_request_send",
+            "client_quic_response_receive",
+            "blob_cache_peer_request_byte_admission_wait",
+            "blob_cache_peer_open_bi",
+            "blob_cache_peer_request_send",
+            "blob_cache_peer_response_receive",
+            "blob_cache_peer_get",
+            "blob_cache_peer_get_miss",
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert_eq!(families[*family]["operations"], json!([names[92 + index]]));
+            assert_eq!(families[*family]["returned_rows"], "unavailable");
+            assert!(!storage_instrumented_operation_names().contains(&names[92 + index]));
+        }
+        assert_eq!(
+            families["blob_cache_peer_request_send"]["bytes"],
+            "known_successfully_submitted_plaintext_request_header_and_payload_bytes; not_wire_bytes_or_acknowledgments"
+        );
+        assert_eq!(
+            families["blob_cache_peer_response_receive"]["bytes"],
+            "known_successfully_validated_plaintext_status_and_body_bytes; not_wire_bytes"
+        );
+        assert_eq!(
+            families["blob_cache_peer_get"]["bytes"],
+            "known_successful_logical_get_payload_bytes; misses_zero"
+        );
+        assert_eq!(
+            families["blob_cache_peer_get_miss"]["duration"],
+            "classification_marker_nanoseconds; excludes_get_request_duration"
+        );
+        for family in [
+            "client_quic_request_send",
+            "client_quic_response_receive",
+            "blob_cache_peer_request_byte_admission_wait",
+            "blob_cache_peer_open_bi",
+            "blob_cache_peer_get_miss",
+        ] {
+            assert_eq!(families[family]["bytes"], "unavailable");
+        }
+        assert_eq!(
+            snapshot["measurement"]["storage_bytes"],
+            "known_successful_stage_specific_bytes; payload_or_plaintext_envelope_as_declared_by_family; zero_does_not_establish_no_payload"
+        );
         assert_eq!(LEGACY_NON_TIDB_INSTRUMENTED_OPERATIONS.len(), 60);
         assert_eq!(&names[..60], LEGACY_NON_TIDB_INSTRUMENTED_OPERATIONS);
         assert_eq!(
@@ -7381,19 +7477,27 @@ mod tests {
                 "exact static site count {field}"
             );
         }
-        assert_eq!(snapshot["storage"]["entries"].as_array().unwrap().len(), 92);
-        let client_row = &snapshot["storage"]["entries"][91];
-        assert_eq!(client_row["name"], "client.quic.open_bi");
-        for field in [
-            "calls",
-            "success",
-            "error",
-            "cancelled",
-            "bytes",
-            "elapsed_ns",
-            "in_flight",
-        ] {
-            assert_eq!(client_row[field], "0");
+        assert_eq!(
+            snapshot["storage"]["entries"].as_array().unwrap().len(),
+            100
+        );
+        for (index, name) in names[91..].iter().enumerate() {
+            let transport_row = &snapshot["storage"]["entries"][91 + index];
+            assert_eq!(transport_row["name"], *name);
+            for field in [
+                "calls",
+                "success",
+                "error",
+                "cancelled",
+                "bytes",
+                "elapsed_ns",
+                "in_flight",
+                "returned_rows",
+                "returned_row_observations",
+            ] {
+                assert_eq!(transport_row[field], "0");
+            }
+            assert_eq!(transport_row["latency_log2_us"], json!(vec!["0"; 32]));
         }
         for (index, name) in names[78..85].iter().enumerate() {
             let row = &snapshot["storage"]["entries"][78 + index];
@@ -7480,13 +7584,19 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            92
+            100
         );
         assert!(
             instrumented
                 .iter()
                 .all(|name| !name.as_str().unwrap().starts_with("blob_cache.")),
             "cache bank declarations do not establish addon source coverage"
+        );
+        assert!(
+            instrumented
+                .iter()
+                .all(|name| !name.as_str().unwrap().starts_with("client.quic.")),
+            "client transport declarations do not establish addon source coverage"
         );
         #[cfg(all(
             feature = "foundationdb",

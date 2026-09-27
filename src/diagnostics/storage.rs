@@ -111,8 +111,16 @@ pub enum Operation {
     BlobCachePeerConnectionLockWait,
     BlobCachePeerConnectionEstablish,
     RemoteClientQuicOpenBi,
+    RemoteClientQuicRequestSend,
+    RemoteClientQuicResponseReceive,
+    BlobCachePeerRequestByteAdmissionWait,
+    BlobCachePeerOpenBi,
+    BlobCachePeerRequestSend,
+    BlobCachePeerResponseReceive,
+    BlobCachePeerGet,
+    BlobCachePeerGetMiss,
 }
-const NAMES: [&str; 92] = [
+const NAMES: [&str; 100] = [
     "metadata.load",
     "metadata.load_if_changed",
     "metadata.snapshot",
@@ -205,6 +213,14 @@ const NAMES: [&str; 92] = [
     "blob_cache.peer.connection_lock_wait",
     "blob_cache.peer.connection_establish",
     "client.quic.open_bi",
+    "client.quic.request_send",
+    "client.quic.response_receive",
+    "blob_cache.peer.request_byte_admission_wait",
+    "blob_cache.peer.open_bi",
+    "blob_cache.peer.request_send",
+    "blob_cache.peer.response_receive",
+    "blob_cache.peer.get",
+    "blob_cache.peer.get_miss",
 ];
 
 /// Fixed serialized row order. Appended families have separate invocation semantics.
@@ -670,7 +686,7 @@ mod tests {
     #[test]
     fn fixed_names_match_appended_sdk_tidb_and_foundationdb_rows() {
         let names = operation_names();
-        assert_eq!(names.len(), 92);
+        assert_eq!(names.len(), 100);
         assert_eq!(
             names[Operation::SdkMetadataLoadIfChanged as usize],
             "sdk.metadata.load_if_changed"
@@ -723,6 +739,34 @@ mod tests {
         );
         assert_eq!(Operation::RemoteClientQuicOpenBi as usize, 91);
         assert_eq!(names[91], "client.quic.open_bi");
+        for (offset, operation) in [
+            Operation::RemoteClientQuicRequestSend,
+            Operation::RemoteClientQuicResponseReceive,
+            Operation::BlobCachePeerRequestByteAdmissionWait,
+            Operation::BlobCachePeerOpenBi,
+            Operation::BlobCachePeerRequestSend,
+            Operation::BlobCachePeerResponseReceive,
+            Operation::BlobCachePeerGet,
+            Operation::BlobCachePeerGetMiss,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(operation as usize, 92 + offset);
+        }
+        assert_eq!(
+            &names[92..],
+            &[
+                "client.quic.request_send",
+                "client.quic.response_receive",
+                "blob_cache.peer.request_byte_admission_wait",
+                "blob_cache.peer.open_bi",
+                "blob_cache.peer.request_send",
+                "blob_cache.peer.response_receive",
+                "blob_cache.peer.get",
+                "blob_cache.peer.get_miss",
+            ]
+        );
         assert_eq!(
             names
                 .iter()

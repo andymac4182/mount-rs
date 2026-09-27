@@ -121,10 +121,18 @@ export const STORAGE_OPERATION_NAMES = [
   "blob_cache.peer.connection_lock_wait",
   "blob_cache.peer.connection_establish",
   "client.quic.open_bi",
+  "client.quic.request_send",
+  "client.quic.response_receive",
+  "blob_cache.peer.request_byte_admission_wait",
+  "blob_cache.peer.open_bi",
+  "blob_cache.peer.request_send",
+  "blob_cache.peer.response_receive",
+  "blob_cache.peer.get",
+  "blob_cache.peer.get_miss",
 ]
 const storageNames = STORAGE_OPERATION_NAMES
 export const STORAGE_CALL_SEMANTICS = "fixed_label_provider_and_driver_operations; families_overlap_and_are_not_application_iops"
-export const STORAGE_BYTE_SEMANTICS = "known_successful_payload_bytes_only; zero_does_not_establish_no_payload"
+export const STORAGE_BYTE_SEMANTICS = "known_successful_stage_specific_bytes; payload_or_plaintext_envelope_as_declared_by_family; zero_does_not_establish_no_payload"
 export const STORAGE_ROW_SEMANTICS = "known_returned_sql_rows; observations_count_successes_with_known_rows; excludes_affected_rows"
 export const STORAGE_OPERATION_FAMILIES = {
   napi_provider: { operations: STORAGE_OPERATION_NAMES.filter((name) => name.startsWith("metadata.") || name.startsWith("blocks.")), calls: "napi_dynamic_provider_method_invocations", bytes: "known_successful_block_put_input_and_get_or_migration_payload_bytes; metadata_bytes_unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
@@ -137,8 +145,16 @@ export const STORAGE_OPERATION_FAMILIES = {
   tidb_sql: { operations: STORAGE_OPERATION_NAMES.filter((name) => name.startsWith("tidb.sql.")), calls: "categorized_sql_adapter_invocations; not_internal_requests", bytes: "known_selected_successful_payload_bytes_only; other_sql_bytes_unavailable", returned_rows: STORAGE_ROW_SEMANTICS, duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
   foundationdb_transaction: { operations: ["foundationdb.transaction.create", "foundationdb.transaction.closure_attempt", "foundationdb.transaction.commit", "foundationdb.transaction.on_error"], calls: "provider_closure_attempts_and_native_create_commit_on_error_invocations; distinct_units_not_logical_transactions", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
   foundationdb_read: { operations: ["foundationdb.read.get", "foundationdb.read.get_key", "foundationdb.read.get_range_page"], calls: "native_client_read_method_invocations; range_page_calls_not_key_value_count", bytes: "known_selected_successful_returned_value_key_and_range_page_key_value_payload_bytes_only", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
-  blob_cache: { operations: STORAGE_OPERATION_NAMES.filter((name) => name.startsWith("blob_cache.")), calls: "cache_stage_invocations; lookups_include_hits_and_misses; waits_count_acquisitions_or_termination", bytes: "known_successful_ram_and_disk_lookup_returned_payload_bytes_only; waits_and_connection_stages_zero; misses_zero", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  blob_cache: { operations: ["blob_cache.miss.admission_wait", "blob_cache.miss.singleflight_wait", "blob_cache.ram.lookup", "blob_cache.disk.lookup", "blob_cache.peer.connection_lock_wait", "blob_cache.peer.connection_establish"], calls: "cache_stage_invocations; lookups_include_hits_and_misses; waits_count_acquisitions_or_termination", bytes: "known_successful_ram_and_disk_lookup_returned_payload_bytes_only; waits_and_connection_stages_zero; misses_zero", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
   client_quic: { operations: ["client.quic.open_bi"], calls: "stream_acquisition_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_open_bi_await_nanoseconds; not_exclusive_cpu_or_network_time" },
+  client_quic_request_send: { operations: ["client.quic.request_send"], calls: "request_send_stage_invocations; includes_success_error_and_cancellation; not_acknowledgments", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_write_and_fin_submission_nanoseconds; not_acknowledgment_or_exclusive_cpu_time" },
+  client_quic_response_receive: { operations: ["client.quic.response_receive"], calls: "response_receive_stage_invocations; includes_success_error_and_cancellation; not_server_operations", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_decode_and_eof_validation_nanoseconds; not_exclusive_cpu_or_network_time" },
+  blob_cache_peer_request_byte_admission_wait: { operations: ["blob_cache.peer.request_byte_admission_wait"], calls: "request_byte_permit_acquisition_invocations; includes_success_error_and_cancellation", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_request_byte_permit_await_nanoseconds; overlaps_get_duration" },
+  blob_cache_peer_open_bi: { operations: ["blob_cache.peer.open_bi"], calls: "stream_acquisition_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_open_bi_await_nanoseconds; overlaps_get_duration" },
+  blob_cache_peer_request_send: { operations: ["blob_cache.peer.request_send"], calls: "request_send_stage_invocations; includes_success_error_and_cancellation; not_acknowledgments", bytes: "known_successfully_submitted_plaintext_request_header_and_payload_bytes; not_wire_bytes_or_acknowledgments", returned_rows: "unavailable", duration: "inclusive_write_and_fin_submission_nanoseconds; overlaps_get_duration" },
+  blob_cache_peer_response_receive: { operations: ["blob_cache.peer.response_receive"], calls: "response_receive_stage_invocations; includes_success_error_and_cancellation; not_backing_reads", bytes: "known_successfully_validated_plaintext_status_and_body_bytes; not_wire_bytes", returned_rows: "unavailable", duration: "inclusive_response_read_and_validation_nanoseconds; overlaps_get_duration" },
+  blob_cache_peer_get: { operations: ["blob_cache.peer.get"], calls: "logical_peer_get_and_get_shared_invocations; includes_hits_misses_errors_and_cancellation", bytes: "known_successful_logical_get_payload_bytes; misses_zero", returned_rows: "unavailable", duration: "inclusive_get_method_nanoseconds; includes_request_and_existing_return_conversion; overlaps_transport_stages" },
+  blob_cache_peer_get_miss: { operations: ["blob_cache.peer.get_miss"], calls: "successful_get_miss_classifications; not_peer_requests", bytes: "unavailable", returned_rows: "unavailable", duration: "classification_marker_nanoseconds; excludes_get_request_duration" },
 }
 export const TIDB_DIAGNOSTIC_COVERAGE = {
   schema: "mount-rs-tidb-client-diagnostic-coverage-v1", status: "source_sites_instrumented",
