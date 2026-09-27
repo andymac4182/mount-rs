@@ -610,9 +610,27 @@ impl Database {
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
-        self.connection
-            .lock()
-            .map_err(|_| backend_error("SQLite storage lock poisoned"))
+        let started = self._io_diagnostics.as_ref().map(|_| Instant::now());
+        let result = self.connection.lock();
+        if let (Some(counts), Some(started)) = (&self._io_diagnostics, started) {
+            counts.lock_finished(
+                started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
+                result.is_ok(),
+            );
+        }
+        result.map_err(|_| backend_error("SQLite storage lock poisoned"))
+    }
+
+    fn observed_commit(&self, transaction: rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
+        let started = self._io_diagnostics.as_ref().map(|_| Instant::now());
+        let result = transaction.commit();
+        if let (Some(counts), Some(started)) = (&self._io_diagnostics, started) {
+            counts.commit_finished(
+                started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
+                result.is_ok(),
+            );
+        }
+        result
     }
 
     #[cfg(unix)]
@@ -1524,7 +1542,7 @@ impl SqliteBlockStore {
                 .with_syscall("put block")
                 .with_message("SQLite block insert was not applied"));
         }
-        if let Err(error) = transaction.commit() {
+        if let Err(error) = self.0.observed_commit(transaction) {
             return Err(sqlite_busy_known_noncommit(
                 &error,
                 connection.is_autocommit(),

@@ -909,7 +909,8 @@ async fn stage(
         .expect("process resource profile unavailable")
         .delta(&resources_before)
         .expect("process resource counters invalid");
-    let report = json!({"mode":format!("{mode:?}"),"codec":codec.label(),"nominal_seconds":seconds,"start_unix_ms":start_unix_ms,"finish_unix_ms":SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis(),"clients":clients.len(),"active_clients":active_clients,"servers":server_count,"per_client_depth":depth,"total_queue_depth":active_clients*depth,"elapsed_seconds_including_drain":elapsed,"read":read.json(),"write":write.json(),"read_iops":read.count as f64/elapsed,"write_iops":write.count as f64/elapsed,"total_iops":iops,"payload_mib_per_second":iops*BYTES as f64/1048576.0,"reference_target_iops":100000,"target_attainment":iops/100000.0,"failures":errors.len(),"cache":"cache-warm randomized dataset; no cold-cache claim"});
+    let mut report = json!({"mode":format!("{mode:?}"),"codec":codec.label(),"nominal_seconds":seconds,"start_unix_ms":start_unix_ms,"finish_unix_ms":SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis(),"clients":clients.len(),"active_clients":active_clients,"servers":server_count,"per_client_depth":depth,"total_queue_depth":active_clients*depth,"elapsed_seconds_including_drain":elapsed,"read":read.json(),"write":write.json(),"read_iops":read.count as f64/elapsed,"write_iops":write.count as f64/elapsed,"total_iops":iops,"payload_mib_per_second":iops*BYTES as f64/1048576.0,"reference_target_iops":100000,"target_attainment":iops/100000.0,"failures":errors.len(),"cache":"cache-warm randomized dataset; no cold-cache claim"});
+    report["runtime"] = runtime_worker_receipt();
     #[cfg(all(feature = "resource-profiling", unix))]
     let report = {
         let mut report = report;
@@ -918,13 +919,96 @@ async fn stage(
     };
     (report, ledger, errors)
 }
-#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+const RUNTIME_WORKER_SELECTOR: &str = "MOUNT_RS_REMOTE_SATURATION_RUNTIME_WORKERS";
+
+fn selected_runtime_workers(value: Option<&str>) -> Result<usize, &'static str> {
+    match value {
+        None | Some("16") => Ok(16),
+        Some("32") => Ok(32),
+        Some("64") => Ok(64),
+        Some(_) => Err("runtime worker selector requires exactly 16, 32 or 64"),
+    }
+}
+
+fn saturation_runtime(value: Option<&str>) -> Result<tokio::runtime::Runtime, &'static str> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(selected_runtime_workers(value)?)
+        .enable_all()
+        .build()
+        .map_err(|_| "saturation runtime construction failed")
+}
+
+fn runtime_worker_receipt() -> Value {
+    json!({
+        "scheduler":"tokio_multi_thread",
+        "worker_threads":tokio::runtime::Handle::current().metrics().num_workers(),
+        "selector_env":RUNTIME_WORKER_SELECTOR,
+        "selector_value":std::env::var(RUNTIME_WORKER_SELECTOR).ok(),
+        "scope":"observed Tokio scheduler worker pool size; not busy or physical thread count; per-client I/O depth and workload unchanged"
+    })
+}
+
+#[test]
+fn runtime_worker_selector_is_strict_and_defaults_to_16() {
+    assert_eq!(selected_runtime_workers(None), Ok(16));
+    for (value, expected) in [("16", 16), ("32", 32), ("64", 64)] {
+        assert_eq!(selected_runtime_workers(Some(value)), Ok(expected));
+    }
+    for invalid in [
+        "", "0", "1", "8", "17", "31", "65", "128", "016", "+32", "32 ", " 32", "32,64", "invalid",
+    ] {
+        assert!(
+            selected_runtime_workers(Some(invalid)).is_err(),
+            "{invalid:?}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "explicit serial runtime worker-pool observation control"]
+fn runtime_worker_selector_reaches_observed_tokio_pool() {
+    let caller_thread = std::thread::current().id();
+    for selector in [None, Some("16"), Some("32"), Some("64")] {
+        let expected = selected_runtime_workers(selector).unwrap();
+        let runtime = saturation_runtime(selector).unwrap();
+        let (receipt, task_thread) = runtime.block_on(async {
+            tokio::spawn(async { (runtime_worker_receipt(), std::thread::current().id()) })
+                .await
+                .unwrap()
+        });
+        assert_ne!(
+            task_thread, caller_thread,
+            "probe must execute on a runtime worker"
+        );
+        let encoded = serde_json::to_vec(&receipt).unwrap();
+        let observed: Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(observed["worker_threads"], expected);
+        assert_eq!(observed["scheduler"], "tokio_multi_thread");
+        assert_eq!(observed["selector_env"], RUNTIME_WORKER_SELECTOR);
+        println!(
+            "MOUNT_RS_RUNTIME_WORKERS expected={expected} observed={} worker_task_verified=true",
+            observed["worker_threads"]
+        );
+        // Each complete runtime is dropped before the next is constructed.
+        drop(runtime);
+    }
+}
+
+#[test]
 #[ignore = "requires disposable provider; 100 QUIC clients / 10 independent coordinators"]
-async fn actual_tidb_100_clients_10_servers_saturation() {
-    tokio::time::timeout(Duration::from_secs(1800), packet())
-        .await
-        .expect("overall saturation deadline exceeded")
-        .expect("saturation failed");
+fn actual_tidb_100_clients_10_servers_saturation() {
+    let selected = match std::env::var(RUNTIME_WORKER_SELECTOR) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => panic!("runtime worker selector must be Unicode"),
+    };
+    let runtime = saturation_runtime(selected.as_deref()).expect("invalid saturation runtime");
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(1800), packet())
+            .await
+            .expect("overall saturation deadline exceeded")
+            .expect("saturation failed");
+    });
 }
 async fn stage_observer(
     phase: &str,
@@ -1339,6 +1423,7 @@ async fn packet() -> Result<(), String> {
     let snapshot_verification =
         std::env::var("MOUNT_RS_REMOTE_SATURATION_SNAPSHOT_VERIFY").as_deref() == Ok("1");
     let mut artifact = json!({"separate_drives":separate,"drive_count":if separate {client_count} else {1},"driver_replicas":if separate {client_count*server_count} else {server_count},"verification_method":if separate && snapshot_verification {"all stored and fresh driver files"} else if separate {"all fresh driver files"} else if snapshot_verification {"all stored files plus fresh driver sample"} else {"all fresh driver files"},"fresh_driver_sample_limit":if separate {active_clients} else if snapshot_verification {64} else {active_clients},"schema":"mount-rs-provider-saturation-v2","inode_updates":backend.inode_mode.inode_updates(),"compact_inode_updates":backend.inode_mode.compact_inode_updates(),"provider":backend.name,"provider_identity":backend.identity,"provider_version":backend.version,"volume_key":key,"clients":client_count,"active_clients":active_clients,"servers":server_count,"offline_empty_file_preseed":preseed,"setup_concurrency":setup_concurrency,"setup_seconds":setup_seconds,"driver_setup_seconds":driver_setup_seconds,"parallel_server_startup":separate,"drives_provisioned_before_startup":provision,"provisioning_seconds":provisioning_seconds,"dataset_bytes":active_clients*blocks*BYTES,"namespace_bytes":namespace_bytes,"topology":topology,"debug_assertions":cfg!(debug_assertions),"build_profile":if cfg!(debug_assertions){"debug"}else{"release"},"warmup_seconds":warmup,"nominal_stage_seconds":seconds,"configured_modes":modes.iter().map(|m|format!("{m:?}")).collect::<Vec<_>>(),"audit_logging":"enabled; request audit cost included","latency_histogram":"power-of-two microsecond upper bounds","stages":reports,"failed_phase":failed_phase,"verification_status":verification_status,"verified_files":if verification_status=="passed"{active_clients}else{0},"work_error":work.as_ref().err(),"cleanup_error":cleanup.as_ref().err(),"verification_error":verification.as_ref().err()});
+    artifact["runtime"] = runtime_worker_receipt();
     artifact["requested_inode_mode"] = json!(backend.inode_mode.label());
     artifact["inode_mode_selector_env"] = json!({
         "MOUNT_RS_REMOTE_SATURATION_INODE_UPDATES":std::env::var("MOUNT_RS_REMOTE_SATURATION_INODE_UPDATES").ok(),

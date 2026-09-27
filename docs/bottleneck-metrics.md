@@ -1725,3 +1725,66 @@ accounting and whole-disk driver counters. It finds 1x blob payload amplificatio
 full inode extent-list metadata publication, and a source-supported blocking
 SQLite worker-ceiling hypothesis. None of those accounting layers establishes
 physical SSD IOPS.
+
+## SQLite transaction diagnostics
+
+With `MOUNT_RS_PROFILE_IO=1` before opening provider stores,
+`mount_rs_sqlite::sqlite_io_diagnostics` additionally exports for registered
+provider `Database` connections (the service catalog and legacy `SqliteStore`
+are outside this registry):
+
+- Actual `journal_mode`, `synchronous`, locking mode, busy timeout, fullfsync,
+  checkpoint fullfsync, WAL autocheckpoint and cache settings. These are read
+  queries at the registry phase boundary, not changes to storage policy.
+- Nine fixed SQL categories with SQLite PROFILE notification counts, approximate
+  elapsed nanoseconds, maxima, and 32 logarithmic microsecond buckets.
+- Monotonic connection mutex acquisition wall time and acquisition errors.
+- Monotonic `Transaction::commit` call wall time and errors for block PUT and
+  the shared MRC5 compact transaction helper. This includes automatic checkpoint
+  work and error-path transaction Drop rollback before the call returns.
+
+SQLite PROFILE uses the bundled SQLite VFS wall clock with approximately 1 ms
+resolution. A zero duration means below that resolution; notifications include
+unsuccessful execution and cursor reset/finalization. PROFILE does not include
+Rust lock acquisition, statement preparation or post-PROFILE WAL callbacks.
+Statement starts and PROFILE notifications can differ, including for triggers.
+The first-token SQL classifier is unchanged; leading-space or semicolon-only
+keywords can retain the `OTHER` label. No SQL text, values or file paths are
+exported. Invalid durations and overflow flags make a timing sample incomplete.
+The fixed callback counters do not acquire Rust locks or allocate Rust objects;
+whole provider calls, JSON snapshots and SQLite allocations remain distinct.
+
+Lock acquisition, SQL PROFILE, provider COMMIT and SDK spans overlap. Do not
+add their totals as exclusive CPU time or distinct I/O. Connection-lock timing
+excludes lock hold time and SQLite busy waiting. The commit counters cover the
+specified helper calls, not every SQLite transaction in the workspace.
+
+Drain the workload before sampling. A resetting snapshot returns prior totals,
+runs observer queries under callback suppression, then clears counters **after**
+the observer queries. The subsequent end totals are already the stage counts;
+do not subtract the returned begin totals. Non-reset snapshots leave counters
+cumulative. Their pager sample precedes their observer queries, so a later
+non-reset sample can include prior observer pager activity. Match positive unique
+connection IDs at both endpoints and reject missing IDs, errors, invalid timings,
+overflows and incomplete workload boundaries. These sequential observations do
+not establish global background-task quiescence.
+
+The raw Rust saturation artifact and raw N-API snapshot retain these fields.
+The current JavaScript benchmark `connectionDelta` projector omits the added
+configuration/profile/lock/commit fields; that transformed coverage is unavailable.
+
+### Controlled runtime-worker experiment
+
+The ignored saturation fixture keeps its default 16-worker Tokio runtime. The
+strict test-only selector `MOUNT_RS_REMOTE_SATURATION_RUNTIME_WORKERS` accepts
+`16`, `32` or `64`; other values fail before providers are opened. Each stage and
+final artifact record `runtime.worker_threads` from the actual Tokio runtime.
+This is the configured pool size, not a busy-worker measurement. Client depth,
+dataset, drivers and storage durability policy remain separate selectors.
+
+Use serial runs with fresh disposable backing state and identical selectors,
+including a repeated 16-worker run to detect drift. Settle child containment and
+fresh backing verification before starting the next run. The pure selector and
+ignored `runtime_worker_selector_reaches_observed_tokio_pool` control verify the
+parser and actual spawned-task execution. Small single-process results do not
+qualify the 10-server, 10,000-client production topology.

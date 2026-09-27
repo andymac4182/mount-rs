@@ -335,7 +335,7 @@ impl SqliteMetadataStore {
             };
             let result = action(&tx)?;
             self.0.current_file_stamp()?;
-            if let Err(error) = tx.commit() {
+            if let Err(error) = self.0.observed_commit(tx) {
                 return Err(sqlite_busy_known_noncommit(
                     &error,
                     connection.is_autocommit(),
