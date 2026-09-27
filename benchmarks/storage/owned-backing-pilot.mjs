@@ -18,7 +18,7 @@ const capturePath = join(directory, "capture-native.cjs")
 const bindingPath = join(repo, "bindings/mount-rs-napi/index.js")
 const require = createRequire(import.meta.url)
 const roles = ["pd-1", "pd-2", "pd-3", "tikv-1", "tikv-2", "tikv-3", "tidb", "rustfs-service"]
-// Fixed 47-row core prefix followed by 67 causal rows. Missing rows remain unavailable.
+// Fixed 114-row prefix followed by four compact node counters. Missing rows remain unavailable.
 const profileNames = [
   "wire.json_encode_bytes",
   "wire.json_decode_bytes",
@@ -134,6 +134,10 @@ const profileNames = [
   "filesystem.mutation.create_guard.revision_mismatch",
   "filesystem.mutation.create_guard.allocation_mismatch",
   "filesystem.mutation.create_guard.path_present",
+  "compact.namespace.materialize_nodes",
+  "filesystem.mutation.candidate_clone_nodes",
+  "compact.structure.delta_capture_nodes",
+  "compact.structure.expected_guard_nodes",
 ]
 const phaseNames = ["create", "workload-4096bytes", "cleanup", "shutdown"]
 const sources = ["scripts/test-rustfs.sh", "scripts/test-tidb.sh", "benchmarks/storage/runner.mjs", "benchmarks/storage/owned-backing-pilot.mjs", "benchmarks/storage/owned-backing-pilot.test.mjs", "benchmarks/storage/README.md"]

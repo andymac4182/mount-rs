@@ -9,6 +9,7 @@
 mod causal_metrics;
 #[cfg(all(test, unix))]
 mod create_guard_metrics_tests;
+mod create_rebase;
 mod migration;
 pub use migration::{migrate_mrc1_backing, migrate_trusted_unstamped_mrc1_backing};
 
@@ -17,6 +18,7 @@ use causal_metrics::{
     GatePhasePermit, GateWaitObservation, MutationObservation, PutObservation, PutReason,
     RequestOutcome,
 };
+use create_rebase::{PreparedCreateRebase, rebase_prepared_create};
 
 use async_trait::async_trait;
 use mount_rs_core::chunking::{Chunker, FixedSizeChunker, from_config};
@@ -1926,6 +1928,7 @@ where
                     FsError::new(ErrorCode::Eio)
                         .with_message("compact Full operation has no coherent captured base")
                 })?;
+            let _profile = Span::new(Event::Snapshot).units(base.guards.len() as u64);
             let mut namespace = base.namespace()?;
             for (inode, atime_ms) in &state.pending_atime {
                 if let Some(node) = namespace.nodes.get_mut(inode) {
@@ -3988,14 +3991,42 @@ where
                         }
                         observed.considered();
                         let mut mutation = (**mutation).clone();
-                        // Same-revision creates can share one batch. A
-                        // remote CAS loss invalidates prepared inode/layout
-                        // assumptions, so those requests report Conflict
-                        // and take the caller's full replay path.
-                        if mutation.new_inode && mutation.expected_revision == revision {
+                        // Exclusive same-revision creates retain their inode
+                        // remap. Concurrent fresh creates check each current
+                        // accumulated candidate before using prepared blocks.
+                        if !self.inner.options.concurrent_writes
+                            && mutation.new_inode
+                            && mutation.expected_revision == revision
+                        {
                             mutation.inode = namespace.next_inode;
                         }
-                        let mut candidate = namespace.clone();
+                        let mut candidate = {
+                            let _profile = Span::new(Event::MutationCandidateCloneNodes)
+                                .units(namespace.nodes.len() as u64);
+                            namespace.clone()
+                        };
+                        if self.inner.options.concurrent_writes && mutation.new_inode {
+                            match rebase_prepared_create(
+                                &candidate,
+                                revision,
+                                &mut mutation,
+                                |parent| self.require_inode_authority(&candidate, parent),
+                            ) {
+                                Ok(PreparedCreateRebase::ChunkerChanged) => {
+                                    responses.push(Some(Ok(MutationResult::WholeFile(
+                                        WholeFileMutationResult::Conflict,
+                                    ))));
+                                    continue;
+                                }
+                                Err(error) => {
+                                    responses.push(Some(Err(error)));
+                                    continue;
+                                }
+                                Ok(
+                                    PreparedCreateRebase::Unchanged | PreparedCreateRebase::Rebased,
+                                ) => {}
+                            }
+                        }
                         let result = apply_whole_file_mutation(
                             &mut candidate,
                             revision,
@@ -4028,7 +4059,11 @@ where
                             continue;
                         }
                         observed.considered();
-                        let mut candidate = namespace.clone();
+                        let mut candidate = {
+                            let _profile = Span::new(Event::MutationCandidateCloneNodes)
+                                .units(namespace.nodes.len() as u64);
+                            namespace.clone()
+                        };
                         match apply_unlink_mutation(self, &mut candidate, path) {
                             Ok(()) => {
                                 namespace = candidate;

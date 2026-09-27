@@ -33,6 +33,40 @@ microseconds. Logs contain no storage keys, paths or raw errors. Leave tracing
 off for the allocation and throughput baseline; writing diagnostic output adds
 observer work.
 
+## Compact metadata work
+
+The compact path has separate observations for local work before provider I/O:
+
+| Fixed row | Timed work / units |
+| --- | --- |
+| `filesystem.snapshot_nodes` | A filesystem Full snapshot, including compact namespace materialization and pending atime folding; attempted input nodes. |
+| `compact.namespace.materialize_nodes` | Guard validation, namespace construction and graph validation inside `CompactSnapshot::namespace`; attempted input guards. |
+| `filesystem.mutation.candidate_clone_nodes` | The actual namespace copy for each considered write or unlink in a batch; input nodes copied. |
+| `compact.structure.delta_capture_nodes` | Structural delta validation and construction; attempted candidate nodes. |
+| `compact.structure.expected_guard_nodes` | Successful delta captures and their expected physical guard counts; count only, with no elapsed time. |
+
+The four new rows append to the unchanged 114-row core prefix, producing 118
+core rows and leaving the 85 storage rows unchanged. Node units use existing
+collection lengths; observing them adds no graph traversal or namespace copy.
+Failed validation still contributes attempted materialization/capture work.
+Expected guard units are recorded only after capture succeeds.
+
+These timings overlap: delta capture includes a call to namespace
+materialization, and a filesystem snapshot includes materialization too.
+Compare their calls, units and inclusive latency with provider spans. Do not
+sum them as exclusive CPU time. Large node counts per acknowledged operation
+identify repeated local work; they are not allocation counts or device IOPS.
+Historical measurements lack these new rows. The general benchmark projector
+retains that absence, while exact current pilot qualification requires all
+118 rows. The six optional `compact.capture.*` and `compact.create.*` projector
+labels have no Rust producers and do not supply these observations.
+
+All timed rows use the existing opt-in recorder and fixed slow-log format
+`MOUNT_RS_PROFILE_SLOW event=... elapsed_us=... units=...`. With storage tracing
+enabled, operations taking at least 100 ms can emit at most 16 such records per
+process. Paths, storage keys and payloads are excluded. Keep tracing disabled
+for throughput and warmed recorder allocation controls.
+
 ## Locate the bottleneck in one measured phase
 
 Use completed workload operations and the workload's own elapsed time for the
@@ -63,6 +97,10 @@ the test exit status and existing deadlines. Verify the uploaded artifact before
 using its test names or counts; an empty check-API response supplies neither.
 
 ## Compact snapshot revision experiment
+
+This section records the earlier snapshot-revision experiment and its controls
+at that measurement head. The current fresh-create behavior and subsequent
+measurements are recorded in the final section below.
 
 A public SQLite regression reproduced a prepared create reporting one conflict
 and entering whole-file replay without any competing writer. Installing a
@@ -1110,3 +1148,81 @@ primitives, excluding complete filesystem operations, snapshots and logging.
 
 Retained joined evidence: `/private/tmp/mount-rs-create-guard-actual-summary-20260927-kva9g3x1/summary.json`,
 SHA-256 `a6d572aff2921b05ffbd36233ddbb2ba9923059bd9d037de33f0400c9ffd091b`.
+
+## Current create rebase and local-work observations, 2026-09-27
+
+Concurrent fresh creates now resolve their current path and directory authority,
+compare the prepared chunker with current defaults, and rebind only their
+ephemeral revision/inode before the existing apply guard. Each accumulated batch
+candidate and confirmed uncommitted CAS retry is checked again. A changed
+chunker takes full replay; an occupied path retains its guard conflict. Current
+symlink targets and defaults apply. Durable publication and uncertain-commit
+handling remain unchanged. Public SQLite controls verify complete persisted
+bytes and EOF through fresh connections for peer allocation, current symlink
+targets, occupied paths and rejected current parents.
+
+The fresh native addon is SHA-256
+`3689d34d2754bd7afa01cdd29c2dc8ca545024ac5c675fb2d72eaab61b717d8a`,
+built from 437 frozen inputs; each native arm pins 451 runtime inputs. The
+installed addon and the protected original checkout remain untouched. Workload
+dimensions remain 400 lifecycles, concurrency 64, 4096-byte payloads,
+65536-byte chunks and the original 1000 logical operations/sec floor.
+
+| Initial local SQLite arm | Logical operations/sec | Original floor |
+| --- | ---: | --- |
+| Compact, profiling enabled | 1888.08 | Passed |
+| Compact, profiling disabled | 1819.69 | Passed |
+| Legacy, profiling enabled | 1294.21 | Passed |
+| Legacy, profiling disabled | **826.53** | **Failed: `IOPS_TARGET_NOT_MET`** |
+
+The floor failure prompted an additional profiling-disabled layout sequence:
+legacy 1287.33, compact 1791.76, compact 1798.09, legacy 1475.18 operations/sec.
+All four follow-up arms passed the unchanged floor. Retain the initial failure:
+these short measurements expose substantial legacy variability and do not
+establish a causal before/after speedup or isolated observer overhead. Layout
+selection also changes the benchmark's ownership options: compact uses
+concurrent inode updates, while legacy uses its existing exclusive default.
+The comparison therefore includes those configured implementation differences.
+
+All eight arms verified 400 complete read payloads through the native read-to-EOF
+loop and acknowledged 1200 write/read/delete operations each: 3200 verified
+readbacks and 9600 logical operations total. No workload errors, timeouts, late
+operations or cleanup failures occurred. The original throughput floor failure
+is separate from those successful operations. Creation, workload and cleanup
+diagnostics in both profiled arms are complete and quiescent; shutdown
+diagnostics remain incomplete after SQLite connections close.
+
+| Profiled compact observation | Calls | Node units | Inclusive elapsed |
+| --- | ---: | ---: | ---: |
+| Filesystem Full snapshot | 436 | 76059 | 10.54 ms |
+| Compact namespace materialization | 944 | 167966 | 24.06 ms |
+| Write/unlink candidate copy | 800 | 173016 | 11.04 ms |
+| Structural delta capture | 36 | 8324 | 3.63 ms |
+| Successful expected physical guard set | 36 | 7924 | Count only |
+
+The compact workload recorded zero fresh-create guard conflicts and zero
+whole-file replay holds. Its 36 successful batch attempts considered 800
+write/unlink request units and returned 800 committed replies, with no recorded
+batch CAS conflict. The 436 backend snapshots comprise 400 preparations and 36
+batch captures. Initial block PUT input remains 400 calls / 1638400 bytes.
+Full captures and guard work still return 87183 inode bodies / 44693540 known
+bytes, alongside 22540 SQLite statements and 2130 pager writes. These counters
+locate remaining repeated work, without proving a per-request causal timeline.
+Materialization appears inside other measured spans; do not add their durations
+as exclusive costs.
+
+Focused verification retained 261 Rust test executions (six helper cases also
+execute in the library suite), four default ignored rows, 126 Node consumer
+passes, formatting and strict Clippy. The actual warmed recorder allocation
+gate covers all 71 causal events with zero added allocations, excluding whole
+filesystem operations, initialization, snapshots and logging. The new bounded
+Kani harness is wired but its execution remains pending. These local API runs
+provide no physical device IOPS, total allocator counts, mounted-client,
+cross-host, distributed-cache or production-topology qualification.
+
+Retained native evidence:
+`/private/tmp/mount-rs-compact-work-native-actual-20260927-gkiukj4u/summary.json`,
+SHA-256 `c1d62ed0f9be73577fe3c34742cf56d37931a102c0b7afc71c1cf4ccf35bc225`.
+Focused gate evidence:
+`/private/tmp/mount-rs-compact-work-actual-gates-20260927-nbyw3h7i/summary.json`,
+SHA-256 `7373a752d0a8cdc11f7f65a1d7a881ed97c36d4cfce74f99b221befe3811755a`.

@@ -480,9 +480,11 @@ fn coalesced_conflicting_batch_separates_candidate_replay_from_sent_replies() {
     let after = profile::snapshot();
     assert_eq!(blocks.counts.calls.load(Ordering::SeqCst), 2);
     assert_eq!(blocks.counts.bytes.load(Ordering::SeqCst), 9);
-    assert_eq!(metadata.attempts.load(Ordering::SeqCst) - attempts, 3);
-    assert_eq!(metadata.commits.load(Ordering::SeqCst) - commits, 2);
+    assert_eq!(metadata.attempts.load(Ordering::SeqCst) - attempts, 2);
+    assert_eq!(metadata.commits.load(Ordering::SeqCst) - commits, 1);
     assert_eq!(metadata.conflicts.load(Ordering::SeqCst), 1);
+    // One confirmed provider CAS loss retries the same two prepared creates
+    // against a fresh candidate; both then commit in one publication.
     assert_eq!(
         delta(
             &before,
@@ -503,12 +505,16 @@ fn coalesced_conflicting_batch_separates_candidate_replay_from_sent_replies() {
         (1, 2)
     );
     assert_eq!(
+        delta(&before, &after, "filesystem.mutation.attempt.success"),
+        (1, 2)
+    );
+    assert_eq!(
         delta(
             &before,
             &after,
             "filesystem.mutation.attempt.no_publication"
         ),
-        (1, 2)
+        (0, 0)
     );
     assert_eq!(
         delta(&before, &after, "filesystem.mutation.enqueue_requests").1,
@@ -525,11 +531,11 @@ fn coalesced_conflicting_batch_separates_candidate_replay_from_sent_replies() {
     assert!(delta(&before, &after, "filesystem.mutation.coalescing_yields").1 >= 1);
     assert_eq!(
         delta(&before, &after, "filesystem.mutation.request.committed").1,
-        0
+        2
     );
     assert_eq!(
         delta(&before, &after, "filesystem.mutation.request.conflict").1,
-        2
+        0
     );
     assert_eq!(
         delta(&before, &after, "filesystem.mutation.request.reply_sent").1,
@@ -537,7 +543,7 @@ fn coalesced_conflicting_batch_separates_candidate_replay_from_sent_replies() {
     );
     assert_eq!(
         delta(&before, &after, "filesystem.gate_hold.whole_file_replay").0,
-        2
+        0
     );
 }
 
@@ -1009,7 +1015,9 @@ fn sqlite_compact_selected_gates_and_phases_preserve_payload_after_reopen() {
                 .unwrap()
                 .is_some(),
         );
+        let before_create = profile::snapshot();
         fs.write_file("/data", b"abcdefgh").await.unwrap();
+        let after_create = profile::snapshot();
         let handle = fs.open("/data", "r+", 0).await.unwrap();
 
         let before_write = profile::snapshot();
@@ -1153,5 +1161,20 @@ fn sqlite_compact_selected_gates_and_phases_preserve_payload_after_reopen() {
         reader.close().await.unwrap();
         drop(reader);
         reopened.shutdown().await.unwrap();
+
+        // These rows measure node work caused by the real persisted create.
+        // The baseline excludes filesystem initialization and the snapshots
+        // exclude the later selected write and reopen readback.
+        for name in [
+            "filesystem.snapshot_nodes",
+            "compact.namespace.materialize_nodes",
+            "filesystem.mutation.candidate_clone_nodes",
+            "compact.structure.delta_capture_nodes",
+            "compact.structure.expected_guard_nodes",
+        ] {
+            let (calls, nodes) = delta(&before_create, &after_create, name);
+            assert!(calls > 0, "{name} must record a create call");
+            assert!(nodes > 0, "{name} must record touched nodes");
+        }
     });
 }

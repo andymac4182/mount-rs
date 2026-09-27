@@ -34,6 +34,7 @@ cd "$(dirname "$0")/.."
 ./scripts/cargo-shared kani -p mount-rs-s3 --harness decoded_chunk_total_never_wraps_or_exceeds_limits
 ./scripts/cargo-shared kani -p mount-rs-s3 --harness chunk_payload_and_footer_stay_within_body
 ./scripts/cargo-shared kani -p mount-rs-chunked --harness reacquired_writer_fence_is_exactly_next
+./scripts/cargo-shared kani -p mount-rs-chunked --harness current_fresh_create_rebinds_only_eligible_preparation
 ./scripts/cargo-shared kani -p mount-rs-webdav --harness timeout_and_remaining_are_wide_before_clamping
 ./scripts/cargo-shared kani -p mount-rs-webdav --harness canonical_scope_and_two_lock_conflicts
 ./scripts/cargo-shared kani -p mount-rs-sqlite-vfs --harness sqlite_io_extent_matches_signed_range

@@ -16,6 +16,7 @@
 //! switch to MRC4. Provider/core fault tests must enforce that I/O rule.
 
 use super::*;
+use crate::diagnostics::profile::{self, Event, Span};
 
 /// Capability advertisement only; it does not assert a volume is enrolled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -262,6 +263,8 @@ impl CompactSnapshot {
     }
 
     pub fn namespace(&self) -> Result<Namespace> {
+        let _profile =
+            Span::new(Event::CompactNamespaceMaterializeNodes).units(self.guards.len() as u64);
         self.anchor.validate()?;
         if !self
             .anchor
@@ -484,6 +487,8 @@ impl CompactStructuralDelta {
         candidate: &Namespace,
         scope: StructuralScope,
     ) -> Result<Self> {
+        let _profile = Span::new(Event::CompactStructuralDeltaCaptureNodes)
+            .units(candidate.nodes.len() as u64);
         base.namespace()?;
         candidate.validate()?;
         let generation = base
@@ -554,6 +559,10 @@ impl CompactStructuralDelta {
         if scope == StructuralScope::FileCreate {
             delta.validate_file_create(base)?;
         }
+        profile::add(
+            Event::CompactStructuralExpectedGuardNodes,
+            delta.expected.len() as u64,
+        );
         Ok(delta)
     }
 

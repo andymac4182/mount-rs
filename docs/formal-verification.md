@@ -99,6 +99,24 @@ SQLite and PGlite keep the versioning schema at version 1 on ordinary open/reope
 
 Each future harness needs its own property, input assumptions, bound, and result before it enters the proved inventory.
 
+### Current fresh-create rebinding: pending execution
+
+`current_fresh_create_rebinds_only_eligible_preparation` calls the actual private
+create helper in `mount-rs-chunked`. It uses a concrete root graph and path with
+symbolic full-range inode/revision values, fresh versus existing preparation,
+path occupancy, matching chunker and parent authority refusal. With unwind 64,
+it checks that only eligible preparation changes its ephemeral revision/inode,
+and that all other preparation fields remain unchanged. Covers require eligible,
+occupied, denied, changed-chunker and non-fresh decisions to be reachable.
+
+The harness is included in `scripts/verify-formal` and a focused supported Linux
+CI job. It has not been executed on this macOS host, and no current-head proof
+result is claimed here. Existing historical proof results do not qualify it.
+It does not prove arbitrary namespace graphs, asynchronous publication,
+provider commit/durability, or deployment capacity. Symbolic inode values
+include values that a real validated namespace cannot contain; this checks the
+helper's decision, while normal application still requires validated state.
+
 | Candidate | Proposed input assumptions | Limits to report |
 | --- | --- | --- |
 | Namespace graph | Extend file layouts beyond the proved one-, two-, and three-extent shapes. Model a small adjacency matrix with a solver-friendly, production-used graph decision, then check root, cycle, multiple-parent, unreachable, and local link counts. | Symbolic `BTreeMap` and indexed-`Vec` traversal attempts were stopped without results and the refactor was reverted. The 512-mask three-directory and 65,536-mask four-directory regressions are finite, not symbolic proofs or arbitrary storage evidence. |

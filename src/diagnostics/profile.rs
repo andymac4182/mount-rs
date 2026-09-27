@@ -136,6 +136,10 @@ events! {
     FilesystemMutationCreateGuardRevisionMismatch => "filesystem.mutation.create_guard.revision_mismatch",
     FilesystemMutationCreateGuardAllocationMismatch => "filesystem.mutation.create_guard.allocation_mismatch",
     FilesystemMutationCreateGuardPathPresent => "filesystem.mutation.create_guard.path_present",
+    CompactNamespaceMaterializeNodes => "compact.namespace.materialize_nodes",
+    MutationCandidateCloneNodes => "filesystem.mutation.candidate_clone_nodes",
+    CompactStructuralDeltaCaptureNodes => "compact.structure.delta_capture_nodes",
+    CompactStructuralExpectedGuardNodes => "compact.structure.expected_guard_nodes",
 }
 
 #[derive(Default)]
@@ -698,8 +702,24 @@ mod tests {
                 Event::FilesystemMutationCreateGuardPathPresent,
                 "filesystem.mutation.create_guard.path_present",
             ),
+            (
+                Event::CompactNamespaceMaterializeNodes,
+                "compact.namespace.materialize_nodes",
+            ),
+            (
+                Event::MutationCandidateCloneNodes,
+                "filesystem.mutation.candidate_clone_nodes",
+            ),
+            (
+                Event::CompactStructuralDeltaCaptureNodes,
+                "compact.structure.delta_capture_nodes",
+            ),
+            (
+                Event::CompactStructuralExpectedGuardNodes,
+                "compact.structure.expected_guard_nodes",
+            ),
         ];
-        assert_eq!(NAMES.len(), 114);
+        assert_eq!(NAMES.len(), 118);
         for (offset, (event, name)) in expected.into_iter().enumerate() {
             assert_eq!(event as usize, 47 + offset);
             assert_eq!(NAMES[47 + offset], name);

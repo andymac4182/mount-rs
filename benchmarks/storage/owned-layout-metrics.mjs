@@ -134,6 +134,10 @@ const CORE_NAMES = new Set([
   "filesystem.mutation.create_guard.revision_mismatch",
   "filesystem.mutation.create_guard.allocation_mismatch",
   "filesystem.mutation.create_guard.path_present",
+  "compact.namespace.materialize_nodes",
+  "filesystem.mutation.candidate_clone_nodes",
+  "compact.structure.delta_capture_nodes",
+  "compact.structure.expected_guard_nodes",
 ])
 const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value)
 const fields = (source, names) => Object.fromEntries(names.map((name) => [name, source[name]]))

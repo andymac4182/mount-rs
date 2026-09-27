@@ -286,19 +286,29 @@ const causalProfileNames = [
   "filesystem.mutation.create_guard.revision_mismatch",
   "filesystem.mutation.create_guard.allocation_mismatch",
   "filesystem.mutation.create_guard.path_present",
+  "compact.namespace.materialize_nodes",
+  "filesystem.mutation.candidate_clone_nodes",
+  "compact.structure.delta_capture_nodes",
+  "compact.structure.expected_guard_nodes",
 ]
 
 test("causal core projection preserves fixed prefix, new zero rows and exact decimal strings", () => {
-  assert.equal(causalProfileNames.length, 114)
+  assert.equal(causalProfileNames.length, 118)
   assert.equal(causalProfileNames[46], "provider.inode_serialized_bytes")
   assert.equal(causalProfileNames[47], "filesystem.block_put.initial")
-  assert.deepEqual(causalProfileNames.slice(108), [
+  assert.deepEqual(causalProfileNames.slice(108, 114), [
     "filesystem.mutation.create_guard.evaluated",
     "filesystem.mutation.create_guard.passed",
     "filesystem.mutation.create_guard.conflict",
     "filesystem.mutation.create_guard.revision_mismatch",
     "filesystem.mutation.create_guard.allocation_mismatch",
     "filesystem.mutation.create_guard.path_present",
+  ])
+  assert.deepEqual(causalProfileNames.slice(114), [
+    "compact.namespace.materialize_nodes",
+    "filesystem.mutation.candidate_clone_nodes",
+    "compact.structure.delta_capture_nodes",
+    "compact.structure.expected_guard_nodes",
   ])
   const source = model()
   source.native.measurement.profile = "existing_core_profile_counters"
@@ -308,6 +318,12 @@ test("causal core projection preserves fixed prefix, new zero rows and exact dec
   assert.deepEqual(value.core_profile.entries, source.native.profile.entries)
   assert.equal(value.core_profile.status, "observed")
   assert.equal(value.storage.entries.length, 85)
+  source.native.profile.entries = source.native.profile.entries.slice(0, 114)
+  const previousSnapshot = projectOwnedLayoutPhaseMetrics(source).core_profile
+  assert.equal(previousSnapshot.status, "observed")
+  assert.equal(previousSnapshot.entries.length, 114)
+  assert.equal(previousSnapshot.entries.some((row) => row.name === causalProfileNames[114]), false)
+  assert.match(previousSnapshot.scope, /absent_events_unavailable/u)
   source.native.profile.entries = source.native.profile.entries.slice(0, 108)
   const oldSnapshot = projectOwnedLayoutPhaseMetrics(source).core_profile
   assert.equal(oldSnapshot.status, "observed")
@@ -348,6 +364,22 @@ test("partial projector retains six existing optional compact labels independent
   ]
   const complete = projectOwnedLayoutPhaseMetrics(source).core_profile
   assert.equal(complete.status, "observed")
-  assert.equal(complete.entries.length, 120)
+  assert.equal(complete.entries.length, 124)
   assert.deepEqual(complete.entries, source.native.profile.entries)
+})
+
+test("compact node projection retains each measured node count and inclusive timing as exact strings", () => {
+  const source = model()
+  source.native.measurement.profile = "existing_core_profile_counters"
+  source.native.profile = { entries: causalProfileNames.slice(114).map((name, index) => ({
+    name, calls: String(index + 1), elapsed_ns: String(9007199254740993n + BigInt(index)),
+    units: String(18446744073709551615n - BigInt(index)),
+  })) }
+  const before = structuredClone(source)
+  const value = projectOwnedLayoutPhaseMetrics(source).core_profile
+  assert.equal(value.status, "observed")
+  assert.deepEqual(value.entries, source.native.profile.entries)
+  assert.deepEqual(source, before)
+  assert.equal(Object.isFrozen(value.entries[0]), true)
+  assert.match(value.scope, /units_depend_on_fixed_event/u)
 })

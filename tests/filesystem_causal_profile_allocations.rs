@@ -41,7 +41,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
-const CAUSAL_EVENTS: [Event; 67] = [
+const CAUSAL_EVENTS: [Event; 71] = [
     Event::FilesystemBlockPutInitial,
     Event::FilesystemBlockPutInitialSuccess,
     Event::FilesystemBlockPutInitialError,
@@ -109,6 +109,10 @@ const CAUSAL_EVENTS: [Event; 67] = [
     Event::FilesystemMutationCreateGuardRevisionMismatch,
     Event::FilesystemMutationCreateGuardAllocationMismatch,
     Event::FilesystemMutationCreateGuardPathPresent,
+    Event::CompactNamespaceMaterializeNodes,
+    Event::MutationCandidateCloneNodes,
+    Event::CompactStructuralDeltaCaptureNodes,
+    Event::CompactStructuralExpectedGuardNodes,
 ];
 
 #[test]
@@ -140,8 +144,8 @@ fn warmed_causal_profile_rows_record_without_added_allocations() {
         "warmed actual profile Span/add/drop recording added an allocation"
     );
     let delta = profile::snapshot().delta(&before).unwrap();
-    assert_eq!(before.entries.len(), 114);
-    assert_eq!(delta.entries.len(), 67);
+    assert_eq!(before.entries.len(), 118);
+    assert_eq!(delta.entries.len(), 71);
     for (event, row) in CAUSAL_EVENTS.into_iter().zip(delta.entries) {
         assert_eq!(row.name, before.entries[event as usize].name);
         assert_eq!((row.calls, row.units), (3, 8));
