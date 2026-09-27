@@ -4,6 +4,8 @@
 //! support. That keeps the CLI's direct dependency surface small while still
 //! allowing every object in the public schema to reject unknown fields.
 
+use mount_rs_sdk::{SqliteJournalMode, SqliteStorageOptions};
+
 use std::collections::BTreeSet;
 use std::fmt::{self, Display, Formatter};
 use std::fs;
@@ -64,6 +66,10 @@ pub enum StorageProvider {
     Sqlite {
         path: PathBuf,
     },
+    SqliteWithOptions {
+        path: PathBuf,
+        options: SqliteStorageOptions,
+    },
     Pglite {
         connection: EnvReference,
         volume_key: String,
@@ -112,6 +118,11 @@ impl fmt::Debug for StorageProvider {
             Self::Sqlite { path } => formatter
                 .debug_struct("Sqlite")
                 .field("path", path)
+                .finish(),
+            Self::SqliteWithOptions { path, options } => formatter
+                .debug_struct("SqliteWithOptions")
+                .field("path", path)
+                .field("options", options)
                 .finish(),
             Self::Pglite {
                 connection,
@@ -787,8 +798,9 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
             }
             | StorageProvider::Pglite { .. }
             | StorageProvider::Tidb { .. } => {}
-            StorageProvider::Sqlite { path } if sqlite_durable_path(path) => {}
-            StorageProvider::Sqlite { .. } => {
+            StorageProvider::Sqlite { path } | StorageProvider::SqliteWithOptions { path, .. }
+                if sqlite_durable_path(path) => {}
+            StorageProvider::Sqlite { .. } | StorageProvider::SqliteWithOptions { .. } => {
                 return Err(ConfigError::at(
                     "config.driver.storage.metadata.path",
                     "concurrent_writes SQLite metadata requires a durable local database path",
@@ -808,9 +820,11 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
                     "concurrent_writes requires a shared block provider; memory blocks cannot serve independent mounts",
                 ));
             }
-            StorageProvider::Sqlite { path }
-                if !matches!(&metadata, StorageProvider::Sqlite { .. })
-                    || !sqlite_durable_path(path) =>
+            StorageProvider::Sqlite { path } | StorageProvider::SqliteWithOptions { path, .. }
+                if !matches!(
+                    &metadata,
+                    StorageProvider::Sqlite { .. } | StorageProvider::SqliteWithOptions { .. }
+                ) || !sqlite_durable_path(path) =>
             {
                 return Err(ConfigError::at(
                     "config.driver.storage.blocks",
@@ -869,9 +883,36 @@ fn parse_provider(
             StorageProvider::Memory
         }
         "sqlite" => {
-            reject_unknown(object, &["kind", "path"], path)?;
-            StorageProvider::Sqlite {
-                path: required_path(object, "path", path, base_dir)?,
+            reject_unknown(object, &["kind", "path", "journal_mode"], path)?;
+            let options = object
+                .get("journal_mode")
+                .map(|value| {
+                    let journal_mode = match value.as_str() {
+                        Some("preserve") => SqliteJournalMode::Preserve,
+                        Some("wal") => SqliteJournalMode::Wal,
+                        _ => {
+                            return Err(ConfigError::at(
+                                &format!("{path}.journal_mode"),
+                                "must be 'preserve' or 'wal'",
+                            ));
+                        }
+                    };
+                    Ok(SqliteStorageOptions { journal_mode })
+                })
+                .transpose()?;
+            let raw_path = required_string(object, "path", path)?;
+            if options.is_some_and(|options| options.journal_mode == SqliteJournalMode::Wal)
+                && !sqlite_durable_path(Path::new(raw_path))
+            {
+                return Err(ConfigError::at(
+                    &format!("{path}.path"),
+                    "SQLite WAL requires a local file path; empty, :memory: and file: paths are unsupported",
+                ));
+            }
+            let path = required_path(object, "path", path, base_dir)?;
+            match options {
+                Some(options) => StorageProvider::SqliteWithOptions { path, options },
+                None => StorageProvider::Sqlite { path },
             }
         }
         "pglite" => {
@@ -1804,6 +1845,117 @@ fn redact_assignment_values(value: &mut String, key: &str) {
 mod tests {
     use super::*;
     use crate::parser::{Command, parse_args};
+
+    #[tokio::test]
+    async fn sqlite_journal_mode_reaches_normal_split_provider() {
+        let directory = tempfile::tempdir().unwrap();
+        let value = serde_json::json!({
+            "version": 1,
+            "driver": { "kind": "splitstore", "storage": {
+                "metadata": { "kind": "sqlite", "path": "metadata.db", "journal_mode": "wal" },
+                "blocks": { "kind": "sqlite", "path": "blocks.db", "journal_mode": "wal" }
+            }}
+        });
+        let config = parse_config_str(&value.to_string(), directory.path()).unwrap();
+        let runtime = crate::runtime::DriverRuntime::open(&config.to_options(), 0, 0)
+            .await
+            .unwrap();
+        let payload: Vec<u8> = (0..131_079).map(|index| (index % 251) as u8).collect();
+        mount_rs_core::Loopback::from_arc(runtime.driver())
+            .write_file("/payload", &payload)
+            .await
+            .unwrap();
+        runtime.shutdown().await.unwrap();
+        drop(runtime);
+        for name in ["metadata.db", "blocks.db"] {
+            let connection = rusqlite::Connection::open(directory.path().join(name)).unwrap();
+            assert_eq!(
+                connection
+                    .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
+                    .unwrap(),
+                "wal"
+            );
+            assert_eq!(
+                connection
+                    .query_row("PRAGMA synchronous", [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                2
+            );
+        }
+        let runtime = crate::runtime::DriverRuntime::open(&config.to_options(), 0, 0)
+            .await
+            .unwrap();
+        let handle = mount_rs_core::Loopback::from_arc(runtime.driver())
+            .open("/payload", "r", 0)
+            .await
+            .unwrap();
+        let mut bytes = vec![0; payload.len()];
+        assert_eq!(
+            handle.read(&mut bytes, Some(0)).await.unwrap(),
+            payload.len()
+        );
+        assert_eq!(bytes, payload);
+        assert_eq!(
+            handle
+                .read(&mut bytes, Some(payload.len() as u64))
+                .await
+                .unwrap(),
+            0
+        );
+        handle.close().await.unwrap();
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn sqlite_journal_mode_is_closed_and_refuses_raw_special_paths() {
+        let value = serde_json::json!({"version":1, "driver":{"kind":"splitstore", "storage":{
+            "metadata":{"kind":"sqlite", "path":"meta.db"},
+            "blocks":{"kind":"sqlite", "path":"blocks.db"}
+        }}});
+        for role in ["metadata", "blocks"] {
+            for journal in [
+                serde_json::json!("delete"),
+                serde_json::json!("WAL"),
+                serde_json::json!(true),
+                Value::Null,
+                serde_json::json!(1),
+            ] {
+                let mut invalid = value.clone();
+                invalid["driver"]["storage"][role]["journal_mode"] = journal;
+                assert!(parse_config_str(&invalid.to_string(), Path::new("/tmp/config")).is_err());
+            }
+            for path in ["", ":memory:", "file:some.db"] {
+                let mut invalid = value.clone();
+                invalid["driver"]["storage"][role]["path"] = serde_json::json!(path);
+                invalid["driver"]["storage"][role]["journal_mode"] = serde_json::json!("wal");
+                assert!(parse_config_str(&invalid.to_string(), Path::new("/tmp/config")).is_err());
+            }
+            let mut invalid = value.clone();
+            invalid["driver"]["storage"][role] =
+                serde_json::json!({"kind":"memory", "journal_mode":"preserve"});
+            assert!(parse_config_str(&invalid.to_string(), Path::new("/tmp/config")).is_err());
+        }
+        let default = parse_config_str(&value.to_string(), Path::new("/tmp/config"))
+            .unwrap()
+            .storage
+            .unwrap();
+        assert!(matches!(default.metadata, StorageProvider::Sqlite { .. }));
+        let mut explicit = value;
+        explicit["driver"]["storage"]["metadata"]["journal_mode"] = serde_json::json!("preserve");
+        let explicit = parse_config_str(&explicit.to_string(), Path::new("/tmp/config"))
+            .unwrap()
+            .storage
+            .unwrap();
+        assert!(matches!(
+            explicit.metadata,
+            StorageProvider::SqliteWithOptions {
+                options: SqliteStorageOptions {
+                    journal_mode: SqliteJournalMode::Preserve
+                },
+                ..
+            }
+        ));
+    }
 
     const SPLIT_MEMORY: &str = r#"{
         "version": 1,

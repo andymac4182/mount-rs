@@ -13,6 +13,10 @@ mod direct_io_benchmark;
 #[path = "compact.rs"]
 mod compact;
 
+#[path = "journal_options.rs"]
+mod journal_options;
+
+use super::{SqliteJournalMode, SqliteStorageOptions};
 use async_trait::async_trait;
 use mount_rs_core::diagnostics::profile::{self, Event};
 use mount_rs_core::storage::compact::{
@@ -1213,28 +1217,12 @@ fn initialize_version_schema(database: &Database) -> Result<()> {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(backend_error)?;
-    if mode.as_deref() == Some(DELEGATED_WRITE_MODE) {
-        let state: DelegationState = serde_json::from_str(
-            delegation_json
-                .as_deref()
-                .ok_or_else(|| incompatible_schema("MRC3 grant state is missing"))?,
-        )
-        .map_err(backend_error)?;
-        let namespace: Namespace = serde_json::from_str(
-            namespace_json
-                .as_deref()
-                .ok_or_else(|| incompatible_schema("MRC3 namespace is missing"))?,
-        )
-        .map_err(backend_error)?;
-        if Some(state.backing.to_hex()).as_deref() != backing.as_deref() {
-            return Err(incompatible_schema("MRC3 backing and grants disagree"));
-        }
-        state.validate(&namespace)?;
-    } else if delegation_json.is_some() {
-        return Err(incompatible_schema(
-            "nondelegated SQLite metadata contains grants",
-        ));
-    }
+    validate_delegation_authority(
+        mode.as_deref(),
+        backing.as_deref(),
+        delegation_json.as_deref(),
+        namespace_json.as_deref(),
+    )?;
     tx.execute(
         "UPDATE mount_rs_metadata
          SET volume_id = 'sqlite-' || lower(hex(randomblob(16)))
@@ -1412,6 +1400,35 @@ fn initialize_version_schema(database: &Database) -> Result<()> {
     tx.commit().map_err(backend_error)
 }
 
+// Read-only authority validation shared by ordinary metadata construction and
+// explicit journal selection through a block provider of the same file.
+fn validate_delegation_authority(
+    mode: Option<&str>,
+    backing: Option<&str>,
+    delegation_json: Option<&str>,
+    namespace_json: Option<&str>,
+) -> Result<()> {
+    if mode == Some(DELEGATED_WRITE_MODE) {
+        let state: DelegationState = serde_json::from_str(
+            delegation_json.ok_or_else(|| incompatible_schema("MRC3 grant state is missing"))?,
+        )
+        .map_err(backend_error)?;
+        let namespace: Namespace = serde_json::from_str(
+            namespace_json.ok_or_else(|| incompatible_schema("MRC3 namespace is missing"))?,
+        )
+        .map_err(backend_error)?;
+        if Some(state.backing.to_hex()).as_deref() != backing {
+            return Err(incompatible_schema("MRC3 backing and grants disagree"));
+        }
+        state.validate(&namespace)?;
+    } else if delegation_json.is_some() {
+        return Err(incompatible_schema(
+            "nondelegated SQLite metadata contains grants",
+        ));
+    }
+    Ok(())
+}
+
 fn table_columns(connection: &Connection, table: &str) -> Result<Option<BTreeSet<String>>> {
     let exists: bool = connection
         .query_row(
@@ -1540,8 +1557,17 @@ pub struct SqliteMetadataStore(Database, VolumeId);
 
 impl SqliteMetadataStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_options(path, SqliteStorageOptions::default())
+    }
+
+    pub fn open_with_options(
+        path: impl AsRef<Path>,
+        options: SqliteStorageOptions,
+    ) -> Result<Self> {
+        journal_options::validate_path(path.as_ref(), options)?;
         let database = Database::open(Some(path.as_ref()), METADATA_SCHEMA)?;
         let store = Self::from_database(database)?;
+        journal_options::apply(&store.0, options)?;
         Ok(store)
     }
     pub fn in_memory() -> Result<Self> {
@@ -1561,7 +1587,17 @@ pub struct SqliteBlockStore(Database);
 
 impl SqliteBlockStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::from_database(Database::open(Some(path.as_ref()), BLOCK_SCHEMA)?)
+        Self::open_with_options(path, SqliteStorageOptions::default())
+    }
+
+    pub fn open_with_options(
+        path: impl AsRef<Path>,
+        options: SqliteStorageOptions,
+    ) -> Result<Self> {
+        journal_options::validate_path(path.as_ref(), options)?;
+        let store = Self::from_database(Database::open(Some(path.as_ref()), BLOCK_SCHEMA)?)?;
+        journal_options::apply(&store.0, options)?;
+        Ok(store)
     }
     pub fn in_memory() -> Result<Self> {
         Self::from_database(Database::open(None, BLOCK_SCHEMA)?)

@@ -26,6 +26,7 @@ pub use mount_rs_memfs::MemoryOptions;
 pub use mount_rs_observability::{
     Telemetry, TelemetryConfig, global as global_telemetry, set_global as set_global_telemetry,
 };
+pub use mount_rs_sqlite::{SqliteJournalMode, SqliteStorageOptions};
 pub use options::{FoundationDbLeaseAuthority, SplitOptions, StoreConfig};
 pub use providers::StorageContext;
 

@@ -263,7 +263,12 @@ impl Filesystem {
         expected_revision: u64,
         expected_volume: VolumeId,
     ) -> Result<ConcurrentBackingId> {
-        if !options.concurrent_writes || !matches!(options.metadata, StoreConfig::Sqlite { .. }) {
+        if !options.concurrent_writes
+            || !matches!(
+                options.metadata,
+                StoreConfig::Sqlite { .. } | StoreConfig::SqliteWithOptions { .. }
+            )
+        {
             return Err(FsError::new(ErrorCode::Einval)
                 .with_message("trusted MRC1 reenrollment requires concurrent SQLite metadata"));
         }
@@ -421,8 +426,9 @@ fn validate_concurrent_split_options(options: &SplitOptions) -> Result<()> {
             }
             | StoreConfig::Pglite { .. }
             | StoreConfig::Tidb { .. } => {}
-            StoreConfig::Sqlite { path } if sqlite_durable_path(path) => {}
-            StoreConfig::Sqlite { .. } => {
+            StoreConfig::Sqlite { path } | StoreConfig::SqliteWithOptions { path, .. }
+                if sqlite_durable_path(path) => {}
+            StoreConfig::Sqlite { .. } | StoreConfig::SqliteWithOptions { .. } => {
                 return Err(FsError::new(ErrorCode::Einval).with_message(
                     "concurrent_writes SQLite metadata requires a durable local database path",
                 ));
@@ -439,9 +445,11 @@ fn validate_concurrent_split_options(options: &SplitOptions) -> Result<()> {
                     "concurrent_writes requires a shared block provider; memory blocks are unavailable to independent mounts",
                 ));
             }
-            StoreConfig::Sqlite { path }
-                if !matches!(&options.metadata, StoreConfig::Sqlite { .. })
-                    || !sqlite_durable_path(path) =>
+            StoreConfig::Sqlite { path } | StoreConfig::SqliteWithOptions { path, .. }
+                if !matches!(
+                    &options.metadata,
+                    StoreConfig::Sqlite { .. } | StoreConfig::SqliteWithOptions { .. }
+                ) || !sqlite_durable_path(path) =>
             {
                 return Err(FsError::new(ErrorCode::Einval).with_message(
                     "concurrent_writes requires a shared block provider; local SQLite blocks require local SQLite metadata on the same host and a durable block database path",
@@ -480,6 +488,43 @@ impl Clone for Filesystem {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn sqlite_option_variants_retain_concurrent_pairing_rules() {
+        let sqlite = |configured: bool, path: &str| {
+            if configured {
+                StoreConfig::SqliteWithOptions {
+                    path: path.into(),
+                    options: crate::SqliteStorageOptions {
+                        journal_mode: crate::SqliteJournalMode::Wal,
+                    },
+                }
+            } else {
+                StoreConfig::Sqlite { path: path.into() }
+            }
+        };
+        for metadata_configured in [false, true] {
+            for blocks_configured in [false, true] {
+                let mut options = SplitOptions {
+                    metadata: sqlite(metadata_configured, "metadata.db"),
+                    blocks: sqlite(blocks_configured, "blocks.db"),
+                    ..SplitOptions::memory("wal-pairing", 4096).with_concurrent_writes(true)
+                };
+                validate_concurrent_split_options(&options).unwrap();
+                options.blocks = sqlite(blocks_configured, ":memory:");
+                assert!(validate_concurrent_split_options(&options).is_err());
+                options.blocks = sqlite(blocks_configured, "blocks.db");
+                options.metadata = StoreConfig::Tidb {
+                    connection: "unopened".into(),
+                    volume_key: "volume".into(),
+                    durable: true,
+                };
+                assert!(validate_concurrent_split_options(&options).is_err());
+                options.metadata = sqlite(metadata_configured, ":memory:");
+                assert!(validate_concurrent_split_options(&options).is_err());
+            }
+        }
+    }
 
     #[tokio::test]
     async fn inode_options_reject_incompatible_modes_before_opening_storage() {

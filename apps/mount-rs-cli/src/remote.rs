@@ -261,14 +261,7 @@ pub(crate) async fn apply(path: &Path) -> Result<(), CliError> {
     // Reuse the normal CLI backend parser for every independent Drive.
     for partition in document.partitions.values_mut() {
         for drive in partition.drives.values_mut() {
-            resolve_backend_paths(&mut drive.driver, &document_base);
-            let spec = parse_config_str(
-                &serde_json::json!({"version":1,"driver":drive.driver}).to_string(),
-                document_path.parent().unwrap_or(Path::new(".")),
-            )?;
-            if spec.driver.is_none() {
-                return Err(CliError::usage("Drive requires a storage driver"));
-            }
+            resolve_catalog_driver(&mut drive.driver, &document_base)?;
         }
     }
     let catalog = SqliteCatalog::open(relative(path, &config.catalog))
@@ -683,6 +676,20 @@ pub(crate) async fn mount(path: &Path) -> Result<(), CliError> {
     Ok(())
 }
 
+fn resolve_catalog_driver(value: &mut serde_json::Value, base: &Path) -> Result<(), CliError> {
+    // Validate the original lexical paths before catalog rebasing can turn a
+    // refused SQLite URI or :memory: selection into an ordinary filename.
+    let spec = parse_config_str(
+        &serde_json::json!({"version":1,"driver":value}).to_string(),
+        base,
+    )?;
+    if spec.driver.is_none() {
+        return Err(CliError::usage("Drive requires a storage driver"));
+    }
+    resolve_backend_paths(value, base);
+    Ok(())
+}
+
 fn resolve_backend_paths(value: &mut serde_json::Value, base: &Path) {
     if let Some(object) = value.as_object_mut() {
         for (key, value) in object {
@@ -722,6 +729,35 @@ pub(crate) fn validate(path: &Path) -> Result<(), CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sqlite_wal_catalog_rejects_special_paths_before_rebasing_both_roles() {
+        for role in ["metadata", "blocks"] {
+            for path in ["", ":memory:", "file:memory?mode=memory"] {
+                let mut value = serde_json::json!({"kind":"splitstore", "storage": {
+                    "metadata":{"kind":"memory"}, "blocks":{"kind":"memory"}
+                }});
+                value["storage"][role] =
+                    serde_json::json!({"kind":"sqlite", "path":path, "journal_mode":"wal"});
+                assert!(resolve_catalog_driver(&mut value, Path::new("/tmp/catalog")).is_err());
+                assert_eq!(value["storage"][role]["path"], path);
+            }
+        }
+        let mut value = serde_json::json!({"kind":"splitstore", "storage": {
+            "metadata":{"kind":"sqlite", "path":"meta.db", "journal_mode":"wal"},
+            "blocks":{"kind":"sqlite", "path":"blocks.db", "journal_mode":"wal"}
+        }});
+        resolve_catalog_driver(&mut value, Path::new("/tmp/catalog")).unwrap();
+        assert_eq!(value["storage"]["metadata"]["path"], "/tmp/catalog/meta.db");
+        let parsed = parse_config_str(
+            &serde_json::json!({"version":1,"driver":value}).to_string(),
+            Path::new("/tmp/catalog"),
+        )
+        .unwrap();
+        assert!(
+            matches!(parsed.storage.unwrap().blocks, crate::config::StorageProvider::SqliteWithOptions { path, .. } if path == Path::new("/tmp/catalog/blocks.db"))
+        );
+    }
+
     #[tokio::test]
     async fn startup_failure_reports_real_memory_and_sqlite_opens_before_bind() {
         use base64::Engine;

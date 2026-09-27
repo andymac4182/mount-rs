@@ -353,6 +353,10 @@ async fn open_metadata(
         StoreConfig::Sqlite { path } => {
             Ok((Arc::new(SqliteMetadataStore::open(path)?), Vec::new()))
         }
+        StoreConfig::SqliteWithOptions { path, options } => Ok((
+            Arc::new(SqliteMetadataStore::open_with_options(path, *options)?),
+            Vec::new(),
+        )),
         StoreConfig::Pglite {
             connection,
             volume_key,
@@ -476,6 +480,10 @@ async fn open_blocks(
             "SlateDB is a metadata provider; use RustFS for immutable blocks",
         )),
         StoreConfig::Sqlite { path } => Ok((Arc::new(SqliteBlockStore::open(path)?), Vec::new())),
+        StoreConfig::SqliteWithOptions { path, options } => Ok((
+            Arc::new(SqliteBlockStore::open_with_options(path, *options)?),
+            Vec::new(),
+        )),
         StoreConfig::Pglite {
             connection,
             volume_key,

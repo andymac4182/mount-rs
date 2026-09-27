@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "driver": {
+    "kind": "splitstore",
+    "storage": {
+      "metadata": {
+        "kind": "sqlite",
+        "path": "./state/metadata.sqlite",
+        "journal_mode": "wal"
+      },
+      "blocks": {
+        "kind": "sqlite",
+        "path": "./state/blocks.sqlite",
+        "journal_mode": "wal"
+      },
+      "compact_inode_updates": true
+    }
+  }
+}

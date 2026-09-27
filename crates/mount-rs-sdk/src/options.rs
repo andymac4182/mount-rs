@@ -1,5 +1,7 @@
 //! Provider selection and split-store construction options.
 
+use mount_rs_sqlite::SqliteStorageOptions;
+
 use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -15,6 +17,10 @@ pub enum StoreConfig {
     Memory,
     Sqlite {
         path: PathBuf,
+    },
+    SqliteWithOptions {
+        path: PathBuf,
+        options: SqliteStorageOptions,
     },
     Pglite {
         connection: String,
@@ -78,6 +84,11 @@ impl fmt::Debug for StoreConfig {
             Self::Sqlite { path } => formatter
                 .debug_struct("Sqlite")
                 .field("path", path)
+                .finish(),
+            Self::SqliteWithOptions { path, options } => formatter
+                .debug_struct("SqliteWithOptions")
+                .field("path", path)
+                .field("options", options)
                 .finish(),
             Self::Pglite {
                 connection: _,

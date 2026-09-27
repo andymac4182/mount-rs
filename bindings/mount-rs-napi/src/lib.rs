@@ -62,7 +62,9 @@ use mount_rs_pglite_fs::connect_pglite_with_store;
 use mount_rs_r2::{R2BlockStore, R2Config};
 use mount_rs_r2_fs::open_r2;
 use mount_rs_rustfs::{RustFsBlockStore, RustFsConfig};
-use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
+use mount_rs_sqlite::{
+    SqliteBlockStore, SqliteJournalMode, SqliteMetadataStore, SqliteStorageOptions,
+};
 use mount_rs_sqlite_fs::open_sqlite;
 use mount_rs_tidb::{TidbBlockStore, TidbMetadataStore, TidbStorageOptions};
 use napi::bindgen_prelude::{Buffer, Either, Env, PromiseRaw, Reference};
@@ -1892,6 +1894,9 @@ pub struct JsMountFailure {
 /// backend never falls back to an in-memory store.
 #[napi(object)]
 pub struct JsChunkedStoreOptions {
+    /// SQLite only: preserve (default) or wal, retaining FULL synchronization.
+    #[napi(ts_type = "'preserve' | 'wal'")]
+    pub journal_mode: Option<String>,
     /// Supported values are memory, sqlite, pglite, tidb, foundationdb, r2,
     /// and rustfs (object stores are blocks only). FoundationDB requires the native feature and an
     /// explicit persisted-single-authority, shared-provider, or revision-cas authority.
@@ -3175,6 +3180,33 @@ fn optional_u32(name: &str, value: Option<f64>, default: u32) -> Result<u32, Err
         .unwrap_or(Ok(default))
 }
 
+fn sqlite_storage_options(
+    options: &JsChunkedStoreOptions,
+    role: &str,
+) -> Result<SqliteStorageOptions, Error> {
+    if options.kind != "sqlite" {
+        reject_set(&options.journal_mode, &format!("{role}.journalMode"))?;
+        return Ok(SqliteStorageOptions::default());
+    }
+    let journal_mode = match options.journal_mode.as_deref() {
+        None | Some("preserve") => SqliteJournalMode::Preserve,
+        Some("wal") => SqliteJournalMode::Wal,
+        _ => {
+            return Err(config_error(format!(
+                "{role}.journalMode must be 'preserve' or 'wal'"
+            )));
+        }
+    };
+    if journal_mode == SqliteJournalMode::Wal
+        && !options.uri.as_deref().is_some_and(sqlite_durable_uri)
+    {
+        return Err(config_error(format!(
+            "{role}.uri: SQLite WAL requires a local file path; empty, :memory: and file: paths are unsupported"
+        )));
+    }
+    Ok(SqliteStorageOptions { journal_mode })
+}
+
 async fn build_metadata_store(
     options: &JsChunkedStoreOptions,
     _block_options: &JsChunkedStoreOptions,
@@ -3204,7 +3236,13 @@ async fn build_metadata_store(
             reject_set(&options.access_key_id, "metadata.accessKeyId")?;
             reject_set(&options.secret_access_key, "metadata.secretAccessKey")?;
             Ok((
-                Arc::new(SqliteMetadataStore::open(uri).map_err(to_js_error)?),
+                Arc::new(
+                    SqliteMetadataStore::open_with_options(
+                        uri,
+                        sqlite_storage_options(options, "metadata")?,
+                    )
+                    .map_err(to_js_error)?,
+                ),
                 None,
             ))
         }
@@ -3316,7 +3354,13 @@ async fn build_block_store(
             reject_set(&options.access_key_id, "blocks.accessKeyId")?;
             reject_set(&options.secret_access_key, "blocks.secretAccessKey")?;
             Ok((
-                Arc::new(SqliteBlockStore::open(uri).map_err(to_js_error)?),
+                Arc::new(
+                    SqliteBlockStore::open_with_options(
+                        uri,
+                        sqlite_storage_options(options, "blocks")?,
+                    )
+                    .map_err(to_js_error)?,
+                ),
                 None,
             ))
         }
@@ -5094,6 +5138,9 @@ pub async fn inspect_split_namespace_presence(
 
 #[napi]
 pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Filesystem> {
+    // Validate both journal selections before opening either provider.
+    sqlite_storage_options(&options.metadata, "metadata")?;
+    sqlite_storage_options(&options.blocks, "blocks")?;
     let (ownership_mode, _) =
         chunked_ownership_mode(options.ownership_mode.as_deref(), options.concurrent_writes)?;
     let compact_inode_updates = options.compact_inode_updates.unwrap_or(false);
@@ -5444,6 +5491,7 @@ mod tests {
         inode: bool,
     ) -> JsChunkedOptions {
         let store = |name: &str| JsChunkedStoreOptions {
+            journal_mode: None,
             kind: "sqlite".into(),
             uri: Some(path.join(name).to_string_lossy().into_owned()),
             key: None,
@@ -5975,6 +6023,72 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn sqlite_journal_options_reject_invalid_selections_before_first_open() {
+        let path = std::env::temp_dir().join(format!(
+            "mount-rs-napi-wal-rejection-{}",
+            std::process::id()
+        ));
+        assert!(!path.exists());
+        for role in ["metadata", "blocks"] {
+            for value in ["delete", "WAL", ""] {
+                let mut options = compact_layout_sqlite_options(&path, true, true);
+                let store = if role == "metadata" {
+                    &mut options.metadata
+                } else {
+                    &mut options.blocks
+                };
+                store.journal_mode = Some(value.into());
+                assert_eq!(
+                    block_on(create_chunked_driver(options))
+                        .err()
+                        .unwrap()
+                        .reason,
+                    config_error(format!("{role}.journalMode must be 'preserve' or 'wal'")).reason
+                );
+                assert!(!path.exists());
+            }
+            for kind in ["memory", "pglite", "tidb", "foundationdb", "r2", "rustfs"] {
+                let mut options = compact_layout_sqlite_options(&path, true, true);
+                let store = if role == "metadata" {
+                    &mut options.metadata
+                } else {
+                    &mut options.blocks
+                };
+                store.kind = kind.into();
+                store.journal_mode = Some("preserve".into());
+                assert_eq!(
+                    block_on(create_chunked_driver(options))
+                        .err()
+                        .unwrap()
+                        .reason,
+                    config_error(format!("{role}.journalMode is not valid for this backend"))
+                        .reason
+                );
+                assert!(!path.exists());
+            }
+            for uri in ["", ":memory:", "file:database.db"] {
+                let mut options = compact_layout_sqlite_options(&path, true, true);
+                let store = if role == "metadata" {
+                    &mut options.metadata
+                } else {
+                    &mut options.blocks
+                };
+                store.uri = Some(uri.into());
+                store.journal_mode = Some("wal".into());
+                assert!(block_on(create_chunked_driver(options)).is_err());
+                assert!(!path.exists());
+            }
+        }
+        let mut options = compact_layout_sqlite_options(&path, true, true);
+        options.metadata.journal_mode = Some("preserve".into());
+        assert_eq!(
+            sqlite_storage_options(&options.metadata, "metadata").unwrap(),
+            SqliteStorageOptions::default()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn create_chunked_driver_forwards_compact_runtime_through_dynamic_stores() {
         block_on(async {
             let path = std::env::temp_dir().join(format!(
@@ -5987,6 +6101,7 @@ mod tests {
             ));
             std::fs::create_dir(&path).unwrap();
             let store = |name: &str| JsChunkedStoreOptions {
+                journal_mode: Some("wal".into()),
                 kind: "sqlite".into(),
                 uri: Some(path.join(name).to_string_lossy().into_owned()),
                 key: None,
@@ -6036,6 +6151,13 @@ mod tests {
             drop(driver);
             second.shutdown().await.unwrap();
             drop(second);
+            for name in ["metadata.db", "blocks.db"] {
+                let bytes = std::fs::read(path.join(name)).unwrap();
+                assert_eq!(&bytes[..16], b"SQLite format 3\0");
+                // SQLite's persistent header read/write versions are both 2
+                // for WAL. This observes the actual files after clean close.
+                assert_eq!(&bytes[18..20], &[2, 2], "{name} must persist WAL");
+            }
             std::fs::remove_dir_all(path).unwrap();
         });
     }
@@ -6264,6 +6386,7 @@ mod tests {
     fn foundationdb_policy_requires_exact_kind_uri_and_prefix_pair() {
         use FoundationDbBlockAuthorityPolicy::{ExternalBlockStore, SameKeyspace};
         let config = |kind: &str, uri: &str, key: &str| JsChunkedStoreOptions {
+            journal_mode: None,
             kind: kind.into(),
             uri: Some(uri.into()),
             key: Some(key.into()),
@@ -6615,6 +6738,7 @@ mod tests {
     #[test]
     fn r2_block_durability_preserves_explicit_override() {
         let mut options = JsChunkedStoreOptions {
+            journal_mode: None,
             kind: "r2".to_owned(),
             uri: None,
             key: Some("mount-rs/test".to_owned()),
@@ -6640,6 +6764,7 @@ mod tests {
     #[test]
     fn rustfs_block_durability_is_only_asserted_when_configured() {
         let mut options = JsChunkedStoreOptions {
+            journal_mode: None,
             kind: "rustfs".to_owned(),
             uri: None,
             key: Some("mount-rs/test".to_owned()),
@@ -6711,6 +6836,7 @@ mod tests {
     fn live_r2_raw_diagnostics_require_exact_fields() {
         assert!(storage::enabled(), "run with MOUNT_RS_PROFILE_IO=1");
         let options = JsChunkedStoreOptions {
+            journal_mode: None,
             kind: "r2".to_owned(),
             uri: None,
             key: Some("private-test-prefix".to_owned()),
@@ -6928,6 +7054,7 @@ mod tests {
     fn disabled_r2_local_diagnostics_do_not_register_instances() {
         assert!(!storage::enabled(), "run with MOUNT_RS_PROFILE_IO unset");
         let options = JsChunkedStoreOptions {
+            journal_mode: None,
             kind: "r2".to_owned(),
             uri: None,
             key: Some("private-disabled-prefix".to_owned()),
@@ -6965,6 +7092,7 @@ mod tests {
 
     fn inert_diagnostic_store_options(kind: &str, prefix: &str) -> JsChunkedStoreOptions {
         JsChunkedStoreOptions {
+            journal_mode: None,
             kind: kind.to_owned(),
             uri: None,
             key: Some(prefix.to_owned()),

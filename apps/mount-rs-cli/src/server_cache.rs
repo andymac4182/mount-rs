@@ -226,7 +226,9 @@ impl BlockStoreDecorator for DriveCacheDecorator {
                 IntegrityPolicy::ObjectStoreSha256OrOpaque
             }
             StoreConfig::Pglite { .. } => IntegrityPolicy::PgliteMd5,
-            StoreConfig::Memory | StoreConfig::Sqlite { .. } => IntegrityPolicy::Opaque,
+            StoreConfig::Memory
+            | StoreConfig::Sqlite { .. }
+            | StoreConfig::SqliteWithOptions { .. } => IntegrityPolicy::Opaque,
         };
         let store = CachedBlockStore::new(store, self.cache.clone(), self.identity.clone(), policy)
             .with_runtime(self.runtime.clone());
@@ -559,8 +561,11 @@ mod tests {
         options.metadata = StoreConfig::Sqlite {
             path: dir.path().join("metadata.sqlite"),
         };
-        options.blocks = StoreConfig::Sqlite {
+        options.blocks = StoreConfig::SqliteWithOptions {
             path: dir.path().join("blocks.sqlite"),
+            options: mount_rs_sdk::SqliteStorageOptions {
+                journal_mode: mount_rs_sdk::SqliteJournalMode::Wal,
+            },
         };
         let first =
             mount_rs_sdk::Filesystem::split_with_block_decorator(options.clone(), &decorator)

@@ -331,6 +331,12 @@ fn sdk_store_config(provider: &StorageProvider) -> Result<StoreConfig, CliError>
     match provider {
         StorageProvider::Memory => Ok(StoreConfig::Memory),
         StorageProvider::Sqlite { path } => Ok(StoreConfig::Sqlite { path: path.clone() }),
+        StorageProvider::SqliteWithOptions { path, options } => {
+            Ok(StoreConfig::SqliteWithOptions {
+                path: path.clone(),
+                options: *options,
+            })
+        }
         StorageProvider::Pglite {
             connection,
             volume_key,
@@ -1514,7 +1520,9 @@ fn validate_concurrent_sqlite_backing_paths(
         return Ok(());
     };
     for (role, provider) in [("metadata", &storage.metadata), ("blocks", &storage.blocks)] {
-        let StorageProvider::Sqlite { path } = provider else {
+        let (StorageProvider::Sqlite { path } | StorageProvider::SqliteWithOptions { path, .. }) =
+            provider
+        else {
             continue;
         };
         let backing = canonical_mountpoint_candidate(&expand_path(path))?;
@@ -1535,8 +1543,13 @@ fn validate_concurrent_sqlite_backing_paths(
 fn concurrent_sqlite_backing_requested(options: &CliOptions) -> bool {
     options.storage.as_ref().is_some_and(|storage| {
         storage.concurrent_writes
-            && (matches!(storage.metadata, StorageProvider::Sqlite { .. })
-                || matches!(storage.blocks, StorageProvider::Sqlite { .. }))
+            && (matches!(
+                storage.metadata,
+                StorageProvider::Sqlite { .. } | StorageProvider::SqliteWithOptions { .. }
+            ) || matches!(
+                storage.blocks,
+                StorageProvider::Sqlite { .. } | StorageProvider::SqliteWithOptions { .. }
+            ))
     })
 }
 
@@ -2376,6 +2389,56 @@ mod tests {
         assert_eq!(split.checkout_path.as_deref(), Some("/project"));
         assert!(split.concurrent_writes);
         assert!(!shared_view_requested(&options));
+    }
+
+    #[tokio::test]
+    async fn sqlite_journal_options_retain_native_backing_and_transport_guards() {
+        let directory = tempfile::tempdir().unwrap();
+        let view = directory.path().join("view");
+        let value = serde_json::json!({"version":1,"driver":{"kind":"splitstore","storage":{
+            "concurrent_writes":true,
+            "metadata":{"kind":"sqlite","path":"view/metadata.db","journal_mode":"wal"},
+            "blocks":{"kind":"sqlite","path":"blocks.db","journal_mode":"wal"}
+        }}});
+        let mut options = crate::config::parse_config_str(&value.to_string(), directory.path())
+            .unwrap()
+            .to_options();
+        options.mountpoint = Some(view);
+        options.transport = TransportChoice::Nfs;
+        assert!(concurrent_sqlite_backing_requested(&options));
+        assert!(
+            requested_mountpoints(&options)
+                .unwrap_err()
+                .to_string()
+                .contains("SQLite backing")
+        );
+        let split = split_options(&options, 0, 0).unwrap();
+        assert!(matches!(
+            split.metadata,
+            StoreConfig::SqliteWithOptions { .. }
+        ));
+        assert!(matches!(
+            split.blocks,
+            StoreConfig::SqliteWithOptions { .. }
+        ));
+        options.storage.as_mut().unwrap().metadata = StorageProvider::SqliteWithOptions {
+            path: directory.path().join("metadata.db"),
+            options: mount_rs_sdk::SqliteStorageOptions {
+                journal_mode: mount_rs_sdk::SqliteJournalMode::Wal,
+            },
+        };
+        for transport in [TransportChoice::Fuse, TransportChoice::P9] {
+            options.transport = transport;
+            assert!(
+                mount_command(options.clone())
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("shared mounts require NFS")
+            );
+        }
+        assert!(!directory.path().join("metadata.db").exists());
+        assert!(!directory.path().join("blocks.db").exists());
     }
 
     #[test]

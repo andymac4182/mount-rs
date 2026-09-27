@@ -1346,6 +1346,8 @@ export interface JsChunkedOptions {
  * backend never falls back to an in-memory store.
  */
 export interface JsChunkedStoreOptions {
+  /** SQLite only. Defaults to preserve; WAL keeps FULL synchronization. */
+  journalMode?: 'preserve' | 'wal'
   /**
    * Supported values are memory, sqlite, pglite, tidb, foundationdb, r2,
    * and rustfs (object stores are blocks only). FoundationDB requires the native feature and an

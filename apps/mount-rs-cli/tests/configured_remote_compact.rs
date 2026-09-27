@@ -637,8 +637,8 @@ async fn configured_binary_selects_mrc5_for_signed_quic_and_websocket_reopen() {
             "partitions":{
                 "red":{"drives":{
                     "data":{"driver":{"kind":"splitstore","storage":{
-                        "metadata":{"kind":"sqlite","path":"data-metadata.sqlite"},
-                        "blocks":{"kind":"sqlite","path":"data-blocks.sqlite"},
+                        "metadata":{"kind":"sqlite","path":"data-metadata.sqlite","journal_mode":"wal"},
+                        "blocks":{"kind":"sqlite","path":"data-blocks.sqlite","journal_mode":"wal"},
                         "compact_inode_updates":true
                     }}},
                     "logs":{"driver":{"kind":"memory"}}
@@ -768,6 +768,20 @@ async fn configured_binary_selects_mrc5_for_signed_quic_and_websocket_reopen() {
 
     let metadata_path = root.join("data-metadata.sqlite");
     let blocks_path = root.join("data-blocks.sqlite");
+    for path in [&metadata_path, &blocks_path] {
+        let connection = rusqlite::Connection::open(path).unwrap();
+        let journal: String = connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        let synchronous: i64 = connection
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal, "wal");
+        assert_eq!(synchronous, 2);
+        println!(
+            "configured SQLite reopen receipt: journal_mode={journal} synchronous={synchronous}"
+        );
+    }
     let metadata = SqliteMetadataStore::open(&metadata_path).unwrap();
     let mode = metadata.compact_inode_mode_state().await.unwrap().unwrap();
     let compact = metadata.load_compact_snapshot(mode.backing).await.unwrap();
