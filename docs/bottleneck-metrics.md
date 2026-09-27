@@ -100,6 +100,63 @@ hotspots, while a matched comparison is still needed to isolate their cost.
 The forwarding-future counter covers one specific boxing site; requested object
 bytes are separate from allocator traffic, retained memory and lifetime peaks.
 
+## Latest instrumented Ozone observations
+
+The [PR CI run](https://github.com/andymac4182/mount-rs/actions/runs/36295144716)
+retained FoundationDB artifact `10924420071` and TiDB artifact `10924080720`.
+Their archive digests and all four log/JSON member digests were independently
+checked. Both benchmarks used the legacy layout, 400 lifecycle iterations,
+concurrency 64, 4,096-byte payloads and 65,536-byte chunks. Each completed
+400 writes, reads and deletes and verified all 400 read payloads, with zero
+workload timeouts or cleanup failures. Both retained `IOPS_TARGET_NOT_MET`
+against the unchanged 1,000 floor.
+
+| Workload observation | FoundationDB/Ozone | TiDB/Ozone |
+| --- | --- | --- |
+| Logical operations / measured wall time | 1,200 / 2,815.36 ms | 1,200 / 2,884.30 ms |
+| Lifecycle operations/sec | 426.23 | 416.05 |
+| Write latency, median / p95 / p99 | 395.81 / 461.31 / 462.24 ms | 380.92 / 818.97 / 820.07 ms |
+| Read latency, median / p95 / p99 | 66.63 / 158.24 / 162.09 ms | 15.66 / 30.21 / 30.42 ms |
+| Filesystem gate waits, calls / inclusive time | 3,113 / 97.83 s | 3,059 / 98.73 s |
+| Block put calls / inclusive time | 752 / 21.34 s | 737 / 27.27 s |
+| Upload follower waits, calls / inclusive time | 728 / 20.44 s | 721 / 26.51 s |
+| Namespace serialized bytes / publications | 16,410,569 / 743 | 15,863,601 / 705 |
+| Block create calls / conditional conflicts | 24 / 23 | 16 / 15 |
+| Verified read cache hits | 400 | 400 |
+| Workload process CPU, user / system | 665,078 / 172,360 microseconds | 242,270 / 81,320 microseconds |
+| Workload process RSS at end | 122,839,040 bytes | 101,818,368 bytes |
+
+The new FoundationDB rows recorded 743 successful transaction creations,
+743 closure attempts, 743 commits and 2,972 point gets. Selected-key reads,
+range pages and explicit `on_error` recovery were zero in this workload.
+Those observations separate provider attempts from block adapter work;
+they do not establish the absence of client-internal retries or wire RPCs.
+The hosted log also retained passing results for the 31 transaction-driver
+controls, the retry-policy control and both NAPI snapshot/coverage controls.
+
+The 752 and 737 block put calls respectively carried 3,080,192 and 3,018,752
+bytes: exactly 4,096 bytes per call. This workload therefore did not pad new
+4 KiB files into 64 KiB stored blocks. Its block-adapter write byte ratios were
+1.88 and 1.8425 against the 400 acknowledged payloads; these are separate from
+the actual object-create and conflict-verification counters. Both runs confirmed
+one new object create and served all normal reads from the adapter cache.
+They do not exercise cold backing reads or demonstrate backing-store saturation.
+
+Gate and follower waits identify caller contention to investigate next. Their
+concurrent, nested totals overlap and cannot be added into exclusive time shares.
+A matched layout comparison is needed to isolate the cost of namespace
+publication and preparation work. A backing-store saturation experiment also
+needs distinct payloads and an explicitly observed cache condition.
+
+These are observations from this CI run, rather than a clean source/binary
+qualification or backend ranking. The FoundationDB benchmark could not verify
+its container checkout revision; TiDB recorded PR checkout revision
+`f9b9b5e160a06b2a2f98a231a63de9bfa45e87e6` with one dirty entry. Native files
+were hashed, but their exact source/build joins remain unverified. The workload
+metric phases were complete; both shutdown phases retained incomplete native
+observations after the object-store instance closed. Native/JavaScript allocator
+counts, server CPU and device operation counts remain unavailable.
+
 ## Independently check retained comparison records
 
 Using Node 24, run the offline verifier against the two retained outputs, the four original
