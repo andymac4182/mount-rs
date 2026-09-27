@@ -462,7 +462,10 @@ function syntheticNativeSnapshot(live) {
     },
     backend_waits: { pglite_client_lock: "instrumented", tidb_pool: "instrumented_inclusive_checkout_including_lazy_connect_and_session_configuration" }, http_attempts: "unavailable", physical_device_iops: "unavailable",
     storage: { in_flight: "0", forwarding_boxes: { sites: "napi_dynamic_provider_forwarding_future", calls: "0", requested_object_bytes: "0" }, entries: STORAGE_OPERATION_NAMES.map((name) => ({ name, ...zero(["calls", "success", "error", "cancelled", "bytes", "returned_rows", "returned_row_observations", "in_flight", "elapsed_ns"]), latency_log2_us: Array(32).fill("0") })) },
-    profile: { entries: [] }, sqlite: { connections: [] }, r2: { scope: "process_live_instances", internal_successful_retries: "unavailable", instances: live ? [instance] : [] },
+    profile: { entries: [] }, sqlite: {
+      connections: [], sql_statements: "0", observer_elapsed_ns: "0",
+      observer_scope: "Instant wall time for sequential registry lock and per-connection observer collection; excludes final outer JSON serialization; not workload time",
+    }, r2: { scope: "process_live_instances", internal_successful_retries: "unavailable", instances: live ? [instance] : [] },
   })
 }
 

@@ -293,7 +293,10 @@ function snapshot({ legacy = false, preCache = false, preClient = false, preTran
     backend_waits: { pglite_client_lock: "instrumented", tidb_pool: "instrumented_inclusive_checkout_including_lazy_connect_and_session_configuration" },
     http_attempts: "unavailable", physical_device_iops: "unavailable",
     storage: { in_flight: "0", forwarding_boxes: { sites: "napi_dynamic_provider_forwarding_future", calls: "0", requested_object_bytes: "0" }, entries: names.map(row) },
-    profile: { entries: [] }, sqlite: { connections: [] },
+    profile: { entries: [] }, sqlite: {
+      connections: [], sql_statements: "0", observer_elapsed_ns: "0",
+      observer_scope: "Instant wall time for sequential registry lock and per-connection observer collection; excludes final outer JSON serialization; not workload time",
+    },
     r2: { scope: "process_live_instances", instances: [], internal_successful_retries: "unavailable" },
   }
 }
