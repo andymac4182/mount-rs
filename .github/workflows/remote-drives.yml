@@ -122,7 +122,7 @@ jobs:
           redis_phase=package_download
           (
             cd "$redis_root/downloads"
-            apt-get download redis-server redis-tools >> "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/redis-package.log" 2>&1
+            apt-get download redis-server redis-tools liblzf1 >> "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/redis-package.log" 2>&1
           )
           redis_phase=package_extract
           for package in "$redis_root/downloads"/*.deb; do
@@ -142,10 +142,23 @@ jobs:
           test -x "$redis_source"
           # A regular file named redis-server preserves server mode after path resolution.
           install -m 700 "$redis_source" "$redis_root/redis-server"
+          redis_phase=library_select
+          redis_library_root=$(python3 - "$redis_root/unpacked" 2>> "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/redis-package.log" <<'PY'
+          import pathlib, sys
+          root = pathlib.Path(sys.argv[1]).resolve(strict=True)
+          candidates = list(root.rglob("liblzf.so.1"))
+          assert len(candidates) == 1, "one owned liblzf required"
+          target = candidates[0].resolve(strict=True)
+          assert target.is_relative_to(root) and target.is_file(), "owned liblzf target required"
+          print(candidates[0].parent)
+          PY
+          )
           redis_phase=version
-          "$redis_root/redis-server" --version > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/redis-version.txt" 2>&1
+          LD_LIBRARY_PATH="$redis_library_root${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+            "$redis_root/redis-server" --version > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/redis-version.txt" 2>&1
           redis_phase=export
-          printf 'MOUNT_RS_CACHE_REDIS_SERVER=%s\n' "$redis_root/redis-server" >> "$GITHUB_ENV"
+          printf 'MOUNT_RS_CACHE_REDIS_SERVER=%s\nMOUNT_RS_CACHE_REDIS_LIBRARY_DIRECTORY=%s\n' \
+            "$redis_root/redis-server" "$redis_library_root" >> "$GITHUB_ENV"
       - name: Warm the two locked failure test targets online
         run: |
           set -euo pipefail
@@ -156,10 +169,14 @@ jobs:
             > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-remote.log" 2>&1
       - name: Verify Redis directory and peer failures through the owned parent
         timeout-minutes: 5
-        run: python3 -B scripts/test-remote-failures.py redisfault
+        run: |
+          LD_LIBRARY_PATH="$MOUNT_RS_CACHE_REDIS_LIBRARY_DIRECTORY${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+            python3 -B scripts/test-remote-failures.py redisfault
       - name: Verify cancelled Redis fixture cleanup through the owned parent
         timeout-minutes: 5
-        run: python3 -B scripts/test-remote-failures.py rediscleanup
+        run: |
+          LD_LIBRARY_PATH="$MOUNT_RS_CACHE_REDIS_LIBRARY_DIRECTORY${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+            python3 -B scripts/test-remote-failures.py rediscleanup
       - name: Verify SQLite commit after lost WebSocket reply through the owned parent
         timeout-minutes: 5
         run: python3 -B scripts/test-remote-failures.py wsloss
