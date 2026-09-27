@@ -2,12 +2,16 @@
 
 Importing this module performs no process, signal, environment or filesystem
 operation. Callers create the owned new-session Popen and supply every group
-and clock operation. Receipt writing and owner PID-file identity checks belong
-to the separately reviewed callers.
+and clock operation. Receipt publication requires an explicit writer call;
+owner PID-file identity checks belong to the separately reviewed callers.
 """
 
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
+import stat
 import subprocess
 
 
@@ -324,3 +328,111 @@ def retain_before_release(receipt: dict[str, object], *, retain, release) -> boo
         release()
         return True
     return False
+
+
+def _directory_identity(observed) -> tuple[int, int]:
+    return observed.st_dev, observed.st_ino
+
+
+def _private_directory(observed, uid: int) -> bool:
+    return (
+        stat.S_ISDIR(observed.st_mode) and observed.st_uid == uid
+        and stat.S_IMODE(observed.st_mode) == 0o700
+    )
+
+
+def _private_leaf(observed, uid: int) -> bool:
+    return (
+        stat.S_ISREG(observed.st_mode) and observed.st_uid == uid
+        and stat.S_IMODE(observed.st_mode) == 0o600 and observed.st_nlink == 1
+    )
+
+
+def _check_parent(parent: Path, parent_fd: int, identity: tuple[int, int], uid: int) -> None:
+    if parent.resolve(strict=True) != parent:
+        raise ValueError(_PREFIX + "RECEIPT_WRITE_FAILED")
+    named = parent.lstat()
+    pinned = os.fstat(parent_fd)
+    if (
+        not _private_directory(named, uid) or not _private_directory(pinned, uid)
+        or _directory_identity(named) != identity or _directory_identity(pinned) != identity
+    ):
+        raise ValueError(_PREFIX + "RECEIPT_WRITE_FAILED")
+
+
+def write_private_process_receipt(path, receipt: dict[str, object]) -> None:
+    """Exclusively publish capped exact bytes beneath a pinned private parent.
+
+    Filesystem calls are not promised a uniform wall deadline. Identity checks
+    describe publication boundaries, rather than interval immutability.
+    Failed private partial files are retained unqualified; no pathname cleanup
+    can race a replacement, and a later attempt needs a new exclusive path.
+    """
+    parent_fd = None
+    leaf_fd = None
+    created_identity = None
+    parent = None
+    name = None
+    uid = None
+    failed = False
+    close_failed = False
+    try:
+        copied = _receipt_copy(receipt)
+        encoded = (json.dumps(copied, ensure_ascii=True, separators=(",", ":")) + "\n").encode("ascii")
+        if not 0 < len(encoded) <= 4096:
+            raise ValueError(_PREFIX + "RECEIPT_WRITE_FAILED")
+        raw_path = os.fspath(path)
+        if type(raw_path) is not str or not 0 < len(raw_path) <= 4096 or "\x00" in raw_path:
+            raise ValueError(_PREFIX + "RECEIPT_WRITE_FAILED")
+        destination = Path(raw_path)
+        if not destination.is_absolute() or str(destination) != raw_path:
+            raise ValueError(_PREFIX + "RECEIPT_WRITE_FAILED")
+        parent = destination.parent
+        name = destination.name
+        if not name or name in (".", "..") or parent.resolve(strict=True) != parent:
+            raise ValueError(_PREFIX + "RECEIPT_WRITE_FAILED")
+        uid = os.getuid()
+        parent_before = parent.lstat()
+        if not _private_directory(parent_before, uid):
+            raise ValueError(_PREFIX + "RECEIPT_WRITE_FAILED")
+        parent_identity = _directory_identity(parent_before)
+        parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        _check_parent(parent, parent_fd, parent_identity, uid)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        leaf_fd = os.open(name, flags, 0o600, dir_fd=parent_fd)
+        leaf_before = os.fstat(leaf_fd)
+        created_identity = _directory_identity(leaf_before)
+        if not _private_leaf(leaf_before, uid) or leaf_before.st_size != 0:
+            raise ValueError(_PREFIX + "RECEIPT_WRITE_FAILED")
+        cursor = 0
+        attempts = 0
+        while cursor < len(encoded):
+            remaining = encoded[cursor:]
+            written = os.write(leaf_fd, remaining)
+            attempts += 1
+            if type(written) is not int or not 0 < written <= len(remaining) or attempts > 4096:
+                raise ValueError(_PREFIX + "RECEIPT_WRITE_FAILED")
+            cursor += written
+        leaf_after = os.fstat(leaf_fd)
+        named_leaf = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            not _private_leaf(leaf_after, uid) or not _private_leaf(named_leaf, uid)
+            or _directory_identity(leaf_after) != created_identity
+            or _directory_identity(named_leaf) != created_identity
+            or leaf_after.st_size != len(encoded) or named_leaf.st_size != len(encoded)
+            or (leaf_after.st_mtime_ns, leaf_after.st_ctime_ns)
+            != (named_leaf.st_mtime_ns, named_leaf.st_ctime_ns)
+        ):
+            raise ValueError(_PREFIX + "RECEIPT_WRITE_FAILED")
+        _check_parent(parent, parent_fd, parent_identity, uid)
+    except Exception:
+        failed = True
+    finally:
+        for descriptor in (leaf_fd, parent_fd):
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except Exception:
+                    close_failed = True
+    if failed or close_failed:
+        raise ValueError(_PREFIX + "RECEIPT_WRITE_FAILED") from None

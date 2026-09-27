@@ -150,12 +150,20 @@ native builds and joined lifecycle verification are pending.
 retain-before-release logic. Its exact 19-field receipts preserve raw child
 return codes, observed supervisor signals, timeouts and unavailable wait/group
 observations, even after later settlement. Modeled controls exercise injected
-process, group and clock operations. Filesystem receipt writing and integration
-with the actual owner helpers remain pending.
+process, group and clock operations. The receipt writer creates an exclusive
+mode 0600 file in a canonical, current-user-owned mode 0700 directory. It checks
+the bounded bytes, parent and file identities, and closes both owned file
+descriptors before successful publication. Failed publication retains any
+private partial file, blocks PID-file release and requires a new exclusive path
+for retry. These checks observe publication boundaries; they do not establish
+crash durability or interval immutability. Integration with the actual owner
+helpers remains pending.
 
 Unix CI retains the Node receipt controls with `owned-layout-controls.log` and
-the Python models with `owned-layout-process-controls.log`. Test success covers
-these controls; owner teardown and workload qualification require actual runs.
+the Python models with `owned-layout-process-controls.log`. The writer's 21
+filesystem controls are retained in `owned-layout-process-writer-controls.log`;
+the supervisor has 35 modeled controls. Test success covers these controls;
+owner teardown and workload qualification require actual runs.
 
 ## Native diagnostic schemas
 
