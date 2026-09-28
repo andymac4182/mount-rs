@@ -39,3 +39,7 @@ are in RustFS.
 hashes, focused case names, formatting, source review, and earlier failed gates.
 The [earlier native diagnostic](../tidb-rustfs-marker-diagnostic-20260928/README.md)
 contains the first measured TiDB/RustFS results.
+
+The subsequent [complete remote contention baseline](../tidb-rustfs-contention-baseline-20260928/README.md)
+records the first accepted live ten-server TiDB/RustFS control. It is separate
+from this selector qualification and does not establish production capacity.

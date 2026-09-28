@@ -143,6 +143,11 @@ fn rustfs_rejects_offline_tidb_block_preseed_before_preparation() {
 }
 
 fn owned_fixture() -> Value {
+    #[cfg(windows)]
+    let data_source = r"C:\private\tmp\owned-rustfs\data";
+    #[cfg(not(windows))]
+    let data_source = "/private/tmp/owned-rustfs/data";
+
     json!({
         "id":"a".repeat(64), "name":"/mount-rs-rustfs-test-run",
         "owner_label":"mount-rs-rustfs-test", "run":"mount-rs-rustfs-test-run",
@@ -150,7 +155,7 @@ fn owned_fixture() -> Value {
         "image":"rustfs/rustfs:1.0.0@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff",
         "image_id":format!("sha256:{}", "b".repeat(64)),
         "ports":{"9000/tcp":[{"HostIp":"127.0.0.1","HostPort":"9878"}]},
-        "mounts":[{"Type":"bind","Source":"/private/tmp/owned-rustfs/data","Destination":"/data","RW":true}]
+        "mounts":[{"Type":"bind","Source":data_source,"Destination":"/data","RW":true}]
     })
 }
 
