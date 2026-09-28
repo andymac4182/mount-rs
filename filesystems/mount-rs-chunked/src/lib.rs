@@ -37,8 +37,8 @@ use mount_rs_core::error::{ErrorCode, FsError, Result};
 use mount_rs_core::handle::OpenFlags;
 use mount_rs_core::path::{is_path_inside, normalize_path, split_path};
 use mount_rs_core::storage::compact::{
-    CompactInodeCapability, CompactSnapshot, CompactStructuralDelta, PhysicalInodeIdentity,
-    StructuralScope, ValidatedCompactStructure,
+    CompactInodeCapability, CompactSnapshot, CompactStructuralDelta, LoadedCompactInode,
+    PhysicalInodeIdentity, StructuralScope, ValidatedCompactStructure,
 };
 use mount_rs_core::storage::{
     BlockExtent, BlockReconcileReport, BlockStore, CheckoutRequest, ConcurrentBackingId,
@@ -2356,6 +2356,12 @@ where
     }
 
     async fn refresh_compact_structure_for_read(&self) -> Result<bool> {
+        Ok(self.load_current_compact_root().await?.is_some())
+    }
+
+    /// A selected root read checked against the retained structural body and
+    /// physical identity. A changed generation installs one coherent Full view.
+    async fn load_current_compact_root(&self) -> Result<Option<LoadedCompactInode>> {
         self.check_inode_runtime()?;
         let backing = self
             .inner
@@ -2388,11 +2394,11 @@ where
                 .await
                 .map_err(|error| self.fail_closed(error))?;
             self.install_compact_snapshot(snapshot, revision, None)?;
-            return Ok(false);
+            return Ok(None);
         }
         let state = self.lock_state()?;
         if state.revision != revision {
-            return Ok(false);
+            return Ok(None);
         }
         let physical = state
             .compact
@@ -2406,7 +2412,7 @@ where
             drop(state);
             return Err(self.fail_closed(stale_inode_structure()));
         }
-        Ok(true)
+        Ok(Some(loaded))
     }
 
     async fn refresh_compact_inode_once(&self, inode: InodeId) -> Result<bool> {
@@ -2940,6 +2946,79 @@ where
         }
         publication.disarm();
         Ok(next)
+    }
+
+    /// Install a targeted create without certifying untouched selected bodies
+    /// as fresh. Their exact physical identities and overlays remain paired.
+    async fn publish_compact_file_create(
+        &self,
+        revision: u64,
+        namespace: Namespace,
+        structure: ValidatedCompactStructure,
+        delta: CompactStructuralDelta,
+    ) -> Result<()> {
+        self.check_inode_runtime()?;
+        if self.lock_state()?.revision != revision {
+            return Err(FsError::new(ErrorCode::Eagain));
+        }
+        self.inner.blocks.flush().await?;
+        let backing = self
+            .inner
+            .concurrent_backing
+            .ok_or_else(stale_inode_structure)?;
+        self.inner
+            .blocks
+            .verify_concurrent_backing(backing)
+            .await
+            .map_err(|error| self.fail_closed(error))?;
+        let mut publication = PublicationGuard::new(&self.inner.state, &self.inner.failed);
+        let receipt = match self.inner.metadata.publish_compact_structure(&delta).await {
+            Ok(receipt) => receipt,
+            Err(error) if error.code == ErrorCode::Eagain => {
+                publication.disarm();
+                return Err(error);
+            }
+            Err(error) => return Err(self.fail_closed(error)),
+        };
+        let next_structure = delta
+            .validate_next_structure(&structure, &receipt, &namespace)
+            .map_err(|error| self.fail_closed(error))?;
+        if !self.inner.metadata.publish_includes_flush_barrier() {
+            self.inner
+                .metadata
+                .flush()
+                .await
+                .map_err(|error| self.fail_closed(error))?;
+        }
+        self.check_inode_runtime()?;
+        {
+            let mut state = self.lock_state()?;
+            if state.revision != revision {
+                return Err(FsError::new(ErrorCode::Estale));
+            }
+            let compact = state.compact.as_mut().ok_or_else(stale_inode_structure)?;
+            for (&inode, guard) in &receipt.upserts {
+                compact.physical.insert(inode, guard.identity);
+            }
+            compact.structure = next_structure;
+            compact.pending_full = None;
+            for inode in receipt.upserts.keys() {
+                state.selected_inodes.remove(inode);
+            }
+            state.namespace = Arc::new(namespace);
+            state.revision = state
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+            state.persisted_revision = receipt.anchor.generation;
+            // Untouched physical revisions are now projected at the new
+            // generation. Selected reloads must derive logical tokens afresh.
+            state.inode_revisions.clear();
+            // pending_atime is intentionally untouched: FileCreate published
+            // only parent entry/timestamps and the new file, no read atimes.
+        }
+        publication.disarm();
+        Ok(())
     }
 
     async fn write_selected_inode(
@@ -5630,6 +5709,103 @@ where
         ))
     }
 
+    /// Caller holds the metadata gate. Only the root-child wx+ shape reaches
+    /// this path; all other namespace mutations retain the Full transaction.
+    async fn open_compact_root_child_exclusive(
+        &self,
+        path: String,
+        flags: OpenFlags,
+        mode: u32,
+        guard: Option<(&PathGuard, &str, ObservedEntry)>,
+        phase: GatePhasePermit<'_>,
+    ) -> Result<(Arc<dyn FileHandle>, PathIdentity)> {
+        for attempt in 0..MAX_CONCURRENT_CAS_RETRIES {
+            let parent = {
+                let _refresh = phase.phase(GatePhase::Refresh);
+                self.load_current_compact_root().await?
+            };
+            let Some(parent) = parent else {
+                continue;
+            };
+            let (cached, revision, structure, expected_parent) = {
+                let state = self.lock_state()?;
+                let compact = state.compact.as_ref().ok_or_else(stale_inode_structure)?;
+                (
+                    state.namespace.clone(),
+                    state.revision,
+                    compact.structure.clone(),
+                    *compact
+                        .physical
+                        .get(&state.namespace.root)
+                        .ok_or_else(stale_inode_structure)?,
+                )
+            };
+            let mut namespace = cached.as_ref().clone();
+            let entry = walk(&namespace, &path, false, "open", 0)?;
+            validate_open_guard(&namespace, &path, &entry, flags, guard)?;
+            if entry.node.is_some() {
+                return Err(error_with_path(ErrorCode::Eexist, "open", &entry.path));
+            }
+            if entry.parent != namespace.root {
+                return Err(error_with_path(ErrorCode::Estale, "open", &entry.path));
+            }
+            let inode = namespace.next_inode;
+            namespace.next_inode = inode
+                .checked_add(1)
+                .ok_or_else(|| error_with_path(ErrorCode::Eoverflow, "open", &entry.path))?;
+            let mode = S_IFREG | (mode & !namespace.umask & 0o7777);
+            namespace.nodes.insert(
+                inode,
+                new_file_node(
+                    inode,
+                    mode,
+                    namespace.default_uid,
+                    namespace.default_gid,
+                    namespace.default_chunker.clone(),
+                ),
+            );
+            add_entry(
+                &mut namespace,
+                entry.parent,
+                entry.name,
+                inode,
+                "open",
+                &entry.path,
+                true,
+            )?;
+            let delta = CompactStructuralDelta::capture_file_create(
+                &structure,
+                &cached,
+                &parent,
+                expected_parent,
+                &namespace,
+            )?;
+            let result = {
+                let _publication = phase.phase(GatePhase::Publication);
+                self.publish_compact_file_create(revision, namespace, structure, delta)
+                    .await
+            };
+            match result {
+                Ok(()) => return self.open_inode_handle(inode, path, flags),
+                Err(error) if error.code == ErrorCode::Eagain => {
+                    // Only a proven noncommit is replayable. Refresh a coherent
+                    // Full view even when an unrelated selected write kept the
+                    // structural generation unchanged.
+                    self.ensure_operation_lease(Some(phase)).await?;
+                    if attempt + 1 == MAX_CONCURRENT_CAS_RETRIES {
+                        return Err(error);
+                    }
+                    let _backoff = phase.phase(GatePhase::CasBackoff);
+                    concurrent_cas_backoff(attempt, &self.inner.options.owner).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(FsError::new(ErrorCode::Eagain)
+            .with_syscall("open")
+            .with_message("another writer repeatedly changed the namespace"))
+    }
+
     async fn open_flags_inner(
         &self,
         path: &str,
@@ -5657,6 +5833,28 @@ where
         let _gate = self.operation_gate(GateKind::Metadata).await;
         drop(gate_profile);
         trace.stage("gate_acquired", format_args!("path={normalized:?}"));
+        if self.inner.options.compact_inode_updates
+            && !self.inner.options.delegated
+            && flags.read
+            && flags.write
+            && flags.create
+            && flags.exclusive
+            && flags.truncate
+            && !flags.append
+            && normalized
+                .strip_prefix('/')
+                .is_some_and(|name| !name.is_empty() && !name.contains('/'))
+        {
+            return self
+                .open_compact_root_child_exclusive(
+                    normalized,
+                    flags,
+                    mode,
+                    guard,
+                    _gate.phase_permit(),
+                )
+                .await;
+        }
         if self.inner.options.inode_updates && !flags.truncate {
             let (namespace, entry) = self
                 .inode_path_view(
@@ -11591,6 +11789,60 @@ mod compact_preparation_tests {
             drop(blocks);
             drop(metadata);
             oracle(&volume, &[("/created", b"complete replacement")]).await;
+        });
+    }
+
+    #[test]
+    fn targeted_create_preserves_selected_physical_body_pairs_and_pending_atime() {
+        block_on(async {
+            let volume = Volume::new();
+            let fs = volume.open("targeted-overlay").await;
+            fs.write_file("/old", b"base").await.unwrap();
+            let handle = FsDriver::open(&fs, "/old", "r+", 0).await.unwrap();
+            handle.write(b"LOCAL", Some(0)).await.unwrap();
+            let inode = handle.stat().await.unwrap().ino;
+            let (old_body, old_physical, old_generation, atimes) = {
+                let mut state = fs.lock_state().unwrap();
+                let parent = state.namespace.root;
+                state.pending_atime.insert(parent, i64::MAX - 1);
+                state.pending_atime.insert(inode, i64::MAX);
+                (
+                    state.selected_inodes[&inode].clone(),
+                    state.compact.as_ref().unwrap().physical[&inode],
+                    state.persisted_revision,
+                    state.pending_atime.clone(),
+                )
+            };
+            assert!(old_physical.revision > 0);
+            let created = FsDriver::open(&fs, "/new", "wx+", 0o600).await.unwrap();
+            {
+                let state = fs.lock_state().unwrap();
+                assert!(Arc::ptr_eq(&state.selected_inodes[&inode], &old_body));
+                assert_eq!(
+                    state.compact.as_ref().unwrap().physical[&inode],
+                    old_physical
+                );
+                assert_eq!(state.pending_atime, atimes);
+                assert_eq!(state.persisted_revision, old_generation + 1);
+                let captured = CapturedInodeVersion::capture(&state, inode).unwrap();
+                assert_eq!(captured.physical, Some(old_physical));
+                assert_eq!(captured.logical.structural_generation, old_generation + 1);
+                assert_eq!(captured.logical.inode_revision, 0);
+            }
+            // A later peer write must be compared to the preserved physical
+            // identity, never accepted as the stale local body at revision zero.
+            let peer = volume.open("targeted-overlay-peer").await;
+            let remote = FsDriver::open(&peer, "/old", "r+", 0).await.unwrap();
+            remote.write(b"PEER!", Some(0)).await.unwrap();
+            remote.close().await.unwrap();
+            handle.write(b"X", Some(0)).await.unwrap();
+            let mut bytes = [0; 5];
+            assert_eq!(handle.read(&mut bytes, Some(0)).await.unwrap(), 5);
+            assert_eq!(&bytes, b"XEER!");
+            created.close().await.unwrap();
+            handle.close().await.unwrap();
+            peer.shutdown().await.unwrap();
+            fs.shutdown().await.unwrap();
         });
     }
 

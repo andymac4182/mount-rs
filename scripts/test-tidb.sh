@@ -797,8 +797,10 @@ run_node_provider_test() {
 }
 
 run_ambiguous_commit_test() {
-  MOUNT_RS_TIDB_URL="$tidb_url" \
-    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --test ambiguous_commit -- --ignored --nocapture
+  # Compact query-count controls require the storage diagnostics bank.
+  MOUNT_RS_TIDB_URL="$tidb_url" MOUNT_RS_PROFILE_IO=1 \
+    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb \
+      --test ambiguous_commit --test compact -- --ignored --nocapture --test-threads=1
 }
 
 echo "Starting actual TiDB/TiKV test topology=$topology version=$image_version platform=$docker_platform docker_cpus=$docker_cpu_count docker_mem_bytes=$docker_mem_bytes" >&2

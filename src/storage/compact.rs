@@ -396,6 +396,7 @@ pub struct CompactStructuralDelta {
     created: BTreeMap<InodeId, NodeMetadata>,
     removed: BTreeSet<InodeId>,
     entries: Vec<ParentEntryPrecondition>,
+    parent_body: Option<NodeMetadata>,
     scope: StructuralScope,
 }
 
@@ -507,6 +508,7 @@ impl CompactStructuralDelta {
             created: BTreeMap::new(),
             removed: BTreeSet::new(),
             entries: Vec::new(),
+            parent_body: None,
             scope,
         };
         for (&inode, old) in &base.guards {
@@ -558,6 +560,7 @@ impl CompactStructuralDelta {
         }
         if scope == StructuralScope::FileCreate {
             delta.validate_file_create(base)?;
+            delta.parent_body = Some(base.guards[&delta.entries[0].parent].node.clone());
         }
         profile::add(
             Event::CompactStructuralExpectedGuardNodes,
@@ -566,7 +569,137 @@ impl CompactStructuralDelta {
         Ok(delta)
     }
 
+    /// Capture one file create from retained topology and a fresh selected parent.
+    /// The cached namespace supplies unchanged bodies, not their freshness. Only
+    /// the parent is expected at publication; unrelated selected bodies remain
+    /// outside the transaction read/write set.
+    pub fn capture_file_create(
+        structure: &ValidatedCompactStructure,
+        cached: &Namespace,
+        parent: &LoadedCompactInode,
+        expected_parent: PhysicalInodeIdentity,
+        candidate: &Namespace,
+    ) -> Result<Self> {
+        let _profile = Span::new(Event::CompactStructuralDeltaCaptureNodes)
+            .units(candidate.nodes.len() as u64);
+        let fail = || invalid_namespace("delta is not an independent file create");
+        let anchor = structure.anchor();
+        anchor.validate()?;
+        candidate.validate()?;
+        if cached.format_version != NAMESPACE_FORMAT_VERSION
+            || cached.root != anchor.root
+            || cached.next_inode != anchor.next_inode
+            || cached.default_uid != anchor.default_uid
+            || cached.default_gid != anchor.default_gid
+            || cached.umask != anchor.umask
+            || cached.default_chunker != anchor.default_chunker
+            || !cached
+                .nodes
+                .keys()
+                .copied()
+                .eq(anchor.members.iter().copied())
+        {
+            return Err(fail());
+        }
+        if parent.generation != anchor.generation {
+            return Err(FsError::new(ErrorCode::Eagain));
+        }
+        let inode = parent.guard.node.stats.ino;
+        parent.guard.validate(inode, anchor)?;
+        if parent.guard.identity != expected_parent {
+            return Err(FsError::new(ErrorCode::Eagain));
+        }
+        let old_parent = cached.nodes.get(&inode).ok_or_else(fail)?;
+        if old_parent != &parent.guard.node {
+            return Err(invalid_namespace(
+                "compact parent body differs from cached namespace",
+            ));
+        }
+        let generation = anchor
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| overflow_namespace("compact structural generation exhausted"))?;
+        let next_inode = anchor
+            .next_inode
+            .checked_add(1)
+            .ok_or_else(|| overflow_namespace("compact inode allocation exhausted"))?;
+        let mut next = anchor.clone();
+        next.generation = generation;
+        next.next_inode = next_inode;
+        next.members.push(anchor.next_inode);
+        if candidate.root != next.root
+            || candidate.next_inode != next.next_inode
+            || candidate.default_uid != next.default_uid
+            || candidate.default_gid != next.default_gid
+            || candidate.umask != next.umask
+            || candidate.default_chunker != next.default_chunker
+            || !candidate
+                .nodes
+                .keys()
+                .copied()
+                .eq(next.members.iter().copied())
+        {
+            return Err(fail());
+        }
+        for (&id, node) in &cached.nodes {
+            if id != inode && candidate.nodes.get(&id) != Some(node) {
+                return Err(fail());
+            }
+        }
+        let changed_parent = candidate.nodes.get(&inode).ok_or_else(fail)?;
+        let NodeData::Directory { entries } = &changed_parent.data else {
+            return Err(fail());
+        };
+        let NodeData::Directory {
+            entries: old_entries,
+        } = &old_parent.data
+        else {
+            return Err(fail());
+        };
+        let mut remaining = old_entries.iter().peekable();
+        let mut added_entry = None;
+        for entry in entries {
+            if remaining.peek().is_some_and(|old| *old == entry) {
+                remaining.next();
+            } else if added_entry.replace(entry).is_some() {
+                return Err(fail());
+            }
+        }
+        if remaining.next().is_some() {
+            return Err(fail());
+        }
+        let added_entry = added_entry.ok_or_else(fail)?;
+        let created = candidate.nodes.get(&anchor.next_inode).ok_or_else(fail)?;
+        let delta = Self {
+            base: anchor.clone(),
+            next,
+            expected: BTreeMap::from([(inode, expected_parent)]),
+            changed: BTreeMap::from([(inode, changed_parent.clone())]),
+            created: BTreeMap::from([(anchor.next_inode, created.clone())]),
+            removed: BTreeSet::new(),
+            entries: vec![ParentEntryPrecondition {
+                parent: inode,
+                name: added_entry.name.clone(),
+                expected: None,
+            }],
+            parent_body: Some(old_parent.clone()),
+            scope: StructuralScope::FileCreate,
+        };
+        delta.validate_file_create_parent(old_parent)?;
+        profile::add(Event::CompactStructuralExpectedGuardNodes, 1);
+        Ok(delta)
+    }
+
     fn validate_file_create(&self, base: &CompactSnapshot) -> Result<()> {
+        let old = self
+            .entries
+            .first()
+            .and_then(|entry| base.guards.get(&entry.parent))
+            .ok_or_else(|| invalid_namespace("delta is not an independent file create"))?;
+        self.validate_file_create_parent(&old.node)
+    }
+
+    fn validate_file_create_parent(&self, old: &NodeMetadata) -> Result<()> {
         let fail = || invalid_namespace("delta is not an independent file create");
         let next_inode = self
             .base
@@ -590,10 +723,9 @@ impl CompactStructuralDelta {
             return Err(fail());
         }
         let entry = &self.entries[0];
-        if entry.expected.is_some() {
+        if entry.expected.is_some() || old.stats.ino != entry.parent {
             return Err(fail());
         }
-        let old = &base.guards.get(&entry.parent).ok_or_else(fail)?.node;
         let changed = self.changed.get(&entry.parent).ok_or_else(fail)?;
         let (
             NodeData::Directory {
@@ -702,6 +834,14 @@ impl CompactStructuralDelta {
                 != entry.expected
             {
                 return Err(FsError::new(ErrorCode::Eagain));
+            }
+        }
+        if self.scope == StructuralScope::FileCreate {
+            let entry = &self.entries[0];
+            if self.parent_body.as_ref() != Some(&guards[&entry.parent].node) {
+                return Err(invalid_namespace(
+                    "compact parent body differs from captured guard",
+                ));
             }
         }
         let mut upserts = BTreeMap::new();

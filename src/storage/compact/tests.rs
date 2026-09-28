@@ -117,6 +117,19 @@ fn create_candidate(base: &CompactSnapshot, name: &str) -> Namespace {
     candidate
 }
 
+fn retained_create_inputs(
+    base: &CompactSnapshot,
+) -> (Namespace, ValidatedCompactStructure, LoadedCompactInode) {
+    let (cached, _, structure) = base.clone().into_validated_namespace().unwrap();
+    let parent = LoadedCompactInode::from_guard(
+        &base.anchor,
+        base.anchor.root,
+        base.guards[&base.anchor.root].clone(),
+    )
+    .unwrap();
+    (cached, structure, parent)
+}
+
 fn update(base: &CompactSnapshot, inode: u64, size: u64) -> CompactSnapshot {
     let mut node = base.guards[&inode].node.clone();
     node.stats.size = size;
@@ -392,6 +405,242 @@ fn targeted_scope_rejects_defaults_existing_content_and_nonallocation_changes() 
 }
 
 #[test]
+fn retained_file_create_capture_matches_snapshot_intent_for_any_insertion_position() {
+    let base = fixture();
+    let (cached, structure, parent) = retained_create_inputs(&base);
+    for position in 0..3 {
+        let mut candidate = create_candidate(&base, "new");
+        let NodeData::Directory { entries } = &mut candidate.nodes.get_mut(&1).unwrap().data else {
+            panic!()
+        };
+        let inserted = entries.pop().unwrap();
+        entries.insert(position, inserted);
+        let captured = CompactStructuralDelta::capture_file_create(
+            &structure,
+            &cached,
+            &parent,
+            parent.guard.identity,
+            &candidate,
+        )
+        .unwrap();
+        let reference =
+            CompactStructuralDelta::capture(&base, &candidate, StructuralScope::FileCreate)
+                .unwrap();
+        assert_eq!(captured.scope(), StructuralScope::FileCreate);
+        assert_eq!(captured.expected(), reference.expected());
+        assert_eq!(captured.parent_entries(), reference.parent_entries());
+        let guards = BTreeMap::from([(1, parent.guard.clone())]);
+        assert_eq!(
+            captured.validate_current(&base.anchor, &guards).unwrap(),
+            reference.validate_current(&base.anchor, &guards).unwrap()
+        );
+    }
+}
+
+#[test]
+fn retained_file_create_capture_preserves_untouched_selected_body_and_identity() {
+    let base = fixture();
+    let (_, structure, parent) = retained_create_inputs(&base);
+    let current = update(&base, 2, 917);
+    let cached = current.namespace().unwrap();
+    let candidate = create_candidate(&current, "new");
+    let captured = CompactStructuralDelta::capture_file_create(
+        &structure,
+        &cached,
+        &parent,
+        parent.guard.identity,
+        &candidate,
+    )
+    .unwrap();
+    assert_eq!(
+        captured.expected().keys().copied().collect::<Vec<_>>(),
+        vec![1]
+    );
+    let latest = update(&current, 3, 918);
+    let next = captured.evaluate(&latest).unwrap();
+    assert_eq!(next.guards[&2], latest.guards[&2]);
+    assert_eq!(next.guards[&3], latest.guards[&3]);
+    assert_eq!(next.anchor.members, vec![1, 2, 3, 4]);
+}
+
+#[test]
+fn retained_file_create_capture_rejects_candidate_changes_outside_parent_and_new_file() {
+    let base = fixture();
+    let (cached, structure, parent) = retained_create_inputs(&base);
+    for change in 0..7 {
+        let mut candidate = create_candidate(&base, "new");
+        match change {
+            0 => candidate.default_uid += 1,
+            1 => candidate.nodes.get_mut(&2).unwrap().stats.size = 10,
+            2 => candidate.nodes.get_mut(&1).unwrap().stats.uid += 1,
+            3 => {
+                let NodeData::Directory { entries } =
+                    &mut candidate.nodes.get_mut(&1).unwrap().data
+                else {
+                    panic!()
+                };
+                entries.swap(0, 1);
+            }
+            4 => candidate.next_inode += 1,
+            5 => {
+                let file = candidate.nodes.get_mut(&4).unwrap();
+                file.stats.mode = S_IFLNK | 0o777;
+                file.data = NodeData::Symlink { target: "a".into() };
+            }
+            _ => candidate.nodes.get_mut(&1).unwrap().stats.atime_ms += 1,
+        }
+        candidate.validate().unwrap();
+        code(
+            CompactStructuralDelta::capture_file_create(
+                &structure,
+                &cached,
+                &parent,
+                parent.guard.identity,
+                &candidate,
+            ),
+            ErrorCode::Einval,
+        );
+    }
+}
+
+#[test]
+fn retained_file_create_capture_requires_fresh_parent_generation_and_physical_identity() {
+    let base = fixture();
+    let (cached, structure, parent) = retained_create_inputs(&base);
+    let candidate = create_candidate(&base, "new");
+    for change in 0..3 {
+        let mut loaded = parent.clone();
+        let mut expected = parent.guard.identity;
+        match change {
+            0 => loaded.generation += 1,
+            1 => loaded.guard.identity.revision += 1,
+            _ => expected.revision += 1,
+        }
+        code(
+            CompactStructuralDelta::capture_file_create(
+                &structure, &cached, &loaded, expected, &candidate,
+            ),
+            ErrorCode::Eagain,
+        );
+    }
+}
+
+#[test]
+fn retained_file_create_capture_rejects_changed_parent_body_with_same_identity() {
+    let base = fixture();
+    let (cached, structure, parent) = retained_create_inputs(&base);
+    let candidate = create_candidate(&base, "new");
+    for change in 0..2 {
+        let mut current = base.clone();
+        let changed = current.guards.get_mut(&1).unwrap();
+        if change == 0 {
+            changed.node.stats.mode ^= 0o001;
+        } else {
+            let NodeData::Directory { entries } = &mut changed.node.data else {
+                panic!()
+            };
+            entries[0].name = "renamed".into();
+        }
+        current.namespace().unwrap();
+        let loaded =
+            LoadedCompactInode::from_guard(&current.anchor, 1, current.guards[&1].clone()).unwrap();
+        assert_eq!(loaded.guard.identity, parent.guard.identity);
+        code(
+            CompactStructuralDelta::capture_file_create(
+                &structure,
+                &cached,
+                &loaded,
+                parent.guard.identity,
+                &candidate,
+            ),
+            ErrorCode::Einval,
+        );
+    }
+}
+
+#[test]
+fn retained_file_create_capture_rejects_cached_anchor_drift() {
+    let base = fixture();
+    let (mut cached, structure, parent) = retained_create_inputs(&base);
+    cached.default_uid += 1;
+    let mut candidate = create_candidate(&base, "new");
+    candidate.default_uid = cached.default_uid;
+    candidate.validate().unwrap();
+    code(
+        CompactStructuralDelta::capture_file_create(
+            &structure,
+            &cached,
+            &parent,
+            parent.guard.identity,
+            &candidate,
+        ),
+        ErrorCode::Einval,
+    );
+}
+
+#[test]
+fn retained_file_create_capture_validates_complete_candidate_graph() {
+    let base = fixture();
+    let (mut cached, structure, parent) = retained_create_inputs(&base);
+    cached.nodes.get_mut(&2).unwrap().stats.nlink = 2;
+    let mut candidate = create_candidate(&base, "new");
+    candidate.nodes.get_mut(&2).unwrap().stats.nlink = 2;
+    assert_eq!(candidate.nodes[&2], cached.nodes[&2]);
+    code(
+        CompactStructuralDelta::capture_file_create(
+            &structure,
+            &cached,
+            &parent,
+            parent.guard.identity,
+            &candidate,
+        ),
+        ErrorCode::Einval,
+    );
+}
+
+#[test]
+fn retained_file_create_capture_checks_generation_and_allocation_overflow() {
+    let mut base = fixture();
+    base.anchor.generation = u64::MAX;
+    let (cached, structure, parent) = retained_create_inputs(&base);
+    code(
+        CompactStructuralDelta::capture_file_create(
+            &structure,
+            &cached,
+            &parent,
+            parent.guard.identity,
+            &create_candidate(&base, "new"),
+        ),
+        ErrorCode::Eoverflow,
+    );
+
+    base = fixture();
+    base.anchor.next_inode = u64::MAX;
+    let (cached, structure, parent) = retained_create_inputs(&base);
+    let mut candidate = cached.clone();
+    let mut file = candidate.nodes[&2].clone();
+    file.stats.ino = u64::MAX;
+    candidate.nodes.insert(u64::MAX, file);
+    let NodeData::Directory { entries } = &mut candidate.nodes.get_mut(&1).unwrap().data else {
+        panic!()
+    };
+    entries.push(DirectoryEntry {
+        name: "new".into(),
+        inode: u64::MAX,
+    });
+    code(
+        CompactStructuralDelta::capture_file_create(
+            &structure,
+            &cached,
+            &parent,
+            parent.guard.identity,
+            &candidate,
+        ),
+        ErrorCode::Eoverflow,
+    );
+}
+
+#[test]
 fn full_structure_handles_rename_hardlink_orphan_removal_and_defaults() {
     let mut current = fixture();
     for step in 0..4 {
@@ -547,6 +796,52 @@ fn missing_parent_entry_precondition_conflicts_even_when_identity_is_unchanged()
     code(
         delta.validate_current(&base.anchor, &BTreeMap::from([(1, parent)])),
         ErrorCode::Eagain,
+    );
+}
+
+#[test]
+fn targeted_transaction_rejects_changed_valid_parent_attributes_with_same_identity() {
+    let base = fixture();
+    let delta = CompactStructuralDelta::capture(
+        &base,
+        &create_candidate(&base, "new"),
+        StructuralScope::FileCreate,
+    )
+    .unwrap();
+    let mut current = base.clone();
+    current.guards.get_mut(&1).unwrap().node.stats.mode ^= 0o001;
+    current.namespace().unwrap();
+    let parent = current.guards.remove(&1).unwrap();
+    assert_eq!(parent.identity, delta.expected()[&1]);
+    let result = delta.validate_current(&base.anchor, &BTreeMap::from([(1, parent)]));
+    assert!(
+        result.is_err(),
+        "a valid parent attribute change with the same identity must not be overwritten: {result:?}"
+    );
+}
+
+#[test]
+fn targeted_transaction_rejects_changed_valid_parent_entries_with_same_identity() {
+    let base = fixture();
+    let delta = CompactStructuralDelta::capture(
+        &base,
+        &create_candidate(&base, "new"),
+        StructuralScope::FileCreate,
+    )
+    .unwrap();
+    let mut current = base.clone();
+    let NodeData::Directory { entries } = &mut current.guards.get_mut(&1).unwrap().node.data else {
+        panic!()
+    };
+    entries[0].name = "renamed".into();
+    assert!(entries.iter().all(|entry| entry.name != "new"));
+    current.namespace().unwrap();
+    let parent = current.guards.remove(&1).unwrap();
+    assert_eq!(parent.identity, delta.expected()[&1]);
+    let result = delta.validate_current(&base.anchor, &BTreeMap::from([(1, parent)]));
+    assert!(
+        result.is_err(),
+        "a valid parent entry change with the same identity must not be overwritten: {result:?}"
     );
 }
 

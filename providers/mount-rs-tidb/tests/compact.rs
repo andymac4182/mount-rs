@@ -485,6 +485,167 @@ async fn actual_compact_lost_commit_ack_is_unknown_and_not_replayed() {
 
 #[tokio::test]
 #[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL"]
+async fn actual_compact_file_create_lost_commit_ack_is_unknown_and_not_replayed() {
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    const BOUND: Duration = Duration::from_secs(10);
+    let f = fixture(true).await;
+    let before = f.store.load_compact_snapshot(f.backing).await.unwrap();
+    let mut ns = before.namespace().unwrap();
+    let new = add_file(&mut ns, "lost-create-ack");
+    ns.nodes.get_mut(&new).unwrap().stats.mtime_ms = 9;
+    let delta = CompactStructuralDelta::capture(&before, &ns, StructuralScope::FileCreate).unwrap();
+
+    // Assemble the committed state independently of the shared delta evaluator.
+    // A generation-only oracle would miss a partial parent/new-file mutation.
+    let mut anchor = before.anchor.clone();
+    anchor.generation += 1;
+    anchor.next_inode += 1;
+    anchor.members.push(new);
+    let expected = CompactSnapshot {
+        guards: std::collections::BTreeMap::from([
+            (
+                anchor.root,
+                CompactGuard {
+                    identity: PhysicalInodeIdentity {
+                        incarnation: before.guards[&anchor.root].identity.incarnation,
+                        epoch: anchor.generation,
+                        revision: 0,
+                    },
+                    node: ns.nodes[&anchor.root].clone(),
+                },
+            ),
+            (
+                new,
+                CompactGuard {
+                    identity: PhysicalInodeIdentity {
+                        incarnation: anchor.generation,
+                        epoch: anchor.generation,
+                        revision: 0,
+                    },
+                    node: ns.nodes[&new].clone(),
+                },
+            ),
+        ]),
+        anchor,
+    };
+    let proxy = compact_proxy::Proxy::new(&f.url).await;
+    let writer = TidbMetadataStore::connect_with_key(&proxy.url, &f.key)
+        .await
+        .unwrap();
+    proxy.begin();
+    // The existing relay discards only an actual successful server COMMIT OK.
+    proxy.trace.drop_commit_ack.store(true, Ordering::SeqCst);
+    let publication = timeout(BOUND, writer.publish_compact_structure(&delta)).await;
+    let (queries, rows) = proxy.end();
+    let commits = proxy.trace.commits.load(Ordering::SeqCst);
+    let dropped_acks = proxy.trace.dropped_acks.load(Ordering::SeqCst);
+
+    // Bypass the faulting connection for the full anchor/body/identity oracle.
+    let fresh = timeout(BOUND, TidbMetadataStore::connect_with_key(&f.url, &f.key)).await;
+    let loaded = match fresh.as_ref() {
+        Ok(Ok(store)) => Some(timeout(BOUND, store.load_compact_snapshot(f.backing)).await),
+        _ => None,
+    };
+    // Attempt all disconnects and drain the actual relay before assertions.
+    let writer_closed = timeout(BOUND, writer.close()).await;
+    let fresh_closed = match fresh.as_ref() {
+        Ok(Ok(store)) => Some(timeout(BOUND, store.close()).await),
+        _ => None,
+    };
+    let fixture_closed = timeout(BOUND, f.store.close()).await;
+    let proxy_closed = timeout(BOUND, proxy.shutdown()).await;
+
+    writer_closed.expect("writer disconnect completed").unwrap();
+    fixture_closed
+        .expect("fixture disconnect completed")
+        .unwrap();
+    proxy_closed.expect("proxy listener and relays settled");
+    fresh.expect("fresh store connect completed").unwrap();
+    fresh_closed
+        .expect("fresh store available for close")
+        .expect("fresh store disconnect completed")
+        .unwrap();
+
+    let error = publication
+        .expect("controlled file-create publication completed")
+        .unwrap_err();
+    assert!(error.is(ErrorCode::Eio));
+    assert!(!error.is(ErrorCode::Eagain));
+    assert!(
+        error
+            .to_string()
+            .contains("publish compact structure commit outcome is unknown")
+    );
+    assert_eq!(commits, 1);
+    assert_eq!(dropped_acks, 1);
+    assert_eq!(rows, 1);
+    // A replay can fail at its next read without another mutation or COMMIT.
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| sql.starts_with("START TRANSACTION"))
+            .count(),
+        1
+    );
+    let joined = |sql: &String| {
+        sql.starts_with("SELECT m.revision,m.write_mode,m.backing_id,m.owner,")
+            && sql.contains(" LEFT JOIN mount_rs_tidb_compact_guards AS g ")
+    };
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| {
+                joined(sql)
+                    || sql.starts_with("SELECT revision,write_mode,backing_id,owner,fence,expires,namespace,delegation")
+            })
+            .count(),
+        1,
+        "one anchor-bearing read must precede the one publication"
+    );
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| {
+                joined(sql)
+                    || sql.starts_with("SELECT inode,incarnation,epoch,revision,node FROM mount_rs_tidb_compact_guards")
+            })
+            .count(),
+        1,
+        "one parent-bearing read must precede the one publication"
+    );
+    for (prefix, count) in [
+        ("INSERT INTO mount_rs_tidb_compact_guards", 1),
+        ("UPDATE mount_rs_tidb_compact_guards", 1),
+        ("DELETE FROM mount_rs_tidb_compact_guards", 0),
+        ("UPDATE mount_rs_tidb_metadata", 1),
+    ] {
+        assert_eq!(
+            queries.iter().filter(|sql| sql.starts_with(prefix)).count(),
+            count,
+            "{prefix}"
+        );
+    }
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| sql.eq_ignore_ascii_case("COMMIT"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        loaded
+            .expect("fresh store available for full snapshot")
+            .expect("fresh full snapshot completed")
+            .unwrap(),
+        expected,
+        "lost acknowledgment must leave exactly one complete file create committed"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL"]
 async fn actual_compact_targeted_counts_and_128_fresh_full_byte_oracles() {
     use mount_rs_core::storage::{BlockExtent, BlockStore};
     use mount_rs_tidb::TidbBlockStore;
