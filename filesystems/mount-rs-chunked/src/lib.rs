@@ -15,6 +15,8 @@ mod create_rebase;
 mod migration;
 #[cfg(test)]
 mod runtime_health_tests;
+#[cfg(all(test, unix))]
+mod selected_preparation_allocation_tests;
 pub use migration::{migrate_mrc1_backing, migrate_trusted_unstamped_mrc1_backing};
 
 use causal_metrics::{
@@ -3161,10 +3163,18 @@ where
             )
             .await?;
             self.flush_mutation_blocks().await?;
-            let mut node = (*original).clone();
-            node.data = NodeData::File(layout);
+            #[cfg(all(test, unix))]
+            let preparation_allocations = selected_preparation_allocation_tests::begin(
+                selected_preparation_allocation_tests::PreparationPath::HandleWrite,
+            );
+            let mut node = NodeMetadata {
+                stats: original.stats.clone(),
+                data: NodeData::File(layout),
+            };
             set_file_size(&mut node.stats, size);
             touch_modified(&mut node.stats, true)?;
+            #[cfg(all(test, unix))]
+            drop(preparation_allocations);
             let _gate = self.operation_gate(GateKind::WriteCommit).await;
             if self.inner.options.compact_inode_updates {
                 match self
@@ -3499,10 +3509,18 @@ where
                 .await?
             };
             self.inner.blocks.flush().await?;
-            let mut node = (*original).clone();
-            node.data = NodeData::File(layout);
+            #[cfg(all(test, unix))]
+            let preparation_allocations = selected_preparation_allocation_tests::begin(
+                selected_preparation_allocation_tests::PreparationPath::WholeFileReplace,
+            );
+            let mut node = NodeMetadata {
+                stats: original.stats.clone(),
+                data: NodeData::File(layout),
+            };
             set_file_size(&mut node.stats, size);
             touch_modified(&mut node.stats, true)?;
+            #[cfg(all(test, unix))]
+            drop(preparation_allocations);
             let _gate = self.operation_gate(GateKind::WriteCommit).await;
             match self
                 .publish_selected_node(inode, expected, node, _gate.phase_permit())
