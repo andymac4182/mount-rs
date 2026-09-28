@@ -141,6 +141,29 @@ fn config() -> RustFsConfig {
         region: "us-east-1".into(),
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "platform client construction profile"]
+async fn native_http_client_build_profile() {
+    let configuration = config();
+    for sample_index in 0..3 {
+        let started = std::time::Instant::now();
+        let client = configuration
+            .build_client_with_probe_limits(true)
+            .expect("native probe client construction must succeed");
+        let elapsed_ns = u64::try_from(started.elapsed().as_nanos())
+            .expect("native client construction duration must fit u64 nanoseconds");
+        std::hint::black_box(&client);
+        drop(client);
+        println!(
+            "native_http_client_build_profile {{\"schema\":\"mount-rs.rustfs-native-http-client-build-profile.v1\",\"pid\":{},\"sample_index\":{},\"elapsed_ns\":{},\"probe\":true,\"actual_native_reqwest\":true,\"requests_performed\":0}}",
+            std::process::id(),
+            sample_index,
+            elapsed_ns,
+        );
+    }
+}
+
 fn poll_once<F: Future + ?Sized>(future: Pin<&mut F>) -> Poll<F::Output> {
     future.poll(&mut Context::from_waker(Waker::noop()))
 }
