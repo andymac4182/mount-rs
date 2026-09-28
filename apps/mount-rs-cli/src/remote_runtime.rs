@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use mount_rs_core::Result;
-use mount_rs_core::construction::ConstructionObserver;
+use mount_rs_core::construction::{ConstructionObserver, ConstructionResource};
 use mount_rs_sdk::StorageContext;
 use mount_rs_service::filesystem_runtime::{ConstructedRuntime, RuntimeConstructor};
 
@@ -45,6 +45,13 @@ use mount_rs_service::runtime_pool::RuntimePool;
 use tokio::sync::watch;
 
 use crate::server_cache::ServerCache;
+
+#[async_trait]
+impl ConstructionResource for ServerCache {
+    async fn close(&self) -> Result<()> {
+        self.shutdown().await
+    }
+}
 
 type CloseFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 
@@ -106,7 +113,7 @@ struct OwnedResources {
     pool: Option<RuntimePool>,
     factories: Vec<Arc<SdkRuntimeFactory>>,
     context: Option<StorageContext>,
-    cache: Option<Arc<ServerCache>>,
+    cache: Option<Arc<dyn ConstructionResource>>,
     phase: ClosePhase,
     current: Option<CloseFuture>,
     next_factory: usize,
@@ -288,10 +295,7 @@ impl RemoteRuntimeLifecycle {
                     }
                     if let Some(cache) = owned.cache.clone() {
                         // Store the borrowed shutdown's actual join future too.
-                        owned.current = Some(Box::pin(async move {
-                            cache.shutdown().await;
-                            Ok(())
-                        }));
+                        owned.current = Some(Box::pin(async move { cache.close().await }));
                     } else {
                         owned.phase = ClosePhase::Complete;
                     }

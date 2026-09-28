@@ -439,10 +439,22 @@ impl ServerCache {
             metrics: self.metrics.clone(),
         })
     }
-    pub(crate) async fn shutdown(&self) {
-        self.runtime.shutdown().await;
-        self.peers.shutdown().await;
-        self.local.shutdown().await;
+    pub(crate) async fn shutdown(&self) -> Result<()> {
+        // Every drain is attempted in dependency order, even after an error.
+        // Preserve the first failure; metrics only describe a proven drain.
+        let mut failure = None;
+        for result in [
+            self.runtime.shutdown().await,
+            self.peers.shutdown().await,
+            self.local.shutdown().await,
+        ] {
+            if let Err(error) = result {
+                failure.get_or_insert(error);
+            }
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
         if let Ok(metrics) = self.metrics.lock() {
             for ((partition, drive), metrics) in metrics.iter() {
                 let stats = metrics.snapshot();
@@ -452,6 +464,7 @@ impl ServerCache {
                 );
             }
         }
+        Ok(())
     }
 }
 
@@ -611,7 +624,7 @@ mod tests {
         second.shutdown().await.unwrap();
         drop(view);
         drop(second);
-        runtime.shutdown().await;
+        runtime.shutdown().await.unwrap();
         assert!(
             Arc::ptr_eq(&first_metrics, &second_metrics),
             "reopening a Drive replaced its server-generation metric bank"

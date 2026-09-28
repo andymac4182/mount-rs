@@ -43,6 +43,20 @@ async fn sqlite_backed_authenticated_cache_failures_preserve_exact_backing_savin
     sqlite_cache::run().await;
 }
 
+// A phase barrier for a quiescent fixture, not a terminal cleanup ACK.
+// Holding every existing slot observes completion of admitted disk bodies.
+async fn wait_for_cache_io(cache: &Arc<LocalCache>) {
+    timeout(CLEANUP_BOUND, async {
+        let mut permits = Vec::with_capacity(8);
+        for _ in 0..8 {
+            permits.push(cache.io_permit().await.unwrap());
+        }
+        drop(permits);
+    })
+    .await
+    .expect("bounded nonterminal fixture IO observation");
+}
+
 fn io_error() -> FsError {
     FsError::new(ErrorCode::Eio)
 }
@@ -557,9 +571,9 @@ impl Pair {
         store
     }
     async fn stop_a(&mut self) {
-        self.a.take().unwrap().shutdown().await;
+        self.a.take().unwrap().shutdown().await.unwrap();
         let local = self.a_cache.take().unwrap();
-        local.shutdown().await;
+        local.shutdown().await.unwrap();
         drop(local);
     }
     fn restart_a(&mut self) {
@@ -595,15 +609,15 @@ impl Pair {
         if self.a.is_some() {
             self.stop_a().await;
         }
-        self.b.shutdown().await;
-        self.b_cache.shutdown().await;
+        self.b.shutdown().await.unwrap();
+        self.b_cache.shutdown().await.unwrap();
         self.cleaned = true;
     }
 }
 type PairCleanupResult = std::result::Result<(), String>;
 async fn wait_for_cache_owners(cache_lifetimes: Vec<Weak<LocalCache>>) -> PairCleanupResult {
-    // LocalCache::shutdown discards its timeout result. Zero remaining Arc owners
-    // proves its non-cancellable blocking closures and other cache users are gone.
+    // Successful shutdown now positively joins the admitted disk workers.
+    // Zero Arc owners independently observes release of every fixture cache user.
     while cache_lifetimes
         .iter()
         .any(|cache| cache.strong_count() != 0)
@@ -663,15 +677,30 @@ impl Drop for Pair {
         let caches = std::mem::take(&mut self.cache_lifetimes);
         let complete = self.cleanup_complete.take();
         let work = async move {
+            let mut failure = None;
             if !cleaned {
-                if let Some(a) = &a {
-                    a.shutdown().await;
+                if let Some(a) = &a
+                    && let Err(error) = a.shutdown().await
+                {
+                    failure.get_or_insert(error);
                 }
-                b.shutdown().await;
-                if let Some(ac) = &ac {
-                    ac.shutdown().await;
+                if let Err(error) = b.shutdown().await {
+                    failure.get_or_insert(error);
                 }
-                bc.shutdown().await;
+                if let Some(ac) = &ac
+                    && let Err(error) = ac.shutdown().await
+                {
+                    failure.get_or_insert(error);
+                }
+                if let Err(error) = bc.shutdown().await {
+                    failure.get_or_insert(error);
+                }
+            }
+            if failure.is_some() {
+                // A failed fixture cleanup cannot release resource keepers or
+                // remove the directory as if it had an acknowledgment.
+                std::mem::forget((a, ac, b, bc));
+                return Err("peer/cache shutdown was not acknowledged".to_owned());
             }
             drop(a);
             drop(ac);
@@ -1186,6 +1215,7 @@ async fn redis_directory_real_peer_failures_preserve_exact_backing() {
         assert!(
             local
                 .get(&scope(), &stale_id, IntegrityPolicy::Sha256Prefixed)
+                .unwrap()
                 .is_none()
         );
         assert_eq!(pair.b_cache.usage().2, 0, "all requester blocks start cold");
@@ -1234,6 +1264,7 @@ async fn redis_directory_real_peer_failures_preserve_exact_backing() {
                 .as_ref()
                 .unwrap()
                 .get(&scope(), &peer_down_id, IntegrityPolicy::Sha256Prefixed)
+                .unwrap()
                 .unwrap(),
             peer_down
         );
@@ -1297,6 +1328,7 @@ async fn redis_directory_real_peer_failures_preserve_exact_backing() {
                     &directory_down_id,
                     IntegrityPolicy::Sha256Prefixed
                 )
+                .unwrap()
                 .unwrap(),
             directory_down,
             "restarted peer independently verifies full persisted binary bytes"
@@ -1366,7 +1398,7 @@ async fn redis_directory_real_peer_failures_preserve_exact_backing() {
             backing.bytes.load(Ordering::SeqCst)
         );
         drop(store);
-        runtime.shutdown().await;
+        runtime.shutdown().await.unwrap();
         drop(runtime);
         drop(discovery);
         pair.shutdown().await;
@@ -1448,8 +1480,8 @@ async fn authenticated_hierarchy_saves_reads_and_reconnects_to_persisted_peer() 
         assert_eq!(backing.reads(), 1);
         assert_eq!(store.metrics().snapshot().local_hits, 20);
         // The requester starts cold for the peer phase.
-        pair.b_cache.shutdown().await;
-        pair.b_cache.invalidate(&scope(), &id);
+        wait_for_cache_io(&pair.b_cache).await;
+        pair.b_cache.invalidate(&scope(), &id).unwrap();
         assert_eq!(
             pair.b_cache.usage().2,
             0,
@@ -1463,8 +1495,8 @@ async fn authenticated_hierarchy_saves_reads_and_reconnects_to_persisted_peer() 
         assert_eq!(store.get(&id).await.unwrap(), bytes);
         assert_eq!(store.metrics().snapshot().peer_hits, 1);
         assert_eq!(backing.reads(), 1);
-        pair.b_cache.shutdown().await;
-        pair.b_cache.invalidate(&scope(), &id);
+        wait_for_cache_io(&pair.b_cache).await;
+        pair.b_cache.invalidate(&scope(), &id).unwrap();
         assert_eq!(
             pair.b_cache.usage().2,
             0,
@@ -1512,8 +1544,8 @@ async fn authenticated_hierarchy_saves_reads_and_reconnects_to_persisted_peer() 
         assert_eq!(store.metrics().snapshot().peer_hits - peers, 1);
         assert_eq!(backing.reads(), 1);
         pair.stop_a().await;
-        pair.b_cache.shutdown().await;
-        pair.b_cache.invalidate(&scope(), &id);
+        wait_for_cache_io(&pair.b_cache).await;
+        pair.b_cache.invalidate(&scope(), &id).unwrap();
         assert_eq!(
             pair.b_cache.usage().2,
             0,
@@ -1539,12 +1571,12 @@ async fn authenticated_hierarchy_saves_reads_and_reconnects_to_persisted_peer() 
             pair.a_cache
                 .as_ref()
                 .unwrap()
-                .get(&scope(), &id, IntegrityPolicy::Sha256Prefixed)
+                .get(&scope(), &id, IntegrityPolicy::Sha256Prefixed).unwrap()
                 .unwrap(),
             bytes
         );
-        pair.b_cache.shutdown().await;
-        pair.b_cache.invalidate(&scope(), &id);
+        wait_for_cache_io(&pair.b_cache).await;
+        pair.b_cache.invalidate(&scope(), &id).unwrap();
         assert_eq!(
             pair.b_cache.usage().2,
             0,
@@ -1565,13 +1597,13 @@ async fn authenticated_hierarchy_saves_reads_and_reconnects_to_persisted_peer() 
         assert_eq!(disk_store.metrics().snapshot().local_hits,1);
         assert_eq!(pair.counted.gets.load(Ordering::SeqCst),attempts);
         assert_eq!(backing.reads(),2);
-        drop(disk_store);disk_cache.shutdown().await;drop(disk_cache);
+        drop(disk_store);disk_cache.shutdown().await.unwrap();drop(disk_cache);
         println!(
             "hierarchy: 125 logical reads, 2 backing GETs / {} bytes; 3 peer fills; 1 disk-only local hit",
             backing.bytes.load(Ordering::SeqCst)
         );
         drop(store);
-        runtime.shutdown().await;
+        runtime.shutdown().await.unwrap();
         drop(runtime);
         pair.shutdown().await;
     })
@@ -1640,7 +1672,7 @@ async fn stopped_peer_udp_rebind_waits_for_real_driver_release() {
                 .unwrap();
                 let address = peer.local_addr().unwrap();
                 let weak = Arc::downgrade(&peer);
-                peer.shutdown().await;
+                peer.shutdown().await.unwrap();
                 drop(peer);
                 assert!(weak.upgrade().is_none());
                 address
@@ -1674,7 +1706,7 @@ async fn stopped_peer_udp_rebind_waits_for_real_driver_release() {
         let held = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let held_result = bind_stopped_fixture_udp(held.local_addr().unwrap()).await;
         drop(held);
-        local.shutdown().await;
+        local.shutdown().await.unwrap();
         drop(local);
         assert!(weak_cache.upgrade().is_none());
         std::fs::remove_dir_all(dir).unwrap();
@@ -1790,7 +1822,7 @@ async fn peer_read_reconnect_bypasses_pending_replica_handshake() {
         assert!(local.path_for(&scope(), &id).exists());
         assert_eq!(
             local
-                .get(&scope(), &id, IntegrityPolicy::Sha256Prefixed)
+                .get(&scope(), &id, IntegrityPolicy::Sha256Prefixed).unwrap()
                 .unwrap(),
             bytes
         );
@@ -1895,7 +1927,7 @@ async fn peer_read_reconnect_bypasses_pending_replica_handshake() {
         let total_peer_gets = counted.gets.load(Ordering::SeqCst);
         drop(store);
         println!("peer_read_reconnect_progress=before_runtime_shutdown");
-        runtime.shutdown().await;
+        runtime.shutdown().await.unwrap();
         println!("peer_read_reconnect_progress=after_runtime_shutdown");
         drop(runtime);
         drop(counted);
@@ -1907,12 +1939,12 @@ async fn peer_read_reconnect_bypasses_pending_replica_handshake() {
                 println!("peer_read_reconnect_progress=after_server_shutdown");
             },
             async {
-                requester.shutdown().await;
+                requester.shutdown().await.unwrap();
                 println!("peer_read_reconnect_progress=after_requester_shutdown");
             }
         );
         drop(requester);
-        pair.b_cache.shutdown().await;
+        pair.b_cache.shutdown().await.unwrap();
         pair.cleaned = true;
         println!("peer_read_reconnect_progress=after_pair_shutdown");
         drop(pair);
@@ -2137,7 +2169,7 @@ async fn cache_lookup_stage_metrics_preserve_bytes_and_cancellation() {
         );
         checks.hit("empty RAM hit", &hits, RAM_HIT, 1, 0);
         drop(store);
-        rt.shutdown().await;
+        rt.shutdown().await.unwrap();
         drop(rt);
 
         for (phase, permits, same_key) in [
@@ -2220,7 +2252,7 @@ async fn cache_lookup_stage_metrics_preserve_bytes_and_cancellation() {
                 ],
             );
             drop(store);
-            rt.shutdown().await;
+            rt.shutdown().await.unwrap();
             drop(rt);
         }
 
@@ -2329,9 +2361,9 @@ async fn cache_lookup_stage_metrics_preserve_bytes_and_cancellation() {
         checks.hit("disk deadline peer fallback", &hits, RAM_HIT, 0, 0);
         let attempts = pair.counted.gets.load(Ordering::SeqCst);
         drop(store);
-        rt.shutdown().await;
+        rt.shutdown().await.unwrap();
         drop(rt);
-        disk.shutdown().await;
+        disk.shutdown().await.unwrap();
         drop(disk);
 
         let path = pair.dir.as_ref().unwrap().path().join("metrics-empty-disk");
@@ -2339,7 +2371,7 @@ async fn cache_lookup_stage_metrics_preserve_bytes_and_cancellation() {
         pair.track_cache(&seed);
         seed.insert(&scope(), &empty, b"", IntegrityPolicy::Sha256Prefixed)
             .unwrap();
-        seed.shutdown().await;
+        seed.shutdown().await.unwrap();
         drop(seed);
         let disk = cache(&path, 0, 32768);
         pair.track_cache(&disk);
@@ -2370,7 +2402,7 @@ async fn cache_lookup_stage_metrics_preserve_bytes_and_cancellation() {
         checks.hit("empty disk hit", &hits, DISK_HIT, 1, 0);
         checks.hit("empty disk hit", &hits, RAM_HIT, 0, 0);
         drop(store);
-        disk.shutdown().await;
+        disk.shutdown().await.unwrap();
         drop(disk);
         pair.shutdown().await;
         drop(pair);
@@ -2422,8 +2454,8 @@ async fn corrupt_disk_capacity_eviction_and_stale_hint_fall_back_to_exact_backin
             assert!(usage.2 <= 128);
         }
         assert!(!path.exists(), "old entry must actually be evicted");
-        pair.b_cache.shutdown().await;
-        pair.b_cache.invalidate(&scope(), &id);
+        wait_for_cache_io(&pair.b_cache).await;
+        pair.b_cache.invalidate(&scope(), &id).unwrap();
         assert_eq!(
             pair.b_cache.usage().2,
             0,
@@ -2440,7 +2472,7 @@ async fn corrupt_disk_capacity_eviction_and_stale_hint_fall_back_to_exact_backin
         assert_eq!(backing.reads(), 3);
         assert_eq!(pair.counted.gets.load(Ordering::SeqCst), attempts + 1);
         drop(store);
-        runtime.shutdown().await;
+        runtime.shutdown().await.unwrap();
         drop(runtime);
         pair.shutdown().await;
     })
@@ -2576,7 +2608,7 @@ async fn real_peer_placement_waits_for_successful_backing_flush() {
                 assert_eq!(backing.committed.lock().unwrap().get(&id).unwrap(), bytes);
             }
             drop(store);
-            runtime.shutdown().await;
+            runtime.shutdown().await.unwrap();
             drop(runtime);
             pair.shutdown().await;
         }
@@ -2649,7 +2681,7 @@ async fn sqlite_sdk_acknowledgment_survives_fresh_undecorated_reopen() {
         drop(view);
         drop(first);
         drop(decorator);
-        runtime.shutdown().await;
+        runtime.shutdown().await.unwrap();
         drop(runtime);
         pair.shutdown().await;
         drop(pair);

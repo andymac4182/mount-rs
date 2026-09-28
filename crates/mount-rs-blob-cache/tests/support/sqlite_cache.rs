@@ -364,7 +364,7 @@ fn observed_connection(sample: &Value) -> std::result::Result<&Value, &'static s
 
 // Eight permits are the existing LocalCache worker bank. Hold all of them to
 // observe actual drain and to prevent late fills from racing invalidation.
-async fn cache_barrier(cache: &Arc<LocalCache>) -> Vec<tokio::sync::OwnedSemaphorePermit> {
+async fn cache_barrier(cache: &Arc<LocalCache>) -> Vec<mount_rs_blob_cache::CacheIoPermit> {
     timeout(CLEANUP_BOUND, async {
         let mut permits = Vec::new();
         for _ in 0..8 {
@@ -376,8 +376,10 @@ async fn cache_barrier(cache: &Arc<LocalCache>) -> Vec<tokio::sync::OwnedSemapho
     .expect("observed complete cache-worker permit bank")
 }
 async fn cold(cache: &Arc<LocalCache>, scope: &CacheScope, id: &BlockId) {
-    let permits = cache_barrier(cache).await;
-    cache.invalidate(scope, id);
+    let mut permits = cache_barrier(cache).await;
+    cache
+        .invalidate_with_permit(&mut permits[0], scope, id)
+        .unwrap();
     assert!(
         cache
             .get_memory(scope, id, IntegrityPolicy::Opaque)
@@ -961,7 +963,7 @@ pub(super) async fn run() {
         retire(eviction_store, eviction).await;
 
         drop(store);
-        runtime.shutdown().await;
+        runtime.shutdown().await.unwrap();
         drop(runtime);
         scoped.pair.shutdown().await;
         drop(scoped);

@@ -5,8 +5,12 @@ use mount_rs_core::diagnostics::storage::{Operation, Span};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    future::{Future, poll_fn},
     net::SocketAddr,
+    pin::Pin,
     sync::Arc,
+    sync::atomic::{AtomicU8, AtomicU64, Ordering},
+    task::{Context, Poll, Waker},
     time::Duration,
 };
 use tokio::{
@@ -14,6 +18,11 @@ use tokio::{
     time::timeout,
 };
 const MAX_HEADER_BYTES: usize = 25 + 4 * 1024;
+// Cleanup is separate from the unchanged RPC/stream deadline. Quinn closes a
+// connection after 3*PTO; its bootstrap RTT/variance give a ~2.997s close phase.
+// Allow that protocol phase plus 1s for task wakeups. A slower/lost drain still
+// fails with its owners retained; this is not a guarantee for arbitrary RTTs.
+const PEER_DRAIN_ALLOWANCE: Duration = Duration::from_secs(4);
 fn peer_transfer_charge(max: usize) -> Result<u32> {
     max.checked_add(MAX_HEADER_BYTES)
         .and_then(|n| n.checked_mul(2))
@@ -75,7 +84,87 @@ struct PeerConnections {
     reads: Mutex<Option<quinn::Connection>>,
     placements: Mutex<Option<quinn::Connection>>,
 }
-pub struct QuicPeerTransport {
+#[cfg(all(test, unix))]
+struct TestSessionExitGate {
+    entered: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+#[derive(Default)]
+struct PeerRequestState {
+    stopped: bool,
+    active: usize,
+    failure: Option<FsError>,
+    waker: Option<Waker>,
+}
+#[derive(Default)]
+struct PeerRequests(std::sync::Mutex<PeerRequestState>);
+impl PeerRequests {
+    fn lock(&self) -> std::sync::MutexGuard<'_, PeerRequestState> {
+        match self.0.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                let mut state = poisoned.into_inner();
+                state.stopped = true;
+                state.failure.get_or_insert_with(error);
+                state
+            }
+        }
+    }
+    fn enter(self: &Arc<Self>, permits: &Arc<Semaphore>) -> Result<PeerRequest> {
+        let mut state = self.lock();
+        if let Some(error) = &state.failure {
+            return Err(error.clone());
+        }
+        if state.stopped {
+            return Err(error());
+        }
+        let permit = permits.clone().try_acquire_owned().map_err(|_| error())?;
+        state.active = state.active.checked_add(1).ok_or_else(error)?;
+        Ok(PeerRequest {
+            requests: self.clone(),
+            permit: Some(permit),
+        })
+    }
+    fn seal(&self) {
+        self.lock().stopped = true;
+    }
+    fn poll_closed(&self, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        let mut state = self.lock();
+        if let Some(error) = &state.failure {
+            return Poll::Ready(Err(error.clone()));
+        }
+        if state.active == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        state.waker = Some(cx.waker().clone());
+        Poll::Pending
+    }
+}
+struct PeerRequest {
+    requests: Arc<PeerRequests>,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+impl Drop for PeerRequest {
+    fn drop(&mut self) {
+        drop(self.permit.take());
+        let waker = {
+            let mut state = self.requests.lock();
+            match state.active.checked_sub(1) {
+                Some(active) => state.active = active,
+                None => {
+                    state.stopped = true;
+                    state.failure.get_or_insert_with(error);
+                }
+            }
+            state.waker.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+}
+// Sessions own resource data, never the lifecycle that owns their joins.
+struct PeerCore {
     endpoint: quinn::Endpoint,
     config: QuicPeerConfig,
     cache: Arc<LocalCache>,
@@ -87,6 +176,174 @@ pub struct QuicPeerTransport {
     request_bytes: Arc<Semaphore>,
     transfer_charge: u32,
     stop: tokio::sync::watch::Sender<bool>,
+    requests: Arc<PeerRequests>,
+    #[cfg(all(test, unix))]
+    test_session_exit_gate: std::sync::Mutex<Option<TestSessionExitGate>>,
+}
+type PeerCloseFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+#[derive(Default)]
+struct PeerCloseState {
+    started: bool,
+    finished: bool,
+    failure: Option<FsError>,
+    current: Option<PeerCloseFuture>,
+    // A completed error future may already have dropped its captures.
+    resources: Option<Arc<PeerCore>>,
+    // Unproven cleanup deliberately retains its actual resources and joins.
+    retained: Option<Arc<PeerClose>>,
+    #[cfg(all(test, unix))]
+    worker: Option<tokio::task::AbortHandle>,
+}
+struct PeerClose {
+    core: std::sync::Weak<PeerCore>,
+    deadline: Duration,
+    supervisor: Arc<crate::owned::OwnedTask>,
+    state: std::sync::Mutex<PeerCloseState>,
+    completed: tokio::sync::watch::Sender<Option<Result<()>>>,
+    phase: AtomicU8,
+    supervisor_join_micros: AtomicU64,
+    requests_drained_micros: AtomicU64,
+}
+impl PeerClose {
+    fn lock(&self) -> std::sync::MutexGuard<'_, PeerCloseState> {
+        match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                let mut state = poisoned.into_inner();
+                state.failure.get_or_insert_with(error);
+                state
+            }
+        }
+    }
+    fn start(self: &Arc<Self>) {
+        let mut state = self.lock();
+        if state.started {
+            return;
+        }
+        state.started = true;
+        state.retained = Some(self.clone());
+        let Some(core) = self.core.upgrade() else {
+            drop(state);
+            self.finish(Err(error()));
+            return;
+        };
+        core.seal();
+        state.resources = Some(core.clone());
+        let supervisor = self.supervisor.clone();
+        let progress = self.clone();
+        let started = std::time::Instant::now();
+        self.phase.store(1, Ordering::Release);
+        state.current = Some(Box::pin(async move {
+            supervisor.join().await?;
+            progress.supervisor_join_micros.store(
+                started.elapsed().as_micros().min(u64::MAX as u128) as u64,
+                Ordering::Release,
+            );
+            progress.phase.store(2, Ordering::Release);
+            poll_fn(|cx| core.requests.poll_closed(cx)).await?;
+            progress.requests_drained_micros.store(
+                started.elapsed().as_micros().min(u64::MAX as u128) as u64,
+                Ordering::Release,
+            );
+            progress.phase.store(3, Ordering::Release);
+            core.endpoint.wait_idle().await;
+            progress.phase.store(4, Ordering::Release);
+            Ok(())
+        }));
+        drop(state);
+        let runtime = match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => runtime,
+            Err(_) => {
+                self.finish(Err(error()));
+                return;
+            }
+        };
+        let guard = PeerCloseGuard {
+            close: self.clone(),
+            acknowledged: false,
+        };
+        let _worker = runtime.spawn(guard.run());
+        #[cfg(all(test, unix))]
+        {
+            self.lock().worker = Some(_worker.abort_handle());
+        }
+    }
+    fn poll_close(&self, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        let mut state = self.lock();
+        if let Some(error) = &state.failure {
+            return Poll::Ready(Err(error.clone()));
+        }
+        match state.current.as_mut() {
+            Some(current) => current.as_mut().poll(cx),
+            None => Poll::Ready(Err(error())),
+        }
+    }
+    fn finish(&self, result: Result<()>) {
+        let result = {
+            let mut state = self.lock();
+            if state.finished {
+                return;
+            }
+            state.finished = true;
+            let result = state.failure.clone().map_or(result, Err);
+            if result.is_ok() {
+                state.current = None;
+                state.resources = None;
+                state.retained = None;
+            }
+            result
+        };
+        self.completed.send_replace(Some(result));
+    }
+    async fn join(self: &Arc<Self>) -> Result<()> {
+        let mut completed = self.completed.subscribe();
+        self.start();
+        loop {
+            if let Some(result) = completed.borrow().clone() {
+                return result;
+            }
+            completed.changed().await.map_err(|_| error())?;
+        }
+    }
+    fn timeout_error(&self) -> FsError {
+        let phase = self.phase.load(Ordering::Acquire);
+        let stage = match phase {
+            1 => "supervisor",
+            2 => "requests",
+            3 => "endpoint_idle",
+            4 => "complete",
+            _ => "not_started",
+        };
+        let core = self.core.upgrade();
+        let requests = core.as_ref().map(|core| core.requests.lock().active);
+        let connections = core.as_ref().map(|core| core.endpoint.open_connections());
+        FsError::new(ErrorCode::Ebusy).with_syscall("cache peer drain timeout")
+            .with_message(format!("stage={stage} supervisor_joined={} request_owners={requests:?} endpoint_connections={connections:?} supervisor_join_us={} requests_drained_us={}", phase >= 2, self.supervisor_join_micros.load(Ordering::Acquire), self.requests_drained_micros.load(Ordering::Acquire)))
+    }
+}
+struct PeerCloseGuard {
+    close: Arc<PeerClose>,
+    acknowledged: bool,
+}
+impl PeerCloseGuard {
+    async fn run(mut self) {
+        let result = timeout(self.close.deadline, poll_fn(|cx| self.close.poll_close(cx)))
+            .await
+            .unwrap_or_else(|_| Err(self.close.timeout_error()));
+        self.close.finish(result);
+        self.acknowledged = true;
+    }
+}
+impl Drop for PeerCloseGuard {
+    fn drop(&mut self) {
+        if !self.acknowledged {
+            self.close.finish(Err(error()));
+        }
+    }
+}
+pub struct QuicPeerTransport {
+    core: Arc<PeerCore>,
+    close: Arc<PeerClose>,
 }
 impl QuicPeerTransport {
     pub fn bind(config: QuicPeerConfig, cache: Arc<LocalCache>) -> Result<Arc<Self>> {
@@ -169,7 +426,7 @@ impl QuicPeerTransport {
             .keys()
             .map(|peer| (peer.clone(), Arc::new(PeerConnections::default())))
             .collect();
-        let result = Arc::new(Self {
+        let core = Arc::new(PeerCore {
             endpoint,
             permits: Arc::new(Semaphore::new(config.max_inflight)),
             inbound: Arc::new(Semaphore::new(config.max_inflight)),
@@ -181,24 +438,101 @@ impl QuicPeerTransport {
             cache,
             connections,
             stop,
+            requests: Arc::new(PeerRequests::default()),
+            #[cfg(all(test, unix))]
+            test_session_exit_gate: std::sync::Mutex::new(None),
         });
-        let weak = Arc::downgrade(&result);
-        let endpoint = result.endpoint.clone();
-        let mut stopping = result.stop.subscribe();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {incoming=endpoint.accept()=>{let Some(incoming)=incoming else{break};let Some(service)=weak.upgrade()else{break};let Ok(permit)=service.inbound.clone().try_acquire_owned()else{incoming.refuse();continue};tokio::spawn(async move{let _permit=permit;let _=service.accept(incoming).await;});},_=stopping.changed()=>break}
-            }
+        let supervisor_core = core.clone();
+        let supervisor =
+            crate::owned::OwnedTask::new(tokio::spawn(
+                async move { supervisor_core.supervise().await },
+            ));
+        let (completed, _) = tokio::sync::watch::channel(None);
+        let close = Arc::new(PeerClose {
+            core: Arc::downgrade(&core),
+            deadline: core.config.deadline + PEER_DRAIN_ALLOWANCE,
+            supervisor,
+            state: std::sync::Mutex::new(PeerCloseState::default()),
+            completed,
+            phase: AtomicU8::new(0),
+            supervisor_join_micros: AtomicU64::new(0),
+            requests_drained_micros: AtomicU64::new(0),
         });
-        Ok(result)
+        Ok(Arc::new(Self { core, close }))
     }
     pub fn local_addr(&self) -> Result<SocketAddr> {
-        self.endpoint.local_addr().map_err(|_| error())
+        self.core.endpoint.local_addr().map_err(|_| error())
     }
-    pub async fn shutdown(&self) {
-        let _ = self.stop.send(true);
+    /// Join one bounded, independently owned drain of actual peer tasks.
+    /// Cancellation only abandons this waiter. Unproven cleanup remains retained.
+    pub async fn shutdown(&self) -> Result<()> {
+        self.close.join().await
+    }
+    async fn request(
+        &self,
+        peer: &PeerId,
+        scope: &CacheScope,
+        id: &BlockId,
+        bytes: Option<PeerPayload<'_>>,
+    ) -> Result<Option<Bytes>> {
+        self.core.request(peer, scope, id, bytes).await
+    }
+}
+impl PeerCore {
+    fn seal(&self) {
+        self.requests.seal();
+        self.permits.close();
+        self.inbound.close();
+        self.streams.close();
+        self.receive_bytes.close();
+        self.request_bytes.close();
+        self.stop.send_replace(true);
         self.endpoint.close(0u32.into(), b"shutdown");
-        self.endpoint.wait_idle().await;
+    }
+    async fn supervise(self: Arc<Self>) -> Result<()> {
+        let mut stopping = self.stop.subscribe();
+        let mut sessions = tokio::task::JoinSet::new();
+        let mut failure = None;
+        while !*stopping.borrow() {
+            tokio::select! {
+                biased;
+                _ = stopping.changed() => break,
+                completed = sessions.join_next(), if !sessions.is_empty() => {
+                    match completed {
+                        Some(Ok(Ok(()))) => {},
+                        _ => {
+                            failure.get_or_insert_with(error);
+                            self.seal();
+                            break;
+                        }
+                    }
+                }
+                incoming = self.endpoint.accept() => {
+                    let Some(incoming) = incoming else { break };
+                    if *stopping.borrow() || sessions.len() >= self.config.max_inflight {
+                        incoming.refuse();
+                        continue;
+                    }
+                    let Ok(permit) = self.inbound.clone().try_acquire_owned() else {
+                        incoming.refuse();
+                        continue;
+                    };
+                    let service = self.clone();
+                    sessions.spawn(async move {
+                        let _permit = permit;
+                        service.accept(incoming).await
+                    });
+                }
+            }
+        }
+        // Sessions stop their streams and positively reap them. Aborting a
+        // session here would merely drop its JoinSet without joining children.
+        while let Some(completed) = sessions.join_next().await {
+            if !matches!(completed, Ok(Ok(()))) {
+                failure.get_or_insert_with(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
     }
     fn authenticated(&self, c: &quinn::Connection) -> Result<PeerId> {
         let certs = c
@@ -216,6 +550,9 @@ impl QuicPeerTransport {
             .ok_or_else(error)
     }
     async fn connection(&self, id: &PeerId, placement: bool) -> Result<quinn::Connection> {
+        if *self.stop.borrow() {
+            return Err(error());
+        }
         let peer = self.config.trusted.get(id).ok_or_else(error)?;
         let slots = self.connections.get(id).ok_or_else(error)?;
         let (slot, other) = if placement {
@@ -229,6 +566,9 @@ impl QuicPeerTransport {
             span.finish_success(0);
             slot
         };
+        if *self.stop.borrow() {
+            return Err(error());
+        }
         if let Some(connection) = slot.as_ref()
             && connection.close_reason().is_none()
         {
@@ -275,21 +615,41 @@ impl QuicPeerTransport {
         Ok(connection)
     }
     async fn accept(self: Arc<Self>, incoming: quinn::Incoming) -> Result<()> {
-        let connection = timeout(self.config.deadline, incoming)
-            .await
-            .map_err(|_| error())?
-            .map_err(|_| error())?;
+        let mut stopping = self.stop.subscribe();
+        if *stopping.borrow() {
+            return Ok(());
+        }
+        let connection = tokio::select! {
+            biased;
+            _ = stopping.changed() => return Ok(()),
+            connection = timeout(self.config.deadline, incoming) => {
+                match connection {
+                    Ok(Ok(connection)) => connection,
+                    // Handshake and trust failures are routine peer failures;
+                    // they do not imply unobserved task cleanup.
+                    _ => return Ok(()),
+                }
+            }
+        };
         let id = match self.authenticated(&connection) {
             Ok(id) => id,
-            Err(error) => {
+            Err(_) => {
                 connection.close(1u32.into(), b"untrusted peer");
-                return Err(error);
+                return Ok(());
             }
         };
         let mut workers = tokio::task::JoinSet::new();
-        loop {
+        let mut failure = None;
+        while !*stopping.borrow() {
             tokio::select! {
-                completed=workers.join_next(),if !workers.is_empty()=>{let _=completed;},
+                biased;
+                _ = stopping.changed() => break,
+                completed=workers.join_next(),if !workers.is_empty()=>{
+                    if !matches!(completed, Some(Ok(()))) {
+                        failure.get_or_insert_with(error);
+                        break;
+                    }
+                },
                 stream=timeout(Duration::from_secs(30),connection.accept_bi())=>{
                     let (mut send,mut recv)=match stream{Ok(Ok(stream))=>stream,_=>break};
                     let permit=match self.streams.clone().try_acquire_owned(){Ok(permit) if workers.len()<self.config.max_inflight=>permit,_=>{let _=send.reset(1u32.into());let _=recv.stop(1u32.into());continue;}};
@@ -298,8 +658,26 @@ impl QuicPeerTransport {
             }
         }
         workers.abort_all();
-        while workers.join_next().await.is_some() {}
-        Ok(())
+        while let Some(completed) = workers.join_next().await {
+            if let Err(join) = completed
+                && !join.is_cancelled()
+            {
+                failure.get_or_insert_with(error);
+            }
+        }
+        #[cfg(all(test, unix))]
+        {
+            let gate = self
+                .test_session_exit_gate
+                .lock()
+                .map_err(|_| error())?
+                .take();
+            if let Some(gate) = gate {
+                let _ = gate.entered.send(());
+                let _ = gate.release.await;
+            }
+        }
+        failure.map_or(Ok(()), Err)
     }
     async fn process_stream(
         &self,
@@ -377,11 +755,7 @@ impl QuicPeerTransport {
         if !p.partitions.contains(&scope.identity.partition) {
             return Err(error());
         }
-        let _permit = self
-            .permits
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| error())?;
+        let _request = self.requests.enter(&self.permits)?;
         if bytes
             .as_ref()
             .is_some_and(|b| b.len() > self.config.max_blob_bytes)
@@ -483,20 +857,13 @@ impl QuicPeerTransport {
 }
 async fn bounded_cache_work<R: Send + 'static>(
     cache: Arc<LocalCache>,
-    work: impl FnOnce(Arc<LocalCache>) -> R + Send + 'static,
+    work: impl FnOnce(&crate::local::AdmittedCache) -> R + Send + 'static,
 ) -> Result<R> {
-    let io = cache.io_permit().await?;
-    tokio::task::spawn_blocking(move || {
-        let _io = io;
-        work(cache)
-    })
-    .await
-    .map_err(|_| error())
+    cache.run_blocking(work).await
 }
 impl Drop for QuicPeerTransport {
     fn drop(&mut self) {
-        let _ = self.stop.send(true);
-        self.endpoint.close(0u32.into(), b"shutdown");
+        self.close.start();
     }
 }
 // The GET span includes the caller's existing payload conversion. A miss is a
@@ -679,10 +1046,12 @@ mod tests {
         })
         .await
         .unwrap();
+        let drained = cache.shutdown().await;
         assert_eq!(
             available, 7,
             "noncancellable disk work must retain its global slot after async cancellation"
         );
+        assert!(drained.is_ok(), "actual canceled cache worker did not join");
     }
     #[tokio::test]
     async fn queued_payload_ownership_retains_its_transfer_charge() {
@@ -903,20 +1272,276 @@ mod tests {
                 scope,
             }
         }
-        async fn shutdown(&self) {
-            self.a.shutdown().await;
-            self.b.shutdown().await;
-            self.a.cache.shutdown().await;
-            self.b_cache.shutdown().await;
+        async fn shutdown(&self) -> Result<()> {
+            let a = self.a.shutdown().await;
+            let b = self.b.shutdown().await;
+            let a_cache = self.a.core.cache.shutdown().await;
+            let b_cache = self.b_cache.shutdown().await;
+            a?;
+            b?;
+            a_cache?;
+            b_cache?;
+            Ok(())
         }
     }
     impl Drop for MetricPeers {
         fn drop(&mut self) {
             // Files were retained before startup. Shutdown's bounded worker
             // drain is not permission to delete them before the process barrier.
-            self.a.endpoint.close(0u32.into(), b"fixture dropped");
-            self.b.endpoint.close(0u32.into(), b"fixture dropped");
+            self.a.core.endpoint.close(0u32.into(), b"fixture dropped");
+            self.b.core.endpoint.close(0u32.into(), b"fixture dropped");
         }
+    }
+    #[tokio::test]
+    async fn cancelled_close_waiter_does_not_acknowledge_a_live_peer_session_owner() {
+        use std::{future::poll_fn, task::Poll};
+
+        let peers = MetricPeers::new(false, false);
+        let bytes = b"owned peer session shutdown\0\xff";
+        let id = BlockId("owned session".into());
+        peers
+            .b_cache
+            .insert(&peers.scope, &id, bytes, IntegrityPolicy::Opaque)
+            .unwrap();
+        let received = peers.a.get(&PeerId("b".into()), &peers.scope, &id).await;
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *peers.b.core.test_session_exit_gate.lock().unwrap() = Some(TestSessionExitGate {
+            entered: entered_tx,
+            release: release_rx,
+        });
+        let mut first_waiter = Box::pin(peers.b.shutdown());
+        poll_fn(|cx| {
+            let _ = first_waiter.as_mut().poll(cx);
+            Poll::Ready(())
+        })
+        .await;
+        drop(first_waiter);
+        let entered = timeout(Duration::from_secs(1), entered_rx).await;
+        let entered_exit = matches!(entered, Ok(Ok(())));
+        let premature_acknowledgment = if entered_exit {
+            matches!(
+                timeout(Duration::from_millis(100), peers.b.shutdown()).await,
+                Ok(Ok(()))
+            )
+        } else {
+            false
+        };
+        let owners = [Arc::downgrade(&peers.a), Arc::downgrade(&peers.b)];
+        let cache_owners = [
+            Arc::downgrade(&peers.a.core.cache),
+            Arc::downgrade(&peers.b_cache),
+        ];
+        // Release the actual session before any assertion or fixture removal.
+        drop(release_tx);
+        let drained = peers.shutdown().await;
+        drop(peers);
+        let released = timeout(Duration::from_secs(3), async {
+            while owners.iter().any(|owner| owner.upgrade().is_some())
+                || cache_owners.iter().any(|owner| owner.upgrade().is_some())
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert_eq!(received.unwrap().as_deref(), Some(bytes.as_slice()));
+        assert!(
+            entered_exit,
+            "actual authenticated session did not reach its exit gate"
+        );
+        assert!(
+            released.is_ok(),
+            "actual peer/cache owners did not release after the gate"
+        );
+        assert!(
+            drained.is_ok(),
+            "actual peer/cache drain did not acknowledge completion"
+        );
+        assert!(
+            !premature_acknowledgment,
+            "peer shutdown acknowledged while the actual authenticated session owner remained"
+        );
+    }
+    #[tokio::test]
+    async fn aborted_close_worker_retains_the_actual_peer_drain_and_cached_failure() {
+        failed_close_retains_actual_owners(true).await;
+    }
+    #[tokio::test]
+    async fn held_session_drain_timeout_retains_actual_owners_and_cached_failure() {
+        failed_close_retains_actual_owners(false).await;
+    }
+    #[tokio::test]
+    async fn cold_failed_connection_drain_joins_endpoint_before_ack() {
+        let peers = MetricPeers::new(false, false);
+        let peer = PeerId("blackhole".into());
+        let id = BlockId("cancelled cold connection".into());
+        let mut read = peers.a.get(&peer, &peers.scope, &id);
+        poll_fn(|cx| {
+            assert!(read.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        let cold_owner = peers.a.core.requests.lock().active == 1
+            && peers.a.core.endpoint.open_connections() > 0
+            && peers
+                .a
+                .core
+                .connections
+                .get(&peer)
+                .unwrap()
+                .reads
+                .try_lock()
+                .is_err();
+        drop(read);
+        let request_dropped = peers.a.core.requests.lock().active == 0;
+        let started = std::time::Instant::now();
+        let drained = peers.a.shutdown().await;
+        let elapsed = started.elapsed();
+        let phase = peers.a.close.phase.load(Ordering::Acquire);
+        let supervisor_us = peers.a.close.supervisor_join_micros.load(Ordering::Acquire);
+        let requests_us = peers
+            .a
+            .close
+            .requests_drained_micros
+            .load(Ordering::Acquire);
+        let actual_join = matches!(peers.a.close.supervisor.poll_result(), Poll::Ready(Ok(())));
+        let endpoint_connections = peers.a.core.endpoint.open_connections();
+        let b_drained = peers.b.shutdown().await;
+        let a_cache_drained = peers.a.core.cache.shutdown().await;
+        let b_cache_drained = peers.b_cache.shutdown().await;
+        let owners = [
+            Arc::downgrade(&peers.a.core.cache),
+            Arc::downgrade(&peers.b_cache),
+        ];
+        drop(peers);
+        let released = timeout(Duration::from_secs(3), async {
+            while owners.iter().any(|owner| owner.strong_count() != 0) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(
+            cold_owner && request_dropped,
+            "actual cold query admission and cancellation were not observed"
+        );
+        assert!(
+            drained.is_ok()
+                && b_drained.is_ok()
+                && a_cache_drained.is_ok()
+                && b_cache_drained.is_ok()
+        );
+        assert!(
+            actual_join && phase == 4 && endpoint_connections == 0,
+            "endpoint idle and actual session joins must precede ACK"
+        );
+        assert!(
+            released.is_ok(),
+            "acknowledged transport/cache owners remained"
+        );
+        println!(
+            "MOUNT_RS_PEER_DRAIN cold_failed_connection=true actual_supervisor_join=true request_owners=0 endpoint_connections={endpoint_connections} elapsed_us={} supervisor_join_us={supervisor_us} requests_drained_us={requests_us}",
+            elapsed.as_micros()
+        );
+    }
+    async fn failed_close_retains_actual_owners(abort: bool) {
+        let mut peers = MetricPeers::new(false, false);
+        if !abort {
+            // A shortened cleanup budget injects a real held-session timeout;
+            // RPC/stream/transport timers retain their production values.
+            Arc::get_mut(&mut Arc::get_mut(&mut peers.b).unwrap().close)
+                .unwrap()
+                .deadline = Duration::from_millis(75);
+        }
+        let id = BlockId("aborted close".into());
+        let bytes = b"aborted peer closer\0\xff";
+        peers
+            .b_cache
+            .insert(&peers.scope, &id, bytes, IntegrityPolicy::Opaque)
+            .unwrap();
+        let received = peers.a.get(&PeerId("b".into()), &peers.scope, &id).await;
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *peers.b.core.test_session_exit_gate.lock().unwrap() = Some(TestSessionExitGate {
+            entered: entered_tx,
+            release: release_rx,
+        });
+        let mut waiter = Box::pin(peers.b.shutdown());
+        poll_fn(|cx| {
+            let _ = waiter.as_mut().poll(cx);
+            Poll::Ready(())
+        })
+        .await;
+        drop(waiter);
+        let entered = timeout(Duration::from_secs(1), entered_rx).await;
+        let entered_exit = matches!(entered, Ok(Ok(())));
+        let worker = peers.b.close.lock().worker.clone();
+        let worker_owned = worker.is_some();
+        if let Some(worker) = worker.filter(|_| abort) {
+            worker.abort();
+        }
+        let failed = timeout(Duration::from_secs(1), peers.b.shutdown()).await;
+        let repeated = timeout(Duration::from_secs(1), peers.b.shutdown()).await;
+        let retained = {
+            let state = peers.b.close.lock();
+            state.retained.is_some() && state.current.is_some() && state.resources.is_some()
+        };
+        let sealed = peers.b.core.inbound.clone().try_acquire_owned().is_err()
+            && peers.b.core.streams.clone().try_acquire_owned().is_err()
+            && peers.b.core.requests.lock().stopped;
+        // The public failure remains sticky. The fixture separately resumes the
+        // retained actual future after releasing its known session gate, solely
+        // to positively join all real owners before removing test observations.
+        drop(release_tx);
+        let actual_drain = timeout(
+            Duration::from_secs(3),
+            poll_fn(|cx| peers.b.close.poll_close(cx)),
+        )
+        .await;
+        let a_drained = peers.a.shutdown().await;
+        let a_cache_drained = peers.a.core.cache.shutdown().await;
+        let b_cache_drained = peers.b_cache.shutdown().await;
+        let owners = [
+            Arc::downgrade(&peers.a.core.cache),
+            Arc::downgrade(&peers.b_cache),
+        ];
+        if matches!(actual_drain, Ok(Ok(()))) {
+            let mut state = peers.b.close.lock();
+            state.current = None;
+            state.resources = None;
+            state.retained = None;
+        }
+        drop(peers);
+        let released = timeout(Duration::from_secs(3), async {
+            while owners.iter().any(|owner| owner.upgrade().is_some()) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert_eq!(received.unwrap().as_deref(), Some(bytes.as_slice()));
+        assert!(
+            entered_exit && worker_owned,
+            "actual session and close worker were not observed"
+        );
+        let expected = if abort {
+            ErrorCode::Eio
+        } else {
+            ErrorCode::Ebusy
+        };
+        assert!(matches!(failed, Ok(Err(ref error)) if error.is(expected)));
+        assert!(matches!(repeated, Ok(Err(ref error)) if error.is(expected)));
+        assert!(
+            retained && sealed,
+            "unacknowledged cleanup lost ownership or admission seal"
+        );
+        assert!(
+            matches!(actual_drain, Ok(Ok(()))),
+            "actual retained peer drain did not join"
+        );
+        assert!(a_drained.is_ok() && a_cache_drained.is_ok() && b_cache_drained.is_ok());
+        assert!(
+            released.is_ok(),
+            "fixture owners did not release after actual drain"
+        );
     }
     // Literal labels allow this real-transport qualification to compile before producers exist.
     #[tokio::test]
@@ -936,12 +1561,15 @@ mod tests {
         async fn cleanup(peers: MetricPeers) {
             let addresses = [peers.a.local_addr().unwrap(), peers.b.local_addr().unwrap()];
             let lifetimes = [
-                Arc::downgrade(&peers.a.cache),
+                Arc::downgrade(&peers.a.core.cache),
                 Arc::downgrade(&peers.b_cache),
             ];
+            // The unchanged global15s qualification bounds these real drains.
+            // The3s observer below measures owner/socket release after positive
+            // protocol/task drain ACKs, not Quinn's distinct3*PTO close phase.
+            peers.shutdown().await.expect("actual peer/cache shutdown");
+            drop(peers);
             timeout(Duration::from_secs(3), async {
-                peers.shutdown().await;
-                drop(peers);
                 loop {
                     if lifetimes.iter().all(|owner| owner.upgrade().is_none()) {
                         match (
@@ -1011,11 +1639,11 @@ mod tests {
                     Expected(GET, 1, 0, 0, length), Expected(MISS, miss, 0, 0, 0),
                 ]);
             }
-            let connection = peers.a.connection(&peer, false).await.unwrap();
+            let connection = peers.a.core.connection(&peer, false).await.unwrap();
             let stable_id = connection.stable_id();
 
-            let budget = peers.a.request_bytes.clone().acquire_many_owned(
-                (peers.a.config.transfer_bytes / 2) as u32,
+            let budget = peers.a.core.request_bytes.clone().acquire_many_owned(
+                (peers.a.core.config.transfer_bytes / 2) as u32,
             ).await.unwrap();
             let before = storage::snapshot();
             let mut request = peers.a.get(&peer, &peers.scope, &id);
@@ -1058,10 +1686,10 @@ mod tests {
                 let _ = recv.stop(0u32.into());
             }
             assert_eq!(peers.a.get(&peer, &peers.scope, &id).await.unwrap(), Some(bytes.to_vec()));
-            assert_eq!(peers.a.connection(&peer, false).await.unwrap().stable_id(), stable_id);
+            assert_eq!(peers.a.core.connection(&peer, false).await.unwrap().stable_id(), stable_id);
 
-            let quota = peers.b.receive_bytes.clone().acquire_many_owned(
-                (peers.b.config.transfer_bytes / 2) as u32,
+            let quota = peers.b.core.receive_bytes.clone().acquire_many_owned(
+                (peers.b.core.config.transfer_bytes / 2) as u32,
             ).await.unwrap();
             let before = storage::snapshot();
             let mut request = peers.a.get(&peer, &peers.scope, &id);
@@ -1075,7 +1703,7 @@ mod tests {
             ]);
             drop(quota);
             assert_eq!(peers.a.get(&peer, &peers.scope, &id).await.unwrap(), Some(bytes.to_vec()));
-            assert_eq!(peers.a.connection(&peer, false).await.unwrap().stable_id(), stable_id);
+            assert_eq!(peers.a.core.connection(&peer, false).await.unwrap().stable_id(), stable_id);
 
             let mut unregistered = peers.scope.clone();
             unregistered.identity.drive = "unregistered sibling".into();
@@ -1087,7 +1715,7 @@ mod tests {
                 Expected(RECEIVE, 0, 1, 0, 0), Expected(MISS, 0, 0, 0, 0),
             ]);
             assert_eq!(peers.a.get(&peer, &peers.scope, &id).await.unwrap(), Some(bytes.to_vec()));
-            assert_eq!(peers.a.connection(&peer, false).await.unwrap().stable_id(), stable_id);
+            assert_eq!(peers.a.core.connection(&peer, false).await.unwrap().stable_id(), stable_id);
 
             let mut denied = peers.scope.clone();
             denied.identity.partition = "forbidden".into();
@@ -1096,15 +1724,15 @@ mod tests {
             checks.phase("partition denied before transport work", &before, vec![
                 Expected(GET, 0, 1, 0, 0), Expected(BYTE, 0, 0, 0, 0), Expected(OPEN, 0, 0, 0, 0),
             ]);
-            let permits = peers.a.permits.clone().acquire_many_owned(peers.a.config.max_inflight as u32).await.unwrap();
+            let permits = peers.a.core.permits.clone().acquire_many_owned(peers.a.core.config.max_inflight as u32).await.unwrap();
             let before = storage::snapshot();
             assert!(peers.a.get(&peer, &peers.scope, &id).await.is_err());
             checks.phase("fail fast operation admission", &before, vec![Expected(GET, 0, 1, 0, 0), Expected(BYTE, 0, 0, 0, 0)]);
             drop(permits);
             let placement = BlockId("placement preserved".into());
             peers.a.put(&peer, &peers.scope, &placement, bytes).await.unwrap();
-            assert_eq!(peers.b_cache.get(&peers.scope, &placement, IntegrityPolicy::Opaque), Some(bytes.to_vec()));
-            assert_eq!(peers.a.connection(&peer, true).await.unwrap().stable_id(), stable_id);
+            assert_eq!(peers.b_cache.get(&peers.scope, &placement, IntegrityPolicy::Opaque).unwrap(), Some(bytes.to_vec()));
+            assert_eq!(peers.a.core.connection(&peer, true).await.unwrap().stable_id(), stable_id);
             drop(connection);
             cleanup(peers).await;
 
@@ -1113,7 +1741,7 @@ mod tests {
                 let before = storage::snapshot();
                 assert!(peers.a.get(&peer, &peers.scope, &id).await.is_err());
                 checks.phase("rejected mTLS identity GET", &before, vec![Expected(GET, 0, 1, 0, 0), Expected(MISS, 0, 0, 0, 0)]);
-                assert!(peers.b_cache.get(&peers.scope, &id, IntegrityPolicy::Opaque).is_none());
+                assert!(peers.b_cache.get(&peers.scope, &id, IntegrityPolicy::Opaque).unwrap().is_none());
                 cleanup(peers).await;
             }
             println!("peer_request_stage_behavior_oracles=complete full_empty_miss_verified=true connection_reuse_verified=true security_verified=true cache_owners_and_udp_released=true send_backpressure_unqualified=true");
@@ -1140,17 +1768,17 @@ mod tests {
             let before = storage::snapshot();
             assert_eq!(peers.a.get(&peer,&peers.scope,&id).await.unwrap(),Some(bytes.to_vec()));
             checks.phase("reused authenticated connection",&before,vec![Expected(LOCK,1,0,0,0),Expected(ESTABLISH,0,0,0,0)]);
-            let connection_id = peers.a.connection(&peer,false).await.unwrap().stable_id();
+            let connection_id = peers.a.core.connection(&peer,false).await.unwrap().stable_id();
             let before = storage::snapshot();
             peers.a.put(&peer,&peers.scope,&BlockId("placement reuse".into()),bytes).await.unwrap();
             checks.phase("placement reuses authenticated read connection",&before,vec![Expected(LOCK,1,0,0,0),Expected(ESTABLISH,0,0,0,0)]);
-            assert_eq!(peers.a.connection(&peer,true).await.unwrap().stable_id(),connection_id);
-            assert_eq!(peers.b_cache.get(&peers.scope,&BlockId("placement reuse".into()),IntegrityPolicy::Opaque),Some(bytes.to_vec()));
+            assert_eq!(peers.a.core.connection(&peer,true).await.unwrap().stable_id(),connection_id);
+            assert_eq!(peers.b_cache.get(&peers.scope,&BlockId("placement reuse".into()),IntegrityPolicy::Opaque).unwrap(),Some(bytes.to_vec()));
             let mut denied = peers.scope.clone(); denied.identity.partition = "other".into();
             let before = storage::snapshot();
             assert!(peers.a.get(&peer,&denied,&id).await.is_err());
             checks.phase("partition rejected before connection",&before,vec![Expected(LOCK,0,0,0,0),Expected(ESTABLISH,0,0,0,0)]);
-            let slot = peers.a.connections.get(&peer).unwrap().clone();
+            let slot = peers.a.core.connections.get(&peer).unwrap().clone();
             let held = slot.reads.lock().await;
             let before = storage::snapshot();
             let mut read = peers.a.get(&peer,&peers.scope,&id);
@@ -1164,11 +1792,11 @@ mod tests {
             let before = storage::snapshot();
             let mut put = peers.a.put(&blackhole,&peers.scope,&id,bytes);
             poll_fn(|cx| { assert!(put.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
-            assert!(peers.a.connections.get(&blackhole).unwrap().placements.try_lock().is_err(),"cold PUT holds only its placement negotiation slot");
+            assert!(peers.a.core.connections.get(&blackhole).unwrap().placements.try_lock().is_err(),"cold PUT holds only its placement negotiation slot");
             checks.pending("blackhole PUT establishment",1,vec![(LOCK,0),(ESTABLISH,1)]);
             let mut get = peers.a.get(&blackhole,&peers.scope,&id);
             poll_fn(|cx| { assert!(get.as_mut().poll(cx).is_pending()); Poll::Ready(()) }).await;
-            assert!(peers.a.connections.get(&blackhole).unwrap().reads.try_lock().is_err(),"cold GET owns its independent read negotiation slot");
+            assert!(peers.a.core.connections.get(&blackhole).unwrap().reads.try_lock().is_err(),"cold GET owns its independent read negotiation slot");
             checks.pending("blackhole PUT and same-peer GET",3,vec![(LOCK,0),(ESTABLISH,2)]);
             // A different peer's reused connection remains functional while the
             // owned blackhole holds two independent role negotiations.
@@ -1177,7 +1805,7 @@ mod tests {
             checks.pending("blackhole PUT after GET cancellation",1,vec![(LOCK,0),(ESTABLISH,1)]);
             drop(put);
             checks.phase("overlapping establishment cancellation",&before,vec![Expected(LOCK,3,0,0,0),Expected(ESTABLISH,0,0,2,0)]);
-            let blackhole_slots = peers.a.connections.get(&blackhole).unwrap();
+            let blackhole_slots = peers.a.core.connections.get(&blackhole).unwrap();
             assert!(blackhole_slots.reads.try_lock().is_ok());
             assert!(blackhole_slots.placements.try_lock().is_ok());
             let before = storage::snapshot();
@@ -1213,31 +1841,31 @@ mod tests {
             checks.phase("same role recovers from owner cancellation",&before,vec![Expected(LOCK,2,0,0,0),Expected(ESTABLISH,0,0,2,0)]);
             assert!(blackhole_slots.reads.try_lock().is_ok());
             assert!(peers.blackhole.local_addr().unwrap().ip().is_loopback());
-            peers.shutdown().await; drop(slot); drop(peers);
+            peers.shutdown().await.expect("actual peer/cache shutdown"); drop(slot); drop(peers);
             let peers = MetricPeers::new(false,false);
             let before = storage::snapshot();
             peers.a.put(&peer,&peers.scope,&id,b"").await.unwrap();
             checks.phase("cold empty PUT authenticates placement",&before,vec![Expected(LOCK,1,0,0,0),Expected(ESTABLISH,1,0,0,0)]);
-            let placement_id = peers.a.connection(&peer,true).await.unwrap().stable_id();
+            let placement_id = peers.a.core.connection(&peer,true).await.unwrap().stable_id();
             let before = storage::snapshot();
             assert_eq!(peers.a.get(&peer,&peers.scope,&id).await.unwrap(),Some(Vec::new()));
             checks.phase("read reuses authenticated placement connection",&before,vec![Expected(LOCK,1,0,0,0),Expected(ESTABLISH,0,0,0,0)]);
-            assert_eq!(peers.a.connection(&peer,false).await.unwrap().stable_id(),placement_id);
+            assert_eq!(peers.a.core.connection(&peer,false).await.unwrap().stable_id(),placement_id);
             let full_id = BlockId("placement full bytes".into());
             peers.a.put(&peer,&peers.scope,&full_id,bytes).await.unwrap();
             assert_eq!(peers.a.get(&peer,&peers.scope,&full_id).await.unwrap(),Some(bytes.to_vec()));
-            peers.shutdown().await; drop(peers);
+            peers.shutdown().await.expect("actual peer/cache shutdown"); drop(peers);
             for unknown_ca in [false,true] {
                 let peers = MetricPeers::new(!unknown_ca,unknown_ca);
                 let rejected = BlockId("rejected".into()); let before = storage::snapshot();
                 assert!(peers.a.put(&peer,&peers.scope,&rejected,bytes).await.is_err());
-                assert!(peers.b_cache.get(&peers.scope,&rejected,IntegrityPolicy::Opaque).is_none(),"rejected identity cannot admit bytes");
+                assert!(peers.b_cache.get(&peers.scope,&rejected,IntegrityPolicy::Opaque).unwrap().is_none(),"rejected identity cannot admit bytes");
                 if !unknown_ca {
                     checks.phase("mismatched certificate pin",&before,vec![Expected(LOCK,1,0,0,0),Expected(ESTABLISH,0,1,0,0)]);
                 }
                 // Unknown CA can fail after TLS establishment in stream work;
                 // only rejection/no-admission is required for this existing arm.
-                peers.shutdown().await; drop(peers);
+                peers.shutdown().await.expect("actual peer/cache shutdown"); drop(peers);
             }
             println!("peer_stage_behavior_oracles=complete bytes_verified=true denied_identity_admission=false");
             checks.verify();
@@ -1343,9 +1971,9 @@ mod tests {
         let peer = PeerId("b".into());
         let id = BlockId("opaque".into());
         assert!(a.get(&peer, &s, &id).await.unwrap().is_none());
-        let read_connection = a.connection(&peer, false).await.unwrap();
+        let read_connection = a.core.connection(&peer, false).await.unwrap();
         a.put(&peer, &s, &id, b"binary\0bytes").await.unwrap();
-        let placement_connection = a.connection(&peer, true).await.unwrap();
+        let placement_connection = a.core.connection(&peer, true).await.unwrap();
         assert_eq!(
             read_connection.stable_id(),
             placement_connection.stable_id(),
@@ -1371,7 +1999,7 @@ mod tests {
         while let Some(result) = readers.join_next().await {
             assert_eq!(result.unwrap().unwrap(), Some(b"binary\0bytes".to_vec()));
         }
-        let connection = a.connection(&peer, false).await.unwrap();
+        let connection = a.core.connection(&peer, false).await.unwrap();
         let (mut stalled_send, mut stalled_recv) = connection.open_bi().await.unwrap();
         stalled_send
             .write_all(&encode(&s, &id, None, 1024).unwrap())
@@ -1409,8 +2037,8 @@ mod tests {
         let mut denied = s;
         denied.identity.partition = "other".into();
         assert!(a.get(&peer, &denied, &id).await.is_err());
-        a.shutdown().await;
-        b.shutdown().await;
+        a.shutdown().await.expect("actual peer shutdown");
+        b.shutdown().await.expect("actual peer shutdown");
     }
     #[tokio::test]
     async fn actual_quic_rejects_mismatched_pin_and_unknown_client_ca() {
@@ -1512,9 +2140,14 @@ mod tests {
                     .await
                     .is_err()
             );
-            assert!(b_cache.get(&scope, &id, IntegrityPolicy::Opaque).is_none());
-            a.shutdown().await;
-            b.shutdown().await;
+            assert!(
+                b_cache
+                    .get(&scope, &id, IntegrityPolicy::Opaque)
+                    .unwrap()
+                    .is_none()
+            );
+            a.shutdown().await.expect("actual peer shutdown");
+            b.shutdown().await.expect("actual peer shutdown");
         }
     }
 }

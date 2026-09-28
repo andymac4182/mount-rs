@@ -1,3 +1,4 @@
+use crate::owned::OwnedTask;
 use crate::*;
 use async_trait::async_trait;
 use mount_rs_core::diagnostics::{
@@ -7,10 +8,13 @@ use mount_rs_core::diagnostics::{
 use mount_rs_core::storage::{BlockReconcileReport, BlockStore};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    future::{Future, poll_fn},
+    pin::Pin,
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    task::Poll,
     time::Duration,
 };
 use tokio::{
@@ -75,7 +79,8 @@ pub struct DistributedRuntime {
     flights: Mutex<BTreeMap<String, Weak<tokio::sync::Mutex<()>>>>,
     stopping: AtomicBool,
     stop: tokio::sync::watch::Sender<bool>,
-    worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    worker: Arc<OwnedTask>,
+    failure: Mutex<Option<mount_rs_core::FsError>>,
 }
 impl DistributedRuntime {
     pub fn new(
@@ -112,12 +117,15 @@ impl DistributedRuntime {
             .max(Duration::from_millis(100));
         let worker = tokio::spawn(async move {
             let mut placements = tokio::task::JoinSet::new();
+            let mut failure = None;
             let mut heartbeat = tokio::time::interval(heartbeat_period);
             heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {
                     _=stopped.changed()=>{break;}
-                    _=placements.join_next(), if !placements.is_empty()=>{}
+                    completed=placements.join_next(), if !placements.is_empty()=>{
+                        if matches!(completed,Some(Err(_))) {failure.get_or_insert_with(error);}
+                    }
                     item=receiver.recv(), if placements.len()<placement_concurrency=>{
                         let Some(item)=item else {break};
                         let d=d.clone(); let t=t.clone(); let p=p.clone();
@@ -146,6 +154,16 @@ impl DistributedRuntime {
                     _=heartbeat.tick()=>{let _=timeout(deadline,d.heartbeat(&p)).await;}
                 }
             }
+            receiver.close();
+            hints.close();
+            // Every placement has its existing deadline. Stop admitting work,
+            // then positively join it rather than dropping/aborting the set.
+            while let Some(result) = placements.join_next().await {
+                if result.is_err() {
+                    failure.get_or_insert_with(error);
+                }
+            }
+            failure.map_or(Ok(()), Err)
         });
         Ok(Arc::new(Self {
             discovery,
@@ -159,7 +177,8 @@ impl DistributedRuntime {
             advertisement_period,
             stopping: AtomicBool::new(false),
             stop,
-            worker: Mutex::new(Some(worker)),
+            worker: OwnedTask::new(worker),
+            failure: Mutex::new(None),
         }))
     }
     fn touch(&self, cache: &LocalCache, scope: &Arc<CacheScope>, id: &BlockId, key: &CacheKey) {
@@ -226,28 +245,36 @@ impl DistributedRuntime {
         flights.insert(key, Arc::downgrade(&f));
         Ok(f)
     }
-    pub async fn shutdown(&self) {
+    pub async fn shutdown(&self) -> Result<()> {
         self.stopping.store(true, Ordering::Release);
+        self.misses.close();
         let _ = self.stop.send(true);
-        let worker = self.worker.lock().ok().and_then(|mut w| w.take());
-        if let Some(mut worker) = worker
-            && timeout(self.config.deadline + Duration::from_secs(1), &mut worker)
-                .await
-                .is_err()
-        {
-            worker.abort();
-            let _ = worker.await;
+        let joined = timeout(
+            self.config.deadline + Duration::from_secs(1),
+            self.worker.join(),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(mount_rs_core::FsError::new(mount_rs_core::ErrorCode::Ebusy)
+                .with_syscall("cache maintenance drain timeout"))
+        });
+        let mut failure = match self.failure.lock() {
+            Ok(failure) => failure,
+            Err(poisoned) => {
+                let mut failure = poisoned.into_inner();
+                failure.get_or_insert_with(error);
+                failure
+            }
+        };
+        if let Err(error) = joined {
+            failure.get_or_insert(error);
         }
+        failure.clone().map_or(Ok(()), Err)
     }
 }
 impl Drop for DistributedRuntime {
     fn drop(&mut self) {
         let _ = self.stop.send(true);
-        if let Ok(mut worker) = self.worker.lock()
-            && let Some(worker) = worker.take()
-        {
-            worker.abort();
-        }
     }
 }
 struct PendingBlob {
@@ -377,18 +404,14 @@ impl CachedBlockStore {
             .unwrap_or(Duration::from_millis(500));
         let mut span = Span::new(Operation::BlobCacheDiskLookup);
         let result = timeout(deadline, async {
-            let permit = self.cache.io_permit().await.ok()?;
-            let cache = self.cache.clone();
             let scope = scope.clone();
             let id = id.clone();
             let policy = self.policy;
-            tokio::task::spawn_blocking(move || {
-                let _permit = permit;
-                cache.get_disk(&scope, &id, policy)
-            })
-            .await
-            .ok()
-            .flatten()
+            self.cache
+                .run_blocking(move |cache| cache.get_disk(&scope, &id, policy))
+                .await
+                .ok()
+                .flatten()
         })
         .await;
         match result {
@@ -426,12 +449,6 @@ impl CachedBlockStore {
         }
         // Optional disk copies never delay backing acknowledgement. Both payload and
         // non-cancellable worker remain charged until the blocking closure finishes.
-        let Ok(permit) = self.cache.io_permits.clone().try_acquire_owned() else {
-            self.metrics
-                .maintenance_dropped
-                .fetch_add(1, Ordering::Relaxed);
-            return;
-        };
         let reservation =
             reservation.or_else(|| self.cache.reserve_pending(bytes.len()).map(Arc::new));
         let Some(reservation) = reservation else {
@@ -440,18 +457,24 @@ impl CachedBlockStore {
                 .fetch_add(1, Ordering::Relaxed);
             return;
         };
-        let cache = self.cache.clone();
         let scope = scope.clone();
         let id = id.clone();
         let policy = self.policy;
         let metrics = self.metrics.clone();
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            let _reservation = reservation;
-            if cache.insert_shared(&scope, &id, bytes, policy).is_err() {
-                metrics.cache_errors.fetch_add(1, Ordering::Relaxed);
-            }
-        });
+        if self
+            .cache
+            .try_spawn_blocking(move |cache| {
+                let _reservation = reservation;
+                if cache.insert_shared(&scope, &id, bytes, policy).is_err() {
+                    metrics.cache_errors.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+            .is_err()
+        {
+            self.metrics
+                .maintenance_dropped
+                .fetch_add(1, Ordering::Relaxed);
+        }
     }
     async fn fetch(&self, scope: &Arc<CacheScope>, id: &BlockId) -> Result<Vec<u8>> {
         let bytes = {
@@ -508,12 +531,12 @@ impl CachedBlockStore {
                     }
                 };
                 let mut peers=distributed::unique(peers,&d.local,d.config.max_peer_queries).into_iter();
-                let mut queries=tokio::task::JoinSet::new();
-                let start=|queries: &mut tokio::task::JoinSet<_>, peer: PeerId| {
-                    let transport=d.transport.clone(); let scope=scope.clone(); let id=id.clone();
-                    queries.spawn(async move {transport.get_shared(&peer,&scope,&id).await});
-                };
-                if let Some(peer)=peers.next(){start(&mut queries,peer);}
+                type Query<'a> = Pin<Box<dyn Future<Output=Result<Option<bytes::Bytes>>> + Send + 'a>>;
+                let mut queries: Vec<Query<'_>>=Vec::with_capacity(2);
+                fn start<'a>(queries: &mut Vec<Query<'a>>, d: &'a DistributedRuntime, scope: &'a CacheScope, id: &'a BlockId, peer: PeerId) {
+                    queries.push(Box::pin(async move {d.transport.get_shared(&peer,scope,id).await}));
+                }
+                if let Some(peer)=peers.next(){start(&mut queries,d,scope,id,peer);}
                 let hedge=tokio::time::sleep(d.config.hedge_delay.min(d.config.deadline/4));
                 tokio::pin!(hedge);
                 let mut hedged=false;
@@ -521,15 +544,29 @@ impl CachedBlockStore {
                     tokio::select! {
                         _=&mut hedge, if !hedged=>{
                             hedged=true;
-                            if let Some(peer)=peers.next(){start(&mut queries,peer);}
+                            if let Some(peer)=peers.next(){start(&mut queries,d,scope,id,peer);}
                         }
-                        result=queries.join_next()=>{
+                        result=poll_fn(|cx| {
+                            for index in 0..queries.len() {
+                                // Preserve optional-query panic fallback without spawning
+                                // owners that can outlive a winning/canceled read.
+                                let polled=std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| queries[index].as_mut().poll(cx)));
+                                let result=match polled {
+                                    Ok(Poll::Pending)=>continue,
+                                    Ok(Poll::Ready(result))=>result,
+                                    Err(_)=>Err(error()),
+                                };
+                                drop(queries.swap_remove(index));
+                                return Poll::Ready(result);
+                            }
+                            Poll::Pending
+                        })=>{
                             match result {
-                                Some(Ok(Ok(Some(bytes)))) if bytes.len()<=self.cache.max_blob_bytes() && self.policy.verify(id,&bytes).is_ok()=>return Ok(Some(bytes)),
-                                Some(Ok(Ok(None)))=>{},
+                                Ok(Some(bytes)) if bytes.len()<=self.cache.max_blob_bytes() && self.policy.verify(id,&bytes).is_ok()=>return Ok(Some(bytes)),
+                                Ok(None)=>{},
                                 _=>{self.metrics.cache_errors.fetch_add(1,Ordering::Relaxed);}
                             }
-                            if let Some(peer)=peers.next(){start(&mut queries,peer);}
+                            if let Some(peer)=peers.next(){start(&mut queries,d,scope,id,peer);}
                         }
                     }
                 }
@@ -728,15 +765,10 @@ impl BlockStore for CachedBlockStore {
             .map_err(|_| error())?
             .retain(|b| &b.id != id);
         if let Some(scope) = self.current() {
-            let permit = self.cache.io_permit().await?;
-            let cache = self.cache.clone();
             let id = id.clone();
-            tokio::task::spawn_blocking(move || {
-                let _permit = permit;
-                cache.invalidate(&scope, &id)
-            })
-            .await
-            .map_err(|_| error())?;
+            self.cache
+                .run_blocking(move |cache| cache.invalidate(&scope, &id))
+                .await?;
         }
         Ok(())
     }
@@ -751,14 +783,9 @@ impl BlockStore for CachedBlockStore {
             .map_err(|_| error())?
             .retain(|b| live.contains(&b.id));
         if let Some(scope) = self.current() {
-            let permit = self.cache.io_permit().await?;
-            let cache = self.cache.clone();
-            tokio::task::spawn_blocking(move || {
-                let _permit = permit;
-                cache.invalidate_scope(&scope)
-            })
-            .await
-            .map_err(|_| error())?;
+            self.cache
+                .run_blocking(move |cache| cache.invalidate_scope(&scope))
+                .await?;
         }
         Ok(report)
     }
@@ -928,7 +955,7 @@ mod tests {
             Ok(())
         }
     }
-    fn runtime(peer: Arc<TestPeer>) -> Arc<DistributedRuntime> {
+    fn runtime(peer: Arc<dyn PeerTransport>) -> Arc<DistributedRuntime> {
         DistributedRuntime::new(
             FixedDiscovery::new(vec![PeerId("self".into()), PeerId("peer".into())], 2).unwrap(),
             peer,
@@ -977,7 +1004,7 @@ mod tests {
         }
         assert_eq!(backing.gets.load(Ordering::Relaxed), 1);
         assert_eq!(store.metrics().snapshot().backing_fetches, 1);
-        runtime.shutdown().await;
+        runtime.shutdown().await.unwrap();
     }
     #[tokio::test]
     async fn corrupt_peer_content_falls_back_and_opaque_peer_content_is_usable() {
@@ -1012,7 +1039,7 @@ mod tests {
                 backing.gets.load(Ordering::Relaxed),
                 u64::from(policy != IntegrityPolicy::Opaque)
             );
-            runtime.shutdown().await;
+            runtime.shutdown().await.unwrap();
         }
     }
     #[tokio::test]
@@ -1039,6 +1066,82 @@ mod tests {
         );
         drop(held);
     }
+    #[tokio::test]
+    async fn shutdown_does_not_acknowledge_a_detached_fill_still_holding_disk_ownership() {
+        let backing = Backing::new();
+        let (dir, cache, store) = fixture(backing);
+        store.prepare_concurrent_backing().await.unwrap();
+        let scope = store.current().unwrap();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (worker_tx, worker_rx) = tokio::sync::oneshot::channel();
+        *cache.test_disk_insert_gate.lock().unwrap() = Some(crate::local::TestDiskInsertGate {
+            entered: entered_tx,
+            release: release_rx,
+        });
+        *cache.test_fill_worker.lock().unwrap() = Some(worker_tx);
+        let bytes = b"detached fill shutdown ownership";
+        let id = store.put(bytes).await.unwrap();
+        store.flush().await.unwrap();
+        // The handle is the one submitted by the actual optional fill path.
+        let worker = worker_rx.await.expect("actual fill worker handle retained");
+        let entered = timeout(Duration::from_secs(2), entered_rx).await;
+        let entered_disk = matches!(entered, Ok(Ok(())));
+        let shutdown_returned = if entered_disk {
+            // Exceeds LocalCache's unchanged two-second drain timeout.
+            timeout(Duration::from_millis(2500), cache.shutdown())
+                .await
+                .is_ok_and(|result| result.is_ok())
+        } else {
+            false
+        };
+        let worker_finished_before_release = worker.poll_result().is_ready();
+        let config = LocalCacheConfig {
+            directory: dir.path().join("cache"),
+            memory_bytes: 8192,
+            disk_bytes: 16384,
+            max_entries: 128,
+            max_blob_bytes: 4096,
+        };
+        // Remove the test/runtime cache owners. Only the real paused worker
+        // may retain the old LocalCache's directory lock at this point.
+        drop(store);
+        drop(cache);
+        let reuse_while_held = LocalCache::new(config.clone());
+        let directory_still_owned = reuse_while_held.is_err();
+        drop(reuse_while_held);
+        // Release and positively join before any assertion or fixture deletion.
+        drop(release_tx);
+        let joined = worker.join().await;
+        let reopened = LocalCache::new(config);
+        let fresh_bytes = reopened.as_ref().ok().and_then(|cache| {
+            cache
+                .get_disk(&scope, &id, IntegrityPolicy::Sha256Prefixed)
+                .ok()
+                .flatten()
+        });
+        drop(reopened);
+        assert!(
+            entered_disk,
+            "actual fill did not enter the disk-locked insert"
+        );
+        assert!(!worker_finished_before_release, "actual fill was not held");
+        assert!(
+            directory_still_owned,
+            "paused worker did not retain the directory lock"
+        );
+        assert!(joined.is_ok(), "actual fill worker did not positively join");
+        assert_eq!(
+            fresh_bytes.as_deref(),
+            Some(bytes.as_slice()),
+            "fresh cache reuse lost completed disk bytes"
+        );
+        assert!(
+            !shutdown_returned,
+            "LocalCache shutdown acknowledged before the detached fill released disk ownership"
+        );
+    }
+
     struct OrderedPeers;
     #[async_trait]
     impl Discovery for OrderedPeers {
@@ -1061,6 +1164,7 @@ mod tests {
     struct LatencyPeer {
         bytes: Vec<u8>,
         calls: AtomicU64,
+        reads: AtomicU64,
         active: AtomicU64,
         peak: AtomicU64,
         release: tokio::sync::Notify,
@@ -1075,6 +1179,8 @@ mod tests {
     impl PeerTransport for LatencyPeer {
         async fn get(&self, peer: &PeerId, _: &CacheScope, _: &BlockId) -> Result<Option<Vec<u8>>> {
             self.calls.fetch_add(1, Ordering::Relaxed);
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            let _active = ActivePlacement(&self.reads);
             if peer.0 == "slow" {
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
@@ -1092,10 +1198,178 @@ mod tests {
         Arc::new(LatencyPeer {
             bytes: b"original".to_vec(),
             calls: AtomicU64::new(0),
+            reads: AtomicU64::new(0),
             active: AtomicU64::new(0),
             peak: AtomicU64::new(0),
             release: tokio::sync::Notify::new(),
         })
+    }
+    #[tokio::test]
+    async fn cancelled_maintenance_close_rejoins_actual_placement_owners() {
+        let (_dir, cache, _) = fixture(Backing::new());
+        let peer = latency_peer();
+        let runtime = DistributedRuntime::new(
+            Arc::new(OrderedPeers),
+            peer.clone(),
+            PeerId("self".into()),
+            DistributedConfig {
+                deadline: Duration::from_secs(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let scope = Arc::new(CacheScope {
+            identity: ScopeIdentity {
+                cluster: "c".into(),
+                partition: "p".into(),
+                drive: "d".into(),
+            },
+            backing: ConcurrentBackingId::from_bytes([1; 16]).unwrap(),
+        });
+        runtime.enqueue(
+            &cache,
+            scope.clone(),
+            BlockId("held".into()),
+            Arc::from(b"bytes".as_slice()),
+            &CacheMetrics::default(),
+        );
+        timeout(Duration::from_secs(1), async {
+            while peer.active.load(Ordering::Relaxed) != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let r = runtime.clone();
+        let first = tokio::spawn(async move { r.shutdown().await });
+        while !runtime.stopping.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        let before = peer.peak.load(Ordering::Relaxed);
+        runtime.enqueue(
+            &cache,
+            scope,
+            BlockId("closed".into()),
+            Arc::from(b"bytes".as_slice()),
+            &CacheMetrics::default(),
+        );
+        let r = runtime.clone();
+        let mut second = tokio::spawn(async move { r.shutdown().await });
+        let premature = timeout(Duration::from_millis(50), &mut second).await;
+        peer.release.notify_waiters();
+        let joined = second.await.unwrap();
+        assert!(
+            premature.is_err(),
+            "maintenance close acknowledged live placement owners"
+        );
+        assert!(joined.is_ok());
+        assert_eq!(peer.active.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            peer.peak.load(Ordering::Relaxed),
+            before,
+            "sealed maintenance admitted a new transfer"
+        );
+        assert_eq!(
+            Arc::strong_count(&peer),
+            2,
+            "actual placement task transport owners must be released before ACK"
+        );
+    }
+    struct PanicPlacement(AtomicBool);
+    #[async_trait]
+    impl PeerTransport for PanicPlacement {
+        async fn get(&self, _: &PeerId, _: &CacheScope, _: &BlockId) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        async fn put(&self, _: &PeerId, _: &CacheScope, _: &BlockId, _: &[u8]) -> Result<()> {
+            self.0.store(true, Ordering::Release);
+            panic!("actual placement task failure")
+        }
+    }
+    #[tokio::test]
+    async fn actual_placement_panic_is_a_sticky_failed_close() {
+        let (_dir, cache, _) = fixture(Backing::new());
+        let peer = Arc::new(PanicPlacement(AtomicBool::new(false)));
+        let runtime = DistributedRuntime::new(
+            Arc::new(OrderedPeers),
+            peer.clone(),
+            PeerId("self".into()),
+            DistributedConfig::default(),
+        )
+        .unwrap();
+        let scope = Arc::new(CacheScope {
+            identity: ScopeIdentity {
+                cluster: "c".into(),
+                partition: "p".into(),
+                drive: "d".into(),
+            },
+            backing: ConcurrentBackingId::from_bytes([1; 16]).unwrap(),
+        });
+        runtime.enqueue(
+            &cache,
+            scope,
+            BlockId("panic".into()),
+            Arc::from(b"bytes".as_slice()),
+            &CacheMetrics::default(),
+        );
+        // Wait for the actual supervisor to consume the accepted item, rather
+        // than racing shutdown against a still-queued placement.
+        timeout(Duration::from_secs(1), async {
+            while !peer.0.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        for _ in 0..2 {
+            assert!(
+                runtime
+                    .shutdown()
+                    .await
+                    .is_err_and(|e| e.code == ErrorCode::Eio)
+            );
+        }
+    }
+    struct PanicQuery;
+    #[async_trait]
+    impl PeerTransport for PanicQuery {
+        async fn get(&self, _: &PeerId, _: &CacheScope, _: &BlockId) -> Result<Option<Vec<u8>>> {
+            panic!("optional inline peer query failure")
+        }
+        async fn put(&self, _: &PeerId, _: &CacheScope, _: &BlockId, _: &[u8]) -> Result<()> {
+            Ok(())
+        }
+    }
+    #[tokio::test]
+    async fn inline_peer_query_panic_preserves_exact_backing_fallback() {
+        let backing = Backing::new();
+        let id = backing.put(b"panic fallback").await.unwrap();
+        let (_dir, cache, _) = fixture(backing.clone());
+        let runtime = runtime(Arc::new(PanicQuery));
+        let store = CachedBlockStore::new(
+            backing.clone(),
+            cache.clone(),
+            ScopeIdentity {
+                cluster: "c".into(),
+                partition: "p".into(),
+                drive: "d".into(),
+            },
+            IntegrityPolicy::Sha256Prefixed,
+        )
+        .with_runtime(runtime.clone());
+        store.prepare_concurrent_backing().await.unwrap();
+        let bytes = store.get(&id).await.unwrap();
+        let errors = store.metrics().snapshot().cache_errors;
+        runtime.shutdown().await.unwrap();
+        cache.shutdown().await.unwrap();
+        assert_eq!(bytes, b"panic fallback");
+        assert_eq!(backing.gets.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            errors, 1,
+            "optional query panic must retain its cache error accounting"
+        );
     }
     #[tokio::test]
     async fn slow_owner_does_not_hide_a_healthy_replica() {
@@ -1134,7 +1408,12 @@ mod tests {
         );
         assert!(started.elapsed() < Duration::from_millis(150));
         assert_eq!(peer.calls.load(Ordering::Relaxed), 2);
-        runtime.shutdown().await;
+        assert_eq!(
+            peer.reads.load(Ordering::Relaxed),
+            0,
+            "completed hedged read must release every actual query owner"
+        );
+        runtime.shutdown().await.unwrap();
     }
     #[tokio::test]
     async fn placement_tasks_overlap_with_a_fixed_upper_bound() {
@@ -1178,7 +1457,7 @@ mod tests {
             "four tasks, at most two replicas each"
         );
         peer.release.notify_waiters();
-        runtime.shutdown().await;
+        runtime.shutdown().await.unwrap();
         assert_eq!(peer.active.load(Ordering::Relaxed), 0);
     }
 }

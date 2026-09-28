@@ -428,3 +428,180 @@ async fn lazy_aborted_worker_retains_both_installed_consuming_futures_and_termin
     // is not a claim that listener internals survived an internal poll panic.
     std::mem::forget(keeper);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn lazy_actual_server_cache_unacknowledged_io_keeps_directory_and_keeper() {
+    use base64::Engine;
+    use mount_rs_blob_cache::{LocalCache, LocalCacheConfig};
+    // Preserve the fixture before installing an intentionally unsuccessful
+    // owner; this control must not remove its files on a failed cleanup ACK.
+    let directory = tempfile::tempdir().unwrap().keep();
+    let rcgen::CertifiedKey { cert, signing_key } =
+        rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let pem = |label: &str, der: &[u8]| {
+        format!(
+            "-----BEGIN {label}-----\n{}\n-----END {label}-----\n",
+            base64::engine::general_purpose::STANDARD.encode(der)
+        )
+    };
+    std::fs::write(
+        directory.join("certificate.pem"),
+        pem("CERTIFICATE", cert.der()),
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("key.pem"),
+        pem("PRIVATE KEY", &signing_key.serialize_der()),
+    )
+    .unwrap();
+    let configuration: crate::server_cache::CacheServiceConfig = serde_json::from_value(serde_json::json!({
+        "cluster":"actual-drain", "node_id":"node", "disk_path":"cache", "ram_bytes":64,
+        "disk_bytes":256, "max_entries":10, "max_blob_bytes":16, "peer_listen":"127.0.0.1:0",
+        "ca_certificate":"certificate.pem", "certificate":"certificate.pem", "private_key":"key.pem",
+        "discovery":"peer-query", "peers":[]
+    })).unwrap();
+    let actual =
+        Arc::new(ServerCache::start(&configuration, &directory.join("config.json")).unwrap());
+    let cache_owner = Arc::downgrade(&actual.local);
+    let server_owner = Arc::downgrade(&actual);
+    // This is an actual admitted IO ticket, not a disk-body qualification.
+    // The cache's separate real-worker controls exercise disk execution/joins.
+    let ticket = actual.local.io_permit().await.unwrap();
+    let keeper = Arc::new(RemoteRuntimeKeeper::default());
+    let scope = keeper.reserve().unwrap();
+    let context = StorageContext::new(2).unwrap();
+    scope.0.install_context(context.clone());
+    scope.0.install_cache(actual);
+    let result = bounded(scope.0.close()).await;
+    drop(ticket);
+    let repeated = bounded(scope.0.close()).await;
+    let still_owned = LocalCache::new(LocalCacheConfig {
+        directory: directory.join("cache"),
+        memory_bytes: 64,
+        disk_bytes: 256,
+        max_entries: 10,
+        max_blob_bytes: 16,
+    })
+    .is_err();
+    assert!(result.is_err_and(|error| error.code == ErrorCode::Ebusy));
+    assert!(repeated.is_err_and(|error| error.code == ErrorCode::Ebusy));
+    assert!(server_owner.upgrade().is_some() && cache_owner.upgrade().is_some());
+    assert!(
+        still_owned,
+        "unsuccessful cache cleanup released the real directory lock"
+    );
+    assert!(!context_usable(&context).await);
+    assert!(matches!(keeper.reserve(), Err(error) if error.code == ErrorCode::Ebusy));
+    // The actual failed owner remains in the keeper through process exit.
+    std::mem::forget(keeper);
+}
+
+// These controls inject the cache lifecycle boundary. They prove keeper/result
+// ownership, not that an actual LocalCache disk worker or QUIC driver drained.
+struct CacheDrainSeam {
+    calls: Arc<AtomicUsize>,
+    entered: Arc<Notify>,
+    release: Option<Arc<Notify>>,
+    failure: Option<ErrorCode>,
+    dropped: Arc<AtomicUsize>,
+}
+
+impl Drop for CacheDrainSeam {
+    fn drop(&mut self) {
+        self.dropped.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl ConstructionResource for CacheDrainSeam {
+    async fn close(&self) -> Result<()> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.entered.notify_one();
+        if let Some(release) = &self.release {
+            release.notified().await;
+        }
+        self.failure.map_or(Ok(()), |code| Err(FsError::new(code)))
+    }
+}
+
+#[tokio::test]
+async fn lazy_cache_cleanup_seam_failure_retains_owner_and_keeper_without_retry() {
+    let keeper = Arc::new(RemoteRuntimeKeeper::default());
+    let scope = keeper.reserve().unwrap();
+    let context = StorageContext::new(2).unwrap();
+    scope.0.install_context(context.clone());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let cache = Arc::new(CacheDrainSeam {
+        calls: calls.clone(),
+        entered: Arc::new(Notify::new()),
+        release: None,
+        failure: Some(ErrorCode::Eacces),
+        dropped: dropped.clone(),
+    });
+    let owner = Arc::downgrade(&cache);
+    lock(&scope.0.owned).cache = Some(cache);
+
+    for _ in 0..2 {
+        assert!(
+            matches!(bounded(scope.0.close()).await, Err(error) if error.code == ErrorCode::Eacces)
+        );
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(dropped.load(Ordering::SeqCst), 0);
+    assert!(owner.upgrade().is_some());
+    assert!(lock(&scope.0.owned).cache.is_some());
+    assert!(
+        !context_usable(&context).await,
+        "context precedes cache close"
+    );
+    assert!(matches!(keeper.reserve(), Err(error) if error.code == ErrorCode::Ebusy));
+    // The injected unsuccessful owner remains retained until process exit.
+    std::mem::forget(keeper);
+}
+
+#[tokio::test]
+async fn lazy_cancelled_cache_cleanup_seam_waiter_joins_one_owned_drain() {
+    let keeper = Arc::new(RemoteRuntimeKeeper::default());
+    let scope = keeper.reserve().unwrap();
+    let context = StorageContext::new(2).unwrap();
+    scope.0.install_context(context.clone());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let cache = Arc::new(CacheDrainSeam {
+        calls: calls.clone(),
+        entered: entered.clone(),
+        release: Some(release.clone()),
+        failure: None,
+        dropped: dropped.clone(),
+    });
+    let owner = Arc::downgrade(&cache);
+    lock(&scope.0.owned).cache = Some(cache);
+    let first = tokio::spawn({
+        let lifecycle = scope.0.clone();
+        async move { lifecycle.close().await }
+    });
+    bounded(entered.notified()).await;
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(dropped.load(Ordering::SeqCst), 0);
+    assert!(owner.upgrade().is_some());
+    assert!(lock(&scope.0.owned).current.is_some());
+    assert!(matches!(keeper.reserve(), Err(error) if error.code == ErrorCode::Ebusy));
+    assert!(
+        !context_usable(&context).await,
+        "context precedes cache close"
+    );
+
+    release.notify_one();
+    bounded(scope.0.close()).await.unwrap();
+    bounded(scope.0.close()).await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    assert!(owner.upgrade().is_none());
+    assert!(keeper.is_empty());
+}

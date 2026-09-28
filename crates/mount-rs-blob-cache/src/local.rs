@@ -1,3 +1,4 @@
+use crate::owned::{OwnedTask, notify_waker};
 use crate::*;
 use std::{
     collections::BTreeMap,
@@ -8,6 +9,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
+    task::{Poll, Waker},
 };
 #[cfg(unix)]
 use std::{
@@ -51,6 +53,135 @@ impl Drop for PendingReservation {
         self.used.fetch_sub(self.bytes, Ordering::AcqRel);
     }
 }
+#[cfg(all(test, unix))]
+pub(crate) struct TestDiskInsertGate {
+    pub(crate) entered: tokio::sync::oneshot::Sender<()>,
+    pub(crate) release: std::sync::mpsc::Receiver<()>,
+}
+
+struct IoState {
+    sealed: bool,
+    permits: usize,
+    workers: Vec<Arc<OwnedTask>>,
+    failure: Option<FsError>,
+}
+struct IoRegistry {
+    state: Mutex<IoState>,
+    changed: Arc<tokio::sync::Notify>,
+    wake: Waker,
+}
+impl IoRegistry {
+    fn new() -> Arc<Self> {
+        let changed = Arc::new(tokio::sync::Notify::new());
+        let wake = notify_waker(&changed);
+        Arc::new(Self {
+            state: Mutex::new(IoState {
+                sealed: false,
+                permits: 0,
+                workers: Vec::with_capacity(8),
+                failure: None,
+            }),
+            changed,
+            wake,
+        })
+    }
+    fn lock(&self) -> std::sync::MutexGuard<'_, IoState> {
+        match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                let mut state = poisoned.into_inner();
+                state.sealed = true;
+                state.failure.get_or_insert_with(error);
+                state
+            }
+        }
+    }
+    fn reap(&self, state: &mut IoState) {
+        let IoState {
+            workers,
+            sealed,
+            failure,
+            ..
+        } = state;
+        workers.retain(|worker| match worker.poll_result() {
+            Poll::Pending => true,
+            Poll::Ready(result) => {
+                if let Err(error) = result {
+                    *sealed = true;
+                    failure.get_or_insert(error);
+                }
+                false
+            }
+        });
+    }
+}
+
+/// An admitted IO slot. Dropping it wakes an owned shutdown even when the
+/// request that acquired it was canceled before submitting a blocking worker.
+pub struct CacheIoPermit {
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    registry: Arc<IoRegistry>,
+}
+impl Drop for CacheIoPermit {
+    fn drop(&mut self) {
+        let mut state = self.registry.lock();
+        if let Some(remaining) = state.permits.checked_sub(1) {
+            state.permits = remaining;
+        } else {
+            state.sealed = true;
+            state.failure.get_or_insert_with(error);
+        }
+        drop(state);
+        // Publish the accounting change before making its physical slot
+        // available to another admission; the registry count stays <=8.
+        drop(self.permit.take());
+        self.registry.changed.notify_waiters();
+    }
+}
+
+/// Only the blocking launcher can create this view. Its exact cache owner and
+/// admitted slot remain alive until the callback returns, including after the
+/// cache seals admission. Callbacks borrow it and cannot take or clone its slot.
+pub(crate) struct AdmittedCache {
+    cache: Arc<LocalCache>,
+    _permit: CacheIoPermit,
+}
+impl AdmittedCache {
+    pub(crate) fn get_disk(
+        &self,
+        scope: &CacheScope,
+        id: &BlockId,
+        policy: IntegrityPolicy,
+    ) -> Option<Vec<u8>> {
+        self.cache.get_disk_admitted(scope, id, policy)
+    }
+    #[cfg(test)]
+    fn insert(
+        &self,
+        scope: &CacheScope,
+        id: &BlockId,
+        bytes: &[u8],
+        policy: IntegrityPolicy,
+    ) -> Result<()> {
+        self.cache.insert_admitted(scope, id, bytes, policy)
+    }
+    pub(crate) fn insert_shared(
+        &self,
+        scope: &CacheScope,
+        id: &BlockId,
+        bytes: Arc<[u8]>,
+        policy: IntegrityPolicy,
+    ) -> Result<()> {
+        self.cache.insert_shared_admitted(scope, id, bytes, policy)
+    }
+    pub(crate) fn invalidate(&self, scope: &CacheScope, id: &BlockId) {
+        self.cache.invalidate_admitted(scope, id)
+    }
+    pub(crate) fn invalidate_scope(&self, scope: &CacheScope) {
+        self.cache.invalidate_scope_admitted(scope)
+    }
+}
+
 /// One bounded cache shared across drives. Disk operations serialize independently
 /// of the RAM index; no filesystem operation holds the index mutex.
 pub struct LocalCache {
@@ -61,6 +192,11 @@ pub struct LocalCache {
     _lock: File,
     pending: Arc<AtomicUsize>,
     pub(crate) io_permits: Arc<tokio::sync::Semaphore>,
+    io: Arc<IoRegistry>,
+    #[cfg(all(test, unix))]
+    pub(crate) test_disk_insert_gate: Mutex<Option<TestDiskInsertGate>>,
+    #[cfg(all(test, unix))]
+    pub(crate) test_fill_worker: Mutex<Option<tokio::sync::oneshot::Sender<Arc<OwnedTask>>>>,
 }
 impl LocalCache {
     /// Secure descriptor-relative disk operations currently require Unix.
@@ -178,6 +314,11 @@ impl LocalCache {
             _lock: lock,
             pending: Arc::new(AtomicUsize::new(0)),
             io_permits: Arc::new(tokio::sync::Semaphore::new(8)),
+            io: IoRegistry::new(),
+            #[cfg(all(test, unix))]
+            test_disk_insert_gate: Mutex::new(None),
+            #[cfg(all(test, unix))]
+            test_fill_worker: Mutex::new(None),
         }))
     }
     pub fn reserve_pending(&self, payload: usize) -> Option<PendingReservation> {
@@ -199,12 +340,125 @@ impl LocalCache {
     pub fn max_blob_bytes(&self) -> usize {
         self.config.max_blob_bytes
     }
-    pub async fn io_permit(&self) -> Result<tokio::sync::OwnedSemaphorePermit> {
-        self.io_permits
+    pub async fn io_permit(&self) -> Result<CacheIoPermit> {
+        let permit = self
+            .io_permits
             .clone()
             .acquire_owned()
             .await
-            .map_err(|_| error())
+            .map_err(|_| FsError::new(ErrorCode::Ebusy).with_syscall("closed cache IO"))?;
+        self.admit_permit(permit)
+    }
+    fn try_io_permit(&self) -> Result<CacheIoPermit> {
+        let permit = self
+            .io_permits
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| FsError::new(ErrorCode::Ebusy).with_syscall("cache IO admission"))?;
+        self.admit_permit(permit)
+    }
+    fn admit_permit(&self, permit: tokio::sync::OwnedSemaphorePermit) -> Result<CacheIoPermit> {
+        let mut state = self.io.lock();
+        self.io.reap(&mut state);
+        if let Some(error) = &state.failure {
+            return Err(error.clone());
+        }
+        if state.sealed {
+            return Err(FsError::new(ErrorCode::Ebusy).with_syscall("closed cache IO"));
+        }
+        state.permits = state
+            .permits
+            .checked_add(1)
+            .filter(|count| *count <= 8)
+            .ok_or_else(error)?;
+        Ok(CacheIoPermit {
+            permit: Some(permit),
+            registry: self.io.clone(),
+        })
+    }
+    fn start_blocking<R: Send + 'static>(
+        self: &Arc<Self>,
+        state: &mut IoState,
+        permit: CacheIoPermit,
+        work: impl FnOnce(&AdmittedCache) -> R + Send + 'static,
+    ) -> (Arc<OwnedTask>, tokio::sync::oneshot::Receiver<R>) {
+        let cache = AdmittedCache {
+            cache: self.clone(),
+            _permit: permit,
+        };
+        let (send, receive) = tokio::sync::oneshot::channel();
+        let handle = tokio::task::spawn_blocking(move || {
+            let result = work(&cache);
+            let _ = send.send(result);
+            Ok(())
+        });
+        let worker = OwnedTask::with_signal(handle, self.io.changed.clone(), self.io.wake.clone());
+        state.workers.push(worker.clone());
+        #[cfg(all(test, unix))]
+        if let Some(retained) = self
+            .test_fill_worker
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+        {
+            let _ = retained.send(worker.clone());
+        }
+        (worker, receive)
+    }
+    /// Submit optional work without waiting for a slot or disk completion.
+    /// Actual joins remain bounded by the same eight IO slots, even if callers
+    /// abandon their result or a blocking closure panics.
+    pub(crate) fn try_spawn_blocking<R: Send + 'static>(
+        self: &Arc<Self>,
+        work: impl FnOnce(&AdmittedCache) -> R + Send + 'static,
+    ) -> Result<()> {
+        let raw = self
+            .io_permits
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| FsError::new(ErrorCode::Ebusy))?;
+        let permit = self.admit_permit(raw)?;
+        let mut state = self.io.lock();
+        self.io.reap(&mut state);
+        if let Some(error) = &state.failure {
+            return Err(error.clone());
+        }
+        if state.sealed || state.workers.len() == 8 {
+            return Err(FsError::new(ErrorCode::Ebusy).with_syscall("cache worker admission"));
+        }
+        let (_, receive) = self.start_blocking(&mut state, permit, work);
+        drop(receive);
+        Ok(())
+    }
+    pub(crate) async fn run_blocking<R: Send + 'static>(
+        self: &Arc<Self>,
+        work: impl FnOnce(&AdmittedCache) -> R + Send + 'static,
+    ) -> Result<R> {
+        let permit = self.io_permit().await?;
+        let (worker, receive) = loop {
+            let changed = self.io.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            {
+                let mut state = self.io.lock();
+                self.io.reap(&mut state);
+                if let Some(error) = &state.failure {
+                    return Err(error.clone());
+                }
+                if state.sealed {
+                    return Err(
+                        FsError::new(ErrorCode::Ebusy).with_syscall("cache worker admission")
+                    );
+                }
+                if state.workers.len() < 8 {
+                    break self.start_blocking(&mut state, permit, work);
+                }
+            }
+            changed.await;
+        };
+        let result = receive.await;
+        worker.join().await?;
+        result.map_err(|_| error())
     }
     pub fn scope_hash(scope: &CacheScope) -> CacheKey {
         hash_parts(&[
@@ -321,11 +575,22 @@ impl LocalCache {
         scope: &CacheScope,
         id: &BlockId,
         policy: IntegrityPolicy,
-    ) -> Option<Vec<u8>> {
-        self.get_memory(scope, id, policy)
-            .or_else(|| self.get_disk(scope, id, policy))
+    ) -> Result<Option<Vec<u8>>> {
+        let _permit = self.try_io_permit()?;
+        Ok(self
+            .get_memory(scope, id, policy)
+            .or_else(|| self.get_disk_admitted(scope, id, policy)))
     }
     pub fn get_disk(
+        &self,
+        scope: &CacheScope,
+        id: &BlockId,
+        policy: IntegrityPolicy,
+    ) -> Result<Option<Vec<u8>>> {
+        let _permit = self.try_io_permit()?;
+        Ok(self.get_disk_admitted(scope, id, policy))
+    }
+    fn get_disk_admitted(
         &self,
         scope: &CacheScope,
         id: &BlockId,
@@ -399,10 +664,20 @@ impl LocalCache {
         bytes: &[u8],
         policy: IntegrityPolicy,
     ) -> Result<()> {
+        let _permit = self.try_io_permit()?;
+        self.insert_admitted(scope, id, bytes, policy)
+    }
+    fn insert_admitted(
+        &self,
+        scope: &CacheScope,
+        id: &BlockId,
+        bytes: &[u8],
+        policy: IntegrityPolicy,
+    ) -> Result<()> {
         if bytes.len() > self.config.max_blob_bytes {
             return Err(error());
         }
-        self.insert_shared(scope, id, Arc::from(bytes), policy)
+        self.insert_shared_admitted(scope, id, Arc::from(bytes), policy)
     }
     /// Admit immutable verified bytes to RAM without touching the filesystem.
     /// New entries are skipped when making room would require a disk eviction.
@@ -477,6 +752,16 @@ impl LocalCache {
         bytes: Arc<[u8]>,
         policy: IntegrityPolicy,
     ) -> Result<()> {
+        let _permit = self.try_io_permit()?;
+        self.insert_shared_admitted(scope, id, bytes, policy)
+    }
+    fn insert_shared_admitted(
+        &self,
+        scope: &CacheScope,
+        id: &BlockId,
+        bytes: Arc<[u8]>,
+        policy: IntegrityPolicy,
+    ) -> Result<()> {
         if bytes.len() > self.config.max_blob_bytes {
             return Err(error());
         }
@@ -485,6 +770,19 @@ impl LocalCache {
         let disk_bytes = bytes.len().checked_add(32).ok_or_else(error)?;
         let memory = bytes.len() <= self.config.memory_bytes;
         let _disk = self.disk_io.lock().map_err(|_| error())?;
+        #[cfg(all(test, unix))]
+        {
+            let gate = self
+                .test_disk_insert_gate
+                .lock()
+                .map_err(|_| error())?
+                .take();
+            if let Some(gate) = gate {
+                let _ = gate.entered.send(());
+                // Dropping the test's release sender also releases the real worker.
+                let _ = gate.release.recv();
+            }
+        }
         self.retry_quarantine();
         let disk = disk_bytes <= self.config.disk_bytes
             && self
@@ -668,7 +966,27 @@ impl LocalCache {
             }
         }
     }
-    pub fn invalidate(&self, scope: &CacheScope, id: &BlockId) {
+    pub fn invalidate(&self, scope: &CacheScope, id: &BlockId) -> Result<()> {
+        let _permit = self.try_io_permit()?;
+        self.invalidate_admitted(scope, id);
+        Ok(())
+    }
+    /// Invalidate within an already admitted slot, including a batch that holds
+    /// every IO slot. The exclusive borrow prevents concurrent slot reuse, and
+    /// a permit from another cache cannot authorize this cache's disk work.
+    pub fn invalidate_with_permit(
+        &self,
+        permit: &mut CacheIoPermit,
+        scope: &CacheScope,
+        id: &BlockId,
+    ) -> Result<()> {
+        if permit.permit.is_none() || !Arc::ptr_eq(&permit.registry, &self.io) {
+            return Err(error().with_syscall("cache IO permit identity"));
+        }
+        self.invalidate_admitted(scope, id);
+        Ok(())
+    }
+    fn invalidate_admitted(&self, scope: &CacheScope, id: &BlockId) {
         let key = Self::key(scope, id);
         if let Ok(_disk) = self.disk_io.lock() {
             let remove = self
@@ -681,7 +999,12 @@ impl LocalCache {
             }
         }
     }
-    pub fn invalidate_scope(&self, scope: &CacheScope) {
+    pub fn invalidate_scope(&self, scope: &CacheScope) -> Result<()> {
+        let _permit = self.try_io_permit()?;
+        self.invalidate_scope_admitted(scope);
+        Ok(())
+    }
+    fn invalidate_scope_admitted(&self, scope: &CacheScope) {
         if let Ok(_disk) = self.disk_io.lock() {
             let hash = Self::scope_hash(scope);
             let unlink = if let Ok(mut state) = self.state.lock() {
@@ -726,12 +1049,41 @@ impl LocalCache {
             state.entries.len() + state.quarantined.len(),
         )
     }
-    pub async fn shutdown(&self) {
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            self.io_permits.clone().acquire_many_owned(8),
-        )
-        .await;
+    pub async fn shutdown(&self) -> Result<()> {
+        {
+            let mut state = self.io.lock();
+            state.sealed = true;
+            self.io_permits.close();
+        }
+        let drain = async {
+            loop {
+                let changed = self.io.changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                {
+                    let mut state = self.io.lock();
+                    self.io.reap(&mut state);
+                    if let Some(error) = &state.failure {
+                        return Err(error.clone());
+                    }
+                    if state.workers.is_empty() && state.permits == 0 {
+                        return Ok(());
+                    }
+                }
+                changed.await;
+            }
+        };
+        match tokio::time::timeout(std::time::Duration::from_secs(2), drain).await {
+            Ok(result) => result,
+            Err(_) => {
+                let mut state = self.io.lock();
+                let failure = FsError::new(ErrorCode::Ebusy).with_syscall("cache IO drain timeout");
+                let failure = state.failure.get_or_insert(failure).clone();
+                drop(state);
+                self.io.changed.notify_waiters();
+                Err(failure)
+            }
+        }
     }
 }
 fn hash_parts(parts: &[&[u8]]) -> CacheKey {
@@ -879,6 +1231,309 @@ mod tests {
             max_blob_bytes: 16,
         }
     }
+    #[tokio::test]
+    async fn public_sync_disk_work_is_drained_before_shutdown_acknowledges() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = cfg(dir.path());
+        let cache = LocalCache::new(config.clone()).unwrap();
+        let s = scope("sync-drain");
+        let id = BlockId("finished".into());
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        *cache.test_disk_insert_gate.lock().unwrap() = Some(TestDiskInsertGate {
+            entered,
+            release: blocked,
+        });
+        let c = cache.clone();
+        let write_scope = s.clone();
+        let write_id = id.clone();
+        let worker = std::thread::spawn(move || {
+            c.insert(&write_scope, &write_id, b"done", IntegrityPolicy::Opaque)
+        });
+        ready.await.unwrap();
+        let c = cache.clone();
+        let mut close = tokio::spawn(async move { c.shutdown().await });
+        let observed = tokio::time::timeout(std::time::Duration::from_millis(50), &mut close).await;
+        let retained = LocalCache::new(config.clone()).is_err();
+        // Release and positively join the actual disk worker before any final
+        // assertion can unwind its fixture or hide a false acknowledgment.
+        drop(release);
+        let written = worker.join().unwrap();
+        let (premature, closed) = match observed {
+            Ok(result) => (true, result.unwrap()),
+            Err(_) => (false, close.await.unwrap()),
+        };
+        drop(cache);
+        let fresh = LocalCache::new(config).unwrap();
+        let bytes = fresh.get_disk(&s, &id, IntegrityPolicy::Opaque).unwrap();
+        assert!(written.is_ok());
+        assert!(closed.is_ok());
+        assert!(
+            retained,
+            "real synchronous worker must retain the disk owner"
+        );
+        assert_eq!(bytes.as_deref(), Some(b"done".as_slice()));
+        assert!(
+            !premature,
+            "shutdown acknowledged real public disk work before it drained"
+        );
+    }
+    #[tokio::test]
+    async fn public_sync_disk_work_is_rejected_after_shutdown_acknowledges() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = cfg(dir.path());
+        let cache = LocalCache::new(config.clone()).unwrap();
+        let s = scope("sealed");
+        let kept = BlockId("kept".into());
+        let late = BlockId("late".into());
+        cache
+            .insert(&s, &kept, b"done", IntegrityPolicy::Opaque)
+            .unwrap();
+        cache.shutdown().await.unwrap();
+        let attempts = [
+            cache.get(&s, &kept, IntegrityPolicy::Opaque).map(|_| ()),
+            cache
+                .get_disk(&s, &kept, IntegrityPolicy::Opaque)
+                .map(|_| ()),
+            cache.insert(&s, &late, b"late", IntegrityPolicy::Opaque),
+            cache.insert_shared(
+                &s,
+                &late,
+                Arc::from(b"late".as_slice()),
+                IntegrityPolicy::Opaque,
+            ),
+            cache.invalidate(&s, &kept),
+            cache.invalidate_scope(&s),
+        ];
+        drop(cache);
+        let fresh = LocalCache::new(config).unwrap();
+        let bytes = fresh.get_disk(&s, &kept, IntegrityPolicy::Opaque).unwrap();
+        let absent = fresh.get_disk(&s, &late, IntegrityPolicy::Opaque).unwrap();
+        assert_eq!(bytes.as_deref(), Some(b"done".as_slice()));
+        assert!(absent.is_none(), "sealed insertion changed the disk");
+        for result in attempts {
+            assert!(result.is_err_and(|e| e.code == ErrorCode::Ebusy));
+        }
+    }
+    #[tokio::test]
+    async fn public_sync_disk_admission_shares_all_eight_slots() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = cfg(dir.path());
+        config.memory_bytes = 0;
+        config.disk_bytes = 8 * 36;
+        config.max_entries = 8;
+        let cache = LocalCache::new(config.clone()).unwrap();
+        let s = scope("sync-capacity");
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        *cache.test_disk_insert_gate.lock().unwrap() = Some(TestDiskInsertGate {
+            entered,
+            release: blocked,
+        });
+        let mut workers = Vec::new();
+        for index in 0..8 {
+            let cache = cache.clone();
+            let scope = s.clone();
+            workers.push(std::thread::spawn(move || {
+                cache.insert(
+                    &scope,
+                    &BlockId(index.to_string()),
+                    b"done",
+                    IntegrityPolicy::Opaque,
+                )
+            }));
+        }
+        ready.await.unwrap();
+        let full = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while cache.io.lock().permits != 8 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .is_ok();
+        let ninth = full.then(|| {
+            cache.insert(
+                &s,
+                &BlockId("ninth".into()),
+                b"late",
+                IntegrityPolicy::Opaque,
+            )
+        });
+        let c = cache.clone();
+        let mut close = tokio::spawn(async move { c.shutdown().await });
+        let observed = tokio::time::timeout(std::time::Duration::from_millis(50), &mut close).await;
+        drop(release);
+        let written = workers
+            .into_iter()
+            .map(|worker| worker.join())
+            .collect::<Vec<_>>();
+        let (premature, closed) = match observed {
+            Ok(result) => (true, result.unwrap()),
+            Err(_) => (false, close.await.unwrap()),
+        };
+        let empty = cache.io.lock().permits == 0;
+        drop(cache);
+        let fresh = LocalCache::new(config).unwrap();
+        let bytes = (0..8)
+            .map(|index| {
+                fresh
+                    .get_disk(&s, &BlockId(index.to_string()), IntegrityPolicy::Opaque)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            full,
+            "all eight actual synchronous workers must be admitted"
+        );
+        assert!(
+            ninth.is_some_and(|result| result.is_err_and(|error| error.code == ErrorCode::Ebusy))
+        );
+        assert!(!premature);
+        assert!(closed.is_ok());
+        assert!(empty);
+        assert!(
+            written
+                .into_iter()
+                .all(|result| result.is_ok_and(|result| result.is_ok()))
+        );
+        assert!(
+            bytes
+                .into_iter()
+                .all(|bytes| bytes.as_deref() == Some(b"done".as_slice()))
+        );
+    }
+    #[tokio::test]
+    async fn public_sync_disk_admission_rejects_another_caches_permit() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = LocalCache::new(cfg(&dir.path().join("a"))).unwrap();
+        let b = LocalCache::new(cfg(&dir.path().join("b"))).unwrap();
+        let s = scope("permit-identity");
+        let id = BlockId("kept".into());
+        a.insert(&s, &id, b"done", IntegrityPolicy::Opaque).unwrap();
+        let mut wrong = b.io_permit().await.unwrap();
+        let result = a.invalidate_with_permit(&mut wrong, &s, &id);
+        let bytes = a.get_disk(&s, &id, IntegrityPolicy::Opaque).unwrap();
+        drop(wrong);
+        a.shutdown().await.unwrap();
+        b.shutdown().await.unwrap();
+        assert!(result.is_err_and(|error| error.code == ErrorCode::Eio));
+        assert_eq!(bytes.as_deref(), Some(b"done".as_slice()));
+    }
+    #[tokio::test]
+    async fn cancelled_close_rejoins_actual_worker_and_seals_new_io() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = cfg(dir.path());
+        let cache = LocalCache::new(config.clone()).unwrap();
+        let s = scope("drain");
+        let id = BlockId("finished".into());
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let c = cache.clone();
+        let write_scope = s.clone();
+        let write_id = id.clone();
+        let request = tokio::spawn(async move {
+            c.run_blocking(move |cache| {
+                entered.send(()).unwrap();
+                let _ = blocked.recv();
+                cache.insert(&write_scope, &write_id, b"done", IntegrityPolicy::Opaque)
+            })
+            .await
+        });
+        ready.await.unwrap();
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        let c = cache.clone();
+        let first = tokio::spawn(async move { c.shutdown().await });
+        while !cache.io.lock().sealed {
+            tokio::task::yield_now().await;
+        }
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        let admission = cache
+            .run_blocking(|_| panic!("sealed work must not start"))
+            .await;
+        let c = cache.clone();
+        let mut second = tokio::spawn(async move { c.shutdown().await });
+        let premature =
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut second).await;
+        // Unblock the actual worker before assertions that can unwind the fixture.
+        drop(release);
+        let joined = second.await.unwrap();
+        let drained = {
+            let state = cache.io.lock();
+            state.workers.is_empty() && state.permits == 0
+        };
+        drop(cache);
+        let fresh = LocalCache::new(config).unwrap();
+        let bytes = fresh.get_disk(&s, &id, IntegrityPolicy::Opaque).unwrap();
+        assert!(admission.is_err_and(|e| e.code == ErrorCode::Ebusy));
+        assert!(
+            premature.is_err(),
+            "second close acknowledged a live real worker"
+        );
+        assert!(
+            joined.is_ok(),
+            "second close did not positively join the worker"
+        );
+        assert!(drained);
+        assert_eq!(bytes.as_deref(), Some(b"done".as_slice()));
+    }
+    #[tokio::test]
+    async fn actual_worker_panic_is_sticky_and_keeps_directory_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = cfg(dir.path());
+        let cache = LocalCache::new(config.clone()).unwrap();
+        let result = cache
+            .run_blocking(|_| panic!("actual cache worker failure"))
+            .await;
+        let closed = cache.shutdown().await;
+        let retry = cache.shutdown().await;
+        let retained = LocalCache::new(config.clone()).is_err();
+        let reaped = {
+            let state = cache.io.lock();
+            state.workers.is_empty() && state.permits == 0
+        };
+        drop(cache);
+        let fresh = LocalCache::new(config).unwrap();
+        drop(fresh);
+        assert!(result.is_err_and(|e| e.code == ErrorCode::Eio));
+        assert!(closed.is_err_and(|e| e.code == ErrorCode::Eio));
+        assert!(retry.is_err_and(|e| e.code == ErrorCode::Eio));
+        assert!(retained, "failed close must leave keeper ownership intact");
+        assert!(reaped, "panic must be an observed real task join");
+    }
+    #[tokio::test]
+    async fn actual_worker_registry_is_bounded_by_eight_io_slots() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = LocalCache::new(cfg(dir.path())).unwrap();
+        let mut releases = Vec::new();
+        for _ in 0..8 {
+            let (entered, ready) = tokio::sync::oneshot::channel();
+            let (release, blocked) = std::sync::mpsc::channel::<()>();
+            cache
+                .try_spawn_blocking(move |_| {
+                    entered.send(()).unwrap();
+                    let _ = blocked.recv();
+                })
+                .unwrap();
+            ready.await.unwrap();
+            releases.push(release);
+        }
+        let count = cache.io.lock().workers.len();
+        let ninth = cache.try_spawn_blocking(|_| panic!("ninth worker must not start"));
+        drop(releases);
+        let joined = cache.shutdown().await;
+        let state = cache.io.lock();
+        assert_eq!(count, 8);
+        assert!(ninth.is_err_and(|e| e.code == ErrorCode::Ebusy));
+        assert!(joined.is_ok());
+        assert!(state.workers.is_empty());
+        assert_eq!(
+            state.workers.capacity(),
+            8,
+            "completed joins must not accumulate"
+        );
+    }
     #[test]
     fn ram_hit_does_not_wait_for_a_blocked_disk_open() {
         use std::os::unix::fs::OpenOptionsExt;
@@ -904,7 +1559,7 @@ mod tests {
         let (started, ready) = std::sync::mpsc::channel();
         let disk = std::thread::spawn(move || {
             started.send(()).unwrap();
-            c.get_disk(&s, &id, IntegrityPolicy::Opaque)
+            c.get_disk(&s, &id, IntegrityPolicy::Opaque).unwrap()
         });
         ready.recv().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(30));
@@ -976,8 +1631,18 @@ mod tests {
         let b_bytes = fs::read(&pb).unwrap();
         fs::write(&pa, b_bytes).unwrap();
         fs::write(&pb, a_bytes).unwrap();
-        assert!(cache.get_disk(&a, &id, IntegrityPolicy::Opaque).is_none());
-        assert!(cache.get_disk(&b, &id, IntegrityPolicy::Opaque).is_none());
+        assert!(
+            cache
+                .get_disk(&a, &id, IntegrityPolicy::Opaque)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            cache
+                .get_disk(&b, &id, IntegrityPolicy::Opaque)
+                .unwrap()
+                .is_none()
+        );
     }
     #[test]
     fn owned_temporary_quarantine_replaces_the_matching_ram_entry_charge() {
@@ -1130,7 +1795,8 @@ mod tests {
                 &scope("one"),
                 &BlockId("opaque".into()),
                 IntegrityPolicy::Opaque
-            ),
+            )
+            .unwrap(),
             Some(b"abcd".to_vec())
         );
     }
@@ -1147,11 +1813,11 @@ mod tests {
         drop(c);
         let c = LocalCache::new(config).unwrap();
         assert_eq!(
-            c.get(&s, &id, IntegrityPolicy::Opaque),
+            c.get(&s, &id, IntegrityPolicy::Opaque).unwrap(),
             Some(b"data".to_vec())
         );
         fs::write(path, b"XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXoops").unwrap();
-        assert_eq!(c.get(&s, &id, IntegrityPolicy::Opaque), None);
+        assert_eq!(c.get(&s, &id, IntegrityPolicy::Opaque).unwrap(), None);
     }
     #[test]
     fn rejects_foreign_directory_and_duplicate_owner() {
@@ -1178,7 +1844,7 @@ mod tests {
         let path = c.path_for(&s, &id);
         fs::remove_file(&path).unwrap();
         symlink(&outside, &path).unwrap();
-        assert!(c.get(&s, &id, IntegrityPolicy::Opaque).is_none());
+        assert!(c.get(&s, &id, IntegrityPolicy::Opaque).unwrap().is_none());
         assert_eq!(fs::read(outside).unwrap(), b"secret");
     }
 }

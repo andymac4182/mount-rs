@@ -320,7 +320,7 @@ impl Fixture {
             ..
         } = self;
         drop(store);
-        runtime.shutdown().await;
+        runtime.shutdown().await.unwrap();
         drop(runtime);
         // No producer remains. Holding every I/O permit proves the blocking
         // workers drained; LocalCache::shutdown alone ignores its timeout.
