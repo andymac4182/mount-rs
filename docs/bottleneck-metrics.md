@@ -1368,6 +1368,31 @@ block operation counters remain unavailable, even when byte counters exist.
 Container block accounting, process disk bytes and shared host device counters
 are different observations; none establishes physical NAND IOPS.
 
+## Diagnose a stale native resource report
+
+The native ten-process cache test requires an RSS report from the preceding
+second. A stale report fails qualification even when the last measured RSS was
+below the cap. It does not establish datastore contention or a memory limit
+breach. The worker's operation loop publishes reports while it is polled;
+synchronous work or a delayed poll can interrupt that publication.
+
+Set `MOUNT_RS_TEN_PROCESS_TRACE_PROGRESS=1` for a diagnostic run of this test.
+Its bounded `native_progress ` records bracket individual future polls,
+resource sampling, retained-log reads, free-space checks, child sampling and
+private oracle capture/cleanup. Labels are fixed and records contain numeric
+identities and common-clock timestamps, without configuration, credentials,
+paths or arbitrary error text. Collection is disabled by default. Exhausted
+capacity, clock failures and write failures make trace coverage unavailable.
+
+The controller retains the first rejected report's scalar validation inputs
+separately from the first fatal RSS acquisition. Match the report sequence and
+validation time to the worker's progress intervals. A missing interval is not a
+zero-duration call, and wall-clock oracle capture timestamps are not monotonic
+operation timings. These diagnostics preserve the one-second freshness guard,
+resource limits, deadlines and original process ownership. Their collection
+cost is part of a traced run; compare a run without tracing before making a
+throughput claim.
+
 ## Preserve the first cache RSS failure
 
 The native cache qualification controller retains the first fatal RSS

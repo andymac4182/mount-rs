@@ -3,6 +3,7 @@ use super::{
     config::{CLUSTER, CacheSettings, Fixture, sha256, write},
     contracts::*,
     process::{Fleet, free_disk, native_deadline},
+    progress_trace::{self, Label},
 };
 use mount_rs_blob_cache::{
     CacheScope, Discovery, DiscoveryMode, FixedDiscovery, LocalCache, PeerId, ScopeIdentity,
@@ -41,7 +42,9 @@ where
         }
         fleet.check()?;
         tokio::select! {
-            result = &mut future => {
+            result = std::future::poll_fn(|context| {
+                progress_trace::poll(future.as_mut(), context, Label::CheckedPoll)
+            }) => {
                 let value = result?;
                 fleet.check()?;
                 if Instant::now() >= deadline { return Err("late operation completion; no replay".into()); }
@@ -990,6 +993,7 @@ fn worker_selected(tidb_rustfs_cold: bool) {
         "processes":processes,"unreaped_owned":unreaped,"generation_logical_banks":fleet.banks,"phases":phases,
         "object_store_observations":fleet.object_store_observations,
         "owned_resource_evidence":fleet.resource_evidence(),
+        "progress_trace":progress_trace::snapshot(),
         "private_credential_cleanup":credentials_receipt,
         "unavailable":{"maintenance_quiescence":"CLI shutdown does not prove worker drain",
             "exact_phase_counters":"only cumulative generation shutdown banks are exported",

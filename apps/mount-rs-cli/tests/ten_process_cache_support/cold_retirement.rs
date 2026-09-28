@@ -4,6 +4,7 @@ use super::{
     config::{CLUSTER, CacheSettings, Fixture, sha256, write},
     contracts::*,
     process::Fleet,
+    progress_trace::{self, Label},
     scenario,
 };
 use mount_rs_blob_cache::{
@@ -306,30 +307,49 @@ impl OracleOwner {
             settled: false,
         });
         let task = tokio::spawn(async move {
-            let before = worker_observation();
+            let before = {
+                let _capture = progress_trace::span(Label::OracleCaptureBefore);
+                worker_observation()
+            };
             if let Ok(mut recorded) = observation.lock() {
                 *recorded = json!({"status":"unavailable","reason":"missing_after",
                     "owner":{"pid":std::process::id(),"job":index,"phase":phase,"stderr":"worker.stderr","server_generation":Value::Null},
                     "before":before.evidence});
             }
-            let result = match tokio::time::timeout_at(
-                tokio::time::Instant::from_std(deadline),
-                action(resources.clone()),
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(_) => Err("private oracle operation deadline exhausted; no replay".into()),
+            let result = {
+                let action = action(resources.clone());
+                tokio::pin!(action);
+                match tokio::time::timeout_at(
+                    tokio::time::Instant::from_std(deadline),
+                    std::future::poll_fn(|context| {
+                        progress_trace::poll(action.as_mut(), context, Label::OracleActionPoll)
+                    }),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err("private oracle operation deadline exhausted; no replay".into()),
+                }
             };
             // Cancellation of a waiter leaves this actual task and every partial owner retained.
             let cleanup_deadline = clipped(Instant::now(), parent, SHUTDOWN_SECONDS)?;
-            let cleanup = close_retained(&resources, cleanup_deadline).await;
+            let cleanup = {
+                let cleanup = close_retained(&resources, cleanup_deadline);
+                tokio::pin!(cleanup);
+                std::future::poll_fn(|context| {
+                    progress_trace::poll(cleanup.as_mut(), context, Label::OracleCleanupPoll)
+                })
+                .await
+            };
             if let Err(error) = &cleanup
                 && let Ok(mut state) = resources.lock()
             {
                 state.cleanup_failure = Some(error.clone());
             }
-            let after = worker_observation();
+            let after = {
+                let _capture = progress_trace::span(Label::OracleCaptureAfter);
+                worker_observation()
+            };
             let projected = super::object_store_projection::project_worker(
                 &super::object_store_projection::WorkerBinding {
                     pid: std::process::id(),

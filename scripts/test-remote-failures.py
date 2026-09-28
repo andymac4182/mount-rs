@@ -181,6 +181,19 @@ EXPECTED_PACKAGE_CASES['tidbcoldunit'] = tuple('ten_process_cache_support::cold_
     'worker_mixed_capture_pid_context_generation_or_order_is_rejected',
     'worker_reset_and_saturation_refuse_windows_but_quality_is_retained',
     'worker_reserved_sequence_rejects_callback_identity_drift_before_snapshot_or_write',
+)) + tuple('ten_process_cache_support::progress_trace::tests::' + name for name in (
+    'native_progress_disabled_performs_no_output_or_clock_reads_and_requires_exact_opt_in',
+    'native_progress_monotonic_pair_preserves_numeric_identity_and_physical_bounds',
+    'native_progress_cap_is_atomic_bounded_and_never_reset',
+    'native_progress_clock_and_io_failures_never_fake_complete_interval',
+    'native_progress_each_pending_and_ready_poll_has_its_own_interval',
+)) + tuple('ten_process_cache_support::process::tests::' + name for name in (
+    'frame_validation_same_fresh_sequence_then_stale_is_retained_before_rss',
+    'frame_validation_final_recompose_retains_loaded_frame_and_first_failure',
+    'frame_validation_max_scalars_are_bounded_without_private_strings',
+    'frame_validation_malformed_json_has_no_numeric_evidence_or_rss_queries',
+    'frame_validation_other_contract_failure_has_categorical_evidence',
+    'frame_validation_final_rss_error_does_not_fabricate_frame_failure',
 ))
 EXPECTED_PACKAGE_CASES.update({
     'rustfsownedprefix': tuple('owned_prefix_tests::' + name for name in (
