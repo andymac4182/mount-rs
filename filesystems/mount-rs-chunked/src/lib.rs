@@ -850,14 +850,7 @@ impl<M: MetadataStore + 'static, B: BlockStore + 'static> ConstructionResource
         match cleanup {
             Cleanup::Lease(metadata, lease) => metadata.release_writer(&lease).await?,
             Cleanup::Filesystem(filesystem) => {
-                filesystem.check_construction_cleanup()?;
-                filesystem.shutdown().await?;
-                filesystem.check_construction_cleanup()?;
-                if filesystem.lock_lease()?.is_some() || filesystem.local_grant()?.is_some() {
-                    return Err(FsError::backend(
-                        "construction authority remains after shutdown",
-                    ));
-                }
+                filesystem.shutdown_construction_authority().await?;
             }
         }
         *self.lock()? = ConstructionAuthorityState::Closed;
@@ -885,6 +878,24 @@ where
         {
             return Err(FsError::backend(
                 "construction directory checkout remains uncertain",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Drain authority before a retained construction owner closes providers.
+    ///
+    /// Failed state, an ambiguous checkout, poison, or unacknowledged shutdown
+    /// rejects cleanup. Successful return requires no writer lease or local
+    /// directory grant. Callers retain the actual owner and use an owned cleanup
+    /// task when waiter cancellation must not drop this future.
+    pub async fn shutdown_construction_authority(&self) -> Result<()> {
+        self.check_construction_cleanup()?;
+        self.shutdown().await?;
+        self.check_construction_cleanup()?;
+        if self.lock_lease()?.is_some() || self.local_grant()?.is_some() {
+            return Err(FsError::backend(
+                "construction authority remains after shutdown",
             ));
         }
         Ok(())

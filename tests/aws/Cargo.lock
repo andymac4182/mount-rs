@@ -1524,6 +1524,7 @@ dependencies = [
  "mount-rs-core",
  "mount-rs-object-store-blocks",
  "object_store 0.12.5",
+ "tokio",
 ]
 
 [[package]]
@@ -1545,6 +1546,7 @@ dependencies = [
  "mount-rs-sqlite",
  "mount-rs-sqlite-fs",
  "mount-rs-tidb",
+ "tokio",
 ]
 
 [[package]]

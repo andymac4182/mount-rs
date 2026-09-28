@@ -84,6 +84,13 @@ and a factory without opening. Eager registration stays available.
   observations. Run service ordinary tests and strict Clippy, then independent
   lifecycle/security review.
 
+Five concrete local SQLite pool controls now pass, including ten opens/nine
+evictions, request/handle pins, failed publication quarantine and durable MRC4
+ineligibility. Their old-owner observation is Weak runtime Arc retirement;
+native SQLite connection/thread resource observations and canceled concrete
+eviction/shutdown waiters are still unqualified. The checklist item remains
+open until those observations and the broader final gates are complete.
+
 The pool now has a separate explicitly enabled timing observer with eight fixed
 stages. Controlled cancellation, error and post-unlock publication cases pass;
 the warmed lease/handle allocation oracle covers both disabled and enabled
@@ -97,11 +104,17 @@ pool into the CLI/process fixture. Those remain required below.
 
 Preparatory source now provides a resolved CLI plan and cached driver Arc,
 explicit provider/Chunked construction ownership hooks, and an SDK per-attempt
-journal. These require composition into the SDK and retained CLI factory before
-lazy activation is enabled. AWS source selection still rereads environment
-settings, and CLI SQLite postconfiguration still needs ownership registration
-before its await. The first item remains incomplete until those seams are
-resolved; additive startup v2 support alone does not change CLI/process startup.
+journal. Observed SDK composition now retains the actual providers and authority
+in the journal, preserves metadata-before-block cleanup and rejects provider
+shutdown after failed or ambiguous authority. Ten SDK and fifteen provider/fixture
+controls cover failed publication, retained ordinary owners and actual canceled
+committed checkout. The SDK and Chunked journal share the full authority barrier.
+The retained CLI factory still needs wiring before lazy activation is enabled.
+AWS source selection still rereads environment settings, SlateDB pre-return
+tasks remain unqualified, and CLI SQLite postconfiguration still needs ownership
+registration before its await. The first item remains incomplete until those
+seams are resolved; additive startup v2 support alone does not change CLI/process
+startup.
 
 - [ ] Add an owned resolved open plan so storage environment references, paths,
   endpoint and volume selection are frozen once at registration.

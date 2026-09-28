@@ -21,6 +21,21 @@ not enable lazy CLI startup or qualify the full production workload.
   providers when authority cleanup fails. Failure retains the registered owners.
   A successful handoff releases only journal references after the caller has
   retained the actual returned owner.
+- Observed SDK split opening now composes a retained provider group with the
+  Chunked authority in that journal. The group retains constructor owners,
+  synchronous provider Arcs and original/decorated block providers before their
+  later work. Failed observed opens leave cleanup to the retained journal;
+  ordinary entry points preserve their existing best-effort behavior. Observed
+  SDK shutdown stops before providers on failed or ambiguous authority. Both
+  observed shutdown and filesystem construction-resource close use the full
+  Chunked barrier, including pending checkout and exact lease/grant absence.
+  Direct ordinary shutdown preserves its previous behavior. The SDK filesystem
+  can also be retained as a construction resource
+  before application postconfiguration.
+- A bounded, allocation-free eligibility observation captures successful MRC5
+  construction, actual provider durability flags and backing identity. Sticky
+  failure rejects eligibility. Admission still needs request/handle pins and
+  owned successful shutdown before replacing a generation.
 - Startup v2 can represent lazy construction plans separately from opened
   runtimes. The eager v1 shape remains available. The CLI and process fixture
   still use eager startup until the lifecycle wiring is completed.
@@ -43,10 +58,20 @@ controls do not prove native resource cleanup or filesystem integration. The
 [retained report](live-service-metrics-20260928/report.json) records the executed
 scope and the source-frozen gate results.
 
+The subsequent [SDK composition qualification](sdk-observed-construction-20260928.md)
+adds ten actual SDK cases, fifteen provider/wire-fixture controls and five local
+SQLite runtime-pool cases. Full file bytes and exact/beyond EOF survive repeated
+eviction; actual SQLite publication failure retains the failed owner without a
+replacement generation. Actual committed checkout with a canceled acknowledgement
+is rejected by observed shutdown and resource close after its task is joined.
+Runtime Arc retirement is not a native connection,
+thread or process drain observation. These concrete cases do not test canceled
+eviction or shutdown waiters.
+
 ## Remaining seams
 
-SDK provider composition and CLI postconfiguration must register these actual
-owners before their later awaits. The CLI factory must retain each journal
+CLI postconfiguration must register the actual returned owner before its later
+awaits. The CLI factory must retain each journal
 before polling, preserve shared context/cache ownership and wire runtime banks
 into diagnostics. Lazy signed CLI and real-process gates remain required.
 

@@ -13,6 +13,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use mount_rs_aws_s3::{AwsS3BlockStore, AwsS3Config};
+use mount_rs_core::construction::{ConstructionObserver, ConstructionResource};
 use mount_rs_core::storage::{BlockStore, InodeModeState, MetadataStore};
 use mount_rs_core::{Result, backend_error};
 #[cfg(all(
@@ -173,6 +174,9 @@ impl StorageContext {
 
 #[derive(Clone)]
 enum ProviderResource {
+    Constructor(Arc<dyn ConstructionResource>),
+    MetadataKeepalive(Arc<dyn MetadataStore>),
+    BlockKeepalive(Arc<dyn BlockStore>),
     #[cfg(all(test, unix))]
     CloseProbe(Arc<compact_layout_inspection_tests::CloseProbe>),
     PgliteMetadata(PgliteMetadataStore),
@@ -195,6 +199,15 @@ enum ProviderResource {
 impl ProviderResource {
     async fn close(&self) -> Result<()> {
         match self {
+            Self::Constructor(owner) => owner.close().await,
+            Self::MetadataKeepalive(store) => {
+                let _ = store;
+                Ok(())
+            }
+            Self::BlockKeepalive(store) => {
+                let _ = store;
+                Ok(())
+            }
             #[cfg(all(test, unix))]
             Self::CloseProbe(probe) => probe.close().await,
             Self::PgliteMetadata(store) => store.close().await,
@@ -225,10 +238,18 @@ impl ProviderResource {
 #[derive(Clone, Default)]
 pub(crate) struct StorageResources {
     resources: Vec<ProviderResource>,
+    observed: Option<Arc<ObservedStorageResources>>,
 }
 
 impl StorageResources {
+    pub(crate) fn is_observed(&self) -> bool {
+        self.observed.is_some()
+    }
+
     pub(crate) async fn close(&self) -> Result<()> {
+        if let Some(observed) = &self.observed {
+            return observed.close().await;
+        }
         let mut first_error = None;
         for resource in &self.resources {
             if let Err(error) = resource.close().await
@@ -238,6 +259,159 @@ impl StorageResources {
             }
         }
         first_error.map_or(Ok(()), Err)
+    }
+}
+
+struct ObservedProviderState {
+    accepting: bool,
+    uncertain: bool,
+    closed: bool,
+    next: usize,
+    failure: Option<mount_rs_core::FsError>,
+    resources: Vec<ProviderResource>,
+}
+
+/// One canonical owner for observed provider construction. Its forward order
+/// preserves metadata-before-block cleanup inside the journal's reverse order.
+struct ObservedStorageResources {
+    state: std::sync::Mutex<ObservedProviderState>,
+    closing: tokio::sync::Mutex<()>,
+}
+
+impl ObservedStorageResources {
+    fn lock(&self) -> std::sync::MutexGuard<'_, ObservedProviderState> {
+        match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                let mut state = poisoned.into_inner();
+                state.uncertain = true;
+                state
+            }
+        }
+    }
+
+    fn retain_provider(&self, resource: ProviderResource) {
+        let mut state = self.lock();
+        if !state.accepting || state.closed {
+            state.uncertain = true;
+        }
+        // A late or poisoned registration remains owned even though cleanup
+        // cannot acknowledge it. Never drop a constructor's actual owner.
+        state.resources.push(resource);
+    }
+}
+
+impl ConstructionObserver for ObservedStorageResources {
+    fn retain(&self, resource: Arc<dyn ConstructionResource>) {
+        self.retain_provider(ProviderResource::Constructor(resource));
+    }
+}
+
+#[async_trait::async_trait]
+impl ConstructionResource for ObservedStorageResources {
+    async fn close(&self) -> Result<()> {
+        let _closing = self.closing.lock().await;
+        loop {
+            let resource = {
+                let state = self.lock();
+                if let Some(error) = &state.failure {
+                    return Err(error.clone());
+                }
+                if state.uncertain {
+                    return Err(mount_rs_core::FsError::new(mount_rs_core::ErrorCode::Eio));
+                }
+                if state.accepting {
+                    return Err(mount_rs_core::FsError::new(mount_rs_core::ErrorCode::Ebusy));
+                }
+                if state.closed {
+                    return Ok(());
+                }
+                state.resources.get(state.next).cloned()
+            };
+            if let Some(resource) = resource {
+                let result = resource.close().await;
+                let mut state = self.lock();
+                if let Err(error) = result {
+                    state.failure = Some(error.clone());
+                    state.uncertain = true;
+                    return Err(error);
+                }
+                if state.uncertain {
+                    return Err(mount_rs_core::FsError::new(mount_rs_core::ErrorCode::Eio));
+                }
+                state.next += 1;
+            } else {
+                let released = {
+                    let mut state = self.lock();
+                    if state.uncertain {
+                        return Err(mount_rs_core::FsError::new(mount_rs_core::ErrorCode::Eio));
+                    }
+                    state.closed = true;
+                    std::mem::take(&mut state.resources)
+                };
+                // Actual provider destructors run outside the ownership mutex.
+                drop(released);
+                if self.lock().uncertain {
+                    return Err(mount_rs_core::FsError::new(mount_rs_core::ErrorCode::Eio));
+                }
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// Dropping an unsealed constructor makes even an empty group uncertain.
+struct ProviderConstruction {
+    resources: Arc<ObservedStorageResources>,
+    completed: bool,
+}
+
+impl ProviderConstruction {
+    fn new(observer: &dyn ConstructionObserver) -> Self {
+        let resources = Arc::new(ObservedStorageResources {
+            state: std::sync::Mutex::new(ObservedProviderState {
+                accepting: true,
+                uncertain: false,
+                closed: false,
+                next: 0,
+                failure: None,
+                resources: Vec::new(),
+            }),
+            closing: tokio::sync::Mutex::new(()),
+        });
+        // The outer application owner assumes this group before any provider
+        // constructor is polled or can register a child owner.
+        observer.retain(resources.clone());
+        Self {
+            resources,
+            completed: false,
+        }
+    }
+
+    fn retain_provider(&self, resource: ProviderResource) {
+        self.resources.retain_provider(resource);
+    }
+
+    fn finish(mut self) -> Arc<ObservedStorageResources> {
+        self.resources.lock().accepting = false;
+        self.completed = true;
+        self.resources.clone()
+    }
+}
+
+impl ConstructionObserver for ProviderConstruction {
+    fn retain(&self, resource: Arc<dyn ConstructionResource>) {
+        self.resources.retain(resource);
+    }
+}
+
+impl Drop for ProviderConstruction {
+    fn drop(&mut self) {
+        if !self.completed {
+            let mut state = self.resources.lock();
+            state.accepting = false;
+            state.uncertain = true;
+        }
     }
 }
 
@@ -292,35 +466,87 @@ pub(crate) async fn open_storage_in_context(
     decorator: Option<&dyn crate::filesystem::BlockStoreDecorator>,
     context: Option<&StorageContext>,
 ) -> Result<OpenStorage> {
+    open_storage_in_context_with_observer(metadata, blocks, decorator, context, None).await
+}
+
+pub(crate) async fn open_storage_in_context_with_observer(
+    metadata: &StoreConfig,
+    blocks: &StoreConfig,
+    decorator: Option<&dyn crate::filesystem::BlockStoreDecorator>,
+    context: Option<&StorageContext>,
+    observer: Option<&dyn ConstructionObserver>,
+) -> Result<OpenStorage> {
     if let Some(context) = context {
         context.require_open()?;
     }
+    let construction = observer.map(ProviderConstruction::new);
+    let opened =
+        open_storage_observed(metadata, blocks, decorator, context, construction.as_ref()).await;
+    let observed = construction.map(ProviderConstruction::finish);
+    opened.map(|mut opened| {
+        opened.resources.observed = observed;
+        opened
+    })
+}
+
+async fn open_storage_observed(
+    metadata: &StoreConfig,
+    blocks: &StoreConfig,
+    decorator: Option<&dyn crate::filesystem::BlockStoreDecorator>,
+    context: Option<&StorageContext>,
+    construction: Option<&ProviderConstruction>,
+) -> Result<OpenStorage> {
+    let observer = construction.map(|construction| construction as &dyn ConstructionObserver);
     let block_config = blocks;
-    let (metadata, mut metadata_resources) = open_metadata(metadata, blocks, context).await?;
-    let (blocks, mut block_resources) = match open_blocks(blocks, context).await {
+    let (metadata, mut metadata_resources) =
+        open_metadata(metadata, blocks, context, observer).await?;
+    if let Some(construction) = construction {
+        for resource in metadata_resources.drain(..) {
+            construction.retain_provider(resource);
+        }
+        construction.retain_provider(ProviderResource::MetadataKeepalive(metadata.clone()));
+    }
+    let (blocks, mut block_resources) = match open_blocks(blocks, context, observer).await {
         Ok(opened) => opened,
         Err(error) => {
-            let resources = StorageResources {
-                resources: metadata_resources,
-            };
-            let _ = resources.close().await;
+            if construction.is_none() {
+                let resources = StorageResources {
+                    resources: metadata_resources,
+                    observed: None,
+                };
+                let _ = resources.close().await;
+            }
             return Err(error);
         }
     };
+    if let Some(construction) = construction {
+        for resource in block_resources.drain(..) {
+            construction.retain_provider(resource);
+        }
+        construction.retain_provider(ProviderResource::BlockKeepalive(blocks.clone()));
+    }
     metadata_resources.append(&mut block_resources);
     let blocks = match decorator {
         Some(decorator) => match decorator.decorate(block_config, blocks) {
             Ok(blocks) => blocks,
             Err(error) => {
-                let resources = StorageResources {
-                    resources: metadata_resources,
-                };
-                let _ = resources.close().await;
+                if construction.is_none() {
+                    let resources = StorageResources {
+                        resources: metadata_resources,
+                        observed: None,
+                    };
+                    let _ = resources.close().await;
+                }
                 return Err(error);
             }
         },
         None => blocks,
     };
+    if decorator.is_some()
+        && let Some(construction) = construction
+    {
+        construction.retain_provider(ProviderResource::BlockKeepalive(blocks.clone()));
+    }
     #[cfg(feature = "observability")]
     let (metadata, blocks) = {
         let telemetry = mount_rs_observability::global();
@@ -339,6 +565,7 @@ pub(crate) async fn open_storage_in_context(
         blocks,
         resources: StorageResources {
             resources: metadata_resources,
+            observed: None,
         },
     })
 }
@@ -347,6 +574,7 @@ async fn open_metadata(
     provider: &StoreConfig,
     _block_config: &StoreConfig,
     context: Option<&StorageContext>,
+    observer: Option<&dyn ConstructionObserver>,
 ) -> Result<(Arc<dyn MetadataStore>, Vec<ProviderResource>)> {
     match provider {
         StoreConfig::Memory => Ok((Arc::new(MemoryMetadataStore::new()), Vec::new())),
@@ -362,14 +590,19 @@ async fn open_metadata(
             volume_key,
             durable,
         } => {
-            let store = PgliteMetadataStore::connect_with_options(
+            let store = PgliteMetadataStore::connect_with_options_and_observer(
                 connection,
                 PgliteStorageOptions::new(volume_key.clone()).with_durable(*durable),
+                observer,
             )
             .await?;
             Ok((
                 Arc::new(store.clone()),
-                vec![ProviderResource::PgliteMetadata(store)],
+                if observer.is_none() {
+                    vec![ProviderResource::PgliteMetadata(store)]
+                } else {
+                    Vec::new()
+                },
             ))
         }
         StoreConfig::Tidb {
@@ -384,14 +617,19 @@ async fn open_metadata(
                     .await?;
                 return Ok((Arc::new(store), Vec::new()));
             }
-            let store = TidbMetadataStore::connect_with_options(
+            let store = TidbMetadataStore::connect_with_options_and_observer(
                 connection,
                 TidbStorageOptions::new(volume_key.clone()).with_durable(*durable),
+                observer,
             )
             .await?;
             Ok((
                 Arc::new(store.clone()),
-                vec![ProviderResource::TidbMetadata(store)],
+                if observer.is_none() {
+                    vec![ProviderResource::TidbMetadata(store)]
+                } else {
+                    Vec::new()
+                },
             ))
         }
         StoreConfig::SlateDb {
@@ -473,6 +711,7 @@ async fn open_metadata(
 async fn open_blocks(
     provider: &StoreConfig,
     context: Option<&StorageContext>,
+    observer: Option<&dyn ConstructionObserver>,
 ) -> Result<(Arc<dyn BlockStore>, Vec<ProviderResource>)> {
     match provider {
         StoreConfig::Memory => Ok((Arc::new(MemoryBlockStore::new()), Vec::new())),
@@ -489,14 +728,19 @@ async fn open_blocks(
             volume_key,
             durable,
         } => {
-            let store = PgliteBlockStore::connect_with_options(
+            let store = PgliteBlockStore::connect_with_options_and_observer(
                 connection,
                 PgliteStorageOptions::new(volume_key.clone()).with_durable(*durable),
+                observer,
             )
             .await?;
             Ok((
                 Arc::new(store.clone()),
-                vec![ProviderResource::PgliteBlocks(store)],
+                if observer.is_none() {
+                    vec![ProviderResource::PgliteBlocks(store)]
+                } else {
+                    Vec::new()
+                },
             ))
         }
         StoreConfig::Tidb {
@@ -511,14 +755,19 @@ async fn open_blocks(
                     .await?;
                 return Ok((Arc::new(store), Vec::new()));
             }
-            let store = TidbBlockStore::connect_with_options(
+            let store = TidbBlockStore::connect_with_options_and_observer(
                 connection,
                 TidbStorageOptions::new(volume_key.clone()).with_durable(*durable),
+                observer,
             )
             .await?;
             Ok((
                 Arc::new(store.clone()),
-                vec![ProviderResource::TidbBlocks(store)],
+                if observer.is_none() {
+                    vec![ProviderResource::TidbBlocks(store)]
+                } else {
+                    Vec::new()
+                },
             ))
         }
         StoreConfig::FoundationDb {
@@ -681,6 +930,10 @@ fn open_foundationdb_storage(
     };
     FoundationDbStorage::connect(cluster_file, options)
 }
+
+#[cfg(all(test, unix))]
+#[path = "provider_construction_tests.rs"]
+mod provider_construction_tests;
 
 #[cfg(all(test, unix))]
 mod compact_layout_inspection_tests {

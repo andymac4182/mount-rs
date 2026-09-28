@@ -1,5 +1,9 @@
 //! Filesystem facade and its shutdown lifecycle.
 
+#[cfg(test)]
+#[path = "filesystem_construction_tests.rs"]
+mod construction_cleanup_tests;
+
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
@@ -7,6 +11,7 @@ use std::sync::Arc;
 use mount_rs_chunked::{
     ChunkedFs, ChunkedOptions, migrate_mrc1_backing, migrate_trusted_unstamped_mrc1_backing,
 };
+use mount_rs_core::construction::{ConstructionObserver, ConstructionResource};
 use mount_rs_core::storage::{
     BlockStore, ConcurrentBackingId, DelegatedRecovery, DelegationState, MetadataStore,
 };
@@ -17,7 +22,9 @@ use mount_rs_memfs::{MemoryFs, MemoryOptions};
 use mount_rs_sqlite_fs::{SqliteFs, open_sqlite};
 
 use crate::options::{FoundationDbLeaseAuthority, SplitOptions, StoreConfig};
-use crate::providers::{StorageContext, StorageResources, open_storage, open_storage_in_context};
+use crate::providers::{
+    StorageContext, StorageResources, open_storage, open_storage_in_context_with_observer,
+};
 use crate::stores::{ErasedBlockStore, ErasedMetadataStore};
 #[cfg(feature = "observability")]
 use crate::{Telemetry, global_telemetry};
@@ -34,6 +41,7 @@ pub enum FilesystemKind {
 /// A Rust SDK filesystem and its provider cleanup lifecycle.
 pub struct Filesystem {
     inner: FilesystemInner,
+    persistent_eviction_allowed: bool,
 }
 
 /// Decorate an opened block provider while preserving its cleanup lifecycle.
@@ -61,6 +69,7 @@ impl Filesystem {
     pub fn memory(options: MemoryOptions) -> Self {
         Self {
             inner: FilesystemInner::Memory(MemoryFs::new(options)),
+            persistent_eviction_allowed: false,
         }
     }
 
@@ -68,6 +77,7 @@ impl Filesystem {
     pub fn host(root: impl AsRef<Path>, options: HostFsOptions) -> Self {
         Self {
             inner: FilesystemInner::Host(HostFs::with_options(root, options)),
+            persistent_eviction_allowed: false,
         }
     }
 
@@ -75,12 +85,13 @@ impl Filesystem {
     pub async fn sqlite(path: impl AsRef<Path>) -> Result<Self> {
         Ok(Self {
             inner: FilesystemInner::Sqlite(open_sqlite(path).await?),
+            persistent_eviction_allowed: false,
         })
     }
 
     /// Open a filesystem composed from independent metadata and block stores.
     pub async fn split(options: SplitOptions) -> Result<Self> {
-        Self::split_impl(options, None, None).await
+        Self::split_impl(options, None, None, None).await
     }
 
     /// Open split storage with an application-owned block provider decorator.
@@ -88,7 +99,7 @@ impl Filesystem {
         options: SplitOptions,
         decorator: &dyn BlockStoreDecorator,
     ) -> Result<Self> {
-        Self::split_impl(options, Some(decorator), None).await
+        Self::split_impl(options, Some(decorator), None, None).await
     }
 
     /// Open split storage borrowing pools owned by an explicit server context.
@@ -96,7 +107,7 @@ impl Filesystem {
         options: SplitOptions,
         context: &StorageContext,
     ) -> Result<Self> {
-        Self::split_impl(options, None, Some(context)).await
+        Self::split_impl(options, None, Some(context), None).await
     }
 
     /// Context-backed variant preserving the application's block decorator.
@@ -105,19 +116,56 @@ impl Filesystem {
         context: &StorageContext,
         decorator: &dyn BlockStoreDecorator,
     ) -> Result<Self> {
-        Self::split_impl(options, Some(decorator), Some(context)).await
+        Self::split_impl(options, Some(decorator), Some(context), None).await
+    }
+
+    /// Open split storage with explicitly retained construction ownership.
+    ///
+    /// Retain the observer in the lifecycle owner before polling this future.
+    /// Provider and writer-authority owners transfer before later awaits. On
+    /// error or cancellation the observer retains them for owned reconciliation;
+    /// this path does not run the unobserved best-effort cleanup. The caller
+    /// seals an acknowledged error or hands off only after retaining this actual
+    /// returned filesystem. An abandoned attempt must remain uncertain.
+    /// Early provider callbacks cover PGlite and private TiDB construction;
+    /// shared pools remain context-owned. SlateDB's dependency still has an
+    /// unobserved pre-return construction interval. A journal receipt covers
+    /// registered resources and does not qualify that native interval.
+    pub async fn split_with_construction_observer(
+        options: SplitOptions,
+        context: Option<&StorageContext>,
+        decorator: Option<&dyn BlockStoreDecorator>,
+        observer: &dyn ConstructionObserver,
+    ) -> Result<Self> {
+        Self::split_impl(options, decorator, context, Some(observer)).await
+    }
+
+    /// Context-backed construction retaining partial resources in the observer.
+    pub async fn split_with_context_and_construction_observer(
+        options: SplitOptions,
+        context: &StorageContext,
+        observer: &dyn ConstructionObserver,
+    ) -> Result<Self> {
+        Self::split_with_construction_observer(options, Some(context), None, observer).await
     }
 
     async fn split_impl(
         options: SplitOptions,
         decorator: Option<&dyn BlockStoreDecorator>,
         context: Option<&StorageContext>,
+        observer: Option<&dyn ConstructionObserver>,
     ) -> Result<Self> {
         if options.chunk_size_bytes == 0 {
             return Err(FsError::new(ErrorCode::Einval)
                 .with_message("chunk_size_bytes must be greater than zero"));
         }
         validate_concurrent_split_options(&options)?;
+        let persistent_eviction_options = options.concurrent_writes
+            && options.inode_updates
+            && options.compact_inode_updates
+            && !options.delegated
+            && !options.writeback
+            && options.checkout_path.is_none();
         let mut chunk_options = ChunkedOptions::fixed(options.owner, options.chunk_size_bytes)?
             .with_lease_ttl(options.lease_ttl)
             .with_concurrent_writes(options.concurrent_writes)
@@ -132,15 +180,29 @@ impl Filesystem {
                 chunk_options = chunk_options.with_checkout_path(path);
             }
         }
-        let opened =
-            open_storage_in_context(&options.metadata, &options.blocks, decorator, context).await?;
+        let opened = open_storage_in_context_with_observer(
+            &options.metadata,
+            &options.blocks,
+            decorator,
+            context,
+            observer,
+        )
+        .await?;
+        let persistent_eviction_allowed =
+            persistent_eviction_options && opened.metadata.durable() && opened.blocks.durable();
         let resources = opened.resources.clone();
-        match ChunkedFs::open(opened.metadata, opened.blocks, chunk_options).await {
+        match ChunkedFs::open_with_observer(opened.metadata, opened.blocks, chunk_options, observer)
+            .await
+        {
             Ok(driver) => Ok(Self {
+                persistent_eviction_allowed: persistent_eviction_allowed
+                    && driver.concurrent_backing_id().is_some(),
                 inner: FilesystemInner::Split(driver, resources),
             }),
             Err(error) => {
-                let _ = resources.close().await;
+                if observer.is_none() {
+                    let _ = resources.close().await;
+                }
                 Err(error)
             }
         }
@@ -385,10 +447,28 @@ impl Filesystem {
         }
     }
 
+    /// Observe qualification for healthy persistent compact runtime eviction.
+    ///
+    /// This bounded observation captures successful compact MRC5 construction,
+    /// actual durable metadata/block providers and a fixed backing identity.
+    /// Other layouts and driver kinds remain ineligible. It allocates nothing
+    /// and takes no filesystem-state lock. It does not validate fresh authority,
+    /// prove that requests/handles drained, or acknowledge shutdown.
+    pub fn persistent_eviction_allowed(&self) -> bool {
+        self.persistent_eviction_allowed && !self.failed()
+    }
+
     /// Release writer leases and provider resources in the safe order.
+    ///
+    /// Explicitly observed construction rejects failed or ambiguous authority
+    /// and stops before providers unless authority shutdown is acknowledged.
+    /// The unobserved entry points preserve their best-effort cleanup behavior.
     pub async fn shutdown(&self) -> Result<()> {
         match &self.inner {
             FilesystemInner::Split(driver, resources) => {
+                if resources.is_observed() {
+                    return self.shutdown_construction_resources().await;
+                }
                 let driver_result = driver.shutdown().await;
                 let resources_result = resources.close().await;
                 driver_result.and(resources_result)
@@ -397,6 +477,25 @@ impl Filesystem {
                 Ok(())
             }
         }
+    }
+
+    async fn shutdown_construction_resources(&self) -> Result<()> {
+        match &self.inner {
+            FilesystemInner::Split(driver, resources) => {
+                driver.shutdown_construction_authority().await?;
+                resources.close().await
+            }
+            FilesystemInner::Memory(_) | FilesystemInner::Host(_) | FilesystemInner::Sqlite(_) => {
+                Ok(())
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ConstructionResource for Filesystem {
+    async fn close(&self) -> Result<()> {
+        self.shutdown_construction_resources().await
     }
 }
 
@@ -509,7 +608,10 @@ impl Clone for Filesystem {
                 FilesystemInner::Split(driver.clone(), resources.clone())
             }
         };
-        Self { inner }
+        Self {
+            inner,
+            persistent_eviction_allowed: self.persistent_eviction_allowed,
+        }
     }
 }
 
