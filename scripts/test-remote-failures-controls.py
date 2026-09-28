@@ -1335,5 +1335,140 @@ class DarwinSignalControls(unittest.TestCase):
         self.assertFalse(self.settled(unknown=("initial_owned_group_mismatch",)))
 
 
+class ObjectStoreExportSelectors(unittest.TestCase):
+    CODEC = tuple('object_store_diagnostics::tests::' + name for name in (
+        'one_real_bank_capture_is_bound_to_all_seven_frames_before_later_changes',
+        'disabled_and_unavailable_capture_publish_no_records_and_no_measured_zero',
+        'every_maximum_u64_field_survives_all_seven_bounded_records',
+        'complete_indexed_set_can_arrive_out_of_order',
+        'decoder_rejects_missing_duplicate_conflicting_and_cross_capture_frames',
+        'decoder_requires_exact_typed_fixed_rows_without_numeric_coercion',
+        'bounded_serializer_never_publishes_partial_or_caller_error_text',
+        'sink_failure_leaves_an_unacceptable_partial_set',
+        'zero_sequence_and_generation_remain_exact_startup_identity',
+        'valid_json_at_frame_limit_is_accepted_and_one_byte_over_is_rejected',
+    ))
+    CLI = tuple('remote::diagnostics::tests::' + name for name in (
+        'disabled_object_store_sideband_never_samples_or_exports_zero_rows',
+        'object_store_sideband_uses_exact_periodic_identity_and_one_real_snapshot',
+        'object_store_sideband_keeps_max_u64_and_legacy_schema_separate',
+        'shutdown_object_store_identity_is_lazy_unique_and_exhaustion_closed',
+    ))
+    SDK = tuple('target::metrics::tests::' + name for name in (
+        'object_store_actual_local_capture_encloses_once_and_binds_worker_and_controller',
+        'object_store_disabled_skips_callback_and_unavailable_does_not_export_zero',
+        'object_store_boundary_identity_checks_pid_and_preserves_zero_sequence_generation',
+        'object_store_records_own_exact_u64_snapshot_and_reject_cross_boundary_merge',
+        'object_store_additive_receipt_does_not_enter_existing_phase_deltas',
+        'object_store_public_local_capture_uses_actual_process_bank_or_disabled_status',
+    ))
+    CLI_RED = 'remote::diagnostics::tests::actual_periodic_router_binds_one_sample_to_zero_one_or_two_listeners'
+    CASES = {
+        'exportcodecred': (CODEC[0],),
+        'exportcodecunit': CODEC,
+        'exportclired': (CLI_RED,),
+        'exportcliunit': CLI,
+        'exportsdkred': (SDK[0],),
+        'exportsdkunit': SDK,
+        'exportsdkpublicon': (SDK[-1],),
+        'exportsdkpublicoff': (SDK[-1],),
+    }
+
+    def fixture(self, kind, nocapture=False):
+        names = self.CASES[kind]
+        output = f'running {len(names)} tests\n'
+        for name in names:
+            output += f'test {name} ... controlled output\nok\n' if nocapture else f'test {name} ... ok\n'
+        return output + f'test result: ok. {len(names)} passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n'
+
+    def passed(self, kind, output):
+        names = parent.EXPECTED_SUITES.get(kind)
+        return names is not None and parent.named_suite_passed(output, names, nocapture=True)
+
+    def test_fixed_export_commands_bind_exact_cases_profiles_and_180_seconds(self):
+        codec = ['./scripts/cargo-shared', 'test', '--locked', '--offline', '-p', 'mount-rs-service', '--lib', '--']
+        cli = ['./scripts/cargo-shared', 'test', '--locked', '--offline', '-p', 'mount-rs-cli', '--lib', '--']
+        sdk = ['./scripts/cargo-shared', 'test', '--locked', '--offline', '-p', 'mount-rs-service', '--features', 'sdk-runtime,resource-profiling', '--test', 'quic_production_target', '--']
+        tail = ['--test-threads=1', '--nocapture']
+        commands = {
+            'exportcodecred': (codec + [self.CODEC[0], '--exact'] + tail, 180, 0, 0),
+            'exportcodecunit': (codec + ['object_store_diagnostics::tests::'] + tail, 180, 0, 0),
+            'exportclired': (cli + [self.CLI_RED, '--exact'] + tail, 180, 0, 0),
+            'exportcliunit': (cli + ['object_store_'] + tail, 180, 0, 0),
+            'exportsdkred': (sdk + [self.SDK[0], '--exact'] + tail, 180, 1, 0),
+            'exportsdkunit': (sdk + ['target::metrics::tests::object_store_'] + tail, 180, 1, 0),
+            'exportsdkpublicon': (sdk + [self.SDK[-1], '--exact'] + tail, 180, 1, 0),
+            'exportsdkpublicoff': (sdk + [self.SDK[-1], '--exact'] + tail, 180, 0, 0),
+        }
+        for kind, expected in commands.items():
+            with self.subTest(kind=kind):
+                self.assertEqual(parent.COMMANDS.get(kind), expected)
+                self.assertEqual(parent.EXPECTED_SUITES.get(kind), self.CASES[kind])
+                exact = self.CASES[kind][0] if '--exact' in expected[0] else None
+                self.assertEqual(parent.EXACT_CASES.get(kind), exact)
+
+    def test_all_required_cases_and_nocapture_names_are_positive_controls(self):
+        for kind in self.CASES:
+            with self.subTest(kind=kind):
+                self.assertTrue(self.passed(kind, self.fixture(kind)))
+                self.assertTrue(self.passed(kind, self.fixture(kind, nocapture=True)))
+
+    def test_zero_missing_or_renamed_filters_cannot_qualify(self):
+        empty = 'running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n'
+        for kind, names in self.CASES.items():
+            with self.subTest(kind=kind):
+                self.assertFalse(self.passed(kind, empty))
+                self.assertFalse(self.passed(kind, self.fixture(kind).replace(names[0], 'unrelated::case')))
+                self.assertFalse(self.passed(kind, self.fixture(kind).replace(f'test {names[0]} ... ok\n', '')))
+
+    def test_coherent_duplicate_or_extra_case_counters_cannot_qualify(self):
+        for kind, names in self.CASES.items():
+            with self.subTest(kind=kind):
+                output = self.fixture(kind)
+                for extra in (names[0], 'unrelated::case'):
+                    changed = output.replace('test result:', f'test {extra} ... ok\ntest result:')
+                    changed = changed.replace(f'running {len(names)} tests', f'running {len(names) + 1} tests')
+                    changed = changed.replace(f'{len(names)} passed;', f'{len(names) + 1} passed;')
+                    self.assertFalse(self.passed(kind, changed))
+
+    def test_required_ignored_or_failed_cases_cannot_qualify(self):
+        for kind, names in self.CASES.items():
+            with self.subTest(kind=kind):
+                ignored = self.fixture(kind).replace(f'test {names[0]} ... ok', f'test {names[0]} ... ignored')
+                ignored = ignored.replace(f'{len(names)} passed; 0 failed; 0 ignored;', f'{len(names) - 1} passed; 0 failed; 1 ignored;')
+                failed = self.fixture(kind).replace(f'test {names[0]} ... ok', f'test {names[0]} ... FAILED')
+                failed = failed.replace(f'test result: ok. {len(names)} passed; 0 failed;', f'test result: FAILED. {len(names) - 1} passed; 1 failed;')
+                self.assertFalse(self.passed(kind, ignored))
+                self.assertFalse(self.passed(kind, failed))
+
+    def test_unfinished_unterminated_or_nested_success_cannot_qualify(self):
+        for kind in self.CASES:
+            with self.subTest(kind=kind):
+                output = self.fixture(kind)
+                self.assertFalse(self.passed(kind, output.rstrip('\n')))
+                self.assertFalse(self.passed(kind, output + 'running 1 test\n'))
+                self.assertFalse(self.passed(kind, output + output))
+                self.assertFalse(self.passed(kind, output.split('test result:')[0]))
+
+    def test_cli_filter_does_not_substitute_for_actual_periodic_router_case(self):
+        self.assertNotIn(self.CLI_RED, self.CLI)
+        self.assertFalse(self.passed('exportclired', self.fixture('exportcliunit')))
+        self.assertFalse(self.passed('exportcliunit', self.fixture('exportclired')))
+        self.assertEqual(parent.EXPECTED_SUITES.get('exportclired'), (self.CLI_RED,))
+
+    def test_fresh_public_sdk_variants_share_one_case_and_change_only_profile(self):
+        on = parent.COMMANDS.get('exportsdkpublicon')
+        off = parent.COMMANDS.get('exportsdkpublicoff')
+        self.assertIsNotNone(on)
+        self.assertIsNotNone(off)
+        if on is None or off is None:
+            return
+        self.assertEqual(on[0], off[0])
+        self.assertEqual(on[1:], (180, 1, 0))
+        self.assertEqual(off[1:], (180, 0, 0))
+        self.assertEqual(parent.EXACT_CASES.get('exportsdkpublicon'), self.SDK[-1])
+        self.assertEqual(parent.EXACT_CASES.get('exportsdkpublicoff'), self.SDK[-1])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -340,6 +340,37 @@ EXPECTED_SUITES = {
         'serialization_failure_uses_a_fixed_incomplete_record',
     )),
 }
+
+# Fixed export gates: all require one complete named harness, including singleton cases.
+OBJECT_STORE_EXPORT_SUITES = {
+    'exportcodecred': ('object_store_diagnostics::tests::one_real_bank_capture_is_bound_to_all_seven_frames_before_later_changes',),
+    'exportcodecunit': ('object_store_diagnostics::tests::one_real_bank_capture_is_bound_to_all_seven_frames_before_later_changes', 'object_store_diagnostics::tests::disabled_and_unavailable_capture_publish_no_records_and_no_measured_zero', 'object_store_diagnostics::tests::every_maximum_u64_field_survives_all_seven_bounded_records', 'object_store_diagnostics::tests::complete_indexed_set_can_arrive_out_of_order', 'object_store_diagnostics::tests::decoder_rejects_missing_duplicate_conflicting_and_cross_capture_frames', 'object_store_diagnostics::tests::decoder_requires_exact_typed_fixed_rows_without_numeric_coercion', 'object_store_diagnostics::tests::bounded_serializer_never_publishes_partial_or_caller_error_text', 'object_store_diagnostics::tests::sink_failure_leaves_an_unacceptable_partial_set', 'object_store_diagnostics::tests::zero_sequence_and_generation_remain_exact_startup_identity', 'object_store_diagnostics::tests::valid_json_at_frame_limit_is_accepted_and_one_byte_over_is_rejected'),
+    'exportclired': ('remote::diagnostics::tests::actual_periodic_router_binds_one_sample_to_zero_one_or_two_listeners',),
+    'exportcliunit': ('remote::diagnostics::tests::disabled_object_store_sideband_never_samples_or_exports_zero_rows', 'remote::diagnostics::tests::object_store_sideband_uses_exact_periodic_identity_and_one_real_snapshot', 'remote::diagnostics::tests::object_store_sideband_keeps_max_u64_and_legacy_schema_separate', 'remote::diagnostics::tests::shutdown_object_store_identity_is_lazy_unique_and_exhaustion_closed'),
+    'exportsdkred': ('target::metrics::tests::object_store_actual_local_capture_encloses_once_and_binds_worker_and_controller',),
+    'exportsdkunit': ('target::metrics::tests::object_store_actual_local_capture_encloses_once_and_binds_worker_and_controller', 'target::metrics::tests::object_store_disabled_skips_callback_and_unavailable_does_not_export_zero', 'target::metrics::tests::object_store_boundary_identity_checks_pid_and_preserves_zero_sequence_generation', 'target::metrics::tests::object_store_records_own_exact_u64_snapshot_and_reject_cross_boundary_merge', 'target::metrics::tests::object_store_additive_receipt_does_not_enter_existing_phase_deltas', 'target::metrics::tests::object_store_public_local_capture_uses_actual_process_bank_or_disabled_status'),
+    'exportsdkpublicon': ('target::metrics::tests::object_store_public_local_capture_uses_actual_process_bank_or_disabled_status',),
+    'exportsdkpublicoff': ('target::metrics::tests::object_store_public_local_capture_uses_actual_process_bank_or_disabled_status',),
+}
+COMMANDS.update({
+    'exportcodecred': (['./scripts/cargo-shared', 'test', '--locked', '--offline', '-p', 'mount-rs-service', '--lib', '--', 'object_store_diagnostics::tests::one_real_bank_capture_is_bound_to_all_seven_frames_before_later_changes', '--exact', '--test-threads=1', '--nocapture'], 180, 0, 0),
+    'exportcodecunit': (['./scripts/cargo-shared', 'test', '--locked', '--offline', '-p', 'mount-rs-service', '--lib', '--', 'object_store_diagnostics::tests::', '--test-threads=1', '--nocapture'], 180, 0, 0),
+    'exportclired': (['./scripts/cargo-shared', 'test', '--locked', '--offline', '-p', 'mount-rs-cli', '--lib', '--', 'remote::diagnostics::tests::actual_periodic_router_binds_one_sample_to_zero_one_or_two_listeners', '--exact', '--test-threads=1', '--nocapture'], 180, 0, 0),
+    'exportcliunit': (['./scripts/cargo-shared', 'test', '--locked', '--offline', '-p', 'mount-rs-cli', '--lib', '--', 'object_store_', '--test-threads=1', '--nocapture'], 180, 0, 0),
+    'exportsdkred': (['./scripts/cargo-shared', 'test', '--locked', '--offline', '-p', 'mount-rs-service', '--features', 'sdk-runtime,resource-profiling', '--test', 'quic_production_target', '--', 'target::metrics::tests::object_store_actual_local_capture_encloses_once_and_binds_worker_and_controller', '--exact', '--test-threads=1', '--nocapture'], 180, 1, 0),
+    'exportsdkunit': (['./scripts/cargo-shared', 'test', '--locked', '--offline', '-p', 'mount-rs-service', '--features', 'sdk-runtime,resource-profiling', '--test', 'quic_production_target', '--', 'target::metrics::tests::object_store_', '--test-threads=1', '--nocapture'], 180, 1, 0),
+    'exportsdkpublicon': (['./scripts/cargo-shared', 'test', '--locked', '--offline', '-p', 'mount-rs-service', '--features', 'sdk-runtime,resource-profiling', '--test', 'quic_production_target', '--', 'target::metrics::tests::object_store_public_local_capture_uses_actual_process_bank_or_disabled_status', '--exact', '--test-threads=1', '--nocapture'], 180, 1, 0),
+    'exportsdkpublicoff': (['./scripts/cargo-shared', 'test', '--locked', '--offline', '-p', 'mount-rs-service', '--features', 'sdk-runtime,resource-profiling', '--test', 'quic_production_target', '--', 'target::metrics::tests::object_store_public_local_capture_uses_actual_process_bank_or_disabled_status', '--exact', '--test-threads=1', '--nocapture'], 180, 0, 0),
+})
+EXPECTED_SUITES.update(OBJECT_STORE_EXPORT_SUITES)
+EXACT_CASES.update({
+    'exportcodecred': 'object_store_diagnostics::tests::one_real_bank_capture_is_bound_to_all_seven_frames_before_later_changes',
+    'exportclired': 'remote::diagnostics::tests::actual_periodic_router_binds_one_sample_to_zero_one_or_two_listeners',
+    'exportsdkred': 'target::metrics::tests::object_store_actual_local_capture_encloses_once_and_binds_worker_and_controller',
+    'exportsdkpublicon': 'target::metrics::tests::object_store_public_local_capture_uses_actual_process_bank_or_disabled_status',
+    'exportsdkpublicoff': 'target::metrics::tests::object_store_public_local_capture_uses_actual_process_bank_or_disabled_status',
+})
+
 def named_suite_passed(output, names, nocapture=False):
     count=len(names)
     return bool(
@@ -822,6 +853,7 @@ def main():
     FAULT_KINDS.update({'holdersdk', 'holdercli', 'holdercliprofiled', 'holderclippy', 'holderclippyprofiled'})
     FAULT_KINDS.update({'tidbcoldcompile', 'tidbcoldunit'})
     FAULT_KINDS.update({'objectstorered', 'objectstorecachered', 'rustfshttpred', 'objectstoreunit', 'objectstorecacheunit', 'rustfshttpunit', 'rustfsownedprefix', 'objectstorealloc', 'objectstorequalification', 'objectstoreclippy'})
+    FAULT_KINDS.update(OBJECT_STORE_EXPORT_SUITES)
     FAULT_KINDS.update(COLD_HOLDER_CASES)
     assert kind in FAULT_KINDS, 'fixed fault qualification commands only'
     root=pathlib.Path(tempfile.mkdtemp(prefix='mount-rs-owned-fault-'+kind+'-',dir=os.environ.get('MOUNT_RS_FAILURE_EVIDENCE_ROOT',tempfile.gettempdir())));os.chmod(root,0o700)
@@ -885,6 +917,7 @@ def main():
     before=frozen();write('source-before.json',before)
     env=os.environ.copy();env.update({'MOUNT_RS_PROFILE_IO':str(profile),'MOUNT_RS_TRACE_STORAGE':str(trace),'MOUNT_RS_TRACE_REQUESTS':'0','CARGO_TARGET_DIR':os.environ.get('CARGO_TARGET_DIR',os.environ.get('MOUNT_RS_CARGO_TARGET_DIR',str(root/'cargo-target')))})
     if kind in {'wsloss','wsautoloss','wscompactloss','wsheldmonitor','wsclientmetrics','wsservicedefault','wsserviceon','wsserviceunit','wspackages','wspackagesprofiled','wsclippy','wsclippyprofiled','clidiagnostics','clicompact'}:env['MOUNT_RS_TRACE_SERVICE']='0'
+    if kind in OBJECT_STORE_EXPORT_SUITES:env['MOUNT_RS_TRACE_SERVICE']='0'
     if kind in {'cacheconsumers','cacheconsumerred'}:
      # Pure suites forbid loading a real addon or latching native profiling.
      for key in ['MOUNT_RS_PROFILE_IO','MOUNT_RS_TRACE_STORAGE','MOUNT_RS_TRACE_REQUESTS','NAPI_RS_FORCE_WASI','NAPI_RS_WASI_FLAVOR','NODE_PATH']:
@@ -1040,7 +1073,7 @@ def main():
      selected_suite_pass=None
      if selected_suite is not None:
       output=(root/'stdout.log').read_text()
-      selected_suite_pass=held_reply_monitor_suite_passed(output) if kind=='wsheldmonitor' else lazy_suite_passed(output,kind) if kind in {'lazycli','lazyservice'} else named_suite_passed(output,selected_suite,nocapture=kind in {'createpath','createunit','filesystemmetrics','targetlazyunit'})
+      selected_suite_pass=held_reply_monitor_suite_passed(output) if kind=='wsheldmonitor' else lazy_suite_passed(output,kind) if kind in {'lazycli','lazyservice'} else named_suite_passed(output,selected_suite,nocapture=kind in {'createpath','createunit','filesystemmetrics','targetlazyunit'} or kind in OBJECT_STORE_EXPORT_SUITES)
       if not selected_suite_pass:unknown.append('named_suite_not_observed_passed')
      required_package_cases=EXPECTED_PACKAGE_CASES.get(kind)
      package_harness_pass=None

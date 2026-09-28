@@ -1,12 +1,14 @@
 //! Local, bounded service records for explicit periodic capture and shutdown.
 
 use crate::runtime::CliError;
-use mount_rs_core::diagnostics::{profile, storage};
+use mount_rs_core::diagnostics::{object_store, profile, storage};
+use mount_rs_service::object_store_diagnostics::{Capture, CaptureContext, CodecError, Sample};
 use serde::Serialize;
 use std::{
     ffi::OsStr,
     future::Future,
     io::{self, Write},
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -291,12 +293,126 @@ fn encode_capture_record(
     }
 }
 
+// Shutdown sidebands are distinct process observations even when both
+// listener diagnostics are emitted in the same millisecond. Exhaustion omits
+// a sample instead of reusing an identity. No new timer is installed.
+static OBJECT_STORE_SHUTDOWN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn shutdown_object_store_capture(
+    profiling: bool,
+    sequence: &AtomicU64,
+    pid: impl FnOnce() -> u32,
+    observed_unix_ms: impl FnOnce() -> u64,
+) -> Option<Capture> {
+    if !profiling {
+        return None;
+    }
+    let previous = sequence
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .ok()?;
+    Some(Capture {
+        pid: pid(),
+        sequence: previous + 1,
+        observed_unix_ms: observed_unix_ms(),
+        context: CaptureContext::Shutdown,
+        generation: None,
+    })
+}
+
+fn capture_object_store(
+    profiling: bool,
+    capture: Capture,
+    snapshot: impl FnOnce() -> Option<object_store::Snapshot>,
+) -> Result<Option<Sample>, CodecError> {
+    mount_rs_service::object_store_diagnostics::capture(profiling, capture, snapshot)
+}
+
+fn emit_object_store(sample: Result<Option<Sample>, CodecError>) {
+    if let Ok(Some(sample)) = sample {
+        // Export serialization/record allocations are outside warmed-bank
+        // claims. Failed or partial writes remain unavailable to a complete-set
+        // decoder; the controller retains the existing stderr/output limits.
+        let _ = sample.write(&mut io::stderr().lock());
+    }
+}
+
 pub(super) fn emit(observer: &mount_rs_service::server::ServerDiagnostics) {
     emit_snapshot(Transport::Quic, &observer.snapshot());
 }
 
 pub(super) fn emit_websocket(observer: &mount_rs_service::websocket::WebSocketDiagnostics) {
     emit_snapshot(Transport::WebSocket, &observer.snapshot());
+}
+
+struct PeriodicRecords<'a, Q, W, S, P> {
+    quic: Option<&'a Q>,
+    websocket: Option<&'a W>,
+    process: &'a ProcessDiagnostics<S, P>,
+    pid: u32,
+    capture: CaptureMetadata,
+}
+
+struct RecordSink<F>(F);
+
+impl<F: FnMut(&[u8])> Write for RecordSink<F> {
+    fn write(&mut self, record: &[u8]) -> io::Result<usize> {
+        (self.0)(record);
+        Ok(record.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+// The application routes one captured process value alongside zero, one or
+// two listener snapshots. The injected sink is the existing best-effort record
+// writer in production; tests observe this same routing boundary.
+fn emit_periodic_records<Q: Serialize, W: Serialize, S: Serialize, P: Serialize>(
+    records: PeriodicRecords<'_, Q, W, S, P>,
+    object_store_enabled: bool,
+    object_store_snapshot: impl FnOnce() -> Option<object_store::Snapshot>,
+    mut output: impl FnMut(&[u8]),
+) {
+    if records.quic.is_none() && records.websocket.is_none() {
+        return;
+    }
+    let sample = capture_object_store(
+        object_store_enabled,
+        Capture {
+            pid: records.pid,
+            sequence: records.capture.sequence,
+            observed_unix_ms: records.capture.observed_unix_ms,
+            context: CaptureContext::Periodic,
+            generation: None,
+        },
+        object_store_snapshot,
+    );
+    if let Some(snapshot) = records.quic {
+        output(&encode_periodic_record(
+            Transport::Quic,
+            snapshot,
+            records.pid,
+            records.process,
+            records.capture,
+        ));
+    }
+    if let Some(snapshot) = records.websocket {
+        output(&encode_periodic_record(
+            Transport::WebSocket,
+            snapshot,
+            records.pid,
+            records.process,
+            records.capture,
+        ));
+    }
+    // A frame is staged before the callback is invoked. Diagnostic writes
+    // retain best-effort outcome semantics and the controller's existing caps.
+    if let Ok(Some(sample)) = sample {
+        let _ = sample.write(&mut RecordSink(output));
+    }
 }
 
 pub(super) fn emit_periodic(
@@ -307,40 +423,58 @@ pub(super) fn emit_periodic(
     if observer.is_none() && websocket.is_none() {
         return;
     }
-    // These process-wide cumulative banks are captured once for both listener
-    // records. The listener snapshots remain separate, non-atomic observations.
+    // Process-wide banks are captured once for both listener records. The
+    // listener snapshots remain separate, non-atomic observations.
     let process = process_diagnostics(
         capture_bank(storage::enabled(), storage::snapshot),
         capture_bank(profile::enabled(), profile::snapshot),
     );
-    let pid = std::process::id();
-    if let Some(observer) = observer {
-        write_record(&encode_periodic_record(
-            Transport::Quic,
-            &observer.snapshot(),
-            pid,
-            &process,
+    let quic = observer.map(|observer| observer.snapshot());
+    let websocket = websocket.map(|observer| observer.snapshot());
+    let object_store = object_store::Observer::enabled();
+    emit_periodic_records(
+        PeriodicRecords {
+            quic: quic.as_ref(),
+            websocket: websocket.as_ref(),
+            process: &process,
+            pid: std::process::id(),
             capture,
-        ));
-    }
-    if let Some(observer) = websocket {
-        write_record(&encode_periodic_record(
-            Transport::WebSocket,
-            &observer.snapshot(),
-            pid,
-            &process,
-            capture,
-        ));
-    }
+        },
+        object_store.is_enabled(),
+        || object_store.snapshot(),
+        write_record,
+    );
 }
 
 fn emit_snapshot(transport: Transport, snapshot: &impl Serialize) {
+    let object_store = object_store::Observer::enabled();
+    let object_store_sample = shutdown_object_store_capture(
+        object_store.is_enabled(),
+        &OBJECT_STORE_SHUTDOWN_SEQUENCE,
+        std::process::id,
+        || {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+                .unwrap_or(0)
+        },
+    )
+    .map(|capture| {
+        capture_object_store(object_store.is_enabled(), capture, || {
+            object_store.snapshot()
+        })
+    });
     let process = process_diagnostics(
         capture_bank(storage::enabled(), storage::snapshot),
         capture_bank(profile::enabled(), profile::snapshot),
     );
     let record = encode_record(transport, snapshot, std::process::id(), &process);
     write_record(&record);
+    if let Some(sample) = object_store_sample {
+        // Shutdown context names this observation point; release counters and
+        // zero in-flight rows do not acknowledge provider/socket shutdown.
+        emit_object_store(sample);
+    }
 }
 
 fn write_record(record: &[u8]) {
@@ -353,8 +487,250 @@ fn write_record(record: &[u8]) {
 mod tests {
     use super::*;
     use mount_rs_core::diagnostics::{profile, storage};
+    use mount_rs_service::object_store_diagnostics;
     use serde::ser::Error as _;
     use serde_json::{Value, json};
+
+    #[test]
+    fn disabled_object_store_sideband_never_samples_or_exports_zero_rows() {
+        let capture = Capture {
+            pid: 321,
+            sequence: 0,
+            observed_unix_ms: 17,
+            context: CaptureContext::Periodic,
+            generation: None,
+        };
+        assert!(
+            capture_object_store(false, capture, || panic!("disabled object-store capture"))
+                .unwrap()
+                .is_none()
+        );
+        // An enabled application observer can still have an unavailable bank;
+        // it must not fabricate seven zero snapshots for that case.
+        let unavailable = object_store::Observer::disabled();
+        assert!(
+            capture_object_store(true, capture, || unavailable.snapshot())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn object_store_sideband_uses_exact_periodic_identity_and_one_real_snapshot() {
+        use object_store::ClientRole;
+        use std::cell::Cell;
+
+        let observer = object_store::Observer::isolated();
+        let _primary = observer.client(ClientRole::PrimaryDataMixed);
+        let calls = Cell::new(0);
+        let capture = Capture {
+            pid: 321,
+            sequence: 9007199254740993,
+            observed_unix_ms: 29,
+            context: CaptureContext::Periodic,
+            generation: None,
+        };
+        let sample = capture_object_store(true, capture, || {
+            calls.set(calls.get() + 1);
+            let captured = observer.snapshot();
+            // The live bank changes after the actual capture. Serialization
+            // must preserve the returned copy, not fetch a later bank state.
+            let _later = observer.client(ClientRole::QualificationProbe);
+            captured
+        })
+        .unwrap()
+        .expect("enabled real bank must export a sample");
+        let mut output = Vec::new();
+        sample.write(&mut output).unwrap();
+        let decoded = object_store_diagnostics::decode(&output).unwrap();
+        assert_eq!(decoded.capture(), &capture);
+        assert_eq!(calls.get(), 1);
+        assert_eq!(output.iter().filter(|byte| **byte == b'\n').count(), 7);
+        for line in output.split_inclusive(|byte| *byte == b'\n') {
+            assert!(line.len() <= object_store_diagnostics::RECORD_LIMIT);
+            assert!(line.starts_with(object_store_diagnostics::PREFIX));
+        }
+        assert_eq!(decoded.snapshot().clients[0].constructed, 1);
+        assert_eq!(decoded.snapshot().clients[0].live, 1);
+        assert_eq!(decoded.snapshot().clients[3].constructed, 0);
+        assert_eq!(observer.snapshot().unwrap().clients[3].constructed, 1);
+        assert_eq!(observer.snapshot().unwrap().clients[3].released, 1);
+    }
+
+    #[test]
+    fn object_store_sideband_keeps_max_u64_and_legacy_schema_separate() {
+        let capture = Capture {
+            pid: 321,
+            sequence: u64::MAX,
+            observed_unix_ms: u64::MAX,
+            context: CaptureContext::Periodic,
+            generation: Some(u64::MAX),
+        };
+        let mut snapshot = object_store::Snapshot::default();
+        snapshot.clients[0].constructed = u64::MAX;
+        snapshot.clients[0].http[0].body_bytes = u64::MAX;
+        snapshot.bundles.live = u64::MAX;
+        snapshot.cache.payload_bytes = u64::MAX;
+        snapshot.concurrent_activity = true;
+        let sample = capture_object_store(true, capture, || Some(snapshot))
+            .unwrap()
+            .expect("enabled max-u64 sample must remain available");
+        let mut output = Vec::new();
+        sample.write(&mut output).unwrap();
+        let decoded = object_store_diagnostics::decode(&output).unwrap();
+        assert_eq!(decoded.capture(), &capture);
+        assert_eq!(decoded.snapshot(), &snapshot);
+        for line in output.split_inclusive(|byte| *byte == b'\n') {
+            assert!(line.len() <= 16 * 1024);
+        }
+        let legacy = parse_record(&encode_periodic_record(
+            Transport::Quic,
+            &json!({"counter": u64::MAX}),
+            321,
+            &disabled_process(),
+            CaptureMetadata {
+                sequence: u64::MAX,
+                observed_unix_ms: u64::MAX,
+            },
+        ));
+        assert_eq!(legacy["schema"], "mount-rs.cli-service-diagnostics.v2");
+        assert_eq!(legacy["capture"]["sequence"].as_u64(), Some(u64::MAX));
+        assert_eq!(legacy["snapshot"]["counter"].as_u64(), Some(u64::MAX));
+        assert!(legacy.get("object_store_observation").is_none());
+        assert_eq!(
+            legacy["process_diagnostics"]["unavailable"]["http_attempts"]["available"],
+            false
+        );
+        assert_eq!(RECORD_LIMIT, 1024 * 1024);
+    }
+
+    #[test]
+    fn shutdown_object_store_identity_is_lazy_unique_and_exhaustion_closed() {
+        let sequence = AtomicU64::new(0);
+        assert!(
+            shutdown_object_store_capture(
+                false,
+                &sequence,
+                || panic!("disabled pid"),
+                || panic!("disabled clock")
+            )
+            .is_none()
+        );
+        assert_eq!(sequence.load(Ordering::Relaxed), 0);
+        let first = shutdown_object_store_capture(true, &sequence, || 321, || 42).unwrap();
+        let second = shutdown_object_store_capture(true, &sequence, || 321, || 42).unwrap();
+        assert_eq!(first.context, CaptureContext::Shutdown);
+        assert_eq!(first.sequence, 1);
+        assert_eq!(second.sequence, 2);
+        assert_eq!(first.observed_unix_ms, second.observed_unix_ms);
+        assert_ne!(first, second);
+        let exhausted = AtomicU64::new(u64::MAX);
+        assert!(
+            shutdown_object_store_capture(
+                true,
+                &exhausted,
+                || panic!("exhausted pid"),
+                || panic!("exhausted clock")
+            )
+            .is_none()
+        );
+        assert_eq!(exhausted.load(Ordering::Relaxed), u64::MAX);
+    }
+
+    #[test]
+    fn actual_periodic_router_binds_one_sample_to_zero_one_or_two_listeners() {
+        use std::cell::Cell;
+        let quic = json!({"quic_counter": 3});
+        let websocket = json!({"websocket_counter": 5});
+        for (quic, websocket) in [
+            (None, None),
+            (Some(&quic), None),
+            (None, Some(&websocket)),
+            (Some(&quic), Some(&websocket)),
+        ] {
+            let observer = object_store::Observer::isolated();
+            let _client = observer.client(object_store::ClientRole::PrimaryDataMixed);
+            let calls = Cell::new(0);
+            let capture = CaptureMetadata {
+                sequence: 9007199254740993,
+                observed_unix_ms: 51,
+            };
+            let mut records = Vec::new();
+            emit_periodic_records(
+                PeriodicRecords {
+                    quic,
+                    websocket,
+                    process: &disabled_process(),
+                    pid: 321,
+                    capture,
+                },
+                true,
+                || {
+                    calls.set(calls.get() + 1);
+                    observer.snapshot()
+                },
+                |record| records.push(record.to_vec()),
+            );
+            let listener_count = usize::from(quic.is_some()) + usize::from(websocket.is_some());
+            let old_records: Vec<_> = records
+                .iter()
+                .filter(|record| record.starts_with(PREFIX))
+                .collect();
+            let new_records: Vec<_> = records
+                .iter()
+                .filter(|record| record.starts_with(object_store_diagnostics::PREFIX))
+                .collect();
+            assert_eq!(old_records.len(), listener_count);
+            if listener_count == 0 {
+                assert_eq!(
+                    calls.get(),
+                    0,
+                    "no listeners must not sample a process bank"
+                );
+                assert!(records.is_empty());
+                continue;
+            }
+            assert_eq!(
+                calls.get(),
+                1,
+                "one/two listeners share one actual bank capture"
+            );
+            assert_eq!(
+                new_records.len(),
+                7,
+                "listener count must not duplicate sidebands"
+            );
+            for record in old_records {
+                let legacy = parse_record(record);
+                assert_eq!(legacy["pid"].as_u64(), Some(321));
+                assert_eq!(
+                    legacy["capture"]["sequence"].as_u64(),
+                    Some(capture.sequence)
+                );
+                assert_eq!(
+                    legacy["capture"]["observed_unix_ms"].as_u64(),
+                    Some(capture.observed_unix_ms)
+                );
+            }
+            let bytes: Vec<_> = new_records
+                .iter()
+                .flat_map(|record| record.iter().copied())
+                .collect();
+            let sample = object_store_diagnostics::decode(&bytes).unwrap();
+            assert_eq!(
+                sample.capture(),
+                &Capture {
+                    pid: 321,
+                    sequence: capture.sequence,
+                    observed_unix_ms: capture.observed_unix_ms,
+                    context: CaptureContext::Periodic,
+                    generation: None,
+                }
+            );
+            assert_eq!(sample.snapshot().clients[0].constructed, 1);
+            assert_eq!(sample.snapshot().clients[0].live, 1);
+        }
+    }
 
     fn parse_record(record: &[u8]) -> Value {
         assert!(

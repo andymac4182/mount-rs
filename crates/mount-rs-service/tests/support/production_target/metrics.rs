@@ -881,6 +881,75 @@ pub(super) fn example_runtime(generation: u64, drives: usize) -> Value {
     json!({"schema":"mount-rs.target-runtime.v1","generation":generation,"capacity":drives,"available":false,"complete":false,"pool":pool,"diagnostics":null,"observations":(0..drives).map(|drive|json!({"drive":drive,"expected_backing":format!("{:032x}",drive+1),"observed_backing":null,"constructed":0})).collect::<Vec<_>>()})
 }
 
+type ObjectStoreSnapshot = mount_rs_core::diagnostics::object_store::Snapshot;
+struct ObjectStoreCapture<'a> {
+    enabled: bool,
+    snapshot: &'a mut dyn FnMut() -> Option<ObjectStoreSnapshot>,
+}
+const OBJECT_STORE_SCOPE: &str = "process cumulative RustFS service dispatch/body and generic adapter cache observations; bounded records from one fixed snapshot; not exact wire requests, physical IOPS, transactional cut or provider/socket drain acknowledgment";
+fn object_store_identity(
+    identity: &Value,
+    started: u64,
+) -> Result<mount_rs_service::object_store_diagnostics::Capture, String> {
+    use mount_rs_service::object_store_diagnostics::{Capture, CaptureContext};
+    Ok(Capture {
+        pid: identity["pid"]
+            .as_u64()
+            .and_then(|pid| u32::try_from(pid).ok())
+            .ok_or("object-store boundary PID missing or invalid")?,
+        sequence: identity["sequence"]
+            .as_u64()
+            .ok_or("object-store boundary sequence missing or invalid")?,
+        observed_unix_ms: started,
+        // This context covers every owned fixture process boundary. Outer role
+        // remains authoritative, including real controller SDK/provider setup.
+        context: CaptureContext::WorkerBoundary,
+        generation: Some(
+            identity["generation"]
+                .as_u64()
+                .ok_or("object-store boundary generation missing or invalid")?,
+        ),
+    })
+}
+fn object_store_records(
+    enabled: bool,
+    identity: &Value,
+    started: u64,
+    snapshot: impl FnOnce() -> Option<ObjectStoreSnapshot>,
+) -> Result<Value, String> {
+    use mount_rs_service::object_store_diagnostics as codec;
+    let absent = |status, reason| json!({"enabled":enabled,"available":false,"complete":false,"status":status,"reason":reason,"records":[],"scope":OBJECT_STORE_SCOPE});
+    if !enabled {
+        // No callback, capture validation, encoded frame or synthetic zero bank.
+        return Ok(absent("disabled", "object-store profiling disabled"));
+    }
+    let Some(sample) = codec::capture(true, object_store_identity(identity, started)?, snapshot)
+        .map_err(|_| "object-store boundary capture invalid")?
+    else {
+        return Ok(absent("unavailable", "object-store observer unavailable"));
+    };
+    let mut bytes = Vec::new();
+    sample
+        .write(&mut bytes)
+        .map_err(|_| "object-store bounded record encoding failed")?;
+    let text = String::from_utf8(bytes).map_err(|_| "object-store record encoding invalid")?;
+    let records: Vec<_> = text.split_inclusive('\n').map(str::to_owned).collect();
+    if records.len() != codec::FRAME_COUNT
+        || records.iter().any(|record| {
+            record.len() > codec::RECORD_LIMIT
+                || !record.as_bytes().starts_with(codec::PREFIX)
+                || !record.ends_with('\n')
+        })
+    {
+        return Err("object-store bounded record set invalid".into());
+    }
+    // Export allocations are inside the existing local capture envelope and
+    // outside allocation-free fixed-bank update claims. No second capture.
+    Ok(
+        json!({"enabled":true,"available":true,"complete":false,"status":"observed","records":records,"scope":OBJECT_STORE_SCOPE}),
+    )
+}
+
 pub struct Local {
     baseline: Option<super::resource_profile::Snapshot>,
     previous_process: Option<super::resource_profile::Snapshot>,
@@ -911,7 +980,7 @@ impl Local {
         oracle: Value,
     ) -> Result<Value, String> {
         let span = observer().begin("metric_capture");
-        let result = self.capture_inner(identity, service, oracle, None);
+        let result = self.capture_inner(identity, service, oracle, None, None);
         span.finish(result.is_ok(), 0);
         result
     }
@@ -927,7 +996,7 @@ impl Local {
         let span = observer().begin("metric_capture");
         let mut capture =
             || runtime().map_err(|_| "runtime metric capture unavailable".to_string());
-        let result = self.capture_inner(identity, service, Value::Null, Some(&mut capture));
+        let result = self.capture_inner(identity, service, Value::Null, Some(&mut capture), None);
         span.finish(result.is_ok(), 0);
         result
     }
@@ -937,9 +1006,24 @@ impl Local {
         service: Option<&mount_rs_service::server::ServerDiagnostics>,
         oracle: Value,
         runtime: Option<&mut dyn FnMut() -> Result<Value, String>>,
+        object_store: Option<ObjectStoreCapture<'_>>,
     ) -> Result<Value, String> {
         let start = Instant::now();
         let started = super::utc_ms();
+        // One snapshot and its seven bounded records belong to this same
+        // boundary/allowance. The private override supports isolated controls;
+        // existing public paths always use the actual process bank.
+        let object_store = match object_store {
+            Some(capture) => {
+                object_store_records(capture.enabled, &identity, started, capture.snapshot)?
+            }
+            None => {
+                let observer = mount_rs_core::diagnostics::object_store::Observer::enabled();
+                object_store_records(observer.is_enabled(), &identity, started, || {
+                    observer.snapshot()
+                })?
+            }
+        };
         // Include the bounded runtime snapshot in the existing capture allowance
         // and observer category; no added sampler or deadline is created.
         let runtime = runtime.map(|capture| capture()).transpose()?;
@@ -1033,8 +1117,8 @@ impl Local {
             "capture_started_unix_ms":started,"capture_ended_unix_ms":super::utc_ms(),"capture_elapsed_ns":elapsed.as_nanos().min(u128::from(u64::MAX)) as u64,"process_observation_elapsed_seconds":self.started.elapsed().as_secs_f64(),
             "capture_complete":!enabled || elapsed<=Duration::from_secs(30),"metrics_complete":enabled && quiescent && accounting_complete && runtime_complete && elapsed<=Duration::from_secs(30),"accounting_complete":accounting_complete,
             "quiescence":{"controller_work_drained":true,"service_observed":service.is_some(),"application_quiescent":application_quiescent,"instrumented_storage_in_flight_zero":storage_quiescent,"scope":"owned controller work drained; only instrumented service/storage activity observed; no global atomic cut or proof of all provider/background work"},
-            "core":core,"storage":storage,"process_since_baseline":process,"process_since_previous_boundary":process_interval,"server_quic":service,"server_quic_before_local_capture":service_envelope,"oracle":oracle,"runtime_activation":runtime,
-            "coverage":{"core":family_state(enabled,true,true,quiescent),"storage":family_state(enabled,true,true,quiescent),"process":family_state(enabled,true,true,true),
+            "object_store_observation":object_store,"core":core,"storage":storage,"process_since_baseline":process,"process_since_previous_boundary":process_interval,"server_quic":service,"server_quic_before_local_capture":service_envelope,"oracle":oracle,"runtime_activation":runtime,
+            "coverage":{"object_store_observation":json!({"enabled":object_store["enabled"],"configured":true,"available":object_store["available"],"complete":false,"status":if object_store["available"]==true{"partial"}else if object_store["enabled"]==true{"unavailable"}else{"disabled"},"scope":OBJECT_STORE_SCOPE}),"core":family_state(enabled,true,true,quiescent),"storage":family_state(enabled,true,true,quiescent),"process":family_state(enabled,true,true,true),
                 "server_quic":family_state(enabled,worker,service.is_some(),quiescent),
                 "runtime_activation":family_state(enabled,worker,runtime.as_ref().is_some_and(|value| value["available"]==true),runtime_complete),
                 "catalog_pager_core":{"status":if enabled{"partial"}else{"disabled"},"available":enabled,"scope":"catalog pager hit/miss/write/unavailable core rows retained; not all SQLite connections"},
@@ -1933,5 +2017,291 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         assert!(publish_immutable(&path, &json!({"complete":true})).is_err());
         assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+    fn object_store_sample(value: &Value) -> mount_rs_service::object_store_diagnostics::Sample {
+        let codec_records = value["records"].as_array().expect("bounded record array");
+        let mut bytes = Vec::new();
+        for record in codec_records {
+            let record = record.as_str().expect("record is a complete string");
+            assert!(record.len() <= mount_rs_service::object_store_diagnostics::RECORD_LIMIT);
+            assert!(
+                record
+                    .as_bytes()
+                    .starts_with(mount_rs_service::object_store_diagnostics::PREFIX)
+            );
+            assert!(record.ends_with('\n'));
+            bytes.extend_from_slice(record.as_bytes());
+        }
+        assert_eq!(
+            codec_records.len(),
+            mount_rs_service::object_store_diagnostics::FRAME_COUNT
+        );
+        mount_rs_service::object_store_diagnostics::decode(&bytes)
+            .expect("one coherent fixed sample")
+    }
+
+    #[test]
+    fn object_store_actual_local_capture_encloses_once_and_binds_worker_and_controller() {
+        use mount_rs_core::diagnostics::object_store::{ClientRole, HttpMethod, Observer};
+        use mount_rs_service::object_store_diagnostics::CaptureContext;
+        // Explicit enabled applies solely to this isolated object-store seam;
+        // no environment write or cached global-profile reset is required.
+        for role in ["worker", "controller"] {
+            for delay in [Duration::ZERO, Duration::from_millis(25)] {
+                let bank = Observer::isolated();
+                let client = bank.client(ClientRole::StandaloneData);
+                let mut body = client.attempt(HttpMethod::Get, Some(4096)).headers(200);
+                body.data(4096);
+                body.eof();
+                let mut local = Local::new().unwrap();
+                let mut outer_identity = identity();
+                outer_identity["role"] = json!(role);
+                let mut calls = 0;
+                let mut callback_elapsed = None;
+                let mut captured = None;
+                let mut callback = || {
+                    calls += 1;
+                    let elapsed = Instant::now();
+                    std::thread::sleep(delay);
+                    let snapshot = bank.snapshot().expect("isolated bank is enabled");
+                    captured = Some(snapshot);
+                    callback_elapsed = Some(elapsed.elapsed());
+                    Some(snapshot)
+                };
+                let value = local
+                    .capture_inner(
+                        outer_identity.clone(),
+                        None,
+                        Value::Null,
+                        None,
+                        Some(ObjectStoreCapture {
+                            enabled: true,
+                            snapshot: &mut callback,
+                        }),
+                    )
+                    .unwrap();
+                assert_eq!(calls, 1, "actual Local boundary must invoke one snapshot");
+                let callback_elapsed = callback_elapsed.unwrap();
+                let start = value["capture_started_unix_ms"].as_u64().unwrap();
+                // The epoch clock can step; binding is exact below, while the
+                // monotonic elapsed proves the callback is inside the envelope.
+                assert!(
+                    u128::from(value["capture_elapsed_ns"].as_u64().unwrap())
+                        >= callback_elapsed.as_nanos()
+                );
+                assert_eq!(value["identity"], outer_identity);
+                assert_eq!(value["object_store_observation"]["status"], "observed");
+                let sample = object_store_sample(&value["object_store_observation"]);
+                assert_eq!(
+                    sample.capture(),
+                    &object_store_identity(&outer_identity, start).unwrap()
+                );
+                assert_eq!(sample.capture().context, CaptureContext::WorkerBoundary);
+                assert_eq!(sample.snapshot(), captured.as_ref().unwrap());
+                assert_eq!(
+                    value["coverage"]["object_store_observation"]["status"],
+                    "partial"
+                );
+                assert_eq!(
+                    value["coverage"]["object_store_observation"]["complete"],
+                    false
+                );
+                assert_eq!(value["coverage"]["http_attempts"]["available"], false);
+                assert_eq!(value["coverage"]["physical_iops"]["available"], false);
+                assert_eq!(value["schema"], "mount-rs-phase-metrics-v1");
+            }
+        }
+    }
+
+    #[test]
+    fn object_store_disabled_skips_callback_and_unavailable_does_not_export_zero() {
+        let calls = std::cell::Cell::new(0);
+        let disabled = object_store_records(false, &Value::Null, 0, || {
+            calls.set(calls.get() + 1);
+            panic!("disabled export must skip its actual snapshot callback");
+        })
+        .unwrap();
+        assert_eq!(calls.get(), 0);
+        assert_eq!(disabled["status"], "disabled");
+        assert_eq!(disabled["available"], false);
+        assert_eq!(disabled["records"], json!([]));
+        let unavailable = object_store_records(true, &identity(), 123, || {
+            calls.set(calls.get() + 1);
+            None
+        })
+        .unwrap();
+        assert_eq!(calls.get(), 1, "enabled unavailable bank is observed once");
+        assert_eq!(unavailable["status"], "unavailable");
+        assert_eq!(unavailable["available"], false);
+        assert_eq!(unavailable["complete"], false);
+        assert_eq!(unavailable["records"], json!([]));
+        assert!(unavailable.get("snapshot").is_none());
+    }
+
+    #[test]
+    fn object_store_boundary_identity_checks_pid_and_preserves_zero_sequence_generation() {
+        use mount_rs_core::diagnostics::object_store::Observer;
+        for (field, replacement) in [
+            ("pid", json!(u64::from(u32::MAX) + 1)),
+            ("pid", json!(0)),
+            ("sequence", json!(-1)),
+            ("generation", json!("1")),
+        ] {
+            let mut invalid = identity();
+            invalid[field] = replacement;
+            let calls = std::cell::Cell::new(0);
+            let result = object_store_records(true, &invalid, 123, || {
+                calls.set(calls.get() + 1);
+                None
+            });
+            assert!(
+                result.is_err(),
+                "invalid {field} must fail before the callback"
+            );
+            assert_eq!(calls.get(), 0);
+        }
+        let bank = Observer::isolated();
+        let mut startup = identity();
+        startup["sequence"] = json!(0);
+        startup["generation"] = json!(0);
+        let value = object_store_records(true, &startup, 0, || bank.snapshot()).unwrap();
+        let sample = object_store_sample(&value);
+        assert_eq!(sample.capture().sequence, 0);
+        assert_eq!(sample.capture().generation, Some(0));
+        assert_eq!(sample.capture().observed_unix_ms, 0);
+    }
+
+    #[test]
+    fn object_store_records_own_exact_u64_snapshot_and_reject_cross_boundary_merge() {
+        use mount_rs_core::diagnostics::object_store::{ClientRole, HttpMethod, Observer};
+        use mount_rs_service::object_store_diagnostics as codec;
+        let bank = Observer::isolated();
+        let client = bank.client(ClientRole::StandaloneData);
+        let mut body = client.attempt(HttpMethod::Get, Some(u64::MAX)).headers(200);
+        body.data(u64::MAX);
+        body.eof();
+        let calls = std::cell::Cell::new(0);
+        let expected = bank.snapshot().unwrap();
+        let outer_identity = identity();
+        let value = object_store_records(true, &outer_identity, 456, || {
+            calls.set(calls.get() + 1);
+            bank.snapshot()
+        })
+        .unwrap();
+        assert_eq!(calls.get(), 1);
+        let sample = object_store_sample(&value);
+        assert_eq!(sample.snapshot(), &expected);
+        let row = &sample.snapshot().clients[ClientRole::StandaloneData.index()].http
+            [HttpMethod::Get.index()];
+        assert_eq!(row.offered_bytes, u64::MAX);
+        assert_eq!(row.body_bytes, u64::MAX);
+        client.attempt(HttpMethod::Get, None).transport_error();
+        assert_ne!(bank.snapshot().unwrap(), expected);
+        assert_eq!(
+            object_store_sample(&value).snapshot(),
+            &expected,
+            "receipt owns a copied value, never recaptures its live bank"
+        );
+        for (field, replacement) in [
+            ("pid", json!(124)),
+            ("generation", json!(2)),
+            ("sequence", json!(5)),
+        ] {
+            let mut changed = outer_identity.clone();
+            changed[field] = replacement;
+            assert_ne!(
+                sample.capture(),
+                &object_store_identity(&changed, 456).unwrap()
+            );
+        }
+        assert_ne!(
+            sample.capture(),
+            &object_store_identity(&outer_identity, 457).unwrap()
+        );
+        let mut records: Vec<String> = value["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row.as_str().unwrap().to_owned())
+            .collect();
+        let mut frame: Value = serde_json::from_str(&records[0][codec::PREFIX.len()..]).unwrap();
+        frame["capture"]["sequence"] = json!(5);
+        records[0] = format!(
+            "{}{}\n",
+            std::str::from_utf8(codec::PREFIX).unwrap(),
+            serde_json::to_string(&frame).unwrap()
+        );
+        assert!(
+            codec::decode(records.concat().as_bytes()).is_err(),
+            "one changed frame cannot silently merge another boundary"
+        );
+    }
+
+    #[test]
+    fn object_store_additive_receipt_does_not_enter_existing_phase_deltas() {
+        let mut before = json!({"identity":identity(),"core":{"entries":[]},"object_store_observation":{"available":true,"records":["older cumulative bank"]}});
+        before["identity"]["sequence"] = json!(3);
+        let mut after = before.clone();
+        after["identity"]["sequence"] = json!(4);
+        after["object_store_observation"] =
+            json!({"available":false,"records":[],"status":"unavailable"});
+        let delta = phase_delta(&before, &after).unwrap();
+        assert!(delta.get("object_store_observation").is_none());
+        let mut legacy_before = before.clone();
+        let mut legacy_after = after.clone();
+        legacy_before
+            .as_object_mut()
+            .unwrap()
+            .remove("object_store_observation");
+        legacy_after
+            .as_object_mut()
+            .unwrap()
+            .remove("object_store_observation");
+        assert_eq!(delta, phase_delta(&legacy_before, &legacy_after).unwrap());
+    }
+    #[test]
+    fn object_store_public_local_capture_uses_actual_process_bank_or_disabled_status() {
+        use mount_rs_core::diagnostics::object_store::{ClientRole, HttpMethod, Observer};
+        let bank = Observer::enabled();
+        let client = bank.client(ClientRole::StandaloneProbe);
+        // This is real bank work, not HTTP/network activity. Fresh-process
+        // MOUNT_RS_PROFILE_IO=1 enables the positive public-path control.
+        if bank.is_enabled() {
+            let body = client.attempt(HttpMethod::Head, None).headers(200);
+            drop(body);
+        }
+        let mut outer_identity = identity();
+        outer_identity["role"] = json!("controller");
+        outer_identity["pid"] = json!(std::process::id());
+        let value = Local::new()
+            .unwrap()
+            .capture(outer_identity.clone(), None, Value::Null)
+            .unwrap();
+        let observation = &value["object_store_observation"];
+        assert_eq!(observation["enabled"], bank.is_enabled());
+        if bank.is_enabled() {
+            assert_eq!(observation["status"], "observed");
+            let sample = object_store_sample(observation);
+            assert_eq!(
+                sample.capture(),
+                &object_store_identity(
+                    &outer_identity,
+                    value["capture_started_unix_ms"].as_u64().unwrap()
+                )
+                .unwrap()
+            );
+            let row = &sample.snapshot().clients[ClientRole::StandaloneProbe.index()].http
+                [HttpMethod::Head.index()];
+            assert!(row.attempts_started >= 1);
+            assert!(row.body_dropped >= 1);
+            assert_eq!(
+                value["coverage"]["object_store_observation"]["status"],
+                "partial"
+            );
+        } else {
+            assert_eq!(observation["status"], "disabled");
+            assert_eq!(observation["available"], false);
+            assert_eq!(observation["records"], json!([]));
+        }
     }
 }
