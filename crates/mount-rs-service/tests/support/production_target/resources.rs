@@ -32,6 +32,7 @@ pub struct Resources {
     stop: Arc<AtomicBool>,
     current: Arc<Mutex<Value>>,
     thread: Option<std::thread::JoinHandle<()>>,
+    checkpoint_setup: Option<Arc<Mutex<Option<super::checkpoints::Setup>>>>,
 }
 pub fn validate_sample(value: &Value, pid: u32, now: u64) -> Result<(), String> {
     if let Some(error) = value["error"].as_str() {
@@ -155,7 +156,14 @@ impl Resources {
         let current = Arc::new(Mutex::new(initial));
         let halt = stop.clone();
         let output = current.clone();
+        let checkpoint_setup = mount_rs_core::diagnostics::profile::enabled()
+            .then(|| Arc::new(Mutex::new(None::<super::checkpoints::Setup>)));
+        let checkpoint_control = checkpoint_setup.clone();
+        let checkpoint_path = checkpoint_setup
+            .as_ref()
+            .map(|_| path.with_file_name("checkpoint-latest.json"));
         let thread = std::thread::spawn(move || {
+            let mut checkpoints = None;
             loop {
                 if !halt.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(100));
@@ -181,6 +189,14 @@ impl Resources {
                 if super::write_json(&path, &value).is_err() {
                     output.lock().unwrap()["error"] = json!("resource receipt write failed");
                 }
+                if let (Some(setup), Some(path)) = (&checkpoint_control, &checkpoint_path) {
+                    let configured = setup.lock().unwrap().is_some();
+                    if configured {
+                        checkpoints
+                            .get_or_insert_with(super::checkpoints::Sampler::new)
+                            .tick(setup, path, &value, terminal);
+                    }
+                }
                 if terminal {
                     break;
                 }
@@ -190,7 +206,33 @@ impl Resources {
             stop,
             current,
             thread: Some(thread),
+            checkpoint_setup,
         })
+    }
+    /// Install only after the worker has verified its source and binary. The
+    /// sampler stays unconfigured before this point, even with profiling on.
+    pub fn install_checkpoints(
+        &self,
+        identity: super::checkpoints::Identity,
+    ) -> Result<(), String> {
+        let Some(setup) = &self.checkpoint_setup else {
+            return Ok(());
+        };
+        if !identity.valid() || identity.pid != std::process::id() {
+            return Err("checkpoint identity invalid".into());
+        }
+        let mut setup = setup.lock().unwrap();
+        if setup.as_ref().is_some_and(|previous| {
+            !identity.same_process(&previous.identity)
+                || identity.generation < previous.identity.generation
+        }) {
+            return Err("checkpoint identity changed".into());
+        }
+        *setup = Some(super::checkpoints::Setup {
+            identity,
+            scope: "verified_worker_source_and_binary",
+        });
+        Ok(())
     }
     /// Real process observations and sampler lifecycle with a modeled disk
     /// observation. This private control is not host preflight qualification.
@@ -199,11 +241,25 @@ impl Resources {
         path: std::path::PathBuf,
         disk_observation: DiskObservation,
     ) -> Result<Self, String> {
-        Self::start_observing_disk(
+        let resources = Self::start_observing_disk(
             path,
             disk_observation,
             Some("modeled_disk_only_sampler_lifecycle_control"),
-        )
+        )?;
+        if let Some(setup) = &resources.checkpoint_setup {
+            *setup.lock().unwrap() = Some(super::checkpoints::Setup {
+                identity: super::checkpoints::Identity {
+                    pid: std::process::id(),
+                    controller_pid: std::process::id(),
+                    worker: 0,
+                    generation: 0,
+                    source_digest: "a".repeat(64),
+                    binary_digest: "b".repeat(64),
+                },
+                scope: "modeled_identity_sampler_lifecycle_control",
+            });
+        }
+        Ok(resources)
     }
     pub fn snapshot(&self) -> Value {
         self.current.lock().unwrap().clone()
@@ -376,5 +432,298 @@ async fn sampler_control_rejects_low_or_unavailable_disk_before_publishing_or_sp
             !path.exists(),
             "admission refusal precedes receipt publication and thread creation"
         );
+    }
+}
+
+#[cfg(test)]
+mod periodic_checkpoint_tests {
+    use super::*;
+    use mount_rs_core::diagnostics::{object_store, profile, storage};
+    use std::path::Path;
+
+    // Public modeled identity for the existing sampler-control seam. It is not
+    // source/binary qualification. Production must install its verified identity
+    // explicitly; merely enabling profiling must not enable worker checkpoints.
+    const SOURCE_DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const BINARY_DIGEST: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const CHECKPOINT_LIMIT: usize = 512 * 1024;
+
+    fn enabled() -> bool {
+        // The root gate runs each positive control in a fresh process with
+        // MOUNT_RS_PROFILE_IO=1. Ordinary disabled suites exercise the negative
+        // control below and do not mutate a cached process profiling switch.
+        profile::enabled() && storage::enabled()
+    }
+
+    async fn observe_after_samples(
+        resources: &Resources,
+        minimum_samples: u64,
+        path: &Path,
+    ) -> Result<Option<Value>, String> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                resources.check()?;
+                if resources.snapshot()["samples"].as_u64().unwrap_or(0) >= minimum_samples {
+                    return match std::fs::read(path) {
+                        Ok(bytes) => {
+                            if bytes.len() > CHECKPOINT_LIMIT {
+                                return Err("checkpoint receipt exceeded fixed cap".into());
+                            }
+                            serde_json::from_slice(&bytes)
+                                .map(Some)
+                                .map_err(|_| "checkpoint publication exposed partial JSON".into())
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                        Err(_) => Err("checkpoint receipt read failed".into()),
+                    };
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .map_err(|_| "owned sampler did not advance inside safety deadline".to_string())?
+    }
+
+    fn row<'a>(sample: &'a Value, family: &str, name: &str) -> &'a Value {
+        sample[family]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == name)
+            .expect("actual bank row absent")
+    }
+
+    fn assert_modeled_identity(sample: &Value) {
+        assert_eq!(sample["schema"], "mount-rs.target-checkpoint.v1");
+        assert_eq!(sample["observation"], "concurrent_partial");
+        assert_eq!(sample["counter_scope"], "process_lifetime_cumulative");
+        assert_eq!(sample["metrics_complete"], false);
+        assert_eq!(
+            sample["identity_scope"],
+            "modeled_identity_sampler_lifecycle_control"
+        );
+        assert_eq!(sample["identity"]["pid"], std::process::id());
+        assert_eq!(sample["identity"]["controller_pid"], std::process::id());
+        assert_eq!(sample["identity"]["worker"], 0);
+        assert_eq!(sample["identity"]["generation"], 0);
+        assert_eq!(sample["identity"]["source_digest"], SOURCE_DIGEST);
+        assert_eq!(sample["identity"]["binary_digest"], BINARY_DIGEST);
+        assert!(sample["identity"]["sequence"].as_u64().unwrap() > 0);
+        assert_eq!(sample["resources"]["pid"], std::process::id());
+        for field in ["cpu_user_us", "cpu_system_us", "rss_end_bytes"] {
+            assert!(
+                sample["resources"]["process_delta"][field]
+                    .as_u64()
+                    .is_some()
+            );
+        }
+        assert!(sample["resources"]["samples"].as_u64().unwrap() > 0);
+        let started = sample["capture_started_unix_ms"].as_u64().unwrap();
+        let completed = sample["capture_completed_unix_ms"].as_u64().unwrap();
+        assert!(started > 0 && completed >= started);
+        assert!(completed <= super::super::utc_ms());
+    }
+
+    #[tokio::test]
+    async fn periodic_sampler_captures_actual_banks_while_storage_work_is_held() {
+        if !enabled() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("checkpoint-latest.json");
+        let mut completed = storage::Span::new(storage::Operation::TidbSqlInodeRead);
+        completed.finish_success_with_rows(0, 17);
+        profile::add(profile::Event::CompactNamespaceMaterializeNodes, 29);
+        profile::add(profile::Event::InodeReturned, 313);
+        let expected_core = serde_json::to_value(profile::snapshot()).unwrap();
+        let mut held = storage::Span::new(storage::Operation::TidbSqlInodeRead);
+        let expected_storage = serde_json::to_value(storage::snapshot()).unwrap();
+        let object_bank = object_store::Observer::enabled();
+        let client = object_bank.client(object_store::ClientRole::StandaloneProbe);
+        // This records local observer activity only; no HTTP request is issued.
+        drop(
+            client
+                .attempt(object_store::HttpMethod::Head, None)
+                .headers(200),
+        );
+        let expected_object = object_bank.snapshot().unwrap();
+        let mut resources =
+            Resources::start_sampler_control(root.path().join("resources.json"), || Ok(DISK_FLOOR))
+                .unwrap();
+        // At least eleven completed 100ms intervals give the existing sampler
+        // a due one-second checkpoint while the real storage span remains open.
+        let observation = observe_after_samples(&resources, 12, &path).await;
+        let shutdown = resources.finish().await;
+        held.finish_success_with_rows(0, 0);
+        drop(client);
+        // All actual sampler ownership is settled before the expected RED.
+        shutdown.unwrap();
+        assert!(resources.thread.is_none());
+        let sample = observation
+            .unwrap()
+            .expect("owned sampler must publish a periodic checkpoint before phase completion");
+        assert_modeled_identity(&sample);
+        assert_eq!(sample["core"]["entries"].as_array().unwrap().len(), 136);
+        assert_eq!(sample["storage"]["entries"].as_array().unwrap().len(), 116);
+        let expected = json!({"core":expected_core,"storage":expected_storage});
+        for name in [
+            "compact.namespace.materialize_nodes",
+            "provider.inode_returned_bytes",
+        ] {
+            assert!(
+                row(&sample, "core", name)["units"].as_u64().unwrap()
+                    >= row(&expected, "core", name)["units"].as_u64().unwrap()
+            );
+        }
+        let sql = row(&sample, "storage", "tidb.sql.inode_read");
+        let baseline_sql = row(&expected, "storage", "tidb.sql.inode_read");
+        assert!(
+            sql["returned_rows"].as_u64().unwrap()
+                >= baseline_sql["returned_rows"].as_u64().unwrap()
+        );
+        assert!(
+            sql["returned_row_observations"].as_u64().unwrap()
+                >= baseline_sql["returned_row_observations"].as_u64().unwrap()
+        );
+        assert!(sql["in_flight"].as_u64().unwrap() > 0);
+        assert!(sample["storage"]["in_flight"].as_u64().unwrap() > 0);
+        let records = sample["object_store_observation"]["records"]
+            .as_array()
+            .unwrap();
+        let bytes = records
+            .iter()
+            .map(|record| record.as_str().unwrap())
+            .collect::<String>();
+        let decoded = mount_rs_service::object_store_diagnostics::decode(bytes.as_bytes()).unwrap();
+        assert_eq!(
+            records.len(),
+            mount_rs_service::object_store_diagnostics::FRAME_COUNT
+        );
+        assert_eq!(decoded.capture().pid, std::process::id());
+        assert_eq!(
+            decoded.capture().sequence,
+            sample["identity"]["sequence"].as_u64().unwrap()
+        );
+        assert_eq!(decoded.capture().generation, Some(0));
+        assert_eq!(
+            decoded.capture().context,
+            mount_rs_service::object_store_diagnostics::CaptureContext::Periodic
+        );
+        let role = object_store::ClientRole::StandaloneProbe.index();
+        let method = object_store::HttpMethod::Head.index();
+        assert!(
+            decoded.snapshot().clients[role].http[method].attempts_started
+                >= expected_object.clients[role].http[method].attempts_started
+        );
+        assert!(
+            decoded.snapshot().clients[role].http[method].body_dropped
+                >= expected_object.clients[role].http[method].body_dropped
+        );
+        assert!(sample.get("delta_from_previous").is_none());
+        assert!(sample.get("quiescent_phase_delta").is_none());
+    }
+
+    #[tokio::test]
+    async fn periodic_sampler_replaces_latest_with_advancing_cumulative_checkpoint() {
+        if !enabled() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("checkpoint-latest.json");
+        let mut resources =
+            Resources::start_sampler_control(root.path().join("resources.json"), || Ok(DISK_FLOOR))
+                .unwrap();
+        let first = observe_after_samples(&resources, 12, &path).await;
+        profile::add(profile::Event::CompactNamespaceMaterializeNodes, 23);
+        let mut operation = storage::Span::new(storage::Operation::TidbSqlInodeRead);
+        operation.finish_success_with_rows(0, 31);
+        let second = observe_after_samples(&resources, 24, &path).await;
+        let shutdown = resources.finish().await;
+        shutdown.unwrap();
+        assert!(resources.thread.is_none());
+        let first = first.unwrap().expect("first periodic checkpoint absent");
+        let second = second.unwrap().expect("second periodic checkpoint absent");
+        assert_modeled_identity(&first);
+        assert_modeled_identity(&second);
+        assert!(
+            second["identity"]["sequence"].as_u64().unwrap()
+                > first["identity"]["sequence"].as_u64().unwrap()
+        );
+        assert!(
+            second["resources"]["samples"].as_u64().unwrap()
+                > first["resources"]["samples"].as_u64().unwrap()
+        );
+        let first_nodes = row(&first, "core", "compact.namespace.materialize_nodes")["units"]
+            .as_u64()
+            .unwrap();
+        let second_nodes = row(&second, "core", "compact.namespace.materialize_nodes")["units"]
+            .as_u64()
+            .unwrap();
+        assert!(second_nodes.checked_sub(first_nodes).unwrap() >= 23);
+        let first_rows = row(&first, "storage", "tidb.sql.inode_read")["returned_rows"]
+            .as_u64()
+            .unwrap();
+        let second_rows = row(&second, "storage", "tidb.sql.inode_read")["returned_rows"]
+            .as_u64()
+            .unwrap();
+        assert!(second_rows.checked_sub(first_rows).unwrap() >= 31);
+        let mut files = std::fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        files.sort();
+        assert_eq!(files, ["checkpoint-latest.json", "resources.json"]);
+        assert!(std::fs::metadata(path).unwrap().len() <= CHECKPOINT_LIMIT as u64);
+    }
+
+    #[tokio::test]
+    async fn unconfigured_sampler_never_publishes_a_worker_checkpoint() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("checkpoint-latest.json");
+        // The same production sampler start path, with disk observation modeled
+        // to avoid imposing host qualification on this lifecycle-only control.
+        // No verified or modeled checkpoint identity has been installed.
+        let mut resources = Resources::start_observing_disk(
+            root.path().join("resources.json"),
+            || Ok(DISK_FLOOR),
+            None,
+        )
+        .unwrap();
+        let observation = observe_after_samples(&resources, 12, &path).await;
+        let shutdown = resources.finish().await;
+        shutdown.unwrap();
+        assert!(resources.thread.is_none());
+        assert!(observation.unwrap().is_none());
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn profiling_off_ignores_even_an_installed_checkpoint_identity() {
+        if enabled() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("checkpoint-latest.json");
+        let mut resources = Resources::start_observing_disk(
+            root.path().join("resources.json"),
+            || Ok(DISK_FLOOR),
+            None,
+        )
+        .unwrap();
+        let installed = resources.install_checkpoints(super::super::checkpoints::Identity {
+            pid: std::process::id(),
+            controller_pid: std::process::id(),
+            worker: 0,
+            generation: 0,
+            source_digest: SOURCE_DIGEST.into(),
+            binary_digest: BINARY_DIGEST.into(),
+        });
+        let shutdown = resources.finish().await;
+        shutdown.unwrap();
+        installed.unwrap();
+        assert!(resources.thread.is_none());
+        assert!(resources.checkpoint_setup.is_none());
+        assert!(!path.exists());
+        assert!(!path.with_extension("pending").exists());
     }
 }

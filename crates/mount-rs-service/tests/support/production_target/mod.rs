@@ -1,5 +1,6 @@
 //! Fixture-only independent-process controller. No production runtime policy changes.
 mod backend;
+mod checkpoints;
 mod command;
 mod config;
 #[allow(dead_code)]
@@ -35,6 +36,8 @@ use std::{
 };
 use workload::Lane;
 type Client = Lane;
+#[cfg(test)]
+pub use checkpoints::retained_checkpoint;
 use fixture::{FileProfile, SignedTokens, target_catalog};
 pub use process::worker;
 pub fn utc_ms() -> u64 {
@@ -96,6 +99,10 @@ pub async fn source_identity(commands: &mut command::Commands) -> Result<Value, 
         ("config.rs", include_bytes!("config.rs").as_slice()),
         ("state.rs", include_bytes!("state.rs").as_slice()),
         ("resources.rs", include_bytes!("resources.rs").as_slice()),
+        (
+            "checkpoints.rs",
+            include_bytes!("checkpoints.rs").as_slice(),
+        ),
         ("backend.rs", include_bytes!("backend.rs").as_slice()),
         (
             "lazy_runtime.rs",

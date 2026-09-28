@@ -262,6 +262,7 @@ fn ten_process_lazy_startup_preserves_exact_backing_and_workload() {
     );
     assert!(journal["cleanup_errors"].as_array().unwrap().is_empty());
     assert!(!directory.join("private/worker-config.json").exists());
+    let mut checkpoint_workers = std::collections::BTreeSet::new();
     for (index, worker) in workers.iter().enumerate() {
         let ready =
             target::read_json(&directory.join(format!("worker-{index}/ready-generation-0.json")))
@@ -277,5 +278,53 @@ fn ten_process_lazy_startup_preserves_exact_backing_and_workload() {
             actual_opens, 0,
             "registered Drive plans must not eagerly open providers on worker {index}"
         );
+        let server = worker["server"].as_u64().unwrap();
+        assert!(server < 10 && checkpoint_workers.insert(server));
+        let root = directory.join(format!("worker-{server}"));
+        let final_ready = target::read_json(&root.join("ready.json")).unwrap();
+        assert_eq!(final_ready, worker["ready"]);
+        let expected_identity = serde_json::json!({
+            "pid":worker["pid"],
+            "controller_pid":journal["controller_resources"]["pid"],
+            "worker":server,
+            "generation":final_ready["generation"],
+            "source_digest":journal["source"]["digest"],
+            "binary_digest":journal["source"]["binary_sha256"]
+        });
+        let checkpoint =
+            target::retained_checkpoint(&root.join("checkpoint-latest.json"), &expected_identity)
+                .expect("joined worker must retain a valid cumulative checkpoint");
+        assert!(checkpoint["identity"]["sequence"].as_u64().unwrap() > 1);
+        assert_eq!(checkpoint["resources"]["terminal_sample"], true);
+        assert_eq!(checkpoint["resources"], worker["resources"]);
+        assert_eq!(checkpoint["resources"], worker["terminal"]["resources"]);
+        assert!(
+            checkpoint["resources"]["samples"].as_u64().unwrap()
+                > ready["resources"]["samples"].as_u64().unwrap()
+        );
+        for counter in ["cpu_user_us", "cpu_system_us"] {
+            assert!(
+                checkpoint["resources"]["process_delta"][counter]
+                    .as_u64()
+                    .unwrap()
+                    >= ready["resources"]["process_delta"][counter]
+                        .as_u64()
+                        .unwrap()
+            );
+        }
+        let startup = target::read_json(&root.join("metrics/startup-g0.json")).unwrap();
+        let completed_calls = |value: &serde_json::Value| -> u128 {
+            value["storage"]["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| u128::from(row["calls"].as_u64().unwrap()))
+                .sum()
+        };
+        assert!(
+            completed_calls(&checkpoint) > completed_calls(&startup),
+            "checkpoint must observe actual storage work after cold registration"
+        );
     }
+    assert_eq!(checkpoint_workers.len(), 10);
 }

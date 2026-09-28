@@ -288,6 +288,13 @@ impl Fleet {
         self.project_resources_with(progress, |progress, owner, root| {
             progress.resource(owner, || read_resource_file(&root.join("resources.json")))
         });
+        for child in &self.children {
+            if self.resource_expected[child.server] && !child.reaped {
+                progress.checkpoint(self.resource_owner(child), || {
+                    super::checkpoints::read_latest(&child.root.join("checkpoint-latest.json"))
+                });
+            }
+        }
     }
     fn resource_owner(&self, child: &OwnedChild) -> super::progress::ResourceOwner {
         let context = self.resource_generation_seen[child.server]
@@ -1018,6 +1025,12 @@ async fn worker_observed(
         }, &mut |snapshot| publish_startup_progress(&root, 0, snapshot)).await?;
         let phase_metrics = phase_metrics.as_mut().ok_or("worker metric owner unavailable")?;
         loop {
+            if mount_rs_core::diagnostics::profile::enabled() {
+                resources.install_checkpoints(super::checkpoints::Identity {
+                    pid: std::process::id(), controller_pid: p.parent_pid, worker: index, generation,
+                    source_digest: p.source_digest.clone(), binary_digest: p.binary_digest.clone(),
+                })?;
+            }
             if generation != 0 {
                 *startup = Startup::new_lazy(mount_rs_core::diagnostics::profile::enabled(), StartupIdentity::worker(index, generation));
             }

@@ -10,6 +10,18 @@ use std::{
 
 const LIMIT: usize = 4096;
 const RESOURCE_LIMIT: usize = 2048;
+
+#[test]
+fn disabled_checkpoint_projection_never_reads_the_source() {
+    Progress::disabled().checkpoint(
+        ResourceOwner {
+            pid: std::process::id(),
+            worker: Some(0),
+            generation_context: Some(0),
+        },
+        || panic!("disabled projection read its source"),
+    );
+}
 #[derive(Clone, Copy)]
 struct ResourceSource {
     revision: [u8; 40],
@@ -170,6 +182,7 @@ struct State {
     resource_source: Option<ResourceSource>,
     resource_pending: bool,
     resource_last: [Option<(u32, ResourceObservation)>; SERVERS + 1],
+    checkpoints: [super::checkpoints::Projection; SERVERS],
 }
 /// None is a zero-clock, zero-timer, zero-allocation disabled path.
 pub struct Progress {
@@ -182,6 +195,57 @@ pub struct ResourceOwner {
     pub generation_context: Option<u64>,
 }
 impl Progress {
+    pub fn checkpoint(
+        &mut self,
+        owner: ResourceOwner,
+        read: impl FnOnce() -> Result<Option<Value>, &'static str>,
+    ) {
+        if !self.resources_due() {
+            return;
+        }
+        let (Some(worker), Some(generation)) = (owner.worker, owner.generation_context) else {
+            return;
+        };
+        if worker >= SERVERS {
+            return;
+        }
+        let state = self.state.as_mut().unwrap();
+        let Some(source) = &state.resource_source else {
+            return;
+        };
+        if state.checkpoints[worker].exhausted() {
+            return;
+        }
+        let identity = super::checkpoints::Identity {
+            pid: owner.pid,
+            controller_pid: std::process::id(),
+            worker,
+            generation,
+            source_digest: std::str::from_utf8(&source.digest).unwrap().to_owned(),
+            binary_digest: std::str::from_utf8(&source.binary).unwrap().to_owned(),
+        };
+        let capture = super::metrics::observer().begin("metric_capture");
+        let value = read().and_then(|sample| {
+            if sample
+                .as_ref()
+                .is_some_and(|value| value["identity_scope"] != "verified_worker_source_and_binary")
+            {
+                Err("checkpoint_identity_mismatch")
+            } else {
+                Ok(sample)
+            }
+        });
+        capture.finish(value.is_ok(), 0);
+        let publication = super::metrics::observer().begin("receipt_publication");
+        let success = state.checkpoints[worker].write(
+            value,
+            &identity,
+            state.phase,
+            super::utc_ms(),
+            &mut std::io::stderr().lock(),
+        );
+        publication.finish(success, 0);
+    }
     pub fn resources_due(&self) -> bool {
         self.state.as_ref().is_some_and(|state| {
             !state.terminal && state.resource_source.is_some() && state.resource_pending
@@ -400,6 +464,7 @@ impl Progress {
                     resource_source: None,
                     resource_pending: false,
                     resource_last: [None; SERVERS + 1],
+                    checkpoints: std::array::from_fn(|_| super::checkpoints::Projection::default()),
                 }
             }),
         }
