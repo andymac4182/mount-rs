@@ -11,6 +11,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use mount_rs_core::construction::{ConstructionObserver, ConstructionResource};
+use mount_rs_core::storage::{BlockId, BlockStore};
 use mount_rs_core::{ErrorCode, FsError, Result};
 use object_store::memory::InMemory;
 use object_store::path::Path;
@@ -21,7 +22,7 @@ use object_store::{
 use tokio::sync::{Notify, oneshot};
 
 use super::client_construction::RustFsConstructionContext;
-use super::{RustFsBlockStore, RustFsConfig, SignedClientBundle};
+use super::{RawBlockCacheBudget, RustFsBlockStore, RustFsConfig, SignedClientBundle};
 
 const SAFETY_DEADLINE: Duration = Duration::from_secs(5);
 type Factory = Box<dyn FnOnce() -> Result<RustFsBlockStore> + Send>;
@@ -825,6 +826,326 @@ fn memory_bundle() -> Result<Arc<SignedClientBundle>> {
         mount_rs_core::diagnostics::object_store::Observer::disabled(),
         |_, _, _| Ok(Arc::new(InMemory::new())),
     )
+}
+
+const CONTEXT_RAW_ENTRY_CHARGE: usize = 128;
+
+fn scoped_memory_bundle(backing: Arc<InMemory>) -> BundleFactory {
+    Box::new(move || {
+        SignedClientBundle::build_with(
+            mount_rs_core::diagnostics::object_store::Observer::disabled(),
+            |_, _, _| Ok(backing.clone()),
+        )
+    })
+}
+
+async fn context_raw_backing_control(
+    backing: &InMemory,
+    store: &RustFsBlockStore,
+    id: &BlockId,
+    bytes: &[u8],
+) {
+    store.flush().await.unwrap();
+    assert_eq!(store.get_for_migration(id).await.unwrap(), bytes);
+    let direct = backing
+        .get(&Path::from(format!("{}/{}", store.prefix(), id.0)))
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert_eq!(direct.as_ref(), bytes);
+}
+
+// Warm the real facade, then immediately measure its ordinary always-on hit
+// counter. One observed hit proves the entry was retained by that actual cache;
+// this does not infer residency from a context pointer or an unwired budget bank.
+async fn context_raw_retained_charge(
+    store: &RustFsBlockStore,
+    id: &BlockId,
+    bytes: &[u8],
+) -> (usize, usize) {
+    assert_eq!(store.get(id).await.unwrap(), bytes);
+    let before = store.stats().cache_hits;
+    assert_eq!(store.get(id).await.unwrap(), bytes);
+    let hits = store.stats().cache_hits.checked_sub(before).unwrap();
+    assert!(hits <= 1);
+    let entries = usize::try_from(hits).unwrap();
+    (
+        entries,
+        entries * (bytes.len().max(1) + CONTEXT_RAW_ENTRY_CHARGE),
+    )
+}
+
+#[tokio::test]
+async fn context_raw_cache_budget_bounds_same_group_scoped_facades() {
+    let budget = RawBlockCacheBudget::new(CONTEXT_RAW_ENTRY_CHARGE + 4, 8);
+    let context = RustFsConstructionContext::new_with_cache_budget(2, budget.clone()).unwrap();
+    let backing = Arc::new(InMemory::new());
+    let first = bounded(context.build_shared_test_with_prefix(
+        reusable_config(),
+        "budget-context/drive-a".into(),
+        false,
+        scoped_memory_bundle(backing.clone()),
+        None,
+    ))
+    .await
+    .unwrap();
+    let second = bounded(context.build_shared_test_with_prefix(
+        reusable_config(),
+        "budget-context/drive-b".into(),
+        true,
+        Box::new(|| panic!("same configuration must reuse its actual client bundle")),
+        None,
+    ))
+    .await
+    .unwrap();
+    assert!(!first.durable());
+    assert!(second.durable());
+    let first_id = first.put(b"same").await.unwrap();
+    assert!(
+        second
+            .get(&first_id)
+            .await
+            .unwrap_err()
+            .is(ErrorCode::Enoent)
+    );
+    let second_id = second.put(b"same").await.unwrap();
+    assert_eq!(first_id, second_id);
+    context_raw_backing_control(backing.as_ref(), &first, &first_id, b"same").await;
+    context_raw_backing_control(backing.as_ref(), &second, &second_id, b"same").await;
+    let one = context_raw_retained_charge(&first, &first_id, b"same").await;
+    let two = context_raw_retained_charge(&second, &second_id, b"same").await;
+    assert_eq!(
+        one,
+        (1, 132),
+        "the enabled exact-fit first cache must actually admit"
+    );
+    let occupied = context.raw_cache_budget().snapshot().unwrap();
+    bounded(context.close()).await.unwrap();
+    drop(first);
+    drop(second);
+    let released = budget.snapshot().unwrap();
+    assert!(
+        one.1 + two.1 <= budget.max_charged_bytes(),
+        "same-group independent prefix caches over-admitted: {one:?} + {two:?}"
+    );
+    assert_eq!(
+        (occupied.entries, occupied.charged_bytes),
+        (one.0 + two.0, one.1 + two.1)
+    );
+    assert_eq!((released.entries, released.charged_bytes), (0, 0));
+}
+
+#[tokio::test]
+async fn context_raw_cache_budget_is_common_across_credential_groups_and_backings() {
+    let budget = RawBlockCacheBudget::new(CONTEXT_RAW_ENTRY_CHARGE + 4, 8);
+    let context = RustFsConstructionContext::new_with_cache_budget(2, budget.clone()).unwrap();
+    let first_backing = Arc::new(InMemory::new());
+    let second_backing = Arc::new(InMemory::new());
+    let first = bounded(context.build_shared_test_with_prefix(
+        reusable_config(),
+        "budget-credentials/blocks".into(),
+        false,
+        scoped_memory_bundle(first_backing.clone()),
+        None,
+    ))
+    .await
+    .unwrap();
+    let mut other_config = reusable_config();
+    other_config.access_key_id = "another-unit-key".into();
+    other_config.secret_access_key = "another-unit-secret".into();
+    let second = bounded(context.build_shared_test_with_prefix(
+        other_config,
+        "budget-credentials/blocks".into(),
+        false,
+        scoped_memory_bundle(second_backing.clone()),
+        None,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(context.test_shared_snapshot(), (2, 0, 0));
+    let id = BlockId("b0123456789abcdef0123456789abcdef".into());
+    for (remote, store, bytes) in [
+        (first_backing.as_ref(), &first, b"one!".as_slice()),
+        (second_backing.as_ref(), &second, b"two!".as_slice()),
+    ] {
+        remote
+            .put(
+                &Path::from(format!("{}/{}", store.prefix(), id.0)),
+                PutPayload::from(bytes.to_vec()),
+            )
+            .await
+            .unwrap();
+        context_raw_backing_control(remote, store, &id, bytes).await;
+    }
+    // Distinct legacy contents prove that shared capacity never shares authority.
+    let one = context_raw_retained_charge(&first, &id, b"one!").await;
+    let two = context_raw_retained_charge(&second, &id, b"two!").await;
+    assert_eq!(one, (1, 132));
+    let occupied = context.raw_cache_budget().snapshot().unwrap();
+    bounded(context.close()).await.unwrap();
+    drop(first);
+    drop(second);
+    assert!(
+        one.1 + two.1 <= budget.max_charged_bytes(),
+        "credential groups received independent raw budgets: {one:?} + {two:?}"
+    );
+    assert_eq!(
+        (occupied.entries, occupied.charged_bytes),
+        (one.0 + two.0, one.1 + two.1)
+    );
+    assert_eq!(budget.snapshot().unwrap().entries, 0);
+}
+
+#[tokio::test]
+async fn context_raw_cache_budget_covers_uncached_bundle_fallback() {
+    let budget = RawBlockCacheBudget::new(CONTEXT_RAW_ENTRY_CHARGE + 4, 8);
+    let context = RustFsConstructionContext::new_with_cache_budget(2, budget.clone()).unwrap();
+    let backing = Arc::new(InMemory::new());
+    let first = bounded(context.build_shared_test_with_prefix(
+        reusable_config(),
+        "budget-fallback/cached".into(),
+        false,
+        scoped_memory_bundle(backing.clone()),
+        None,
+    ))
+    .await
+    .unwrap();
+    for index in 1..64 {
+        let mut configuration = reusable_config();
+        configuration.bucket = format!("budget-filler-{index}");
+        drop(
+            bounded(context.build_shared_test_with_prefix(
+                configuration,
+                format!("budget-fallback/filler-{index}"),
+                false,
+                Box::new(memory_bundle),
+                None,
+            ))
+            .await
+            .unwrap(),
+        );
+    }
+    assert_eq!(context.test_shared_snapshot(), (64, 0, 0));
+    let mut overflow = reusable_config();
+    overflow.bucket = "budget-uncached-overflow".into();
+    let uncached = bounded(context.build_shared_test_with_prefix(
+        overflow,
+        "budget-fallback/uncached".into(),
+        false,
+        scoped_memory_bundle(backing.clone()),
+        None,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(context.test_shared_snapshot(), (64, 0, 0));
+    assert_eq!(
+        context.test_snapshot().charged,
+        0,
+        "constructor transfer is complete"
+    );
+    let first_id = first.put(b"full").await.unwrap();
+    let second_id = uncached.put(b"next").await.unwrap();
+    context_raw_backing_control(backing.as_ref(), &first, &first_id, b"full").await;
+    context_raw_backing_control(backing.as_ref(), &uncached, &second_id, b"next").await;
+    let one = context_raw_retained_charge(&first, &first_id, b"full").await;
+    let two = context_raw_retained_charge(&uncached, &second_id, b"next").await;
+    assert_eq!(one, (1, 132));
+    let occupied = context.raw_cache_budget().snapshot().unwrap();
+    bounded(context.close()).await.unwrap();
+    drop(first);
+    drop(uncached);
+    assert!(
+        one.1 + two.1 <= budget.max_charged_bytes(),
+        "uncached HTTP-bundle fallback escaped common raw capacity: {one:?} + {two:?}"
+    );
+    assert_eq!(
+        (occupied.entries, occupied.charged_bytes),
+        (one.0 + two.0, one.1 + two.1)
+    );
+    assert_eq!(budget.snapshot().unwrap().entries, 0);
+}
+
+#[tokio::test]
+async fn context_raw_cache_budget_zero_disables_real_facade_admission() {
+    let budget = RawBlockCacheBudget::new(0, 0);
+    let context = RustFsConstructionContext::new_with_cache_budget(2, budget.clone()).unwrap();
+    let backing = Arc::new(InMemory::new());
+    let store = bounded(context.build_shared_test_with_prefix(
+        reusable_config(),
+        "budget-context-disabled/blocks".into(),
+        false,
+        scoped_memory_bundle(backing.clone()),
+        None,
+    ))
+    .await
+    .unwrap();
+    let id = store.put(b"").await.unwrap();
+    context_raw_backing_control(backing.as_ref(), &store, &id, b"").await;
+    let retained = context_raw_retained_charge(&store, &id, b"").await;
+    let occupied = context.raw_cache_budget().snapshot().unwrap();
+    bounded(context.close()).await.unwrap();
+    drop(store);
+    assert_eq!(
+        retained,
+        (0, 0),
+        "zero context limits still admitted an empty block into a real facade"
+    );
+    assert_eq!((occupied.entries, occupied.charged_bytes), (0, 0));
+    assert!(occupied.admission_skips > 0);
+}
+
+#[tokio::test]
+async fn context_raw_cache_budget_retained_facade_competes_with_new_generation() {
+    let budget = RawBlockCacheBudget::new(CONTEXT_RAW_ENTRY_CHARGE + 1, 8);
+    let context = RustFsConstructionContext::new_with_cache_budget(2, budget.clone()).unwrap();
+    let backing = Arc::new(InMemory::new());
+    let original = bounded(context.build_shared_test_with_prefix(
+        reusable_config(),
+        "budget-retained/blocks".into(),
+        false,
+        scoped_memory_bundle(backing.clone()),
+        None,
+    ))
+    .await
+    .unwrap();
+    let old_id = original.put(b"a").await.unwrap();
+    let retained = original.clone();
+    drop(original);
+    let next = bounded(context.build_shared_test_with_prefix(
+        reusable_config(),
+        "budget-retained/blocks".into(),
+        false,
+        Box::new(|| panic!("overlapping facade must reuse the ready signed clients")),
+        None,
+    ))
+    .await
+    .unwrap();
+    let next_id = next.put(b"b").await.unwrap();
+    context_raw_backing_control(backing.as_ref(), &retained, &old_id, b"a").await;
+    context_raw_backing_control(backing.as_ref(), &next, &next_id, b"b").await;
+    let old = context_raw_retained_charge(&retained, &old_id, b"a").await;
+    let new = context_raw_retained_charge(&next, &next_id, b"b").await;
+    assert_eq!(old, (1, 129));
+    bounded(context.close()).await.unwrap();
+    let while_retained = budget.snapshot().unwrap();
+    drop(retained);
+    let old_released = budget.snapshot().unwrap();
+    let after_release = context_raw_retained_charge(&next, &next_id, b"b").await;
+    drop(next);
+    let all_released = budget.snapshot().unwrap();
+    assert!(
+        old.1 + new.1 <= budget.max_charged_bytes(),
+        "retained facade and new generation each admitted a private cache: {old:?} + {new:?}"
+    );
+    assert_eq!(
+        (while_retained.entries, while_retained.charged_bytes),
+        (1, 129)
+    );
+    assert_eq!((old_released.entries, old_released.charged_bytes), (0, 0));
+    assert_eq!(after_release, (1, 129));
+    assert_eq!((all_released.entries, all_released.charged_bytes), (0, 0));
 }
 
 struct HeldBundleFactory {

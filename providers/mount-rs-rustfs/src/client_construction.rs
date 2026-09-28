@@ -13,8 +13,8 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use super::{
-    OWNED_PREFIX_OBSERVATION_DEADLINE, RustFsBlockStore, RustFsConfig, SignedClientBundle,
-    observe_owned_prefix_absence_with, validate_owned_prefix,
+    OWNED_PREFIX_OBSERVATION_DEADLINE, RawBlockCacheBudget, RustFsBlockStore, RustFsConfig,
+    SignedClientBundle, observe_owned_prefix_absence_with, validate_owned_prefix,
 };
 
 fn sealed_error() -> FsError {
@@ -366,6 +366,7 @@ enum Recipe {
         config: RustFsConfig,
         prefix: String,
         durable: bool,
+        raw_cache_budget: RawBlockCacheBudget,
     },
     OwnedPrefixProbe {
         config: RustFsConfig,
@@ -387,9 +388,15 @@ impl Recipe {
                 config,
                 prefix,
                 durable,
-            } => RustFsBlockStore::from_config(&config, prefix, durable)
-                .map(Box::new)
-                .map(Product::BlockStore),
+                raw_cache_budget,
+            } => RustFsBlockStore::from_config_with_cache_budget(
+                &config,
+                prefix,
+                durable,
+                raw_cache_budget,
+            )
+            .map(Box::new)
+            .map(Product::BlockStore),
             Self::OwnedPrefixProbe { config, prefix } => {
                 let store = config.build_client_with_probe_limits(true).map_err(|_| {
                     FsError::backend("RustFS owned prefix observation client construction failed")
@@ -686,10 +693,20 @@ impl Drop for Owner {
 #[derive(Clone)]
 pub struct RustFsConstructionContext {
     owner: Arc<Owner>,
+    raw_cache_budget: RawBlockCacheBudget,
 }
 
 impl RustFsConstructionContext {
     pub fn new(max_builds: usize) -> Result<Self> {
+        Self::new_with_cache_budget(max_builds, RawBlockCacheBudget::new(64 * 1024 * 1024, 4096))
+    }
+
+    /// Apply one common adapter capacity owner across every configuration and
+    /// prefix, including the uncached-client fallback and retained facades.
+    pub fn new_with_cache_budget(
+        max_builds: usize,
+        raw_cache_budget: RawBlockCacheBudget,
+    ) -> Result<Self> {
         if max_builds == 0 {
             return Err(FsError::new(ErrorCode::Einval)
                 .with_message("RustFS construction capacity must be positive"));
@@ -700,7 +717,13 @@ impl RustFsConstructionContext {
                 changed: Arc::new(Notify::new()),
                 max_builds,
             }),
+            raw_cache_budget,
         })
+    }
+
+    /// The returned type originates in mount-rs-object-store-blocks.
+    pub fn raw_cache_budget(&self) -> RawBlockCacheBudget {
+        self.raw_cache_budget.clone()
     }
 
     /// Reject and wake admissions synchronously; do not wait for constructors.
@@ -1001,6 +1024,7 @@ impl RustFsConstructionContext {
                             config,
                             prefix,
                             durable,
+                            raw_cache_budget: self.raw_cache_budget.clone(),
                         },
                         observer,
                     )
@@ -1017,7 +1041,12 @@ impl RustFsConstructionContext {
                     .acquire_bundle(entry, leader, BundleRecipe::Config(config), observer)
                     .await
                     .and_then(|bundle| {
-                        RustFsBlockStore::from_client_bundle(&bundle, prefix, durable)
+                        RustFsBlockStore::from_client_bundle_with_cache_budget(
+                            &bundle,
+                            prefix,
+                            durable,
+                            self.raw_cache_budget.clone(),
+                        )
                     });
                 match result {
                     Ok(mut store) => {
@@ -1074,13 +1103,21 @@ impl RustFsConstructionContext {
                 let bundle = self
                     .acquire_bundle(entry, leader, BundleRecipe::Test(factory), observer)
                     .await?;
-                RustFsBlockStore::from_client_bundle(&bundle, prefix, durable)
+                RustFsBlockStore::from_client_bundle_with_cache_budget(
+                    &bundle,
+                    prefix,
+                    durable,
+                    self.raw_cache_budget.clone(),
+                )
             }
             BundleReservation::Uncached => {
+                let budget = self.raw_cache_budget.clone();
                 self.build_test(
                     Box::new(move || {
                         let bundle = factory()?;
-                        RustFsBlockStore::from_client_bundle(&bundle, prefix, durable)
+                        RustFsBlockStore::from_client_bundle_with_cache_budget(
+                            &bundle, prefix, durable, budget,
+                        )
                     }),
                     observer,
                 )

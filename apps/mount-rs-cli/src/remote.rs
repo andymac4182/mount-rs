@@ -388,7 +388,17 @@ async fn serve_resources(
     let context = startup
         .observe(
             Stage::Configuration,
-            async { mount_rs_sdk::StorageContext::new(config.tidb_pool_max_connections) },
+            async {
+                if config.cache.is_some() {
+                    mount_rs_sdk::StorageContext::new_with_raw_cache_limits(
+                        config.tidb_pool_max_connections,
+                        0,
+                        0,
+                    )
+                } else {
+                    mount_rs_sdk::StorageContext::new(config.tidb_pool_max_connections)
+                }
+            },
             sink,
         )
         .await?;
@@ -897,6 +907,117 @@ mod tests {
             .unwrap();
         assert!(keeper.is_empty());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    async fn assert_lazy_ready_raw_cache_policy(cache_limits: Option<(usize, usize)>) {
+        use mount_rs_service::startup::{Identity, Outcome, Startup};
+        let root = tempfile::tempdir().unwrap().keep();
+        let path = lazy_service_fixture(
+            &root,
+            "127.0.0.1:0".parse().unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
+        )
+        .await;
+        if let Some((ram_bytes, disk_bytes)) = cache_limits {
+            let catalog = SqliteCatalog::open(root.join("catalog.sqlite"))
+                .await
+                .unwrap();
+            let mut snapshot = catalog.load_current().await.unwrap();
+            snapshot
+                .partitions
+                .get_mut("p")
+                .unwrap()
+                .drives
+                .get_mut("d")
+                .unwrap()
+                .driver["storage"]["concurrent_writes"] = serde_json::json!(true);
+            catalog
+                .compare_and_swap(snapshot.revision, snapshot)
+                .await
+                .unwrap();
+            let mut config: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            config["cache"] = serde_json::json!({
+                "cluster":"test", "node_id":"node", "disk_path":"cache",
+                "ram_bytes":ram_bytes, "disk_bytes":disk_bytes, "max_entries":16,
+                "peer_listen":"127.0.0.1:0", "ca_certificate":"cert.pem",
+                "certificate":"cert.pem", "private_key":"key.pem",
+                "discovery":"peer-query", "peers":[]
+            });
+            std::fs::write(&path, config.to_string()).unwrap();
+        }
+        let keeper = Arc::new(RemoteRuntimeKeeper::default());
+        let startup = Arc::new(Startup::new_lazy(true, Identity::cli()));
+        let ready = Arc::new(tokio::sync::Notify::new());
+        let serving = tokio::spawn({
+            let keeper = keeper.clone();
+            let startup = startup.clone();
+            let ready = ready.clone();
+            async move {
+                serve_observed(
+                    &path,
+                    &startup,
+                    &mut |snapshot| {
+                        if snapshot.terminal_outcome == Outcome::Ready {
+                            ready.notify_one();
+                        }
+                        Ok(())
+                    },
+                    &keeper,
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), ready.notified())
+            .await
+            .unwrap();
+        let lifecycle = keeper.retained().unwrap();
+        let retained_limits = lifecycle.raw_cache_limits_for_test().unwrap();
+        assert_eq!(lifecycle.listener_count(), 2);
+        assert_eq!(startup.snapshot().unwrap().open_started, 0);
+        assert_eq!(startup.snapshot().unwrap().construction_plans, Some(1));
+        assert!(!root.join("cold-metadata.sqlite").exists());
+        assert!(!root.join("cold-blocks.sqlite").exists());
+        serving.abort();
+        assert!(serving.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_secs(5), lifecycle.close())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(keeper.is_empty());
+        assert!(!root.join("cold-metadata.sqlite").exists());
+        assert!(!root.join("cold-blocks.sqlite").exists());
+        std::fs::remove_dir_all(root).unwrap();
+        // Check policy after the actual listeners and retained owners have drained,
+        // so a behavioral RED cannot leave a running service behind.
+        assert_eq!(
+            retained_limits,
+            if cache_limits.is_some() {
+                (0, 0)
+            } else {
+                (64 * 1024 * 1024, 4096)
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn lazy_ready_raw_cache_ram_tier_disables_inner_cache() {
+        assert_lazy_ready_raw_cache_policy(Some((4096, 0))).await;
+    }
+
+    #[tokio::test]
+    async fn lazy_ready_raw_cache_disk_tier_disables_inner_cache() {
+        assert_lazy_ready_raw_cache_policy(Some((0, 4096))).await;
+    }
+
+    #[tokio::test]
+    async fn lazy_ready_raw_cache_both_tiers_disable_inner_cache() {
+        assert_lazy_ready_raw_cache_policy(Some((4096, 4096))).await;
+    }
+
+    #[tokio::test]
+    async fn lazy_ready_raw_cache_without_server_cache_keeps_common_default() {
+        assert_lazy_ready_raw_cache_policy(None).await;
     }
 
     #[tokio::test]

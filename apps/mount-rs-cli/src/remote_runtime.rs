@@ -166,6 +166,13 @@ impl RemoteRuntimeLifecycle {
     pub(crate) fn listener_count(&self) -> usize {
         lock(&self.owned).listeners.len()
     }
+    #[cfg(test)]
+    pub(crate) fn raw_cache_limits_for_test(&self) -> Option<(usize, usize)> {
+        lock(&self.owned)
+            .context
+            .as_ref()
+            .map(StorageContext::raw_cache_limits)
+    }
     pub(crate) fn install_context(&self, context: StorageContext) -> Result<()> {
         let mut owned = lock(&self.owned);
         let rejection = if self.closing.load(Ordering::Acquire) {

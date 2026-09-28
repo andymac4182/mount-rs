@@ -12,8 +12,9 @@ use async_trait::async_trait;
 use mount_rs_core::storage::{BlockId, BlockReconcileReport, BlockStore, ConcurrentBackingId};
 use mount_rs_core::{ErrorCode, FsError, Result};
 use mount_rs_object_store_blocks::{
-    ObjectStoreBlockStore, generate_private_qualification_prefix, prepare_configured_backing_id,
-    probe_configured_concurrent_prefix, prove_two_configured_clients, verify_configured_backing_id,
+    ObjectStoreBlockStore, RawBlockCacheBudget, generate_private_qualification_prefix,
+    prepare_configured_backing_id, probe_configured_concurrent_prefix,
+    prove_two_configured_clients, verify_configured_backing_id,
 };
 use object_store::ObjectStore;
 
@@ -99,6 +100,20 @@ impl R2BlockStore {
         ))
     }
 
+    /// Wrap an existing client with an explicit raw-cache capacity owner.
+    pub fn new_with_cache_budget(
+        store: Arc<dyn ObjectStore>,
+        prefix: impl Into<String>,
+        durable: bool,
+        budget: RawBlockCacheBudget,
+    ) -> Result<Self> {
+        Ok(Self(
+            ObjectStoreBlockStore::new_with_cache_budget(store, prefix, durable, budget)?,
+            None,
+            None,
+        ))
+    }
+
     /// Build durable blocks using this provider's S3-compatible R2 client.
     /// Concurrent backing stays unavailable until an exact service and bucket
     /// have passed the separate live qualification gate.
@@ -115,6 +130,19 @@ impl R2BlockStore {
         durable: bool,
     ) -> Result<Self> {
         let mut blocks = Self::new(config.build_store()?, prefix, durable)?;
+        blocks.1 = Some(config.build_probe_store()?);
+        Ok(blocks)
+    }
+
+    /// Build signed blocks with an explicit raw-cache capacity owner.
+    pub fn from_config_with_cache_budget(
+        config: &crate::R2Config,
+        prefix: impl Into<String>,
+        durable: bool,
+        budget: RawBlockCacheBudget,
+    ) -> Result<Self> {
+        let mut blocks =
+            Self::new_with_cache_budget(config.build_store()?, prefix, durable, budget)?;
         blocks.1 = Some(config.build_probe_store()?);
         Ok(blocks)
     }
@@ -142,6 +170,24 @@ impl R2BlockStore {
                 .with_message("R2 qualification belongs to another endpoint or bucket"));
         }
         let mut blocks = Self::from_config_with_durable(config, prefix, durable)?;
+        blocks.2 = Some(qualification.clone());
+        Ok(blocks)
+    }
+
+    /// Build qualified signed blocks with an explicit raw-cache capacity owner.
+    pub fn from_qualified_config_with_cache_budget(
+        config: &crate::R2Config,
+        prefix: impl Into<String>,
+        durable: bool,
+        qualification: &R2ConcurrentQualification,
+        budget: RawBlockCacheBudget,
+    ) -> Result<Self> {
+        let endpoint = canonical_cloudflare_r2_endpoint(config)?;
+        if endpoint != qualification.endpoint || config.bucket != qualification.bucket {
+            return Err(FsError::new(ErrorCode::Estale)
+                .with_message("R2 qualification belongs to another endpoint or bucket"));
+        }
+        let mut blocks = Self::from_config_with_cache_budget(config, prefix, durable, budget)?;
         blocks.2 = Some(qualification.clone());
         Ok(blocks)
     }
@@ -225,6 +271,251 @@ mod qualification_tests {
         PutMultipartOptions, PutOptions, PutPayload, PutResult,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn block_path(prefix: &str, id: &BlockId) -> ObjectPath {
+        ObjectPath::from(format!("{prefix}/{}", id.0))
+    }
+
+    async fn assert_shared_budget_retains_one_facade(max_bytes: usize, max_entries: usize) {
+        let backing = Arc::new(InMemory::new());
+        let budget = RawBlockCacheBudget::new(max_bytes, max_entries);
+        let first = R2BlockStore::new_with_cache_budget(
+            backing.clone(),
+            "shared-budget/drive-a",
+            false,
+            budget.clone(),
+        )
+        .unwrap();
+        let second = R2BlockStore::new_with_cache_budget(
+            backing.clone(),
+            "shared-budget/drive-b",
+            false,
+            budget.clone(),
+        )
+        .unwrap();
+        let first_id = first.put(b"abcd").await.unwrap();
+        let second_id = second.put(b"wxyz").await.unwrap();
+        first.flush().await.unwrap();
+        second.flush().await.unwrap();
+        for (store, id, expected) in [(&first, &first_id, b"abcd"), (&second, &second_id, b"wxyz")]
+        {
+            assert_eq!(
+                backing
+                    .get(&block_path(store.prefix(), id))
+                    .await
+                    .unwrap()
+                    .bytes()
+                    .await
+                    .unwrap()
+                    .as_ref(),
+                expected
+            );
+        }
+        // Remove only the actual backing objects. Reads now reveal which
+        // independent facade retained a payload, without trusting counters.
+        backing
+            .delete(&block_path(first.prefix(), &first_id))
+            .await
+            .unwrap();
+        backing
+            .delete(&block_path(second.prefix(), &second_id))
+            .await
+            .unwrap();
+        assert_eq!(first.get(&first_id).await.unwrap(), b"abcd");
+        assert!(
+            second
+                .get(&second_id)
+                .await
+                .expect_err("second prefix must not retain an entry without shared credit")
+                .is(ErrorCode::Enoent)
+        );
+        let occupied = budget.snapshot().unwrap();
+        assert_eq!((occupied.entries, occupied.payload_bytes), (1, 4));
+        assert!(occupied.charged_bytes <= max_bytes);
+        drop(first);
+        drop(second);
+        assert_eq!(budget.snapshot().unwrap().entries, 0);
+    }
+
+    #[tokio::test]
+    async fn public_r2_shared_budget_bounds_bytes_across_prefixed_facades() {
+        assert_shared_budget_retains_one_facade(132, 8).await;
+    }
+
+    #[tokio::test]
+    async fn public_r2_shared_budget_bounds_entries_across_prefixed_facades() {
+        assert_shared_budget_retains_one_facade(64 * 1024, 1).await;
+    }
+
+    async fn assert_zero_budget_keeps_reads_authoritative(max_bytes: usize, max_entries: usize) {
+        let backing = Arc::new(InMemory::new());
+        let budget = RawBlockCacheBudget::new(max_bytes, max_entries);
+        let store = R2BlockStore::new_with_cache_budget(
+            backing.clone(),
+            "zero-budget/blocks",
+            false,
+            budget.clone(),
+        )
+        .unwrap();
+        let id = store.put(b"backing authority").await.unwrap();
+        store.flush().await.unwrap();
+        assert_eq!(store.get(&id).await.unwrap(), b"backing authority");
+        assert_eq!(
+            store.get_for_migration(&id).await.unwrap(),
+            b"backing authority"
+        );
+        backing
+            .delete(&block_path(store.prefix(), &id))
+            .await
+            .unwrap();
+        assert!(
+            store
+                .get(&id)
+                .await
+                .expect_err("zero in either limit must prevent a retained raw payload")
+                .is(ErrorCode::Enoent)
+        );
+        let occupied = budget.snapshot().unwrap();
+        assert_eq!((occupied.entries, occupied.charged_bytes), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn public_r2_shared_budget_zero_byte_limit_keeps_reads_authoritative() {
+        assert_zero_budget_keeps_reads_authoritative(0, 8).await;
+    }
+
+    #[tokio::test]
+    async fn public_r2_shared_budget_zero_entry_limit_keeps_reads_authoritative() {
+        assert_zero_budget_keeps_reads_authoritative(64 * 1024, 0).await;
+    }
+
+    #[tokio::test]
+    async fn public_r2_shared_budget_preserves_conditional_collision_and_migration_checks() {
+        let backing = Arc::new(InMemory::new());
+        let budget = RawBlockCacheBudget::new(0, 0);
+        let published = R2BlockStore::new_with_cache_budget(
+            backing.clone(),
+            "shared-budget/source",
+            false,
+            budget.clone(),
+        )
+        .unwrap();
+        assert!(!published.durable());
+        let body = b"immutable publication";
+        let id = published.put(body).await.unwrap();
+        published.flush().await.unwrap();
+        assert_eq!(
+            backing
+                .get(&block_path(published.prefix(), &id))
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap()
+                .as_ref(),
+            body
+        );
+        let collision_prefix = "shared-budget/collision";
+        let conflicting_body = b"another object at the content-addressed path";
+        backing
+            .put(
+                &block_path(collision_prefix, &id),
+                PutPayload::from(conflicting_body.to_vec()),
+            )
+            .await
+            .unwrap();
+        let conflicting = R2BlockStore::new_with_cache_budget(
+            backing.clone(),
+            collision_prefix,
+            false,
+            budget.clone(),
+        )
+        .unwrap();
+        assert!(conflicting.put(body).await.unwrap_err().is(ErrorCode::Eio));
+        assert!(conflicting.get(&id).await.unwrap_err().is(ErrorCode::Eio));
+        assert_eq!(
+            backing
+                .get(&block_path(collision_prefix, &id))
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap()
+                .as_ref(),
+            conflicting_body
+        );
+        backing
+            .put(
+                &block_path(published.prefix(), &id),
+                PutPayload::from(conflicting_body.to_vec()),
+            )
+            .await
+            .unwrap();
+        assert!(
+            published
+                .get_for_migration(&id)
+                .await
+                .unwrap_err()
+                .is(ErrorCode::Eio)
+        );
+        assert!(
+            published
+                .prepare_concurrent_backing()
+                .await
+                .unwrap_err()
+                .is(ErrorCode::Enotsup)
+        );
+    }
+
+    #[tokio::test]
+    async fn public_r2_shared_budget_keeps_same_legacy_id_scoped_to_prefix_and_backing() {
+        let backing = Arc::new(InMemory::new());
+        let other_backing = Arc::new(InMemory::new());
+        let budget = RawBlockCacheBudget::new(64 * 1024, 8);
+        let first = R2BlockStore::new_with_cache_budget(
+            backing.clone(),
+            "scoped/drive-a",
+            false,
+            budget.clone(),
+        )
+        .unwrap();
+        let sibling = R2BlockStore::new_with_cache_budget(
+            backing.clone(),
+            "scoped/drive-b",
+            false,
+            budget.clone(),
+        )
+        .unwrap();
+        let other = R2BlockStore::new_with_cache_budget(
+            other_backing.clone(),
+            "scoped/drive-a",
+            false,
+            budget.clone(),
+        )
+        .unwrap();
+        let missing =
+            R2BlockStore::new_with_cache_budget(backing.clone(), "scoped/missing", false, budget)
+                .unwrap();
+        let id = BlockId("b0123456789abcdef0123456789abcdef".to_owned());
+        for (remote, store, body) in [
+            (backing.as_ref(), &first, b"alpha".as_slice()),
+            (backing.as_ref(), &sibling, b"bravo".as_slice()),
+            (other_backing.as_ref(), &other, b"other".as_slice()),
+        ] {
+            remote
+                .put(
+                    &block_path(store.prefix(), &id),
+                    PutPayload::from(body.to_vec()),
+                )
+                .await
+                .unwrap();
+            assert_eq!(store.get(&id).await.unwrap(), body);
+        }
+        assert_eq!(first.get(&id).await.unwrap(), b"alpha");
+        assert_eq!(sibling.get(&id).await.unwrap(), b"bravo");
+        assert_eq!(other.get(&id).await.unwrap(), b"other");
+        assert!(missing.get(&id).await.unwrap_err().is(ErrorCode::Enoent));
+    }
 
     #[derive(Debug)]
     struct SimulatedCreateStore {

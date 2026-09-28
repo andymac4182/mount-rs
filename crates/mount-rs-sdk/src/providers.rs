@@ -33,7 +33,8 @@ use mount_rs_memory::{MemoryBlockStore, MemoryMetadataStore};
 use mount_rs_pglite::{PgliteBlockStore, PgliteMetadataStore, PgliteStorageOptions};
 use mount_rs_r2::{R2BlockStore, R2Config};
 use mount_rs_rustfs::{
-    OwnedPrefixProbe, RustFsBlockStore, RustFsConfig, RustFsConstructionContext,
+    OwnedPrefixProbe, RawBlockCacheBudget, RawBlockCacheBudgetSnapshot, RustFsBlockStore,
+    RustFsConfig, RustFsConstructionContext,
 };
 use mount_rs_slatedb::{SlateDbMetadataStore, rustfs_object_store};
 use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
@@ -61,6 +62,7 @@ pub struct StorageContext {
     inner: Arc<std::sync::Mutex<ContextState>>,
     max_tidb_connections: usize,
     rustfs: RustFsConstructionContext,
+    raw_cache_budget: RawBlockCacheBudget,
 }
 #[derive(Default)]
 struct ContextState {
@@ -74,17 +76,45 @@ impl Default for StorageContext {
 }
 impl StorageContext {
     pub fn new(max_tidb_connections: usize) -> Result<Self> {
+        Self::new_with_raw_cache_limits(max_tidb_connections, 64 * 1024 * 1024, 4096)
+    }
+
+    /// Configure raw block cache capacity shared by RustFS, R2 and AWS S3
+    /// facades opened with this context. Zero in either limit disables their
+    /// raw cache admission; the charged limit is not a process RSS cap.
+    pub fn new_with_raw_cache_limits(
+        max_tidb_connections: usize,
+        max_charged_bytes: usize,
+        max_entries: usize,
+    ) -> Result<Self> {
         if max_tidb_connections == 0 {
             return Err(
                 mount_rs_core::FsError::new(mount_rs_core::ErrorCode::Einval)
                     .with_message("TiDB context pool maximum must be positive"),
             );
         }
+        let raw_cache_budget = RawBlockCacheBudget::new(max_charged_bytes, max_entries);
+        let rustfs = RustFsConstructionContext::new_with_cache_budget(8, raw_cache_budget.clone())?;
         Ok(Self {
             inner: Arc::new(std::sync::Mutex::new(ContextState::default())),
             max_tidb_connections,
-            rustfs: RustFsConstructionContext::new(8)?,
+            rustfs,
+            raw_cache_budget,
         })
+    }
+
+    /// Immutable configured limits: charged bytes and retained entries.
+    /// This observes configuration without locking or inspecting live usage.
+    pub fn raw_cache_limits(&self) -> (usize, usize) {
+        (
+            self.raw_cache_budget.max_charged_bytes(),
+            self.raw_cache_budget.max_entries(),
+        )
+    }
+
+    /// Common adapter observations; this type is reexported through RustFS.
+    pub fn raw_cache_budget_snapshot(&self) -> Option<RawBlockCacheBudgetSnapshot> {
+        self.raw_cache_budget.snapshot()
     }
     fn require_open(&self) -> Result<()> {
         if self
@@ -917,7 +947,16 @@ async fn open_blocks(
                 secret_access_key: secret_access_key.clone(),
                 state_key: prefix.clone(),
             };
-            let store = R2BlockStore::from_config_with_durable(&config, prefix.clone(), *durable)?;
+            let store = if let Some(context) = context {
+                R2BlockStore::from_config_with_cache_budget(
+                    &config,
+                    prefix.clone(),
+                    *durable,
+                    context.raw_cache_budget.clone(),
+                )?
+            } else {
+                R2BlockStore::from_config_with_durable(&config, prefix.clone(), *durable)?
+            };
             Ok((Arc::new(store), Vec::new()))
         }
         StoreConfig::RustFs {
@@ -956,8 +995,16 @@ async fn open_blocks(
                 bucket: bucket.clone(),
                 region: region.clone(),
             };
-            let store =
-                AwsS3BlockStore::from_config_with_durable(&config, prefix.clone(), *durable)?;
+            let store = if let Some(context) = context {
+                AwsS3BlockStore::from_config_with_cache_budget(
+                    &config,
+                    prefix.clone(),
+                    *durable,
+                    context.raw_cache_budget.clone(),
+                )?
+            } else {
+                AwsS3BlockStore::from_config_with_durable(&config, prefix.clone(), *durable)?
+            };
             Ok((Arc::new(store), Vec::new()))
         }
     }
@@ -1924,6 +1971,117 @@ mod rustfs_construction_async_tests {
     use mount_rs_rustfs::RustFsConfig;
 
     use super::{StorageContext, StoreConfig, open_blocks};
+
+    #[tokio::test]
+    async fn public_context_raw_cache_budget_accepts_zero_and_validates_pool_capacity() {
+        assert!(StorageContext::new_with_raw_cache_limits(0, 132, 8).is_err());
+        for (bytes, entries) in [(0, 8), (1024, 0), (132, 8)] {
+            let context = StorageContext::new_with_raw_cache_limits(1, bytes, entries).unwrap();
+            assert_eq!(context.raw_cache_limits(), (bytes, entries));
+            assert_eq!(context.raw_cache_budget.max_charged_bytes(), bytes);
+            assert_eq!(context.raw_cache_budget.max_entries(), entries);
+            let unused = context.raw_cache_budget_snapshot().unwrap();
+            assert_eq!(
+                (unused.entries, unused.payload_bytes, unused.charged_bytes),
+                (0, 0, 0)
+            );
+            context.close().await.unwrap();
+            assert_eq!(context.raw_cache_limits(), (bytes, entries));
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "root-owned local RustFS fixture and fresh owned cache-budget prefix required"]
+    async fn public_context_raw_cache_budget_bounds_actual_rustfs_io() {
+        fn private_variable(name: &str) -> String {
+            std::env::var(name).unwrap_or_else(|_| {
+                panic!("root-owned cache-budget fixture configuration required")
+            })
+        }
+        let signed = RustFsConfig {
+            endpoint: private_variable("MOUNT_RS_CACHE_BUDGET_RUSTFS_ENDPOINT"),
+            bucket: private_variable("MOUNT_RS_CACHE_BUDGET_RUSTFS_BUCKET"),
+            access_key_id: private_variable("MOUNT_RS_CACHE_BUDGET_RUSTFS_ACCESS_KEY_ID"),
+            secret_access_key: private_variable("MOUNT_RS_CACHE_BUDGET_RUSTFS_SECRET_ACCESS_KEY"),
+            region: private_variable("MOUNT_RS_CACHE_BUDGET_RUSTFS_REGION"),
+        };
+        assert!(
+            signed.endpoint.starts_with("http://127.0.0.1:")
+                || signed.endpoint.starts_with("http://localhost:"),
+            "fixture must be local"
+        );
+        signed.validate().unwrap();
+        let prefix = private_variable("MOUNT_RS_CACHE_BUDGET_RUSTFS_PREFIX");
+        assert!(
+            prefix.starts_with("mount-rs-cache-budget-"),
+            "explicit owned test prefix required"
+        );
+        assert!(
+            signed.observe_owned_prefix_absence(&prefix).await.unwrap(),
+            "owned prefix must start empty"
+        );
+        let scoped = |suffix: &str| StoreConfig::RustFs {
+            endpoint: signed.endpoint.clone(),
+            bucket: signed.bucket.clone(),
+            region: signed.region.clone(),
+            prefix: format!("{prefix}/{suffix}/blocks"),
+            access_key_id: signed.access_key_id.clone(),
+            secret_access_key: signed.secret_access_key.clone(),
+            durable: true,
+        };
+        let context = StorageContext::new_with_raw_cache_limits(1, 132, 8).unwrap();
+        let (first, first_resources) = open_blocks(&scoped("drive-a"), Some(&context), None)
+            .await
+            .unwrap();
+        let (second, second_resources) = open_blocks(&scoped("drive-b"), Some(&context), None)
+            .await
+            .unwrap();
+        assert!(first_resources.is_empty());
+        assert!(second_resources.is_empty());
+        let first_id = first.put(b"same").await.unwrap();
+        assert!(
+            second
+                .get(&first_id)
+                .await
+                .unwrap_err()
+                .is(ErrorCode::Enoent)
+        );
+        let second_id = second.put(b"same").await.unwrap();
+        assert_eq!(first_id, second_id);
+        first.flush().await.unwrap();
+        second.flush().await.unwrap();
+        assert_eq!(first.get_for_migration(&first_id).await.unwrap(), b"same");
+        assert_eq!(second.get_for_migration(&second_id).await.unwrap(), b"same");
+        assert_eq!(first.get(&first_id).await.unwrap(), b"same");
+        assert_eq!(second.get(&second_id).await.unwrap(), b"same");
+        // This bank must account actual opened provider entries, not just the
+        // unused configuration owner retained by an inert constructor scaffold.
+        let occupied = context.raw_cache_budget_snapshot().unwrap();
+        first.delete(&first_id).await.unwrap();
+        second.delete(&second_id).await.unwrap();
+        assert!(signed.observe_owned_prefix_absence(&prefix).await.unwrap());
+        drop(first);
+        drop(second);
+        context.close().await.unwrap();
+        assert_eq!(
+            (
+                occupied.entries,
+                occupied.payload_bytes,
+                occupied.charged_bytes
+            ),
+            (1, 4, 132),
+            "actual RustFS I/O must occupy the common configured context budget"
+        );
+        let released = context.raw_cache_budget_snapshot().unwrap();
+        assert_eq!(
+            (
+                released.entries,
+                released.payload_bytes,
+                released.charged_bytes
+            ),
+            (0, 0, 0)
+        );
+    }
 
     #[derive(Default)]
     struct Journal(Mutex<Vec<Arc<dyn ConstructionResource>>>);

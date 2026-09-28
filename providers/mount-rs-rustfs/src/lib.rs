@@ -24,6 +24,9 @@ use object_store::{ClientOptions, ObjectStore, RetryConfig};
 pub use mount_rs_object_store_blocks::{
     ObjectStoreBlockStoreErrorClass as RustFsBlockStoreErrorClass,
     ObjectStoreBlockStoreStats as RustFsBlockStoreStats,
+    // These are the common adapter's capacity types, not RustFS-specific credit.
+    RawBlockCacheBudget,
+    RawBlockCacheBudgetSnapshot,
 };
 
 mod client_construction;
@@ -469,13 +472,31 @@ impl RustFsBlockStore {
         prefix: impl Into<String>,
         durable: bool,
     ) -> Result<Self> {
-        Ok(Self {
-            blocks: ObjectStoreBlockStore::new(store, prefix, durable)?,
+        Ok(Self::from_blocks(ObjectStoreBlockStore::new(
+            store, prefix, durable,
+        )?))
+    }
+
+    /// Wrap one scoped client using the common adapter's shared capacity owner.
+    pub fn new_with_cache_budget(
+        store: Arc<dyn ObjectStore>,
+        prefix: impl Into<String>,
+        durable: bool,
+        budget: RawBlockCacheBudget,
+    ) -> Result<Self> {
+        Ok(Self::from_blocks(
+            ObjectStoreBlockStore::new_with_cache_budget(store, prefix, durable, budget)?,
+        ))
+    }
+
+    fn from_blocks(blocks: ObjectStoreBlockStore) -> Self {
+        Self {
+            blocks,
             configured_probe: None,
             qualification_clients: None,
             http_observer: Observer::disabled(),
             _http_bundle: None,
-        })
+        }
     }
 
     /// Build RustFS blocks with the caller's explicit durability assertion.
@@ -490,15 +511,50 @@ impl RustFsBlockStore {
         })
     }
 
+    /// Build signed clients while retaining the supplied common raw capacity.
+    /// Standalone `from_config` retains its private bounded cache policy.
+    pub fn from_config_with_cache_budget(
+        config: &RustFsConfig,
+        prefix: impl Into<String>,
+        durable: bool,
+        budget: RawBlockCacheBudget,
+    ) -> Result<Self> {
+        let observer = Observer::enabled();
+        Self::from_config_with_builder_and_cache_budget(
+            prefix,
+            durable,
+            observer,
+            Some(budget),
+            |probe, role, observer| config.build_store_with_observer(probe, role, observer),
+        )
+    }
+
     fn from_config_with_builder(
         prefix: impl Into<String>,
         durable: bool,
         observer: Observer,
         build: impl FnMut(bool, ClientRole, &Observer) -> Result<Arc<dyn ObjectStore>>,
     ) -> Result<Self> {
+        Self::from_config_with_builder_and_cache_budget(prefix, durable, observer, None, build)
+    }
+
+    fn from_config_with_builder_and_cache_budget(
+        prefix: impl Into<String>,
+        durable: bool,
+        observer: Observer,
+        budget: Option<RawBlockCacheBudget>,
+        build: impl FnMut(bool, ClientRole, &Observer) -> Result<Arc<dyn ObjectStore>>,
+    ) -> Result<Self> {
         let build_span = observer.bundle_build();
-        let result = SignedClientBundle::build_with(observer.clone(), build)
-            .and_then(|bundle| Self::from_client_bundle(&bundle, prefix, durable));
+        let result =
+            SignedClientBundle::build_with(observer.clone(), build).and_then(
+                |bundle| match budget {
+                    Some(budget) => {
+                        Self::from_client_bundle_with_cache_budget(&bundle, prefix, durable, budget)
+                    }
+                    None => Self::from_client_bundle(&bundle, prefix, durable),
+                },
+            );
         match result {
             Ok(mut blocks) => {
                 blocks.http_observer = observer;
@@ -517,11 +573,30 @@ impl RustFsBlockStore {
         prefix: impl Into<String>,
         durable: bool,
     ) -> Result<Self> {
-        let mut blocks = Self::new(bundle.clients.first_data.clone(), prefix, durable)?;
+        let blocks = Self::new(bundle.clients.first_data.clone(), prefix, durable)?;
+        Ok(Self::attach_client_bundle(blocks, bundle))
+    }
+
+    fn from_client_bundle_with_cache_budget(
+        bundle: &SignedClientBundle,
+        prefix: impl Into<String>,
+        durable: bool,
+        budget: RawBlockCacheBudget,
+    ) -> Result<Self> {
+        let blocks = Self::new_with_cache_budget(
+            bundle.clients.first_data.clone(),
+            prefix,
+            durable,
+            budget,
+        )?;
+        Ok(Self::attach_client_bundle(blocks, bundle))
+    }
+
+    fn attach_client_bundle(mut blocks: Self, bundle: &SignedClientBundle) -> Self {
         blocks.configured_probe = Some(bundle.clients.first_probe.clone());
         blocks.qualification_clients = Some(bundle.clients.clone());
         blocks.http_observer = bundle.observer.clone();
-        Ok(blocks)
+        blocks
     }
 
     pub fn prefix(&self) -> &str {
