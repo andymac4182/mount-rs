@@ -132,7 +132,12 @@ const websocketNames = Object.freeze([
 ])
 const setupDiscoveryNames = Object.freeze(["client.quic.connection_setup", "blob_cache.discovery.locate"])
 const historical108Names = Object.freeze([...preTransportNames, ...transportNames, ...websocketNames])
-const operationNames = Object.freeze([...historical108Names, ...setupDiscoveryNames])
+const markerNames = Object.freeze([
+  "object_store.backing_marker.probe.get", "object_store.backing_marker.probe.body_read",
+  "object_store.backing_marker.data.get", "object_store.backing_marker.data.body_read",
+  "object_store.backing_marker.probe.create", "object_store.backing_marker.retry_backoff",
+])
+const operationNames = Object.freeze([...historical108Names, ...setupDiscoveryNames, ...markerNames])
 // Literal historical 100-row inventory, independent of the current declaration.
 const historical100Names = Object.freeze([
   "metadata.load",
@@ -420,7 +425,7 @@ function snapshot({ legacy = false, preCache = false, preClient = false, preTran
     measurement: {
       storage_calls: STORAGE_CALL_SEMANTICS, storage_bytes: historical ? historical92ByteSemantics : preWebSocket ? historical100ByteSemantics : STORAGE_BYTE_SEMANTICS, storage_rows: STORAGE_ROW_SEMANTICS,
       storage_operations: [...names], storage_families: structuredClone(families),
-      storage_instrumented_operations: [...legacyNames, ...(!legacy && feature ? foundationdbNames : [])],
+      storage_instrumented_operations: [...legacyNames, ...(!legacy && feature ? foundationdbNames : []), ...names.filter((name) => markerNames.includes(name))],
       tidb_coverage: structuredClone(TIDB_DIAGNOSTIC_COVERAGE),
       ...(legacy ? {} : { foundationdb_coverage: structuredClone(feature ? foundationdbCoverage : disabledCoverage) }),
       storage_duration: duration,
@@ -474,9 +479,9 @@ function summary(native) {
   return JSON.parse(lines[0].replace(/^MOUNT_RS_STORAGE_PHASE /u, ""))
 }
 
-test("new 110-row fixture has reconciled exact decimal endpoints before consumer validation", () => {
+test("new 116-row fixture has reconciled exact decimal endpoints before consumer validation", () => {
   const value = snapshot()
-  assert.equal(value.storage.entries.length, 110)
+  assert.equal(value.storage.entries.length, 116)
   assert.deepEqual(value.storage.entries.map((entry) => entry.name), operationNames)
   assert.deepEqual(value.storage.entries.slice(78, 85).map((entry) => entry.name), foundationdbNames)
   assert.deepEqual(value.storage.entries.slice(85, 91).map((entry) => entry.name), cacheNames)
@@ -485,7 +490,10 @@ test("new 110-row fixture has reconciled exact decimal endpoints before consumer
   assert.deepEqual(value.storage.entries.slice(100, 108).map((entry) => entry.name), websocketNames)
   assert.deepEqual(value.storage.entries.slice(0, 100).map((entry) => entry.name), historical100Names)
   assert.deepEqual(value.storage.entries.slice(0, 108).map((entry) => entry.name), historical108Names)
-  assert.deepEqual(value.storage.entries.slice(108).map((entry) => entry.name), setupDiscoveryNames)
+  assert.deepEqual(value.storage.entries.slice(108, 110).map((entry) => entry.name), setupDiscoveryNames)
+  assert.deepEqual(value.storage.entries.slice(110, 116).map((entry) => entry.name), markerNames)
+  assert.deepEqual(value.measurement.storage_families.object_store_backing_marker.operations, markerNames)
+  assert.deepEqual(value.measurement.storage_instrumented_operations.slice(-6), markerNames)
   for (const entry of value.storage.entries) {
     assert.equal(BigInt(entry.calls), BigInt(entry.success) + BigInt(entry.error) + BigInt(entry.cancelled))
     assert.equal(entry.latency_log2_us.reduce((sum, count) => sum + BigInt(count), 0n), BigInt(entry.calls))
@@ -550,7 +558,7 @@ test("literal historical 100-row inventory stays incomplete without invented Web
   assert.equal(value.observations.after.storage.entries.values.some((entry) => websocketNames.includes(entry.name)), false)
   assert.equal(value.observations.after.storage.entries.values.find((entry) => entry.name === "client.quic.request_send").calls, base)
 })
-test("current 110-row inventory refuses the historical payload-only byte descriptor", () => {
+test("current 116-row inventory refuses the historical payload-only byte descriptor", () => {
   const before = snapshot(), after = snapshot()
   before.measurement.storage_bytes = historical92ByteSemantics
   after.measurement.storage_bytes = historical92ByteSemantics
@@ -592,19 +600,19 @@ test("successful empty get payload is a known zero without inventing SQL rows", 
   assert.match(value.measurement.storage_bytes, /zero_does_not_establish_no_payload/u)
   assert.equal(value.measurement.storage_families.foundationdb_read.returned_rows, "unavailable")
 })
-test("feature-off 110-row phase keeps FDB and cache source coverage unavailable", () => {
+test("feature-off 116-row phase keeps FDB and cache source coverage unavailable", () => {
   const value = observed(snapshot({ feature: false }), snapshot({ feature: false }))
   assert.deepEqual(value.measurement.foundationdb_coverage, disabledCoverage)
   assert.equal(value.measurement.storage_instrumented_operations.some((name) => name.startsWith("foundationdb.")), false)
-  assert.equal(value.measurement.storage_instrumented_operations.length, 78)
+  assert.equal(value.measurement.storage_instrumented_operations.length, 84)
   assert.equal(value.measurement.storage_instrumented_operations.some((name) => name.startsWith("blob_cache.")), false)
-  assert.equal(value.storage.entries.length, 110)
+  assert.equal(value.storage.entries.length, 116)
   assert.equal(value.measurement.storage_instrumented_operations.some((name) => name.startsWith("client.")), false)
 })
 test("declared cache family stays unavailable in addon summaries with FDB enabled or disabled", () => {
   for (const feature of [true, false]) {
     const value = observed(snapshot({ feature }), snapshot({ feature }))
-    assert.equal(value.measurement.storage_instrumented_operations.length, feature ? 85 : 78)
+    assert.equal(value.measurement.storage_instrumented_operations.length, feature ? 91 : 84)
     assert.equal(value.measurement.storage_instrumented_operations.some((name) => cacheNames.includes(name)), false)
     const family = summary(value).families.blob_cache
     assert.equal(family.available, false)
@@ -616,7 +624,7 @@ test("declared cache family stays unavailable in addon summaries with FDB enable
 test("declared client stream family stays unavailable in addon summaries with FDB enabled or disabled", () => {
   for (const feature of [true, false]) {
     const value = observed(snapshot({ feature }), snapshot({ feature }))
-    assert.equal(value.measurement.storage_instrumented_operations.length, feature ? 85 : 78)
+    assert.equal(value.measurement.storage_instrumented_operations.length, feature ? 91 : 84)
     assert.equal(value.measurement.storage_instrumented_operations.includes("client.quic.open_bi"), false)
     const family = summary(value).families.client_quic
     assert.equal(family.available, false)
@@ -632,10 +640,10 @@ test("eight transport families retain separate units without claiming addon sour
     blob_cache_peer_request_send: transportNames[4], blob_cache_peer_response_receive: transportNames[5],
     blob_cache_peer_get: transportNames[6], blob_cache_peer_get_miss: transportNames[7],
   }
-  assert.equal(Object.keys(STORAGE_OPERATION_FAMILIES).length, 23)
+  assert.equal(Object.keys(STORAGE_OPERATION_FAMILIES).length, 24)
   const declared = Object.values(STORAGE_OPERATION_FAMILIES).flatMap((family) => family.operations)
-  assert.equal(declared.length, 110)
-  assert.equal(new Set(declared).size, 110)
+  assert.equal(declared.length, 116)
+  assert.equal(new Set(declared).size, 116)
   assert.deepEqual(STORAGE_OPERATION_FAMILIES.blob_cache.operations, cacheNames)
   assert.equal(STORAGE_OPERATION_FAMILIES.blob_cache_peer_request_send.bytes, "known_successfully_submitted_plaintext_request_header_and_payload_bytes; not_wire_bytes_or_acknowledgments")
   assert.equal(STORAGE_OPERATION_FAMILIES.blob_cache_peer_response_receive.bytes, "known_successfully_validated_plaintext_status_and_body_bytes; not_wire_bytes")
@@ -643,7 +651,7 @@ test("eight transport families retain separate units without claiming addon sour
   assert.equal(STORAGE_OPERATION_FAMILIES.blob_cache_peer_get_miss.duration, "classification_marker_nanoseconds; excludes_get_request_duration")
   for (const feature of [true, false]) {
     const value = observed(snapshot({ feature }), snapshot({ feature }))
-    assert.equal(value.measurement.storage_instrumented_operations.length, feature ? 85 : 78)
+    assert.equal(value.measurement.storage_instrumented_operations.length, feature ? 91 : 84)
     const logged = summary(value)
     for (const [family, operation] of Object.entries(expectedFamilies)) {
       assert.deepEqual(value.measurement.storage_families[family].operations, [operation])
@@ -730,7 +738,7 @@ test("a feature-on coverage claim cannot omit one audited FoundationDB operation
   const before = snapshot(), after = snapshot()
   for (const value of [before, after]) {
     value.measurement.foundationdb_coverage.operations.pop()
-    value.measurement.storage_instrumented_operations.pop()
+    value.measurement.storage_instrumented_operations = value.measurement.storage_instrumented_operations.filter((name) => name !== foundationdbNames.at(-1))
   }
   const value = incomplete(before, after, /metadata|coverage/u)
   assert.equal(value.observations.after.measurement.foundationdb_coverage, "unavailable")

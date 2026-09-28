@@ -129,8 +129,14 @@ pub enum Operation {
     RemoteClientWebSocketResponseDecode,
     RemoteClientQuicConnectionSetup,
     BlobCacheDiscoveryLocate,
+    ObjectStoreBackingMarkerProbeGet,
+    ObjectStoreBackingMarkerProbeBodyRead,
+    ObjectStoreBackingMarkerDataGet,
+    ObjectStoreBackingMarkerDataBodyRead,
+    ObjectStoreBackingMarkerProbeCreate,
+    ObjectStoreBackingMarkerRetryBackoff,
 }
-const NAMES: [&str; 110] = [
+const NAMES: [&str; 116] = [
     "metadata.load",
     "metadata.load_if_changed",
     "metadata.snapshot",
@@ -241,6 +247,12 @@ const NAMES: [&str; 110] = [
     "client.websocket.response_decode",
     "client.quic.connection_setup",
     "blob_cache.discovery.locate",
+    "object_store.backing_marker.probe.get",
+    "object_store.backing_marker.probe.body_read",
+    "object_store.backing_marker.data.get",
+    "object_store.backing_marker.data.body_read",
+    "object_store.backing_marker.probe.create",
+    "object_store.backing_marker.retry_backoff",
 ];
 
 /// Fixed serialized row order. Appended families have separate invocation semantics.
@@ -734,7 +746,7 @@ mod tests {
     #[test]
     fn fixed_names_match_appended_sdk_tidb_and_foundationdb_rows() {
         let names = operation_names();
-        assert_eq!(names.len(), 110);
+        assert_eq!(names.len(), 116);
         assert_eq!(
             names[Operation::SdkMetadataLoadIfChanged as usize],
             "sdk.metadata.load_if_changed"
@@ -846,10 +858,34 @@ mod tests {
         assert_eq!(Operation::RemoteClientQuicConnectionSetup as usize, 108);
         assert_eq!(Operation::BlobCacheDiscoveryLocate as usize, 109);
         assert_eq!(
-            &names[108..],
+            &names[108..110],
             &[
                 "client.quic.connection_setup",
                 "blob_cache.discovery.locate"
+            ]
+        );
+        for (offset, operation) in [
+            Operation::ObjectStoreBackingMarkerProbeGet,
+            Operation::ObjectStoreBackingMarkerProbeBodyRead,
+            Operation::ObjectStoreBackingMarkerDataGet,
+            Operation::ObjectStoreBackingMarkerDataBodyRead,
+            Operation::ObjectStoreBackingMarkerProbeCreate,
+            Operation::ObjectStoreBackingMarkerRetryBackoff,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(operation as usize, 110 + offset);
+        }
+        assert_eq!(
+            &names[110..116],
+            &[
+                "object_store.backing_marker.probe.get",
+                "object_store.backing_marker.probe.body_read",
+                "object_store.backing_marker.data.get",
+                "object_store.backing_marker.data.body_read",
+                "object_store.backing_marker.probe.create",
+                "object_store.backing_marker.retry_backoff",
             ]
         );
         assert_eq!(

@@ -27,6 +27,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
+use mount_rs_core::diagnostics::storage::{Operation as StorageOperation, Span as StorageSpan};
 use mount_rs_core::storage::{BlockId, BlockReconcileReport, BlockStore, ConcurrentBackingId};
 use mount_rs_core::{ErrorCode, FsError, Result, backend_error};
 use object_store::path::Path as ObjectPath;
@@ -72,23 +73,25 @@ async fn prepare_configured_backing_id_with_candidate(
             {
                 MarkerVisibility::Winner(id) => return Ok(id),
                 MarkerVisibility::Partial => {
-                    tokio::time::sleep(backing_id_backoff(attempts, candidate)).await;
+                    observe_backing_marker_backoff(backing_id_backoff(attempts, candidate)).await;
                     attempts = attempts.saturating_add(1);
                     continue;
                 }
                 MarkerVisibility::Missing if create_accepted => {
-                    tokio::time::sleep(backing_id_backoff(attempts, candidate)).await;
+                    observe_backing_marker_backoff(backing_id_backoff(attempts, candidate)).await;
                     attempts = attempts.saturating_add(1);
                     continue;
                 }
                 MarkerVisibility::Missing => {}
             }
             if backoff_before_retry {
-                tokio::time::sleep(backing_id_backoff(attempts, candidate)).await;
+                observe_backing_marker_backoff(backing_id_backoff(attempts, candidate)).await;
             }
             let mut payload = Vec::with_capacity(20);
             payload.extend_from_slice(BACKING_ID_MAGIC);
             payload.extend_from_slice(&candidate.as_bytes());
+            let mut create_span =
+                StorageSpan::new(StorageOperation::ObjectStoreBackingMarkerProbeCreate);
             let create = probe
                 .put_opts(
                     &path,
@@ -99,6 +102,10 @@ async fn prepare_configured_backing_id_with_candidate(
                     },
                 )
                 .await;
+            match &create {
+                Ok(_) => create_span.finish_success(20),
+                Err(_) => create_span.finish_error(),
+            }
             match create {
                 Ok(_) => create_accepted = true,
                 Err(object_store::Error::AlreadyExists { .. })
@@ -140,14 +147,35 @@ enum MarkerVisibility {
     Winner(ConcurrentBackingId),
 }
 
+/// Closed context keeps generic configured-prefix preflight outside marker rows.
+#[derive(Clone, Copy)]
+enum BackingMarkerRole {
+    Probe,
+    Data,
+}
+impl BackingMarkerRole {
+    fn get_operation(self) -> StorageOperation {
+        match self {
+            Self::Probe => StorageOperation::ObjectStoreBackingMarkerProbeGet,
+            Self::Data => StorageOperation::ObjectStoreBackingMarkerDataGet,
+        }
+    }
+    fn body_operation(self) -> StorageOperation {
+        match self {
+            Self::Probe => StorageOperation::ObjectStoreBackingMarkerProbeBodyRead,
+            Self::Data => StorageOperation::ObjectStoreBackingMarkerDataBodyRead,
+        }
+    }
+}
+
 async fn read_backing_id_from_both(
     probe: &dyn ObjectStore,
     blocks: &dyn ObjectStore,
     path: &ObjectPath,
     retry_throttled: Option<ConcurrentBackingId>,
 ) -> Result<MarkerVisibility> {
-    let first = read_backing_id(probe, path, retry_throttled).await?;
-    let second = read_backing_id(blocks, path, retry_throttled).await?;
+    let first = read_backing_id(probe, path, retry_throttled, BackingMarkerRole::Probe).await?;
+    let second = read_backing_id(blocks, path, retry_throttled, BackingMarkerRole::Data).await?;
     match (first, second) {
         (Some(first), Some(second)) if first == second => Ok(MarkerVisibility::Winner(first)),
         (None, None) => Ok(MarkerVisibility::Missing),
@@ -160,6 +188,7 @@ async fn read_backing_id(
     store: &dyn ObjectStore,
     path: &ObjectPath,
     retry_throttled: Option<ConcurrentBackingId>,
+    role: BackingMarkerRole,
 ) -> Result<Option<ConcurrentBackingId>> {
     let mut attempts = 0_u32;
     let jitter = retry_throttled.map_or_else(
@@ -167,10 +196,10 @@ async fn read_backing_id(
         |candidate| u64::from(candidate.as_bytes()[0]) % 101,
     );
     let bytes = loop {
-        match read_direct_object_bytes_once(store, path).await {
+        match read_backing_marker_bytes_once(store, path, role).await {
             Ok(bytes) => break bytes,
             Err(error) if is_temporary_object_read_error(&error) => {
-                tokio::time::sleep(probe_backoff(attempts, jitter)).await;
+                observe_backing_marker_backoff(probe_backoff(attempts, jitter)).await;
                 attempts = attempts.saturating_add(1);
             }
             Err(error) => return Err(backing_id_object_error("read", &error)),
@@ -183,6 +212,48 @@ async fn read_backing_id(
     let id = ConcurrentBackingId::from_bytes(bytes[4..].try_into().expect("length checked"))
         .map_err(|_| stale_backing_id())?;
     Ok(Some(id))
+}
+
+async fn read_backing_marker_bytes_once(
+    store: &dyn ObjectStore,
+    path: &ObjectPath,
+    role: BackingMarkerRole,
+) -> object_store::Result<Option<Vec<u8>>> {
+    let mut get_span = StorageSpan::new(role.get_operation());
+    let result = match store.get(path).await {
+        Ok(result) => {
+            get_span.finish_success(0);
+            result
+        }
+        Err(error) => {
+            // NotFound is an actual failed GET, even when authority handling
+            // interprets it as a missing marker rather than a transport failure.
+            get_span.finish_error();
+            return match error {
+                object_store::Error::NotFound { .. } => Ok(None),
+                error => Err(error),
+            };
+        }
+    };
+    let mut body_span = StorageSpan::new(role.body_operation());
+    match result.bytes().await {
+        Ok(bytes) => {
+            // Count returned bytes before identity validation. Malformed marker
+            // content still has a successful GET and body materialization.
+            body_span.finish_success(bytes.len() as u64);
+            Ok(Some(bytes.to_vec()))
+        }
+        Err(error) => {
+            body_span.finish_error();
+            Err(error)
+        }
+    }
+}
+
+async fn observe_backing_marker_backoff(duration: Duration) {
+    let mut span = StorageSpan::new(StorageOperation::ObjectStoreBackingMarkerRetryBackoff);
+    tokio::time::sleep(duration).await;
+    span.finish_success(0);
 }
 
 async fn read_direct_object_bytes_once(

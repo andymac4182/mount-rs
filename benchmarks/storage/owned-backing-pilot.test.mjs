@@ -1206,7 +1206,7 @@ const historical92Families = {
   client_quic: { operations: ["client.quic.open_bi"], calls: "stream_acquisition_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_open_bi_await_nanoseconds; not_exclusive_cpu_or_network_time" },
 }
 
-test("historical 85-row storage snapshot leaves twenty-five appended cache and client stages unavailable", () => {
+test("historical 85-row storage snapshot leaves thirty-one appended cache, client and marker stages unavailable", () => {
   const fixture = resultFixture()
   assert.equal(historical85Names.length, 85)
   const oldStorage = historical85Names.map((name) => ({ name, calls: "0", success: "0", error: "0", cancelled: "0" }))
@@ -1217,7 +1217,7 @@ test("historical 85-row storage snapshot leaves twenty-five appended cache and c
   const phase = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1]
   const projected = phase.storage
   assert.equal(phase.status, "incomplete")
-  assert.equal(projected.length, 110)
+  assert.equal(projected.length, 116)
   assert.deepEqual(projected.slice(85, 100).map((row) => row.name), [
     "blob_cache.miss.admission_wait", "blob_cache.miss.singleflight_wait",
     "blob_cache.ram.lookup", "blob_cache.disk.lookup",
@@ -1246,7 +1246,7 @@ test("historical 85-row storage snapshot leaves twenty-five appended cache and c
   assert.deepEqual(fixture, before)
 })
 
-test("historical 91-row storage snapshot leaves nineteen client and peer stages unavailable", () => {
+test("historical 91-row storage snapshot leaves twenty-five client, peer and marker stages unavailable", () => {
   const fixture = resultFixture()
   assert.equal(historical91Names.length, 91)
   const oldStorage = historical91Names.map((name) => ({ name, calls: "0", success: "0", error: "0", cancelled: "0" }))
@@ -1257,7 +1257,7 @@ test("historical 91-row storage snapshot leaves nineteen client and peer stages 
   const phase = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1]
   const projected = phase.storage
   assert.equal(phase.status, "incomplete")
-  assert.equal(projected.length, 110)
+  assert.equal(projected.length, 116)
   assert.ok(projected.slice(0, 91).every((row) => row.calls === "0"))
   assert.equal(projected[91].name, "client.quic.open_bi")
   for (const row of projected.slice(91)) {
@@ -1267,7 +1267,7 @@ test("historical 91-row storage snapshot leaves nineteen client and peer stages 
   assert.deepEqual(fixture, before)
 })
 
-test("literal historical 92-row v3 descriptor leaves all eighteen appended transport rows unavailable", () => {
+test("literal historical 92-row v3 descriptor leaves all twenty-four appended transport and marker rows unavailable", () => {
   const fixture = resultFixture()
   assert.equal(historical92Names.length, 92)
   const oldStorage = historical92Names.map((name) => ({ name, calls: "0", success: "0", error: "0", cancelled: "0" }))
@@ -1279,7 +1279,7 @@ test("literal historical 92-row v3 descriptor leaves all eighteen appended trans
   const before = structuredClone(fixture)
   const phase = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1]
   assert.equal(phase.status, "incomplete")
-  assert.equal(phase.storage.length, 110)
+  assert.equal(phase.storage.length, 116)
   assert.ok(phase.storage.slice(0, 92).every((row) => row.calls === "0"))
   assert.deepEqual(phase.storage.slice(92, 100).map((row) => row.name), [
     "client.quic.request_send", "client.quic.response_receive",
@@ -1321,7 +1321,7 @@ test("compact, refresh, and cache pilot projection retains measured units withou
   assert.match(core.scope, /inclusive_elapsed_and_event_specific_units/u)
 })
 
-test("historical 108-row storage projection leaves setup and discovery unavailable", () => {
+test("historical 108-row storage projection leaves setup, discovery and marker rows unavailable", () => {
   const fixture = resultFixture()
   const oldNames = [...historical92Names,
     "client.quic.request_send", "client.quic.response_receive",
@@ -1338,8 +1338,13 @@ test("historical 108-row storage projection leaves setup and discovery unavailab
   } }] }
   const phase = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1]
   assert.equal(phase.status, "incomplete")
-  assert.equal(phase.storage.length, 110)
-  assert.deepEqual(phase.storage.slice(108).map((row) => row.name), ["client.quic.connection_setup", "blob_cache.discovery.locate"])
+  assert.equal(phase.storage.length, 116)
+  assert.deepEqual(phase.storage.slice(108, 110).map((row) => row.name), ["client.quic.connection_setup", "blob_cache.discovery.locate"])
+  assert.deepEqual(phase.storage.slice(110, 116).map((row) => row.name), [
+    "object_store.backing_marker.probe.get", "object_store.backing_marker.probe.body_read",
+    "object_store.backing_marker.data.get", "object_store.backing_marker.data.body_read",
+    "object_store.backing_marker.probe.create", "object_store.backing_marker.retry_backoff",
+  ])
   for (const row of phase.storage.slice(108)) {
     for (const field of ["calls", "success", "error", "cancelled", "bytes", "returned_rows", "returned_row_observations", "elapsed_ns", "in_flight_start", "in_flight_end"]) assert.equal(row[field], null)
     assert.deepEqual(row.latency_log2_us, Array(32).fill(null))

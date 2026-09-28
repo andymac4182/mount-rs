@@ -178,6 +178,12 @@ export const STORAGE_OPERATION_NAMES = [
   "client.websocket.response_decode",
   "client.quic.connection_setup",
   "blob_cache.discovery.locate",
+  "object_store.backing_marker.probe.get",
+  "object_store.backing_marker.probe.body_read",
+  "object_store.backing_marker.data.get",
+  "object_store.backing_marker.data.body_read",
+  "object_store.backing_marker.probe.create",
+  "object_store.backing_marker.retry_backoff",
 ]
 const storageNames = STORAGE_OPERATION_NAMES
 export const STORAGE_CALL_SEMANTICS = "fixed_label_provider_and_driver_operations; families_overlap_and_are_not_application_iops"
@@ -207,6 +213,7 @@ export const STORAGE_OPERATION_FAMILIES = {
   client_websocket: { operations: ["client.websocket.tcp_connect", "client.websocket.tls_handshake", "client.websocket.upgrade", "client.websocket.socket_lock_wait", "client.websocket.request_encode", "client.websocket.request_send", "client.websocket.response_receive", "client.websocket.response_decode"], calls: "client_stage_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_stage_wall_nanoseconds; nested_and_parallel_spans_overlap; not_exclusive_cpu_or_network_time" },
   client_quic_connection_setup: { operations: ["client.quic.connection_setup"], calls: "quic_transport_setup_attempts; excludes_credentials_hello_and_websocket_fallback", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_tls_config_endpoint_connect_and_alpn_validation_nanoseconds; not_exclusive_cpu_or_network_time" },
   blob_cache_discovery: { operations: ["blob_cache.discovery.locate"], calls: "discovery_locate_invocations; empty_and_fallback_peer_lists_are_success; not_peer_gets_or_directory_health", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_locate_await_nanoseconds; excludes_peer_filtering_queries_and_hedging" },
+  object_store_backing_marker: { operations: STORAGE_OPERATION_NAMES.filter((name) => name.startsWith("object_store.backing_marker.")), calls: "object_store_marker_get_body_create_and_backoff_invocations; includes_success_error_and_cancellation; not_http_attempts_or_application_iops", bytes: "known_successful_materialized_body_bytes_before_identity_validation_and_accepted_create_input_bytes; get_backoff_error_and_cancellation_bytes_unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
 }
 export const TIDB_DIAGNOSTIC_COVERAGE = {
   schema: "mount-rs-tidb-client-diagnostic-coverage-v1", status: "source_sites_instrumented",
@@ -320,7 +327,16 @@ export const FOUNDATIONDB_DIAGNOSTIC_UNAVAILABLE = {
   "operations": []
 }
 // Compatibility export describes feature-off coverage, not every bank row.
-export const STORAGE_INSTRUMENTED_OPERATION_NAMES = storageNames.filter((name) => legacyInstrumentedNames.has(name) || TIDB_DIAGNOSTIC_COVERAGE.operations.includes(name))
+// This literal inventory audits producer sites independently of registry declarations.
+export const OBJECT_STORE_BACKING_MARKER_INSTRUMENTED_OPERATIONS = Object.freeze([
+  "object_store.backing_marker.probe.get",
+  "object_store.backing_marker.probe.body_read",
+  "object_store.backing_marker.data.get",
+  "object_store.backing_marker.data.body_read",
+  "object_store.backing_marker.probe.create",
+  "object_store.backing_marker.retry_backoff",
+])
+export const STORAGE_INSTRUMENTED_OPERATION_NAMES = storageNames.filter((name) => legacyInstrumentedNames.has(name) || TIDB_DIAGNOSTIC_COVERAGE.operations.includes(name) || OBJECT_STORE_BACKING_MARKER_INSTRUMENTED_OPERATIONS.includes(name))
 function foundationdbCoverage(value) {
   if (isDeepStrictEqual(value, FOUNDATIONDB_DIAGNOSTIC_COVERAGE)) return FOUNDATIONDB_DIAGNOSTIC_COVERAGE
   if (isDeepStrictEqual(value, FOUNDATIONDB_DIAGNOSTIC_UNAVAILABLE)) return FOUNDATIONDB_DIAGNOSTIC_UNAVAILABLE
@@ -329,7 +345,7 @@ function foundationdbCoverage(value) {
 export function storageInstrumentedOperationNames(coverage) {
   const audited = foundationdbCoverage(coverage)
   if (!audited) invalid("FoundationDB coverage metadata unavailable")
-  return storageNames.filter((name) => legacyInstrumentedNames.has(name) || TIDB_DIAGNOSTIC_COVERAGE.operations.includes(name) || audited.operations.includes(name))
+  return storageNames.filter((name) => legacyInstrumentedNames.has(name) || TIDB_DIAGNOSTIC_COVERAGE.operations.includes(name) || audited.operations.includes(name) || OBJECT_STORE_BACKING_MARKER_INSTRUMENTED_OPERATIONS.includes(name))
 }
 function validInstrumentedOperations(measurement) {
   const coverage = foundationdbCoverage(measurement?.foundationdb_coverage)

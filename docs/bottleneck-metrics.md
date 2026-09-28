@@ -64,7 +64,7 @@ observer work.
 Phase reports now retain the resource counters already sampled at each boundary.
 `resource_measurement.schema` is `mount-rs.process-resources.v1`. No new Node
 sampler calls are added. The current core, storage and service row inventories are
-136, 110 and 22 respectively; the cache and client additions are described below.
+136, 116 and 22 respectively; the cache, client and marker additions are described below.
 
 | Report field | Meaning |
 | --- | --- |
@@ -202,7 +202,7 @@ source still needs hosted qualification.
 | `blob_cache.discovery.locate` | Exactly the discovery await inside the existing peer deadline, before deduplication, filtering and hedged peer requests. | Empty and fallback lists are successful lookup results; trait errors are errors. The outer peer deadline and caller drop cancel this span. Success does not prove directory health. |
 
 These append at storage ordinals 108 and 109, preserving all previous ordinals.
-The bank has 110 rows and 23 units families; the core Event bank stays at 136.
+The current bank has 116 rows and 24 units families; the core Event bank stays at 136.
 Both stages expose calls, success/error/cancellation, in-flight gauges, inclusive
 wall time and 32 latency buckets. Their bytes and SQL returned rows are unavailable.
 Their timings overlap other work and cannot be added as exclusive CPU time.
@@ -214,7 +214,7 @@ Use `MOUNT_RS_PROFILE_IO=1` before constructing the client or cache. Read
 sharing the existing limit of 16 records per process. Keep tracing disabled for
 throughput/allocation measurements. Logs exclude credentials, storage keys,
 paths, peer IDs and payloads. Native addon declarations include these rows,
-but its audited source coverage remains unchanged at 78/85: declared zero rows
+with current audited source coverage of 84/91 including marker producers: declared zero rows
 do not establish observed client setup or discovery. A server CLI shutdown
 record cannot see a separate client's counters.
 
@@ -273,8 +273,8 @@ size observation; whole-client allocation counts remain unmeasured.
 
 The Node and native exporters declare the row and its `client_quic` units family.
 Historical 91-row records retain null client measurements, and strict current
-pilots reject a missing row. NAPI still audits 78 default or 85 FoundationDB
-storage producers; its client family remains unavailable because the addon does
+pilots reject a missing row. NAPI currently audits 84 default or 91 FoundationDB
+storage producers, including six marker labels; its client family remains unavailable because the addon does
 not call this remote client. Server CLI shutdown exports are process-local and
 cannot observe counters in a separate client process. A dedicated shutdown
 export for client CLI mounts remains open; library and owned load-runner process
@@ -285,7 +285,7 @@ snapshots can observe this row.
 The [retained transport report](benchmarks/transport-stage-metrics-20260928/report.json)
 qualifies eight appended storage rows, preserving the original 92-row prefix.
 That slice produced 100 rows and 20 distinct units families. The current bank,
-including the WebSocket stages below, has 110 rows and 23 families.
+including the WebSocket and marker stages below, has 116 rows and 24 families.
 
 | Fixed row | Timed boundary | Successful bytes |
 | --- | --- | --- |
@@ -346,11 +346,11 @@ observes weak cache owners gone and both actual UDP addresses rebound.
 The owned parent independently observes reap, absent process group and EOF
 before removing its private fixtures.
 
-JS and NAPI exports declare stage-specific bytes. The addon still audits 78
-storage producers by default or 85 with FoundationDB; its transport families
+JS and NAPI exports declare stage-specific bytes. The current addon audits 84
+storage producers by default or 91 with FoundationDB, including six marker labels; its transport families
 remain unavailable. Literal historical 92-row records retain missing rows and
 histograms as null/unavailable. Strict current validators reject missing rows
-and the historical payload-only descriptor on a current 110-row inventory.
+and the historical payload-only descriptor on a current 116-row inventory.
 Server CLI shutdown banks remain process-local; a dedicated client CLI shutdown
 export and incoming peer setup timings remain open.
 
@@ -396,7 +396,7 @@ The WebSocket snapshot has no QUIC transport subtree. TCP/TLS wire bytes,
 WebSocket frame counts, peer acknowledgment, process CPU and physical device
 IOPS are explicitly unavailable. NAPI declares the eight client rows and the
 `client_websocket` family but does not invoke that client: addon source coverage
-remains 78 rows by default or 85 with FoundationDB. Historical 100-row receipts
+is now 84 rows by default or 91 with FoundationDB, including six marker labels. Historical 100-row receipts
 remain incomplete under strict current validation and are never padded.
 
 Optional slow logs require `MOUNT_RS_TRACE_STORAGE=1` for client stages or
@@ -422,8 +422,8 @@ The cache slice appends six storage rows at indexes 85 through 90 and two core
 hit counters at 134 and 135. The existing 85 storage and 134 core rows retain
 their offsets. This cache slice produced 91 storage rows; client stream acquisition
 brought that slice to 92 storage and 136 core rows; the request-stage slice
-above produced 100 storage rows; the WebSocket stages produced 108 rows; setup/discovery bring the current bank to
-110.
+above produced 100 storage rows; the WebSocket stages produced 108 rows and
+setup/discovery produced 110. The marker family extends the current bank to 116.
 
 | Fixed storage row | Measured boundary | Successful bytes |
 | --- | --- | --- |
@@ -488,7 +488,8 @@ Historical observations with 85 storage and 134 core rows lack the cache additio
 Projectors retain those missing rows as unavailable/null; exact current
 qualification requires the new bank. Native-addon storage declarations contain
 the cache family, but that addon has no blob-cache dependency: its audited
-instrumented-operation counts remain 78 feature-off and 85 with FoundationDB.
+current instrumented-operation counts are 84 feature-off and 91 with FoundationDB,
+including six marker producer labels.
 Cache rows therefore remain unavailable in native-addon coverage.
 
 ### Hosted peer reconnect diagnostics
@@ -544,7 +545,7 @@ The authority/refresh slice appended sixteen rows to the 118-row prefix, for
 those unchanged prefixes, producing 136 core and 91 storage rows. Client stream
 acquisition subsequently appended storage row 91, producing 92 rows. The
 request-stage slice produced 100 storage rows; WebSocket stages subsequently
-produced 108 rows; setup/discovery bring the current bank to 110.
+produced 108 rows; setup/discovery produced 110, and markers bring the current bank to 116.
 The authority/refresh observations split the
 repeated compact metadata work seen in the latest lifecycle measurement:
 
@@ -1224,7 +1225,7 @@ overlapping wall durations. Global banks survive provider retirement without
 retaining stores or connections. They do not attribute totals to a particular
 drive or provider instance, and zero in-flight gauges do not prove drain.
 
-Storage retains all 110 ordered rows, outcomes, known successful bytes by
+Storage retains all 116 ordered rows, outcomes, known successful bytes by
 operation (payload or peer plaintext envelope as documented above),
 returned rows and row-observation availability, global/per-row in-flight
 gauges, 32 latency buckets and forwarding-box provenance. Coverage labels are
@@ -1238,6 +1239,10 @@ and eight client WebSocket rows are also declared in the bank. The additional
 establish their use or instrumentation in every process. Zero TiDB rows do not prove TiDB use or complete
 SQL/network coverage. Core profile rows retain fixed names, calls, elapsed
 nanoseconds and event-specific units.
+
+The six backing-marker rows are also exported dynamically, with fixed probe/data
+GET and body, accepted create, and retry-backoff units. Their presence does not
+establish object-store use in a SQLite CLI fixture or observe another process.
 
 SDK block bytes describe successful known logical payloads; SDK metadata
 payload bytes are unavailable at this seam. Zero `returned_row_observations`
@@ -2028,3 +2033,60 @@ fresh backing verification before starting the next run. The pure selector and
 ignored `runtime_worker_selector_reaches_observed_tokio_pool` control verify the
 parser and actual spawned-task execution. Small single-process results do not
 qualify the 10-server, 10,000-client production topology.
+
+
+## Object-store backing-marker observations
+
+Six fixed global Storage rows append at ordinals 110 through 115 without changing
+existing ordinals: `object_store.backing_marker.probe.get`,
+`object_store.backing_marker.probe.body_read`,
+`object_store.backing_marker.data.get`,
+`object_store.backing_marker.data.body_read`,
+`object_store.backing_marker.probe.create`, and
+`object_store.backing_marker.retry_backoff`. The current bank has 116 rows and
+24 units families; profile remains 136 and SDK coverage remains 47. NAPI and
+JavaScript independently audit these six producer labels, in addition to the
+unchanged legacy and TiDB inventories, for 84 default or 91 FoundationDB labels.
+
+The producers observe actual configured-backing prepare/verify calls through
+sequential, fresh probe and data clients, one conditional marker create, and
+all four existing marker retry-sleep sites. They preserve authority validation,
+request order, retry policy, deadlines and acknowledgment behavior. Generic
+configured-prefix preflight is outside these marker labels. The raw API v1 and
+local work v1 per-instance banks continue to exclude marker work.
+
+Calls count object-store GET/body/create invocations or scheduled backoff waits,
+with terminal success/error/cancellation, in-flight gauges and inclusive wall
+nanoseconds. NotFound is a failed API GET even when the authority protocol
+handles a missing marker. Malformed identity has successful transport/body
+observations followed by ESTALE. Successful body bytes are materialized returned
+bytes before identity validation; successful creation records 20 accepted input
+bytes. GET/wait bytes are unavailable, and zero error/cancellation bytes do not
+establish that no bytes transferred. Dropping an active await records cancellation
+and drains its gauge; unpolled futures record nothing.
+
+These are process-global inclusive sums, with no Drive or coordinator attribution.
+They are not HTTP attempt counts, opaque internal retries, physical IOPS, exclusive
+CPU, or evidence of a live TiDB/RustFS bottleneck. The CLI dynamically exports the
+global rows; raw RustFS instance stats remain unavailable in that CLI path. The
+stack-only observer uses the existing Span bank; cold environment/global-bank
+initialization and intrinsic payload/client-future allocations are outside warmed
+recorder allocation claims. Root-owned validation passed nine marker cases,
+505 Node capture/mock tests, the default workspace (1,940 passed, 246 ignored),
+profiled touched packages (913 passed, 134 ignored), both strict Clippy modes,
+formatting, and signed QUIC/WebSocket exports. The warmed recorder exercised
+38 selected rows, including the six marker rows, with zero allocation calls;
+this does not establish zero allocations for the full metadata or RPC pipeline.
+
+The [TiDB/RustFS diagnostic report](benchmarks/tidb-rustfs-marker-diagnostic-20260928/README.md)
+records actual native-addon use and two successful small paired cells. One and
+eight workers achieved 102.50 and 177.48 mixed overwrite/read operations per
+second on one Drive. The eight-worker workload reused contents across lanes,
+and these 32-sample bursts do not qualify sustained or production capacity.
+Ordinary blob reads hit the local cache. At eight workers the shared filesystem
+operation gate accumulated 2,343.636 ms of caller wait in a 623.36 ms enclosing
+workload window; these overlapping waits are not exclusive CPU time. TiDB pool
+checkout and observed server retry/latch metrics did not demonstrate a matching
+backend contention problem in these cells. Docker block-operation counts and
+physical device IOPS remained unavailable. The report retains timing boundaries,
+resource coverage, code hashes, and persistence/cleanup witnesses.

@@ -58,10 +58,11 @@ const storageFamilyMeasurement = {
   client_websocket: { operations: [...clientWebSocketNames], calls: "client_stage_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_stage_wall_nanoseconds; nested_and_parallel_spans_overlap; not_exclusive_cpu_or_network_time" },
   client_quic_connection_setup: { operations: ["client.quic.connection_setup"], calls: "quic_transport_setup_attempts; excludes_credentials_hello_and_websocket_fallback", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_tls_config_endpoint_connect_and_alpn_validation_nanoseconds; not_exclusive_cpu_or_network_time" },
   blob_cache_discovery: { operations: ["blob_cache.discovery.locate"], calls: "discovery_locate_invocations; empty_and_fallback_peer_lists_are_success; not_peer_gets_or_directory_health", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_locate_await_nanoseconds; excludes_peer_filtering_queries_and_hedging" },
+  object_store_backing_marker: { operations: STORAGE_OPERATION_NAMES.filter((name) => name.startsWith("object_store.backing_marker.")), calls: "object_store_marker_get_body_create_and_backoff_invocations; includes_success_error_and_cancellation; not_http_attempts_or_application_iops", bytes: "known_successful_materialized_body_bytes_before_identity_validation_and_accepted_create_input_bytes; get_backoff_error_and_cancellation_bytes_unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
 }
 // This synthetic native snapshot represents a default, feature-off addon: the
-// fixed bank declares 110 rows, but only the frozen legacy prefix is audited.
-const storageInstrumentedOperations = STORAGE_OPERATION_NAMES.slice(0, 78)
+// fixed bank declares 116 rows; the legacy/TiDB prefix and six marker producers are audited.
+const storageInstrumentedOperations = [...STORAGE_OPERATION_NAMES.slice(0, 78), ...STORAGE_OPERATION_NAMES.slice(110, 116)]
 const foundationdbCoverageMeasurement = {
   schema: "mount-rs-foundationdb-client-diagnostic-coverage-v1",
   status: "unavailable",
@@ -437,8 +438,8 @@ function diagnosticSnapshot(calls, connectionId = "7", instances = []) {
 
 async function testStoragePhaseDiagnostics() {
   const snapshot = diagnosticSnapshot
-  assert.equal(snapshot(2).storage.entries.length, 110)
-  assert.equal(Object.keys(snapshot(2).measurement.storage_families).length, 23)
+  assert.equal(snapshot(2).storage.entries.length, 116)
+  assert.equal(Object.keys(snapshot(2).measurement.storage_families).length, 24)
   const delta = deltaNativeSnapshots(snapshot(2), snapshot(5))
   assert.equal(delta.complete, true)
   assert.equal(delta.storage?.entries?.[5]?.bytes, "12288")
@@ -1009,12 +1010,17 @@ async function testStorageFamilyMetadata() {
   assert.deepEqual(delta.measurement.storage_instrumented_operations, storageInstrumentedOperations, "coverage must retain the producer's audited operation list")
   assert.deepEqual(delta.measurement.tidb_coverage, tidbCoverageMeasurement, "static coverage is distinct from dynamic operation counters")
   assert.deepEqual(delta.measurement.foundationdb_coverage, foundationdbCoverageMeasurement, "feature-off FoundationDB coverage is unavailable despite fixed zero rows")
-  assert.equal(delta.storage.entries.length, 110)
-  assert.equal(Object.keys(delta.measurement.storage_families).length, 23)
+  assert.equal(delta.storage.entries.length, 116)
+  assert.deepEqual(delta.storage.entries.slice(110, 116).map((entry) => entry.name), [
+    "object_store.backing_marker.probe.get", "object_store.backing_marker.probe.body_read",
+    "object_store.backing_marker.data.get", "object_store.backing_marker.data.body_read",
+    "object_store.backing_marker.probe.create", "object_store.backing_marker.retry_backoff",
+  ])
+  assert.equal(Object.keys(delta.measurement.storage_families).length, 24)
   assert.equal(delta.storage.entries.find((entry) => entry.name === "tidb.sql.flush_probe").returned_row_observations, "1", "the final SQL row must reach phase evidence")
   assert.deepEqual(delta.storage.entries.slice(78, 85).map((entry) => entry.name), ["foundationdb.transaction.create", "foundationdb.transaction.closure_attempt", "foundationdb.read.get", "foundationdb.read.get_key", "foundationdb.read.get_range_page", "foundationdb.transaction.commit", "foundationdb.transaction.on_error"])
   assert.deepEqual(delta.storage.entries.slice(85, 91).map((entry) => entry.name), ["blob_cache.miss.admission_wait", "blob_cache.miss.singleflight_wait", "blob_cache.ram.lookup", "blob_cache.disk.lookup", "blob_cache.peer.connection_lock_wait", "blob_cache.peer.connection_establish"])
-  assert.equal(delta.measurement.storage_instrumented_operations.length, 78)
+  assert.equal(delta.measurement.storage_instrumented_operations.length, 84)
   assert.equal(delta.measurement.storage_instrumented_operations.some((name) => name.startsWith("blob_cache.")), false)
   assert.equal(delta.storage.entries[91].name, "client.quic.open_bi")
   assert.deepEqual(delta.storage.entries.slice(92, 100).map((entry) => entry.name), [

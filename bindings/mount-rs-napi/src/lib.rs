@@ -325,7 +325,11 @@ fn storage_operation_families() -> Value {
         "blob_cache_discovery":{"operations":["blob_cache.discovery.locate"],
             "calls":"discovery_locate_invocations; empty_and_fallback_peer_lists_are_success; not_peer_gets_or_directory_health",
             "bytes":"unavailable","returned_rows":"unavailable",
-            "duration":"inclusive_locate_await_nanoseconds; excludes_peer_filtering_queries_and_hedging"}
+            "duration":"inclusive_locate_await_nanoseconds; excludes_peer_filtering_queries_and_hedging"},
+        "object_store_backing_marker":{"operations":matching(&["object_store.backing_marker."]),
+            "calls":"object_store_marker_get_body_create_and_backoff_invocations; includes_success_error_and_cancellation; not_http_attempts_or_application_iops",
+            "bytes":"known_successful_materialized_body_bytes_before_identity_validation_and_accepted_create_input_bytes; get_backoff_error_and_cancellation_bytes_unavailable",
+            "returned_rows":"unavailable","duration":duration}
     })
 }
 
@@ -394,6 +398,16 @@ const LEGACY_NON_TIDB_INSTRUMENTED_OPERATIONS: &[&str] = &[
     "sdk.blocks.reconcile",
 ];
 
+// Independently audited actual marker producer sites, separate from registry declarations.
+const OBJECT_STORE_BACKING_MARKER_INSTRUMENTED_OPERATIONS: &[&str] = &[
+    "object_store.backing_marker.probe.get",
+    "object_store.backing_marker.probe.body_read",
+    "object_store.backing_marker.data.get",
+    "object_store.backing_marker.data.body_read",
+    "object_store.backing_marker.probe.create",
+    "object_store.backing_marker.retry_backoff",
+];
+
 fn storage_instrumented_operation_names() -> Vec<&'static str> {
     // Keep the core order while consuming audited producer coverage explicitly.
     storage::operation_names()
@@ -405,6 +419,7 @@ fn storage_instrumented_operation_names() -> Vec<&'static str> {
                     .operations
                     .contains(name)
                 || foundationdb_instrumented_operations().contains(name)
+                || OBJECT_STORE_BACKING_MARKER_INSTRUMENTED_OPERATIONS.contains(name)
         })
         .collect()
 }
@@ -7459,13 +7474,13 @@ mod tests {
         let families = snapshot["measurement"]["storage_families"]
             .as_object()
             .unwrap();
-        assert_eq!(families.len(), 23);
+        assert_eq!(families.len(), 24);
         let declared = families
             .values()
             .flat_map(|family| family["operations"].as_array().unwrap())
             .map(|name| name.as_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(declared.len(), 110);
+        assert_eq!(declared.len(), 116);
         assert_eq!(
             declared
                 .into_iter()
@@ -7495,7 +7510,22 @@ mod tests {
             "known_selected_successful_returned_value_key_and_range_page_key_value_payload_bytes_only"
         );
         let names = storage::operation_names();
-        assert_eq!(names.len(), 110);
+        assert_eq!(names.len(), 116);
+        assert_eq!(
+            &names[110..116],
+            OBJECT_STORE_BACKING_MARKER_INSTRUMENTED_OPERATIONS
+        );
+        assert_eq!(
+            families["object_store_backing_marker"]["operations"],
+            json!(OBJECT_STORE_BACKING_MARKER_INSTRUMENTED_OPERATIONS)
+        );
+        assert_eq!(
+            families["object_store_backing_marker"]["returned_rows"],
+            "unavailable"
+        );
+        for (index, name) in names[110..116].iter().enumerate() {
+            assert_eq!(snapshot["storage"]["entries"][110 + index]["name"], *name);
+        }
         assert_eq!(
             &names[78..85],
             &[
@@ -7655,9 +7685,9 @@ mod tests {
         }
         assert_eq!(
             snapshot["storage"]["entries"].as_array().unwrap().len(),
-            110
+            116
         );
-        for (index, name) in names[91..].iter().enumerate() {
+        for (index, name) in names[91..110].iter().enumerate() {
             let transport_row = &snapshot["storage"]["entries"][91 + index];
             assert_eq!(transport_row["name"], *name);
             for field in [
@@ -7751,6 +7781,10 @@ mod tests {
         let instrumented = snapshot["measurement"]["storage_instrumented_operations"]
             .as_array()
             .unwrap();
+        assert_eq!(OBJECT_STORE_BACKING_MARKER_INSTRUMENTED_OPERATIONS.len(), 6);
+        for name in OBJECT_STORE_BACKING_MARKER_INSTRUMENTED_OPERATIONS {
+            assert!(instrumented.contains(&json!(name)));
+        }
         assert_eq!(
             coverage["schema"],
             "mount-rs-foundationdb-client-diagnostic-coverage-v1"
@@ -7760,7 +7794,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            110
+            116
         );
         assert!(
             instrumented
@@ -7799,7 +7833,7 @@ mod tests {
             for name in source.operations {
                 assert!(instrumented.contains(&json!(name)));
             }
-            assert_eq!(instrumented.len(), 85);
+            assert_eq!(instrumented.len(), 91);
         }
         #[cfg(not(all(
             feature = "foundationdb",
@@ -7820,7 +7854,7 @@ mod tests {
                     "operations":[]
                 })
             );
-            assert_eq!(instrumented.len(), 78);
+            assert_eq!(instrumented.len(), 84);
             assert!(
                 instrumented
                     .iter()

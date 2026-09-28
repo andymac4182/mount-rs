@@ -568,8 +568,23 @@ impl ServerProcess {
         let storage = &process["storage"]["snapshot"];
         let storage_entries = storage["entries"].as_array().unwrap();
         let names = mount_rs_core::diagnostics::storage::operation_names();
-        assert_eq!(storage_entries.len(), 110);
-        assert_eq!(names.len(), 110);
+        assert_eq!(storage_entries.len(), 116);
+        assert_eq!(names.len(), 116);
+        // This SQLite fixture proves current export inventory, not marker activity.
+        assert_eq!(
+            storage_entries[110..116]
+                .iter()
+                .map(|row| row["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "object_store.backing_marker.probe.get",
+                "object_store.backing_marker.probe.body_read",
+                "object_store.backing_marker.data.get",
+                "object_store.backing_marker.data.body_read",
+                "object_store.backing_marker.probe.create",
+                "object_store.backing_marker.retry_backoff",
+            ]
+        );
         assert_eq!(storage_entries[77]["name"], "tidb.sql.flush_probe");
         assert_eq!(
             storage_entries[78..85]

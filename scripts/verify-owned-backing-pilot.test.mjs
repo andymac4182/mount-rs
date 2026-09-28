@@ -467,7 +467,7 @@ test("current verifier refuses a complete historical 134-core / 85-storage snaps
   const { pilot, build } = model()
   const workload = pilot.native_phases.phases[0]
   assert.equal(workload.core_profile.entries.length, 136)
-  assert.equal(workload.storage.length, 110)
+  assert.equal(workload.storage.length, 116)
   workload.core_profile.entries.splice(134)
   workload.storage = historicalStorageRows(workload.storage, historical85Names)
   assert.equal(workload.core_profile.entries.length, 134)
@@ -478,7 +478,7 @@ test("current verifier refuses a complete historical 136-core / 92-storage snaps
   const { pilot, build } = model()
   const workload = pilot.native_phases.phases[0]
   assert.equal(workload.core_profile.entries.length, 136)
-  assert.equal(workload.storage.length, 110)
+  assert.equal(workload.storage.length, 116)
   workload.storage = historicalStorageRows(workload.storage, historical92Names)
   assert.equal(workload.core_profile.entries.length, 136)
   assert.equal(workload.storage.length, 92)
@@ -518,10 +518,13 @@ for (const name of [
   "client.websocket.request_encode", "client.websocket.request_send",
   "client.websocket.response_receive", "client.websocket.response_decode",
   "client.quic.connection_setup", "blob_cache.discovery.locate",
+  "object_store.backing_marker.probe.get", "object_store.backing_marker.probe.body_read",
+  "object_store.backing_marker.data.get", "object_store.backing_marker.data.body_read",
+  "object_store.backing_marker.probe.create", "object_store.backing_marker.retry_backoff",
 ]) test(`current exact missing ${name} storage row rejects qualification`, () => {
   const { pilot, build } = model()
   const rows = pilot.native_phases.phases[0].storage
-  assert.equal(rows.length, 110)
+  assert.equal(rows.length, 116)
   const index = rows.findIndex((row) => row.name === name)
   assert.notEqual(index, -1)
   rows.splice(index, 1)
