@@ -420,6 +420,31 @@ class CacheStageSelectors(unittest.TestCase):
             self.assertFalse(parent.named_suite_passed(output.replace(names[0], 'unrelated'), names))
             self.assertFalse(parent.named_suite_passed('running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored;\n', names))
 
+    def test_lazy_runtime_literal_selectors_require_every_named_case(self):
+        for kind, count in [('lazycli', 12), ('lazyservice', 23)]:
+            with self.subTest(kind=kind):
+                self.assertIn(kind, parent.COMMANDS)
+                command, limit, profile, trace = parent.COMMANDS[kind]
+                self.assertEqual((limit, profile, trace), (180, 1, 0))
+                self.assertIn('--locked', command)
+                self.assertIn('--offline', command)
+                self.assertIn('--test-threads=1', command)
+                self.assertNotIn('--ignored', command)
+                names = parent.EXPECTED_SUITES[kind]
+                self.assertEqual(len(names), count)
+                if kind == 'lazycli':
+                    self.assertIn('::lazy_', command)
+                    groups = [names]
+                else:
+                    self.assertEqual(command.count('--test'), 3)
+                    groups = [names[:8], names[8:17], names[17:]]
+                output = ''.join(f'running {len(group)} tests\n' + ''.join(f'test {name} ... controlled output\nok\n' for name in group) + f'test result: ok. {len(group)} passed; 0 failed; 0 ignored;\n' for group in groups)
+                self.assertTrue(parent.lazy_suite_passed(output, kind))
+                self.assertFalse(parent.lazy_suite_passed(output.replace(names[0], 'unrelated'), kind))
+                self.assertFalse(parent.lazy_suite_passed(output.replace('0 failed', '1 failed', 1), kind))
+                self.assertFalse(parent.lazy_suite_passed(output+f'test {names[0]} ... ok\n', kind))
+                self.assertFalse(parent.lazy_suite_passed(output.replace('running 8 tests', 'running 7 tests'), kind) if kind == 'lazyservice' else parent.lazy_suite_passed('running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored;\n', kind))
+
     def test_websocket_client_metrics_requires_one_profiled_case(self):
         name = "websocket::metrics_tests::websocket_stages_preserve_serialized_transactions"
         command, limit, profile, trace = parent.COMMANDS["wsclientmetrics"]

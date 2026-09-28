@@ -36,7 +36,7 @@ mount-rs-http = { path = "../../transports/mount-rs-http" }
 mount-rs-observability = { path = "../../crates/mount-rs-observability", optional = true }
 mount-rs-nfs = { path = "../../transports/mount-rs-nfs" }
 mount-rs-sdk = { path = "../../crates/mount-rs-sdk" }
-mount-rs-service = { path = "../../crates/mount-rs-service" }
+mount-rs-service = { path = "../../crates/mount-rs-service", features = ["sdk-runtime"] }
 mount-rs-remote-client = { path = "../../crates/mount-rs-remote-client" }
 serde = { version = "1", features = ["derive"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

@@ -240,6 +240,238 @@ async fn entered(factory: &Factory) {
         .unwrap();
 }
 
+#[cfg(feature = "sdk-runtime")]
+mod sdk_activation {
+    use super::*;
+    use mount_rs_core::construction::ConstructionObserver;
+    use mount_rs_sdk::Filesystem;
+    use mount_rs_service::filesystem_runtime::{
+        ConstructedRuntime, RuntimeConstructor, SdkRuntimeFactory,
+    };
+    use std::sync::Weak;
+
+    const DEADLINE: Duration = Duration::from_secs(5);
+
+    // Count selected driver calls while the actual SDK filesystem owns health,
+    // backing authority and shutdown.
+    struct Driver {
+        actual: Arc<dyn FsDriver>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl FsDriver for Driver {
+        fn capabilities(&self) -> Capabilities {
+            self.actual.capabilities()
+        }
+        async fn stat(&self, path: &str) -> FsResult<Stats> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.actual.stat(path).await
+        }
+        async fn readdir(&self, path: &str) -> FsResult<Vec<DirEntry>> {
+            self.actual.readdir(path).await
+        }
+        async fn open(&self, path: &str, flags: &str, mode: u32) -> FsResult<Arc<dyn FileHandle>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.actual.open(path, flags, mode).await
+        }
+        async fn write_file(&self, path: &str, bytes: &[u8]) -> FsResult<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.actual.write_file(path, bytes).await
+        }
+    }
+
+    struct Constructor {
+        calls: Arc<AtomicUsize>,
+        opens: AtomicUsize,
+        entered: Notify,
+        release: Notify,
+        owner: Mutex<Option<Weak<Filesystem>>>,
+    }
+
+    #[async_trait]
+    impl RuntimeConstructor for Constructor {
+        async fn construct(
+            &self,
+            observer: &dyn ConstructionObserver,
+        ) -> FsResult<ConstructedRuntime> {
+            self.opens.fetch_add(1, Ordering::SeqCst);
+            let actual = Arc::new(Filesystem::memory(MemoryOptions::default()));
+            observer.retain(actual.clone());
+            *self.owner.lock().unwrap() = Some(Arc::downgrade(&actual));
+            let selected = Arc::new(Driver {
+                actual: actual.driver(),
+                calls: self.calls.clone(),
+            });
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(ConstructedRuntime::new(actual, selected))
+        }
+    }
+
+    type Fixture = (
+        Arc<Catalog>,
+        Arc<DriveDispatcher>,
+        RuntimePool,
+        Arc<SdkRuntimeFactory>,
+        Arc<Constructor>,
+        DriveRegistration,
+    );
+
+    fn fixture() -> Fixture {
+        let catalog = Arc::new(Catalog {
+            snapshot: Mutex::new(Arc::new(snapshot())),
+            loads: AtomicUsize::new(0),
+            hold_load: AtomicUsize::new(0),
+            entered: Notify::new(),
+            release: Notify::new(),
+        });
+        let constructor = Arc::new(Constructor {
+            calls: Arc::new(AtomicUsize::new(0)),
+            opens: AtomicUsize::new(0),
+            entered: Notify::new(),
+            release: Notify::new(),
+            owner: Mutex::new(None),
+        });
+        let factory = SdkRuntimeFactory::new(constructor.clone());
+        let pool = RuntimePool::new(1).unwrap();
+        let registration = pool.register(factory.clone()).unwrap();
+        let mut dispatcher = DriveDispatcher::new(catalog.clone());
+        dispatcher
+            .register_lazy_definition("p", "d", json!({"kind":"memory"}), registration.clone())
+            .unwrap();
+        (
+            catalog,
+            Arc::new(dispatcher),
+            pool,
+            factory,
+            constructor,
+            registration,
+        )
+    }
+
+    async fn entered(constructor: &Constructor) {
+        tokio::time::timeout(DEADLINE, constructor.entered.notified())
+            .await
+            .unwrap();
+    }
+
+    async fn finish(pool: &RuntimePool, factory: &SdkRuntimeFactory, constructor: &Constructor) {
+        tokio::time::timeout(DEADLINE, pool.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(DEADLINE, factory.close())
+            .await
+            .unwrap()
+            .unwrap();
+        let owner = constructor.owner.lock().unwrap().as_ref().unwrap().clone();
+        tokio::time::timeout(DEADLINE, async {
+            while owner.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("closed actual SDK owner remained retained");
+    }
+
+    #[tokio::test]
+    async fn actual_sdk_activation_rechecks_same_revision_catalog_before_selected_driver_use() {
+        for mode in 0..4 {
+            let (catalog, dispatcher, pool, factory, constructor, _) = fixture();
+            let operation = if mode == 3 {
+                Operation {
+                    name: OperationName::Write,
+                    body: json!({"path":"/file","data":[1,2,3]}),
+                }
+            } else {
+                stat()
+            };
+            let request = tokio::spawn({
+                let dispatcher = dispatcher.clone();
+                async move { dispatcher.dispatch(&identity(), "d", &operation).await }
+            });
+            entered(&constructor).await;
+            assert!(factory.construction_snapshot().unwrap().opening);
+            assert!(
+                constructor
+                    .owner
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .upgrade()
+                    .is_some()
+            );
+            catalog.change(|snapshot| match mode {
+                0 => snapshot.grants.clear(),
+                1 => {
+                    snapshot.issuer_policies.get_mut("policy").unwrap()["algorithms"] =
+                        json!(["RS256"]);
+                }
+                2 => {
+                    snapshot
+                        .partitions
+                        .get_mut("p")
+                        .unwrap()
+                        .drives
+                        .get_mut("d")
+                        .unwrap()
+                        .driver = json!({"kind":"host"});
+                }
+                _ => {
+                    snapshot
+                        .grants
+                        .get_mut("sandbox")
+                        .unwrap()
+                        .drives
+                        .insert("d".into(), Permission::Read);
+                }
+            });
+            constructor.release.notify_one();
+            let error = tokio::time::timeout(DEADLINE, request)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err();
+            assert_eq!(error.code, if mode == 2 { "ESTALE" } else { "EACCES" });
+            assert_eq!(constructor.calls.load(Ordering::SeqCst), 0);
+            assert_eq!(catalog.loads.load(Ordering::SeqCst), 2);
+            *catalog.snapshot.lock().unwrap() = Arc::new(snapshot());
+            tokio::time::timeout(DEADLINE, dispatcher.dispatch(&identity(), "d", &stat()))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(constructor.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(constructor.opens.load(Ordering::SeqCst), 1);
+            finish(&pool, &factory, &constructor).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn canceled_request_keeps_actual_sdk_activation_owned_without_backend_replay() {
+        let (_, dispatcher, pool, factory, constructor, registration) = fixture();
+        let request =
+            tokio::spawn(async move { dispatcher.dispatch(&identity(), "d", &stat()).await });
+        entered(&constructor).await;
+        request.abort();
+        assert!(matches!(request.await, Err(error) if error.is_cancelled()));
+        let snapshot = factory.construction_snapshot().unwrap();
+        assert!(snapshot.opening && !snapshot.uncertain);
+        assert_eq!(pool.snapshot().opening, 1);
+        assert_eq!(constructor.calls.load(Ordering::SeqCst), 0);
+        constructor.release.notify_one();
+        let lease = tokio::time::timeout(DEADLINE, registration.acquire())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(constructor.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(constructor.opens.load(Ordering::SeqCst), 1);
+        drop(lease);
+        finish(&pool, &factory, &constructor).await;
+    }
+}
+
 #[tokio::test]
 async fn lazy_registration_and_denied_scopes_invoke_no_factory() {
     let (catalog, dispatcher, pool, factory, calls) = fixture(false);

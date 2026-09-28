@@ -1090,6 +1090,15 @@ async fn configured_binary_selects_mrc5_for_signed_quic_and_websocket_reopen() {
     );
 
     let (mut server, quic, websocket) = ServerProcess::spawn(&service_config, true);
+    // Observe the actual child before any accepted workload RPC. Defer these
+    // assertions until both child lifetimes and existing byte/EOF/backing
+    // oracles finish, so an intended eager-start RED also completes cleanup.
+    let cold_at_listener_readiness = [
+        root.join("data-metadata.sqlite"),
+        root.join("data-blocks.sqlite"),
+    ]
+    .into_iter()
+    .all(|path| !path.exists());
     for rejected in [&invalid_signature, &wrong_audience, &expired, &malformed] {
         assert!(
             connect(
@@ -1132,6 +1141,12 @@ async fn configured_binary_selects_mrc5_for_signed_quic_and_websocket_reopen() {
     );
 
     let quic_payload: Vec<u8> = (0..65_543).map(|index| (index % 251) as u8).collect();
+    let cold_after_authentication_denials = [
+        root.join("data-metadata.sqlite"),
+        root.join("data-blocks.sqlite"),
+    ]
+    .into_iter()
+    .all(|path| !path.exists());
     let websocket_payload: Vec<u8> = (0..32_777).map(|index| (index % 239) as u8).collect();
     let quic_connection = connect(
         quic,
@@ -1284,5 +1299,13 @@ async fn configured_binary_selects_mrc5_for_signed_quic_and_websocket_reopen() {
     println!(
         "configured CLI child resource receipt: ru_maxrss={} platform_units",
         usage.ru_maxrss
+    );
+    assert!(
+        cold_at_listener_readiness,
+        "actual configured CLI opened Drive providers before the first authorized operation"
+    );
+    assert!(
+        cold_after_authentication_denials,
+        "rejected authentication activated a cold Drive provider"
     );
 }

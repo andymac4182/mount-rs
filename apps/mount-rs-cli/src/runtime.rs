@@ -189,6 +189,46 @@ enum PreparedDriver {
     Split(Box<SplitOptions>),
 }
 
+// Preserve provider POSIX codes until the caller chooses the CLI or wire
+// boundary. CLI-only root/postconfiguration refusals have a fixed mapping;
+// display text is never parsed back into a wire error or diagnostic.
+enum PreparedOpenError {
+    Filesystem(FsError),
+    Postconfiguration(CliError),
+}
+
+impl From<FsError> for PreparedOpenError {
+    fn from(error: FsError) -> Self {
+        Self::Filesystem(error)
+    }
+}
+
+impl From<CliError> for PreparedOpenError {
+    fn from(error: CliError) -> Self {
+        Self::Postconfiguration(error)
+    }
+}
+
+impl PreparedOpenError {
+    fn into_cli(self) -> CliError {
+        match self {
+            Self::Filesystem(error) => CliError::from(error),
+            Self::Postconfiguration(error) => error,
+        }
+    }
+
+    fn into_filesystem(self) -> FsError {
+        match self {
+            Self::Filesystem(error) => error,
+            Self::Postconfiguration(error) => FsError::new(if error.exit_code() == 2 {
+                ErrorCode::Einval
+            } else {
+                ErrorCode::Eio
+            }),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct SqliteRootOwner {
     configured: Option<(u32, u32)>,
@@ -268,7 +308,9 @@ impl DriverRuntimePlan {
         decorator: Option<&dyn mount_rs_sdk::BlockStoreDecorator>,
         context: Option<&mount_rs_sdk::StorageContext>,
     ) -> Result<DriverRuntime, CliError> {
-        self.open_impl(decorator, context, None).await
+        self.open_impl(decorator, context, None)
+            .await
+            .map_err(PreparedOpenError::into_cli)
     }
 
     /// Open with the application's construction observer. The caller must own
@@ -283,14 +325,36 @@ impl DriverRuntimePlan {
     /// only after its native constructor returns, before root postconfiguration
     /// awaits. The SDK's SlateDB dependency also has a pre-return interval that
     /// this journal does not cover.
-    #[allow(dead_code)] // The lifecycle caller is activated in a later phase.
+    #[allow(dead_code)] // Retained for observer-aware ordinary mount construction.
     pub(crate) async fn open_with_construction_observer(
         &self,
         decorator: Option<&dyn mount_rs_sdk::BlockStoreDecorator>,
         context: Option<&mount_rs_sdk::StorageContext>,
         observer: &dyn ConstructionObserver,
     ) -> Result<DriverRuntime, CliError> {
-        self.open_impl(decorator, context, Some(observer)).await
+        self.open_impl(decorator, context, Some(observer))
+            .await
+            .map_err(PreparedOpenError::into_cli)
+    }
+
+    // Cold service construction reuses the exact prepared plan and selected
+    // driver, preserving typed provider errors rather than flattening CliError.
+    pub(crate) async fn construct_for_service(
+        &self,
+        decorator: Option<&dyn mount_rs_sdk::BlockStoreDecorator>,
+        context: &mount_rs_sdk::StorageContext,
+        observer: &dyn ConstructionObserver,
+    ) -> FsResult<mount_rs_service::filesystem_runtime::ConstructedRuntime> {
+        let runtime = self
+            .open_impl(decorator, Some(context), Some(observer))
+            .await
+            .map_err(PreparedOpenError::into_filesystem)?;
+        Ok(
+            mount_rs_service::filesystem_runtime::ConstructedRuntime::new(
+                runtime.filesystem,
+                runtime.driver,
+            ),
+        )
     }
 
     async fn open_impl(
@@ -298,7 +362,7 @@ impl DriverRuntimePlan {
         decorator: Option<&dyn mount_rs_sdk::BlockStoreDecorator>,
         context: Option<&mount_rs_sdk::StorageContext>,
         observer: Option<&dyn ConstructionObserver>,
-    ) -> Result<DriverRuntime, CliError> {
+    ) -> Result<DriverRuntime, PreparedOpenError> {
         let filesystem = match &self.driver {
             PreparedDriver::Memory(options) => Filesystem::memory(*options),
             PreparedDriver::Host { root, options } => Filesystem::host(root, *options),
@@ -403,7 +467,7 @@ impl DriverRuntime {
     /// Prepare options, then open with an application-owned construction
     /// observer. The caller must begin and settle its journal attempt; this
     /// convenience entrypoint does not own cleanup or cancellation.
-    #[allow(dead_code)] // The lifecycle caller is activated in a later phase.
+    #[allow(dead_code)] // Retained for observer-aware ordinary mount construction.
     pub(crate) async fn open_with_construction_observer(
         options: &CliOptions,
         uid: u32,
@@ -611,7 +675,7 @@ fn resolve_storage_env(reference: &EnvReference) -> Result<String, CliError> {
 async fn configure_sqlite_root_owner(
     driver: &Arc<dyn FsDriver>,
     owner: SqliteRootOwner,
-) -> Result<(), CliError> {
+) -> Result<(), PreparedOpenError> {
     let stats = driver.stat("/").await?;
     let desired = owner.configured.unwrap_or((owner.uid, owner.gid));
     if stats.uid == desired.0 && stats.gid == desired.1 {
@@ -622,13 +686,13 @@ async fn configure_sqlite_root_owner(
         return Err(CliError::runtime(format!(
             "read-only SQLite mount would need virtual root ownership {}:{} -> {}:{}, refusing to mutate persisted metadata; use matching driver.uid and driver.gid or a writable explicit migration",
             stats.uid, stats.gid, desired.0, desired.1
-        )));
+        )).into());
     }
     if owner.configured.is_none() {
         return Err(CliError::runtime(format!(
             "SQLite virtual root is owned by {}:{}, but this process requests {}:{}; set driver.uid and driver.gid for an explicit writable ownership migration",
             stats.uid, stats.gid, owner.uid, owner.gid
-        )));
+        )).into());
     }
 
     driver.chown("/", desired.0, desired.1).await?;

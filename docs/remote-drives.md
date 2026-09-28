@@ -17,6 +17,8 @@ mount-rs mount --config client.json
 
 The bootstrap server config accepts `"max_connections": 1024` for a server expecting 1,000 clients. The compatible default is 128; supported values are 1 through 16,384. This controls connection admission, while the per-connection active request limit remains 32. Size this alongside datastore pools and memory; it is not a throughput guarantee.
 
+An optional positive `"max_active_drives"` bounds resident Drive runtimes on each server. When omitted, capacity equals the number of registered Drives (at least one). The server parses and registers all Drive plans before listener readiness, then opens a backend on its first authorized request. Backend capability and availability errors can therefore occur on that first request. Open handles and requests pin their runtime. At capacity, the server can evict an unpinned, healthy persistent compact runtime only after its actual shutdown succeeds. If no eligible runtime is available, activation returns `EBUSY`; construction or shutdown failures preserve their errors and retain affected owners. Memory and ordinary SQLite runtimes remain resident once opened. Size this limit for the storage modes and simultaneous active Drives in your deployment.
+
 Token credentials are exactly one of:
 
 ```json
@@ -33,7 +35,7 @@ The command runs directly as argv with no shell, a ten-second limit and bounded 
 
 Every operation checks current authorization metadata. Revocation takes effect on the next operation; metadata unavailability denies access. A catalog revision change invalidates previously opened remote handles, even when the change affects another Drive; reopen files explicitly. Ordinary credential renewal preserves handles when identity and catalog revision remain stable. Catalog updates must first empty a Partition and remove its grants before deleting it.
 
-Drive backends are opened at service startup. Adding or changing a Drive definition requires a service restart. An active service returns `ESTALE` when a registered definition changes; it never silently switches an existing mount to another backend. Startup opens every Drive before listener readiness and shutdown ends sessions before closing storage resources.
+Adding or changing a Drive definition requires a service restart. An active service returns `ESTALE` when a registered definition changes; it never silently switches an existing mount to another backend. Authorization is checked before cold activation and again before using the opened backend. Shutdown ends sessions, drains active runtimes and construction owners, then closes shared storage resources and the server cache. Failed or uncertain cleanup retains its owners and prevents a replacement service invocation in that process.
 
 QUIC uses TLS 1.3 and `mount-rs/2` ALPN. TLS WebSocket uses the `/mount-rs` HTTP upgrade path and `mount-rs.v2` subprotocol. Both require the current v2 ClientHello; there is no older-version compatibility implementation. WebSocket uses the same credentials, dispatcher, authoritative Drive permissions, renewal, revision fencing and session handles.
 

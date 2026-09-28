@@ -21,6 +21,166 @@ const DEADLINE: Duration = Duration::from_secs(10);
 const CHUNK: usize = 4096;
 const FILE: &str = "/acknowledged";
 
+#[cfg(feature = "sdk-runtime")]
+#[tokio::test]
+async fn shared_sdk_factory_owns_actual_mrc5_reopen_generations_and_context_sibling() {
+    use mount_rs_core::construction::ConstructionObserver;
+    use mount_rs_service::filesystem_runtime::{
+        ConstructedRuntime, RuntimeConstructor, SdkRuntimeFactory,
+    };
+
+    struct Constructor {
+        options: SplitOptions,
+        context: Arc<StorageContext>,
+        calls: AtomicUsize,
+        owners: Mutex<Vec<Weak<Filesystem>>>,
+    }
+
+    #[async_trait]
+    impl RuntimeConstructor for Constructor {
+        async fn construct(
+            &self,
+            observer: &dyn ConstructionObserver,
+        ) -> Result<ConstructedRuntime> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let actual = Arc::new(
+                Filesystem::split_with_context_and_construction_observer(
+                    self.options.clone(),
+                    &self.context,
+                    observer,
+                )
+                .await?,
+            );
+            observer.retain(actual.clone());
+            self.owners.lock().unwrap().push(Arc::downgrade(&actual));
+            let selected = actual.driver();
+            Ok(ConstructedRuntime::new(actual, selected))
+        }
+    }
+
+    async fn retired(owner: &Weak<Filesystem>) {
+        tokio::time::timeout(DEADLINE, async {
+            while owner.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("closed actual SDK owner remained retained");
+    }
+
+    // Keep an unacknowledged backing after assertion failure. Delete only after
+    // the actual pool, sibling and shared context acknowledge shutdown.
+    let directory = tempfile::tempdir().unwrap().keep();
+    let context = Arc::new(StorageContext::new(2).unwrap());
+    let pool = RuntimePool::new(1).unwrap();
+    let mut constructors = Vec::new();
+    let mut factories = Vec::new();
+    let mut registrations = Vec::new();
+    for index in 0..3 {
+        let path = directory.join(format!("drive-{index}.sqlite"));
+        let constructor = Arc::new(Constructor {
+            options: options(&path, &format!("drive-{index}"), true),
+            context: context.clone(),
+            calls: AtomicUsize::new(0),
+            owners: Mutex::new(Vec::new()),
+        });
+        let factory = SdkRuntimeFactory::new(constructor.clone());
+        registrations.push(pool.register(factory.clone()).unwrap());
+        constructors.push(constructor);
+        factories.push(factory);
+        assert!(
+            !path.exists(),
+            "lazy registration eagerly constructed SQLite"
+        );
+    }
+    let sibling = sibling(
+        options(&directory.join("sibling.sqlite"), "sibling", true),
+        &context,
+    )
+    .await;
+    let sibling_bytes = payload(200);
+    sibling
+        .driver()
+        .write_file(FILE, &sibling_bytes)
+        .await
+        .unwrap();
+    let expected: Vec<_> = (0..3).map(payload).collect();
+    let mut identities = [None; 3];
+    let mut previous: Option<Weak<Filesystem>> = None;
+    for index in [0, 1, 2, 0, 2, 1, 0, 1, 2, 0] {
+        let lease = acquire(&registrations[index]).await.unwrap();
+        if let Some(previous) = previous.take() {
+            retired(&previous).await;
+        }
+        let weak = constructors[index]
+            .owners
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        let actual = weak.upgrade().unwrap();
+        assert!(actual.persistent_eviction_allowed());
+        let backing = actual.concurrent_backing_id().unwrap();
+        drop(actual);
+        if identities[index].is_none() {
+            lease
+                .driver()
+                .write_file(FILE, &expected[index])
+                .await
+                .unwrap();
+            identities[index] = Some(backing);
+        }
+        assert_eq!(Some(backing), identities[index]);
+        full_file(lease.driver(), &expected[index]).await;
+        assert_eq!(
+            stored_backing(&directory.join(format!("drive-{index}.sqlite")), true).await,
+            backing
+        );
+        assert!(factories[index].construction_snapshot().is_none());
+        drop(lease);
+        previous = Some(weak);
+        full_file(&sibling.driver(), &sibling_bytes).await;
+        let state = pool.snapshot();
+        assert_eq!(state.resident, 1);
+        assert_eq!(state.pinned, 0);
+        assert_eq!(state.quarantined, 0);
+    }
+    let state = pool.snapshot();
+    assert_eq!(state.registered, 3);
+    assert_eq!(state.open_success, 10);
+    assert_eq!(state.eviction_success, 9);
+    assert_eq!(state.eviction_error, 0);
+    assert_eq!(
+        constructors
+            .iter()
+            .map(|constructor| constructor.calls.load(Ordering::SeqCst))
+            .collect::<Vec<_>>(),
+        [4, 3, 3]
+    );
+    tokio::time::timeout(DEADLINE, pool.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pool.snapshot().resident, 0);
+    for factory in &factories {
+        tokio::time::timeout(DEADLINE, factory.close())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    for constructor in &constructors {
+        let owners = constructor.owners.lock().unwrap().clone();
+        for owner in &owners {
+            retired(owner).await;
+        }
+    }
+    full_file(&sibling.driver(), &sibling_bytes).await;
+    sibling.shutdown().await.unwrap();
+    context.close().await.unwrap();
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
 fn options(path: &Path, owner: &str, compact: bool) -> SplitOptions {
     let store = StoreConfig::Sqlite {
         path: path.to_owned(),

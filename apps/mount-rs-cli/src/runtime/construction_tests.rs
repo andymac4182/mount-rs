@@ -11,6 +11,126 @@ use mount_rs_core::construction::{ConstructionObserver, ConstructionResource};
 use mount_rs_sdk::ConstructionJournal;
 use std::sync::{Mutex, Weak};
 
+#[cfg(any(
+    windows,
+    target_os = "macos",
+    all(target_os = "linux", target_env = "gnu")
+))]
+#[tokio::test]
+async fn lazy_service_constructor_preserves_typed_provider_error_without_text_parsing() {
+    struct Refuse;
+    impl mount_rs_sdk::BlockStoreDecorator for Refuse {
+        fn decorate(
+            &self,
+            _config: &StoreConfig,
+            _store: Arc<dyn mount_rs_core::storage::BlockStore>,
+        ) -> FsResult<Arc<dyn mount_rs_core::storage::BlockStore>> {
+            // A different code named in the message must not influence the
+            // service error. The actual typed result alone is authoritative.
+            Err(FsError::new(ErrorCode::Enospc).with_message("EACCES is not this result"))
+        }
+    }
+    let root = ProtectedFixture::new();
+    let context = mount_rs_sdk::StorageContext::new(2).unwrap();
+    let journal = ConstructionJournal::new();
+    let attempt = journal.begin().unwrap();
+    let result = compact_plan(root.path())
+        .construct_for_service(Some(&Refuse), &context, &journal)
+        .await;
+    let error = match result {
+        Ok(_) => panic!("controlled decorator error was ignored"),
+        Err(error) => error,
+    };
+    attempt.fail();
+    journal.close().await.unwrap();
+    assert!(journal.snapshot().cleanup_complete);
+    context.close().await.unwrap();
+    assert_eq!(error.code, ErrorCode::Enospc);
+}
+
+#[tokio::test]
+async fn lazy_virtual_root_stat_and_chown_preserve_typed_filesystem_codes_at_service_boundary() {
+    struct FailRoot {
+        actual: Arc<dyn FsDriver>,
+        stat_fails: bool,
+    }
+    #[async_trait::async_trait]
+    impl FsDriver for FailRoot {
+        fn capabilities(&self) -> mount_rs_core::Capabilities {
+            self.actual.capabilities()
+        }
+        async fn stat(&self, path: &str) -> FsResult<mount_rs_core::Stats> {
+            if self.stat_fails {
+                Err(FsError::new(ErrorCode::Enospc).with_message("EACCES is not this result"))
+            } else {
+                self.actual.stat(path).await
+            }
+        }
+        async fn chown(&self, _: &str, _: u32, _: u32) -> FsResult<()> {
+            Err(FsError::new(ErrorCode::Enospc).with_message("EACCES is not this result"))
+        }
+        async fn readdir(&self, path: &str) -> FsResult<Vec<mount_rs_core::DirEntry>> {
+            self.actual.readdir(path).await
+        }
+        async fn open(
+            &self,
+            path: &str,
+            flags: &str,
+            mode: u32,
+        ) -> FsResult<Arc<dyn mount_rs_core::FileHandle>> {
+            self.actual.open(path, flags, mode).await
+        }
+        async fn write_file(&self, path: &str, data: &[u8]) -> FsResult<()> {
+            self.actual.write_file(path, data).await
+        }
+    }
+    let actual = Filesystem::memory(MemoryOptions::default());
+    let initial = actual.driver().stat("/").await.unwrap();
+    for stat_fails in [true, false] {
+        let selected: Arc<dyn FsDriver> = Arc::new(FailRoot {
+            actual: actual.driver(),
+            stat_fails,
+        });
+        let error = match configure_sqlite_root_owner(
+            &selected,
+            SqliteRootOwner {
+                configured: Some((initial.uid ^ 1, initial.gid ^ 1)),
+                uid: initial.uid,
+                gid: initial.gid,
+                read_only: false,
+            },
+        )
+        .await
+        {
+            Ok(()) => panic!("controlled virtual-root error was ignored"),
+            Err(error) => error,
+        };
+        assert_eq!(error.into_filesystem().code, ErrorCode::Enospc);
+    }
+    actual.shutdown().await.unwrap();
+}
+
+#[test]
+fn lazy_explicit_nonfilesystem_refusal_has_fixed_service_mapping_and_unchanged_cli_rendering() {
+    let original = CliError::usage("postconfiguration usage refusal");
+    let rendered = original.to_string();
+    assert_eq!(
+        PreparedOpenError::Postconfiguration(original.clone())
+            .into_filesystem()
+            .code,
+        ErrorCode::Einval
+    );
+    let cli = PreparedOpenError::Postconfiguration(original).into_cli();
+    assert_eq!(cli.exit_code(), 2);
+    assert_eq!(cli.to_string(), rendered);
+    assert_eq!(
+        PreparedOpenError::Postconfiguration(CliError::runtime("opaque runtime refusal"))
+            .into_filesystem()
+            .code,
+        ErrorCode::Eio
+    );
+}
+
 /// A failed assertion must not remove a backing whose terminal close was not
 /// acknowledged. Successful tests remove their temporary backing normally.
 struct ProtectedFixture(Option<tempfile::TempDir>);

@@ -3,6 +3,8 @@
 pub mod auth;
 pub mod catalog;
 pub mod dispatch;
+#[cfg(feature = "sdk-runtime")]
+pub mod filesystem_runtime;
 pub mod runtime_diagnostics;
 pub mod runtime_pool;
 pub mod server;

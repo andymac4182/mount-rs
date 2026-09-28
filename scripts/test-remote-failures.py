@@ -10,6 +10,8 @@ import hashlib,json,os,pathlib,re,selectors,signal,stat,subprocess,sys,tempfile,
 BASE=pathlib.Path(__file__).resolve().parent.parent
 COMMANDS={'cachetests': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--all-targets', '--locked', '--offline'], 180, 0, 0), 'redisfault': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'distributed_failure', '--locked', '--offline', '--', '--ignored', '--exact', 'redis_directory_real_peer_failures_preserve_exact_backing', '--test-threads=1', '--nocapture'], 180, 0, 0), 'rediscleanup': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'distributed_failure', '--locked', '--offline', '--', '--ignored', '--exact', 'cancelled_redis_fixture_reaps_owned_child_before_removing_directory', '--test-threads=1', '--nocapture'], 180, 0, 0), 'wsloss': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-remote-client', '--test', 'quic_mount', '--locked', '--offline', '--', '--ignored', '--exact', 'websocket_sqlite_commit_survives_lost_wire_reply_without_replay', '--test-threads=1', '--nocapture'], 180, 0, 0), 'remotetests': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-remote-client', '--all-targets', '--locked', '--offline'], 180, 0, 0), 'faultclippy': (['./scripts/cargo-shared', 'clippy', '-p', 'mount-rs-blob-cache', '-p', 'mount-rs-remote-client', '--all-targets', '--locked', '--offline', '--', '-D', 'warnings'], 180, 0, 0), 'fmt': (['./scripts/cargo-shared', 'fmt', '--all', '--', '--check'], 120, 0, 0)}
 COMMANDS.update({
+    'lazycli': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-cli', '--features', 'local-oidc-fixture,io-profiling', '--lib', '--locked', '--offline', '::lazy_', '--', '--test-threads=1', '--nocapture'], 180, 1, 0),
+    'lazyservice': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-service', '--features', 'sdk-runtime,io-profiling', '--test', 'filesystem_runtime', '--test', 'lazy_dispatch', '--test', 'runtime_pool_sqlite', '--locked', '--offline', '--', '--test-threads=1', '--nocapture'], 180, 1, 0),
     'clientsetupmetrics': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-remote-client', '--lib', '--locked', '--offline', '--', '--ignored', '--exact', 'connection::metrics_tests::quic_connection_setup_metrics_preserve_outcomes', '--test-threads=1', '--nocapture'], 180, 1, 0),
     'discoverymetrics': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'discovery_metrics', '--locked', '--offline', '--', '--ignored', '--exact', 'discovery_locate_metrics_preserve_bytes_outcomes_and_cancellation', '--test-threads=1', '--nocapture'], 180, 1, 0),
     'wsautoloss': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-remote-client', '--test', 'quic_mount', '--locked', '--offline', '--', '--ignored', '--exact', 'automatic_fallback_sqlite_commit_survives_lost_wire_reply_without_replay', '--test-threads=1', '--nocapture'], 180, 0, 0),
@@ -80,6 +82,47 @@ EXACT_CASES = {
     'corealloc': 'warmed_causal_profile_rows_record_without_added_allocations',
 }
 EXPECTED_SUITES = {
+    'lazycli': tuple('remote::tests::'+name for name in (
+        'lazy_actual_listener_bind_failures_close_created_resources_without_opening_drives',
+        'lazy_cancelled_actual_ready_service_drains_both_retained_listeners_with_cold_providers',
+        'lazy_invalid_drive_plan_preserves_cold_providers_and_reports_prepared_routes',
+        'lazy_zero_active_drive_capacity_fails_before_opening_any_provider',
+    )) + tuple('remote_runtime::lifecycle_tests::'+name for name in (
+        'lazy_aborted_worker_retains_both_installed_consuming_futures_and_terminal_failure',
+        'lazy_cancelled_close_waiter_joins_one_actual_sdk_drain_before_context_close',
+        'lazy_constructor_and_cleanup_failure_retain_context_and_slot_without_retry',
+        'lazy_dropping_serving_scope_keeps_actual_pinned_owner_until_one_drain_finishes',
+        'lazy_prepared_cli_plans_preserve_persistent_bytes_and_backing_through_capacity_one_reopen',
+    )) + tuple('runtime::construction_tests::'+name for name in (
+        'lazy_explicit_nonfilesystem_refusal_has_fixed_service_mapping_and_unchanged_cli_rendering',
+        'lazy_service_constructor_preserves_typed_provider_error_without_text_parsing',
+        'lazy_virtual_root_stat_and_chown_preserve_typed_filesystem_codes_at_service_boundary',
+    )),
+    'lazyservice': (
+        'actual_filesystem_owner_handoff_requires_acknowledged_close_before_next_generation',
+        'actual_shutdown::cancelled_then_failed_actual_sdk_shutdown_never_authorizes_a_replacement',
+        'canceling_failure_cleanup_waiters_does_not_cancel_or_repeat_its_owned_cleanup',
+        'cleanup_panic_preserves_primary_error_and_retains_registered_resource',
+        'factory_retains_before_first_poll_and_abandoned_open_is_nonretryable',
+        'owner_drop_without_shutdown_never_invents_a_close_receipt',
+        'panicking_constructor_retains_its_registered_owner_and_no_retry',
+        'primary_constructor_error_survives_authority_cleanup_failure_and_close_rejoin',
+        'cancelled_cold_request_keeps_open_owner_without_quarantining_uninvoked_backend',
+        'cold_open_rechecks_expiry_before_any_backend_operation',
+        'cold_open_rechecks_same_revision_grant_policy_definition_and_permission',
+        'expiry_during_post_open_catalog_load_never_reaches_backend',
+        'invalid_handle_never_activates_a_cold_drive',
+        'lazy_registration_and_denied_scopes_invoke_no_factory',
+        'quarantined_generation_during_post_open_authorization_never_reaches_backend',
+        'sdk_activation::actual_sdk_activation_rechecks_same_revision_catalog_before_selected_driver_use',
+        'sdk_activation::canceled_request_keeps_actual_sdk_activation_owned_without_backend_replay',
+        'actual_durable_mrc4_backing_does_not_qualify_for_runtime_eviction',
+        'actual_mrc5_bytes_eof_and_backing_survive_repeated_owned_eviction',
+        'actual_mrc5_cloned_request_lease_prevents_eviction_without_opening_target',
+        'actual_mrc5_failed_publication_quarantines_owner_without_replacement_generation',
+        'actual_mrc5_handle_pin_keeps_mutations_and_sparse_eof_through_reopen',
+        'shared_sdk_factory_owns_actual_mrc5_reopen_generations_and_context_sibling',
+    ),
     'wsservicedefault': ('ordinary_websocket_constructor_has_no_observer', 'explicit_websocket_observer_requires_profiling_feature'),
     'wsserviceon': (
         'ordinary_websocket_constructor_has_no_observer',
@@ -157,6 +200,20 @@ def named_suite_passed(output, names, nocapture=False):
             ) if nocapture else
             all(re.search(r'^test '+re.escape(name)+r' \.\.\. ok$', output, re.M) for name in names)
         )
+    )
+
+
+def lazy_suite_passed(output, kind):
+    names = EXPECTED_SUITES[kind]
+    if kind == 'lazycli':
+        return named_suite_passed(output, names, nocapture=True)
+    # One fixed invocation runs exactly these three Cargo-managed binaries.
+    # Require each complete named suite, not an aggregate or one passing bin.
+    groups = (names[:8], names[8:17], names[17:])
+    blocks = re.split(r'(?=^running [0-9]+ tests$)', output, flags=re.M)[1:]
+    return len(blocks) == 3 and all(
+        named_suite_passed(block, group, nocapture=True)
+        for block, group in zip(blocks, groups)
     )
 
 
@@ -471,6 +528,7 @@ def main():
     FAULT_KINDS.add('peeriometrics')
     FAULT_KINDS.add('peeriometricstrace')
     FAULT_KINDS.add('sqlitecache')
+    FAULT_KINDS.update({'lazycli', 'lazyservice'})
     FAULT_KINDS.add('wsclientmetrics')
     FAULT_KINDS.add('wsautoloss')
     FAULT_KINDS.update({'wsservicedefault','wsserviceon','wsserviceunit','wspackages','wspackagesprofiled','wsclippy','wsclippyprofiled'})
@@ -515,6 +573,12 @@ def main():
      paths.extend(BASE/v for v in ['filesystems/mount-rs-chunked/src/causal_metrics.rs','filesystems/mount-rs-chunked/tests/filesystem_causal_metrics.rs','tests/filesystem_causal_profile_allocations.rs','filesystems/mount-rs-chunked/tests/current_path_create_rebase.rs','filesystems/mount-rs-chunked/tests/compact_snapshot_revision.rs','filesystems/mount-rs-chunked/src/create_guard_metrics_tests.rs','filesystems/mount-rs-chunked/src/create_rebase.rs'] if (BASE/v).is_file())
      paths.append(BASE/'crates/mount-rs-blob-cache/tests/quinn_close.rs')
      paths.append(BASE/'crates/mount-rs-remote-client/src/connection_metrics_tests.rs')
+     paths.extend(BASE/v for v in (
+      'apps/mount-rs-cli/src/remote_runtime.rs',
+      'apps/mount-rs-cli/src/remote_runtime/lifecycle_tests.rs',
+      'crates/mount-rs-service/src/filesystem_runtime.rs',
+      'crates/mount-rs-service/tests/filesystem_runtime.rs',
+     ) if (BASE/v).is_file())
      if (BASE/'crates/mount-rs-blob-cache/tests/discovery_metrics.rs').is_file():paths.append(BASE/'crates/mount-rs-blob-cache/tests/discovery_metrics.rs')
      # Pin the complete scoped dependency, including upstream provenance and
      # licenses, even before new vendor files have entered the Git index.
@@ -679,7 +743,8 @@ def main():
      selected_suite=EXPECTED_SUITES.get(kind)
      selected_suite_pass=None
      if selected_suite is not None:
-      selected_suite_pass=named_suite_passed((root/'stdout.log').read_text(),selected_suite,nocapture=kind in {'createpath','createunit','filesystemmetrics'})
+      output=(root/'stdout.log').read_text()
+      selected_suite_pass=lazy_suite_passed(output,kind) if kind in {'lazycli','lazyservice'} else named_suite_passed(output,selected_suite,nocapture=kind in {'createpath','createunit','filesystemmetrics'})
       if not selected_suite_pass:unknown.append('named_suite_not_observed_passed')
      cache_slow_records=None
      if kind=='cachemetricstrace':
