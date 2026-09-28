@@ -5,6 +5,7 @@ mod config;
 #[allow(dead_code)]
 #[path = "../production_fixture.rs"]
 mod fixture;
+mod lazy_runtime;
 #[allow(dead_code)]
 mod metrics;
 mod oracle;
@@ -96,6 +97,46 @@ pub async fn source_identity(commands: &mut command::Commands) -> Result<Value, 
         ("state.rs", include_bytes!("state.rs").as_slice()),
         ("resources.rs", include_bytes!("resources.rs").as_slice()),
         ("backend.rs", include_bytes!("backend.rs").as_slice()),
+        (
+            "lazy_runtime.rs",
+            include_bytes!("lazy_runtime.rs").as_slice(),
+        ),
+        (
+            "../../../src/filesystem_runtime.rs",
+            include_bytes!("../../../src/filesystem_runtime.rs").as_slice(),
+        ),
+        (
+            "../../../src/runtime_pool.rs",
+            include_bytes!("../../../src/runtime_pool.rs").as_slice(),
+        ),
+        (
+            "../../../src/runtime_diagnostics.rs",
+            include_bytes!("../../../src/runtime_diagnostics.rs").as_slice(),
+        ),
+        (
+            "../../../src/dispatch.rs",
+            include_bytes!("../../../src/dispatch.rs").as_slice(),
+        ),
+        (
+            "../../../../mount-rs-sdk/src/filesystem.rs",
+            include_bytes!("../../../../mount-rs-sdk/src/filesystem.rs").as_slice(),
+        ),
+        (
+            "../../../../mount-rs-sdk/src/providers.rs",
+            include_bytes!("../../../../mount-rs-sdk/src/providers.rs").as_slice(),
+        ),
+        (
+            "../../../../mount-rs-sdk/src/construction.rs",
+            include_bytes!("../../../../mount-rs-sdk/src/construction.rs").as_slice(),
+        ),
+        (
+            "../../../../mount-rs-sdk/src/options.rs",
+            include_bytes!("../../../../mount-rs-sdk/src/options.rs").as_slice(),
+        ),
+        (
+            "../../../../../src/construction.rs",
+            include_bytes!("../../../../../src/construction.rs").as_slice(),
+        ),
         (
             "../remote_blocks.rs",
             include_bytes!("../remote_blocks.rs").as_slice(),
@@ -200,6 +241,7 @@ pub async fn source_identity(commands: &mut command::Commands) -> Result<Value, 
             "binary_sha256":file_digest(&std::env::current_exe().map_err(|_|"binary path unavailable")?)?,
             "resource_profiling":cfg!(feature="resource-profiling"),
             "allocation_profiling":cfg!(feature="allocation-profiling"),
+            "sdk_runtime":cfg!(feature="sdk-runtime"),
             "debug_assertions":cfg!(debug_assertions),
             "scope":"current checkout native fixture; dirty source disclosed; not clean committed CI"}
     ))
@@ -514,13 +556,13 @@ pub async fn controller() -> Result<(), String> {
             journal.value["initialization"]["cleanup_confirmed"] = json!(true);
             journal.value["initialization"]["complete"] = json!(true);
             journal.value["initialization"]["elapsed_seconds"] = json!(initialization_start.take().unwrap().elapsed().as_secs_f64());
-            fleet.expect_initialized_backings(
-                initialization_receipts
-                    .iter()
-                    .enumerate()
-                    .map(|(drive, r)| process::validate_backing_receipt(r, drive))
-                    .collect::<Result<_, _>>()?,
-            );
+            let expected_backings = initialization_receipts.iter().enumerate()
+                .map(|(drive, receipt)| process::validate_backing_receipt(receipt, drive))
+                .collect::<Result<Vec<_>, _>>()?;
+            let expected_backings_sha256 = digest(&serde_json::to_vec(&expected_backings)
+                .map_err(|_| "initializer manifest encoding failed")?);
+            fleet.expect_initialized_backings(expected_backings.clone());
+            journal.value["initialization"]["expected_backings_sha256"] = json!(expected_backings_sha256);
             journal.flush()?;
             let catalog_path = directory.join("catalog.sqlite");
             let catalog = mount_rs_service::catalog::SqliteCatalog::open(&catalog_path)
@@ -554,6 +596,8 @@ pub async fn controller() -> Result<(), String> {
                     .into(),
                 output: output.clone(),
                 parent_pid: std::process::id(),
+                expected_backings,
+                expected_backings_sha256,
             };
             let path = directory.join("worker-config.json");
             write_json(&path, &serde_json::to_value(&private).unwrap())?;

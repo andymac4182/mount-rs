@@ -100,6 +100,7 @@ EXPECTED_SUITES = {
         'target::lazy_runtime::tests::lazy_target_no_runtime_retains_unknown_context_even_when_injected_keeper_is_dropped',
         'target::lazy_runtime::tests::lazy_target_listener_deadline_starts_one_storage_allowance_without_replacement_or_context_ack',
         'target::lazy_runtime::tests::lazy_target_late_context_handoff_is_rerooted_and_cannot_reuse_cached_success',
+        'target::lazy_runtime::tests::lazy_target_keeper_poison_refuses_terminal_ack_and_retains_context',
         'target::backend::receipt_pooling_tests::lazy_target_options_resolve_once_and_preserve_exact_drive_keys',
         'target::backend::receipt_pooling_tests::lazy_target_sqlite_plans_preserve_shared_metadata_blocks_without_env_reads',
         'target::metrics::tests::lazy_target_runtime_shape_preserves_cold_and_actual_backing_distinction',
@@ -608,10 +609,15 @@ def exact_case_passed(output, selected_test):
     # Nocapture output may separate the selected name and its trailing "ok".
     # The fixed --exact command plus one executed, nonignored passing case is
     # the qualification boundary; partial/zero/multi-case output is rejected.
+    # Nested controllers can print earlier success. Every observed harness
+    # start needs a result, and only a passing summary at stdout's end,
+    # followed by optional blank LF lines, qualifies the outer result.
     return bool(
         re.search(r'^running 1 test$', output, re.M)
         and re.search(r'^test '+re.escape(selected_test)+r' \.\.\. ', output, re.M)
-        and re.search(r'^test result: ok\. 1 passed; 0 failed; 0 ignored;', output, re.M)
+        and len(re.findall(r'^running [0-9]+ tests?$', output, re.M))
+            == len(re.findall(r'^test result:', output, re.M))
+        and re.search(r'^test result: ok\. 1 passed; 0 failed; 0 ignored;[^\n]*\n*\Z', output, re.M)
     )
 
 

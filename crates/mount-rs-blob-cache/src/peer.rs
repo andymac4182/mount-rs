@@ -463,6 +463,15 @@ impl QuicPeerTransport {
     pub fn local_addr(&self) -> Result<SocketAddr> {
         self.core.endpoint.local_addr().map_err(|_| error())
     }
+    /// Snapshot admitted inbound handshake/session owners, bounded by max_inflight.
+    /// This includes unauthenticated handshakes and is not a TLS or drain ACK.
+    /// Sealing admission does not erase permits still held by active sessions.
+    pub fn active_inbound_sessions(&self) -> usize {
+        self.core
+            .config
+            .max_inflight
+            .saturating_sub(self.core.inbound.available_permits())
+    }
     /// Join one bounded, independently owned drain of actual peer tasks.
     /// Cancellation only abandons this waiter. Unproven cleanup remains retained.
     pub async fn shutdown(&self) -> Result<()> {

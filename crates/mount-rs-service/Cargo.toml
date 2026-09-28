@@ -50,3 +50,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
+
+[[test]]
+name = "quic_production_target"
+required-features = ["sdk-runtime"]

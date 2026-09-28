@@ -555,7 +555,7 @@ jobs:
           git status --porcelain=v1 --untracked-files=all > "$EVIDENCE_DIR/source-before.txt"
           test ! -s "$EVIDENCE_DIR/source-before.txt"
           python3 -B scripts/test-filter-startup-diagnostics.py
-          ./scripts/cargo-shared test --locked -p mount-rs-service --features resource-profiling \
+          ./scripts/cargo-shared test --locked -p mount-rs-service --features sdk-runtime,resource-profiling \
             --test quic_production_target --no-run --message-format=json \
             > "$EVIDENCE_DIR/build.jsonl" 2> "$EVIDENCE_DIR/build.log"
           python3 - <<'PY'

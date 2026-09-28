@@ -1800,15 +1800,14 @@ async fn peer_read_reconnect_bypasses_pending_replica_handshake() {
         // The consumed Initial was the only original datagram delivered to the
         // blackhole. Observe the restarted server owning an incoming attempt before
         // cancellation can make an Initial CLOSE its first received packet.
-        // Only the retained replica is talking to A at this point. The accept
-        // loop upgrades its Weak service only after receiving an incoming. A
-        // second service owner proves that an incoming reached A; it does not
-        // claim that TLS or the spawned task has completed.
+        // Only the retained replica is talking to A at this point. The inbound
+        // permit is held by the actual supervisor's admitted handshake/session.
+        // Its occupied snapshot proves incoming admission, not TLS completion.
         // No Connection handle is cloned and the replica future stays unpolled.
         timeout(Duration::from_secs(3), async {
             let mut tick = tokio::time::interval(Duration::from_millis(1));
             loop {
-                if Arc::strong_count(pair.a.as_ref().unwrap()) > 1 {
+                if pair.a.as_ref().unwrap().active_inbound_sessions() > 0 {
                     break;
                 }
                 tick.tick().await;

@@ -495,6 +495,62 @@ class CompactSqliteRunnerSelectors(unittest.TestCase):
                      "'automatic_retry':False", "before==after", "if code is not None and absent is True and eof:"]:
             self.assertIn(term, source)
 
+class NestedExactResultControls(unittest.TestCase):
+    OUTER = "ten_process_lazy_startup_preserves_exact_backing_and_workload"
+    NESTED = (
+        "\nrunning 1 test\n"
+        "test ten_process_lazy_startup_preserves_exact_backing_and_workload ... \n"
+        "running 1 test\n"
+        "test production_target_controller ... ok\n\n"
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 86 filtered out; finished in 29.04s\n\n"
+    )
+    OBSERVED_FAILED = (
+        NESTED + "FAILED\n\nfailures:\n\nfailures:\n"
+        "    ten_process_lazy_startup_preserves_exact_backing_and_workload\n\n"
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 86 filtered out; finished in 29.09s\n\n"
+    )
+
+    def test_actual_nested_controller_pass_cannot_qualify_outer_failure(self):
+        self.assertFalse(parent.exact_case_passed(self.OBSERVED_FAILED, self.OUTER))
+
+    def test_nested_success_without_outer_result_cannot_qualify_incomplete_harness(self):
+        for output in [self.NESTED, self.NESTED + "ok\n\n",
+                       self.NESTED.rstrip("\n")]:
+            with self.subTest(output=output[-80:]):
+                self.assertFalse(parent.exact_case_passed(output, self.OUTER))
+
+    def test_nested_controller_pass_and_final_outer_success_qualify(self):
+        output = self.NESTED + "ok\n\n" + SUMMARY
+        self.assertTrue(parent.exact_case_passed(output, self.OUTER))
+        self.assertFalse(parent.exact_case_passed(output, "unrelated_case"))
+
+    def test_failed_or_incomplete_final_result_cannot_reuse_nested_success(self):
+        for final in [
+            "test result: FAILED. 0 passed; 1 failed; 0 ignored;\n",
+            "test result: ok. 0 passed; 0 failed; 1 ignored;\n",
+            "test result: ok. 2 passed; 0 failed; 0 ignored;\n",
+            "test result: ok. 0 passed; 0 failed; 0 ignored;\n",
+            "test result: ok. 1 passed;\n",
+            "test result: malformed\n",
+            "FAILED\n",
+        ]:
+            with self.subTest(final=final):
+                self.assertFalse(parent.exact_case_passed(self.NESTED + final, self.OUTER))
+
+    def test_success_before_later_terminal_failure_cannot_qualify_leaf(self):
+        output = f"running 1 test\ntest {NAME} ... ok\n{SUMMARY}"
+        self.assertFalse(parent.exact_case_passed(output + "test result: FAILED. 0 passed; 1 failed; 0 ignored;\n", NAME))
+
+    def test_leaf_legacy_sqlite_and_compact_named_cases_keep_terminal_success(self):
+        for name in [NAME, "fixture::name.with.dot",
+                     "websocket_sqlite_commit_survives_lost_wire_reply_without_replay",
+                     "automatic_fallback_sqlite_commit_survives_lost_wire_reply_without_replay",
+                     "automatic_fallback_compact_sqlite_commit_survives_lost_wire_reply_without_replay"]:
+            with self.subTest(name=name):
+                output = f"running 1 test\ntest {name} ... controlled output\nok\n{SUMMARY}\n"
+                self.assertTrue(parent.exact_case_passed(output, name))
+
+
 class ResultControls(unittest.TestCase):
     def test_single_line_pass(self):
         self.assertTrue(parent.exact_case_passed(f"running 1 test\ntest {NAME} ... ok\n\n{SUMMARY}", NAME))
@@ -597,11 +653,11 @@ class CacheStageSelectors(unittest.TestCase):
         command=parent.COMMANDS['targetlazyunit'][0]
         self.assertIn('lazy_target_',command);self.assertNotIn('--ignored',command)
         names=parent.EXPECTED_SUITES['targetlazyunit']
-        self.assertEqual(len(names),13);self.assertEqual(len(set(names)),13)
-        output='running 13 tests\n'+''.join(f'test {name} ... fixture output\nok\n' for name in names)+'test result: ok. 13 passed; 0 failed; 0 ignored;\n'
+        self.assertEqual(len(names),14);self.assertEqual(len(set(names)),14)
+        output='running 14 tests\n'+''.join(f'test {name} ... fixture output\nok\n' for name in names)+'test result: ok. 14 passed; 0 failed; 0 ignored;\n'
         self.assertTrue(parent.named_suite_passed(output,names,nocapture=True))
         self.assertFalse(parent.named_suite_passed(output.replace(names[0],'unrelated'),names,nocapture=True))
-        self.assertFalse(parent.named_suite_passed(output.replace('13 passed','12 passed'),names,nocapture=True))
+        self.assertFalse(parent.named_suite_passed(output.replace('14 passed','13 passed'),names,nocapture=True))
         self.assertFalse(parent.named_suite_passed('running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored;\n',names,nocapture=True))
 
     def test_websocket_client_metrics_requires_one_profiled_case(self):
