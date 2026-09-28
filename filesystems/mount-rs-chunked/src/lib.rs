@@ -8,6 +8,8 @@
 
 mod causal_metrics;
 #[cfg(all(test, unix))]
+mod construction_tests;
+#[cfg(all(test, unix))]
 mod create_guard_metrics_tests;
 mod create_rebase;
 mod migration;
@@ -24,6 +26,7 @@ use create_rebase::{PreparedCreateRebase, rebase_prepared_create};
 
 use async_trait::async_trait;
 use mount_rs_core::chunking::{Chunker, FixedSizeChunker, from_config};
+use mount_rs_core::construction::{ConstructionObserver, ConstructionResource};
 use mount_rs_core::diagnostics::RequestTrace;
 use mount_rs_core::diagnostics::profile::{self, Event, Span};
 use mount_rs_core::driver::{
@@ -729,11 +732,164 @@ where
     }
 }
 
+// An observer retains this owner before construction crosses an authority
+// acquisition await. The state owns only the resources still needed to prove
+// cleanup; a completed cleanup drops them even while the journal retains us.
+struct ConstructionAuthority<M: MetadataStore, B: BlockStore> {
+    state: Mutex<ConstructionAuthorityState<M, B>>,
+    gate: Arc<tokio::sync::Mutex<()>>,
+}
+
+enum ConstructionAuthorityState<M: MetadataStore, B: BlockStore> {
+    Idle(Arc<M>, Arc<B>),
+    Acquiring(Arc<M>, Arc<B>),
+    Lease(Arc<M>, Arc<B>, WriterLease),
+    Filesystem(ChunkedFs<M, B>),
+    Closed,
+}
+
+impl<M: MetadataStore + 'static, B: BlockStore + 'static> ConstructionAuthority<M, B> {
+    fn retain(
+        metadata: Arc<M>,
+        blocks: Arc<B>,
+        observer: &dyn ConstructionObserver,
+    ) -> (Arc<Self>, tokio::sync::OwnedMutexGuard<()>) {
+        let owner = Arc::new(Self {
+            state: Mutex::new(ConstructionAuthorityState::Idle(metadata, blocks)),
+            gate: Arc::new(tokio::sync::Mutex::new(())),
+        });
+        // Reserve construction synchronously, before exposing the owner. A
+        // cleanup started by the observer must wait until open returns or its
+        // future is dropped; cancellation then leaves the retained state.
+        let constructing = Arc::clone(&owner.gate)
+            .try_lock_owned()
+            .expect("new construction gate is unlocked");
+        observer.retain(owner.clone());
+        (owner, constructing)
+    }
+
+    fn lock(&self) -> Result<MutexGuard<'_, ConstructionAuthorityState<M, B>>> {
+        self.state
+            .lock()
+            .map_err(|_| FsError::backend("construction authority lock poisoned"))
+    }
+
+    fn acquiring(&self) -> Result<()> {
+        let mut state = self.lock()?;
+        let ConstructionAuthorityState::Idle(metadata, blocks) = &*state else {
+            return Err(FsError::backend(
+                "construction authority acquisition is out of order",
+            ));
+        };
+        *state = ConstructionAuthorityState::Acquiring(Arc::clone(metadata), Arc::clone(blocks));
+        Ok(())
+    }
+
+    fn acquired(&self, lease: &WriterLease) -> Result<()> {
+        let mut state = self.lock()?;
+        let ConstructionAuthorityState::Acquiring(metadata, blocks) = &*state else {
+            return Err(FsError::backend(
+                "construction authority acknowledgement is out of order",
+            ));
+        };
+        *state = ConstructionAuthorityState::Lease(
+            Arc::clone(metadata),
+            Arc::clone(blocks),
+            lease.clone(),
+        );
+        Ok(())
+    }
+
+    fn released(&self) -> Result<()> {
+        let mut state = self.lock()?;
+        let ConstructionAuthorityState::Lease(metadata, blocks, _) = &*state else {
+            return Err(FsError::backend(
+                "construction authority release is out of order",
+            ));
+        };
+        *state = ConstructionAuthorityState::Idle(Arc::clone(metadata), Arc::clone(blocks));
+        Ok(())
+    }
+
+    fn transfer(&self, filesystem: &ChunkedFs<M, B>) -> Result<()> {
+        *self.lock()? = ConstructionAuthorityState::Filesystem(filesystem.clone());
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl<M: MetadataStore + 'static, B: BlockStore + 'static> ConstructionResource
+    for ConstructionAuthority<M, B>
+{
+    async fn close(&self) -> Result<()> {
+        let _cleanup = self.gate.lock().await;
+        enum Cleanup<M: MetadataStore, B: BlockStore> {
+            Lease(Arc<M>, WriterLease),
+            Filesystem(ChunkedFs<M, B>),
+        }
+        let cleanup = {
+            let mut state = self.lock()?;
+            match &*state {
+                ConstructionAuthorityState::Idle(..) | ConstructionAuthorityState::Closed => {
+                    *state = ConstructionAuthorityState::Closed;
+                    return Ok(());
+                }
+                ConstructionAuthorityState::Acquiring(..) => {
+                    return Err(FsError::backend(
+                        "construction authority acquisition is uncertain",
+                    ));
+                }
+                ConstructionAuthorityState::Lease(metadata, _, lease) => {
+                    Cleanup::Lease(Arc::clone(metadata), lease.clone())
+                }
+                ConstructionAuthorityState::Filesystem(filesystem) => {
+                    Cleanup::Filesystem(filesystem.clone())
+                }
+            }
+        };
+        match cleanup {
+            Cleanup::Lease(metadata, lease) => metadata.release_writer(&lease).await?,
+            Cleanup::Filesystem(filesystem) => {
+                filesystem.check_construction_cleanup()?;
+                filesystem.shutdown().await?;
+                filesystem.check_construction_cleanup()?;
+                if filesystem.lock_lease()?.is_some() || filesystem.local_grant()?.is_some() {
+                    return Err(FsError::backend(
+                        "construction authority remains after shutdown",
+                    ));
+                }
+            }
+        }
+        *self.lock()? = ConstructionAuthorityState::Closed;
+        Ok(())
+    }
+}
+
 impl<M, B> ChunkedFs<M, B>
 where
     M: MetadataStore + 'static,
     B: BlockStore + 'static,
 {
+    fn check_construction_cleanup(&self) -> Result<()> {
+        if self.failed() {
+            return Err(FsError::backend(
+                "failed construction filesystem remains retained",
+            ));
+        }
+        if self
+            .inner
+            .pending_checkout
+            .lock()
+            .map_err(|_| FsError::backend("directory checkout lock poisoned"))?
+            .is_some()
+        {
+            return Err(FsError::backend(
+                "construction directory checkout remains uncertain",
+            ));
+        }
+        Ok(())
+    }
+
     async fn operation_gate(&self, kind: GateKind) -> OperationGateGuard<'_> {
         let mut wait = GateWaitObservation::new(kind);
         let guard = self.inner.gate.lock().await;
@@ -800,12 +956,14 @@ where
         })
     }
 
-    async fn open_compact(metadata: M, blocks: B, options: ChunkedOptions) -> Result<Self> {
+    async fn open_compact(
+        metadata: Arc<M>,
+        blocks: Arc<B>,
+        options: ChunkedOptions,
+    ) -> Result<Self> {
         if metadata.compact_inode_capability() != CompactInodeCapability::V1 {
             return Err(FsError::new(ErrorCode::Enotsup));
         }
-        let metadata = Arc::new(metadata);
-        let blocks = Arc::new(blocks);
         for attempt in 0..MAX_CONCURRENT_CAS_RETRIES {
             if let Some(mode) = metadata.compact_inode_mode_state().await? {
                 blocks.verify_concurrent_backing(mode.backing).await?;
@@ -942,7 +1100,12 @@ where
             .with_message("another writer repeatedly changed compact enrollment"))
     }
 
-    async fn open_delegated(metadata: M, blocks: B, options: ChunkedOptions) -> Result<Self> {
+    async fn open_delegated(
+        metadata: Arc<M>,
+        blocks: Arc<B>,
+        options: ChunkedOptions,
+        authority: Option<&ConstructionAuthority<M, B>>,
+    ) -> Result<Self> {
         if !options.concurrent_writes || options.writeback {
             return Err(FsError::new(ErrorCode::Einval)
                 .with_message("delegated ownership requires shared write-through mode"));
@@ -967,9 +1130,15 @@ where
             // Establish block-provider support before initializing metadata. The final
             // delegated enrollment still follows durable Legacy root publication/release.
             let backing = blocks.prepare_concurrent_backing().await?;
+            if let Some(authority) = authority {
+                authority.acquiring()?;
+            }
             let lease = metadata
                 .acquire_writer(&options.owner, options.lease_ttl)
                 .await?;
+            if let Some(authority) = authority {
+                authority.acquired(&lease)?;
+            }
             let initialized = async {
                 let namespace = initial_namespace(&options)?;
                 blocks.flush().await?;
@@ -981,6 +1150,11 @@ where
             }
             .await;
             let released = metadata.release_writer(&lease).await;
+            if released.is_ok()
+                && let Some(authority) = authority
+            {
+                authority.released()?;
+            }
             let revision = initialized?;
             released?;
             metadata.prepare_delegated_mode(backing, revision).await?;
@@ -993,16 +1167,17 @@ where
         let namespace = loaded
             .namespace
             .ok_or_else(|| FsError::backend("delegated namespace missing"))?;
-        let authority = delegated.ok_or_else(|| FsError::backend("delegated authority missing"))?;
-        if authority.backing != backing {
+        let delegated_authority =
+            delegated.ok_or_else(|| FsError::backend("delegated authority missing"))?;
+        if delegated_authority.backing != backing {
             return Err(FsError::new(ErrorCode::Estale));
         }
-        authority.validate(&namespace)?;
+        delegated_authority.validate(&namespace)?;
         let checkout = options.checkout_path.clone();
         let fs = Self {
             inner: Arc::new(ChunkedInner {
-                metadata: Arc::new(metadata),
-                blocks: Arc::new(blocks),
+                metadata,
+                blocks,
                 concurrent_backing: Some(backing),
                 delegation: Mutex::new(None),
                 delegation_generation: std::sync::atomic::AtomicU64::new(0),
@@ -1036,6 +1211,9 @@ where
                 preparation_pause: Mutex::new(None),
             }),
         };
+        if let Some(authority) = authority {
+            authority.transfer(&fs)?;
+        }
         if let Some(path) = checkout {
             fs.checkout_scope(&path).await?;
         }
@@ -1436,6 +1614,19 @@ where
     /// protocol. An empty metadata store is initialized with an empty root
     /// directory through the selected publication path.
     pub async fn open(metadata: M, blocks: B, options: ChunkedOptions) -> Result<Self> {
+        Self::open_with_observer(metadata, blocks, options, None).await
+    }
+
+    /// Open while retaining construction authority in the caller's journal.
+    /// The observer must keep retained resources until successful ownership
+    /// handoff or acknowledged cleanup. An uncertain acquisition or checkout
+    /// keeps the exact owner and its providers available for reconciliation.
+    pub async fn open_with_observer(
+        metadata: M,
+        blocks: B,
+        options: ChunkedOptions,
+        observer: Option<&dyn ConstructionObserver>,
+    ) -> Result<Self> {
         if options.compact_inode_updates
             && (!options.inode_updates
                 || !options.concurrent_writes
@@ -1464,14 +1655,26 @@ where
             return Err(FsError::new(ErrorCode::Einval)
                 .with_message("shared ownership cannot enable writeback"));
         }
-        if options.compact_inode_updates {
-            return Self::open_compact(metadata, blocks, options).await;
-        }
-        if options.delegated {
-            return Self::open_delegated(metadata, blocks, options).await;
-        }
         let metadata = Arc::new(metadata);
         let blocks = Arc::new(blocks);
+        let observed = observer.map(|observer| {
+            ConstructionAuthority::<M, B>::retain(
+                Arc::clone(&metadata),
+                Arc::clone(&blocks),
+                observer,
+            )
+        });
+        let authority = observed.as_ref().map(|(owner, _)| owner.as_ref());
+        if options.compact_inode_updates {
+            let filesystem = Self::open_compact(metadata, blocks, options).await?;
+            if let Some(authority) = authority {
+                authority.transfer(&filesystem)?;
+            }
+            return Ok(filesystem);
+        }
+        if options.delegated {
+            return Self::open_delegated(metadata, blocks, options, authority).await;
+        }
         if options.concurrent_writes {
             // Inspect metadata before claiming a block authority. Established
             // MRC2 volumes must verify their persisted block marker read-only;
@@ -1664,7 +1867,7 @@ where
                 } else {
                     (namespace, revision, BTreeMap::new())
                 };
-                return Ok(Self {
+                let filesystem = Self {
                     inner: Arc::new(ChunkedInner {
                         metadata,
                         blocks,
@@ -1700,24 +1903,38 @@ where
                         #[cfg(test)]
                         preparation_pause: Mutex::new(None),
                     }),
-                });
+                };
+                if let Some(authority) = authority {
+                    authority.transfer(&filesystem)?;
+                }
+                return Ok(filesystem);
             }
             return Err(FsError::new(ErrorCode::Eagain)
                 .with_syscall("initialize concurrent metadata")
                 .with_message("another writer repeatedly changed the new volume"));
         }
+        if let Some(authority) = authority {
+            authority.acquiring()?;
+        }
         let lease = metadata
             .acquire_writer(&options.owner, options.lease_ttl)
             .await?;
+        if let Some(authority) = authority {
+            authority.acquired(&lease)?;
+        }
         let loaded = match metadata.load().await {
             Ok(loaded) => loaded,
             Err(error) => {
-                let _ = metadata.release_writer(&lease).await;
+                if authority.is_none() {
+                    let _ = metadata.release_writer(&lease).await;
+                }
                 return Err(error);
             }
         };
         if let Err(error) = loaded.validate() {
-            let _ = metadata.release_writer(&lease).await;
+            if authority.is_none() {
+                let _ = metadata.release_writer(&lease).await;
+            }
             return Err(error);
         }
 
@@ -1743,7 +1960,9 @@ where
         let (namespace, needs_initial_publish) = match namespace_result {
             Ok(value) => value,
             Err(error) => {
-                let _ = metadata.release_writer(&lease).await;
+                if authority.is_none() {
+                    let _ = metadata.release_writer(&lease).await;
+                }
                 return Err(error);
             }
         };
@@ -1785,6 +2004,9 @@ where
                 preparation_pause: Mutex::new(None),
             }),
         };
+        if let Some(authority) = authority {
+            authority.transfer(&filesystem)?;
+        }
 
         if needs_initial_publish
             && let Err(error) = filesystem
@@ -1794,9 +2016,11 @@ where
             // publish_namespace may have renewed the lease before the
             // publication or metadata barrier failed. Release the exact
             // latest token, not the acquisition token.
-            let latest = filesystem.lock_lease().ok().and_then(|lease| lease.clone());
-            if let Some(latest) = latest {
-                let _ = filesystem.inner.metadata.release_writer(&latest).await;
+            if authority.is_none() {
+                let latest = filesystem.lock_lease().ok().and_then(|lease| lease.clone());
+                if let Some(latest) = latest {
+                    let _ = filesystem.inner.metadata.release_writer(&latest).await;
+                }
             }
             return Err(error);
         }

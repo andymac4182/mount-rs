@@ -324,12 +324,16 @@ async fn serve_resources(
                 if let Some(cache) = &config.cache {
                     cache.validate()?;
                 }
-                Ok::<_, CliError>((config, server_options))
+                let diagnostic_interval = diagnostics::diagnostic_interval(
+                    startup.enabled(),
+                    std::env::var_os("MOUNT_RS_DIAGNOSTIC_INTERVAL_MS").as_deref(),
+                )?;
+                Ok::<_, CliError>((config, server_options, diagnostic_interval))
             },
             sink,
         )
         .await?;
-    let (config, server_options) = configuration;
+    let (config, server_options, diagnostic_interval) = configuration;
     #[cfg(all(feature = "local-oidc-fixture", debug_assertions))]
     let local_oidc_fixture = startup
         .observe(
@@ -557,7 +561,14 @@ async fn serve_resources(
             );
         }
         println!("remote listening at {}", server.local_addr());
-        let result = signal.wait().await;
+        let result = diagnostics::wait_with_periodic_capture(
+            signal.wait(),
+            diagnostic_interval,
+            |capture| {
+                diagnostics::emit_periodic(observer.as_ref(), websocket_observer.as_ref(), capture);
+            },
+        )
+        .await;
         server.close().await;
         if let Some(websocket) = websocket {
             websocket.close().await;

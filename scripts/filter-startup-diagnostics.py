@@ -35,6 +35,9 @@ STARTUP_FIELDS = frozenset((
     "registered_drives", "elapsed_ns", "current_stage_elapsed_ns", "accounting_complete",
     "banks_captured", "stages",
 ))
+LAZY_STARTUP_FIELDS = STARTUP_FIELDS | frozenset((
+    "construction_mode", "max_active_drives", "construction_plans",
+))
 STAGE_FIELDS = frozenset((
     "stage", "started", "success", "error", "cancelled", "in_flight", "elapsed_ns", "max_ns",
 ))
@@ -109,8 +112,15 @@ def reject_constant(unused):
 
 
 def validate_startup(record):
-    exact_fields(record, STARTUP_FIELDS)
-    require(record["schema"] == "mount-rs.startup.v1")
+    require(type(record) is dict)
+    enumeration(record.get("schema"), ("mount-rs.startup.v1", "mount-rs.startup.v2"))
+    lazy = record["schema"] == "mount-rs.startup.v2"
+    exact_fields(record, LAZY_STARTUP_FIELDS if lazy else STARTUP_FIELDS)
+    if lazy:
+        require(record["construction_mode"] == "lazy")
+        if record["max_active_drives"] is not None:
+            unsigned(record["max_active_drives"], minimum=1)
+        unsigned(record["construction_plans"])
     unsigned(record["pid"], (1 << 32) - 1, 1)
     if record["worker"] is not None:
         unsigned(record["worker"], 9)
@@ -141,16 +151,30 @@ def validate_startup(record):
     open_row = rows[STAGES.index("drive_open")]
     require(all(record["open_" + field] == open_row[field] for field in
                 ("started", "success", "error", "cancelled", "in_flight")), "invalid_accounting")
-    require(record["registered_drives"] <= record["open_success"], "invalid_accounting")
+    if lazy:
+        require((record["max_active_drives"] is not None) == (record["planned_drives"] is not None)
+                == (record["configured_partitions"] is not None), "invalid_accounting")
+        require(record["registered_drives"] <= record["construction_plans"]
+                <= (record["planned_drives"] or 0), "invalid_accounting")
+        require(all(record["open_" + field] == 0 for field in
+                    ("started", "success", "error", "cancelled", "in_flight")), "invalid_accounting")
+    else:
+        require(record["registered_drives"] <= record["open_success"], "invalid_accounting")
     if record["accounting_complete"]:
         require(record["open_started"] == sum(record[field] for field in
                 ("open_success", "open_error", "open_cancelled", "open_in_flight")), "invalid_accounting")
-    if record["terminal_outcome"] == "ready" and record["accounting_complete"]:
-        require(record["planned_drives"] is not None
-                and record["registered_drives"] == record["open_success"] == record["open_started"]
-                == record["planned_drives"]
-                and record["open_error"] == record["open_cancelled"] == record["open_in_flight"] == 0,
-                "invalid_accounting")
+    if record["terminal_outcome"] == "ready" and (lazy or record["accounting_complete"]):
+        if lazy:
+            require(record["planned_drives"] is not None
+                    and record["max_active_drives"] is not None
+                    and record["registered_drives"] == record["construction_plans"]
+                    == record["planned_drives"], "invalid_accounting")
+        else:
+            require(record["planned_drives"] is not None
+                    and record["registered_drives"] == record["open_success"] == record["open_started"]
+                    == record["planned_drives"]
+                    and record["open_error"] == record["open_cancelled"] == record["open_in_flight"] == 0,
+                    "invalid_accounting")
 
 
 def validate_target(record):

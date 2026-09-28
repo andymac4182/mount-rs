@@ -1047,6 +1047,20 @@ the CLI, catalog validation is included in catalog-load time, the backing-receip
 row is unused, optional cache setup includes the no-cache case, and listener-bind
 time includes signal-handler preparation.
 
+The library also provides an additive `mount-rs.startup.v2` contract for lazy
+construction through `Startup::new_lazy`. This prepares an observer API; the CLI
+continues to use the eager v1 producer until its runtime-pool integration is
+wired. V1 retains its original 21 fields. V2 adds `construction_mode="lazy"`,
+`max_active_drives` and `construction_plans`. Capacity is an explicitly present
+null before `plan_lazy` sets positive capacity and immutable catalog totals;
+the plan can be set only once. `construction_plan` counts completed immutable
+plans, and registration counts factories registered from those plans. A complete
+Ready record requires planned, constructed and registered drive counts to match,
+with zero startup opens. Provider activation and eviction timings belong in the
+dedicated runtime observer bank after startup. Neither a v2 record nor a capacity
+field configures or activates a pool. The Rust parser and public log filter accept
+both versions with their exact field sets and reject private or unknown fields.
+
 The observer records stage changes and publishes at startup, readiness, failure
 and cleanup boundaries and every five seconds while an observed startup
 operation is stalled. The production-target workers

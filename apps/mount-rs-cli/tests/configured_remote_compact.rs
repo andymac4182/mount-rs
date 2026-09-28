@@ -92,6 +92,7 @@ struct ServerProcess {
     child: Child,
     stdout: Arc<Mutex<Vec<String>>>,
     stderr: Arc<Mutex<Vec<String>>>,
+    stderr_receiver: mpsc::Receiver<String>,
     stdout_thread: Option<thread::JoinHandle<()>>,
     stderr_thread: Option<thread::JoinHandle<()>>,
 }
@@ -99,6 +100,9 @@ struct ServerProcess {
 impl ServerProcess {
     fn spawn(config: &Path, diagnostics: bool) -> (Self, SocketAddr, SocketAddr) {
         let mut command = Command::new(env!("CARGO_BIN_EXE_mount-rs"));
+        // The disabled restart deliberately keeps the interval opt-in. A
+        // selected profiler is also required before a timer or capture exists.
+        command.env("MOUNT_RS_DIAGNOSTIC_INTERVAL_MS", "1000");
         if diagnostics {
             command
                 .env("MOUNT_RS_PROFILE_IO", "1")
@@ -129,16 +133,19 @@ impl ServerProcess {
             }
         });
         let stderr_lines = stderr.clone();
+        let (stderr_tx, stderr_receiver) = mpsc::channel();
         let stderr_thread = thread::spawn(move || {
             for line in BufReader::new(stderr_pipe).lines() {
                 let Ok(line) = line else { break };
-                stderr_lines.lock().unwrap().push(line);
+                stderr_lines.lock().unwrap().push(line.clone());
+                let _ = stderr_tx.send(line);
             }
         });
         let mut process = Self {
             child,
             stdout,
             stderr,
+            stderr_receiver,
             stdout_thread: Some(stdout_thread),
             stderr_thread: Some(stderr_thread),
         };
@@ -166,6 +173,186 @@ impl ServerProcess {
         let websocket = websocket
             .unwrap_or_else(|| panic!("missing websocket readiness: {:?}", process.stdout));
         (process, quic, websocket)
+    }
+
+    fn wait_for_periodic_io_records(&mut self) -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut captures = std::collections::BTreeMap::<
+            u64,
+            std::collections::BTreeMap<String, serde_json::Value>,
+        >::new();
+        loop {
+            if self.child.try_wait().unwrap().is_some() {
+                return Err("server stopped before live capture".into());
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(format!(
+                    "missing periodic I/O records before SIGINT: {:?}",
+                    self.stderr.lock().unwrap()
+                ));
+            }
+            let line = match self.stderr_receiver.recv_timeout(remaining) {
+                Ok(line) => line,
+                Err(error) => {
+                    return Err(format!(
+                        "missing periodic I/O records before SIGINT: {error}; stderr={:?}",
+                        self.stderr.lock().unwrap()
+                    ));
+                }
+            };
+            let Some(raw) = line.strip_prefix("service_diagnostics ") else {
+                continue;
+            };
+            assert!(raw.len() + "service_diagnostics \n".len() <= 1024 * 1024);
+            let record: serde_json::Value = serde_json::from_str(raw).unwrap();
+            assert_eq!(
+                record["capture_context"], "periodic",
+                "shutdown record appeared before SIGINT"
+            );
+            assert_eq!(record["schema"], "mount-rs.cli-service-diagnostics.v2");
+            assert_eq!(record["pid"].as_u64(), Some(u64::from(self.child.id())));
+            let sequence = record["capture"]["sequence"].as_u64().unwrap();
+            assert!(sequence > 0);
+            assert!(record["capture"]["observed_unix_ms"].as_u64().unwrap() > 0);
+            let label = record["transport"].as_str().unwrap().to_owned();
+            assert!(["quic", "websocket"].contains(&label.as_str()));
+            let pair = captures.entry(sequence).or_default();
+            assert!(
+                pair.insert(label, record).is_none(),
+                "duplicate transport capture in one tick"
+            );
+            let (Some(quic), Some(websocket)) = (pair.get("quic"), pair.get("websocket")) else {
+                continue;
+            };
+            assert_eq!(
+                quic["capture"], websocket["capture"],
+                "listeners did not share one tick identity"
+            );
+            if ![quic, websocket]
+                .into_iter()
+                .all(Self::periodic_has_completed_io)
+            {
+                continue;
+            }
+            for record in [quic, websocket] {
+                let snapshot = &record["snapshot"];
+                assert_eq!(snapshot["enabled"], true);
+                for flag in [
+                    "complete",
+                    "counter_saturated",
+                    "concurrent_activity",
+                    "application_quiescent",
+                ] {
+                    assert!(
+                        snapshot[flag].as_bool().is_some(),
+                        "missing live capture flag {flag}"
+                    );
+                }
+                for gauge in [
+                    "activity_writers_before",
+                    "activity_writers_after",
+                    "active_handshakes_before",
+                    "active_handshakes_after",
+                    "active_requests_before",
+                    "active_requests_after",
+                    "active_operations",
+                ] {
+                    assert!(
+                        snapshot[gauge].as_u64().is_some(),
+                        "missing live capture gauge {gauge}"
+                    );
+                }
+                for entry in snapshot["entries"].as_array().unwrap() {
+                    for counter in [
+                        "calls",
+                        "success",
+                        "error",
+                        "timeout",
+                        "cancelled",
+                        "in_flight",
+                    ] {
+                        assert!(entry[counter].as_u64().is_some(), "missing live {counter}");
+                    }
+                    assert_eq!(entry["latency_log2_us"].as_array().unwrap().len(), 32);
+                }
+                let process = &record["process_diagnostics"];
+                assert_eq!(process["scope"], "process_cumulative");
+                assert_eq!(process["capture_atomic"], false);
+                assert_eq!(process["application_drain_proven"], false);
+                assert_eq!(
+                    process["duration_semantics"],
+                    "inclusive_overlapping_wall_time"
+                );
+                assert_eq!(process["storage"]["available"], true);
+                assert_eq!(process["profile"]["available"], true);
+                assert!(
+                    process["storage"]["snapshot"]["in_flight"]
+                        .as_u64()
+                        .is_some()
+                );
+                for entry in process["storage"]["snapshot"]["entries"]
+                    .as_array()
+                    .unwrap()
+                {
+                    assert!(entry["in_flight"].as_u64().is_some());
+                }
+                assert_eq!(
+                    process["unavailable"]["physical_device_iops"]["available"],
+                    false
+                );
+            }
+            assert_eq!(quic["snapshot"]["schema"], "mount-rs.service-quic.v1");
+            assert_eq!(
+                websocket["snapshot"]["schema"],
+                "mount-rs.service-websocket.v1"
+            );
+            assert_eq!(
+                websocket["snapshot"]["quiescence_scope"],
+                "application_spans_and_session_cleanup_not_passive_websocket"
+            );
+            assert!(
+                self.child.try_wait().unwrap().is_none(),
+                "periodic evidence arrived after server exit"
+            );
+            println!(
+                "live periodic diagnostic receipt before SIGINT: sequence={sequence} quic={quic} websocket={websocket}"
+            );
+            return Ok(());
+        }
+    }
+
+    fn periodic_has_completed_io(record: &serde_json::Value) -> bool {
+        let entries = record["snapshot"]["entries"].as_array().unwrap();
+        let completed = |name| {
+            entries
+                .iter()
+                .any(|entry| entry["name"] == name && entry["success"].as_u64().unwrap() > 0)
+        };
+        if !completed("dispatch.read") || !completed("dispatch.write") {
+            return false;
+        }
+        let process = &record["process_diagnostics"];
+        let storage = process["storage"]["snapshot"]["entries"]
+            .as_array()
+            .unwrap();
+        let metadata_seen = storage.iter().any(|entry| {
+            entry["name"].as_str().unwrap().starts_with("sdk.metadata.")
+                && entry["calls"].as_u64().unwrap() > 0
+        });
+        let profile = process["profile"]["snapshot"]["entries"]
+            .as_array()
+            .unwrap();
+        metadata_seen
+            && ["provider.blocks.put_bytes", "provider.blocks.get_bytes"]
+                .into_iter()
+                .all(|name| {
+                    profile.iter().any(|entry| {
+                        entry["name"] == name
+                            && entry["calls"].as_u64().unwrap() > 0
+                            && entry["units"].as_u64().unwrap() > 0
+                    })
+                })
     }
 
     fn clean_stop(&mut self) {
@@ -217,12 +404,11 @@ impl ServerProcess {
             .iter()
             .filter_map(|line| line.strip_prefix("service_diagnostics "))
             .collect();
-        assert_eq!(
-            records.len(),
-            usize::from(enabled) * 2,
-            "unexpected service records: {stderr:?}"
-        );
         if !enabled {
+            assert!(
+                records.is_empty(),
+                "disabled restart emitted service records: {stderr:?}"
+            );
             return;
         }
         let records: Vec<serde_json::Value> = records
@@ -232,6 +418,28 @@ impl ServerProcess {
                 serde_json::from_str(record).unwrap()
             })
             .collect();
+        assert!(
+            records
+                .iter()
+                .filter(|record| record["capture_context"] == "periodic")
+                .count()
+                >= 2,
+            "missing live records"
+        );
+        assert!(records.iter().all(|record| {
+            ["periodic", "shutdown"]
+                .iter()
+                .any(|context| record["capture_context"] == *context)
+        }));
+        let records: Vec<_> = records
+            .into_iter()
+            .filter(|record| record["capture_context"] == "shutdown")
+            .collect();
+        assert_eq!(records.len(), 2, "missing or duplicate shutdown records");
+        assert!(
+            records.iter().all(|record| record.get("capture").is_none()),
+            "shutdown v2 shape changed"
+        );
         for label in ["quic", "websocket"] {
             assert_eq!(
                 records
@@ -628,6 +836,12 @@ impl Drop for ServerProcess {
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
+        if let Some(handle) = self.stdout_thread.take() {
+            handle.join().unwrap();
+        }
+        if let Some(handle) = self.stderr_thread.take() {
+            handle.join().unwrap();
+        }
     }
 }
 
@@ -933,7 +1147,14 @@ async fn configured_binary_selects_mrc5_for_signed_quic_and_websocket_reopen() {
     )
     .await;
     websocket_connection.close();
+    let live_diagnostics =
+        cfg!(feature = "io-profiling").then(|| server.wait_for_periodic_io_records());
     server.clean_stop();
+    // A missing-live-capture RED still obtains graceful shutdown records and
+    // joins both pipe readers before reporting the failed requirement.
+    if let Some(result) = live_diagnostics {
+        result.unwrap();
+    }
     server.assert_diagnostics(cfg!(feature = "io-profiling"));
 
     let metadata_path = root.join("data-metadata.sqlite");

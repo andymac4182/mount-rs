@@ -67,6 +67,20 @@ def ready_startup(complete=True):
     return record
 
 
+def lazy_startup(ready=False, complete=True):
+    record = startup()
+    record.update(schema="mount-rs.startup.v2", construction_mode="lazy",
+                  max_active_drives=None, construction_plans=0,
+                  accounting_complete=complete)
+    if ready:
+        record.update(current_stage="ready", terminal_outcome="ready", planned_drives=3,
+                      configured_partitions=2, max_active_drives=2048,
+                      construction_plans=3, registered_drives=3)
+        record["stages"][6].update(started=3, success=3)
+        record["stages"][9].update(started=3, success=3)
+    return record
+
+
 def line(record, prefix="startup_diagnostics "):
     return prefix.encode() + json.dumps(record, separators=(",", ":")).encode() + b"\n"
 
@@ -144,6 +158,75 @@ class FilterTests(unittest.TestCase):
         self.assertEqual(private.getvalue(), payload)
         self.assertEqual(public.getvalue().encode(), line(startup()))
         self.assertFalse(result["identity_verified"])
+
+    def test_lazy_v2_registered_plans_are_ready_without_startup_opens(self):
+        record = lazy_startup(ready=True)
+        payload = line(record)
+        result, private, public = self.run_filter(payload)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["startup_records"], 1)
+        self.assertEqual(private.getvalue(), payload)
+        self.assertEqual(public.getvalue().encode(), payload)
+        emitted = json.loads(public.getvalue().split(" ", 1)[1])
+        self.assertEqual(emitted["registered_drives"], 3)
+        self.assertEqual((emitted["open_started"], emitted["open_success"]), (0, 0))
+
+    def test_lazy_v2_requires_closed_fields_and_explicit_nullable_capacity(self):
+        record = lazy_startup()
+        result, _, public = self.run_filter(line(record))
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(public.getvalue().encode(), line(record))
+        for field in ("construction_mode", "max_active_drives", "construction_plans"):
+            with self.subTest(missing=field):
+                changed = lazy_startup()
+                del changed[field]
+                self.assert_rejected(line(changed))
+        for field, value in (("construction_mode", "eager"),
+                             ("construction_mode", SECRET),
+                             ("max_active_drives", 0), ("max_active_drives", True),
+                             ("max_active_drives", 1.0), ("max_active_drives", 1 << 64),
+                             ("construction_plans", None), ("construction_plans", True),
+                             ("construction_plans", -1), ("construction_plans", 1 << 64),
+                             ("private_path", SECRET)):
+            with self.subTest(field=field, value=value):
+                changed = lazy_startup()
+                changed[field] = value
+                self.assert_rejected(line(changed))
+
+    def test_lazy_v2_rejects_false_readiness_and_nonzero_startup_opens(self):
+        result, _, _ = self.run_filter(line(lazy_startup(ready=True)))
+        self.assertEqual(result["status"], "ok")
+        for complete in (True, False):
+            for field, value in (("max_active_drives", None), ("construction_plans", 2),
+                                 ("registered_drives", 2), ("planned_drives", None)):
+                with self.subTest(field=field, complete=complete):
+                    record = lazy_startup(ready=True, complete=complete)
+                    record[field] = value
+                    self.assert_rejected(line(record))
+            with self.subTest(complete=complete):
+                record = lazy_startup(ready=True, complete=complete)
+                record.update(open_started=1, open_success=1)
+                record["stages"][7].update(started=1, success=1)
+                self.assert_rejected(line(record))
+
+    def test_lazy_v2_incomplete_ready_remains_printable_but_fails_filter(self):
+        record = lazy_startup(ready=True, complete=False)
+        result, _, public = self.run_filter(line(record))
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["first_issue"], "diagnostic_accounting_incomplete")
+        self.assertEqual(public.getvalue().encode(), line(record))
+
+    def test_eager_v1_shape_stays_closed_to_lazy_fields(self):
+        record = startup()
+        self.assertEqual(len(record), 21)
+        result, _, public = self.run_filter(line(record))
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(public.getvalue().encode(), line(record))
+        for field in ("construction_mode", "max_active_drives", "construction_plans"):
+            with self.subTest(field=field):
+                changed = startup()
+                changed[field] = None
+                self.assert_rejected(line(changed))
 
     def test_unrecognized_audit_bank_and_private_lines_are_never_echoed(self):
         payload = (f"remote_access {SECRET}\nstartup_bank_diagnostics {{\"private\":\"{SECRET}\"}}\n"

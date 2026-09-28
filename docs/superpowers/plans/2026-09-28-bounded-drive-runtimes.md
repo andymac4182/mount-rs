@@ -95,6 +95,14 @@ pool into the CLI/process fixture. Those remain required below.
 **Files:** CLI `runtime.rs`, `remote.rs`, diagnostics and
 `tests/configured_remote_compact.rs`.
 
+Preparatory source now provides a resolved CLI plan and cached driver Arc,
+explicit provider/Chunked construction ownership hooks, and an SDK per-attempt
+journal. These require composition into the SDK and retained CLI factory before
+lazy activation is enabled. AWS source selection still rereads environment
+settings, and CLI SQLite postconfiguration still needs ownership registration
+before its await. The first item remains incomplete until those seams are
+resolved; additive startup v2 support alone does not change CLI/process startup.
+
 - [ ] Add an owned resolved open plan so storage environment references, paths,
   endpoint and volume selection are frozen once at registration.
 - [ ] Add a checked `max_active_drives` service setting (default 2,048). Register

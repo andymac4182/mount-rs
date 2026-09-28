@@ -5,11 +5,13 @@
 //! filesystem, compose independent metadata/block providers, access the
 //! shared [`mount_rs_core::FsDriver`] contract, and finish provider cleanup.
 
+mod construction;
 pub mod filesystem;
 pub mod options;
 mod providers;
 mod stores;
 
+pub use construction::{ConstructionAttempt, ConstructionJournal, ConstructionSnapshot};
 pub use filesystem::{BlockStoreDecorator, Filesystem, FilesystemKind};
 pub use mount_rs_auto::{
     AutoMount, AutoMountError, AutoMountOptions, AutoProbe, AutoTransport, Transport,
@@ -29,6 +31,9 @@ pub use mount_rs_observability::{
 pub use mount_rs_sqlite::{SqliteJournalMode, SqliteStorageOptions};
 pub use options::{FoundationDbLeaseAuthority, SplitOptions, StoreConfig};
 pub use providers::StorageContext;
+
+#[cfg(test)]
+mod construction_tests;
 
 #[cfg(test)]
 mod tests {
