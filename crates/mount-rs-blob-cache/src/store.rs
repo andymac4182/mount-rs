@@ -276,6 +276,24 @@ impl CachedBlockStore {
         identity: ScopeIdentity,
         policy: IntegrityPolicy,
     ) -> Self {
+        Self::new_with_metrics(
+            backing,
+            cache,
+            identity,
+            policy,
+            Arc::new(CacheMetrics::default()),
+        )
+    }
+
+    /// Reuse a configured Drive's counters across its runtime generations.
+    /// The caller owns the metric bank's lifetime independently of this store.
+    pub fn new_with_metrics(
+        backing: Arc<dyn BlockStore>,
+        cache: Arc<LocalCache>,
+        identity: ScopeIdentity,
+        policy: IntegrityPolicy,
+        metrics: Arc<CacheMetrics>,
+    ) -> Self {
         Self {
             backing,
             cache,
@@ -283,7 +301,7 @@ impl CachedBlockStore {
             policy,
             scope: Mutex::new(None),
             distributed: None,
-            metrics: Arc::new(CacheMetrics::default()),
+            metrics,
             pending: Mutex::new(Vec::new()),
             flush_gate: tokio::sync::Mutex::new(()),
             write_gate: tokio::sync::RwLock::new(()),

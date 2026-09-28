@@ -230,15 +230,21 @@ impl BlockStoreDecorator for DriveCacheDecorator {
             | StoreConfig::Sqlite { .. }
             | StoreConfig::SqliteWithOptions { .. } => IntegrityPolicy::Opaque,
         };
-        let store = CachedBlockStore::new(store, self.cache.clone(), self.identity.clone(), policy)
-            .with_runtime(self.runtime.clone());
-        self.metrics
+        let metrics = self
+            .metrics
             .lock()
             .map_err(|_| mount_rs_core::FsError::new(mount_rs_core::ErrorCode::Eio))?
-            .insert(
-                (self.identity.partition.clone(), self.identity.drive.clone()),
-                store.metrics(),
-            );
+            .entry((self.identity.partition.clone(), self.identity.drive.clone()))
+            .or_insert_with(|| Arc::new(mount_rs_blob_cache::CacheMetrics::default()))
+            .clone();
+        let store = CachedBlockStore::new_with_metrics(
+            store,
+            self.cache.clone(),
+            self.identity.clone(),
+            policy,
+            metrics,
+        )
+        .with_runtime(self.runtime.clone());
         Ok(Arc::new(store))
     }
 }
@@ -416,8 +422,13 @@ impl ServerCache {
             metrics: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
-    pub(crate) fn decorator(&self, partition: &str, drive: &str) -> DriveCacheDecorator {
-        DriveCacheDecorator {
+    pub(crate) fn decorator(&self, partition: &str, drive: &str) -> Result<DriveCacheDecorator> {
+        self.metrics
+            .lock()
+            .map_err(|_| mount_rs_core::FsError::new(mount_rs_core::ErrorCode::Eio))?
+            .entry((partition.to_owned(), drive.to_owned()))
+            .or_insert_with(|| Arc::new(mount_rs_blob_cache::CacheMetrics::default()));
+        Ok(DriveCacheDecorator {
             cache: self.local.clone(),
             runtime: self.runtime.clone(),
             identity: ScopeIdentity {
@@ -426,7 +437,7 @@ impl ServerCache {
                 drive: drive.to_owned(),
             },
             metrics: self.metrics.clone(),
-        }
+        })
     }
     pub(crate) async fn shutdown(&self) {
         self.runtime.shutdown().await;
@@ -579,6 +590,8 @@ mod tests {
             view.read_file("/data").await.unwrap(),
             b"durable cached bytes"
         );
+        let first_metrics = metrics.lock().unwrap().values().next().unwrap().clone();
+        let first_stats = first_metrics.snapshot();
         first.shutdown().await.unwrap();
         drop(view);
         drop(first);
@@ -591,10 +604,19 @@ mod tests {
             view.read_file("/data").await.unwrap(),
             b"durable cached bytes"
         );
-        let stats = metrics.lock().unwrap().values().next().unwrap().snapshot();
+        let second_metrics = metrics.lock().unwrap().values().next().unwrap().clone();
+        let stats = second_metrics.snapshot();
         assert!(stats.local_hits > 0);
         assert_eq!(stats.backing_fetches, 0);
         second.shutdown().await.unwrap();
+        drop(view);
+        drop(second);
         runtime.shutdown().await;
+        assert!(
+            Arc::ptr_eq(&first_metrics, &second_metrics),
+            "reopening a Drive replaced its server-generation metric bank"
+        );
+        assert!(stats.local_hits > first_stats.local_hits);
+        assert!(stats.hit_bytes > first_stats.hit_bytes);
     }
 }

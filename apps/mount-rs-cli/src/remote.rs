@@ -493,7 +493,8 @@ async fn serve_resources(
                 let options = spec.to_options();
                 let decorator = cache
                     .as_ref()
-                    .map(|cache| cache.decorator(partition_id, drive_id));
+                    .map(|cache| cache.decorator(partition_id, drive_id))
+                    .transpose()?;
                 if decorator.is_some()
                     && options.driver == crate::DriverChoice::SplitStore
                     && !options
