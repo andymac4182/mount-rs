@@ -1,0 +1,1200 @@
+{
+  "artifact_hash_bindings": [
+    {
+      "artifact_basename": "config.json",
+      "bytes": 731,
+      "kind": "fixed_fixture_binding",
+      "sha256": "7c43a6f84ca662faf2224ee5d9a5658c7645e2260326b95d1f3d424f8b4cfbb3"
+    },
+    {
+      "artifact_basename": "ready-receipt.json",
+      "bytes": 524835,
+      "kind": "fixed_fixture_binding",
+      "sha256": "50f2c006d5a947d9523b1a6b89dc280005b27e1faa530a217d8283535a555fd0"
+    },
+    {
+      "artifact_basename": "receipt.json",
+      "bytes": 43779,
+      "kind": "native_control_evidence",
+      "sha256": "e6d9b7a94fb92a3d96f592a3722f7473db0c52b8a4de39eac30815611c6b0a32"
+    },
+    {
+      "artifact_basename": "terminal.json",
+      "bytes": 1151823,
+      "kind": "native_control_evidence",
+      "sha256": "a71165ce035e2772a980f604be6375a38ab7b2f4a714423fe31dfbd4922070c4"
+    },
+    {
+      "artifact_basename": "tidb-preflight.json",
+      "bytes": 12978,
+      "kind": "native_control_evidence",
+      "sha256": "b72c6de831bdf7c3b9acc5e08a16e970845b227da603a025a6165ba9fff8c453"
+    },
+    {
+      "artifact_basename": "source-after.json",
+      "bytes": 86453,
+      "kind": "native_control_evidence",
+      "sha256": "30fcc5d8393bdb52206520e3cdbda44b67216c8f9c84eba845bd18ddf4372a9f"
+    },
+    {
+      "artifact_basename": "source-before.json",
+      "bytes": 86453,
+      "kind": "native_control_evidence",
+      "sha256": "30fcc5d8393bdb52206520e3cdbda44b67216c8f9c84eba845bd18ddf4372a9f"
+    },
+    {
+      "artifact_basename": "after.capture.json",
+      "bytes": 61098,
+      "kind": "prometheus_capture_evidence",
+      "sha256": "58c78aa56ac44d97e4a8945206ad1fc930493e6c6a05c40db05fde2ddcde0fe1"
+    },
+    {
+      "artifact_basename": "after.receipt.json",
+      "bytes": 1257,
+      "kind": "prometheus_capture_evidence",
+      "sha256": "6b759f026a4e5124a3ace6e69c45c368c38d5bdf9ed15146672c3ed8d7c228ed"
+    },
+    {
+      "artifact_basename": "after.tidb.prom",
+      "bytes": 1194400,
+      "kind": "prometheus_capture_evidence",
+      "sha256": "d19d51b9f676d4093a64c7dbdb4b0a479bdbb996f4c969cd998da2aa8900e4bb"
+    },
+    {
+      "artifact_basename": "after.tikv1.prom",
+      "bytes": 2393517,
+      "kind": "prometheus_capture_evidence",
+      "sha256": "36803abd8606b265f87b6355eb4169412f8dd13be644dc5c913762c7dbe6990e"
+    },
+    {
+      "artifact_basename": "after.tikv2.prom",
+      "bytes": 2390296,
+      "kind": "prometheus_capture_evidence",
+      "sha256": "ec87aec2acc365ddec6a16a87768fd20f6357c4f17457bf2a3a599b51b6a9e48"
+    },
+    {
+      "artifact_basename": "after.tikv3.prom",
+      "bytes": 2475183,
+      "kind": "prometheus_capture_evidence",
+      "sha256": "a5914eff5c59dea49f9331f91a6fe8519dae0dafb7e19121fee44c28165d1ae3"
+    },
+    {
+      "artifact_basename": "after.whitelist.json",
+      "bytes": 20585,
+      "kind": "prometheus_capture_evidence",
+      "sha256": "9c2646a1ff5c89b27e520a3e57fef61a31d8345d6409545c5552200c1e0465d0"
+    },
+    {
+      "artifact_basename": "before.capture.json",
+      "bytes": 60190,
+      "kind": "prometheus_capture_evidence",
+      "sha256": "ec77b06a730d9bdb3e7a6731fab43e2a80ed548634a6840ecd1a823f0f7c81e6"
+    },
+    {
+      "artifact_basename": "before.receipt.json",
+      "bytes": 1125,
+      "kind": "prometheus_capture_evidence",
+      "sha256": "050df7e94856ea8f94fcbe024d3e415fc90f89060cb2c6e2ef57a0ca23f0738d"
+    },
+    {
+      "artifact_basename": "before.tidb.prom",
+      "bytes": 1190491,
+      "kind": "prometheus_capture_evidence",
+      "sha256": "dfa8a177f25b46a807ec6016f425a134f457b94d830089acedadf3756256adef"
+    },
+    {
+      "artifact_basename": "before.tikv1.prom",
+      "bytes": 2393412,
+      "kind": "prometheus_capture_evidence",
+      "sha256": "96313e13dd17f09b662ae5fd1f6ad4d848f3c5bab575c5fa9b892d4eb3480727"
+    },
+    {
+      "artifact_basename": "before.tikv2.prom",
+      "bytes": 2383210,
+      "kind": "prometheus_capture_evidence",
+      "sha256": "3cfbfdb4c289ac79ee1d2be943b4ffb38397dd6c2848ac3145466d222fe01222"
+    },
+    {
+      "artifact_basename": "before.tikv3.prom",
+      "bytes": 2475246,
+      "kind": "prometheus_capture_evidence",
+      "sha256": "ffe917cec21c31f68f8bfe11aeba224a37b2ed1fcee4096846d910ceaad763f0"
+    },
+    {
+      "artifact_basename": "remote10-autocommit-prom-observer-v5.py",
+      "bytes": 20683,
+      "kind": "observer_or_offline_audit_source",
+      "sha256": "78651972d2c6f2d346edfabd91615a2c2d941ce1e6a80fff66970e47f19e899e"
+    },
+    {
+      "artifact_basename": "remote10-autocommit-prom-v5-independent-audit-v2.py",
+      "bytes": 34072,
+      "kind": "observer_or_offline_audit_source",
+      "sha256": "746eda3bffa504a5ff0bc7bfacabccb76a520831fc3f1cbe2947f7473bac4246"
+    },
+    {
+      "artifact_basename": "tidb-v8.5.7-executor-adapter.go",
+      "bytes": 81574,
+      "kind": "saved_primary_metric_semantics_source",
+      "sha256": "bf2c05e609a7bac90a4fc9224a2399b5812384b4dc61ed075f9d9748e7bd1b58"
+    },
+    {
+      "artifact_basename": "tidb-v8.5.7-go.mod",
+      "bytes": 17564,
+      "kind": "saved_primary_metric_semantics_source",
+      "sha256": "ae937e4913f2221ef81ff84bbe5d7d2f432c18d82e2397cb06570637e31bd1b5"
+    },
+    {
+      "artifact_basename": "tidb-v8.5.7-pkg-metrics-server.go",
+      "bytes": 13422,
+      "kind": "saved_primary_metric_semantics_source",
+      "sha256": "c170c34611cc6edb06843a9c558963520882f28094401439484bfec86fd393c5"
+    },
+    {
+      "artifact_basename": "tidb-v8.5.7-pkg-metrics-session.go",
+      "bytes": 10322,
+      "kind": "saved_primary_metric_semantics_source",
+      "sha256": "2d42cd7b11cf19284052bf92b091a819801fc0cdac75b4014081d283f70a4c0e"
+    },
+    {
+      "artifact_basename": "tikv-client-go-a2b634d170d9-metrics.go",
+      "bytes": 43059,
+      "kind": "saved_primary_metric_semantics_source",
+      "sha256": "4adea25137bacc71cde97672d127722cdbec3d893e8dbeef32b68e90aad61e91"
+    },
+    {
+      "artifact_basename": "tikv-client-go-a2b634d170d9b5ae8119d0322f807c755a56a23e-internal-client-client.go",
+      "bytes": 33767,
+      "kind": "saved_primary_metric_semantics_source",
+      "sha256": "a40809b6591ce17810f2e84ccf8b77bfeca17db3c1333e15476210dda0ca4831"
+    },
+    {
+      "artifact_basename": "tikv-v8.5.7-scheduler-primary-source.rs",
+      "bytes": 116433,
+      "kind": "saved_primary_metric_semantics_source",
+      "sha256": "a59b759e99ac1c046daf99a008260ca1dcc2c42136a9263c66aeab328b579490"
+    },
+    {
+      "artifact_basename": "tikv-v8.5.7-src-storage-lock_manager-lock_waiting_queue.rs",
+      "bytes": 51559,
+      "kind": "saved_primary_metric_semantics_source",
+      "sha256": "bb6a8fa78595fbcd24358d0d920eb1cb3865e02aa635603b1012aed34c673cb6"
+    },
+    {
+      "artifact_basename": "tikv-v8.5.7-src-storage-metrics.rs",
+      "bytes": 22987,
+      "kind": "saved_primary_metric_semantics_source",
+      "sha256": "71d15a2120b5b0ed6d5b34ce9dc494b518e5725d82bef14fe667956096fb73ed"
+    },
+    {
+      "artifact_basename": "tikv-v8.5.7-src-storage-txn-commands-acquire_pessimistic_lock.rs",
+      "bytes": 19409,
+      "kind": "saved_primary_metric_semantics_source",
+      "sha256": "3cdac019b2a17c1f7a0ebf8d7c5c114236127e1a12bf3b9f3d5948976df90c46"
+    }
+  ],
+  "backoff": {
+    "coverage_complete_for_selected_raw_series": true,
+    "covered_finite_type_groups": 13,
+    "interpretation": "no recorded exported covered backoffer observations; not a lock-wait duration measurement",
+    "mean_seconds": null,
+    "recorded_observation_delta": 0,
+    "recorded_seconds_sum_delta": 0.0
+  },
+  "clock_enclosure": {
+    "controller_created_and_terminal_updated_enclosed": true,
+    "controller_updated_to_first_after_request_seconds": 163.615905,
+    "latest_before_to_controller_created_seconds": 23.699118,
+    "parent_reap_and_pipe_eof_clock_enclosure_separately_available": false,
+    "sample_scope": "bounded body-read completion; histogram event times and scrape simultaneity are unavailable"
+  },
+  "control": {
+    "binary_sha256": "7e06591ffab33c71b6030dbb916f49099cd45da0077b3a53bc81e26a672ef658",
+    "clients": 10,
+    "complete": true,
+    "controller_lifecycle_seconds": 145.711,
+    "drives": 10,
+    "files_per_drive": 100,
+    "full_target": false,
+    "outcome": "success",
+    "owner_seconds": 148.9356736249756,
+    "partitions": 5,
+    "servers": 10,
+    "steady_work_seconds": 105.775286708
+  },
+  "coverage": [
+    {
+      "family_coverage": [
+        {
+          "counter_resets": 0,
+          "dropped_raw_samples": 0,
+          "family": "tidb_server_handle_query_duration_seconds",
+          "matched_raw_samples": 22,
+          "new_raw_samples": 0,
+          "parse_errors": 0
+        },
+        {
+          "counter_resets": 0,
+          "dropped_raw_samples": 0,
+          "family": "tidb_session_statement_pessimistic_retry_count",
+          "matched_raw_samples": 2,
+          "new_raw_samples": 0,
+          "parse_errors": 0
+        },
+        {
+          "counter_resets": 0,
+          "dropped_raw_samples": 0,
+          "family": "tidb_tikvclient_backoff_seconds",
+          "matched_raw_samples": 26,
+          "new_raw_samples": 0,
+          "parse_errors": 0
+        },
+        {
+          "counter_resets": 0,
+          "dropped_raw_samples": 0,
+          "family": "tidb_tikvclient_request_seconds",
+          "matched_raw_samples": 100,
+          "new_raw_samples": 2,
+          "parse_errors": 0
+        }
+      ],
+      "interval_seconds": 333.178039166,
+      "role": "tidb"
+    },
+    {
+      "family_coverage": [
+        {
+          "counter_resets": 0,
+          "dropped_raw_samples": 0,
+          "family": "tikv_scheduler_stage_total",
+          "matched_raw_samples": 2,
+          "new_raw_samples": 0,
+          "parse_errors": 0
+        }
+      ],
+      "interval_seconds": 333.177429916,
+      "role": "tikv1"
+    },
+    {
+      "family_coverage": [
+        {
+          "counter_resets": 0,
+          "dropped_raw_samples": 0,
+          "family": "tikv_scheduler_stage_total",
+          "matched_raw_samples": 2,
+          "new_raw_samples": 0,
+          "parse_errors": 0
+        }
+      ],
+      "interval_seconds": 333.180802708,
+      "role": "tikv2"
+    },
+    {
+      "family_coverage": [
+        {
+          "counter_resets": 0,
+          "dropped_raw_samples": 0,
+          "family": "tikv_scheduler_stage_total",
+          "matched_raw_samples": 2,
+          "new_raw_samples": 0,
+          "parse_errors": 0
+        }
+      ],
+      "interval_seconds": 333.187038542,
+      "role": "tikv3"
+    }
+  ],
+  "identity_coverage": {
+    "eight_role_before_after_identity_capture_available": false,
+    "engine_ready_before_after_identity_capacity_match": true,
+    "fixed_observer_source_hash_verified": true,
+    "four_metric_role_full_identity_limits_loopback_before_after_match": true,
+    "four_metric_roles": [
+      "tidb",
+      "tikv1",
+      "tikv2",
+      "tikv3"
+    ],
+    "identity_scope": "original engine and full identity continuity verified for TiDB and three TiKV metric sources; PD and RustFS have native preflight only, without a post-capture witness",
+    "pd_rustfs_post_capture_identity_witness_in_packet": false,
+    "receipts_raw_capture_whitelist_hashes_verified": true,
+    "seven_native_tidb_pd_tikv_preflight_roles_and_rustfs_preflight_match_original_eight_roles": true
+  },
+  "independent_arithmetic_review": "PASS; saved raw-series reparse and matched-label delta review",
+  "independent_report_hash_bindings": [
+    {
+      "artifact_basename": "report.json",
+      "sha256": "9e2d086d57ad54073804d737077b0218283d951228ad95b0132b06289088dcd2"
+    },
+    {
+      "artifact_basename": "report.md",
+      "sha256": "25fc65e94d00755cef59849ae737554c2ef882d383cd51c63dfada13d6788f3d"
+    },
+    {
+      "artifact_basename": "sourcepins.json",
+      "sha256": "982f430d11c5d42b33b8e62ea0a247f7deab61220f3781527deb3c6fc638ac0a"
+    },
+    {
+      "artifact_basename": "proposed-acceptance.json",
+      "sha256": "3dbfd6641aaefd50b38b6dbc979a269e65f79093bca9cc30abd230a6202ee4e9"
+    }
+  ],
+  "logical_amplification_ratio_available": false,
+  "matched_deltas_and_absent_label_cumulatives": {
+    "tidb": {
+      "tidb_server_handle_query_duration_seconds": {
+        "counter_resets": 0,
+        "coverage_complete_for_selected_raw_series": true,
+        "dropped_begin_cumulative_only_groups": [],
+        "dropped_raw_samples": 0,
+        "matched_groups": [
+          {
+            "inclusive_value_sum_delta": 2.024252611000006,
+            "labels": {
+              "sql_type": "Begin"
+            },
+            "mean_value": 0.00035051993264069366,
+            "observation_delta": 5775
+          },
+          {
+            "inclusive_value_sum_delta": 12.40095910800017,
+            "labels": {
+              "sql_type": "Commit"
+            },
+            "mean_value": 0.0033771675130719416,
+            "observation_delta": 3672
+          },
+          {
+            "inclusive_value_sum_delta": 0.0,
+            "labels": {
+              "sql_type": "Delete"
+            },
+            "mean_value": null,
+            "observation_delta": 0
+          },
+          {
+            "inclusive_value_sum_delta": 0.9218158310000145,
+            "labels": {
+              "sql_type": "Insert"
+            },
+            "mean_value": 0.0005768559643304221,
+            "observation_delta": 1598
+          },
+          {
+            "inclusive_value_sum_delta": 0.1435638700000055,
+            "labels": {
+              "sql_type": "Rollback"
+            },
+            "mean_value": 6.787889834515627e-05,
+            "observation_delta": 2115
+          },
+          {
+            "inclusive_value_sum_delta": 51.05332926199623,
+            "labels": {
+              "sql_type": "Select"
+            },
+            "mean_value": 0.0009330262301618522,
+            "observation_delta": 54718
+          },
+          {
+            "inclusive_value_sum_delta": 0.587911591000065,
+            "labels": {
+              "sql_type": "Set"
+            },
+            "mean_value": 9.862633635297182e-05,
+            "observation_delta": 5961
+          },
+          {
+            "inclusive_value_sum_delta": 3.006402150999997,
+            "labels": {
+              "sql_type": "Update"
+            },
+            "mean_value": 0.000565006981958278,
+            "observation_delta": 5321
+          },
+          {
+            "inclusive_value_sum_delta": 0.0002214999999999998,
+            "labels": {
+              "sql_type": "Use"
+            },
+            "mean_value": 0.0001107499999999999,
+            "observation_delta": 2
+          },
+          {
+            "inclusive_value_sum_delta": 0.0607949119999986,
+            "labels": {
+              "sql_type": "general"
+            },
+            "mean_value": 0.00016887475555555167,
+            "observation_delta": 360
+          },
+          {
+            "inclusive_value_sum_delta": 2.022567530999966,
+            "labels": {
+              "sql_type": "internal"
+            },
+            "mean_value": 0.0017286901974358684,
+            "observation_delta": 1170
+          }
+        ],
+        "matched_raw_samples": 22,
+        "new_end_cumulative_only_groups": [],
+        "new_raw_samples": 0
+      },
+      "tidb_session_statement_pessimistic_retry_count": {
+        "counter_resets": 0,
+        "coverage_complete_for_selected_raw_series": true,
+        "dropped_begin_cumulative_only_groups": [],
+        "dropped_raw_samples": 0,
+        "matched_groups": [
+          {
+            "inclusive_value_sum_delta": 0.0,
+            "labels": {},
+            "mean_value": null,
+            "observation_delta": 0
+          }
+        ],
+        "matched_raw_samples": 2,
+        "new_end_cumulative_only_groups": [],
+        "new_raw_samples": 0
+      },
+      "tidb_tikvclient_backoff_seconds": {
+        "counter_resets": 0,
+        "coverage_complete_for_selected_raw_series": true,
+        "dropped_begin_cumulative_only_groups": [],
+        "dropped_raw_samples": 0,
+        "matched_groups": [
+          {
+            "inclusive_value_sum_delta": 0.0,
+            "labels": {
+              "type": ""
+            },
+            "mean_value": null,
+            "observation_delta": 0
+          },
+          {
+            "inclusive_value_sum_delta": 0.0,
+            "labels": {
+              "type": "dataNotReady"
+            },
+            "mean_value": null,
+            "observation_delta": 0
+          },
+          {
+            "inclusive_value_sum_delta": 0.0,
+            "labels": {
+              "type": "isWitness"
+            },
+            "mean_value": null,
+            "observation_delta": 0
+          },
+          {
+            "inclusive_value_sum_delta": 0.0,
+            "labels": {
+              "type": "pdRPC"
+            },
+            "mean_value": null,
+            "observation_delta": 0
+          },
+          {
+            "inclusive_value_sum_delta": 0.0,
+            "labels": {
+              "type": "regionMiss"
+            },
+            "mean_value": null,
+            "observation_delta": 0
+          },
+          {
+            "inclusive_value_sum_delta": 0.0,
+            "labels": {
+              "type": "regionRecoveryInProgress"
+            },
+            "mean_value": null,
+            "observation_delta": 0
+          },
+          {
+            "inclusive_value_sum_delta": 0.0,
+            "labels": {
+              "type": "regionScheduling"
+            },
+            "mean_value": null,
+            "observation_delta": 0
+          },
+          {
+            "inclusive_value_sum_delta": 0.0,
+            "labels": {
+              "type": "serverBusy"
+            },
+            "mean_value": null,
+            "observation_delta": 0
+          },
+          {
+            "inclusive_value_sum_delta": 0.0,
+            "labels": {
+              "type": "staleCommand"
+            },
+            "mean_value": null,
+            "observation_delta": 0
+          },
+          {
+            "inclusive_value_sum_delta": 0.0,
+            "labels": {
+              "type": "tikvDiskFull"
+            },
+            "mean_value": null,
+            "observation_delta": 0
+          },
+          {
+            "inclusive_value_sum_delta": 0.0,
+            "labels": {
+              "type": "tikvLockFast"
+            },
+            "mean_value": null,
+            "observation_delta": 0
+          },
+          {
+            "inclusive_value_sum_delta": 0.0,
+            "labels": {
+              "type": "tikvRPC"
+            },
+            "mean_value": null,
+            "observation_delta": 0
+          },
+          {
+            "inclusive_value_sum_delta": 0.0,
+            "labels": {
+              "type": "txnLock"
+            },
+            "mean_value": null,
+            "observation_delta": 0
+          }
+        ],
+        "matched_raw_samples": 26,
+        "new_end_cumulative_only_groups": [],
+        "new_raw_samples": 0
+      },
+      "tidb_tikvclient_request_seconds": {
+        "counter_resets": 0,
+        "coverage_complete_for_selected_raw_series": false,
+        "dropped_begin_cumulative_only_groups": [],
+        "dropped_raw_samples": 0,
+        "matched_groups": [
+          {
+            "inclusive_value_sum_delta": 0.2268560750000017,
+            "labels": {
+              "scope": "false",
+              "stale_read": "false",
+              "type": "BatchGet"
+            },
+            "mean_value": 0.00030991267076502964,
+            "observation_delta": 732
+          },
+          {
+            "inclusive_value_sum_delta": 0.0,
+            "labels": {
+              "scope": "false",
+              "stale_read": "false",
+              "type": "CheckTxnStatus"
+            },
+            "mean_value": null,
+            "observation_delta": 0
+          },
+          {
+            "inclusive_value_sum_delta": 0.0,
+            "labels": {
+              "scope": "false",
+              "stale_read": "false",
+              "type": "Commit"
+            },
+            "mean_value": null,
+            "observation_delta": 0
+          },
+          {
+            "inclusive_value_sum_delta": 15.40887189399967,
+            "labels": {
+              "scope": "false",
+              "stale_read": "false",
+              "type": "Cop"
+            },
+            "mean_value": 0.00034459414737453417,
+            "observation_delta": 44716
+          },
+          {
+            "inclusive_value_sum_delta": 11.710311071999966,
+            "labels": {
+              "scope": "false",
+              "stale_read": "false",
+              "type": "Get"
+            },
+            "mean_value": 0.0002561982819637693,
+            "observation_delta": 45708
+          },
+          {
+            "inclusive_value_sum_delta": 0.00993870800000008,
+            "labels": {
+              "scope": "false",
+              "stale_read": "false",
+              "type": "MvccGetByKey"
+            },
+            "mean_value": 0.00070990771428572,
+            "observation_delta": 14
+          },
+          {
+            "inclusive_value_sum_delta": 2.9639332309999835,
+            "labels": {
+              "scope": "false",
+              "stale_read": "false",
+              "type": "PessimisticLock"
+            },
+            "mean_value": 0.0004793681434578657,
+            "observation_delta": 6183
+          },
+          {
+            "inclusive_value_sum_delta": 0.0,
+            "labels": {
+              "scope": "false",
+              "stale_read": "false",
+              "type": "PessimisticRollback"
+            },
+            "mean_value": null,
+            "observation_delta": 0
+          },
+          {
+            "inclusive_value_sum_delta": 10.94993932800004,
+            "labels": {
+              "scope": "false",
+              "stale_read": "false",
+              "type": "Prewrite"
+            },
+            "mean_value": 0.0029666592598211975,
+            "observation_delta": 3691
+          },
+          {
+            "inclusive_value_sum_delta": 0.0,
+            "labels": {
+              "scope": "false",
+              "stale_read": "false",
+              "type": "ResolveLock"
+            },
+            "mean_value": null,
+            "observation_delta": 0
+          },
+          {
+            "inclusive_value_sum_delta": 0.0,
+            "labels": {
+              "scope": "false",
+              "stale_read": "false",
+              "type": "Scan"
+            },
+            "mean_value": null,
+            "observation_delta": 0
+          },
+          {
+            "inclusive_value_sum_delta": 0.00988412400000001,
+            "labels": {
+              "scope": "false",
+              "stale_read": "false",
+              "type": "ScanLock"
+            },
+            "mean_value": 0.0016473540000000017,
+            "observation_delta": 6
+          },
+          {
+            "inclusive_value_sum_delta": 0.0,
+            "labels": {
+              "scope": "false",
+              "stale_read": "false",
+              "type": "SplitRegion"
+            },
+            "mean_value": null,
+            "observation_delta": 0
+          },
+          {
+            "inclusive_value_sum_delta": 0.0,
+            "labels": {
+              "scope": "false",
+              "stale_read": "false",
+              "type": "UnsafeDestroyRange"
+            },
+            "mean_value": null,
+            "observation_delta": 0
+          },
+          {
+            "inclusive_value_sum_delta": 0.0,
+            "labels": {
+              "scope": "true",
+              "stale_read": "false",
+              "type": "CheckTxnStatus"
+            },
+            "mean_value": null,
+            "observation_delta": 0
+          },
+          {
+            "inclusive_value_sum_delta": 0.06092904300000006,
+            "labels": {
+              "scope": "true",
+              "stale_read": "false",
+              "type": "Commit"
+            },
+            "mean_value": 0.002901383000000003,
+            "observation_delta": 21
+          },
+          {
+            "inclusive_value_sum_delta": 0.02974753799999999,
+            "labels": {
+              "scope": "true",
+              "stale_read": "false",
+              "type": "PessimisticLock"
+            },
+            "mean_value": 0.00036277485365853644,
+            "observation_delta": 82
+          },
+          {
+            "inclusive_value_sum_delta": 0.0995624989999998,
+            "labels": {
+              "scope": "true",
+              "stale_read": "false",
+              "type": "Prewrite"
+            },
+            "mean_value": 0.003982499959999992,
+            "observation_delta": 25
+          },
+          {
+            "inclusive_value_sum_delta": 0.0,
+            "labels": {
+              "scope": "true",
+              "stale_read": "false",
+              "type": "ResolveLock"
+            },
+            "mean_value": null,
+            "observation_delta": 0
+          },
+          {
+            "inclusive_value_sum_delta": 0.0,
+            "labels": {
+              "scope": "true",
+              "stale_read": "false",
+              "type": "SplitRegion"
+            },
+            "mean_value": null,
+            "observation_delta": 0
+          },
+          {
+            "inclusive_value_sum_delta": 0.0,
+            "labels": {
+              "scope": "true",
+              "stale_read": "false",
+              "type": "StoreSafeTS"
+            },
+            "mean_value": null,
+            "observation_delta": 0
+          }
+        ],
+        "matched_raw_samples": 100,
+        "new_end_cumulative_only_groups": [
+          {
+            "cumulative_only_parts": {
+              "_count": 1.0,
+              "_sum": 0.002206875
+            },
+            "interval_delta_available": false,
+            "labels": {
+              "scope": "true",
+              "stale_read": "false",
+              "type": "CheckTxnStatus"
+            }
+          }
+        ],
+        "new_raw_samples": 2
+      }
+    },
+    "tikv1": {
+      "tikv_scheduler_stage_total": {
+        "counter_resets": 0,
+        "coverage_complete_for_selected_raw_series": true,
+        "dropped_begin_cumulative_only_groups": [],
+        "dropped_raw_samples": 0,
+        "matched_groups": [
+          {
+            "candidate_event_delta": 0,
+            "labels": {
+              "stage": "lock_wait",
+              "type": "acquire_pessimistic_lock"
+            }
+          },
+          {
+            "candidate_event_delta": 0,
+            "labels": {
+              "stage": "lock_wait",
+              "type": "acquire_pessimistic_lock_resumed"
+            }
+          }
+        ],
+        "matched_raw_samples": 2,
+        "new_end_cumulative_only_groups": [],
+        "new_raw_samples": 0
+      }
+    },
+    "tikv2": {
+      "tikv_scheduler_stage_total": {
+        "counter_resets": 0,
+        "coverage_complete_for_selected_raw_series": true,
+        "dropped_begin_cumulative_only_groups": [],
+        "dropped_raw_samples": 0,
+        "matched_groups": [
+          {
+            "candidate_event_delta": 0,
+            "labels": {
+              "stage": "lock_wait",
+              "type": "acquire_pessimistic_lock"
+            }
+          },
+          {
+            "candidate_event_delta": 0,
+            "labels": {
+              "stage": "lock_wait",
+              "type": "acquire_pessimistic_lock_resumed"
+            }
+          }
+        ],
+        "matched_raw_samples": 2,
+        "new_end_cumulative_only_groups": [],
+        "new_raw_samples": 0
+      }
+    },
+    "tikv3": {
+      "tikv_scheduler_stage_total": {
+        "counter_resets": 0,
+        "coverage_complete_for_selected_raw_series": true,
+        "dropped_begin_cumulative_only_groups": [],
+        "dropped_raw_samples": 0,
+        "matched_groups": [
+          {
+            "candidate_event_delta": 0,
+            "labels": {
+              "stage": "lock_wait",
+              "type": "acquire_pessimistic_lock"
+            }
+          },
+          {
+            "candidate_event_delta": 0,
+            "labels": {
+              "stage": "lock_wait",
+              "type": "acquire_pessimistic_lock_resumed"
+            }
+          }
+        ],
+        "matched_raw_samples": 2,
+        "new_end_cumulative_only_groups": [],
+        "new_raw_samples": 0
+      }
+    }
+  },
+  "per_phase_available": false,
+  "physical_NVMe_IOPS_available": false,
+  "production_capacity_qualified": false,
+  "proof_hashes": {
+    "after_receipt_sha256": "6b759f026a4e5124a3ace6e69c45c368c38d5bdf9ed15146672c3ed8d7c228ed",
+    "after_whitelist_sha256": "9c2646a1ff5c89b27e520a3e57fef61a31d8345d6409545c5552200c1e0465d0",
+    "before_receipt_sha256": "050df7e94856ea8f94fcbe024d3e415fc90f89060cb2c6e2ef57a0ca23f0738d",
+    "control_receipt_sha256": "e6d9b7a94fb92a3d96f592a3722f7473db0c52b8a4de39eac30815611c6b0a32",
+    "observer_sha256": "78651972d2c6f2d346edfabd91615a2c2d941ce1e6a80fff66970e47f19e899e",
+    "source_before_after_sha256": "30fcc5d8393bdb52206520e3cdbda44b67216c8f9c84eba845bd18ddf4372a9f",
+    "terminal_sha256": "a71165ce035e2772a980f604be6375a38ab7b2f4a714423fe31dfbd4922070c4"
+  },
+  "query_histogram": {
+    "coverage_complete_for_selected_raw_series": true,
+    "groups": [
+      {
+        "inclusive_seconds": 2.024252611000006,
+        "mean_ms": 0.35051993264069364,
+        "observations": 5775,
+        "sql_type": "Begin"
+      },
+      {
+        "inclusive_seconds": 12.40095910800017,
+        "mean_ms": 3.377167513071942,
+        "observations": 3672,
+        "sql_type": "Commit"
+      },
+      {
+        "inclusive_seconds": 0.0,
+        "mean_ms": null,
+        "observations": 0,
+        "sql_type": "Delete"
+      },
+      {
+        "inclusive_seconds": 0.9218158310000145,
+        "mean_ms": 0.5768559643304221,
+        "observations": 1598,
+        "sql_type": "Insert"
+      },
+      {
+        "inclusive_seconds": 0.1435638700000055,
+        "mean_ms": 0.06787889834515627,
+        "observations": 2115,
+        "sql_type": "Rollback"
+      },
+      {
+        "inclusive_seconds": 51.05332926199623,
+        "mean_ms": 0.9330262301618523,
+        "observations": 54718,
+        "sql_type": "Select"
+      },
+      {
+        "inclusive_seconds": 0.587911591000065,
+        "mean_ms": 0.09862633635297181,
+        "observations": 5961,
+        "sql_type": "Set"
+      },
+      {
+        "inclusive_seconds": 3.006402150999997,
+        "mean_ms": 0.565006981958278,
+        "observations": 5321,
+        "sql_type": "Update"
+      },
+      {
+        "inclusive_seconds": 0.0002214999999999998,
+        "mean_ms": 0.1107499999999999,
+        "observations": 2,
+        "sql_type": "Use"
+      },
+      {
+        "inclusive_seconds": 0.0607949119999986,
+        "mean_ms": 0.16887475555555168,
+        "observations": 360,
+        "sql_type": "general"
+      },
+      {
+        "inclusive_seconds": 2.022567530999966,
+        "mean_ms": 1.7286901974358684,
+        "observations": 1170,
+        "sql_type": "internal"
+      }
+    ],
+    "inclusive_seconds_sum": 72.22181836699646,
+    "sum_scope": "sum of concurrent inclusive handled-query observations; not elapsed time, CPU time, or filesystem operations",
+    "total_observations": 80692
+  },
+  "request_histogram": {
+    "counter_resets": 0,
+    "coverage_complete_for_selected_raw_series": false,
+    "dropped_raw_samples": 0,
+    "interpretation": "matched subset only; never subtract an absent-before label as zero; full-family totals, rates and means are unavailable",
+    "matched_subset_observations": 101178,
+    "matched_subset_seconds": 41.46997351199966,
+    "new_end_cumulative_only_groups": [
+      {
+        "cumulative_only_parts": {
+          "_count": 1.0,
+          "_sum": 0.002206875
+        },
+        "interval_delta_available": false,
+        "labels": {
+          "scope": "true",
+          "stale_read": "false",
+          "type": "CheckTxnStatus"
+        }
+      }
+    ],
+    "new_raw_samples": 2,
+    "positive_matched_groups": [
+      {
+        "labels": {
+          "scope": "false",
+          "stale_read": "false",
+          "type": "BatchGet"
+        },
+        "matched_duration_seconds": 0.2268560750000017,
+        "matched_mean_ms": 0.30991267076502965,
+        "matched_observation_count": 732
+      },
+      {
+        "labels": {
+          "scope": "false",
+          "stale_read": "false",
+          "type": "Cop"
+        },
+        "matched_duration_seconds": 15.40887189399967,
+        "matched_mean_ms": 0.34459414737453414,
+        "matched_observation_count": 44716
+      },
+      {
+        "labels": {
+          "scope": "false",
+          "stale_read": "false",
+          "type": "Get"
+        },
+        "matched_duration_seconds": 11.710311071999966,
+        "matched_mean_ms": 0.2561982819637693,
+        "matched_observation_count": 45708
+      },
+      {
+        "labels": {
+          "scope": "false",
+          "stale_read": "false",
+          "type": "MvccGetByKey"
+        },
+        "matched_duration_seconds": 0.00993870800000008,
+        "matched_mean_ms": 0.7099077142857201,
+        "matched_observation_count": 14
+      },
+      {
+        "labels": {
+          "scope": "false",
+          "stale_read": "false",
+          "type": "PessimisticLock"
+        },
+        "matched_duration_seconds": 2.9639332309999835,
+        "matched_mean_ms": 0.47936814345786566,
+        "matched_observation_count": 6183
+      },
+      {
+        "labels": {
+          "scope": "false",
+          "stale_read": "false",
+          "type": "Prewrite"
+        },
+        "matched_duration_seconds": 10.94993932800004,
+        "matched_mean_ms": 2.9666592598211974,
+        "matched_observation_count": 3691
+      },
+      {
+        "labels": {
+          "scope": "false",
+          "stale_read": "false",
+          "type": "ScanLock"
+        },
+        "matched_duration_seconds": 0.00988412400000001,
+        "matched_mean_ms": 1.6473540000000018,
+        "matched_observation_count": 6
+      },
+      {
+        "labels": {
+          "scope": "true",
+          "stale_read": "false",
+          "type": "Commit"
+        },
+        "matched_duration_seconds": 0.06092904300000006,
+        "matched_mean_ms": 2.901383000000003,
+        "matched_observation_count": 21
+      },
+      {
+        "labels": {
+          "scope": "true",
+          "stale_read": "false",
+          "type": "PessimisticLock"
+        },
+        "matched_duration_seconds": 0.02974753799999999,
+        "matched_mean_ms": 0.36277485365853646,
+        "matched_observation_count": 82
+      },
+      {
+        "labels": {
+          "scope": "true",
+          "stale_read": "false",
+          "type": "Prewrite"
+        },
+        "matched_duration_seconds": 0.0995624989999998,
+        "matched_mean_ms": 3.982499959999992,
+        "matched_observation_count": 25
+      }
+    ]
+  },
+  "retained_limits": {
+    "eight_role_post_capture_identity_unavailable": true,
+    "logical_io_amplification_denominator_unavailable": true,
+    "matched_rpc_subset_only_one_absent_before_histogram_pair": true,
+    "per_phase_and_per_operation_attribution_unavailable": true,
+    "physical_nvme_iops_unavailable": true,
+    "production_capacity_and_mounted_cli_qualification_unavailable": true,
+    "pure_lock_wait_increment_path_coverage_unverified": true,
+    "whole_window_includes_background_and_observer_work": true
+  },
+  "retry": {
+    "coverage_complete_for_selected_raw_series": true,
+    "interpretation": "no recorded retried-statement observations in this covered histogram; non-panic Exec return with positive retry count only, not pure lock wait",
+    "mean_retry_values": null,
+    "recorded_retried_statement_observation_delta": 0,
+    "retry_value_sum_delta": 0.0
+  },
+  "schema": "mount-rs.tidb-rustfs-autocommit-server-counters.v1",
+  "scope": "whole captured server window enclosing controller lifecycle; includes background and observer work; no per-phase or per-operation attribution",
+  "server_contention_proven": false,
+  "source_intervals": [
+    {
+      "role": "tidb",
+      "seconds": 333.178039166
+    },
+    {
+      "role": "tikv1",
+      "seconds": 333.177429916
+    },
+    {
+      "role": "tikv2",
+      "seconds": 333.180802708
+    },
+    {
+      "role": "tikv3",
+      "seconds": 333.187038542
+    }
+  ],
+  "source_revision": "52c1cdeedddd16937088bfa42ee3191c4b328ff8",
+  "status": "observed_partial",
+  "tikv_lock_stage": {
+    "callsite_coverage_verified": false,
+    "candidate_series": [
+      {
+        "candidate_event_delta": 0,
+        "labels": {
+          "stage": "lock_wait",
+          "type": "acquire_pessimistic_lock"
+        },
+        "role": "tikv1"
+      },
+      {
+        "candidate_event_delta": 0,
+        "labels": {
+          "stage": "lock_wait",
+          "type": "acquire_pessimistic_lock_resumed"
+        },
+        "role": "tikv1"
+      },
+      {
+        "candidate_event_delta": 0,
+        "labels": {
+          "stage": "lock_wait",
+          "type": "acquire_pessimistic_lock"
+        },
+        "role": "tikv2"
+      },
+      {
+        "candidate_event_delta": 0,
+        "labels": {
+          "stage": "lock_wait",
+          "type": "acquire_pessimistic_lock_resumed"
+        },
+        "role": "tikv2"
+      },
+      {
+        "candidate_event_delta": 0,
+        "labels": {
+          "stage": "lock_wait",
+          "type": "acquire_pessimistic_lock"
+        },
+        "role": "tikv3"
+      },
+      {
+        "candidate_event_delta": 0,
+        "labels": {
+          "stage": "lock_wait",
+          "type": "acquire_pessimistic_lock_resumed"
+        },
+        "role": "tikv3"
+      }
+    ],
+    "interpretation": "six zero candidate counter deltas do not establish no contention; increment-path coverage remains unverified",
+    "pure_lock_wait_seconds": null,
+    "selected_raw_label_coverage_complete": true
+  }
+}
