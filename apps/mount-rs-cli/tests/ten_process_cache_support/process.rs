@@ -650,6 +650,7 @@ pub struct OwnedProcess {
     pub receipt: ProcessReceipt,
     stdout: PathBuf,
     stderr: PathBuf,
+    object_store_projection: Option<serde_json::Value>,
     pub quic: Option<SocketAddr>,
     peer: Option<SocketAddr>,
     pub cache: Option<PathBuf>,
@@ -723,6 +724,7 @@ impl OwnedProcess {
             receipt,
             stdout,
             stderr,
+            object_store_projection: None,
             quic: None,
             peer,
             cache,
@@ -966,7 +968,18 @@ impl OwnedProcess {
             self.receipt.pid,
         )?;
         let banks = if self.receipt.role == "server" {
-            Some(parse_banks(&stderr)?)
+            let banks = parse_banks(&stderr)?;
+            self.object_store_projection = Some(super::object_store_projection::project_cli(
+                &super::object_store_projection::CliBinding {
+                    node: &self.receipt.node,
+                    generation: self.receipt.generation,
+                    pid: self.receipt.pid,
+                    path: &self.stderr.to_string_lossy(),
+                    owner_complete: true,
+                },
+                stderr.as_bytes(),
+            ));
+            Some(banks)
         } else {
             None
         };
@@ -995,6 +1008,7 @@ pub struct Fleet {
     pub processes: Vec<OwnedProcess>,
     pub retired: Vec<ProcessReceipt>,
     pub banks: Vec<serde_json::Value>,
+    pub object_store_observations: Vec<serde_json::Value>,
     next_generation: u64,
     resources: ResourceMonitor,
 }
@@ -1011,6 +1025,7 @@ impl Fleet {
             processes: Vec::new(),
             retired: Vec::new(),
             banks: Vec::new(),
+            object_store_observations: Vec::new(),
             next_generation: 1,
             resources: ResourceMonitor {
                 run,
@@ -1398,6 +1413,16 @@ impl Fleet {
             self.banks.push(json!({"node":process.receipt.node,"generation":process.receipt.generation,
                 "pid":process.receipt.pid,"scope":"cumulative generation shutdown logical counters",
                 "launch":process.receipt.launch,"maintenance_quiescence":"unavailable","rows":rows}));
+        }
+        if process.receipt.role == "server" {
+            let projection = if evidence.is_ok() {
+                process.object_store_projection.take().unwrap_or_else(
+                    || json!({"status":"unavailable","reason":"disabled_or_missing"}),
+                )
+            } else {
+                json!({"status":"unavailable","reason":"owner_not_qualified"})
+            };
+            self.object_store_observations.push(projection);
         }
         // Retain ownership/proof failures too; no callback error can discard a receipt.
         self.retired.push(process.receipt.clone());
@@ -2277,6 +2302,7 @@ mod tests {
                 receipt,
                 stdout,
                 stderr,
+                object_store_projection: None,
                 quic: None,
                 peer: None,
                 cache: None,
@@ -2465,6 +2491,7 @@ mod tests {
             processes: vec![process],
             retired: Vec::new(),
             banks: Vec::new(),
+            object_store_observations: Vec::new(),
             next_generation: 2,
             resources: ResourceMonitor {
                 run: previous.run.clone(),

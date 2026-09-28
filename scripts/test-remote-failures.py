@@ -162,6 +162,25 @@ EXPECTED_PACKAGE_CASES['tidbcoldunit'] = tuple('ten_process_cache_support::cold_
     'cold_holder_shutdown_frame_requires_complete_unique_real_contract',
     'cold_oracle_owner_unwind_retains_unproven_actual_resource_group',
     'cold_oracle_owner_releases_only_positive_groups_and_retains_poison',
+)) + tuple('ten_process_cache_support::object_store_projection::tests::' + name for name in (
+    'cli_complete_codec_preserves_external_generation_hashes_and_u64',
+    'cli_near_maximum_counter_keeps_a_one_unit_delta_exact',
+    'cli_periodic_and_shutdown_histories_keep_identical_sequences_separate',
+    'cli_single_complete_sample_has_no_window',
+    'cli_missing_duplicate_or_malformed_frames_cannot_be_salvaged',
+    'cli_foreign_pid_generation_or_context_is_rejected',
+    'cli_repeated_or_regressed_capture_identity_is_rejected',
+    'cli_counter_reset_is_rejected_before_any_window_publication',
+    'cli_gauge_decreases_and_monotonic_maxima_keep_endpoint_values',
+    'cli_saturation_refuses_windows_but_concurrent_and_cache_quality_are_retained',
+    'cli_existing_output_caps_utf8_and_terminal_lf_remain_required',
+    'cli_missing_frames_and_incomplete_owner_never_export_zero',
+    'worker_disabled_capture_skips_identity_snapshot_sequence_and_writes',
+    'worker_exhausted_capture_cannot_reuse_identity_or_write',
+    'worker_actual_isolated_bank_captures_bind_output_owner_and_window',
+    'worker_mixed_capture_pid_context_generation_or_order_is_rejected',
+    'worker_reset_and_saturation_refuse_windows_but_quality_is_retained',
+    'worker_reserved_sequence_rejects_callback_identity_drift_before_snapshot_or_write',
 ))
 EXPECTED_PACKAGE_CASES.update({
     'rustfsownedprefix': tuple('owned_prefix_tests::' + name for name in (
@@ -904,6 +923,11 @@ def main():
       'apps/mount-rs-cli/src/server_cache/cold_holder.rs',
       'apps/mount-rs-cli/src/server_cache/cold_holder_tests.rs',
       'apps/mount-rs-cli/tests/ten_process_cache_support/cold_retirement.rs',
+      'apps/mount-rs-cli/tests/ten_process_cache_support/object_store_projection.rs',
+      'apps/mount-rs-cli/tests/ten_process_cache_support/object_store_projection_tests.rs',
+      'src/diagnostics/object_store.rs',
+      'crates/mount-rs-service/src/object_store_diagnostics.rs',
+      'crates/mount-rs-service/src/object_store_diagnostics_tests.rs',
       'crates/mount-rs-service/src/filesystem_runtime.rs',
       'crates/mount-rs-service/tests/filesystem_runtime.rs',
      ) if (BASE/v).is_file())

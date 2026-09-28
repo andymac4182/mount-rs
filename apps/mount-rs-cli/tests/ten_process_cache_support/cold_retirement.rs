@@ -32,6 +32,55 @@ use std::{
 use tokio::task::JoinHandle;
 
 const READY_SHA: &str = "50f2c006d5a947d9523b1a6b89dc280005b27e1faa530a217d8283535a555fd0";
+
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+enum OraclePhase {
+    Initialize { drive: usize },
+    Fresh { drive: usize, round: FreshRound },
+    PeerPartitionDenial,
+}
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum FreshRound {
+    Initial,
+    Final,
+}
+static WORKER_OBSERVATION_SEQUENCE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+fn worker_observation() -> super::object_store_projection::Captured {
+    let observer = mount_rs_core::diagnostics::object_store::Observer::enabled();
+    if !observer.is_enabled() {
+        return super::object_store_projection::capture_worker(
+            false,
+            &WORKER_OBSERVATION_SEQUENCE,
+            |_| None,
+            || None,
+            &mut std::io::sink(),
+        );
+    }
+    super::object_store_projection::capture_worker(
+        true,
+        &WORKER_OBSERVATION_SEQUENCE,
+        |sequence| {
+            Some(mount_rs_service::object_store_diagnostics::Capture {
+                pid: std::process::id(),
+                sequence,
+                observed_unix_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()?
+                    .as_millis()
+                    .try_into()
+                    .ok()?,
+                context: mount_rs_service::object_store_diagnostics::CaptureContext::WorkerBoundary,
+                generation: None,
+            })
+        },
+        || observer.snapshot(),
+        &mut std::io::stderr().lock(),
+    )
+}
+
 const CONFIG_SHA: &str = "7c43a6f84ca662faf2224ee5d9a5658c7645e2260326b95d1f3d424f8b4cfbb3";
 
 #[derive(Clone)]
@@ -230,6 +279,7 @@ impl Oracle {
 struct Job {
     task: Option<JoinHandle<Result<Oracle>>>,
     resources: Arc<Mutex<Retained>>,
+    observation: Arc<Mutex<Value>>,
     settled: bool,
 }
 #[derive(Default)]
@@ -238,7 +288,7 @@ pub struct OracleOwner {
     failure: Option<String>,
 }
 impl OracleOwner {
-    fn start<F, Fut>(&mut self, parent: Instant, action: F) -> Result<usize>
+    fn start<F, Fut>(&mut self, parent: Instant, phase: OraclePhase, action: F) -> Result<usize>
     where
         F: FnOnce(Arc<Mutex<Retained>>) -> Fut + Send + 'static,
         Fut: Future<Output = Result<Oracle>> + Send + 'static,
@@ -246,12 +296,22 @@ impl OracleOwner {
         let deadline = clipped(Instant::now(), parent, REQUEST_SECONDS)?;
         let resources = Arc::new(Mutex::new(Retained::default()));
         let index = self.jobs.len();
+        let observation = Arc::new(Mutex::new(
+            json!({"status":"unavailable","reason":"not_captured"}),
+        ));
         self.jobs.push(Job {
             task: None,
             resources: resources.clone(),
+            observation: observation.clone(),
             settled: false,
         });
         let task = tokio::spawn(async move {
+            let before = worker_observation();
+            if let Ok(mut recorded) = observation.lock() {
+                *recorded = json!({"status":"unavailable","reason":"missing_after",
+                    "owner":{"pid":std::process::id(),"job":index,"phase":phase,"stderr":"worker.stderr","server_generation":Value::Null},
+                    "before":before.evidence});
+            }
             let result = match tokio::time::timeout_at(
                 tokio::time::Instant::from_std(deadline),
                 action(resources.clone()),
@@ -268,6 +328,19 @@ impl OracleOwner {
                 && let Ok(mut state) = resources.lock()
             {
                 state.cleanup_failure = Some(error.clone());
+            }
+            let after = worker_observation();
+            let projected = super::object_store_projection::project_worker(
+                &super::object_store_projection::WorkerBinding {
+                    pid: std::process::id(),
+                    job: index as u64,
+                    phase: json!(phase),
+                },
+                &before,
+                &after,
+            );
+            if let Ok(mut recorded) = observation.lock() {
+                *recorded = projected;
             }
             match (result, cleanup) {
                 (Ok(value), Ok(())) => Ok(value),
@@ -337,10 +410,15 @@ impl OracleOwner {
         self.failure.clone().map_or(Ok(()), Err)
     }
     pub fn snapshot(&self) -> Value {
-        let rows = self.jobs.iter().map(|job| match job.resources.lock() {
-            Ok(state) => json!({"task_settled":job.settled,"cleanup_complete":state.cleanup_complete,
-                "retained_resources":state.resources.len(),"cleanup_failure":state.cleanup_failure}),
-            Err(_) => json!({"task_settled":job.settled,"cleanup_complete":false,"owner_poisoned":true}),
+        let rows = self.jobs.iter().map(|job| {
+            let mut row = match job.resources.lock() {
+                Ok(state) => json!({"task_settled":job.settled,"cleanup_complete":state.cleanup_complete,
+                    "retained_resources":state.resources.len(),"cleanup_failure":state.cleanup_failure}),
+                Err(_) => json!({"task_settled":job.settled,"cleanup_complete":false,"owner_poisoned":true}),
+            };
+            row["object_store_observation"] = job.observation.lock().map(|value| value.clone())
+                .unwrap_or_else(|_| json!({"status":"unavailable","reason":"observation_owner_poisoned"}));
+            row
         }).collect::<Vec<_>>();
         json!({"jobs":rows,"failure":self.failure,"scope":"actual private provider/SDK tasks and retained resources; process reap is separate"})
     }
@@ -572,12 +650,17 @@ async fn fresh_all(
     fleet: &mut Fleet,
     backing: &Backing,
     deadline: Instant,
+    round: FreshRound,
 ) -> Result<Oracle> {
     let mut result = Oracle::empty();
     let mut rows = Vec::new();
     for n in 0..NODES {
         let backing = backing.clone();
-        let index = owner.start(deadline, move |resources| fresh(backing, n, resources))?;
+        let index = owner.start(
+            deadline,
+            OraclePhase::Fresh { drive: n, round },
+            move |resources| fresh(backing, n, resources),
+        )?;
         let value = owner.wait(fleet, index, deadline).await?;
         result.scopes.extend(value.scopes);
         result.ids.extend(value.ids);
@@ -846,7 +929,11 @@ pub async fn run(
     // Observe exact generated absence before sequential virgin MRC5 enrollment.
     for n in 0..NODES {
         let backing = backing.clone();
-        let index = owner.start(setup, move |resources| initialize(backing, n, resources))?;
+        let index = owner.start(
+            setup,
+            OraclePhase::Initialize { drive: n },
+            move |resources| initialize(backing, n, resources),
+        )?;
         owner.wait(fleet, index, setup).await?;
     }
     fixture.release_reservations();
@@ -894,7 +981,7 @@ pub async fn run(
         write_result?;
     }
     fleet.stop_all(clipped(Instant::now(), setup, SHUTDOWN_SECONDS)?)?;
-    let initial = fresh_all(owner, fleet, &backing, setup).await?;
+    let initial = fresh_all(owner, fleet, &backing, setup, FreshRound::Initial).await?;
     phases.push(json!({"phase":"tidb-rustfs-signed-seed-fresh-oracle","pids":seed_pids,"oracle":initial.report,
         "transport":"signed OIDC QUIC public CLI","ten_cli_processes_simultaneously_live":true,
         "write_ack_scope":"signed RPC completion + syncfs + fresh TiDB/RustFS metadata/raw bytes/SDK EOF",
@@ -1007,7 +1094,7 @@ pub async fn run(
     let allowed_id = initial.ids[0][0].clone();
     let denied = initial.scopes[2].clone();
     let denied_id = initial.ids[2][0].clone();
-    let probe = owner.start(phase, move |resources| {
+    let probe = owner.start(phase, OraclePhase::PeerPartitionDenial, move |resources| {
         peer_partition_denial(
             PeerPartitionProbe {
                 root: probe_root,
@@ -1069,6 +1156,7 @@ pub async fn run(
         fleet,
         &backing,
         clipped(Instant::now(), work, PHASE_SECONDS)?,
+        FreshRound::Final,
     )
     .await?;
     if final_oracle.scopes != initial.scopes || final_oracle.ids != initial.ids {
@@ -1146,6 +1234,7 @@ mod tests {
             owner.jobs.push(Job {
                 task: None,
                 resources: state,
+                observation: Arc::new(Mutex::new(Value::Null)),
                 settled: false,
             });
             panic!("controlled worker receipt failure before positive oracle close");
@@ -1178,11 +1267,13 @@ mod tests {
         owner.jobs.push(Job {
             task: None,
             resources: proven,
+            observation: Arc::new(Mutex::new(Value::Null)),
             settled: true,
         });
         owner.jobs.push(Job {
             task: None,
             resources: poison,
+            observation: Arc::new(Mutex::new(Value::Null)),
             settled: true,
         });
         drop(owner);

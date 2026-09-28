@@ -25,3 +25,10 @@ pub mod scenario;
     any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))
 ))]
 pub mod cold_retirement;
+
+#[cfg(all(
+    feature = "local-oidc-fixture",
+    debug_assertions,
+    any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))
+))]
+pub mod object_store_projection;
