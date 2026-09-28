@@ -1142,7 +1142,7 @@ async fn actual_compact_captured_delta_preserves_new_unrelated_body_and_full_con
 
 #[tokio::test]
 #[ignore = "requires actual owned TiDB, MOUNT_RS_TIDB_URL and MOUNT_RS_PROFILE_IO=1; run serial"]
-async fn actual_compact_selected_load_uses_one_joined_query_and_retains_read_transaction() {
+async fn actual_compact_selected_load_uses_one_autocommit_joined_query() {
     use mount_rs_core::diagnostics::storage;
     assert!(
         storage::enabled(),
@@ -1184,10 +1184,20 @@ async fn actual_compact_selected_load_uses_one_joined_query_and_retains_read_tra
         !selects[0].contains("FOR UPDATE"),
         "selected read remains nonlocking"
     );
+    assert!(
+        queries.iter().all(|sql| {
+            !sql.starts_with("SET ")
+                && !sql.starts_with("START TRANSACTION")
+                && !sql.eq_ignore_ascii_case("BEGIN")
+                && !sql.eq_ignore_ascii_case("COMMIT")
+                && !sql.eq_ignore_ascii_case("ROLLBACK")
+        }),
+        "selected read must send no transaction or session control SQL: {queries:?}"
+    );
     for (name, calls) in [
         ("tidb.pool.checkout", 1),
-        ("tidb.tx.begin.compact_read", 1),
-        ("tidb.tx.rollback", 1),
+        ("tidb.tx.begin.compact_read", 0),
+        ("tidb.tx.rollback", 0),
         ("tidb.sql.inode_read", 1),
         ("tidb.sql.metadata_read", 0),
         ("tidb.tx.commit", 0),
@@ -1203,4 +1213,189 @@ async fn actual_compact_selected_load_uses_one_joined_query_and_retains_read_tra
         assert_eq!(row.cancelled, 0, "{name}");
     }
     assert_eq!(delta.in_flight, 0);
+}
+
+#[tokio::test]
+#[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL; run serial"]
+async fn actual_compact_selected_load_reuses_one_session_after_drop_and_cancellation() {
+    use mount_rs_tidb::{TidbPoolContext, TidbStorageOptions};
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    const BOUND: Duration = Duration::from_secs(10);
+    let f = fixture(true).await;
+    let inode = create(&f, "session-reuse").await;
+    let original = f.store.load_compact_inode(f.backing, inode).await.unwrap();
+    let proxy = compact_proxy::Proxy::new(&f.url).await;
+
+    // Trace starts before the first connection. A cap of one and exactly one
+    // verified session callback pair distinguish warm reuse from reconnects.
+    proxy.begin();
+    let context = TidbPoolContext::new(&proxy.url, 1).unwrap();
+    let reader = context
+        .metadata(TidbStorageOptions::new(&f.key))
+        .await
+        .unwrap();
+    let warm_first = timeout(BOUND, reader.load_compact_inode(f.backing, inode)).await;
+    let warm_second = timeout(BOUND, reader.load_compact_inode(f.backing, inode)).await;
+    let (warm_queries, _) = proxy.end();
+
+    // The independent writer advances the physical identity. Rejecting an
+    // update with the previous identity drops an already-started, tracked
+    // transaction; the cap-one checkout must wait for recycler rollback.
+    let mut updated_node = original.guard.node.clone();
+    updated_node.stats.mtime_ms += 1;
+    let updated = f
+        .store
+        .publish_compact_inode(
+            f.backing,
+            inode,
+            original.generation,
+            original.guard.identity,
+            updated_node,
+        )
+        .await
+        .unwrap();
+
+    // Capture the future independent structural publication before creating
+    // any deliberately interrupted work. It changes both authority generation
+    // and the selected guard's contents, so stale snapshots cannot pass.
+    let base = f.store.load_compact_snapshot(f.backing).await.unwrap();
+    let mut fresh_namespace = base.namespace().unwrap();
+    fresh_namespace
+        .nodes
+        .get_mut(&inode)
+        .unwrap()
+        .stats
+        .mtime_ms += 13;
+    add_file(&mut fresh_namespace, "after-cancel");
+    let fresh_delta =
+        CompactStructuralDelta::capture(&base, &fresh_namespace, StructuralScope::Full).unwrap();
+
+    proxy.begin();
+    let rejected = timeout(
+        BOUND,
+        reader.publish_compact_inode(
+            f.backing,
+            inode,
+            updated.generation,
+            original.guard.identity,
+            original.guard.node.clone(),
+        ),
+    )
+    .await;
+    let after_drop = timeout(BOUND, reader.load_compact_inode(f.backing, inode)).await;
+    let (drop_queries, _) = proxy.end();
+
+    proxy.begin();
+    proxy.trace.pause_guards.store(true, Ordering::SeqCst);
+    let interrupted_reader = reader.clone();
+    let backing = f.backing;
+    let reading =
+        tokio::spawn(async move { interrupted_reader.load_compact_inode(backing, inode).await });
+    // Existing pause_guards holds the prepared EXECUTE before forwarding it
+    // to TiDB. Awaiting the abort and then resuming settles this exact boundary.
+    let reached = timeout(BOUND, proxy.trace.reached.notified()).await;
+    reading.abort();
+    let canceled = reading.await;
+    proxy.trace.resume.notify_one();
+
+    let published = timeout(BOUND, f.store.publish_compact_structure(&fresh_delta)).await;
+    let after_cancel = timeout(BOUND, reader.load_compact_inode(f.backing, inode)).await;
+    let after_cancel_again = timeout(BOUND, reader.load_compact_inode(f.backing, inode)).await;
+    let (cancel_queries, _) = proxy.end();
+
+    // Attempt every shutdown before semantic assertions. Store close releases
+    // its lifecycle; the shared context owns disconnect. Proxy shutdown drains
+    // relay tasks and drops their socket halves before its listener completes.
+    let reader_closed = timeout(BOUND, reader.close()).await;
+    let context_closed = timeout(BOUND, context.close()).await;
+    let fixture_closed = timeout(BOUND, f.store.close()).await;
+    let proxy_closed = timeout(BOUND, proxy.shutdown()).await;
+
+    reader_closed.expect("reader close completed").unwrap();
+    context_closed
+        .expect("shared context disconnect completed")
+        .unwrap();
+    fixture_closed
+        .expect("independent fixture disconnect completed")
+        .unwrap();
+    proxy_closed.expect("proxy listener and relays settled");
+
+    let joined = |sql: &String| {
+        sql.starts_with("SELECT m.revision,m.write_mode,m.backing_id,m.owner,")
+            && sql.contains(" LEFT JOIN mount_rs_tidb_compact_guards AS g ")
+    };
+    let session_sets = |queries: &[String]| {
+        queries
+            .iter()
+            .filter(|sql| sql.as_str() == "SET SESSION autocommit=1")
+            .count()
+    };
+    let session_checks = |queries: &[String]| {
+        queries
+            .iter()
+            .filter(|sql| sql.as_str() == "SELECT @@SESSION.autocommit")
+            .count()
+    };
+    assert_eq!(session_sets(&warm_queries), 1);
+    assert_eq!(session_checks(&warm_queries), 1);
+    assert_eq!(warm_queries.iter().filter(|sql| joined(sql)).count(), 2);
+    for loaded in [warm_first, warm_second] {
+        let loaded = loaded.expect("warm cap-one checkout completed").unwrap();
+        assert_eq!(loaded.generation, original.generation);
+        assert_eq!(loaded.guard, original.guard);
+    }
+
+    assert!(
+        rejected
+            .expect("stale selected update completed")
+            .unwrap_err()
+            .is(ErrorCode::Eagain)
+    );
+    let after_drop = after_drop
+        .expect("checkout after tracked transaction drop completed")
+        .unwrap();
+    assert_eq!(after_drop.generation, updated.generation);
+    assert_eq!(after_drop.guard, updated.guard);
+    let rollback = drop_queries
+        .iter()
+        .position(|sql| sql.eq_ignore_ascii_case("ROLLBACK"))
+        .expect("dropped tracked transaction was rolled back");
+    let selected = drop_queries
+        .iter()
+        .position(joined)
+        .expect("selected read followed tracked transaction cleanup");
+    assert!(rollback < selected);
+    assert_eq!(
+        session_sets(&drop_queries),
+        0,
+        "cleanup reused the configured session"
+    );
+    assert_eq!(session_checks(&drop_queries), 0);
+
+    reached.expect("selected EXECUTE reached controlled proxy pause");
+    assert!(canceled.unwrap_err().is_cancelled());
+    let publication = published
+        .expect("fresh independent structural publication completed")
+        .unwrap();
+    assert!(publication.anchor.generation > updated.generation);
+    let expected_guard = &publication.upserts[&inode];
+    assert_eq!(expected_guard.node, fresh_namespace.nodes[&inode]);
+    assert_ne!(expected_guard, &updated.guard);
+    for loaded in [after_cancel, after_cancel_again] {
+        let loaded = loaded
+            .expect("selected read recovered without cap-one starvation")
+            .unwrap();
+        assert_eq!(loaded.generation, publication.anchor.generation);
+        assert_eq!(&loaded.guard, expected_guard);
+    }
+    assert_eq!(cancel_queries.iter().filter(|sql| joined(sql)).count(), 3);
+    // Safe reuse or one newly verified replacement is permitted after abort.
+    // These counts do not claim a server connection ID or blanket discard.
+    assert_eq!(
+        session_sets(&cancel_queries),
+        session_checks(&cancel_queries)
+    );
+    assert!(session_sets(&cancel_queries) <= 1);
 }

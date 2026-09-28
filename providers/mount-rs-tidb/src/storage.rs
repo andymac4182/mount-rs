@@ -227,7 +227,7 @@ pub const TIDB_DIAGNOSTIC_COVERAGE: TidbDiagnosticCoverage = TidbDiagnosticCover
     metadata_open_sites: 1,
     transaction_begin_sites: 3,
     transaction_commit_sites: 1,
-    transaction_rollback_sites: 5,
+    transaction_rollback_sites: 4,
     sql_statement_sites: 57,
     operations: &[
         "tidb.pool.checkout",

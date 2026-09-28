@@ -30,6 +30,7 @@ pub struct Trace {
 pub struct Proxy {
     pub url: String,
     pub trace: Arc<Trace>,
+    stop: Arc<Notify>,
     task: JoinHandle<()>,
 }
 impl Drop for Proxy {
@@ -60,12 +61,30 @@ impl Proxy {
         url.set_port(Some(listener.local_addr().unwrap().port()))
             .unwrap();
         let trace = Arc::new(Trace::default());
+        let stop = Arc::new(Notify::new());
         let task = tokio::spawn({
             let trace = trace.clone();
+            let stop = stop.clone();
             async move {
                 let mut tasks = tokio::task::JoinSet::new();
                 loop {
                     tokio::select! {
+                        _=stop.notified()=> {
+                            tasks.abort_all();
+                            let mut failure = None;
+                            while let Some(result) = tasks.join_next().await {
+                                if let Err(error) = result
+                                    && !error.is_cancelled()
+                                    && failure.is_none()
+                                {
+                                    failure = Some(error);
+                                }
+                            }
+                            if let Some(error) = failure {
+                                panic!("controlled proxy relay failed: {error}");
+                            }
+                            break;
+                        }
                         accepted=listener.accept()=> { let (client,_)=accepted.unwrap(); let server=TcpStream::connect((host.as_str(),port)).await.unwrap(); client.set_nodelay(true).unwrap();server.set_nodelay(true).unwrap();let trace=trace.clone(); tasks.spawn(async move {relay(client,server,trace).await}); }
                         result=tasks.join_next(), if !tasks.is_empty()=> { result.unwrap().unwrap(); }
                     }
@@ -75,8 +94,16 @@ impl Proxy {
         Self {
             url: url.to_string(),
             trace,
+            stop,
             task,
         }
+    }
+    pub async fn shutdown(mut self) {
+        self.trace.resume.notify_one();
+        self.stop.notify_one();
+        (&mut self.task)
+            .await
+            .expect("controlled proxy listener and relays settled");
     }
     pub fn begin(&self) {
         self.trace.queries.lock().unwrap().clear();

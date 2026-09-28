@@ -1,7 +1,7 @@
-//! Explicit MRC5 transactions; MRC4 authority and guards remain distinct.
+//! MRC5 consistent reads and explicit publication transactions; MRC4 authority stays distinct.
 use super::*;
 use mount_rs_core::storage::{NodeData, compact::*};
-use mysql_async::{Row, Value, from_value_opt, prelude::FromValue};
+use mysql_async::{Row, Value, consts::StatusFlags, from_value_opt, prelude::FromValue};
 
 const TABLE: &str = "mount_rs_tidb_compact_guards";
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_tidb_compact_guards (
@@ -286,6 +286,15 @@ async fn write_guard(
     }
     Ok(())
 }
+fn selected_session_ready(flags: Option<StatusFlags>) -> bool {
+    flags.is_some_and(|flags| {
+        flags.contains(StatusFlags::SERVER_STATUS_AUTOCOMMIT)
+            && !flags.intersects(
+                StatusFlags::SERVER_STATUS_IN_TRANS | StatusFlags::SERVER_STATUS_IN_TRANS_READONLY,
+            )
+    })
+}
+
 async fn read_transaction(conn: &mut Conn) -> Result<Transaction<'_>> {
     // Nonlocking consistent reads share a single TiDB start_ts even when selected
     // writes commit between statements without advancing anchor generation.
@@ -498,11 +507,21 @@ impl TidbMetadataStore {
             .get_conn_observed()
             .await
             .map_err(|e| db_error("load TiDB compact inode", e))?;
-        let mut tx = read_transaction(&mut conn).await?;
+        // The private pool configures autocommit and finishes tracked dirty
+        // cleanup before checkout. Require the latest server status witness;
+        // never turn an unexpected active transaction into an implicit commit.
+        if !selected_session_ready(conn.last_ok_packet().map(|packet| packet.status_flags())) {
+            let _ = conn.disconnect().await;
+            return Err(backend_error(
+                "TiDB compact selected read requires verified autocommit outside a transaction",
+            ));
+        }
+        // One nonlocking joined SELECT reads anchor and guard at one TiDB
+        // statement snapshot. Full snapshots still require explicit RR.
         // Preserve authority-before-range-error precedence from the two-query
         // path. The decoder rejects an out-of-range inode before guard use.
         let selected = signed(inode, "compact inode").unwrap_or(0);
-        let rows: Vec<Row> = tx
+        let rows: Vec<Row> = conn
             .exec_observed(
                 StorageOperation::TidbSqlInodeRead,
                 SELECTED_JOINED_SQL,
@@ -510,11 +529,7 @@ impl TidbMetadataStore {
             )
             .await
             .map_err(|e| db_error("read TiDB compact inode", e))?;
-        let loaded = decode_joined_rows(rows.into_iter().map(Row::unwrap_raw), backing, inode)?;
-        observe_result_future(StorageOperation::TidbRollback, tx.rollback(), 0)
-            .await
-            .map_err(|e| db_error("finish TiDB compact inode", e))?;
-        Ok(loaded)
+        decode_joined_rows(rows.into_iter().map(Row::unwrap_raw), backing, inode)
     }
     pub(super) async fn compact_publish_inode(
         &self,
@@ -637,6 +652,29 @@ impl TidbMetadataStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_session_requires_autocommit_and_no_active_transaction() {
+        assert!(!selected_session_ready(None));
+        for flags in [
+            StatusFlags::empty(),
+            StatusFlags::SERVER_STATUS_IN_TRANS,
+            StatusFlags::SERVER_STATUS_IN_TRANS_READONLY,
+            StatusFlags::SERVER_STATUS_AUTOCOMMIT | StatusFlags::SERVER_STATUS_IN_TRANS,
+            StatusFlags::SERVER_STATUS_AUTOCOMMIT | StatusFlags::SERVER_STATUS_IN_TRANS_READONLY,
+            StatusFlags::SERVER_STATUS_AUTOCOMMIT
+                | StatusFlags::SERVER_STATUS_IN_TRANS
+                | StatusFlags::SERVER_STATUS_IN_TRANS_READONLY,
+        ] {
+            assert!(!selected_session_ready(Some(flags)), "{flags:?}");
+        }
+        assert!(selected_session_ready(Some(
+            StatusFlags::SERVER_STATUS_AUTOCOMMIT
+        )));
+        assert!(selected_session_ready(Some(
+            StatusFlags::SERVER_STATUS_AUTOCOMMIT | StatusFlags::SERVER_STATUS_NO_INDEX_USED
+        )));
+    }
 
     fn joined_fixture() -> (CompactAnchor, CompactGuard, Vec<Option<Value>>) {
         use mount_rs_core::chunking::{Chunker, FixedSizeChunker};
