@@ -734,7 +734,7 @@ async fn actual_registry_drain_precedes_context_close_even_when_close_waiter_is_
     let _ = admission.await;
     let keeper = Arc::new(RemoteRuntimeKeeper::default());
     let owned = keeper.reserve().unwrap();
-    owned.0.install_context(f.context.clone());
+    owned.0.install_context(f.context.clone()).unwrap();
     owned.0.install_inspector_owner_for_test(f.registry.clone());
     let lifecycle = owned.0.clone();
     let close = tokio::spawn(async move { lifecycle.close().await });
@@ -777,7 +777,7 @@ async fn failed_actual_registry_drain_retains_keeper_and_blocks_context_close() 
     failed(f.registry.admit(&scope).await, ErrorCode::Eio);
     let keeper = Arc::new(RemoteRuntimeKeeper::default());
     let owned = keeper.reserve().unwrap();
-    owned.0.install_context(f.context.clone());
+    owned.0.install_context(f.context.clone()).unwrap();
     owned.0.install_inspector_owner_for_test(f.registry.clone());
     let registry = Arc::downgrade(&f.registry);
     let context = f.context.clone();
@@ -954,7 +954,7 @@ async fn first_close_request_seals_holders_before_held_failed_factory_cleanup() 
     let factory = SdkRuntimeFactory::new(Arc::new(RefusedConstructor(resource.clone())));
     let keeper = Arc::new(RemoteRuntimeKeeper::default());
     let owned = keeper.reserve().unwrap();
-    owned.0.install_context(f.context.clone());
+    owned.0.install_context(f.context.clone()).unwrap();
     owned.0.install_inspector_owner_for_test(f.registry.clone());
     owned.0.retain_factory(factory.clone());
     let opening = tokio::spawn({

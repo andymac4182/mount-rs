@@ -2102,6 +2102,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "futures",
  "http-body",
  "mount-rs-core",
  "mount-rs-object-store-blocks",

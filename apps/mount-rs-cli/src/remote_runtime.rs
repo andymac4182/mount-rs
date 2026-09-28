@@ -55,6 +55,24 @@ impl ConstructionResource for ServerCache {
 
 type CloseFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 
+/// Constructor cleanup is independent of backing/SQL close authority.
+#[async_trait]
+trait ClientBuildOwner: Send + Sync {
+    fn seal_admission(&self) -> Result<()>;
+    async fn close(&self) -> Result<()>;
+}
+
+#[async_trait]
+impl ClientBuildOwner for StorageContext {
+    fn seal_admission(&self) -> Result<()> {
+        self.seal_client_builds()
+    }
+
+    async fn close(&self) -> Result<()> {
+        self.close_client_builds().await
+    }
+}
+
 fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
     value
         .lock()
@@ -100,6 +118,7 @@ enum ClosePhase {
     Listeners,
     Pool,
     Factories,
+    ClientBuilds,
     Inspectors,
     Context,
     Cache,
@@ -114,6 +133,7 @@ struct OwnedResources {
     pool: Option<RuntimePool>,
     factories: Vec<Arc<SdkRuntimeFactory>>,
     context: Option<StorageContext>,
+    client_builds: Option<Arc<dyn ClientBuildOwner>>,
     inspectors: Option<Arc<dyn crate::server_cache::InspectionOwner>>,
     cache: Option<Arc<dyn ConstructionResource>>,
     phase: ClosePhase,
@@ -146,8 +166,30 @@ impl RemoteRuntimeLifecycle {
     pub(crate) fn listener_count(&self) -> usize {
         lock(&self.owned).listeners.len()
     }
-    pub(crate) fn install_context(&self, context: StorageContext) {
-        lock(&self.owned).context = Some(context);
+    pub(crate) fn install_context(&self, context: StorageContext) -> Result<()> {
+        let mut owned = lock(&self.owned);
+        let rejection = if self.closing.load(Ordering::Acquire) {
+            Some(ErrorCode::Estale)
+        } else if owned.context.is_some() {
+            Some(ErrorCode::Ebusy)
+        } else {
+            None
+        };
+        if let Some(code) = rejection {
+            let error = FsError::new(code);
+            // A rejected handoff cannot replace the existing owner or publish
+            // behind its drain. Seal immediately, then quarantine the unproven
+            // incoming context for process lifetime; SQL close is unauthorized.
+            if let Err(seal_error) = context.seal_client_builds() {
+                owned.failure.get_or_insert(seal_error);
+            }
+            owned.failure.get_or_insert(error.clone());
+            std::mem::forget(context);
+            return Err(error);
+        }
+        owned.client_builds = Some(Arc::new(context.clone()));
+        owned.context = Some(context);
+        Ok(())
     }
 
     pub(crate) fn install_cache(&self, cache: Arc<ServerCache>) {
@@ -198,13 +240,22 @@ impl RemoteRuntimeLifecycle {
     }
 
     fn request_close(self: &Arc<Self>) {
-        if self.closing.swap(true, Ordering::AcqRel) {
-            return;
+        let (client_builds, inspectors) = {
+            // Serialize the first close snapshot with context installation.
+            let owned = lock(&self.owned);
+            if self.closing.swap(true, Ordering::AcqRel) {
+                return;
+            }
+            (owned.client_builds.clone(), owned.inspectors.clone())
+        };
+        if let Some(client_builds) = client_builds
+            && let Err(error) = client_builds.seal_admission()
+        {
+            lock(&self.owned).failure.get_or_insert(error);
         }
         // Stop fresh holder inspections on the first shutdown request, before
         // listener/pool/factory drains can await or fail. Invoke the separate
         // owner outside the lifecycle mutex; retain actual joins for Inspectors.
-        let inspectors = { lock(&self.owned).inspectors.clone() };
         if let Some(inspectors) = inspectors
             && let Err(error) = inspectors.seal_admission()
         {
@@ -277,6 +328,7 @@ impl RemoteRuntimeLifecycle {
                         owned.phase = match owned.phase {
                             ClosePhase::Pool => ClosePhase::Factories,
                             ClosePhase::Factories => ClosePhase::Factories,
+                            ClosePhase::ClientBuilds => ClosePhase::Inspectors,
                             ClosePhase::Inspectors => ClosePhase::Context,
                             ClosePhase::Context => ClosePhase::Cache,
                             ClosePhase::Cache => ClosePhase::Complete,
@@ -297,6 +349,15 @@ impl RemoteRuntimeLifecycle {
                     if let Some(factory) = owned.factories.get(owned.next_factory).cloned() {
                         owned.next_factory += 1;
                         owned.current = Some(Box::pin(async move { factory.close().await }));
+                    } else {
+                        owned.phase = ClosePhase::ClientBuilds;
+                    }
+                }
+                ClosePhase::ClientBuilds => {
+                    // Pure constructor joins must run even after pool/factory
+                    // failure. Preserve the authority barrier in Inspectors.
+                    if let Some(client_builds) = owned.client_builds.clone() {
+                        owned.current = Some(Box::pin(async move { client_builds.close().await }));
                     } else {
                         owned.phase = ClosePhase::Inspectors;
                     }

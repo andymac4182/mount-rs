@@ -142,7 +142,7 @@ async fn lazy_prepared_cli_plans_preserve_persistent_bytes_and_backing_through_c
     let keeper = Arc::new(RemoteRuntimeKeeper::default());
     let scope = keeper.reserve().unwrap();
     let context = StorageContext::new(2).unwrap();
-    scope.0.install_context(context.clone());
+    scope.0.install_context(context.clone()).unwrap();
     let pool = RuntimePool::new(1).unwrap();
     scope.0.install_pool(pool.clone());
     let mut constructors = Vec::new();
@@ -274,7 +274,7 @@ async fn lazy_cancelled_close_waiter_joins_one_actual_sdk_drain_before_context_c
     let keeper = Arc::new(RemoteRuntimeKeeper::default());
     let scope = keeper.reserve().unwrap();
     let context = StorageContext::new(2).unwrap();
-    scope.0.install_context(context.clone());
+    scope.0.install_context(context.clone()).unwrap();
     let pool = RuntimePool::new(1).unwrap();
     scope.0.install_pool(pool.clone());
     let factory = SdkRuntimeFactory::new(constructor(&context));
@@ -326,7 +326,7 @@ async fn lazy_dropping_serving_scope_keeps_actual_pinned_owner_until_one_drain_f
     let scope = keeper.reserve().unwrap();
     let lifecycle = scope.0.clone();
     let context = StorageContext::new(2).unwrap();
-    lifecycle.install_context(context.clone());
+    lifecycle.install_context(context.clone()).unwrap();
     let pool = RuntimePool::new(1).unwrap();
     lifecycle.install_pool(pool.clone());
     let factory = SdkRuntimeFactory::new(constructor(&context));
@@ -365,7 +365,7 @@ async fn lazy_constructor_and_cleanup_failure_retain_context_and_slot_without_re
     let keeper = Arc::new(RemoteRuntimeKeeper::default());
     let scope = keeper.reserve().unwrap();
     let context = StorageContext::new(2).unwrap();
-    scope.0.install_context(context.clone());
+    scope.0.install_context(context.clone()).unwrap();
     let pool = RuntimePool::new(1).unwrap();
     scope.0.install_pool(pool.clone());
     let factory = SdkRuntimeFactory::new(Arc::new(RefusedConstructor));
@@ -385,6 +385,279 @@ async fn lazy_constructor_and_cleanup_failure_retain_context_and_slot_without_re
     std::mem::forget(keeper);
 }
 
+// Exercise the actual CLI phase machine while withholding only its constructor
+// drain boundary. Provider tests separately hold actual blocking constructors.
+struct ClientBuildDrainSeam {
+    seals: AtomicUsize,
+    closes: AtomicUsize,
+    entered: Notify,
+    release: Notify,
+    seal_failure: bool,
+    close_failure: bool,
+}
+
+#[async_trait]
+impl ClientBuildOwner for ClientBuildDrainSeam {
+    fn seal_admission(&self) -> Result<()> {
+        self.seals.fetch_add(1, Ordering::SeqCst);
+        if self.seal_failure {
+            Err(FsError::new(ErrorCode::Eacces))
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn close(&self) -> Result<()> {
+        self.closes.fetch_add(1, Ordering::SeqCst);
+        self.entered.notify_one();
+        self.release.notified().await;
+        if self.close_failure {
+            Err(FsError::new(ErrorCode::Eio))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Default)]
+struct InspectorDrainSeam {
+    seals: AtomicUsize,
+    closes: AtomicUsize,
+}
+
+#[async_trait]
+impl ConstructionResource for InspectorDrainSeam {
+    async fn close(&self) -> Result<()> {
+        self.closes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+impl crate::server_cache::InspectionOwner for InspectorDrainSeam {
+    fn seal_admission(&self) -> Result<()> {
+        self.seals.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+async fn client_build_failure_barrier_control(
+    factory_failure: bool,
+    seal_failure: bool,
+    close_failure: bool,
+) {
+    let keeper = Arc::new(RemoteRuntimeKeeper::default());
+    let scope = keeper.reserve().unwrap();
+    let context = StorageContext::new(2).unwrap();
+    scope.0.install_context(context.clone()).unwrap();
+    let client_builds = Arc::new(ClientBuildDrainSeam {
+        seals: AtomicUsize::new(0),
+        closes: AtomicUsize::new(0),
+        entered: Notify::new(),
+        release: Notify::new(),
+        seal_failure,
+        close_failure,
+    });
+    lock(&scope.0.owned).client_builds = Some(client_builds.clone());
+    let inspectors = Arc::new(InspectorDrainSeam::default());
+    scope.0.install_inspector_owner_for_test(inspectors.clone());
+    let cache_calls = Arc::new(AtomicUsize::new(0));
+    lock(&scope.0.owned).cache = Some(Arc::new(CacheDrainSeam {
+        calls: cache_calls.clone(),
+        entered: Arc::new(Notify::new()),
+        release: None,
+        failure: None,
+        dropped: Arc::new(AtomicUsize::new(0)),
+    }));
+    let pool = RuntimePool::new(1).unwrap();
+    scope.0.install_pool(pool.clone());
+    if factory_failure {
+        let factory = SdkRuntimeFactory::new(Arc::new(RefusedConstructor));
+        scope.0.retain_factory(factory.clone());
+        let registration = pool.register(factory).unwrap();
+        assert!(matches!(
+            bounded(registration.acquire()).await,
+            Err(error) if error.code == ErrorCode::Enospc
+        ));
+    }
+    let listener_polls = Arc::new(AtomicUsize::new(0));
+    lock(&scope.0.owned).listeners.push(Some(Box::pin({
+        let client_builds = client_builds.clone();
+        let listener_polls = listener_polls.clone();
+        async move {
+            assert_eq!(client_builds.seals.load(Ordering::SeqCst), 1);
+            listener_polls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    })));
+
+    scope.0.request_close();
+    // No runtime yield has happened: sealing precedes even the first listener
+    // poll, including when the seal itself reports a sticky failure.
+    assert_eq!(client_builds.seals.load(Ordering::SeqCst), 1);
+    assert_eq!(inspectors.seals.load(Ordering::SeqCst), 1);
+    assert_eq!(listener_polls.load(Ordering::SeqCst), 0);
+    bounded(client_builds.entered.notified()).await;
+    assert_eq!(listener_polls.load(Ordering::SeqCst), 1);
+    assert_eq!(lock(&scope.0.owned).phase, ClosePhase::ClientBuilds);
+    assert!(lock(&scope.0.owned).current.is_some());
+    if factory_failure {
+        assert_eq!(pool.snapshot().quarantined, 1);
+        assert!(lock(&scope.0.owned).failure.is_some());
+    }
+    // Abandon one actual close waiter while the lifecycle owns the withheld
+    // drain. Its replacement must await the same future and sticky result.
+    let mut waiter = Box::pin(scope.0.close());
+    std::future::poll_fn(|cx| {
+        assert!(waiter.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    drop(waiter);
+    assert!(scope.0.completion.borrow().is_none());
+    assert_eq!(inspectors.closes.load(Ordering::SeqCst), 0);
+    assert_eq!(cache_calls.load(Ordering::SeqCst), 0);
+    assert!(context_usable(&context).await);
+
+    client_builds.release.notify_one();
+    let first = bounded(scope.0.close()).await.unwrap_err();
+    let repeated = bounded(scope.0.close()).await.unwrap_err();
+    assert_eq!(first.code, repeated.code);
+    if seal_failure {
+        assert_eq!(first.code, ErrorCode::Eacces);
+    } else if close_failure {
+        assert_eq!(first.code, ErrorCode::Eio);
+    }
+    assert_eq!(client_builds.seals.load(Ordering::SeqCst), 1);
+    assert_eq!(client_builds.closes.load(Ordering::SeqCst), 1);
+    assert_eq!(inspectors.closes.load(Ordering::SeqCst), 0);
+    assert_eq!(cache_calls.load(Ordering::SeqCst), 0);
+    assert!(context_usable(&context).await);
+    assert!(matches!(keeper.reserve(), Err(error) if error.code == ErrorCode::Ebusy));
+    // Failed authority still owns its context and cache until process exit.
+    std::mem::forget(keeper);
+}
+
+#[tokio::test]
+async fn lazy_client_builds_drain_after_actual_factory_failure_before_authority_barrier() {
+    client_build_failure_barrier_control(true, false, false).await;
+}
+
+#[tokio::test]
+async fn lazy_client_builds_seal_failure_still_drains_before_authority_barrier() {
+    client_build_failure_barrier_control(false, true, false).await;
+}
+
+#[tokio::test]
+async fn lazy_client_builds_drain_failure_blocks_inspector_context_and_cache() {
+    client_build_failure_barrier_control(false, false, true).await;
+}
+
+async fn assert_client_build_admission_sealed(context: &StorageContext) {
+    struct AdmissionObserver(AtomicUsize);
+    impl ConstructionObserver for AdmissionObserver {
+        fn retain(&self, _resource: Arc<dyn ConstructionResource>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let observer = AdmissionObserver(AtomicUsize::new(0));
+    let result = bounded(context.prepare_rustfs_owned_prefix_probe(
+        mount_rs_rustfs::RustFsConfig {
+            endpoint: "http://127.0.0.1:1".into(),
+            bucket: "unit-bucket".into(),
+            access_key_id: "unit-key".into(),
+            secret_access_key: "unit-secret".into(),
+            region: "us-east-1".into(),
+        },
+        "rejected-context/prefix".into(),
+        Some(&observer),
+    ))
+    .await;
+    assert!(matches!(result, Err(error) if error.code == ErrorCode::Estale));
+    assert_eq!(observer.0.load(Ordering::SeqCst), 0);
+    assert!(
+        context_usable(context).await,
+        "constructor seal closed SQL authority"
+    );
+}
+
+#[tokio::test]
+async fn lazy_context_install_during_close_is_sealed_rejected_and_never_published() {
+    let keeper = Arc::new(RemoteRuntimeKeeper::default());
+    let scope = keeper.reserve().unwrap();
+    let context = StorageContext::new(2).unwrap();
+    scope.0.install_context(context.clone()).unwrap();
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    lock(&scope.0.owned).listeners.push(Some(Box::pin({
+        let entered = entered.clone();
+        let release = release.clone();
+        async move {
+            entered.notify_one();
+            release.notified().await;
+            Ok(())
+        }
+    })));
+    scope.0.request_close();
+    let rejected = StorageContext::new(2).unwrap();
+    assert!(matches!(
+        scope.0.install_context(rejected.clone()),
+        Err(error) if error.code == ErrorCode::Estale
+    ));
+    assert_client_build_admission_sealed(&rejected).await;
+    bounded(entered.notified()).await;
+    assert!(context_usable(&context).await);
+    release.notify_one();
+    assert!(matches!(
+        bounded(scope.0.close()).await,
+        Err(error) if error.code == ErrorCode::Estale
+    ));
+    assert!(context_usable(&context).await);
+    assert!(context_usable(&rejected).await);
+    assert!(!keeper.is_empty());
+    std::mem::forget(keeper);
+}
+
+#[tokio::test]
+async fn lazy_duplicate_context_install_seals_rejected_owner_without_replacement() {
+    let keeper = Arc::new(RemoteRuntimeKeeper::default());
+    let scope = keeper.reserve().unwrap();
+    let context = StorageContext::new(2).unwrap();
+    scope.0.install_context(context.clone()).unwrap();
+    let rejected = StorageContext::new(2).unwrap();
+    assert!(matches!(
+        scope.0.install_context(rejected.clone()),
+        Err(error) if error.code == ErrorCode::Ebusy
+    ));
+    assert_client_build_admission_sealed(&rejected).await;
+    assert!(matches!(
+        bounded(scope.0.close()).await,
+        Err(error) if error.code == ErrorCode::Ebusy
+    ));
+    assert!(context_usable(&context).await);
+    assert!(context_usable(&rejected).await);
+    assert!(!keeper.is_empty());
+    std::mem::forget(keeper);
+}
+
+#[tokio::test]
+async fn lazy_context_install_after_completed_close_returns_its_own_rejection() {
+    let keeper = Arc::new(RemoteRuntimeKeeper::default());
+    let scope = keeper.reserve().unwrap();
+    bounded(scope.0.close()).await.unwrap();
+    assert!(keeper.is_empty());
+    let rejected = StorageContext::new(2).unwrap();
+    assert!(matches!(
+        scope.0.install_context(rejected.clone()),
+        Err(error) if error.code == ErrorCode::Estale
+    ));
+    assert_client_build_admission_sealed(&rejected).await;
+    assert!(lock(&scope.0.owned).context.is_none());
+    assert!(lock(&scope.0.owned).client_builds.is_none());
+    // The earlier ACK covers only its original resources. The new handoff has
+    // its own Err and the rejected context is quarantined, never drained here.
+    assert!(scope.0.completion.borrow().as_ref().unwrap().is_ok());
+}
+
 struct PendingOwner(Arc<AtomicUsize>);
 impl Drop for PendingOwner {
     fn drop(&mut self) {
@@ -397,7 +670,7 @@ async fn lazy_aborted_worker_retains_both_installed_consuming_futures_and_termin
     let keeper = Arc::new(RemoteRuntimeKeeper::default());
     let scope = keeper.reserve().unwrap();
     let context = StorageContext::new(2).unwrap();
-    scope.0.install_context(context.clone());
+    scope.0.install_context(context.clone()).unwrap();
     let dropped = Arc::new(AtomicUsize::new(0));
     let entered = [Arc::new(Notify::new()), Arc::new(Notify::new())];
     let mut owners = Vec::new();
@@ -473,7 +746,7 @@ async fn lazy_actual_server_cache_unacknowledged_io_keeps_directory_and_keeper()
     let keeper = Arc::new(RemoteRuntimeKeeper::default());
     let scope = keeper.reserve().unwrap();
     let context = StorageContext::new(2).unwrap();
-    scope.0.install_context(context.clone());
+    scope.0.install_context(context.clone()).unwrap();
     scope.0.install_cache(actual);
     let result = bounded(scope.0.close()).await;
     drop(ticket);
@@ -532,7 +805,7 @@ async fn lazy_cache_cleanup_seam_failure_retains_owner_and_keeper_without_retry(
     let keeper = Arc::new(RemoteRuntimeKeeper::default());
     let scope = keeper.reserve().unwrap();
     let context = StorageContext::new(2).unwrap();
-    scope.0.install_context(context.clone());
+    scope.0.install_context(context.clone()).unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let dropped = Arc::new(AtomicUsize::new(0));
     let cache = Arc::new(CacheDrainSeam {
@@ -568,7 +841,7 @@ async fn lazy_cancelled_cache_cleanup_seam_waiter_joins_one_owned_drain() {
     let keeper = Arc::new(RemoteRuntimeKeeper::default());
     let scope = keeper.reserve().unwrap();
     let context = StorageContext::new(2).unwrap();
-    scope.0.install_context(context.clone());
+    scope.0.install_context(context.clone()).unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let dropped = Arc::new(AtomicUsize::new(0));
     let entered = Arc::new(Notify::new());

@@ -392,7 +392,9 @@ async fn serve_resources(
             sink,
         )
         .await?;
-    lifecycle.install_context(context.clone());
+    lifecycle
+        .install_context(context.clone())
+        .map_err(CliError::from)?;
     let catalog = Arc::new(
         startup
             .observe(

@@ -32,7 +32,9 @@ use mount_rs_foundationdb::{
 use mount_rs_memory::{MemoryBlockStore, MemoryMetadataStore};
 use mount_rs_pglite::{PgliteBlockStore, PgliteMetadataStore, PgliteStorageOptions};
 use mount_rs_r2::{R2BlockStore, R2Config};
-use mount_rs_rustfs::{RustFsBlockStore, RustFsConfig};
+use mount_rs_rustfs::{
+    OwnedPrefixProbe, RustFsBlockStore, RustFsConfig, RustFsConstructionContext,
+};
 use mount_rs_slatedb::{SlateDbMetadataStore, rustfs_object_store};
 use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
 use mount_rs_tidb::{TidbBlockStore, TidbMetadataStore, TidbPoolContext, TidbStorageOptions};
@@ -58,6 +60,7 @@ use crate::stores::{ErasedBlockStore, ErasedMetadataStore};
 pub struct StorageContext {
     inner: Arc<std::sync::Mutex<ContextState>>,
     max_tidb_connections: usize,
+    rustfs: RustFsConstructionContext,
 }
 #[derive(Default)]
 struct ContextState {
@@ -80,6 +83,7 @@ impl StorageContext {
         Ok(Self {
             inner: Arc::new(std::sync::Mutex::new(ContextState::default())),
             max_tidb_connections,
+            rustfs: RustFsConstructionContext::new(8)?,
         })
     }
     fn require_open(&self) -> Result<()> {
@@ -164,43 +168,94 @@ impl StorageContext {
         inspect_compact_layout_opened(opened).await
     }
 
+    /// Reject new pure RustFS client builds without closing storage authority.
+    pub fn seal_client_builds(&self) -> Result<()> {
+        self.rustfs.seal_admission()
+    }
+
+    /// Seal and join retained pure RustFS client builds.
+    ///
+    /// This does not close TiDB pools or acknowledge cleanup of an abandoned
+    /// outer provider operation. Its construction journal remains authoritative.
+    pub async fn close_client_builds(&self) -> Result<()> {
+        self.rustfs.close().await
+    }
+
+    /// Prepare an owned prefix probe without issuing its LIST request.
+    ///
+    /// The context must remain open for admission. The caller separately awaits
+    /// the returned probe's observation and retains its outer operation owner.
+    pub async fn prepare_rustfs_owned_prefix_probe(
+        &self,
+        config: RustFsConfig,
+        prefix: String,
+        observer: Option<&dyn ConstructionObserver>,
+    ) -> Result<OwnedPrefixProbe> {
+        self.require_open()?;
+        self.rustfs
+            .owned_prefix_probe(config, prefix, observer)
+            .await
+    }
+
     pub async fn close(&self) -> Result<()> {
+        let mut error = self.seal_client_builds().err();
         let contexts: Vec<_> = {
-            let mut state = self
-                .inner
-                .lock()
-                .map_err(|_| backend_error("storage context lock poisoned"))?;
+            let mut state = match self.inner.lock() {
+                Ok(state) => state,
+                Err(poisoned) => {
+                    error.get_or_insert_with(|| backend_error("storage context lock poisoned"));
+                    poisoned.into_inner()
+                }
+            };
             state.closed = true;
             state.tidb.values().cloned().collect()
         };
-        let mut closing: Vec<_> = contexts
+        let closing = contexts
             .iter()
             .map(|context| Some(Box::pin(context.close())))
             .collect();
-        let mut error = None;
-        std::future::poll_fn(|cx| {
-            // Every close must be polled before yielding: each provider and
-            // mysql_async pool then enters terminal closure, even if this
-            // caller is cancelled while a checked-out connection drains.
-            // Retaining contexts in the map lets a later close resume waiting.
-            for close in &mut closing {
-                if let Some(future) = close
-                    && let std::task::Poll::Ready(result) = future.as_mut().poll(cx)
-                {
-                    if let Err(e) = result {
-                        error.get_or_insert(e);
-                    }
-                    *close = None;
-                }
-            }
-            if closing.iter().any(Option::is_some) {
-                std::task::Poll::Pending
-            } else {
-                std::task::Poll::Ready(error.take().map_or(Ok(()), Err))
-            }
-        })
-        .await
+        close_context_resources(self.close_client_builds(), closing, error).await
     }
+}
+
+async fn close_context_resources<C, P>(
+    construction: C,
+    mut closing: Vec<Option<std::pin::Pin<Box<P>>>>,
+    mut error: Option<mount_rs_core::FsError>,
+) -> Result<()>
+where
+    C: std::future::Future<Output = Result<()>>,
+    P: std::future::Future<Output = Result<()>>,
+{
+    let mut construction = Some(Box::pin(construction));
+    std::future::poll_fn(|cx| {
+        // Poll both resource families before yielding, even after poison or
+        // another close failure. Retained owners let a later close resume.
+        if let Some(future) = &mut construction
+            && let std::task::Poll::Ready(result) = future.as_mut().poll(cx)
+        {
+            if let Err(e) = result {
+                error.get_or_insert(e);
+            }
+            construction = None;
+        }
+        for close in &mut closing {
+            if let Some(future) = close
+                && let std::task::Poll::Ready(result) = future.as_mut().poll(cx)
+            {
+                if let Err(e) = result {
+                    error.get_or_insert(e);
+                }
+                *close = None;
+            }
+        }
+        if construction.is_some() || closing.iter().any(Option::is_some) {
+            std::task::Poll::Pending
+        } else {
+            std::task::Poll::Ready(error.take().map_or(Ok(()), Err))
+        }
+    })
+    .await
 }
 
 #[derive(Clone)]
@@ -880,7 +935,14 @@ async fn open_blocks(
                 access_key_id: access_key_id.clone(),
                 secret_access_key: secret_access_key.clone(),
             };
-            let store = RustFsBlockStore::from_config(&config, prefix.clone(), *durable)?;
+            let store = if let Some(context) = context {
+                context
+                    .rustfs
+                    .block_store(config, prefix.clone(), *durable, observer)
+                    .await?
+            } else {
+                RustFsBlockStore::from_config(&config, prefix.clone(), *durable)?
+            };
             Ok((Arc::new(store), Vec::new()))
         }
         StoreConfig::AwsS3 {
@@ -1849,5 +1911,492 @@ mod context_tests {
         assert!(context.require_open().is_err());
         assert!(independent.require_open().is_ok());
         independent.close().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod rustfs_construction_async_tests {
+    use std::sync::{Arc, Mutex};
+
+    use mount_rs_core::ErrorCode;
+    use mount_rs_core::construction::{ConstructionObserver, ConstructionResource};
+    use mount_rs_rustfs::RustFsConfig;
+
+    use super::{StorageContext, StoreConfig, open_blocks};
+
+    #[derive(Default)]
+    struct Journal(Mutex<Vec<Arc<dyn ConstructionResource>>>);
+
+    impl ConstructionObserver for Journal {
+        fn retain(&self, resource: Arc<dyn ConstructionResource>) {
+            self.0.lock().unwrap().push(resource);
+        }
+    }
+
+    fn config(endpoint: String, durable: bool) -> StoreConfig {
+        StoreConfig::RustFs {
+            endpoint,
+            bucket: "unit-bucket".into(),
+            region: "us-east-1".into(),
+            prefix: "unit-prefix/nested".into(),
+            access_key_id: "unit-key".into(),
+            secret_access_key: "unit-secret".into(),
+            durable,
+        }
+    }
+
+    fn probe_config(endpoint: String) -> RustFsConfig {
+        RustFsConfig {
+            endpoint,
+            bucket: "unit-bucket".into(),
+            region: "us-east-1".into(),
+            access_key_id: "unit-key".into(),
+            secret_access_key: "unit-secret".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn sealed_client_builds_reject_before_constructor_and_leave_context_usable() {
+        let context = StorageContext::new(1).unwrap();
+        let journal = Journal::default();
+        let sql = "mysql://unused@127.0.0.1:1/unused";
+        context.tidb(sql).unwrap();
+        context.seal_client_builds().unwrap();
+        // Invalid configuration would produce its original validation error if
+        // the constructor ran instead of rejecting sealed admission.
+        let result = open_blocks(
+            &config("invalid".into(), false),
+            Some(&context),
+            Some(&journal),
+        )
+        .await;
+        assert_eq!(result.err().unwrap().code, ErrorCode::Estale);
+        assert!(journal.0.lock().unwrap().is_empty());
+        context.close_client_builds().await.unwrap();
+        context.require_open().unwrap();
+        open_blocks(&StoreConfig::Memory, Some(&context), None)
+            .await
+            .unwrap();
+        context.tidb(sql).unwrap();
+        assert_eq!(context.inner.lock().unwrap().tidb.len(), 1);
+        context.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn context_rustfs_preserves_durability_and_retains_constructor_tickets_without_io() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let context = StorageContext::new(1).unwrap();
+        let journal = Journal::default();
+        for durable in [false, true] {
+            let (store, resources) = open_blocks(
+                &config(endpoint.clone(), durable),
+                Some(&context),
+                Some(&journal),
+            )
+            .await
+            .unwrap();
+            assert_eq!(store.durable(), durable);
+            assert!(resources.is_empty());
+            drop(store);
+        }
+        let tickets = journal.0.lock().unwrap().clone();
+        assert_eq!(tickets.len(), 2);
+        for ticket in tickets {
+            ticket.close().await.unwrap();
+        }
+        context.close().await.unwrap();
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[tokio::test]
+    async fn context_rustfs_preserves_invalid_configuration_errors_and_observer_ownership() {
+        let context = StorageContext::new(1).unwrap();
+        let journal = Journal::default();
+        for invalid_field in 0..5 {
+            let mut options = config("http://127.0.0.1:1".into(), false);
+            let StoreConfig::RustFs {
+                endpoint,
+                bucket,
+                region,
+                access_key_id,
+                secret_access_key,
+                ..
+            } = &mut options
+            else {
+                unreachable!()
+            };
+            match invalid_field {
+                0 => *endpoint = "invalid".into(),
+                1 => bucket.clear(),
+                2 => region.clear(),
+                3 => access_key_id.clear(),
+                _ => secret_access_key.clear(),
+            }
+            let original = super::RustFsBlockStore::from_config(
+                &RustFsConfig {
+                    endpoint: endpoint.clone(),
+                    bucket: bucket.clone(),
+                    region: region.clone(),
+                    access_key_id: access_key_id.clone(),
+                    secret_access_key: secret_access_key.clone(),
+                },
+                "unit-prefix/nested",
+                false,
+            )
+            .err()
+            .expect("invalid configuration must reject the original constructor");
+            let result = open_blocks(&options, Some(&context), Some(&journal)).await;
+            let retained = result.err().unwrap();
+            assert_eq!(retained.code, original.code);
+            assert_eq!(retained.to_string(), original.to_string());
+        }
+        let tickets = journal.0.lock().unwrap().clone();
+        assert_eq!(tickets.len(), 5);
+        for ticket in tickets {
+            ticket.close().await.unwrap();
+        }
+        context.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn owned_prefix_preparation_rejects_invalid_sealed_and_closed_without_list() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let context = StorageContext::new(1).unwrap();
+        let journal = Journal::default();
+        let invalid = context
+            .prepare_rustfs_owned_prefix_probe(
+                probe_config(endpoint.clone()),
+                "../invalid".into(),
+                Some(&journal),
+            )
+            .await;
+        assert_eq!(invalid.err().unwrap().code, ErrorCode::Einval);
+        assert!(journal.0.lock().unwrap().is_empty());
+        let probe = context
+            .prepare_rustfs_owned_prefix_probe(
+                probe_config(endpoint.clone()),
+                "owned/nested".into(),
+                Some(&journal),
+            )
+            .await
+            .unwrap();
+        assert_eq!(journal.0.lock().unwrap().len(), 1);
+        drop(probe);
+        context.seal_client_builds().unwrap();
+        let sealed = context
+            .prepare_rustfs_owned_prefix_probe(
+                probe_config(endpoint.clone()),
+                "owned/nested".into(),
+                Some(&journal),
+            )
+            .await;
+        assert_eq!(sealed.err().unwrap().code, ErrorCode::Estale);
+        context.close().await.unwrap();
+        let closed = context
+            .prepare_rustfs_owned_prefix_probe(
+                probe_config(endpoint),
+                "owned/nested".into(),
+                Some(&journal),
+            )
+            .await;
+        assert_eq!(closed.err().unwrap().code, ErrorCode::Estale);
+        assert_eq!(journal.0.lock().unwrap().len(), 1);
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn canceled_public_rustfs_admission_keeps_outer_journal_uncertain_after_client_drain() {
+        use std::future::{Future, poll_fn};
+        use std::sync::Condvar;
+        use std::task::Poll;
+        use std::time::Duration;
+
+        use crate::{ConstructionJournal, Filesystem, SplitOptions};
+        use mount_rs_rustfs::RustFsConstructionContext;
+
+        const BOUND: Duration = Duration::from_secs(5);
+
+        #[derive(Default)]
+        struct HeldObserver {
+            tickets: Journal,
+            entered: tokio::sync::Notify,
+            released: Mutex<bool>,
+            changed: Condvar,
+        }
+        impl HeldObserver {
+            fn release(&self) {
+                *self.released.lock().unwrap() = true;
+                self.changed.notify_all();
+            }
+        }
+        impl ConstructionObserver for HeldObserver {
+            fn retain(&self, resource: Arc<dyn ConstructionResource>) {
+                self.tickets.retain(resource);
+                self.entered.notify_one();
+                // Finite safety bound protects failed assertions; it does not
+                // establish admission ordering or a scheduling deadline.
+                let (released, _) = self
+                    .changed
+                    .wait_timeout_while(self.released.lock().unwrap(), BOUND * 2, |released| {
+                        !*released
+                    })
+                    .unwrap();
+                let was_released = *released;
+                drop(released);
+                assert!(was_released, "held registration was not released");
+            }
+        }
+        struct ReleaseOnDrop(Arc<HeldObserver>);
+        impl Drop for ReleaseOnDrop {
+            fn drop(&mut self) {
+                self.0.release();
+            }
+        }
+        #[derive(Default)]
+        struct OuterObserver {
+            journal: ConstructionJournal,
+            groups: Journal,
+        }
+        impl ConstructionObserver for OuterObserver {
+            fn retain(&self, resource: Arc<dyn ConstructionResource>) {
+                self.journal.retain(resource.clone());
+                self.groups.retain(resource);
+            }
+        }
+
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let mut context = StorageContext::new(1).unwrap();
+        context.rustfs = RustFsConstructionContext::new(1).unwrap();
+        let held = Arc::new(HeldObserver::default());
+        let _release_on_drop = ReleaseOnDrop(held.clone());
+        let owner = context.rustfs.clone();
+        let held_observer = held.clone();
+        let held_config = probe_config(endpoint.clone());
+        let reservation = tokio::spawn(async move {
+            owner
+                .block_store(held_config, "reserved".into(), false, Some(&*held_observer))
+                .await
+        });
+        tokio::time::timeout(BOUND, held.entered.notified())
+            .await
+            .unwrap();
+        let tickets = held.tickets.0.lock().unwrap().clone();
+        assert_eq!(tickets.len(), 1);
+
+        let outer = OuterObserver::default();
+        let attempt = outer.journal.begin().unwrap();
+        let mut options = SplitOptions::memory("pending-rustfs-admission", 4096);
+        options.blocks = config(endpoint, false);
+        let mut opening = Box::pin(Filesystem::split_with_context_and_construction_observer(
+            options, &context, &outer,
+        ));
+        assert!(
+            poll_fn(|cx| Poll::Ready(opening.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert!(outer.journal.snapshot().opening);
+        assert_eq!(outer.journal.snapshot().retained_resources, 1);
+        drop(opening);
+        drop(attempt);
+        let groups = outer.groups.0.lock().unwrap().clone();
+        assert_eq!(groups.len(), 1);
+        assert!(outer.journal.snapshot().uncertain);
+        assert!(outer.journal.close().await.is_err());
+        assert!(groups[0].close().await.is_err());
+
+        context.seal_client_builds().unwrap();
+        let mut draining = Box::pin(context.close_client_builds());
+        assert!(
+            poll_fn(|cx| Poll::Ready(draining.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        held.release();
+        let rejected = tokio::time::timeout(BOUND, reservation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rejected.err().unwrap().code, ErrorCode::Estale);
+        tokio::time::timeout(BOUND, draining)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(BOUND, tickets[0].close())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(outer.journal.close().await.is_err());
+        assert!(groups[0].close().await.is_err());
+        let snapshot = outer.journal.snapshot();
+        assert!(snapshot.uncertain);
+        assert!(!snapshot.cleanup_complete);
+        assert_eq!(snapshot.retained_resources, 1);
+        context.require_open().unwrap();
+        open_blocks(&StoreConfig::Memory, Some(&context), None)
+            .await
+            .unwrap();
+        context.close().await.unwrap();
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[tokio::test]
+    async fn poisoned_context_close_still_seals_constructors_and_closes_retained_sql() {
+        let context = StorageContext::new(1).unwrap();
+        let sql = context.tidb("mysql://unused@127.0.0.1:1/unused").unwrap();
+        let inner = context.inner.clone();
+        assert!(
+            std::thread::spawn(move || {
+                let _guard = inner.lock().unwrap();
+                panic!("poison SDK map for close control");
+            })
+            .join()
+            .is_err()
+        );
+        assert!(context.close().await.is_err());
+        assert_eq!(
+            sql.metadata(mount_rs_tidb::TidbStorageOptions::new("closed"))
+                .await
+                .err()
+                .unwrap()
+                .code,
+            ErrorCode::Estale,
+        );
+        let result = context
+            .rustfs
+            .block_store(probe_config("invalid".into()), "unit".into(), false, None)
+            .await;
+        assert_eq!(result.err().unwrap().code, ErrorCode::Estale);
+        assert!(context.close().await.is_err());
+    }
+}
+
+#[cfg(test)]
+mod context_close_poll_tests {
+    use std::future::{Future, poll_fn};
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::task::{Context, Poll};
+
+    use mount_rs_core::{ErrorCode, FsError, Result};
+
+    use super::close_context_resources;
+
+    #[derive(Clone, Default)]
+    struct CloseControl {
+        polls: Arc<AtomicUsize>,
+        released: Arc<AtomicBool>,
+        error: Option<ErrorCode>,
+    }
+
+    impl Future for CloseControl {
+        type Output = Result<()>;
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            if self.released.load(Ordering::SeqCst) {
+                Poll::Ready(self.error.map_or(Ok(()), |code| Err(FsError::new(code))))
+            } else {
+                // Tests explicitly poll again after release, so no timing or
+                // scheduler behavior participates in these controls.
+                Poll::Pending
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_close_polls_all_families_despite_initial_error_before_cancel_and_resume() {
+        let constructor = CloseControl::default();
+        let pools = [CloseControl::default(), CloseControl::default()];
+        let mut closing = Box::pin(close_context_resources(
+            constructor.clone(),
+            pools
+                .iter()
+                .cloned()
+                .map(|pool| Some(Box::pin(pool)))
+                .collect(),
+            Some(FsError::new(ErrorCode::Eio)),
+        ));
+        assert!(
+            poll_fn(|cx| Poll::Ready(closing.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        for control in [&constructor, &pools[0], &pools[1]] {
+            assert_eq!(control.polls.load(Ordering::SeqCst), 1);
+        }
+        drop(closing);
+        // The resource owners outlive the canceled waiter. Recreate only its
+        // waiting futures, as StorageContext does from its retained owners.
+        for control in [&constructor, &pools[0], &pools[1]] {
+            control.released.store(true, Ordering::SeqCst);
+        }
+        let resumed = close_context_resources(
+            constructor.clone(),
+            pools
+                .iter()
+                .cloned()
+                .map(|pool| Some(Box::pin(pool)))
+                .collect(),
+            Some(FsError::new(ErrorCode::Eio)),
+        )
+        .await;
+        assert_eq!(resumed.unwrap_err().code, ErrorCode::Eio);
+        for control in [&constructor, &pools[0], &pools[1]] {
+            assert_eq!(control.polls.load(Ordering::SeqCst), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_close_drains_pending_peers_after_constructor_and_pool_errors() {
+        let constructor = CloseControl {
+            error: Some(ErrorCode::Eio),
+            ..CloseControl::default()
+        };
+        let failed_pool = CloseControl {
+            error: Some(ErrorCode::Estale),
+            ..CloseControl::default()
+        };
+        let held_pool = CloseControl::default();
+        constructor.released.store(true, Ordering::SeqCst);
+        failed_pool.released.store(true, Ordering::SeqCst);
+        let mut closing = Box::pin(close_context_resources(
+            constructor.clone(),
+            vec![
+                Some(Box::pin(failed_pool.clone())),
+                Some(Box::pin(held_pool.clone())),
+            ],
+            None,
+        ));
+        assert!(
+            poll_fn(|cx| Poll::Ready(closing.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        for control in [&constructor, &failed_pool, &held_pool] {
+            assert_eq!(control.polls.load(Ordering::SeqCst), 1);
+        }
+        held_pool.released.store(true, Ordering::SeqCst);
+        assert_eq!(closing.await.unwrap_err().code, ErrorCode::Eio);
+        assert_eq!(held_pool.polls.load(Ordering::SeqCst), 2);
+        assert_eq!(constructor.polls.load(Ordering::SeqCst), 1);
+        assert_eq!(failed_pool.polls.load(Ordering::SeqCst), 1);
     }
 }

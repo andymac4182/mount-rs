@@ -26,7 +26,13 @@ pub use mount_rs_object_store_blocks::{
     ObjectStoreBlockStoreStats as RustFsBlockStoreStats,
 };
 
+mod client_construction;
 mod http_observation;
+
+pub use client_construction::{OwnedPrefixProbe, RustFsConstructionContext};
+
+#[cfg(test)]
+mod client_construction_tests;
 
 #[cfg(test)]
 mod http_observation_tests;

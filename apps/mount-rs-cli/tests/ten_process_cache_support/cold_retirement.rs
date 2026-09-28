@@ -15,7 +15,7 @@ use mount_rs_core::{
     FileHandle, FsDriver, Loopback,
     storage::{BlockId, BlockStore, MetadataStore, NodeData},
 };
-use mount_rs_rustfs::{RustFsBlockStore, RustFsConfig};
+use mount_rs_rustfs::{RustFsBlockStore, RustFsConfig, RustFsConstructionContext};
 use mount_rs_sdk::{ConstructionJournal, Filesystem, SplitOptions, StorageContext, StoreConfig};
 use mount_rs_tidb::{TidbMetadataStore, TidbPoolContext, TidbStorageOptions};
 use ring::rand::{SecureRandom, SystemRandom};
@@ -187,6 +187,7 @@ enum Resource {
     Pool(TidbPoolContext),
     Metadata(Arc<TidbMetadataStore>),
     Blocks(Arc<RustFsBlockStore>),
+    ClientBuilds(RustFsConstructionContext),
     Context(StorageContext),
     Journal(ConstructionJournal),
     Filesystem(Arc<Filesystem>),
@@ -200,6 +201,7 @@ impl Resource {
             Self::Pool(value) => value.close().await,
             Self::Metadata(value) => value.close().await,
             Self::Blocks(value) => value.flush().await,
+            Self::ClientBuilds(value) => value.close().await,
             Self::Context(value) => value.close().await,
             Self::Journal(value) if value.snapshot().handed_off => return Ok(()),
             Self::Journal(value) => value.close().await,
@@ -472,9 +474,8 @@ async fn open_sdk(
     backing: &Backing,
     n: usize,
     owner: &Arc<Mutex<Retained>>,
+    context: &StorageContext,
 ) -> Result<Arc<Filesystem>> {
-    let context = StorageContext::new(16).map_err(|_| "private SDK context creation failed")?;
-    retain(owner, Resource::Context(context.clone()))?;
     let journal = ConstructionJournal::new();
     retain(owner, Resource::Journal(journal.clone()))?;
     let attempt = journal
@@ -483,7 +484,7 @@ async fn open_sdk(
     let opened = {
         let opened = Filesystem::split_with_context_and_construction_observer(
             backing.split(n, "owned-ten-cli-fresh-oracle"),
-            &context,
+            context,
             &journal,
         );
         tokio::pin!(opened);
@@ -522,21 +523,32 @@ async fn initialize(backing: Backing, n: usize, owner: Arc<Mutex<Retained>>) -> 
         .map_err(|_| "private namespace absence observation failed")?
         .is_absent()
     };
-    if !namespace_absent
-        || !{
-            let prefix = backing.prefix(n);
-            let observation = backing.blocks.observe_owned_prefix_absence(&prefix);
-            tokio::pin!(observation);
-            std::future::poll_fn(|context| {
-                progress_trace::poll(observation.as_mut(), context, Label::OraclePrefixPoll)
-            })
-            .await
-            .map_err(|_| "private block prefix absence observation failed")?
-        }
-    {
+    if !namespace_absent {
         return Err("generated owned namespace/prefix is not absent; no overwrite".into());
     }
-    open_sdk(&backing, n, &owner).await?;
+    // Retain the constructor owner before preparing the prefix client. The
+    // same context owns subsequent SDK builds; LIST stays in this awaited
+    // oracle operation with its original exact scope and deadline.
+    let context = StorageContext::new(16).map_err(|_| "private SDK context creation failed")?;
+    retain(&owner, Resource::Context(context.clone()))?;
+    let prefix_absent = {
+        let observation = async {
+            let probe = context
+                .prepare_rustfs_owned_prefix_probe(backing.blocks.clone(), backing.prefix(n), None)
+                .await?;
+            probe.observe_owned_prefix_absence().await
+        };
+        tokio::pin!(observation);
+        std::future::poll_fn(|context| {
+            progress_trace::poll(observation.as_mut(), context, Label::OraclePrefixPoll)
+        })
+        .await
+        .map_err(|_| "private block prefix absence observation failed")?
+    };
+    if !prefix_absent {
+        return Err("generated owned namespace/prefix is not absent; no overwrite".into());
+    }
+    open_sdk(&backing, n, &owner, &context).await?;
     Ok(Oracle::empty())
 }
 async fn fresh(backing: Backing, n: usize, owner: Arc<Mutex<Retained>>) -> Result<Oracle> {
@@ -574,8 +586,13 @@ async fn fresh(backing: Backing, n: usize, owner: Arc<Mutex<Retained>>) -> Resul
     if !root.stats.is_directory() || entries.len() != FILES {
         return Err("fresh root type/entries mismatch".into());
     }
+    let client_builds = RustFsConstructionContext::new(1)
+        .map_err(|_| "fresh RustFS constructor context creation failed")?;
+    retain(&owner, Resource::ClientBuilds(client_builds.clone()))?;
     let blocks = Arc::new(
-        RustFsBlockStore::from_config(&backing.blocks, backing.prefix(n), true)
+        client_builds
+            .block_store(backing.blocks.clone(), backing.prefix(n), true, None)
+            .await
             .map_err(|_| "fresh signed RustFS block provider construction failed")?,
     );
     retain(&owner, Resource::Blocks(blocks.clone()))?;
@@ -621,7 +638,9 @@ async fn fresh(backing: Backing, n: usize, owner: Arc<Mutex<Retained>>) -> Resul
         digests.push(sha256(&bytes));
     }
     // Independent undecorated public SDK path, including explicit EOF and handle close.
-    let filesystem = open_sdk(&backing, n, &owner).await?;
+    let context = StorageContext::new(16).map_err(|_| "fresh SDK context creation failed")?;
+    retain(&owner, Resource::Context(context.clone()))?;
+    let filesystem = open_sdk(&backing, n, &owner, &context).await?;
     let driver = filesystem.driver();
     for file in 0..FILES {
         let handle = driver
